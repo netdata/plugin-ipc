@@ -1,0 +1,12 @@
+[package]
+name = "netipc-bench-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+netipc = { path = "../../../src/crates/netipc" }
+
+[[bin]]
+name = "netipc_live_uds_rs"
+path = "netipc_live_uds_rs.rs"
