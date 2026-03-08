@@ -1,4 +1,5 @@
 #include <netipc/netipc_named_pipe.h>
+#include "netipc_shm_hybrid_win.h"
 
 #include <errno.h>
 #include <stdbool.h>
@@ -30,7 +31,7 @@
 #define NETIPC_NEG_OFFSET_AUTH_TOKEN 24u
 #define NETIPC_NEG_OFFSET_STATUS 32u
 
-#define NETIPC_IMPLEMENTED_PROFILES NETIPC_PROFILE_NAMED_PIPE
+#define NETIPC_IMPLEMENTED_PROFILES (NETIPC_PROFILE_NAMED_PIPE | NETIPC_PROFILE_SHM_HYBRID)
 #define NETIPC_PIPE_NAME_CAPACITY 256u
 #define NETIPC_SERVICE_NAME_CAPACITY 96u
 
@@ -46,19 +47,27 @@ struct netipc_negotiation_message {
 
 struct netipc_named_pipe_server {
     HANDLE pipe;
+    char *run_dir;
+    char *service_name;
     uint32_t supported_profiles;
     uint32_t preferred_profiles;
     uint64_t auth_token;
+    uint32_t shm_spin_tries;
     uint32_t negotiated_profile;
+    netipc_win_shm_server_t *shm_server;
     bool connected;
 };
 
 struct netipc_named_pipe_client {
     HANDLE pipe;
+    char *run_dir;
+    char *service_name;
     uint32_t supported_profiles;
     uint32_t preferred_profiles;
     uint64_t auth_token;
+    uint32_t shm_spin_tries;
     uint32_t negotiated_profile;
+    netipc_win_shm_client_t *shm_client;
     uint64_t next_request_id;
 };
 
@@ -168,6 +177,26 @@ static int set_errno_from_win32(DWORD error) {
 static bool config_is_valid(const struct netipc_named_pipe_config *config) {
     return config && config->run_dir && config->run_dir[0] != '\0' && config->service_name &&
            config->service_name[0] != '\0';
+}
+
+static char *dup_string(const char *s) {
+    size_t len = 0u;
+    char *copy = NULL;
+
+    if (!s) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    len = strlen(s) + 1u;
+    copy = (char *)malloc(len);
+    if (!copy) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    memcpy(copy, s, len);
+    return copy;
 }
 
 static uint32_t effective_supported_profiles(const struct netipc_named_pipe_config *config) {
@@ -392,6 +421,9 @@ static int decode_negotiation(const uint8_t frame[NETIPC_NEGOTIATION_FRAME_SIZE]
 }
 
 static uint32_t select_profile(uint32_t candidates) {
+    if ((candidates & NETIPC_PROFILE_SHM_HYBRID) != 0u) {
+        return NETIPC_PROFILE_SHM_HYBRID;
+    }
     if ((candidates & NETIPC_PROFILE_NAMED_PIPE) != 0u) {
         return NETIPC_PROFILE_NAMED_PIPE;
     }
@@ -492,6 +524,13 @@ static int perform_client_handshake(HANDLE pipe,
     if (ack.status != NETIPC_NEGOTIATION_STATUS_OK) {
         return set_errno_from_win32(ack.status);
     }
+    if ((ack.intersection_profiles & supported_profiles) == 0u ||
+        ack.selected_profile == 0u ||
+        (ack.selected_profile & ack.intersection_profiles) == 0u ||
+        (ack.selected_profile & supported_profiles) == 0u) {
+        errno = EPROTO;
+        return -1;
+    }
 
     *out_profile = ack.selected_profile;
     return 0;
@@ -512,8 +551,20 @@ int netipc_named_pipe_server_create(const struct netipc_named_pipe_config *confi
         return -1;
     }
 
+    server->pipe = INVALID_HANDLE_VALUE;
+    server->run_dir = dup_string(config->run_dir);
+    server->service_name = dup_string(config->service_name);
+    if (!server->run_dir || !server->service_name) {
+        free(server->service_name);
+        free(server->run_dir);
+        free(server);
+        return -1;
+    }
+
     wchar_t pipe_name[NETIPC_PIPE_NAME_CAPACITY];
     if (build_pipe_name(config, pipe_name) != 0) {
+        free(server->service_name);
+        free(server->run_dir);
         free(server);
         return -1;
     }
@@ -521,6 +572,7 @@ int netipc_named_pipe_server_create(const struct netipc_named_pipe_config *confi
     server->supported_profiles = effective_supported_profiles(config);
     server->preferred_profiles = effective_preferred_profiles(config, server->supported_profiles);
     server->auth_token = config->auth_token;
+    server->shm_spin_tries = config->shm_spin_tries;
     server->pipe = CreateNamedPipeW(pipe_name,
                                     PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
                                     PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
@@ -530,6 +582,8 @@ int netipc_named_pipe_server_create(const struct netipc_named_pipe_config *confi
                                     0u,
                                     NULL);
     if (server->pipe == INVALID_HANDLE_VALUE) {
+        free(server->service_name);
+        free(server->run_dir);
         free(server);
         return set_errno_from_win32(GetLastError());
     }
@@ -586,6 +640,23 @@ int netipc_named_pipe_server_accept(netipc_named_pipe_server_t *server, uint32_t
         return -1;
     }
 
+    if (server->negotiated_profile == NETIPC_PROFILE_SHM_HYBRID) {
+        struct netipc_named_pipe_config config = {
+            .run_dir = server->run_dir,
+            .service_name = server->service_name,
+            .supported_profiles = server->supported_profiles,
+            .preferred_profiles = server->preferred_profiles,
+            .auth_token = server->auth_token,
+            .shm_spin_tries = server->shm_spin_tries,
+        };
+        if (netipc_win_shm_server_create(&config, &server->shm_server) != 0) {
+            DisconnectNamedPipe(server->pipe);
+            server->connected = false;
+            server->negotiated_profile = 0u;
+            return -1;
+        }
+    }
+
     server->connected = true;
     return 0;
 }
@@ -598,19 +669,26 @@ int netipc_named_pipe_server_receive_frame(netipc_named_pipe_server_t *server,
         return -1;
     }
 
+    if (server->negotiated_profile == NETIPC_PROFILE_SHM_HYBRID) {
+        return netipc_win_shm_server_receive_frame(server->shm_server, frame, timeout_ms);
+    }
+
     return read_pipe_message(server->pipe, frame, timeout_ms);
 }
 
 int netipc_named_pipe_server_send_frame(netipc_named_pipe_server_t *server,
                                         const uint8_t frame[NETIPC_FRAME_SIZE],
                                         uint32_t timeout_ms) {
-    (void)timeout_ms;
-
     if (!server || !frame || server->pipe == INVALID_HANDLE_VALUE || !server->connected) {
         errno = EINVAL;
         return -1;
     }
 
+    if (server->negotiated_profile == NETIPC_PROFILE_SHM_HYBRID) {
+        return netipc_win_shm_server_send_frame(server->shm_server, frame, timeout_ms);
+    }
+
+    (void)timeout_ms;
     return write_pipe_message(server->pipe, frame);
 }
 
@@ -647,11 +725,16 @@ void netipc_named_pipe_server_destroy(netipc_named_pipe_server_t *server) {
         return;
     }
 
+    if (server->shm_server) {
+        netipc_win_shm_server_destroy(server->shm_server);
+    }
     if (server->pipe != INVALID_HANDLE_VALUE) {
         disconnect_pipe(server->pipe, server->connected);
         CloseHandle(server->pipe);
     }
 
+    free(server->service_name);
+    free(server->run_dir);
     free(server);
 }
 
@@ -671,8 +754,20 @@ int netipc_named_pipe_client_create(const struct netipc_named_pipe_config *confi
         return -1;
     }
 
+    client->pipe = INVALID_HANDLE_VALUE;
+    client->run_dir = dup_string(config->run_dir);
+    client->service_name = dup_string(config->service_name);
+    if (!client->run_dir || !client->service_name) {
+        free(client->service_name);
+        free(client->run_dir);
+        free(client);
+        return -1;
+    }
+
     wchar_t pipe_name[NETIPC_PIPE_NAME_CAPACITY];
     if (build_pipe_name(config, pipe_name) != 0) {
+        free(client->service_name);
+        free(client->run_dir);
         free(client);
         return -1;
     }
@@ -680,6 +775,7 @@ int netipc_named_pipe_client_create(const struct netipc_named_pipe_config *confi
     client->supported_profiles = effective_supported_profiles(config);
     client->preferred_profiles = effective_preferred_profiles(config, client->supported_profiles);
     client->auth_token = config->auth_token;
+    client->shm_spin_tries = config->shm_spin_tries;
     client->next_request_id = 1u;
 
     ULONGLONG deadline_ms = timeout_ms == 0u ? 0ull : now_ms() + (ULONGLONG)timeout_ms;
@@ -697,10 +793,14 @@ int netipc_named_pipe_client_create(const struct netipc_named_pipe_config *confi
 
         DWORD error = GetLastError();
         if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PIPE_BUSY) {
+            free(client->service_name);
+            free(client->run_dir);
             free(client);
             return set_errno_from_win32(error);
         }
         if (deadline_expired(deadline_ms)) {
+            free(client->service_name);
+            free(client->run_dir);
             free(client);
             errno = ETIMEDOUT;
             return -1;
@@ -715,6 +815,8 @@ int netipc_named_pipe_client_create(const struct netipc_named_pipe_config *confi
 
     if (set_pipe_wait_mode(client->pipe, PIPE_WAIT) != 0) {
         CloseHandle(client->pipe);
+        free(client->service_name);
+        free(client->run_dir);
         free(client);
         return -1;
     }
@@ -726,8 +828,28 @@ int netipc_named_pipe_client_create(const struct netipc_named_pipe_config *confi
                                  timeout_ms,
                                  &client->negotiated_profile) != 0) {
         CloseHandle(client->pipe);
+        free(client->service_name);
+        free(client->run_dir);
         free(client);
         return -1;
+    }
+
+    if (client->negotiated_profile == NETIPC_PROFILE_SHM_HYBRID) {
+        struct netipc_named_pipe_config shm_config = {
+            .run_dir = client->run_dir,
+            .service_name = client->service_name,
+            .supported_profiles = client->supported_profiles,
+            .preferred_profiles = client->preferred_profiles,
+            .auth_token = client->auth_token,
+            .shm_spin_tries = client->shm_spin_tries,
+        };
+        if (netipc_win_shm_client_create(&shm_config, &client->shm_client, timeout_ms) != 0) {
+            CloseHandle(client->pipe);
+            free(client->service_name);
+            free(client->run_dir);
+            free(client);
+            return -1;
+        }
     }
 
     *out_client = client;
@@ -741,6 +863,13 @@ int netipc_named_pipe_client_call_frame(netipc_named_pipe_client_t *client,
     if (!client || !request_frame || !response_frame || client->pipe == INVALID_HANDLE_VALUE) {
         errno = EINVAL;
         return -1;
+    }
+
+    if (client->negotiated_profile == NETIPC_PROFILE_SHM_HYBRID) {
+        return netipc_win_shm_client_call_frame(client->shm_client,
+                                                request_frame,
+                                                response_frame,
+                                                timeout_ms);
     }
 
     if (write_pipe_message(client->pipe, request_frame) != 0) {
@@ -791,9 +920,14 @@ void netipc_named_pipe_client_destroy(netipc_named_pipe_client_t *client) {
         return;
     }
 
+    if (client->shm_client) {
+        netipc_win_shm_client_destroy(client->shm_client);
+    }
     if (client->pipe != INVALID_HANDLE_VALUE) {
         CloseHandle(client->pipe);
     }
 
+    free(client->service_name);
+    free(client->run_dir);
     free(client);
 }

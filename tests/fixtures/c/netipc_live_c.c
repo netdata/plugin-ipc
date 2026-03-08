@@ -1,5 +1,6 @@
 #include <netipc/netipc_named_pipe.h>
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -41,6 +42,32 @@ static int32_t parse_i32(const char *s) {
         exit(2);
     }
     return (int32_t)v;
+}
+
+static uint32_t parse_u32(const char *s) {
+    char *end = NULL;
+    unsigned long v = strtoul(s, &end, 10);
+    if (!end || *end != '\0') {
+        fprintf(stderr, "invalid u32: %s\n", s);
+        exit(2);
+    }
+    return (uint32_t)v;
+}
+
+static uint32_t parse_env_u32(const char *name, uint32_t fallback) {
+    const char *value = getenv(name);
+    if (!value || value[0] == '\0') {
+        return fallback;
+    }
+    return parse_u32(value);
+}
+
+static uint64_t parse_env_u64(const char *name, uint64_t fallback) {
+    const char *value = getenv(name);
+    if (!value || value[0] == '\0') {
+        return fallback;
+    }
+    return parse_u64(value);
 }
 
 static LARGE_INTEGER performance_frequency(void) {
@@ -160,13 +187,25 @@ static double percentile_micros(const struct latency_samples *samples,
     return counter_to_micros(samples->values[index], freq);
 }
 
+static const char *profile_label(uint32_t profile) {
+    switch (profile) {
+        case NETIPC_PROFILE_SHM_HYBRID:
+            return "c-shm-hybrid";
+        case NETIPC_PROFILE_NAMED_PIPE:
+            return "c-npipe";
+        default:
+            return "c-win-unknown";
+    }
+}
+
 static struct netipc_named_pipe_config pipe_config(const char *run_dir, const char *service) {
     struct netipc_named_pipe_config config = {
         .run_dir = run_dir,
         .service_name = service,
-        .supported_profiles = NETIPC_PROFILE_NAMED_PIPE,
-        .preferred_profiles = NETIPC_PROFILE_NAMED_PIPE,
-        .auth_token = 0u,
+        .supported_profiles = parse_env_u32("NETIPC_SUPPORTED_PROFILES", NETIPC_PROFILE_NAMED_PIPE),
+        .preferred_profiles = parse_env_u32("NETIPC_PREFERRED_PROFILES", NETIPC_PROFILE_NAMED_PIPE),
+        .auth_token = parse_env_u64("NETIPC_AUTH_TOKEN", 0u),
+        .shm_spin_tries = parse_env_u32("NETIPC_SHM_SPIN_TRIES", NETIPC_SHM_HYBRID_DEFAULT_SPIN_TRIES),
     };
     return config;
 }
@@ -209,7 +248,7 @@ static int server_once(const char *run_dir, const char *service) {
         return 1;
     }
 
-    printf("C-PIPE-SERVER request_id=%" PRIu64 " value=%" PRIu64
+    printf("C-WIN-SERVER request_id=%" PRIu64 " value=%" PRIu64
            " response=%" PRIu64 " profile=%u\n",
            request_id,
            request.value,
@@ -251,7 +290,7 @@ static int client_once(const char *run_dir, const char *service, uint64_t value)
         return 1;
     }
 
-    printf("C-PIPE-CLIENT request=%" PRIu64 " response=%" PRIu64 " profile=%u\n",
+    printf("C-WIN-CLIENT request=%" PRIu64 " response=%" PRIu64 " profile=%u\n",
            value,
            response.value,
            netipc_named_pipe_client_negotiated_profile(client));
@@ -281,6 +320,10 @@ static int server_loop(const char *run_dir, const char *service, uint64_t max_re
         struct netipc_increment_response response;
 
         if (netipc_named_pipe_server_receive_increment(server, &request_id, &request, 0u) != 0) {
+            if (errno == EPIPE) {
+                netipc_named_pipe_server_destroy(server);
+                return 0;
+            }
             perror("netipc_named_pipe_server_receive_increment");
             netipc_named_pipe_server_destroy(server);
             return 1;
@@ -374,6 +417,7 @@ static int client_bench(const char *run_dir,
     double elapsed_sec = counter_to_seconds(elapsed_ticks, freq);
     double cpu_cores = elapsed_sec <= 0.0 ? 0.0 : (self_cpu_seconds() - cpu_start) / elapsed_sec;
     double throughput = elapsed_sec <= 0.0 ? 0.0 : (double)responses / elapsed_sec;
+    const char *mode_label = profile_label(netipc_named_pipe_client_negotiated_profile(client));
 
     qsort(samples.values, samples.used, sizeof(uint64_t), compare_u64);
     double p50 = percentile_micros(&samples, freq, 50.0);
@@ -382,7 +426,8 @@ static int client_bench(const char *run_dir,
 
     printf("mode,duration_sec,target_rps,requests,responses,mismatches,throughput_rps,"
            "p50_us,p95_us,p99_us,client_cpu_cores\n");
-    printf("c-npipe,%d,%d,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%.2f,%.2f,%.2f,%.3f\n",
+    printf("%s,%d,%d,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%.2f,%.2f,%.2f,%.3f\n",
+           mode_label,
            duration_sec,
            target_rps,
            requests,

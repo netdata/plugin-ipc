@@ -73,9 +73,9 @@ wait_server
 
 cat "${CLIENT_LOG_PATH}" >&2
 
-grep -q 'C-PIPE-SERVER' "${SERVER_LOG_PATH}"
+grep -q 'C-WIN-SERVER' "${SERVER_LOG_PATH}"
 grep -q 'response=42' "${SERVER_LOG_PATH}"
-grep -q 'C-PIPE-CLIENT' "${CLIENT_LOG_PATH}"
+grep -q 'C-WIN-CLIENT' "${CLIENT_LOG_PATH}"
 grep -q 'response=42' "${CLIENT_LOG_PATH}"
 
 echo "Windows Named Pipe smoke test passed."

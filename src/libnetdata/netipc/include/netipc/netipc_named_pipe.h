@@ -10,7 +10,9 @@ extern "C" {
 #endif
 
 #define NETIPC_PROFILE_NAMED_PIPE (1u << 0)
+#define NETIPC_PROFILE_SHM_HYBRID (1u << 1)
 #define NETIPC_NAMED_PIPE_DEFAULT_PROFILES NETIPC_PROFILE_NAMED_PIPE
+#define NETIPC_SHM_HYBRID_DEFAULT_SPIN_TRIES 1024u
 
 typedef struct netipc_named_pipe_server netipc_named_pipe_server_t;
 typedef struct netipc_named_pipe_client netipc_named_pipe_client_t;
@@ -21,6 +23,7 @@ struct netipc_named_pipe_config {
     uint32_t supported_profiles;
     uint32_t preferred_profiles;
     uint64_t auth_token;
+    uint32_t shm_spin_tries;
 };
 
 int netipc_named_pipe_server_create(const struct netipc_named_pipe_config *config,

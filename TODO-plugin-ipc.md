@@ -430,11 +430,17 @@ If we manage to have an transport layer that supports millions of requests/respo
   - Go `netipc-live-go` helper now consumes the reusable Go package for normal UDS server/client/bench flows instead of embedding a separate transport implementation.
   - Root `CMakeLists.txt` helper targets now depend on library source trees so fixture/helper rebuilds track library changes.
   - C library now contains an initial Windows Named Pipe transport and Windows live fixture build path for MSYS2 `mingw64`/`ucrt64`.
+  - C library now also contains a Windows negotiated `SHM_HYBRID` fast profile backed by shared memory plus named events with bounded spin.
+  - Windows fast-path design is intentionally limited to Win32 primitives that can be ported to Rust and pure Go without `cgo`.
 - Validated:
   - schema interop: `C <-> Rust <-> Go`
   - live SHM interop: `C <-> Rust`
   - live UDS interop: `C <-> Rust <-> Go`
   - Windows C Named Pipe smoke under MSYS2 `mingw64`: `./tests/run-live-npipe-smoke.sh`
+  - Windows C profile comparison under MSYS2 `mingw64`: `./tests/run-live-win-profile-bench.sh`
+    - latest local result on `win11`, 5s, 1 client:
+      - `c-npipe`: ~16.1k req/s, p50 ~43.6us
+      - `c-shm-hybrid` (default spin `1024`): ~82.3k req/s, p50 ~3.8us
   - UDS negative negotiation coverage
   - UDS and negotiated-profile benchmark scripts
   - `cargo test -p netipc`
@@ -443,7 +449,7 @@ If we manage to have an transport layer that supports millions of requests/respo
   - Go package currently implements the reusable POSIX `UDS_SEQPACKET` path only.
   - Go negative-test helper logic for malformed/raw negotiation frames remains local to `bench/drivers/go`; this is fixture-specific coverage, not reusable API.
   - Rust and Go Windows transports remain placeholders.
-  - Windows validation is still limited to the C Named Pipe path; cross-language Windows interop and benchmark coverage are still pending.
+  - Windows validation is still limited to the C Named Pipe/`SHM_HYBRID` path; cross-language Windows interop and benchmark coverage are still pending.
   - TODO/history text still contains historical references to the old prototype paths and should be cleaned once the structure is frozen.
 
 ## Auth Contract Verification (2026-03-08)

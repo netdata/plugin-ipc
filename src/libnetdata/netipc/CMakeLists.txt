@@ -6,6 +6,7 @@ set(NETIPC_LIBRARY_SOURCES
 
 if(WIN32)
     list(APPEND NETIPC_LIBRARY_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/transport/windows/netipc_shm_hybrid_win.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/transport/windows/netipc_named_pipe.c"
     )
 else()
