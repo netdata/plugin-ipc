@@ -29,9 +29,15 @@
   - Repo identity: `netdata/plugin-ipc`.
   - Coverage policy: 100% line + 100% branch for library source files.
   - Benchmark CI model: GitHub-hosted cloud VMs (with repetition/noise controls).
-  - Windows baseline: Named Pipes, one native Windows library implementation (no separate MSYS2 variant).
+  - Windows native baseline remains Named Pipes, but Windows builds must also work under MSYS2 POSIX emulation during the current Netdata transition.
 - Next starting point for the next session:
   - Continue replacing placeholder Rust/Go library scaffolding with real reusable API implementations.
+  - Latest Windows probe findings not yet committed:
+    - `win11` repo path used for testing is `/c/Users/costa/src/plugin-ipc-win.git`
+    - MSYS2/POSIX C configure+build passes there
+    - native `MINGW64` C build currently fails on POSIX-only headers (`arpa/inet.h`, `poll.h`, `sys/mman.h`)
+    - Rust on `win11` is currently `x86_64-pc-windows-msvc`, and the crate still tries to compile POSIX transport code on that Windows target
+    - Go on `win11` still shows a local toolchain inconsistency during `go test` (`compile: version \"go1.26.1\" does not match go tool version \"go1.26.0\"`)
 
 ## TL;DR
 - Build cross-language IPC libraries for Netdata plugins in C, Rust, and Go.
@@ -247,9 +253,9 @@ If we manage to have an transport layer that supports millions of requests/respo
    - Source: user decision "3b".
    - User intent: evaluate benchmark behavior on actual cloud VMs.
 
-44. Windows baseline transport: Option A (Named Pipes), with one native Windows library implementation only.
+44. Windows baseline transport: Option A (Named Pipes) for the native Windows path.
    - Source: user decision "4a".
-   - User context: current Netdata runs under MSYS2 during transition to native Windows; no separate MSYS2-specific library variant is needed.
+   - Historical note: this originally assumed one native Windows implementation only; Decision #62 supersedes that assumption for the current transition period.
 
 45. Create new repository at `~/src/plugin-ipc.git` and port this IPC project there.
    - Source: user direction "creare the repo in ~/src/plugin-ipc.git and port everything there."
@@ -362,6 +368,40 @@ If we manage to have an transport layer that supports millions of requests/respo
    - Implication:
      - cross-compilation alone is not enough for confidence here; Named Pipe behavior, timeouts, permissions, and benchmark results need real runtime validation on Windows.
      - pushing the repo first will make the Windows work easier to sync, review, and validate across machines.
+
+61. Windows MSYS2 environment should use `MINGW64`, with build packages installed via `pacman`, while Rust should be installed separately via `rustup`.
+   - Source: user asked which MSYS2 packages to install and then instructed to ssh and run the install.
+   - User decision:
+     - approved installation of the recommended MSYS2 package set on `win11`
+     - clarified that `ssh win11` lands in `/home/costa` under MSYS2, with repositories available under `/home/costa/src/`
+     - clarified that the remaining Windows prerequisites are now installed
+   - Package set:
+     - `mingw-w64-x86_64-toolchain`
+     - `mingw-w64-x86_64-cmake`
+     - `mingw-w64-x86_64-ninja`
+     - `mingw-w64-x86_64-pkgconf`
+   - Implication:
+     - Windows builds should run under `MINGW64` paths/toolchain, not the broken plain-`MSYS` `/bin/cmake`.
+
+62. Windows support must cover two build/runtime paths during the Netdata transition:
+   - native Windows builds under `MINGW64`
+   - MSYS2 POSIX-emulation builds on Windows, because current Netdata still runs there
+   - Source: user clarification "the windows library needs to also compile under msys2 (posix emulation), because currently netdata runs with posix emulation and we port it to mingw64 (not done yet)"
+   - Implication:
+     - the repository cannot treat "Windows" as one build target only
+     - native Windows transport work still targets Named Pipes
+     - the POSIX transport/library paths also need to compile on Windows under MSYS2 while Netdata remains on the emulation runtime
+   - Risk:
+     - some transport assumptions are no longer simply "POSIX vs Windows"; build-system and source guards need to distinguish Linux/macOS/FreeBSD, MSYS2-on-Windows, and native Windows carefully
+
+63. Before continuing Windows implementation work, keep the GitHub repo in sync with the latest recorded Windows findings so Linux and Windows work starts from the same visible baseline.
+   - Source: user proposal "make sure the repo is synced to github and then I will start you on windows."
+   - User decision: approved commit/push of the updated TODO state before Windows work starts (`1a`).
+   - Fact:
+     - local `HEAD` and `origin/main` currently point to the same commit `1917f75`
+     - the only current local modification is `TODO-plugin-ipc.md`
+   - Implication:
+     - to make the repo fully synced, either the updated TODO must be committed and pushed, or the Windows analysis notes remain local only
 
 ## Current Implementation Status (2026-03-08)
 - Completed:
