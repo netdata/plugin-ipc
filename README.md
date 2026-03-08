@@ -2,7 +2,7 @@
 
 Cross-language IPC workbench and library repository for Netdata plugins.
 
-This repository is now organized to mirror the eventual Netdata monorepo layout:
+This repository mirrors the eventual Netdata monorepo layout:
 
 - C library code: `src/libnetdata/netipc/`
 - Go package home: `src/go/pkg/netipc/`
@@ -10,23 +10,35 @@ This repository is now organized to mirror the eventual Netdata monorepo layout:
 - Test fixtures and helper apps: `tests/fixtures/`
 - Benchmark drivers: `bench/drivers/`
 
-The current validated implementation is still primarily the POSIX prototype:
+Current implemented surfaces:
 
 - C typed frame/schema library
-- POSIX shared-memory hybrid transport
 - POSIX `UDS_SEQPACKET` transport with profile negotiation
+- POSIX `SHM_HYBRID` transport
+- Windows Named Pipe transport for the C library
 - Rust/Go helper binaries for interop and benchmark validation
 
-The reusable Go package and Rust crate locations are now scaffolded, but their full library port is still pending.
+The reusable Go package and Rust crate locations are in place, but their full Windows transport ports are still pending.
 
 ## Build
 
-Canonical build entry point:
+POSIX:
 
 ```bash
 cmake -S . -B build
 cmake --build build
 ```
+
+Windows under MSYS2:
+
+```bash
+# Run from mingw64.exe or ucrt64.exe, not the plain msys shell.
+cmake -S . -B build-mingw -G Ninja
+cmake --build build-mingw
+```
+
+The Windows C backend is native Win32 code using Named Pipes. It is intended to
+be built from an MSYS2 MinGW/UCRT shell, but it must not target the MSYS runtime.
 
 Compatibility wrapper:
 
@@ -34,39 +46,31 @@ Compatibility wrapper:
 make
 ```
 
-Primary build artifacts:
+Primary C build artifacts:
 
-- `build/lib/libnetipc.a`
-- `build/bin/ipc-bench`
-- `build/bin/netipc-codec-c`
-- `build/bin/netipc-shm-server-demo`
-- `build/bin/netipc-shm-client-demo`
-- `build/bin/netipc-uds-server-demo`
-- `build/bin/netipc-uds-client-demo`
-- `build/bin/netipc-codec-rs`
-- `build/bin/netipc_live_rs`
-- `build/bin/netipc_live_uds_rs`
-- `build/bin/netipc-codec-go`
-- `build/bin/netipc-live-go`
+- POSIX: `build/lib/libnetipc.a`
+- POSIX: `build/bin/ipc-bench`
+- POSIX: `build/bin/netipc-shm-server-demo`
+- POSIX: `build/bin/netipc-shm-client-demo`
+- POSIX: `build/bin/netipc-uds-server-demo`
+- POSIX: `build/bin/netipc-uds-client-demo`
+- Windows: `build-mingw/lib/libnetipc.a`
+- Windows: `build-mingw/bin/netipc-live-c.exe`
 
 ## Repository Layout
 
 ```text
 .
-├── CMakeLists.txt
-├── bench/
-│   └── drivers/
-├── docs/
-├── src/
-│   ├── libnetdata/
-│   │   └── netipc/
-│   ├── go/
-│   │   └── pkg/netipc/
-│   └── crates/
-│       └── netipc/
-└── tests/
-    ├── fixtures/
-    └── run-*.sh
+|-- CMakeLists.txt
+|-- bench/
+|   `-- drivers/
+|-- src/
+|   |-- libnetdata/netipc/
+|   |-- go/pkg/netipc/
+|   `-- crates/netipc/
+`-- tests/
+    |-- fixtures/
+    `-- run-*.sh
 ```
 
 ## POSIX Baseline
@@ -81,12 +85,14 @@ Primary build artifacts:
 Headers:
 
 - `src/libnetdata/netipc/include/netipc/netipc_schema.h`
+- `src/libnetdata/netipc/include/netipc/netipc_named_pipe.h` (Windows)
 - `src/libnetdata/netipc/include/netipc/netipc_shm_hybrid.h`
 - `src/libnetdata/netipc/include/netipc/netipc_uds_seqpacket.h`
 
 Sources:
 
 - `src/libnetdata/netipc/src/protocol/netipc_schema.c`
+- `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c` (Windows)
 - `src/libnetdata/netipc/src/transport/posix/netipc_shm_hybrid.c`
 - `src/libnetdata/netipc/src/transport/posix/netipc_uds_seqpacket.c`
 
@@ -112,6 +118,7 @@ Interop and protocol tests:
 ./tests/run-interop.sh
 ./tests/run-live-interop.sh
 ./tests/run-live-uds-interop.sh
+./tests/run-live-npipe-smoke.sh
 ./tests/run-uds-seqpacket.sh
 ./tests/run-uds-negotiation-negative.sh
 ```
@@ -132,13 +139,14 @@ build/bin/netipc-shm-client-demo /tmp netflow 41 3
 build/bin/netipc-uds-server-demo /tmp netflow 3
 build/bin/netipc-uds-client-demo /tmp netflow 41 3
 
-build/bin/ipc-bench --transport stream --mode pingpong --clients 1 --payloads 32 --duration 1
-build/bin/ipc-bench --transport shm-hybrid --mode pingpong --clients 1 --payloads 32 --duration 5 --target-rps 100000
+build-mingw/bin/netipc-live-c.exe server-once /tmp netflow
+build-mingw/bin/netipc-live-c.exe client-once /tmp netflow 41
 ```
 
 ## Current Limits
 
 - The reusable C library is the only fully implemented library surface in this repo today.
 - Go and Rust still rely on helper binaries for the validated live interop/benchmark paths.
-- Windows transport directories are scaffolded, not implemented.
+- The Windows C transport is implemented for native Named Pipes, but Rust/Go Windows transports are still placeholders.
+- Windows validation is still limited to the C smoke path; cross-language Windows interop and benchmark coverage are still pending.
 - Netdata integration wiring is intentionally out of scope for this repository phase.

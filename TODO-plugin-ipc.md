@@ -29,7 +29,9 @@
   - Repo identity: `netdata/plugin-ipc`.
   - Coverage policy: 100% line + 100% branch for library source files.
   - Benchmark CI model: GitHub-hosted cloud VMs (with repetition/noise controls).
-  - Windows native baseline remains Named Pipes, but Windows builds must also work under MSYS2 POSIX emulation during the current Netdata transition.
+  - Windows baseline: Named Pipes, one native Windows library implementation (no separate MSYS2 variant).
+  - Windows builds must also work under MSYS2 POSIX emulation during the current Netdata transition.
+  - Windows C build mode: compile native Win32 code from MSYS2 `mingw64`/`ucrt64`, not the plain `msys` runtime shell.
 - Next starting point for the next session:
   - Continue replacing placeholder Rust/Go library scaffolding with real reusable API implementations.
   - Latest Windows probe findings not yet committed:
@@ -364,7 +366,7 @@ If we manage to have an transport layer that supports millions of requests/respo
      - this repo currently has no configured `git remote`.
      - Rust Windows transport is still a placeholder in `src/crates/netipc/src/transport/windows.rs`.
      - Go Windows transport is still a placeholder package in `src/go/pkg/netipc/transport/windows/`.
-     - the C library currently has no Windows transport source tree under `src/libnetdata/netipc/`.
+     - the C library now has an initial Windows Named Pipe transport under `src/libnetdata/netipc/src/transport/windows/`.
    - Implication:
      - cross-compilation alone is not enough for confidence here; Named Pipe behavior, timeouts, permissions, and benchmark results need real runtime validation on Windows.
      - pushing the repo first will make the Windows work easier to sync, review, and validate across machines.
@@ -427,10 +429,12 @@ If we manage to have an transport layer that supports millions of requests/respo
   - Rust `netipc_live_uds_rs` helper now consumes the reusable crate UDS transport, including negotiated `SHM_HYBRID`, instead of embedding a separate transport implementation.
   - Go `netipc-live-go` helper now consumes the reusable Go package for normal UDS server/client/bench flows instead of embedding a separate transport implementation.
   - Root `CMakeLists.txt` helper targets now depend on library source trees so fixture/helper rebuilds track library changes.
+  - C library now contains an initial Windows Named Pipe transport and Windows live fixture build path for MSYS2 `mingw64`/`ucrt64`.
 - Validated:
   - schema interop: `C <-> Rust <-> Go`
   - live SHM interop: `C <-> Rust`
   - live UDS interop: `C <-> Rust <-> Go`
+  - Windows C Named Pipe smoke under MSYS2 `mingw64`: `./tests/run-live-npipe-smoke.sh`
   - UDS negative negotiation coverage
   - UDS and negotiated-profile benchmark scripts
   - `cargo test -p netipc`
@@ -438,7 +442,8 @@ If we manage to have an transport layer that supports millions of requests/respo
 - Still incomplete:
   - Go package currently implements the reusable POSIX `UDS_SEQPACKET` path only.
   - Go negative-test helper logic for malformed/raw negotiation frames remains local to `bench/drivers/go`; this is fixture-specific coverage, not reusable API.
-  - Windows transport implementation remains a placeholder.
+  - Rust and Go Windows transports remain placeholders.
+  - Windows validation is still limited to the C Named Pipe path; cross-language Windows interop and benchmark coverage are still pending.
   - TODO/history text still contains historical references to the old prototype paths and should be cleaned once the structure is frozen.
 
 ## Auth Contract Verification (2026-03-08)

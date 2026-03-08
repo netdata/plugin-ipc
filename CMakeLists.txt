@@ -1,6 +1,33 @@
 cmake_minimum_required(VERSION 3.20)
 
+if(CMAKE_HOST_WIN32 AND DEFINED ENV{MSYSTEM} AND "$ENV{MSYSTEM}" STREQUAL "MSYS")
+    message(FATAL_ERROR
+        "On Windows, build plugin-ipc from an MSYS2 MinGW/UCRT shell "
+        "(`mingw64.exe` or `ucrt64.exe`), not the plain `msys` shell. "
+        "The Windows C backend is native Win32/Named Pipes, not an MSYS runtime build."
+    )
+endif()
+
 project(plugin_ipc LANGUAGES C)
+
+if(WIN32)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        execute_process(
+            COMMAND "${CMAKE_C_COMPILER}" -dumpmachine
+            RESULT_VARIABLE NETIPC_C_COMPILER_TARGET_RC
+            OUTPUT_VARIABLE NETIPC_C_COMPILER_TARGET
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(NETIPC_C_COMPILER_TARGET_RC EQUAL 0 AND
+           NETIPC_C_COMPILER_TARGET MATCHES "(msys|cygwin)")
+            message(FATAL_ERROR
+                "Compiler target `${NETIPC_C_COMPILER_TARGET}` is not a native Windows target. "
+                "Use an MSYS2 MinGW/UCRT toolchain such as `mingw64` or `ucrt64`."
+            )
+        endif()
+    endif()
+endif()
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
