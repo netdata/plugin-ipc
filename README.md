@@ -27,6 +27,13 @@ The reusable Go package and Rust crate locations are in place, but their full Wi
 `Cargo.toml` and `go.mod` remain native package metadata for Rust and Go, but
 repo-level workflows should be driven through CMake targets.
 
+For single-config generators such as Unix Makefiles and Ninja, the default build
+type is `RelWithDebInfo`. Override it explicitly when needed, for example:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+```
+
 POSIX:
 
 ```bash

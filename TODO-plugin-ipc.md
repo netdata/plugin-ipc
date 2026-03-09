@@ -1465,3 +1465,44 @@ Status (2026-03-08): completed. Validation reruns passed:
       - `tests/generate-benchmarks-posix.sh` and `tests/generate-benchmarks-windows.sh` now preserve the real child exit status in their `run()` wrappers.
       - `tests/run-negotiated-profile-bench.sh` now uses a `12s` server timeout instead of `7s`, to avoid staged benchmark flakiness near the `5s` benchmark window.
       - `benchmarks-posix.md` was regenerated successfully from a complete staged run after these fixes.
+
+85. Validate benchmark trustworthiness and counter correctness
+    - Source: user concern that the benchmark results may not be trustworthy, specifically whether ping-pong correctness is verified by the final counting, and why direct `rust -> rust` SHM is about `5M req/s` while `c -> c` is about `3.2M req/s`.
+    - Requirement:
+      - inspect the active benchmark helpers and scripts to verify exactly how request/response correctness is enforced during ping-pong benchmarks.
+      - determine whether the current benchmark validation guarantees strict counter-chain correctness or only aggregate counts.
+      - inspect the direct SHM C and Rust helper/library paths to explain the large throughput gap, separating facts from working theory.
+    - Plan:
+      - inspect the C and Rust direct SHM benchmark client/server loops and the benchmark scripts.
+      - confirm whether each round-trip validates `response == request + 1`, whether mismatches hard-fail, and whether final handled/request counts are cross-checked.
+      - inspect the direct SHM transport/library code and helper hot paths for asymmetries that can explain the result gap.
+      - respond with an evidence-based trust assessment and, if needed, propose concrete fixes.
+
+86. Default CMake build type
+    - Source: user question "can we make Release the default?"
+    - Facts to verify:
+      - the repo currently configures CMake with no default `CMAKE_BUILD_TYPE`, so single-config generators build C targets without optimization unless the user sets a build type explicitly.
+      - Rust helper builds already use `cargo build --release`, so the current benchmark/build defaults are inconsistent across languages.
+    - Requirement:
+      - inspect the current root CMake behavior and determine the correct way to default to `Release` without overriding explicit user choices or breaking multi-config generators.
+    - Plan:
+      - inspect the root `CMakeLists.txt` and current build cache evidence.
+      - present the safe options, implications, and recommendation before changing code.
+
+86. Default CMake build type decision
+    - User decision: use `RelWithDebInfo` as the default build type for single-config CMake generators.
+    - Reasoning:
+      - this keeps the repo optimized by default, avoiding the current unfair unoptimized C benchmark baseline.
+      - it also keeps debug symbols, which is more practical for crash analysis and transport debugging than pure `Release`.
+    - Implementation scope:
+      - set the default only when `CMAKE_CONFIGURATION_TYPES` is not used and `CMAKE_BUILD_TYPE` was not provided explicitly.
+      - reconfigure the local build, verify the active C flags, rerun validation, and regenerate `benchmarks-posix.md`.
+
+86. Default CMake build type implementation
+    - Implementation:
+      - root `CMakeLists.txt` now defaults single-config generators to `RelWithDebInfo` when the user did not set `CMAKE_BUILD_TYPE` explicitly.
+      - `README.md` now documents the default and how to override it with `-DCMAKE_BUILD_TYPE=Release`.
+    - Next validation:
+      - reconfigure the existing build directory to update the cached build type.
+      - verify that active C flags now include the `RelWithDebInfo` optimization/debug flags.
+      - rerun tests and regenerate `benchmarks-posix.md` under the new default.
