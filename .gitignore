@@ -2,12 +2,5 @@
 build/
 build-*/
 **/target/
-ipc-bench
-libnetipc.a
-netipc-codec-c
-netipc-shm-server-demo
-netipc-shm-client-demo
-netipc-uds-server-demo
-netipc-uds-client-demo
 tests/fixtures/go/netipc-codec-go
 bench/drivers/go/netipc-live-go

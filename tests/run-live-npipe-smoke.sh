@@ -1,10 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BUILD_DIR="${BUILD_DIR:-build-mingw}"
+BUILD_DIR="${NETIPC_CMAKE_BUILD_DIR:-${BUILD_DIR:-build-mingw}}"
 BIN_DIR="${C_BIN_DIR:-${BUILD_DIR}/bin}"
 SERVER_PID=""
 SERVER_LOG=""
+
+configure_build() {
+  if [[ "${NETIPC_SKIP_CONFIGURE:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  run cmake -S . -B "${BUILD_DIR}" -G Ninja
+}
+
+build_targets() {
+  if [[ "${NETIPC_SKIP_BUILD:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  configure_build
+  run cmake --build "${BUILD_DIR}" --target netipc-live-c
+}
 
 run() {
   printf >&2 '%s\n' "+ $*"
@@ -58,8 +75,7 @@ if [[ "${MSYSTEM:-}" == "MSYS" ]]; then
   exit 1
 fi
 
-run cmake -S . -B "${BUILD_DIR}" -G Ninja
-run cmake --build "${BUILD_DIR}" --target netipc-live-c
+build_targets
 
 SERVICE="netipc-win-smoke-$$"
 SERVER_LOG_PATH="${BUILD_DIR}/netipc-live-c-server.log"

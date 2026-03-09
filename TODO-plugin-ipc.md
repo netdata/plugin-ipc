@@ -40,6 +40,12 @@
     - native `MINGW64` C build currently fails on POSIX-only headers (`arpa/inet.h`, `poll.h`, `sys/mman.h`)
     - Rust on `win11` is currently `x86_64-pc-windows-msvc`, and the crate still tries to compile POSIX transport code on that Windows target
     - Go on `win11` still shows a local toolchain inconsistency during `go test` (`compile: version \"go1.26.1\" does not match go tool version \"go1.26.0\"`)
+  - New active task:
+    - pull the latest pushed Windows version from GitHub
+    - inspect the Windows implementation changes
+    - investigate the reported Windows throughput regression (`~16k req/s`)
+  - Current immediate request:
+    - pull the latest pushed code locally for inspection without disrupting in-progress local notes
 
 ## TL;DR
 - Build cross-language IPC libraries for Netdata plugins in C, Rust, and Go.
@@ -333,13 +339,13 @@ If we manage to have an transport layer that supports millions of requests/respo
    - Source: user report "I see binary artifacts at the root".
    - Evidence:
      - top-level files currently present:
-       - `ipc-bench`
+       - the deleted prototype benchmark binary
        - `libnetipc.a`
        - `netipc-codec-c`
-       - `netipc-shm-client-demo`
-       - `netipc-shm-server-demo`
-       - `netipc-uds-client-demo`
-       - `netipc-uds-server-demo`
+       - the deleted SHM client demo binary
+       - the deleted SHM server demo binary
+       - the deleted UDS client demo binary
+       - the deleted UDS server demo binary
      - current documented build outputs already point to `build/bin/` and `build/lib/`, not the repository root.
    - Rationale: these are stale leftovers from the earlier prototype layout and should not remain visible after the CMake refactor.
    - Status: completed.
@@ -404,6 +410,242 @@ If we manage to have an transport layer that supports millions of requests/respo
      - the only current local modification is `TODO-plugin-ipc.md`
    - Implication:
      - to make the repo fully synced, either the updated TODO must be committed and pushed, or the Windows analysis notes remain local only
+
+64. Pause local Windows transport optimization work while another assistant provides a fast-path attempt.
+   - Source: user direction "Wait. Don't do that. the other assistant is working to provide a fast path."
+   - Fact:
+     - current pushed native Windows C named-pipe transport was built and smoke-tested successfully on `win11`
+     - reproduced max-throughput benchmark on `win11` with the current fixture:
+       - `mode=c-npipe`
+       - `duration_sec=5`
+       - `responses=79024`
+       - `throughput_rps=15804.65`
+       - `p50_us=43.30`
+       - `p95_us=105.60`
+       - `p99_us=180.30`
+       - `client_cpu_cores=0.428`
+   - Implication:
+     - do not continue optimizing or redesigning the Windows path in this session until the alternate fast-path proposal is available
+
+65. Benchmarking must use only the shipped library implementations; the deleted prototype benchmark binary should be replaced and then deleted.
+   - Source: user decision "proceed. All A" for Decision 1.
+   - Implication:
+     - private benchmark transport implementations are no longer authoritative
+     - benchmark orchestration code may remain, but transport behavior must live only in the library
+
+66. The authoritative benchmark transport set must include only real library transports:
+   - POSIX: `uds-seqpacket`, `shm-hybrid`
+   - Windows: `named-pipe`
+   - Source: user decision "proceed. All A" for Decision 2.
+   - Implication:
+     - `stream`, `dgram`, `shm-spin`, and `shm-sem` must be removed from benchmark acceptance/reporting paths
+
+67. There must be no separate spin benchmark/product variant; keep only one SHM product path, `shm-hybrid`.
+   - Source: user decision "proceed. All A" for Decision 3.
+   - Implication:
+     - any spin behavior that remains is only an internal implementation detail of `shm-hybrid`
+     - `shm-spin` must be removed as a named benchmark transport
+
+68. CPU accounting must stay out of the library itself; benchmark/helper executables may collect their own CPU usage internally and report it on exit, instead of depending on external scripts.
+   - Source: user clarification "The library should not measure its cpu. But the implementations using the library could by theselves open proc and do the work, on exit, without relying on external scripts."
+   - Implication:
+     - library APIs remain transport-only
+     - benchmark/live helper binaries may own Linux `/proc` sampling and process-lifecycle accounting
+   - Constraint discovered during refactor:
+     - script-side `/proc/<pid>` sampling is unreliable for UDS server benchmarks because the server may exit on client disconnect before the script reads `/proc`
+     - helper-owned final CPU reporting requires a clean benchmark shutdown/reporting path in the helper executable
+
+69. Benchmark result ownership after removing the deleted prototype benchmark binary: Option A.
+   - Source: user decision "i agree" on the proposed option set.
+   - Decision:
+     - move benchmark orchestration into the helper executables themselves
+     - each helper gets a benchmark command that starts its own server child, runs the client loop, measures child/self CPU, and prints one final result row
+   - Implication:
+     - shell scripts become thin matrix orchestrators only
+     - benchmark correctness no longer depends on shell timing around server exit
+
+70. Scope of the first benchmark-orchestrator conversion: Option A.
+   - Source: user decision "i agree" on the proposed option set.
+   - Decision:
+     - convert all current authoritative POSIX benchmark paths together:
+       - `uds-seqpacket` for C, Rust, Go
+       - `shm-hybrid` for C
+     - keep the same model reserved for later Windows `named-pipe` conversion
+   - Implication:
+     - Linux benchmark reporting becomes consistent across the active library-backed transports
+
+71. Linux UDS benchmark coverage must include all C/Rust/Go client-server combinations in both directions, at all three benchmark rates:
+   - `max`
+   - `100k/s`
+   - `10k/s`
+   - Source: user requirement "For each of the implementations we need: max, 100k/s, 10ks. All combinations tested/benchmarked: c, rust, go interoperability in both directions".
+   - Implication:
+     - same-language rows alone are not enough
+     - benchmark scripts must expand into a cross-language client/server matrix
+
+72. Ping-pong benchmark correctness is mandatory: every helper benchmark must fail on any counter mismatch and verify that the increment chain remains correct through the whole run.
+   - Source: user requirement "the ping-pong should be testing incrementing a counter and ensuring that the counter has been incremented properly at the end, or the test should fail."
+   - Fact from current code:
+     - helper clients already check `response == counter + 1` on every request in C, Go, and Rust
+   - Required follow-up:
+     - the benchmark scripts must treat any helper-reported mismatch as a hard failure
+     - the final row must remain non-authoritative if the helper reports mismatches or inconsistent request/response counts
+
+73. Cross-language benchmark ownership model for the full C/Rust/Go matrix: Option A.
+   - Source: user decision "as you recommend".
+   - Decision:
+     - add helper commands for benchmark client/server roles separately
+     - let a thin matrix script compose cross-language client/server pairs
+     - each helper remains responsible for its own CPU measurement and correctness checks
+   - Implication:
+     - benchmark scripts merge helper-produced client/server rows instead of sampling processes externally
+
+74. Remove the remaining legacy C UDS demo dependency from negotiated profile-`2` testing by teaching `netipc-live-c` the same UDS profile override knobs already exposed by the old C demo binaries.
+
+75. Repository cleanup rule (clarified by Costa)
+    - This repo is library-only in purpose, but it keeps everything related to the library: source, documentation, unit/integration/stress tests, build systems, benchmarks, and scripts that exercise/validate the library.
+    - File retention criterion:
+      - Keep any file that is part of library source code.
+      - Keep any file that is part of library documentation.
+      - Keep any file that is part of unit / stress / integration tests for the library.
+      - Keep any file that is part of building / compiling / packaging the library.
+      - Keep any file that is part of benchmarking the library.
+      - Delete anything else.
+    - Mixed files should be cleaned so that only library-related content remains.
+    - Implication: validation and benchmark assets stay if they exercise the real library; obsolete prototype-only binaries, demo paths, and unrelated helper code should be removed.
+
+75. Cleanup execution scope for the current pass
+75. Cleanup results from the current pass
+    - Deleted obsolete private benchmark source the deleted prototype benchmark source.
+    - Deleted obsolete C demo sources:
+      - the deleted SHM server demo source
+      - the deleted SHM client demo source
+      - the deleted UDS server demo source
+      - the deleted UDS client demo source
+    - Switched remaining SHM interop coverage to `netipc-live-c`, so the deleted demo files are no longer needed by tests or build targets.
+    - Removed demo targets from `src/libnetdata/netipc/CMakeLists.txt`.
+    - Cleaned `README.md` and `.gitignore` so they no longer advertise obsolete demo/prototype artifacts.
+    - Full Linux validation after cleanup passed:
+      - `./tests/run-interop.sh`
+      - `./tests/run-live-interop.sh`
+      - `./tests/run-live-uds-interop.sh`
+      - `./tests/run-uds-seqpacket.sh`
+      - `./tests/run-uds-negotiation-negative.sh`
+      - `./tests/run-live-shm-bench.sh`
+      - `./tests/run-live-uds-bench.sh`
+      - `./tests/run-negotiated-profile-bench.sh`
+
+    - Delete obsolete private benchmark implementation the deleted prototype benchmark source and stop documenting it.
+    - Delete obsolete C demo binaries/sources once their remaining SHM interop use is switched to `netipc-live-c`.
+    - Keep fixture crates/modules and helper binaries that exercise the real library (`tests/fixtures/*`, `bench/drivers/go`, `bench/drivers/rust`).
+    - Keep benchmark and validation scripts in `tests/` because they benchmark/test the library.
+    - Keep `Makefile` because it is a build convenience wrapper around CMake and therefore library-build related.
+    - Remove generated artifacts and stale local binaries from the working tree (`build/`, Rust `target/` dirs, generated Go helper binary).
+
+75. Repository cleanup request: remove everything not related to the library we are building.
+   - Source: user request "cleanup everything that is not related to the library we are building."
+   - User clarification:
+     - delete anything not related to the library: sources, binaries, scripts, documentation, anything
+     - validation harnesses, helper binaries, benchmark drivers, and unrelated docs should not stay just because they were convenient during prototyping
+   - Current status:
+     - taking this literally means converting the repo from `library + validation` into `library-only`
+     - active validation currently still depends on helper binaries, fixtures, and benchmark/test scripts
+   - Pending decision:
+     - whether any repo-local validation/documentation is still considered part of the deliverable, or whether the repo should contain only the publishable library packages and their native package/build metadata
+   - Source: user approval "yes, please do this right" after the remaining-cleanup note.
+   - Decision:
+     - extend `netipc-live-c` UDS commands to accept optional `supported_profiles`, `preferred_profiles`, and `auth_token` overrides
+     - preserve the old positional convention for override values, including the legacy one-shot `iterations=1` placeholder used by the old demo binaries
+   - Implication:
+     - negotiated C<->Rust SHM tests and UDS negative tests can move fully onto the live helper path
+     - the old C UDS demo binaries stop being required for active validation
+
+## Benchmark Refactor Status (2026-03-09)
+- Completed:
+  - removed the private C benchmark transport source the deleted prototype benchmark source
+  - removed the the deleted prototype benchmark binary build target from the CMake build graph
+  - added a thin POSIX C live fixture at `tests/fixtures/c/netipc_live_posix_c.c`
+    - `uds-server-once`
+    - `uds-client-once`
+    - `uds-server-loop`
+    - `uds-client-bench`
+    - `shm-server-once`
+    - `shm-client-once`
+    - `shm-server-loop`
+    - `shm-client-bench`
+  - switched `tests/run-live-uds-bench.sh` to benchmark C UDS through `build/bin/netipc-live-c` instead of the deleted prototype benchmark binary
+  - updated `README.md` so the repository no longer advertises the deleted prototype benchmark binary as a primary artifact or benchmark path
+  - moved authoritative benchmark ownership into the helper executables:
+    - C helper now exposes `uds-bench` and `shm-bench`
+    - Go helper now exposes `uds-bench`
+    - Rust helper now exposes `uds-bench`
+  - benchmark helper executables now own server lifecycle and CPU reporting
+  - benchmark shell scripts no longer sample `/proc` or manage benchmark server PIDs directly
+- Linux validation run after the refactor:
+  - `cmake --build build`
+  - `./tests/run-live-uds-bench.sh`
+  - manual smoke: `build/bin/netipc-live-c shm-server-once` + `build/bin/netipc-live-c shm-client-once`
+  - `./tests/run-live-interop.sh`
+  - `./tests/run-live-shm-bench.sh`
+- Current outcome:
+  - authoritative C Linux UDS benchmark data now comes from the public library API path
+  - the fake standalone transport benchmark path is gone
+  - `shm-spin` no longer exists as a benchmark transport path in the repository
+  - authoritative Linux benchmark CPU reporting now comes from the helper executables, not the library and not the shell harness
+  - `tests/run-live-uds-bench.sh` now runs the full Linux UDS directed `C/Rust/Go` matrix (`9` client/server pairs) at `max`, `100k/s`, and `10k/s`
+  - `tests/run-live-uds-interop.sh` now runs the full directed baseline UDS profile-`1` matrix and keeps the negotiated C<->Rust profile-`2` SHM cases
+  - helper benchmarks now fail hard on:
+    - any non-OK response status
+    - any `response != request + 1` mismatch
+    - any `requests != responses` mismatch
+    - any final counter-chain mismatch
+    - any server handled-count mismatch versus client responses
+  - `netipc-live-c` now exposes optional UDS `supported_profiles`, `preferred_profiles`, and `auth_token` overrides for:
+    - one-shot commands
+    - loop commands
+    - bench commands
+  - `netipc-live-c` now exposes a repeated-call UDS client mode so the basic seqpacket smoke test can also stay on the live helper path
+  - no UDS test script under `tests/*.sh` depends on the old C UDS demo binaries anymore
+
+## Latest Authoritative Benchmark Note (2026-03-09)
+- Historical the deleted prototype benchmark binary notes elsewhere in this TODO are prototype history only.
+- They are no longer authoritative for acceptance after Decisions `65` through `73`.
+- Current authoritative Linux acceptance data must come from:
+  - `./tests/run-live-uds-bench.sh`
+  - `./tests/run-live-shm-bench.sh`
+  - helper binaries that call only the shipped library code paths
+
+## Latest Validation Snapshot (2026-03-09)
+- Passed:
+  - `./tests/run-uds-seqpacket.sh`
+  - `./tests/run-live-uds-bench.sh`
+  - `./tests/run-live-uds-interop.sh`
+  - `./tests/run-live-shm-bench.sh`
+  - `./tests/run-live-interop.sh`
+  - `./tests/run-uds-negotiation-negative.sh`
+- Linux UDS benchmark matrix (`27` rows, all helper/library-backed, all strict-correctness checked):
+  - `max`
+    - `c -> c`: ~206.8k req/s, p50 ~4.34us, total CPU ~1.016
+    - `c -> rust`: ~220.7k req/s, p50 ~4.02us, total CPU ~0.986
+    - `c -> go`: ~198.6k req/s, p50 ~4.54us, total CPU ~1.410
+    - `rust -> c`: ~217.1k req/s, p50 ~4.14us, total CPU ~0.996
+    - `rust -> rust`: ~236.6k req/s, p50 ~3.81us, total CPU ~0.975
+    - `rust -> go`: ~232.0k req/s, p50 ~3.63us, total CPU ~1.450
+    - `go -> c`: ~199.9k req/s, p50 ~4.46us, total CPU ~1.392
+    - `go -> rust`: ~222.0k req/s, p50 ~4.18us, total CPU ~1.433
+    - `go -> go`: ~200.4k req/s, p50 ~4.58us, total CPU ~1.907
+  - `100k/s`
+    - all `9` directed pairs held ~100k req/s with strict increment validation
+    - lowest total CPU in this run: `rust -> rust` at ~0.448 cores
+    - highest total CPU in this run: `c -> go` at ~1.271 cores
+  - `10k/s`
+    - all `9` directed pairs held ~10k req/s with strict increment validation
+    - lowest total CPU in this run: `rust -> rust` at ~0.066 cores
+    - highest total CPU in this run: `c -> go` at ~1.042 cores
+- Linux SHM benchmark (`C shm-hybrid`, helper/library-backed):
+  - `max`: ~2.95M req/s, p50 ~0.31us, total CPU ~1.982
+  - `100k/s`: ~100.0k req/s, p50 ~3.33us, total CPU ~1.145
+  - `10k/s`: ~10.0k req/s, p50 ~3.98us, total CPU ~0.996
 
 ## Current Implementation Status (2026-03-08)
 - Completed:
@@ -513,7 +755,7 @@ If we manage to have an transport layer that supports millions of requests/respo
 
 ## Current Phase Plan (Decision #34)
 1. Replace busy/yield rate pacing loops with adaptive sleep pacing in:
-   - `src/ipc_bench.c`
+   - the deleted prototype benchmark source
    - `interop/rust/src/bin/netipc_live_uds_rs.rs`
    - `interop/go-live/main.go`
 2. Keep full-speed (`target_rps=0`) behavior unchanged.
@@ -561,7 +803,7 @@ Status (2026-03-08): completed. Validation reruns passed:
 
 ## Repository Layout Analysis (2026-03-08)
 - Fact: Top-level currently mixes source artifacts, generated binaries, library code, demos, benchmark executable, and language experiments:
-  - top-level binaries: `ipc-bench`, `netipc-codec-c`, `netipc-shm-*`, `netipc-uds-*`, `libnetipc.a`
+  - top-level binaries: `netipc-codec-c`, demo binaries, `libnetipc.a`, and a prototype benchmark executable
   - source directories: `src/`, `include/`, `interop/`, `tests/`
 - Fact: `interop/` is overloaded:
   - `interop/go` is a schema codec tool
@@ -588,7 +830,7 @@ Status (2026-03-08): completed. Validation reruns passed:
 - Implication: the standalone `plugin-ipc` repository should mirror these boundaries as closely as possible, otherwise future integration will require a second structural rewrite.
 
 ## Implementation Progress
-- Done: Phase 1 POSIX C benchmark harness implemented (`ipc-bench`).
+- Done: Phase 1 POSIX C benchmark harness implemented (the deleted prototype benchmark binary).
 - Done: Transport candidates implemented for benchmarking:
 - `AF_UNIX/SOCK_STREAM`
 - `AF_UNIX/SOCK_SEQPACKET`
@@ -617,8 +859,8 @@ Status (2026-03-08): completed. Validation reruns passed:
   - `src/netipc_shm_hybrid.c`
 - Done: C tools/examples added:
   - `netipc-codec-c` (`src/netipc_codec_tool.c`)
-  - `netipc-shm-server-demo` (`src/netipc_shm_server_demo.c`)
-  - `netipc-shm-client-demo` (`src/netipc_shm_client_demo.c`)
+  - the deleted SHM server demo binary (the deleted SHM server demo source)
+  - the deleted SHM client demo binary (the deleted SHM client demo source)
 - Done: Cross-language schema interop tools added:
   - Rust codec tool (`interop/rust`)
   - Go codec tool (`interop/go`)
@@ -628,8 +870,8 @@ Status (2026-03-08): completed. Validation reruns passed:
 - Done: Build system updated (`Makefile`) to produce:
   - `libnetipc.a`
   - `netipc-codec-c`
-  - `netipc-shm-server-demo`
-  - `netipc-shm-client-demo`
+  - the deleted SHM server demo binary
+  - the deleted SHM client demo binary
 - Done: Stale endpoint recovery added to C shared-memory transport:
   - Region ownership PID tracking.
   - Safe takeover rules:
@@ -661,8 +903,8 @@ Status (2026-03-08): completed. Validation reruns passed:
   - active listener -> fail with `EADDRINUSE`
   - stale socket path -> unlink and recreate
 - Done: C UDS demos added:
-  - `netipc-uds-server-demo` (`src/netipc_uds_server_demo.c`)
-  - `netipc-uds-client-demo` (`src/netipc_uds_client_demo.c`)
+  - the deleted UDS server demo binary (the deleted UDS server demo source)
+  - the deleted UDS client demo binary (the deleted UDS client demo source)
 - Done: Build updated for UDS artifacts (`Makefile`).
 - Done: Automated UDS negotiation test added:
   - `tests/run-uds-seqpacket.sh`
@@ -701,8 +943,8 @@ Status (2026-03-08): completed. Validation reruns passed:
     - auth mismatch (`EACCES`)
     - malformed hello (`EPROTO`)
 - Done: C UDS demos extended with optional negotiation inputs:
-  - `src/netipc_uds_server_demo.c`: optional `supported_profiles`, `preferred_profiles`, `auth_token`.
-  - `src/netipc_uds_client_demo.c`: optional `supported_profiles`, `preferred_profiles`, `auth_token`.
+  - the deleted UDS server demo source: optional `supported_profiles`, `preferred_profiles`, `auth_token`.
+  - the deleted UDS client demo source: optional `supported_profiles`, `preferred_profiles`, `auth_token`.
 - Done: C UDS transport now implements negotiated `SHM_HYBRID` data-plane switch (profile `2`) in addition to baseline `UDS_SEQPACKET`:
   - `src/netipc_uds_seqpacket.c`
   - Behavior:
@@ -726,7 +968,7 @@ Status (2026-03-08): completed. Validation reruns passed:
   - `tests/run-negotiated-profile-bench.sh`
   - Compares profile `1` (`UDS_SEQPACKET`) vs profile `2` (`SHM_HYBRID`) under identical 5s client-bench scenarios.
 - Done: Rate-limited benchmark client pacing switched from busy/yield loops to adaptive sleep pacing:
-  - `src/ipc_bench.c` (`sleep_until_ns`, fixed-rate schedule progression)
+  - the deleted prototype benchmark source (`sleep_until_ns`, fixed-rate schedule progression)
   - `interop/rust/src/bin/netipc_live_uds_rs.rs` (`sleep_until`)
   - `interop/go-live/main.go` (`sleepUntil`)
   - Intent: remove pacing busy-loop CPU pollution from fixed-rate benchmark metrics.
@@ -739,8 +981,8 @@ Status (2026-03-08): completed. Validation reruns passed:
     - Rust -> Go -> Rust
     - Go -> C -> Go
 - C shared-memory API smoke test:
-  - Server: `./netipc-shm-server-demo /tmp netipc-demo 2`
-  - Client: `./netipc-shm-client-demo /tmp netipc-demo 50 2`
+  - Server: `./the deleted SHM server demo binary /tmp netipc-demo 2`
+  - Client: `./the deleted SHM client demo binary /tmp netipc-demo 50 2`
   - Result: pass (`50->51`, `51->52`).
 - Live transport interop test:
   - `./tests/run-live-interop.sh`: pass.
@@ -826,7 +1068,7 @@ Status (2026-03-08): completed. Validation reruns passed:
   - `./tests/run-uds-negotiation-negative.sh`: pass.
   - `./tests/run-live-uds-bench.sh`: pass.
 - Seqpacket baseline benchmark spot check:
-  - `./ipc-bench --transport seqpacket --mode pingpong --clients 1 --payloads 32 --duration 5`
+  - `./the deleted prototype benchmark binary --transport seqpacket --mode pingpong --clients 1 --payloads 32 --duration 5`
   - Result: throughput ~265,550 req/s, p50 ~3.46us.
 
 ## Initial Findings (Smoke, Linux x86_64, 1s, 1 client, payload=40B)
@@ -973,3 +1215,80 @@ Status (2026-03-08): completed. Validation reruns passed:
 - Developer guide: how to expose/consume a service from plugins.
 - Protocol spec: framing, message schema, error codes, versioning.
 - Ops notes: RUN_DIR socket/pipe lifecycle, troubleshooting, perf tuning.
+
+## Benchmark Request (2026-03-09)
+- User request: run the Linux benchmark for single-client ping-pong performance with no pipelining.
+- Scope: execute the existing Linux benchmark path and report the measured results.
+
+## Design Correction (2026-03-09)
+- User concern: only one implementation should exist: the library.
+- User decision direction: no spin variant.
+- User concern: benchmark results are not trustworthy when they measure imaginary/private benchmark transports instead of the reusable library.
+- Required outcome: propose how to restructure benchmarking so only library code is measured.
+
+76. Remove all in-tree traces of deleted prototype artifacts
+    - Remove remaining references in documentation, TODO/history notes, comments, scripts, and build files to deleted prototype-only artifacts.
+    - Scope is the current working tree only; git history is not being rewritten in this pass.
+    - Deleted artifact names should disappear from the tree entirely and be replaced with generic wording where historical context must remain.
+
+
+76. Trace-removal result
+    - Removed the deleted artifact names and deleted source paths from active build files, documentation, and TODO/history notes.
+    - Updated `Makefile` cleanup to target current generated outputs instead of deleted prototype artifact names.
+    - Verified with repo-wide search that the deleted artifact names no longer appear in the working tree.
+    - Renamed the Rust benchmark-driver package to remove the residual deleted benchmark substring from package metadata.
+    - Verified `make clean` still passes after the cleanup.
+
+
+77. Build system requirement: the repository must be CMake-based to match Netdata integration.
+    - Source: user decision "The build system must be based on cmake, because Netdata uses cmake and it will do the integration easier."
+    - Requirement:
+      - CMake must remain the top-level and authoritative repository build/test orchestration entrypoint.
+      - The repository layout and targets should stay easy to embed into Netdata's CMake build.
+    - Fact:
+      - Rust crates still require `Cargo.toml`.
+      - Go packages/modules still require `go.mod`.
+    - Implication:
+      - `Cargo.toml` and `go.mod` remain native package metadata, but CMake should drive the repo-level build, validation, and benchmark targets.
+      - Avoid introducing parallel non-CMake top-level build systems for repository orchestration.
+
+
+77. CMake-first execution scope for the current pass
+    - Gap found:
+      - top-level CMake builds library/helper binaries, but it does not own validation or benchmark workflows yet.
+      - shell scripts currently self-configure/self-build, so they are runnable manually but not registered as first-class CMake workflows.
+      - generated Rust/Go outputs outside the build directory are currently cleaned only by the wrapper `Makefile`, not by a CMake target.
+    - Plan for this pass:
+      - register library validation scripts as CMake/CTest workflows.
+      - register benchmark scripts as explicit CMake targets.
+      - let scripts respect a CMake-driven mode so they can run without recursive configure/build when launched from CMake.
+      - add a CMake cleanup target for generated non-build-dir artifacts.
+      - update documentation so CMake is the authoritative repo-level interface.
+
+
+77. CMake-first result
+    - Added CMake workflow targets for validation and benchmarks:
+      - `netipc-check`
+      - `netipc-bench`
+      - `netipc-validate-all`
+      - `netipc-clean-generated`
+    - Registered validation scripts with CTest via CMake build targets.
+    - Updated validation/benchmark scripts to support a CMake-driven mode using:
+      - `NETIPC_CMAKE_BUILD_DIR`
+      - `NETIPC_SKIP_CONFIGURE`
+      - `NETIPC_SKIP_BUILD`
+    - Validation through CMake passed:
+      - `cmake -S . -B build`
+      - `cmake --build build --target test`
+      - `cmake --build build --target netipc-bench`
+      - `cmake --build build --target netipc-clean-generated`
+    - Environment note:
+      - the plain `ctest` command on this workstation resolves to a broken Python shim in `~/.local/bin/ctest`.
+      - `cmake --build build --target test` is therefore the reliable documented path here.
+
+
+78. Push decision for the cleanup + CMake-first pass
+    - Source: user approval "yes push"
+    - Decision:
+      - push commit `e57e74d` on `main` to `origin`
+

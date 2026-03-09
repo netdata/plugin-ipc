@@ -7,14 +7,20 @@ YELLOW='\033[1;33m'
 GRAY='\033[0;90m'
 NC='\033[0m'
 
-CMAKE_BUILD_DIR="build"
+CMAKE_BUILD_DIR="${NETIPC_CMAKE_BUILD_DIR:-build}"
 C_BIN_DIR="${CMAKE_BUILD_DIR}/bin"
 
 configure_build() {
+  if [[ "${NETIPC_SKIP_CONFIGURE:-0}" == "1" ]]; then
+    return 0
+  fi
   run cmake -S . -B "${CMAKE_BUILD_DIR}"
 }
 
 build_targets() {
+  if [[ "${NETIPC_SKIP_BUILD:-0}" == "1" ]]; then
+    return 0
+  fi
   configure_build
   run cmake --build "${CMAKE_BUILD_DIR}" --target "$@"
 }

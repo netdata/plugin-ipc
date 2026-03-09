@@ -2,14 +2,12 @@
 
 BUILD_DIR ?= build
 CMAKE ?= cmake
-LEGACY_ROOT_ARTIFACTS := \
-	ipc-bench \
-	libnetipc.a \
-	netipc-codec-c \
-	netipc-shm-server-demo \
-	netipc-shm-client-demo \
-	netipc-uds-server-demo \
-	netipc-uds-client-demo
+GENERATED_ARTIFACTS := \
+	src/crates/target \
+	tests/fixtures/rust/target \
+	bench/drivers/rust/target \
+	tests/fixtures/go/netipc-codec-go \
+	bench/drivers/go/netipc-live-go
 FORWARD_TARGETS := $(filter-out all configure clean,$(MAKECMDGOALS))
 
 .PHONY: all configure clean $(FORWARD_TARGETS)
@@ -22,7 +20,7 @@ configure:
 
 clean:
 	rm -rf $(BUILD_DIR)
-	rm -f $(LEGACY_ROOT_ARTIFACTS)
+	rm -rf $(GENERATED_ARTIFACTS)
 
 ifneq ($(FORWARD_TARGETS),)
 $(FORWARD_TARGETS): configure

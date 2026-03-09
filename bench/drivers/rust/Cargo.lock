@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "netipc-bench-rust"
+name = "netipc-rust-bench-driver"
 version = "0.1.0"
 dependencies = [
  "libc",

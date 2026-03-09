@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -46,12 +49,28 @@ type negMessage struct {
 	status       uint32
 }
 
+type benchResult struct {
+	durationSec    int
+	targetRPS      int
+	requests       int
+	responses      int
+	mismatches     int
+	elapsedSec     float64
+	throughputRPS  float64
+	p50US          float64
+	p95US          float64
+	p99US          float64
+	clientCPUCores float64
+}
+
 func usage(argv0 string) {
 	fmt.Fprintf(os.Stderr, "usage:\n")
 	fmt.Fprintf(os.Stderr, "  %s uds-server-once <run_dir> <service>\n", argv0)
 	fmt.Fprintf(os.Stderr, "  %s uds-client-once <run_dir> <service> <value>\n", argv0)
 	fmt.Fprintf(os.Stderr, "  %s uds-server-loop <run_dir> <service> <max_requests|0>\n", argv0)
+	fmt.Fprintf(os.Stderr, "  %s uds-server-bench <run_dir> <service> <max_requests|0>\n", argv0)
 	fmt.Fprintf(os.Stderr, "  %s uds-client-bench <run_dir> <service> <duration_sec> <target_rps>\n", argv0)
+	fmt.Fprintf(os.Stderr, "  %s uds-bench <run_dir> <service> <duration_sec> <target_rps>\n", argv0)
 	fmt.Fprintf(os.Stderr, "  %s uds-client-badhello <run_dir> <service>\n", argv0)
 	fmt.Fprintf(os.Stderr, "  %s uds-client-rawhello <run_dir> <service> <supported_mask> <preferred_mask> <auth_token>\n", argv0)
 }
@@ -76,6 +95,26 @@ func parseU32(s string) uint32 {
 
 func protocolError(message string) error {
 	return fmt.Errorf("protocol error: %s", message)
+}
+
+func isDisconnectErr(err error) bool {
+	return err != nil && (errorsIsEOF(err) || isConnReset(err))
+}
+
+func errorsIsEOF(err error) bool {
+	return errors.Is(err, io.EOF)
+}
+
+func isConnReset(err error) bool {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return opErr != nil && (isSyscall(opErr.Err, syscall.ECONNRESET) || isSyscall(opErr.Err, syscall.EPIPE) || isSyscall(opErr.Err, syscall.ENOTCONN))
+	}
+	return isSyscall(err, syscall.ECONNRESET) || isSyscall(err, syscall.EPIPE) || isSyscall(err, syscall.ENOTCONN)
+}
+
+func isSyscall(err error, target syscall.Errno) bool {
+	return err != nil && errors.Is(err, target)
 }
 
 func encodeNeg(msg negMessage) protocol.Frame {
@@ -207,46 +246,76 @@ func udsClientOnce(runDir, service string, value uint64) error {
 }
 
 func udsServerLoop(runDir, service string, maxRequests uint64) error {
+	_, err := udsServerLoopInternal(runDir, service, maxRequests)
+	return err
+}
+
+func udsServerLoopInternal(runDir, service string, maxRequests uint64) (uint64, error) {
 	server, err := posix.Listen(udsConfig(runDir, service))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer server.Close()
 
 	if err := server.Accept(10 * time.Second); err != nil {
-		return err
+		return 0, err
 	}
 
 	handled := uint64(0)
 	for maxRequests == 0 || handled < maxRequests {
 		requestID, request, err := server.ReceiveIncrement(0)
 		if err != nil {
-			return err
+			if isDisconnectErr(err) {
+				return handled, nil
+			}
+			return handled, err
 		}
 		response := protocol.IncrementResponse{
 			Status: protocol.StatusOK,
 			Value:  request.Value + 1,
 		}
 		if err := server.SendIncrement(requestID, response, 0); err != nil {
-			return err
+			if isDisconnectErr(err) {
+				return handled, nil
+			}
+			return handled, err
 		}
 		handled++
 	}
 
-	return nil
+	return handled, nil
 }
 
-func udsClientBench(runDir, service string, durationSec, targetRPS int) error {
+func printServerBenchRow(label string, handled uint64, elapsedSec, serverCPUCores float64) {
+	fmt.Printf("%s-server,%d,%.6f,%.3f\n", label, handled, elapsedSec, serverCPUCores)
+}
+
+func udsServerBench(runDir, service string, maxRequests uint64) error {
+	start := time.Now()
+	cpuStart := selfCPUSeconds()
+	handled, err := udsServerLoopInternal(runDir, service, maxRequests)
+	elapsedSec := time.Since(start).Seconds()
+	serverCPUCores := 0.0
+	if elapsedSec > 0 {
+		serverCPUCores = (selfCPUSeconds() - cpuStart) / elapsedSec
+	}
+	if err == nil {
+		printServerBenchRow("go-uds", handled, elapsedSec, serverCPUCores)
+	}
+	return err
+}
+
+func runClientBenchCapture(runDir, service string, durationSec, targetRPS int) (benchResult, error) {
 	if durationSec <= 0 {
-		return fmt.Errorf("duration_sec must be > 0")
+		return benchResult{}, fmt.Errorf("duration_sec must be > 0")
 	}
 	if targetRPS < 0 {
-		return fmt.Errorf("target_rps must be >= 0")
+		return benchResult{}, fmt.Errorf("target_rps must be >= 0")
 	}
 
 	client, err := posix.Dial(udsConfig(runDir, service), 10*time.Second)
 	if err != nil {
-		return err
+		return benchResult{}, err
 	}
 	defer client.Close()
 
@@ -285,10 +354,13 @@ func udsClientBench(runDir, service string, durationSec, targetRPS int) error {
 
 		response, err := client.CallIncrement(protocol.IncrementRequest{Value: counter}, 0)
 		if err != nil {
-			return err
+			return benchResult{}, err
 		}
-		if response.Status != protocol.StatusOK || response.Value != counter+1 {
-			mismatches++
+		if response.Status != protocol.StatusOK {
+			return benchResult{}, fmt.Errorf("server returned non-OK status during benchmark: %d", response.Status)
+		}
+		if response.Value != counter+1 {
+			return benchResult{}, fmt.Errorf("benchmark counter mismatch: got=%d expected=%d", response.Value, counter+1)
 		}
 
 		counter = response.Value
@@ -303,26 +375,65 @@ func udsClientBench(runDir, service string, durationSec, targetRPS int) error {
 	cpuCores := (selfCPUSeconds() - cpuStart) / elapsedSec
 	throughput := float64(responses) / elapsedSec
 
+	if responses != requests {
+		return benchResult{}, fmt.Errorf("benchmark request/response mismatch: requests=%d responses=%d", requests, responses)
+	}
+	if counter != uint64(responses)+1 {
+		return benchResult{}, fmt.Errorf("benchmark final counter mismatch: counter=%d expected=%d", counter, uint64(responses)+1)
+	}
+
 	sort.Slice(latNs, func(i, j int) bool { return latNs[i] < latNs[j] })
 	p50 := percentileMicros(latNs, 50)
 	p95 := percentileMicros(latNs, 95)
 	p99 := percentileMicros(latNs, 99)
 
-	fmt.Println("mode,duration_sec,target_rps,requests,responses,mismatches,throughput_rps,p50_us,p95_us,p99_us,client_cpu_cores")
-	fmt.Printf(
-		"go-uds,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%.3f\n",
-		durationSec,
-		targetRPS,
-		requests,
-		responses,
-		mismatches,
-		throughput,
-		p50,
-		p95,
-		p99,
-		cpuCores,
-	)
+	return benchResult{
+		durationSec:    durationSec,
+		targetRPS:      targetRPS,
+		requests:       requests,
+		responses:      responses,
+		mismatches:     mismatches,
+		elapsedSec:     elapsedSec,
+		throughputRPS:  throughput,
+		p50US:          p50,
+		p95US:          p95,
+		p99US:          p99,
+		clientCPUCores: cpuCores,
+	}, nil
+}
 
+func printBenchHeader() {
+	fmt.Println("mode,duration_sec,target_rps,requests,responses,mismatches,throughput_rps,p50_us,p95_us,p99_us,client_cpu_cores,server_cpu_cores,total_cpu_cores")
+}
+
+func printBenchRow(label string, result benchResult, serverCPUCores float64) {
+	totalCPUCores := result.clientCPUCores + serverCPUCores
+	fmt.Printf(
+		"%s,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f\n",
+		label,
+		result.durationSec,
+		result.targetRPS,
+		result.requests,
+		result.responses,
+		result.mismatches,
+		result.throughputRPS,
+		result.p50US,
+		result.p95US,
+		result.p99US,
+		result.clientCPUCores,
+		serverCPUCores,
+		totalCPUCores,
+	)
+}
+
+func udsClientBench(runDir, service string, durationSec, targetRPS int) error {
+	result, err := runClientBenchCapture(runDir, service, durationSec, targetRPS)
+	if err != nil {
+		return err
+	}
+
+	printBenchHeader()
+	printBenchRow("go-uds", result, 0)
 	return nil
 }
 
@@ -437,6 +548,59 @@ func sleepUntil(targetNs int64) {
 	}
 }
 
+func waitForPath(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("endpoint %s was not created in time", path)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func udsBench(runDir, service string, durationSec, targetRPS int) error {
+	serverStart := time.Now()
+	cmd := exec.Command(os.Args[0], "uds-server-loop", runDir, service, "0")
+	cmd.Stdout = io.Discard
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	if err := waitForPath(endpointSockPath(runDir, service), 5*time.Second); err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		return err
+	}
+
+	result, err := runClientBenchCapture(runDir, service, durationSec, targetRPS)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		return err
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return err
+	}
+	if cmd.ProcessState == nil {
+		return fmt.Errorf("server benchmark child produced no process state")
+	}
+
+	serverCPU := 0.0
+	serverElapsedSec := time.Since(serverStart).Seconds()
+	if serverElapsedSec > 0 {
+		serverCPU = (cmd.ProcessState.UserTime().Seconds() + cmd.ProcessState.SystemTime().Seconds()) / serverElapsedSec
+	}
+
+	printBenchHeader()
+	printBenchRow("go-uds", result, serverCPU)
+	return nil
+}
+
 func main() {
 	args := os.Args
 	if len(args) < 2 {
@@ -458,13 +622,19 @@ func main() {
 			os.Exit(2)
 		}
 		err = udsClientOnce(args[2], args[3], parseU64(args[4]))
-	case "uds-server-loop":
-		if len(args) != 5 {
-			usage(args[0])
-			os.Exit(2)
-		}
-		err = udsServerLoop(args[2], args[3], parseU64(args[4]))
-	case "uds-client-bench":
+		case "uds-server-loop":
+			if len(args) != 5 {
+				usage(args[0])
+				os.Exit(2)
+			}
+			err = udsServerLoop(args[2], args[3], parseU64(args[4]))
+		case "uds-server-bench":
+			if len(args) != 5 {
+				usage(args[0])
+				os.Exit(2)
+			}
+			err = udsServerBench(args[2], args[3], parseU64(args[4]))
+		case "uds-client-bench":
 		if len(args) != 6 {
 			usage(args[0])
 			os.Exit(2)
@@ -480,6 +650,22 @@ func main() {
 			os.Exit(2)
 		}
 		err = udsClientBench(args[2], args[3], durationSec, targetRPS)
+	case "uds-bench":
+		if len(args) != 6 {
+			usage(args[0])
+			os.Exit(2)
+		}
+		durationSec, parseErr := strconv.Atoi(args[4])
+		if parseErr != nil {
+			fmt.Fprintf(os.Stderr, "invalid duration_sec %q: %v\n", args[4], parseErr)
+			os.Exit(2)
+		}
+		targetRPS, parseErr := strconv.Atoi(args[5])
+		if parseErr != nil {
+			fmt.Fprintf(os.Stderr, "invalid target_rps %q: %v\n", args[5], parseErr)
+			os.Exit(2)
+		}
+		err = udsBench(args[2], args[3], durationSec, targetRPS)
 	case "uds-client-badhello":
 		if len(args) != 4 {
 			usage(args[0])

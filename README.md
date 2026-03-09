@@ -1,6 +1,6 @@
 # plugin-ipc
 
-Cross-language IPC workbench and library repository for Netdata plugins.
+Cross-language IPC library repository for Netdata plugins.
 
 This repository mirrors the eventual Netdata monorepo layout:
 
@@ -23,6 +23,10 @@ The reusable Go package and Rust crate locations are in place, but their full Wi
 
 ## Build
 
+`CMake` is the authoritative top-level build/test interface for this repository.
+`Cargo.toml` and `go.mod` remain native package metadata for Rust and Go, but
+repo-level workflows should be driven through CMake targets.
+
 POSIX:
 
 ```bash
@@ -44,7 +48,7 @@ is intentionally limited to Win32 primitives that can be ported to Rust and pure
 Go without `cgo`. It is intended to be built from an MSYS2 MinGW/UCRT shell,
 but it must not target the MSYS runtime.
 
-Compatibility wrapper:
+Compatibility wrapper only:
 
 ```bash
 make
@@ -53,11 +57,8 @@ make
 Primary C build artifacts:
 
 - POSIX: `build/lib/libnetipc.a`
-- POSIX: `build/bin/ipc-bench`
-- POSIX: `build/bin/netipc-shm-server-demo`
-- POSIX: `build/bin/netipc-shm-client-demo`
-- POSIX: `build/bin/netipc-uds-server-demo`
-- POSIX: `build/bin/netipc-uds-client-demo`
+- POSIX: `build/bin/netipc-live-c`
+- POSIX: `build/bin/netipc-codec-c`
 - Windows: `build-mingw/lib/libnetipc.a`
 - Windows: `build-mingw/bin/netipc-live-c.exe`
 
@@ -111,11 +112,31 @@ Schema fixtures:
 
 Benchmark drivers:
 
-- C driver: `bench/drivers/c/ipc_bench.c`
+- C live fixture: `tests/fixtures/c/netipc_live_posix_c.c` (POSIX)
+- C live fixture: `tests/fixtures/c/netipc_live_c.c` (Windows)
 - Rust UDS driver crate: `bench/drivers/rust/`
 - Go UDS driver module: `bench/drivers/go/`
 
 ## Validation
+
+Primary CMake-driven workflows:
+
+```bash
+cmake -S . -B build
+cmake --build build
+cmake --build build --target test
+cmake --build build --target netipc-check
+cmake --build build --target netipc-bench
+cmake --build build --target netipc-clean-generated
+```
+
+Available CMake workflow targets:
+
+- `netipc-check`: runs the registered validation suite
+- `test`: runs the registered CTest suite through the active CMake generator
+- `netipc-bench`: runs the registered benchmark suite
+- `netipc-validate-all`: runs both validation and benchmark targets
+- `netipc-clean-generated`: removes generated Rust/Go outputs outside `build/`
 
 Interop and protocol tests:
 
@@ -133,17 +154,46 @@ Benchmarks:
 
 ```bash
 ./tests/run-live-uds-bench.sh
+./tests/run-live-shm-bench.sh
 ./tests/run-negotiated-profile-bench.sh
 ```
+
+The benchmark scripts only orchestrate matrix runs. CPU reporting is produced by the helper binaries themselves, not by the reusable library and not by external shell-side `/proc` sampling.
+
+The shell scripts remain in the repository because they are library validation and benchmark assets, but they are now intended to be launched by CMake/CTest as first-class repo workflows.
+
+- `./tests/run-live-uds-bench.sh` runs the full Linux UDS `C/Rust/Go` client-server matrix (`9` directed pairs) at:
+  - `max`
+  - `100k/s`
+  - `10k/s`
+- The UDS benchmark matrix fails hard on:
+  - any non-OK response status
+  - any `response != request + 1` mismatch
+  - any `requests != responses` mismatch
+  - any client/server handled-count mismatch
+- `./tests/run-live-uds-interop.sh` runs the full directed baseline profile-`1` UDS matrix, plus the negotiated C<->Rust profile-`2` SHM cases.
 
 Quick manual runs:
 
 ```bash
-build/bin/netipc-shm-server-demo /tmp netflow 3
-build/bin/netipc-shm-client-demo /tmp netflow 41 3
+build/bin/netipc-live-c uds-server-once /tmp netflow
+build/bin/netipc-live-c uds-client-once /tmp netflow 41
+build/bin/netipc-live-c uds-client-loop /tmp netflow 41 2
+build/bin/netipc-live-c uds-server-once /tmp netflow 1 3 2 0
+build/bin/netipc-live-c uds-client-once /tmp netflow 41 1 3 2 0
+build/bin/netipc-live-c uds-server-bench /tmp netflow 0
+build/bin/netipc-live-c uds-client-bench /tmp netflow 5 0
+build/bin/netipc-live-c uds-bench /tmp netflow 5 0
 
-build/bin/netipc-uds-server-demo /tmp netflow 3
-build/bin/netipc-uds-client-demo /tmp netflow 41 3
+build/bin/netipc-live-c shm-server-once /tmp netflow
+build/bin/netipc-live-c shm-client-once /tmp netflow 41
+build/bin/netipc-live-c shm-server-loop /tmp netflow 2
+build/bin/netipc-live-c shm-client-bench /tmp netflow 5 0
+build/bin/netipc-live-c shm-server-bench /tmp netflow 0
+build/bin/netipc-live-c shm-bench /tmp netflow 5 0
+
+build/bin/netipc-codec-c encode-req 123 41 /tmp/netipc.req
+build/bin/netipc-codec-c decode-req /tmp/netipc.req
 
 build-mingw/bin/netipc-live-c.exe server-once /tmp netflow
 build-mingw/bin/netipc-live-c.exe client-once /tmp netflow 41

@@ -7,14 +7,23 @@ YELLOW='\033[1;33m'
 GRAY='\033[0;90m'
 NC='\033[0m'
 
-CMAKE_BUILD_DIR="build"
+CMAKE_BUILD_DIR="${NETIPC_CMAKE_BUILD_DIR:-build}"
 C_BIN_DIR="${CMAKE_BUILD_DIR}/bin"
+SERVER_PID=""
+SERVER_LOG=""
+TEMP_ROOT=""
 
 configure_build() {
+  if [[ "${NETIPC_SKIP_CONFIGURE:-0}" == "1" ]]; then
+    return 0
+  fi
   run cmake -S . -B "${CMAKE_BUILD_DIR}"
 }
 
 build_targets() {
+  if [[ "${NETIPC_SKIP_BUILD:-0}" == "1" ]]; then
+    return 0
+  fi
   configure_build
   run cmake --build "${CMAKE_BUILD_DIR}" --target "$@"
 }
@@ -37,142 +46,268 @@ run() {
   fi
 }
 
-read_proc_ticks() {
-  local pid=$1
-  awk '{print $14 + $15}' "/proc/${pid}/stat"
+binary_for() {
+  case "$1" in
+    c) printf '%s/netipc-live-c\n' "${C_BIN_DIR}" ;;
+    rust) printf '%s/netipc_live_uds_rs\n' "${C_BIN_DIR}" ;;
+    go) printf '%s/netipc-live-go\n' "${C_BIN_DIR}" ;;
+    *) echo "unknown language: $1" >&2; return 1 ;;
+  esac
 }
 
-bench_c() {
-  local scenario=$1
-  local target_rps=$2
-
-  local row
-  row=$("${C_BIN_DIR}/ipc-bench" --transport seqpacket --mode pingpong --clients 1 --payloads 32 --duration 5 --target-rps "${target_rps}" | awk -F, '/^uds-seqpacket,/ {print $0}')
-
-  local transport mode clients payload duration target failed req resp mismatches last throughput p50 p95 p99 c_in s_in c_cpu s_cpu sreq sresp
-  IFS=',' read -r transport mode clients payload duration target failed req resp mismatches last throughput p50 p95 p99 c_in s_in c_cpu s_cpu sreq sresp <<<"${row}"
-
-  local total_cpu
-  total_cpu=$(awk -v c="${c_cpu}" -v s="${s_cpu}" 'BEGIN { printf "%.3f", c + s }')
-  printf "%s|c-uds|%s|%s|%s|%s|%s\n" "${scenario}" "${throughput}" "${p50}" "${c_cpu}" "${s_cpu}" "${total_cpu}"
+server_cmd_for() {
+  case "$1" in
+    c|go) printf 'uds-server-bench\n' ;;
+    rust) printf 'server-bench\n' ;;
+    *) echo "unknown language: $1" >&2; return 1 ;;
+  esac
 }
 
-bench_go() {
-  local scenario=$1
-  local target_rps=$2
+client_cmd_for() {
+  case "$1" in
+    c|go) printf 'uds-client-bench\n' ;;
+    rust) printf 'client-bench\n' ;;
+    *) echo "unknown language: $1" >&2; return 1 ;;
+  esac
+}
 
-  local service="netipc-uds-go-${target_rps}-${RANDOM}"
-  local endpoint="/tmp/${service}.sock"
-  local server_log="/tmp/${service}.log"
-  local server_time="/tmp/${service}.time"
+client_label_for() {
+  case "$1" in
+    c) printf 'c-uds\n' ;;
+    rust) printf 'rust-uds\n' ;;
+    go) printf 'go-uds\n' ;;
+    *) echo "unknown language: $1" >&2; return 1 ;;
+  esac
+}
 
-  run rm -f "${endpoint}" "${server_log}" "${server_time}"
+server_label_for() {
+  case "$1" in
+    c) printf 'c-uds-server\n' ;;
+    rust) printf 'rust-uds-server\n' ;;
+    go) printf 'go-uds-server\n' ;;
+    *) echo "unknown language: $1" >&2; return 1 ;;
+  esac
+}
+
+start_server() {
+  local server_lang=$1
+  local run_dir=$2
+  local service=$3
+  local log_file=$4
+  local bin
+  local cmd
+
+  bin=$(binary_for "${server_lang}")
+  cmd=$(server_cmd_for "${server_lang}")
+  SERVER_LOG=${log_file}
+
   printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
   printf >&2 "${YELLOW}"
-  printf >&2 "%q " "${C_BIN_DIR}/netipc-live-go" uds-server-loop /tmp "${service}" 0
+  printf >&2 "%q " "${bin}" "${cmd}" "${run_dir}" "${service}" "0"
   printf >&2 "${NC}\n"
 
-  /usr/bin/time -f "%U %S" -o "${server_time}" "${C_BIN_DIR}/netipc-live-go" uds-server-loop /tmp "${service}" 0 >"${server_log}" 2>&1 &
-  local server_pid=$!
-  sleep 0.2
-  if ! kill -0 "${server_pid}" 2>/dev/null; then
-    echo "go uds server failed to start" >&2
-    cat "${server_log}" >&2 || true
+  "${bin}" "${cmd}" "${run_dir}" "${service}" "0" >"${SERVER_LOG}" 2>&1 &
+  SERVER_PID=$!
+  printf '%s\n' "${SERVER_PID}" > "${run_dir}/server.pid"
+}
+
+wait_for_socket() {
+  local path=$1
+  local attempts=$2
+
+  for ((i = 0; i < attempts; i++)); do
+    if [[ -S "${path}" ]]; then
+      return 0
+    fi
+    sleep 0.01
+  done
+
+  echo -e >&2 "${RED}[ERROR] endpoint ${path} was not created in time${NC}"
+  return 1
+}
+
+wait_for_server_exit() {
+  if [[ -z "${SERVER_PID}" ]]; then
+    return 0
+  fi
+
+  if ! timeout 10 tail --pid="${SERVER_PID}" -f /dev/null; then
+    echo -e >&2 "${RED}[ERROR] Server process did not exit in time (pid=${SERVER_PID}). Log:${NC}"
+    cat "${SERVER_LOG}" >&2 || true
+    if kill -0 "${SERVER_PID}" 2>/dev/null; then
+      kill "${SERVER_PID}" || true
+      wait "${SERVER_PID}" || true
+    fi
+    SERVER_PID=""
+    SERVER_LOG=""
     return 1
   fi
 
-  local start_ns end_ns
-  start_ns=$(date +%s%N)
-
-  local client_row
-  client_row=$("${C_BIN_DIR}/netipc-live-go" uds-client-bench /tmp "${service}" 5 "${target_rps}" | awk -F, '/^go-uds,/ {print $0}')
-
-  end_ns=$(date +%s%N)
-  if kill -0 "${server_pid}" 2>/dev/null; then
-    kill "${server_pid}" || true
+  if ! wait "${SERVER_PID}"; then
+    local rc=$?
+    echo -e >&2 "${RED}[ERROR] Server process failed (pid=${SERVER_PID}, rc=${rc}). Log:${NC}"
+    cat "${SERVER_LOG}" >&2 || true
+    SERVER_PID=""
+    SERVER_LOG=""
+    return $rc
   fi
-  wait "${server_pid}" || true
 
-  local mode duration target req resp mismatches throughput p50 p95 p99 c_cpu
-  IFS=',' read -r mode duration target req resp mismatches throughput p50 p95 p99 c_cpu <<<"${client_row}"
-
-  local elapsed_sec s_cpu total_cpu server_cpu_sec
-  elapsed_sec=$(awk -v s="${start_ns}" -v e="${end_ns}" 'BEGIN { printf "%.6f", (e-s)/1e9 }')
-  server_cpu_sec=$(awk '/^[0-9.]+ [0-9.]+$/ {print $1 + $2; found=1} END {if (!found) print 0}' "${server_time}" 2>/dev/null || echo "0")
-  s_cpu=$(awk -v s="${server_cpu_sec}" -v e="${elapsed_sec}" 'BEGIN { if (e <= 0) e = 1e-9; printf "%.3f", s / e }')
-  total_cpu=$(awk -v c="${c_cpu}" -v s="${s_cpu}" 'BEGIN { printf "%.3f", c + s }')
-  printf "%s|go-uds|%s|%s|%s|%s|%s\n" "${scenario}" "${throughput}" "${p50}" "${c_cpu}" "${s_cpu}" "${total_cpu}"
+  SERVER_PID=""
+  SERVER_LOG=""
 }
 
-bench_rust() {
-  local scenario=$1
-  local target_rps=$2
+cleanup() {
+  if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
+    kill "${SERVER_PID}" || true
+    wait "${SERVER_PID}" || true
+  fi
+  if [[ -n "${TEMP_ROOT}" ]] && [[ -d "${TEMP_ROOT}" ]]; then
+    rm -rf "${TEMP_ROOT}"
+  fi
+}
+trap cleanup EXIT
 
-  local service="netipc-uds-rs-${target_rps}-${RANDOM}"
-  local endpoint="/tmp/${service}.sock"
-  local server_log="/tmp/${service}.log"
-  local server_time="/tmp/${service}.time"
+show_logs_and_fail() {
+  local message=$1
+  local client_log=$2
+  local server_log=$3
 
-  run rm -f "${endpoint}" "${server_log}" "${server_time}"
+  echo -e >&2 "${RED}[ERROR] ${message}${NC}"
+  if [[ -f "${client_log}" ]]; then
+    echo -e >&2 "${RED}[CLIENT LOG]${NC}"
+    cat "${client_log}" >&2 || true
+  fi
+  if [[ -f "${server_log}" ]]; then
+    echo -e >&2 "${RED}[SERVER LOG]${NC}"
+    cat "${server_log}" >&2 || true
+  fi
+  exit 1
+}
+
+run_client_capture() {
+  local client_lang=$1
+  local run_dir=$2
+  local service=$3
+  local duration_sec=$4
+  local target_rps=$5
+  local log_file=$6
+  local bin
+  local cmd
+
+  bin=$(binary_for "${client_lang}")
+  cmd=$(client_cmd_for "${client_lang}")
+
   printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
   printf >&2 "${YELLOW}"
-  printf >&2 "%q " "${C_BIN_DIR}/netipc_live_uds_rs" server-loop /tmp "${service}" 0
+  printf >&2 "%q " "${bin}" "${cmd}" "${run_dir}" "${service}" "${duration_sec}" "${target_rps}"
   printf >&2 "${NC}\n"
 
-  /usr/bin/time -f "%U %S" -o "${server_time}" "${C_BIN_DIR}/netipc_live_uds_rs" server-loop /tmp "${service}" 0 >"${server_log}" 2>&1 &
-  local server_pid=$!
-  sleep 0.2
-  if ! kill -0 "${server_pid}" 2>/dev/null; then
-    echo "rust uds server failed to start" >&2
-    cat "${server_log}" >&2 || true
+  if ! "${bin}" "${cmd}" "${run_dir}" "${service}" "${duration_sec}" "${target_rps}" >"${log_file}" 2>&1; then
     return 1
   fi
-
-  local start_ns end_ns
-  start_ns=$(date +%s%N)
-
-  local client_row
-  client_row=$("${C_BIN_DIR}/netipc_live_uds_rs" client-bench /tmp "${service}" 5 "${target_rps}" | awk -F, '/^rust-uds,/ {print $0}')
-
-  end_ns=$(date +%s%N)
-  if kill -0 "${server_pid}" 2>/dev/null; then
-    kill "${server_pid}" || true
-  fi
-  wait "${server_pid}" || true
-
-  local mode duration target req resp mismatches throughput p50 p95 p99 c_cpu
-  IFS=',' read -r mode duration target req resp mismatches throughput p50 p95 p99 c_cpu <<<"${client_row}"
-
-  local elapsed_sec s_cpu total_cpu server_cpu_sec
-  elapsed_sec=$(awk -v s="${start_ns}" -v e="${end_ns}" 'BEGIN { printf "%.6f", (e-s)/1e9 }')
-  server_cpu_sec=$(awk '/^[0-9.]+ [0-9.]+$/ {print $1 + $2; found=1} END {if (!found) print 0}' "${server_time}" 2>/dev/null || echo "0")
-  s_cpu=$(awk -v s="${server_cpu_sec}" -v e="${elapsed_sec}" 'BEGIN { if (e <= 0) e = 1e-9; printf "%.3f", s / e }')
-  total_cpu=$(awk -v c="${c_cpu}" -v s="${s_cpu}" 'BEGIN { printf "%.3f", c + s }')
-  printf "%s|rust-uds|%s|%s|%s|%s|%s\n" "${scenario}" "${throughput}" "${p50}" "${c_cpu}" "${s_cpu}" "${total_cpu}"
 }
 
-build_targets ipc-bench netipc-uds-server-demo netipc-uds-client-demo netipc_live_uds_rs netipc-live-go
+extract_row() {
+  local prefix=$1
+  local log_file=$2
 
-results_file=$(mktemp)
-trap 'rm -f "${results_file}"' EXIT
+  awk -F, -v prefix="${prefix}" '$1 == prefix {print; exit}' "${log_file}"
+}
 
-bench_c "max" 0 >> "${results_file}"
-bench_rust "max" 0 >> "${results_file}"
-bench_go "max" 0 >> "${results_file}"
+run_matrix_case() {
+  local scenario=$1
+  local target_rps=$2
+  local client_lang=$3
+  local server_lang=$4
+  local case_dir service client_log server_log client_row server_row scenario_tag
+  local mode duration target requests responses mismatches throughput p50 p95 p99 client_cpu ignored_server total_ignored
+  local server_mode handled elapsed server_cpu total_cpu
 
-bench_c "100k/s" 100000 >> "${results_file}"
-bench_rust "100k/s" 100000 >> "${results_file}"
-bench_go "100k/s" 100000 >> "${results_file}"
+  scenario_tag=${scenario//\//-}
+  case_dir=$(mktemp -d "${TEMP_ROOT}/uds-${scenario_tag}-${client_lang}-to-${server_lang}.XXXXXX")
+  service="netipc-uds-${scenario_tag}-${client_lang}-to-${server_lang}-${RANDOM}"
+  client_log="${case_dir}/client.log"
+  server_log="${case_dir}/server.log"
 
-bench_c "10k/s" 10000 >> "${results_file}"
-bench_rust "10k/s" 10000 >> "${results_file}"
-bench_go "10k/s" 10000 >> "${results_file}"
+  start_server "${server_lang}" "${case_dir}" "${service}" "${server_log}"
+
+  if ! wait_for_socket "${case_dir}/${service}.sock" 500; then
+    show_logs_and_fail "server endpoint did not appear for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+
+  if ! run_client_capture "${client_lang}" "${case_dir}" "${service}" 5 "${target_rps}" "${client_log}"; then
+    if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
+      kill "${SERVER_PID}" || true
+      wait "${SERVER_PID}" || true
+      SERVER_PID=""
+      SERVER_LOG=""
+    fi
+    show_logs_and_fail "client benchmark failed for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+
+  if ! wait_for_server_exit; then
+    show_logs_and_fail "server benchmark failed for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+
+  client_row=$(extract_row "$(client_label_for "${client_lang}")" "${client_log}")
+  if [[ -z "${client_row}" ]]; then
+    show_logs_and_fail "missing client result row for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+
+  server_row=$(extract_row "$(server_label_for "${server_lang}")" "${server_log}")
+  if [[ -z "${server_row}" ]]; then
+    show_logs_and_fail "missing server result row for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+
+  IFS=',' read -r mode duration target requests responses mismatches throughput p50 p95 p99 client_cpu ignored_server total_ignored <<<"${client_row}"
+  IFS=',' read -r server_mode handled elapsed server_cpu <<<"${server_row}"
+
+  if [[ "${mismatches}" != "0" ]]; then
+    show_logs_and_fail "benchmark reported mismatches=${mismatches} for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+  if [[ "${requests}" != "${responses}" ]]; then
+    show_logs_and_fail "requests=${requests} responses=${responses} for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+  if [[ "${handled}" != "${responses}" ]]; then
+    show_logs_and_fail "server handled=${handled} but client responses=${responses} for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+
+  total_cpu=$(awk -v client="${client_cpu}" -v server="${server_cpu}" 'BEGIN { printf "%.3f", client + server }')
+  printf "%s|%s|%s|%s|%s|%s|%s|%s\n" \
+    "${scenario}" \
+    "${client_lang}" \
+    "${server_lang}" \
+    "${throughput}" \
+    "${p50}" \
+    "${client_cpu}" \
+    "${server_cpu}" \
+    "${total_cpu}"
+}
+
+build_targets netipc-live-c netipc_live_uds_rs netipc-live-go
+
+TEMP_ROOT=$(mktemp -d)
+results_file=$(mktemp "${TEMP_ROOT}/results.XXXXXX")
+
+languages=(c rust go)
+scenarios=("max:0" "100k/s:100000" "10k/s:10000")
+
+for scenario_spec in "${scenarios[@]}"; do
+  scenario=${scenario_spec%%:*}
+  target_rps=${scenario_spec##*:}
+  for client_lang in "${languages[@]}"; do
+    for server_lang in "${languages[@]}"; do
+      run_matrix_case "${scenario}" "${target_rps}" "${client_lang}" "${server_lang}" >> "${results_file}"
+    done
+  done
+done
 
 printf "\n"
-printf "Scenario | Method   | Throughput (req/s) | p50 (us) | Client CPU (cores) | Server CPU (cores) | Total CPU (cores)\n"
-printf -- "---------+----------+--------------------+----------+--------------------+--------------------+------------------\n"
-while IFS='|' read -r scenario method throughput p50 ccpu scpu total; do
-  printf "%-8s | %-8s | %18s | %8s | %18s | %18s | %16s\n" "${scenario}" "${method}" "${throughput}" "${p50}" "${ccpu}" "${scpu}" "${total}"
+printf "Scenario | Client | Server | Throughput (req/s) | p50 (us) | Client CPU (cores) | Server CPU (cores) | Total CPU (cores)\n"
+printf -- "---------+--------+--------+--------------------+----------+--------------------+--------------------+------------------\n"
+while IFS='|' read -r scenario client server throughput p50 client_cpu server_cpu total_cpu; do
+  printf "%-8s | %-6s | %-6s | %18s | %8s | %18s | %18s | %16s\n" \
+    "${scenario}" "${client}" "${server}" "${throughput}" "${p50}" "${client_cpu}" "${server_cpu}" "${total_cpu}"
 done < "${results_file}"
 
-echo -e "\n${GREEN}Live UDS benchmark complete.${NC}"
+echo -e "\n${GREEN}Live UDS benchmark matrix complete.${NC}"

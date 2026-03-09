@@ -9,14 +9,20 @@ NC='\033[0m'
 
 SERVER_PID=""
 SERVER_LOG=""
-CMAKE_BUILD_DIR="build"
+CMAKE_BUILD_DIR="${NETIPC_CMAKE_BUILD_DIR:-build}"
 C_BIN_DIR="${CMAKE_BUILD_DIR}/bin"
 
 configure_build() {
+  if [[ "${NETIPC_SKIP_CONFIGURE:-0}" == "1" ]]; then
+    return 0
+  fi
   run cmake -S . -B "${CMAKE_BUILD_DIR}"
 }
 
 build_targets() {
+  if [[ "${NETIPC_SKIP_BUILD:-0}" == "1" ]]; then
+    return 0
+  fi
   configure_build
   run cmake --build "${CMAKE_BUILD_DIR}" --target "$@"
 }
@@ -79,29 +85,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
-build_targets netipc-uds-server-demo netipc-uds-client-demo
+build_targets netipc-live-c
 
 SERVICE="netipc-uds-test"
 SOCK="/tmp/${SERVICE}.sock"
 run rm -f "${SOCK}"
 
-start_server /tmp/netipc-uds-server.log "${C_BIN_DIR}/netipc-uds-server-demo" /tmp "${SERVICE}" 2
+start_server /tmp/netipc-uds-server.log "${C_BIN_DIR}/netipc-live-c" uds-server-loop /tmp "${SERVICE}" 2
 sleep 0.2
 
-client_out=$("${C_BIN_DIR}/netipc-uds-client-demo" /tmp "${SERVICE}" 41 2)
+client_out=$("${C_BIN_DIR}/netipc-live-c" uds-client-loop /tmp "${SERVICE}" 41 2)
 printf '%s\n' "${client_out}" >&2
 
-if ! grep -q '^negotiated_profile=1$' <<<"${client_out}"; then
+if [[ $(grep -c 'profile=1' <<<"${client_out}") -ne 2 ]]; then
   echo -e >&2 "${RED}[ERROR] client did not negotiate UDS_SEQPACKET profile.${NC}"
   exit 1
 fi
 
-if ! grep -q '^request=41 response=42$' <<<"${client_out}"; then
+if ! grep -q '^C-UDS-CLIENT request=41 response=42 profile=1$' <<<"${client_out}"; then
   echo -e >&2 "${RED}[ERROR] missing first increment response in client output.${NC}"
   exit 1
 fi
 
-if ! grep -q '^request=42 response=43$' <<<"${client_out}"; then
+if ! grep -q '^C-UDS-CLIENT request=42 response=43 profile=1$' <<<"${client_out}"; then
   echo -e >&2 "${RED}[ERROR] missing second increment response in client output.${NC}"
   exit 1
 fi

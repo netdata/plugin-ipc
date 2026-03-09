@@ -9,14 +9,20 @@ NC='\033[0m'
 
 SERVER_PID=""
 SERVER_LOG=""
-CMAKE_BUILD_DIR="build"
+CMAKE_BUILD_DIR="${NETIPC_CMAKE_BUILD_DIR:-build}"
 C_BIN_DIR="${CMAKE_BUILD_DIR}/bin"
 
 configure_build() {
+  if [[ "${NETIPC_SKIP_CONFIGURE:-0}" == "1" ]]; then
+    return 0
+  fi
   run cmake -S . -B "${CMAKE_BUILD_DIR}"
 }
 
 build_targets() {
+  if [[ "${NETIPC_SKIP_BUILD:-0}" == "1" ]]; then
+    return 0
+  fi
   configure_build
   run cmake --build "${CMAKE_BUILD_DIR}" --target "$@"
 }
@@ -83,11 +89,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-build_targets netipc-uds-server-demo netipc-uds-client-demo netipc_live_uds_rs netipc-live-go
+build_targets netipc-live-c netipc_live_uds_rs netipc-live-go
 
 # 1) Profile mismatch: raw hello advertises only profile bit 2, server supports only bit 1.
 run rm -f /tmp/netipc-neg-profile.sock
-start_server /tmp/netipc-neg-profile.log "${C_BIN_DIR}/netipc-uds-server-demo" /tmp netipc-neg-profile 1 1 1 0
+start_server /tmp/netipc-neg-profile.log "${C_BIN_DIR}/netipc-live-c" uds-server-once /tmp netipc-neg-profile 1 1 1 0
 sleep 0.2
 set +e
 client_out=$("${C_BIN_DIR}/netipc-live-go" uds-client-rawhello /tmp netipc-neg-profile 2 2 0 2>&1)
@@ -106,7 +112,7 @@ wait_server_expect_fail
 
 # 2) Auth mismatch: same profiles, different auth tokens.
 run rm -f /tmp/netipc-neg-auth.sock
-start_server /tmp/netipc-neg-auth.log "${C_BIN_DIR}/netipc-uds-server-demo" /tmp netipc-neg-auth 1 1 1 111
+start_server /tmp/netipc-neg-auth.log "${C_BIN_DIR}/netipc-live-c" uds-server-once /tmp netipc-neg-auth 1 1 1 111
 sleep 0.2
 set +e
 client_out=$("${C_BIN_DIR}/netipc-live-go" uds-client-rawhello /tmp netipc-neg-auth 1 1 222 2>&1)
@@ -125,7 +131,7 @@ wait_server_expect_fail
 
 # 3) Malformed hello: send invalid negotiation frame magic.
 run rm -f /tmp/netipc-neg-malformed.sock
-start_server /tmp/netipc-neg-malformed.log "${C_BIN_DIR}/netipc-uds-server-demo" /tmp netipc-neg-malformed 1
+start_server /tmp/netipc-neg-malformed.log "${C_BIN_DIR}/netipc-live-c" uds-server-once /tmp netipc-neg-malformed
 sleep 0.2
 run "${C_BIN_DIR}/netipc-live-go" uds-client-badhello /tmp netipc-neg-malformed
 wait_server_expect_fail

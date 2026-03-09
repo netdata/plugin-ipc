@@ -1,19 +1,33 @@
-use netipc::transport::posix::{
-    UdsSeqpacketClient, UdsSeqpacketConfig, UdsSeqpacketServer, PROFILE_SHM_HYBRID,
-};
+use netipc::transport::posix::{UdsSeqpacketClient, UdsSeqpacketConfig, UdsSeqpacketServer};
 use netipc::{IncrementRequest, IncrementResponse, STATUS_OK};
 use std::env;
+use std::fs;
 use std::io;
-use std::process;
+use std::process::{self, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+struct BenchResult {
+    duration_sec: i32,
+    target_rps: i32,
+    requests: i64,
+    responses: i64,
+    mismatches: i64,
+    throughput_rps: f64,
+    p50_us: f64,
+    p95_us: f64,
+    p99_us: f64,
+    client_cpu_cores: f64,
+}
 
 fn usage(argv0: &str) {
     eprintln!("usage:");
     eprintln!("  {argv0} server-once <run_dir> <service>");
     eprintln!("  {argv0} client-once <run_dir> <service> <value>");
     eprintln!("  {argv0} server-loop <run_dir> <service> <max_requests|0>");
+    eprintln!("  {argv0} server-bench <run_dir> <service> <max_requests|0>");
     eprintln!("  {argv0} client-bench <run_dir> <service> <duration_sec> <target_rps>");
+    eprintln!("  {argv0} uds-bench <run_dir> <service> <duration_sec> <target_rps>");
 }
 
 fn parse_u64(v: &str) -> u64 {
@@ -62,6 +76,13 @@ fn uds_config(run_dir: &str, service: &str) -> UdsSeqpacketConfig {
 
 fn protocol_error(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+fn is_disconnect_error(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(libc::ECONNRESET) | Some(libc::EPIPE) | Some(libc::ENOTCONN) | Some(libc::EPROTO)
+    ) || err.kind() == io::ErrorKind::UnexpectedEof
 }
 
 fn percentile_micros(lat_ns: &[i64], pct: f64) -> f64 {
@@ -152,29 +173,45 @@ fn client_once(run_dir: &str, service: &str, value: u64) -> io::Result<()> {
 }
 
 fn server_loop(run_dir: &str, service: &str, max_requests: u64) -> io::Result<()> {
+    let _ = server_loop_internal(run_dir, service, max_requests)?;
+    Ok(())
+}
+
+fn server_loop_internal(run_dir: &str, service: &str, max_requests: u64) -> io::Result<u64> {
     let mut server = UdsSeqpacketServer::bind(&uds_config(run_dir, service))?;
     server.accept(Some(Duration::from_secs(10)))?;
 
     let mut handled = 0u64;
     while max_requests == 0 || handled < max_requests {
-        let (request_id, request) = server.receive_increment(Some(Duration::from_secs(10)))?;
+        let (request_id, request) = match server.receive_increment(Some(Duration::from_secs(10))) {
+            Ok(value) => value,
+            Err(err) if is_disconnect_error(&err) => return Ok(handled),
+            Err(err) => return Err(err),
+        };
         let response = IncrementResponse {
             status: STATUS_OK,
             value: request.value + 1,
         };
-        server.send_increment(request_id, &response, Some(Duration::from_secs(10)))?;
+        if let Err(err) =
+            server.send_increment(request_id, &response, Some(Duration::from_secs(10)))
+        {
+            if is_disconnect_error(&err) {
+                return Ok(handled);
+            }
+            return Err(err);
+        }
         handled += 1;
     }
 
-    Ok(())
+    Ok(handled)
 }
 
-fn client_bench(
+fn client_bench_capture(
     run_dir: &str,
     service: &str,
     duration_sec: i32,
     target_rps: i32,
-) -> io::Result<()> {
+) -> io::Result<BenchResult> {
     if duration_sec <= 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -190,7 +227,6 @@ fn client_bench(
 
     let mut client =
         UdsSeqpacketClient::connect(&uds_config(run_dir, service), Some(Duration::from_secs(10)))?;
-    let profile = client.negotiated_profile();
 
     let start = Instant::now();
     let end_at = start + Duration::from_secs(duration_sec as u64);
@@ -200,7 +236,7 @@ fn client_bench(
     let mut counter = 1u64;
     let mut requests = 0i64;
     let mut responses = 0i64;
-    let mut mismatches = 0i64;
+    let mismatches = 0i64;
 
     let interval_ns: u64 = if target_rps > 0 {
         let value = 1_000_000_000u64 / target_rps as u64;
@@ -227,8 +263,18 @@ fn client_bench(
             &IncrementRequest { value: counter },
             Some(Duration::from_secs(10)),
         )?;
-        if response.status != STATUS_OK || response.value != counter + 1 {
-            mismatches += 1;
+        if response.status != STATUS_OK {
+            return Err(protocol_error("server returned non-OK status during benchmark"));
+        }
+        if response.value != counter + 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "benchmark counter mismatch: got={} expected={}",
+                    response.value,
+                    counter + 1
+                ),
+            ));
         }
 
         counter = response.value;
@@ -240,34 +286,186 @@ fn client_bench(
     let cpu_cores = (self_cpu_seconds() - cpu_start) / elapsed_sec;
     let throughput = responses as f64 / elapsed_sec;
 
+    if responses != requests {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "benchmark request/response mismatch: requests={} responses={}",
+                requests, responses
+            ),
+        ));
+    }
+    if counter != responses as u64 + 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "benchmark final counter mismatch: counter={} expected={}",
+                counter,
+                responses as u64 + 1
+            ),
+        ));
+    }
+
     lat_ns.sort_unstable();
     let p50 = percentile_micros(&lat_ns, 50.0);
     let p95 = percentile_micros(&lat_ns, 95.0);
     let p99 = percentile_micros(&lat_ns, 99.0);
 
-    println!(
-        "mode,duration_sec,target_rps,requests,responses,mismatches,throughput_rps,p50_us,p95_us,p99_us,client_cpu_cores"
-    );
-    let mode = if profile == PROFILE_SHM_HYBRID {
-        "rust-shm-hybrid"
-    } else {
-        "rust-uds"
-    };
-    println!(
-        "{},{},{},{},{},{},{:.2},{:.2},{:.2},{:.2},{:.3}",
-        mode,
+    Ok(BenchResult {
         duration_sec,
         target_rps,
         requests,
         responses,
         mismatches,
-        throughput,
-        p50,
-        p95,
-        p99,
-        cpu_cores
-    );
+        throughput_rps: throughput,
+        p50_us: p50,
+        p95_us: p95,
+        p99_us: p99,
+        client_cpu_cores: cpu_cores,
+    })
+}
 
+fn print_bench_header() {
+    println!(
+        "mode,duration_sec,target_rps,requests,responses,mismatches,throughput_rps,p50_us,p95_us,p99_us,client_cpu_cores,server_cpu_cores,total_cpu_cores"
+    );
+}
+
+fn print_bench_row(mode: &str, result: &BenchResult, server_cpu_cores: f64) {
+    println!(
+        "{},{},{},{},{},{},{:.2},{:.2},{:.2},{:.2},{:.3},{:.3},{:.3}",
+        mode,
+        result.duration_sec,
+        result.target_rps,
+        result.requests,
+        result.responses,
+        result.mismatches,
+        result.throughput_rps,
+        result.p50_us,
+        result.p95_us,
+        result.p99_us,
+        result.client_cpu_cores,
+        server_cpu_cores,
+        result.client_cpu_cores + server_cpu_cores
+    );
+}
+
+fn print_server_bench_row(mode: &str, handled_requests: u64, elapsed_sec: f64, server_cpu_cores: f64) {
+    println!(
+        "{}-server,{},{:.6},{:.3}",
+        mode, handled_requests, elapsed_sec, server_cpu_cores
+    );
+}
+
+fn client_bench(
+    run_dir: &str,
+    service: &str,
+    duration_sec: i32,
+    target_rps: i32,
+) -> io::Result<()> {
+    let result = client_bench_capture(run_dir, service, duration_sec, target_rps)?;
+    print_bench_header();
+    print_bench_row("rust-uds", &result, 0.0);
+    Ok(())
+}
+
+fn server_bench(run_dir: &str, service: &str, max_requests: u64) -> io::Result<()> {
+    let start = Instant::now();
+    let cpu_start = self_cpu_seconds();
+    let handled_requests = server_loop_internal(run_dir, service, max_requests)?;
+    let elapsed_sec = start.elapsed().as_secs_f64().max(1e-9);
+    let server_cpu_cores = (self_cpu_seconds() - cpu_start) / elapsed_sec;
+    print_server_bench_row("rust-uds", handled_requests, elapsed_sec, server_cpu_cores);
+    Ok(())
+}
+
+fn wait_for_path(path: &str, timeout: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if fs::metadata(path).is_ok() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("endpoint {path} was not created in time"),
+            ));
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn wait_for_child_with_rusage(pid: u32) -> io::Result<libc::rusage> {
+    unsafe {
+        let mut status: libc::c_int = 0;
+        let mut usage: libc::rusage = std::mem::zeroed();
+        let rc = libc::wait4(
+            pid as libc::pid_t,
+            &mut status as *mut libc::c_int,
+            0,
+            &mut usage,
+        );
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("server benchmark child exited abnormally: status={status}"),
+            ));
+        }
+        Ok(usage)
+    }
+}
+
+fn child_cpu_seconds(usage: &libc::rusage) -> f64 {
+    usage.ru_utime.tv_sec as f64
+        + usage.ru_utime.tv_usec as f64 / 1e6
+        + usage.ru_stime.tv_sec as f64
+        + usage.ru_stime.tv_usec as f64 / 1e6
+}
+
+fn uds_bench(run_dir: &str, service: &str, duration_sec: i32, target_rps: i32) -> io::Result<()> {
+    let server_start = Instant::now();
+    let mut child = Command::new(
+        env::args()
+            .next()
+            .unwrap_or_else(|| String::from("netipc_live_uds_rs")),
+    )
+    .arg("server-loop")
+    .arg(run_dir)
+    .arg(service)
+    .arg("0")
+    .stdout(Stdio::null())
+    .stderr(Stdio::inherit())
+    .spawn()?;
+
+    let endpoint = format!("{run_dir}/{service}.sock");
+    if let Err(err) = wait_for_path(&endpoint, Duration::from_secs(5)) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(err);
+    }
+
+    let result = match client_bench_capture(run_dir, service, duration_sec, target_rps) {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(err);
+        }
+    };
+
+    let usage = wait_for_child_with_rusage(child.id())?;
+    let server_elapsed_sec = server_start.elapsed().as_secs_f64();
+    let server_cpu_cores = if server_elapsed_sec > 0.0 {
+        child_cpu_seconds(&usage) / server_elapsed_sec
+    } else {
+        0.0
+    };
+
+    print_bench_header();
+    print_bench_row("rust-uds", &result, server_cpu_cores);
     Ok(())
 }
 
@@ -300,12 +498,26 @@ fn main() {
             }
             server_loop(&args[2], &args[3], parse_u64(&args[4]))
         }
+        "server-bench" => {
+            if args.len() != 5 {
+                usage(&args[0]);
+                process::exit(2);
+            }
+            server_bench(&args[2], &args[3], parse_u64(&args[4]))
+        }
         "client-bench" => {
             if args.len() != 6 {
                 usage(&args[0]);
                 process::exit(2);
             }
             client_bench(&args[2], &args[3], parse_i32(&args[4]), parse_i32(&args[5]))
+        }
+        "uds-bench" => {
+            if args.len() != 6 {
+                usage(&args[0]);
+                process::exit(2);
+            }
+            uds_bench(&args[2], &args[3], parse_i32(&args[4]), parse_i32(&args[5]))
         }
         _ => {
             usage(&args[0]);

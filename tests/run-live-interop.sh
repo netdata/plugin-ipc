@@ -9,14 +9,20 @@ NC='\033[0m'
 
 SERVER_PID=""
 SERVER_LOG=""
-CMAKE_BUILD_DIR="build"
+CMAKE_BUILD_DIR="${NETIPC_CMAKE_BUILD_DIR:-build}"
 C_BIN_DIR="${CMAKE_BUILD_DIR}/bin"
 
 configure_build() {
+  if [[ "${NETIPC_SKIP_CONFIGURE:-0}" == "1" ]]; then
+    return 0
+  fi
   run cmake -S . -B "${CMAKE_BUILD_DIR}"
 }
 
 build_targets() {
+  if [[ "${NETIPC_SKIP_BUILD:-0}" == "1" ]]; then
+    return 0
+  fi
   configure_build
   run cmake --build "${CMAKE_BUILD_DIR}" --target "$@"
 }
@@ -79,18 +85,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-build_targets netipc-shm-server-demo netipc-shm-client-demo netipc_live_rs
+build_targets netipc-live-c netipc_live_rs
 
 # 1) C client -> Rust server
 run rm -f /tmp/netipc-live-c-rust.ipcshm
 start_server /tmp/netipc-live-c-rust.log "${C_BIN_DIR}/netipc_live_rs" server-once /tmp netipc-live-c-rust
 sleep 0.2
-run "${C_BIN_DIR}/netipc-shm-client-demo" /tmp netipc-live-c-rust 41 1
+run "${C_BIN_DIR}/netipc-live-c" shm-client-once /tmp netipc-live-c-rust 41
 wait_server
 
 # 2) Rust client -> C server
 run rm -f /tmp/netipc-live-rust-c.ipcshm
-start_server /tmp/netipc-live-rust-c.log "${C_BIN_DIR}/netipc-shm-server-demo" /tmp netipc-live-rust-c 1
+start_server /tmp/netipc-live-rust-c.log "${C_BIN_DIR}/netipc-live-c" shm-server-once /tmp netipc-live-rust-c
 sleep 0.2
 run "${C_BIN_DIR}/netipc_live_rs" client-once /tmp netipc-live-rust-c 99
 wait_server

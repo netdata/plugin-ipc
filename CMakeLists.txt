@@ -10,6 +10,8 @@ endif()
 
 project(plugin_ipc LANGUAGES C)
 
+include(CTest)
+
 if(WIN32)
     if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         execute_process(
@@ -38,8 +40,8 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 option(NETIPC_BUILD_FIXTURES "Build C fixture binaries" ON)
-option(NETIPC_BUILD_BENCH "Build the C benchmark driver" ON)
 option(NETIPC_BUILD_HELPERS "Build Go/Rust helper binaries via CMake" ON)
+option(NETIPC_REGISTER_SCRIPT_WORKFLOWS "Register shell-script validation and benchmark workflows with CMake" ON)
 
 find_package(Threads REQUIRED)
 
@@ -131,5 +133,169 @@ if(NETIPC_BUILD_HELPERS)
             VERBATIM
         )
         add_custom_target(netipc-live-go DEPENDS "${NETIPC_LIVE_GO_BIN}")
+    endif()
+endif()
+
+add_custom_target(netipc-clean-generated
+    COMMAND "${CMAKE_COMMAND}" -E rm -rf
+        "${CMAKE_SOURCE_DIR}/src/crates/target"
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rust/target"
+        "${CMAKE_SOURCE_DIR}/bench/drivers/rust/target"
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/go/netipc-codec-go"
+        "${CMAKE_SOURCE_DIR}/bench/drivers/go/netipc-live-go"
+    USES_TERMINAL
+    VERBATIM
+)
+
+if(NETIPC_REGISTER_SCRIPT_WORKFLOWS)
+    find_program(BASH_EXECUTABLE bash)
+    if(BASH_EXECUTABLE)
+        function(netipc_add_script_workflow target_name script_path)
+            set(options BENCHMARK)
+            set(oneValueArgs TEST_NAME)
+            set(multiValueArgs DEPENDS LABELS)
+            cmake_parse_arguments(NETIPC_WORKFLOW "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+            foreach(dep IN LISTS NETIPC_WORKFLOW_DEPENDS)
+                if(NOT TARGET "${dep}")
+                    message(STATUS "Skipping ${target_name}: missing dependency target `${dep}`")
+                    return()
+                endif()
+            endforeach()
+
+            add_custom_target("${target_name}"
+                COMMAND "${CMAKE_COMMAND}" -E env
+                    "NETIPC_CMAKE_BUILD_DIR=${CMAKE_BINARY_DIR}"
+                    "NETIPC_SKIP_CONFIGURE=1"
+                    "NETIPC_SKIP_BUILD=1"
+                    "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/${script_path}"
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                DEPENDS ${NETIPC_WORKFLOW_DEPENDS}
+                USES_TERMINAL
+                VERBATIM
+            )
+
+            if(BUILD_TESTING AND NOT NETIPC_WORKFLOW_BENCHMARK)
+                if(NOT NETIPC_WORKFLOW_TEST_NAME)
+                    set(NETIPC_WORKFLOW_TEST_NAME "${target_name}")
+                endif()
+
+                add_test(
+                    NAME "${NETIPC_WORKFLOW_TEST_NAME}"
+                    COMMAND "${CMAKE_COMMAND}" --build "${CMAKE_BINARY_DIR}" --target "${target_name}"
+                )
+
+                if(NETIPC_WORKFLOW_LABELS)
+                    set_tests_properties("${NETIPC_WORKFLOW_TEST_NAME}" PROPERTIES
+                        LABELS "${NETIPC_WORKFLOW_LABELS}"
+                    )
+                endif()
+            endif()
+        endfunction()
+
+        add_custom_target(netipc-check)
+        add_custom_target(netipc-bench)
+        add_custom_target(netipc-validate-all)
+        add_dependencies(netipc-validate-all netipc-check netipc-bench)
+
+        netipc_add_script_workflow(
+            netipc-test-interop
+            tests/run-interop.sh
+            TEST_NAME netipc-interop
+            LABELS "interop;schema"
+            DEPENDS netipc-codec-c netipc-codec-rs netipc-codec-go
+        )
+        if(TARGET netipc-test-interop)
+            add_dependencies(netipc-check netipc-test-interop)
+        endif()
+
+        netipc_add_script_workflow(
+            netipc-test-live-interop
+            tests/run-live-interop.sh
+            TEST_NAME netipc-live-interop
+            LABELS "interop;shm"
+            DEPENDS netipc-live-c netipc_live_rs
+        )
+        if(TARGET netipc-test-live-interop)
+            add_dependencies(netipc-check netipc-test-live-interop)
+        endif()
+
+        netipc_add_script_workflow(
+            netipc-test-live-uds-interop
+            tests/run-live-uds-interop.sh
+            TEST_NAME netipc-live-uds-interop
+            LABELS "interop;uds"
+            DEPENDS netipc-live-c netipc_live_uds_rs netipc-live-go
+        )
+        if(TARGET netipc-test-live-uds-interop)
+            add_dependencies(netipc-check netipc-test-live-uds-interop)
+        endif()
+
+        netipc_add_script_workflow(
+            netipc-test-uds-seqpacket
+            tests/run-uds-seqpacket.sh
+            TEST_NAME netipc-uds-seqpacket
+            LABELS "protocol;uds"
+            DEPENDS netipc-live-c
+        )
+        if(TARGET netipc-test-uds-seqpacket)
+            add_dependencies(netipc-check netipc-test-uds-seqpacket)
+        endif()
+
+        netipc_add_script_workflow(
+            netipc-test-uds-negotiation-negative
+            tests/run-uds-negotiation-negative.sh
+            TEST_NAME netipc-uds-negotiation-negative
+            LABELS "protocol;negative;uds"
+            DEPENDS netipc-live-c netipc_live_uds_rs netipc-live-go
+        )
+        if(TARGET netipc-test-uds-negotiation-negative)
+            add_dependencies(netipc-check netipc-test-uds-negotiation-negative)
+        endif()
+
+        if(WIN32)
+            netipc_add_script_workflow(
+                netipc-test-live-npipe-smoke
+                tests/run-live-npipe-smoke.sh
+                TEST_NAME netipc-live-npipe-smoke
+                LABELS "smoke;windows"
+                DEPENDS netipc-live-c
+            )
+            if(TARGET netipc-test-live-npipe-smoke)
+                add_dependencies(netipc-check netipc-test-live-npipe-smoke)
+            endif()
+        endif()
+
+        netipc_add_script_workflow(
+            netipc-bench-live-shm
+            tests/run-live-shm-bench.sh
+            BENCHMARK
+            DEPENDS netipc-live-c
+        )
+        if(TARGET netipc-bench-live-shm)
+            add_dependencies(netipc-bench netipc-bench-live-shm)
+        endif()
+
+        netipc_add_script_workflow(
+            netipc-bench-live-uds
+            tests/run-live-uds-bench.sh
+            BENCHMARK
+            DEPENDS netipc-live-c netipc_live_uds_rs netipc-live-go
+        )
+        if(TARGET netipc-bench-live-uds)
+            add_dependencies(netipc-bench netipc-bench-live-uds)
+        endif()
+
+        netipc_add_script_workflow(
+            netipc-bench-negotiated-profile
+            tests/run-negotiated-profile-bench.sh
+            BENCHMARK
+            DEPENDS netipc_live_uds_rs
+        )
+        if(TARGET netipc-bench-negotiated-profile)
+            add_dependencies(netipc-bench netipc-bench-negotiated-profile)
+        endif()
+    else()
+        message(STATUS "bash not found; skipping script workflow registration")
     endif()
 endif()
