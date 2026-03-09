@@ -270,7 +270,7 @@ if(NETIPC_REGISTER_SCRIPT_WORKFLOWS)
             netipc-bench-live-shm
             tests/run-live-shm-bench.sh
             BENCHMARK
-            DEPENDS netipc-live-c
+            DEPENDS netipc-live-c netipc_live_rs
         )
         if(TARGET netipc-bench-live-shm)
             add_dependencies(netipc-bench netipc-bench-live-shm)

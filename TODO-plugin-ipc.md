@@ -1292,3 +1292,176 @@ Status (2026-03-08): completed. Validation reruns passed:
     - Decision:
       - push commit `e57e74d` on `main` to `origin`
 
+
+78. Push blocker after approval
+    - Fact:
+      - `git push origin main` was rejected with `fetch first` because `origin/main` contains commits not present locally.
+    - Implication:
+      - local `main` cannot be pushed safely without first integrating the remote changes.
+
+
+79. Inspect the current `origin/main` in a separate clone under `/tmp`
+    - Source: user direction "clone the main to /tmp/ and check it."
+    - Goal:
+      - inspect remote commit `3d56710` (`Add Windows SHM_HYBRID fast profile`) without modifying the current working tree.
+
+
+80. Integrate local cleanup/CMake pass on top of current `origin/main`
+    - Source: user direction "do it" after inspecting the remote `main` clone.
+    - Decision:
+      - rebase the local cleanup/CMake commit on top of `origin/main`
+      - keep the remote Windows `SHM_HYBRID` fast-profile work
+      - resolve overlap in `README.md`, `TODO-plugin-ipc.md`, `src/libnetdata/netipc/CMakeLists.txt`, and `tests/run-live-npipe-smoke.sh`
+
+
+80. Rebase result
+    - Rebase of the local cleanup/CMake commit onto `origin/main` completed cleanly.
+    - New local commit id after rebase:
+      - `810d8eb`
+    - Validation on the rebased tree passed through CMake:
+      - `cmake -S . -B build`
+      - `cmake --build build --target test`
+      - `cmake --build build --target netipc-bench`
+      - `cmake --build build --target netipc-clean-generated`
+
+
+81. Automated benchmark document generation requirement
+    - Source: user requirement to automatically generate `benchmarks-posix.md` and `benchmarks-windows.md` from benchmark runs.
+    - Requirements:
+      - benchmark documents must be regenerated automatically from benchmark execution results.
+      - the committed benchmark documents must never contain partial results.
+      - generation must be buffered/staged so replacement happens only after a complete successful run.
+    - Design constraint:
+      - POSIX and Windows benchmark matrices are different, so completeness must be validated separately for each document.
+      - cross-platform generation cannot rely on a single machine unless that machine can run both matrices.
+
+
+81. Automated benchmark document generation decisions
+    - Source: user approval "I agree. Do it"
+    - Decisions:
+      - Source of truth: staged machine-readable benchmark result files, then generate Markdown from them.
+      - Trigger model: two explicit scripts, one POSIX and one Windows, independent of CMake orchestration.
+    - Implementation plan:
+      - benchmark scripts emit machine-readable results when requested.
+      - a generator validates completeness for POSIX and Windows independently.
+      - Markdown files are rendered to temporary paths and atomically renamed only on full success.
+      - generation is owned by two explicit scripts, not by CMake targets.
+
+
+81. Benchmark-doc trigger clarification
+    - Source: user clarification "this does not need to be cmake driven" and "2 scripts: windows, linux"
+    - Decision:
+      - keep building CMake-based
+      - implement benchmark document regeneration as two explicit scripts:
+        - one script for POSIX
+        - one script for Windows
+      - those scripts call the existing benchmark entrypoints and regenerate the markdown docs atomically
+    - Implementation status:
+      - `tests/generate-benchmarks-posix.sh` implemented
+      - `tests/generate-benchmarks-windows.sh` implemented
+      - benchmark runner scripts now optionally emit staged machine-readable CSV output via `NETIPC_RESULTS_FILE`
+      - `benchmarks-posix.md` is generated from complete staged benchmark runs only
+    - Validation:
+      - `bash -n tests/generate-benchmarks-posix.sh tests/generate-benchmarks-windows.sh tests/run-live-uds-bench.sh tests/run-live-shm-bench.sh tests/run-negotiated-profile-bench.sh tests/run-live-win-profile-bench.sh`
+      - `env NETIPC_SKIP_CONFIGURE=1 ./tests/generate-benchmarks-posix.sh`
+    - Notes:
+      - the first POSIX generator run failed before publication because of two implementation bugs; no markdown file was created, confirming the buffered replacement behavior
+      - `benchmarks-windows.md` is not generated yet in this Linux session; the Windows generator script is implemented and syntax-checked, but runtime validation still needs a Windows run
+
+82. Direct Rust SHM benchmark coverage gap
+    - Source: user request "Fix it." after identifying that `benchmarks-posix.md` lacks direct Rust `shm-hybrid` rows.
+    - Facts:
+      - the Rust library already implements direct POSIX `SHM_HYBRID` transport in `src/crates/netipc/src/transport/posix.rs`.
+      - the current Rust benchmark helper only exposes UDS commands, so `tests/run-live-shm-bench.sh` can benchmark only C direct SHM today.
+      - `tests/run-negotiated-profile-bench.sh` measures Rust SHM only through negotiated UDS profile switching, not direct SHM helper commands.
+    - Requirement:
+      - add direct Rust `shm-hybrid` helper commands and include them in the authoritative POSIX SHM benchmark matrix and generated markdown.
+    - Plan:
+      - inspect the existing Rust `ShmServer` / `ShmClient` library API and current C helper behavior.
+      - implement direct Rust SHM helper commands as thin wrappers over the library.
+      - extend the POSIX SHM benchmark script and markdown generator to include Rust rows and validate completeness.
+      - rerun the POSIX generator and update docs.
+
+82. Direct Rust SHM interop requirement
+    - Source: user clarification "It should also have c->rust/rust->c tests".
+    - Requirement:
+      - direct POSIX `shm-hybrid` coverage must include `c->rust` and `rust->c` validation, not only same-language Rust helper coverage.
+    - Plan extension:
+      - inspect the current SHM interop script and replace or extend it to use library-backed C and Rust SHM helpers in both directions.
+      - keep the authoritative POSIX benchmark markdown focused on benchmark rows, but make sure the direct SHM validation matrix includes cross-language C/Rust directions.
+
+83. Investigate high SHM client CPU at 10k/s
+    - Source: user request to explain why `shm-hybrid` shows high client CPU usage at `10k/s` and whether `spin_tries` is set to `20`.
+    - Requirement:
+      - after fixing direct Rust SHM benchmark coverage, inspect the actual `spin_tries` defaults and the benchmark helper pacing/client loop behavior for `shm-hybrid`.
+      - provide an evidence-based explanation, separating facts from any speculation.
+    - Implementation status:
+      - `tests/fixtures/rust/src/bin/netipc_live_rs.rs` now exposes direct SHM helper roles: `server-once`, `client-once`, `server-loop`, `server-bench`, `client-bench`.
+      - `tests/run-live-shm-bench.sh` now runs the authoritative direct POSIX `SHM_HYBRID` matrix for `C/Rust` in all directed pairs.
+      - `tests/generate-benchmarks-posix.sh` now validates and renders the SHM section as a `C/Rust` directed matrix instead of a single C-only row.
+      - `CMakeLists.txt` now declares `netipc_live_rs` as a dependency of the SHM benchmark workflow.
+    - Validation:
+      - `bash -n tests/run-live-shm-bench.sh tests/generate-benchmarks-posix.sh tests/run-live-uds-bench.sh`
+      - `cargo build --release --manifest-path tests/fixtures/rust/Cargo.toml`
+      - `env NETIPC_SKIP_CONFIGURE=1 ./tests/run-live-interop.sh`
+      - `env NETIPC_SKIP_CONFIGURE=1 NETIPC_SKIP_BUILD=1 ./tests/run-live-shm-bench.sh`
+      - `env NETIPC_SKIP_CONFIGURE=1 ./tests/generate-benchmarks-posix.sh`
+    - Important fact:
+      - direct SHM `c->rust` and `rust->c` validation already existed in `tests/run-live-interop.sh`; this task fixed the benchmark/helper coverage gap, not a missing interop test path.
+
+83. SHM client CPU investigation findings
+    - Facts:
+      - the library default spin window is `20` in both C and Rust:
+        - `src/libnetdata/netipc/include/netipc/netipc_shm_hybrid.h`: `NETIPC_SHM_DEFAULT_SPIN_TRIES 20u`
+        - `src/crates/netipc/src/transport/posix.rs`: `SHM_DEFAULT_SPIN_TRIES: u32 = 20`
+      - the C SHM helper uses that default in `tests/fixtures/c/netipc_live_posix_c.c` via `shm_config(...).spin_tries = NETIPC_SHM_DEFAULT_SPIN_TRIES`.
+      - the C benchmark pacing loop uses `sleep_until_ns()`, which intentionally busy-waits / yields close to the send deadline.
+      - new direct SHM benchmark evidence shows a strong asymmetry at `10k/s`:
+        - `c -> c`: client CPU ~`0.977`, server CPU ~`0.031`
+        - `c -> rust`: client CPU ~`0.978`, server CPU ~`0.029`
+        - `rust -> c`: client CPU ~`0.039`, server CPU ~`0.034`
+        - `rust -> rust`: client CPU ~`0.037`, server CPU ~`0.028`
+    - Conclusion:
+      - the high `10k/s` client CPU is not explained by `spin_tries = 20` alone.
+      - the dominant cause is the C helper's rate-pacing strategy in the benchmark client, which stays active around each scheduled send time.
+      - evidence: when the Rust helper drives the same direct SHM transport at `10k/s`, client CPU drops by about `25x` while using the same library transport semantics.
+
+84. Adaptive client pacing for target-rate benchmarks
+    - Source: user request "fix the client to use adaptive sleep based on the remaining work. So, make it measure its speed and adapt the sleep interval to achieve the goal rate."
+    - Requirement:
+      - benchmark clients should not burn CPU by busy-waiting near every send deadline.
+      - pacing should adapt based on observed progress versus target throughput.
+      - this is benchmark-helper behavior only; it must not change library transport semantics.
+    - Working assumption:
+      - apply the pacing fix to all benchmark helper clients that implement `target_rps`, so comparisons stay fair across languages.
+      - if evidence later shows only the C helper should change, narrow the scope explicitly.
+    - Plan:
+      - inspect the current pacing loops in C, Rust, and Go benchmark helpers.
+      - replace deadline-chasing loops with adaptive sleep based on target progress and backlog.
+      - rerun benchmark validation and compare the low-rate CPU numbers.
+      - then commit and push the full SHM benchmark fix plus pacing change.
+
+84. Adaptive pacing validation uncovered staged negotiated-profile output bug
+    - Facts:
+      - `tests/generate-benchmarks-posix.sh` completed the staged UDS and SHM matrix runs successfully, then failed during the negotiated-profile stage.
+      - failure mode: `tests/run-negotiated-profile-bench.sh` exited without producing `negotiated.csv`, so the generator aborted without updating `benchmarks-posix.md`.
+      - this confirms the buffered publication rule is working as intended: partial benchmark documents are not written.
+    - Requirement extension:
+      - fix the negotiated-profile benchmark script so it emits staged results consistently when `NETIPC_RESULTS_FILE` is set, then rerun the generator before commit/push.
+
+84. Adaptive pacing validation results
+    - Validation:
+      - `cmake -S . -B build`
+      - `cmake --build build --target netipc-live-c netipc_live_rs netipc_live_uds_rs netipc-live-go`
+      - `bash -n tests/generate-benchmarks-posix.sh tests/generate-benchmarks-windows.sh tests/run-live-uds-bench.sh tests/run-live-shm-bench.sh tests/run-negotiated-profile-bench.sh tests/run-live-win-profile-bench.sh`
+      - `env NETIPC_SKIP_CONFIGURE=1 NETIPC_SKIP_BUILD=1 ./tests/run-live-shm-bench.sh`
+      - `env NETIPC_SKIP_CONFIGURE=1 NETIPC_SKIP_BUILD=1 ./tests/run-live-uds-bench.sh`
+      - `env NETIPC_SKIP_CONFIGURE=1 ./tests/generate-benchmarks-posix.sh`
+    - Result:
+      - the adaptive pacing change removed the low-rate client CPU artifact across the POSIX benchmark helpers.
+      - SHM direct `10k/s` client CPU changed from about `0.977-0.978` in the C-driven rows to about `0.034-0.037` after the pacing fix.
+      - UDS direct `10k/s` C-client rows are now about `0.038-0.044`, instead of the previous busy-wait behavior around one full core.
+    - Additional fixes completed as part of validation:
+      - `tests/generate-benchmarks-posix.sh` and `tests/generate-benchmarks-windows.sh` now preserve the real child exit status in their `run()` wrappers.
+      - `tests/run-negotiated-profile-bench.sh` now uses a `12s` server timeout instead of `7s`, to avoid staged benchmark flakiness near the `5s` benchmark window.
+      - `benchmarks-posix.md` was regenerated successfully from a complete staged run after these fixes.

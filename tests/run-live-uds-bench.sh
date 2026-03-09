@@ -143,8 +143,9 @@ wait_for_server_exit() {
     return 1
   fi
 
-  if ! wait "${SERVER_PID}"; then
-    local rc=$?
+  wait "${SERVER_PID}"
+  local rc=$?
+  if [[ $rc -ne 0 ]]; then
     echo -e >&2 "${RED}[ERROR] Server process failed (pid=${SERVER_PID}, rc=${rc}). Log:${NC}"
     cat "${SERVER_LOG}" >&2 || true
     SERVER_PID=""
@@ -166,6 +167,23 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+write_csv_results() {
+  local output_path=$1
+  local output_dir tmp_path
+
+  output_dir=$(dirname "${output_path}")
+  mkdir -p "${output_dir}"
+  tmp_path="${output_dir}/.$(basename "${output_path}").tmp.$$"
+
+  printf "scenario,client,server,throughput_rps,p50_us,client_cpu_cores,server_cpu_cores,total_cpu_cores\n" > "${tmp_path}"
+  while IFS='|' read -r scenario client server throughput p50 client_cpu server_cpu total_cpu; do
+    printf "%s,%s,%s,%s,%s,%s,%s,%s\n" \
+      "${scenario}" "${client}" "${server}" "${throughput}" "${p50}" "${client_cpu}" "${server_cpu}" "${total_cpu}" >> "${tmp_path}"
+  done < "${results_file}"
+
+  mv "${tmp_path}" "${output_path}"
+}
 
 show_logs_and_fail() {
   local message=$1
@@ -309,5 +327,9 @@ while IFS='|' read -r scenario client server throughput p50 client_cpu server_cp
   printf "%-8s | %-6s | %-6s | %18s | %8s | %18s | %18s | %16s\n" \
     "${scenario}" "${client}" "${server}" "${throughput}" "${p50}" "${client_cpu}" "${server_cpu}" "${total_cpu}"
 done < "${results_file}"
+
+if [[ -n "${NETIPC_RESULTS_FILE:-}" ]]; then
+  write_csv_results "${NETIPC_RESULTS_FILE}"
+fi
 
 echo -e "\n${GREEN}Live UDS benchmark matrix complete.${NC}"

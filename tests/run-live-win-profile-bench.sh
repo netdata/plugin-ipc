@@ -5,6 +5,7 @@ BUILD_DIR="${BUILD_DIR:-build-mingw}"
 BIN_DIR="${C_BIN_DIR:-${BUILD_DIR}/bin}"
 SERVER_PID=""
 SERVER_LOG=""
+RESULTS_TMP=""
 
 run() {
   printf >&2 '%s\n' "+ $*"
@@ -41,6 +42,9 @@ cleanup() {
     kill "${SERVER_PID}" || true
     wait "${SERVER_PID}" || true
   fi
+  if [[ -n "${RESULTS_TMP}" ]] && [[ -f "${RESULTS_TMP}" ]]; then
+    rm -f "${RESULTS_TMP}"
+  fi
 }
 trap cleanup EXIT
 
@@ -62,6 +66,12 @@ run cmake --build "${BUILD_DIR}" --target netipc-live-c
 
 printf '%s\n' 'mode,duration_sec,target_rps,requests,responses,mismatches,throughput_rps,p50_us,p95_us,p99_us,client_cpu_cores'
 
+if [[ -n "${NETIPC_RESULTS_FILE:-}" ]]; then
+  mkdir -p "$(dirname "${NETIPC_RESULTS_FILE}")"
+  RESULTS_TMP="$(dirname "${NETIPC_RESULTS_FILE}")/.$(basename "${NETIPC_RESULTS_FILE}").tmp.$$"
+  printf '%s\n' 'mode,duration_sec,target_rps,requests,responses,mismatches,throughput_rps,p50_us,p95_us,p99_us,client_cpu_cores' > "${RESULTS_TMP}"
+fi
+
 run_case() {
   local supported=$1
   local preferred=$2
@@ -75,10 +85,16 @@ run_case() {
     "${BIN_DIR}/netipc-live-c.exe" server-loop /tmp "${service}" 0
   sleep 0.2
 
-  env \
+  local row
+  row=$(env \
     NETIPC_SUPPORTED_PROFILES="${supported}" \
     NETIPC_PREFERRED_PROFILES="${preferred}" \
-    "${BIN_DIR}/netipc-live-c.exe" client-bench /tmp "${service}" 5 "${target_rps}" | awk -F, '/^c-npipe,|^c-shm-hybrid,/ {print $0}'
+    "${BIN_DIR}/netipc-live-c.exe" client-bench /tmp "${service}" 5 "${target_rps}" | awk -F, '/^c-npipe,|^c-shm-hybrid,/ {print $0}')
+
+  printf '%s\n' "${row}"
+  if [[ -n "${RESULTS_TMP}" ]]; then
+    printf '%s\n' "${row}" >> "${RESULTS_TMP}"
+  fi
 
   wait_server
 }
@@ -87,3 +103,8 @@ for target_rps in 0 100000 10000; do
   run_case 1 1 "${target_rps}" "netipc-win-npipe-${target_rps}-$$"
   run_case 3 2 "${target_rps}" "netipc-win-shm-${target_rps}-$$"
 done
+
+if [[ -n "${RESULTS_TMP}" ]]; then
+  mv "${RESULTS_TMP}" "${NETIPC_RESULTS_FILE}"
+  RESULTS_TMP=""
+fi

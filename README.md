@@ -158,6 +158,19 @@ Benchmarks:
 ./tests/run-negotiated-profile-bench.sh
 ```
 
+Generated benchmark reports:
+
+```bash
+./tests/generate-benchmarks-posix.sh
+./tests/generate-benchmarks-windows.sh
+```
+
+The generator scripts are intentionally separate from the CMake workflow. They
+run the benchmark matrix, stage machine-readable results, validate that the
+matrix is complete, and only then replace `benchmarks-posix.md` or
+`benchmarks-windows.md` atomically. A failed or partial run leaves the committed
+markdown untouched.
+
 The benchmark scripts only orchestrate matrix runs. CPU reporting is produced by the helper binaries themselves, not by the reusable library and not by external shell-side `/proc` sampling.
 
 The shell scripts remain in the repository because they are library validation and benchmark assets, but they are now intended to be launched by CMake/CTest as first-class repo workflows.
@@ -166,12 +179,18 @@ The shell scripts remain in the repository because they are library validation a
   - `max`
   - `100k/s`
   - `10k/s`
+- `./tests/run-live-shm-bench.sh` runs the full Linux direct `SHM_HYBRID` `C/Rust` client-server matrix (`4` directed pairs) at:
+  - `max`
+  - `100k/s`
+  - `10k/s`
 - The UDS benchmark matrix fails hard on:
   - any non-OK response status
   - any `response != request + 1` mismatch
   - any `requests != responses` mismatch
   - any client/server handled-count mismatch
+- The direct SHM benchmark matrix fails hard on the same correctness conditions.
 - `./tests/run-live-uds-interop.sh` runs the full directed baseline profile-`1` UDS matrix, plus the negotiated C<->Rust profile-`2` SHM cases.
+- `./tests/run-live-interop.sh` runs direct `SHM_HYBRID` interop for `c->rust` and `rust->c`.
 
 Quick manual runs:
 
@@ -191,6 +210,11 @@ build/bin/netipc-live-c shm-server-loop /tmp netflow 2
 build/bin/netipc-live-c shm-client-bench /tmp netflow 5 0
 build/bin/netipc-live-c shm-server-bench /tmp netflow 0
 build/bin/netipc-live-c shm-bench /tmp netflow 5 0
+
+build/bin/netipc_live_rs server-once /tmp netflow
+build/bin/netipc_live_rs client-once /tmp netflow 41
+build/bin/netipc_live_rs server-loop /tmp netflow 2
+build/bin/netipc_live_rs client-bench /tmp netflow 5 0
 
 build/bin/netipc-codec-c encode-req 123 41 /tmp/netipc.req
 build/bin/netipc-codec-c decode-req /tmp/netipc.req

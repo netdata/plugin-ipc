@@ -228,33 +228,58 @@ static bool install_benchmark_stop_handlers(void) {
     return sigaction(SIGTERM, &action, NULL) == 0 && sigaction(SIGINT, &action, NULL) == 0;
 }
 
-static void cpu_relax(void) {
-#if defined(__x86_64__) || defined(__i386__)
-    __builtin_ia32_pause();
-#else
-    sched_yield();
-#endif
+static void sleep_for_ns(uint64_t sleep_ns) {
+    if (sleep_ns == 0u) {
+        return;
+    }
+
+    struct timespec req = {
+        .tv_sec = (time_t)(sleep_ns / 1000000000ull),
+        .tv_nsec = (long)(sleep_ns % 1000000000ull),
+    };
+    nanosleep(&req, NULL);
 }
 
-static void sleep_until_ns(uint64_t target_ns) {
+static uint64_t adaptive_sleep_ns(uint64_t remaining_ns) {
+    if (remaining_ns > 5000000ull) {
+        return remaining_ns - 1000000ull;
+    }
+    if (remaining_ns > 500000ull) {
+        return remaining_ns / 2u;
+    }
+    if (remaining_ns > 50000ull) {
+        return remaining_ns / 4u;
+    }
+    return remaining_ns;
+}
+
+static bool wait_for_benchmark_slot(uint64_t start_ns,
+                                    uint64_t end_ns,
+                                    int32_t target_rps,
+                                    uint64_t requests_sent) {
+    if (target_rps <= 0) {
+        return monotonic_ns() < end_ns;
+    }
+
+    uint64_t rate = (uint64_t)target_rps;
     for (;;) {
         uint64_t now_ns = monotonic_ns();
-        if (now_ns >= target_ns) {
-            return;
+        if (now_ns >= end_ns) {
+            return false;
         }
 
-        uint64_t remaining_ns = target_ns - now_ns;
-        if (remaining_ns > 2000000ull) {
-            struct timespec req = {
-                .tv_sec = 0,
-                .tv_nsec = 1000000L,
-            };
-            nanosleep(&req, NULL);
-        } else if (remaining_ns > 200000ull) {
-            sched_yield();
-        } else {
-            cpu_relax();
+        uint64_t elapsed_ns = now_ns - start_ns;
+        uint64_t target_completed = (elapsed_ns * rate) / 1000000000ull;
+        if (requests_sent <= target_completed) {
+            return true;
         }
+
+        uint64_t target_elapsed_ns = (requests_sent * 1000000000ull) / rate;
+        if (target_elapsed_ns <= elapsed_ns) {
+            return true;
+        }
+
+        sleep_for_ns(adaptive_sleep_ns(target_elapsed_ns - elapsed_ns));
     }
 }
 
@@ -727,6 +752,14 @@ static int run_server_bench(const struct transport_ops *ops,
                             const char *run_dir,
                             const char *service,
                             uint64_t max_requests) {
+    if (!ops->has_profile) {
+        g_bench_stop_requested = 0;
+        if (!install_benchmark_stop_handlers()) {
+            perror("install_benchmark_stop_handlers");
+            return 1;
+        }
+    }
+
     uint64_t handled_requests = 0u;
     uint64_t start_ns = monotonic_ns();
     double cpu_start = self_cpu_seconds();
@@ -778,20 +811,9 @@ static int run_client_bench_capture(const struct transport_ops *ops,
     uint64_t counter = 1u;
     uint64_t requests = 0u;
     uint64_t responses = 0u;
-    uint64_t interval_ns = 0u;
-    uint64_t next_send_ns = start_ns;
-
-    if (target_rps > 0) {
-        interval_ns = 1000000000ull / (uint64_t)target_rps;
-        if (interval_ns == 0u) {
-            interval_ns = 1u;
-        }
-    }
-
-    while (monotonic_ns() < end_ns) {
-        if (interval_ns != 0u) {
-            sleep_until_ns(next_send_ns);
-            next_send_ns += interval_ns;
+    while (wait_for_benchmark_slot(start_ns, end_ns, target_rps, requests)) {
+        if (monotonic_ns() >= end_ns) {
+            break;
         }
 
         struct netipc_increment_request request = {.value = counter};

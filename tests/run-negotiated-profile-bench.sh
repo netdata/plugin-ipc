@@ -43,6 +43,23 @@ run() {
   fi
 }
 
+write_csv_results() {
+  local output_path=$1
+  local output_dir tmp_path
+
+  output_dir=$(dirname "${output_path}")
+  mkdir -p "${output_dir}"
+  tmp_path="${output_dir}/.$(basename "${output_path}").tmp.$$"
+
+  printf "scenario,profile,throughput_rps,p50_us,client_cpu_cores,server_cpu_cores,total_cpu_cores\n" > "${tmp_path}"
+  while IFS='|' read -r scenario profile throughput p50 ccpu scpu total; do
+    printf "%s,%s,%s,%s,%s,%s,%s\n" \
+      "${scenario}" "${profile}" "${throughput}" "${p50}" "${ccpu}" "${scpu}" "${total}" >> "${tmp_path}"
+  done < "${results_file}"
+
+  mv "${tmp_path}" "${output_path}"
+}
+
 bench_rust_profile() {
   local scenario=$1
   local target_rps=$2
@@ -60,10 +77,10 @@ bench_rust_profile() {
 
   printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
   printf >&2 "${YELLOW}"
-  printf >&2 "%q " /usr/bin/time -f "%U %S" -o "${server_time}" timeout 7s env NETIPC_SUPPORTED_PROFILES="${supported}" NETIPC_PREFERRED_PROFILES="${preferred}" "${C_BIN_DIR}/netipc_live_uds_rs" server-loop /tmp "${service}" 0
+  printf >&2 "%q " /usr/bin/time -f "%U %S" -o "${server_time}" timeout 12s env NETIPC_SUPPORTED_PROFILES="${supported}" NETIPC_PREFERRED_PROFILES="${preferred}" "${C_BIN_DIR}/netipc_live_uds_rs" server-loop /tmp "${service}" 0
   printf >&2 "${NC}\n"
 
-  /usr/bin/time -f "%U %S" -o "${server_time}" timeout 7s env NETIPC_SUPPORTED_PROFILES="${supported}" NETIPC_PREFERRED_PROFILES="${preferred}" "${C_BIN_DIR}/netipc_live_uds_rs" server-loop /tmp "${service}" 0 >"${server_log}" 2>&1 &
+  /usr/bin/time -f "%U %S" -o "${server_time}" timeout 12s env NETIPC_SUPPORTED_PROFILES="${supported}" NETIPC_PREFERRED_PROFILES="${preferred}" "${C_BIN_DIR}/netipc_live_uds_rs" server-loop /tmp "${service}" 0 >"${server_log}" 2>&1 &
   local server_pid=$!
   sleep 0.2
   if ! kill -0 "${server_pid}" 2>/dev/null; then
@@ -81,8 +98,8 @@ bench_rust_profile() {
   end_ns=$(date +%s%N)
   wait "${server_pid}" || true
 
-  local mode duration target req resp mismatches throughput p50 p95 p99 c_cpu
-  IFS=',' read -r mode duration target req resp mismatches throughput p50 p95 p99 c_cpu <<<"${client_row}"
+  local mode duration target req resp mismatches throughput p50 p95 p99 c_cpu ignored_server_cpu ignored_total_cpu
+  IFS=',' read -r mode duration target req resp mismatches throughput p50 p95 p99 c_cpu ignored_server_cpu ignored_total_cpu <<<"${client_row}"
 
   local elapsed_sec server_cpu_sec s_cpu total_cpu
   elapsed_sec=$(awk -v s="${start_ns}" -v e="${end_ns}" 'BEGIN { printf "%.6f", (e-s)/1e9 }')
@@ -113,5 +130,9 @@ printf -- "---------+---------------+--------------------+----------+-----------
 while IFS='|' read -r scenario profile throughput p50 ccpu scpu total; do
   printf "%-8s | %-13s | %18s | %8s | %18s | %18s | %16s\n" "${scenario}" "${profile}" "${throughput}" "${p50}" "${ccpu}" "${scpu}" "${total}"
 done < "${results_file}"
+
+if [[ -n "${NETIPC_RESULTS_FILE:-}" ]]; then
+  write_csv_results "${NETIPC_RESULTS_FILE}"
+fi
 
 echo -e "\n${GREEN}Negotiated profile benchmark complete (Rust server <-> Rust client).${NC}"

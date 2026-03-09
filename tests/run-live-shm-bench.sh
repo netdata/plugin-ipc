@@ -9,6 +9,9 @@ NC='\033[0m'
 
 CMAKE_BUILD_DIR="${NETIPC_CMAKE_BUILD_DIR:-build}"
 C_BIN_DIR="${CMAKE_BUILD_DIR}/bin"
+SERVER_PID=""
+SERVER_LOG=""
+TEMP_ROOT=""
 
 configure_build() {
   if [[ "${NETIPC_SKIP_CONFIGURE:-0}" == "1" ]]; then
@@ -22,7 +25,7 @@ build_targets() {
     return 0
   fi
   configure_build
-  run cmake --build "${CMAKE_BUILD_DIR}" --target netipc-live-c
+  run cmake --build "${CMAKE_BUILD_DIR}" --target "$@"
 }
 
 run() {
@@ -43,33 +46,290 @@ run() {
   fi
 }
 
-bench_c_shm() {
-  local scenario=$1
-  local target_rps=$2
-
-  local service="netipc-shm-c-${target_rps}-${RANDOM}"
-  local client_row
-  client_row=$("${C_BIN_DIR}/netipc-live-c" shm-bench /tmp "${service}" 5 "${target_rps}" | awk -F, '/^c-shm-hybrid,/ {print $0}')
-
-  local mode duration target req resp mismatches throughput p50 p95 p99 c_cpu s_cpu total_cpu
-  IFS=',' read -r mode duration target req resp mismatches throughput p50 p95 p99 c_cpu s_cpu total_cpu <<<"${client_row}"
-  printf "%s|c-shm-hybrid|%s|%s|%s|%s|%s\n" "${scenario}" "${throughput}" "${p50}" "${c_cpu}" "${s_cpu}" "${total_cpu}"
+binary_for() {
+  case "$1" in
+    c) printf '%s/netipc-live-c\n' "${C_BIN_DIR}" ;;
+    rust) printf '%s/netipc_live_rs\n' "${C_BIN_DIR}" ;;
+    *) echo "unknown language: $1" >&2; return 1 ;;
+  esac
 }
 
-build_targets
+server_cmd_for() {
+  case "$1" in
+    c) printf 'shm-server-bench\n' ;;
+    rust) printf 'server-bench\n' ;;
+    *) echo "unknown language: $1" >&2; return 1 ;;
+  esac
+}
 
-results_file=$(mktemp)
-trap 'rm -f "${results_file}"' EXIT
+client_cmd_for() {
+  case "$1" in
+    c) printf 'shm-client-bench\n' ;;
+    rust) printf 'client-bench\n' ;;
+    *) echo "unknown language: $1" >&2; return 1 ;;
+  esac
+}
 
-bench_c_shm "max" 0 >> "${results_file}"
-bench_c_shm "100k/s" 100000 >> "${results_file}"
-bench_c_shm "10k/s" 10000 >> "${results_file}"
+client_label_for() {
+  case "$1" in
+    c) printf 'c-shm-hybrid\n' ;;
+    rust) printf 'rust-shm-hybrid\n' ;;
+    *) echo "unknown language: $1" >&2; return 1 ;;
+  esac
+}
+
+server_label_for() {
+  case "$1" in
+    c) printf 'c-shm-hybrid-server\n' ;;
+    rust) printf 'rust-shm-hybrid-server\n' ;;
+    *) echo "unknown language: $1" >&2; return 1 ;;
+  esac
+}
+
+start_server() {
+  local server_lang=$1
+  local run_dir=$2
+  local service=$3
+  local log_file=$4
+  local bin
+  local cmd
+
+  bin=$(binary_for "${server_lang}")
+  cmd=$(server_cmd_for "${server_lang}")
+  SERVER_LOG=${log_file}
+
+  printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
+  printf >&2 "${YELLOW}"
+  printf >&2 "%q " "${bin}" "${cmd}" "${run_dir}" "${service}" "0"
+  printf >&2 "${NC}\n"
+
+  "${bin}" "${cmd}" "${run_dir}" "${service}" "0" >"${SERVER_LOG}" 2>&1 &
+  SERVER_PID=$!
+  printf '%s\n' "${SERVER_PID}" > "${run_dir}/server.pid"
+}
+
+wait_for_endpoint() {
+  local path=$1
+  local attempts=$2
+
+  for ((i = 0; i < attempts; i++)); do
+    if [[ -f "${path}" ]]; then
+      return 0
+    fi
+    sleep 0.01
+  done
+
+  echo -e >&2 "${RED}[ERROR] endpoint ${path} was not created in time${NC}"
+  return 1
+}
+
+request_server_stop() {
+  if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
+    kill "${SERVER_PID}" || true
+  fi
+}
+
+wait_for_server_exit() {
+  if [[ -z "${SERVER_PID}" ]]; then
+    return 0
+  fi
+
+  if ! timeout 10 tail --pid="${SERVER_PID}" -f /dev/null; then
+    echo -e >&2 "${RED}[ERROR] Server process did not exit in time (pid=${SERVER_PID}). Log:${NC}"
+    cat "${SERVER_LOG}" >&2 || true
+    if kill -0 "${SERVER_PID}" 2>/dev/null; then
+      kill "${SERVER_PID}" || true
+      wait "${SERVER_PID}" || true
+    fi
+    SERVER_PID=""
+    SERVER_LOG=""
+    return 1
+  fi
+
+  wait "${SERVER_PID}"
+  local rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo -e >&2 "${RED}[ERROR] Server process failed (pid=${SERVER_PID}, rc=${rc}). Log:${NC}"
+    cat "${SERVER_LOG}" >&2 || true
+    SERVER_PID=""
+    SERVER_LOG=""
+    return $rc
+  fi
+
+  SERVER_PID=""
+  SERVER_LOG=""
+}
+
+cleanup() {
+  if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
+    kill "${SERVER_PID}" || true
+    wait "${SERVER_PID}" || true
+  fi
+  if [[ -n "${TEMP_ROOT}" ]] && [[ -d "${TEMP_ROOT}" ]]; then
+    rm -rf "${TEMP_ROOT}"
+  fi
+}
+trap cleanup EXIT
+
+write_csv_results() {
+  local output_path=$1
+  local output_dir tmp_path
+
+  output_dir=$(dirname "${output_path}")
+  mkdir -p "${output_dir}"
+  tmp_path="${output_dir}/.$(basename "${output_path}").tmp.$$"
+
+  printf "scenario,client,server,throughput_rps,p50_us,client_cpu_cores,server_cpu_cores,total_cpu_cores\n" > "${tmp_path}"
+  while IFS='|' read -r scenario client server throughput p50 client_cpu server_cpu total_cpu; do
+    printf "%s,%s,%s,%s,%s,%s,%s,%s\n" \
+      "${scenario}" "${client}" "${server}" "${throughput}" "${p50}" "${client_cpu}" "${server_cpu}" "${total_cpu}" >> "${tmp_path}"
+  done < "${results_file}"
+
+  mv "${tmp_path}" "${output_path}"
+}
+
+show_logs_and_fail() {
+  local message=$1
+  local client_log=$2
+  local server_log=$3
+
+  echo -e >&2 "${RED}[ERROR] ${message}${NC}"
+  if [[ -f "${client_log}" ]]; then
+    echo -e >&2 "${RED}[CLIENT LOG]${NC}"
+    cat "${client_log}" >&2 || true
+  fi
+  if [[ -f "${server_log}" ]]; then
+    echo -e >&2 "${RED}[SERVER LOG]${NC}"
+    cat "${server_log}" >&2 || true
+  fi
+  exit 1
+}
+
+run_client_capture() {
+  local client_lang=$1
+  local run_dir=$2
+  local service=$3
+  local duration_sec=$4
+  local target_rps=$5
+  local log_file=$6
+  local bin
+  local cmd
+
+  bin=$(binary_for "${client_lang}")
+  cmd=$(client_cmd_for "${client_lang}")
+
+  printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
+  printf >&2 "${YELLOW}"
+  printf >&2 "%q " "${bin}" "${cmd}" "${run_dir}" "${service}" "${duration_sec}" "${target_rps}"
+  printf >&2 "${NC}\n"
+
+  if ! "${bin}" "${cmd}" "${run_dir}" "${service}" "${duration_sec}" "${target_rps}" >"${log_file}" 2>&1; then
+    return 1
+  fi
+}
+
+extract_row() {
+  local prefix=$1
+  local log_file=$2
+
+  awk -F, -v prefix="${prefix}" '$1 == prefix {print; exit}' "${log_file}"
+}
+
+run_matrix_case() {
+  local scenario=$1
+  local target_rps=$2
+  local client_lang=$3
+  local server_lang=$4
+  local case_dir service client_log server_log client_row server_row scenario_tag
+  local mode duration target requests responses mismatches throughput p50 p95 p99 client_cpu ignored_server total_ignored
+  local server_mode handled elapsed server_cpu total_cpu
+
+  scenario_tag=${scenario//\//-}
+  case_dir=$(mktemp -d "${TEMP_ROOT}/shm-${scenario_tag}-${client_lang}-to-${server_lang}.XXXXXX")
+  service="netipc-shm-${scenario_tag}-${client_lang}-to-${server_lang}-${RANDOM}"
+  client_log="${case_dir}/client.log"
+  server_log="${case_dir}/server.log"
+
+  start_server "${server_lang}" "${case_dir}" "${service}" "${server_log}"
+
+  if ! wait_for_endpoint "${case_dir}/${service}.ipcshm" 500; then
+    show_logs_and_fail "server endpoint did not appear for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+
+  if ! run_client_capture "${client_lang}" "${case_dir}" "${service}" 5 "${target_rps}" "${client_log}"; then
+    request_server_stop
+    wait_for_server_exit || true
+    show_logs_and_fail "client benchmark failed for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+
+  request_server_stop
+  if ! wait_for_server_exit; then
+    show_logs_and_fail "server benchmark failed for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+
+  client_row=$(extract_row "$(client_label_for "${client_lang}")" "${client_log}")
+  if [[ -z "${client_row}" ]]; then
+    show_logs_and_fail "missing client result row for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+
+  server_row=$(extract_row "$(server_label_for "${server_lang}")" "${server_log}")
+  if [[ -z "${server_row}" ]]; then
+    show_logs_and_fail "missing server result row for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+
+  IFS=',' read -r mode duration target requests responses mismatches throughput p50 p95 p99 client_cpu ignored_server total_ignored <<<"${client_row}"
+  IFS=',' read -r server_mode handled elapsed server_cpu <<<"${server_row}"
+
+  if [[ "${mismatches}" != "0" ]]; then
+    show_logs_and_fail "benchmark reported mismatches=${mismatches} for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+  if [[ "${requests}" != "${responses}" ]]; then
+    show_logs_and_fail "requests=${requests} responses=${responses} for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+  if [[ "${handled}" != "${responses}" ]]; then
+    show_logs_and_fail "server handled=${handled} but client responses=${responses} for ${client_lang}->${server_lang} (${scenario})" "${client_log}" "${server_log}"
+  fi
+
+  total_cpu=$(awk -v client="${client_cpu}" -v server="${server_cpu}" 'BEGIN { printf "%.3f", client + server }')
+  printf "%s|%s|%s|%s|%s|%s|%s|%s\n" \
+    "${scenario}" \
+    "${client_lang}" \
+    "${server_lang}" \
+    "${throughput}" \
+    "${p50}" \
+    "${client_cpu}" \
+    "${server_cpu}" \
+    "${total_cpu}"
+}
+
+build_targets netipc-live-c netipc_live_rs
+
+TEMP_ROOT=$(mktemp -d)
+results_file=$(mktemp "${TEMP_ROOT}/results.XXXXXX")
+
+languages=(c rust)
+scenarios=("max:0" "100k/s:100000" "10k/s:10000")
+
+for scenario_spec in "${scenarios[@]}"; do
+  scenario=${scenario_spec%%:*}
+  target_rps=${scenario_spec##*:}
+  for client_lang in "${languages[@]}"; do
+    for server_lang in "${languages[@]}"; do
+      run_matrix_case "${scenario}" "${target_rps}" "${client_lang}" "${server_lang}" >> "${results_file}"
+    done
+  done
+done
 
 printf "\n"
-printf "Scenario | Method       | Throughput (req/s) | p50 (us) | Client CPU (cores) | Server CPU (cores) | Total CPU (cores)\n"
-printf -- "---------+--------------+--------------------+----------+--------------------+--------------------+------------------\n"
-while IFS='|' read -r scenario method throughput p50 ccpu scpu total; do
-  printf "%-8s | %-12s | %18s | %8s | %18s | %18s | %16s\n" "${scenario}" "${method}" "${throughput}" "${p50}" "${ccpu}" "${scpu}" "${total}"
+printf "Scenario | Client | Server | Throughput (req/s) | p50 (us) | Client CPU (cores) | Server CPU (cores) | Total CPU (cores)\n"
+printf -- "---------+--------+--------+--------------------+----------+--------------------+--------------------+------------------\n"
+while IFS='|' read -r scenario client server throughput p50 client_cpu server_cpu total_cpu; do
+  printf "%-8s | %-6s | %-6s | %18s | %8s | %18s | %18s | %16s\n" \
+    "${scenario}" "${client}" "${server}" "${throughput}" "${p50}" "${client_cpu}" "${server_cpu}" "${total_cpu}"
 done < "${results_file}"
 
-echo -e "\n${GREEN}Live shm-hybrid benchmark complete.${NC}"
+if [[ -n "${NETIPC_RESULTS_FILE:-}" ]]; then
+  write_csv_results "${NETIPC_RESULTS_FILE}"
+fi
+
+echo -e "\n${GREEN}Live shm-hybrid benchmark matrix complete.${NC}"

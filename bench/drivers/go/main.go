@@ -329,24 +329,12 @@ func runClientBenchCapture(runDir, service string, durationSec, targetRPS int) (
 	responses := 0
 	mismatches := 0
 
-	var intervalNs int64
-	nextSendNs := startNs
-	if targetRPS > 0 {
-		intervalNs = int64(time.Second) / int64(targetRPS)
-		if intervalNs <= 0 {
-			intervalNs = 1
-		}
-	}
-
 	for {
-		nowNs := time.Now().UnixNano()
-		if nowNs >= endNs {
+		if !waitForBenchmarkSlot(startNs, endNs, targetRPS, requests) {
 			break
 		}
-
-		if targetRPS > 0 {
-			sleepUntil(nextSendNs)
-			nextSendNs += intervalNs
+		if time.Now().UnixNano() >= endNs {
+			break
 		}
 
 		sendStart := time.Now().UnixNano()
@@ -530,21 +518,43 @@ func selfCPUSeconds() float64 {
 		float64(ru.Stime.Sec) + float64(ru.Stime.Usec)/1e6
 }
 
-func sleepUntil(targetNs int64) {
+func adaptiveSleepNs(remainingNs int64) int64 {
+	if remainingNs > 5_000_000 {
+		return remainingNs - 1_000_000
+	}
+	if remainingNs > 500_000 {
+		return remainingNs / 2
+	}
+	if remainingNs > 50_000 {
+		return remainingNs / 4
+	}
+	return remainingNs
+}
+
+func waitForBenchmarkSlot(startNs, endNs int64, targetRPS, requestsSent int) bool {
+	if targetRPS <= 0 {
+		return time.Now().UnixNano() < endNs
+	}
+
+	rate := int64(targetRPS)
 	for {
-		now := time.Now().UnixNano()
-		if now >= targetNs {
-			return
+		nowNs := time.Now().UnixNano()
+		if nowNs >= endNs {
+			return false
 		}
 
-		diff := targetNs - now
-		sleepNs := diff
-		if diff > 2_000_000 {
-			sleepNs = diff - 200_000
-		} else if diff > 200_000 {
-			sleepNs = diff - 50_000
+		elapsedNs := nowNs - startNs
+		targetCompleted := (elapsedNs * rate) / int64(time.Second)
+		if int64(requestsSent) <= targetCompleted {
+			return true
 		}
-		time.Sleep(time.Duration(sleepNs))
+
+		targetElapsedNs := (int64(requestsSent) * int64(time.Second)) / rate
+		if targetElapsedNs <= elapsedNs {
+			return true
+		}
+
+		time.Sleep(time.Duration(adaptiveSleepNs(targetElapsedNs - elapsedNs)))
 	}
 }
 

@@ -114,22 +114,50 @@ fn self_cpu_seconds() -> f64 {
     }
 }
 
-fn sleep_until(start: Instant, target_ns: u64) {
+fn adaptive_sleep_ns(remaining_ns: u64) -> u64 {
+    if remaining_ns > 5_000_000 {
+        return remaining_ns - 1_000_000;
+    }
+    if remaining_ns > 500_000 {
+        return remaining_ns / 2;
+    }
+    if remaining_ns > 50_000 {
+        return remaining_ns / 4;
+    }
+    remaining_ns
+}
+
+fn wait_for_benchmark_slot(
+    start: Instant,
+    end_at: Instant,
+    target_rps: i32,
+    requests_sent: u64,
+) -> bool {
+    if target_rps <= 0 {
+        return Instant::now() < end_at;
+    }
+
+    let rate = target_rps as u64;
     loop {
-        let now_ns = start.elapsed().as_nanos() as u64;
-        if now_ns >= target_ns {
-            return;
+        let now = Instant::now();
+        if now >= end_at {
+            return false;
         }
 
-        let diff = target_ns - now_ns;
-        let sleep_ns = if diff > 2_000_000 {
-            diff - 200_000
-        } else if diff > 200_000 {
-            diff - 50_000
-        } else {
-            diff
-        };
-        thread::sleep(Duration::from_nanos(sleep_ns));
+        let elapsed_ns = start.elapsed().as_nanos() as u64;
+        let target_completed = elapsed_ns.saturating_mul(rate) / 1_000_000_000;
+        if requests_sent <= target_completed {
+            return true;
+        }
+
+        let target_elapsed_ns = requests_sent.saturating_mul(1_000_000_000) / rate;
+        if target_elapsed_ns <= elapsed_ns {
+            return true;
+        }
+
+        thread::sleep(Duration::from_nanos(adaptive_sleep_ns(
+            target_elapsed_ns - elapsed_ns,
+        )));
     }
 }
 
@@ -238,22 +266,9 @@ fn client_bench_capture(
     let mut responses = 0i64;
     let mismatches = 0i64;
 
-    let interval_ns: u64 = if target_rps > 0 {
-        let value = 1_000_000_000u64 / target_rps as u64;
-        if value == 0 {
-            1
-        } else {
-            value
-        }
-    } else {
-        0
-    };
-    let mut next_send_ns = 0u64;
-
-    while Instant::now() < end_at {
-        if interval_ns > 0 {
-            sleep_until(start, next_send_ns);
-            next_send_ns = next_send_ns.saturating_add(interval_ns);
+    while wait_for_benchmark_slot(start, end_at, target_rps, requests as u64) {
+        if Instant::now() >= end_at {
+            break;
         }
 
         let send_start = Instant::now();
