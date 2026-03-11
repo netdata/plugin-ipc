@@ -3,7 +3,7 @@ set -euo pipefail
 
 DEFAULT_BUILD_DIR="build-mingw"
 if [[ "${MSYSTEM:-}" == "MSYS" ]]; then
-  DEFAULT_BUILD_DIR="build-msys"
+  DEFAULT_BUILD_DIR="build-msys-ninja"
 fi
 BUILD_DIR="${NETIPC_CMAKE_BUILD_DIR:-${BUILD_DIR:-${DEFAULT_BUILD_DIR}}}"
 BIN_DIR="${C_BIN_DIR:-${BUILD_DIR}/bin}"
