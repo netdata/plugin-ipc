@@ -45,7 +45,7 @@ kernel call when the peer is still spinning.
 |----------|-----------------|----------|----------|----------|------------|------------|-----------|
 | C | 99,962 | 0.29 | 0.52 | 17.67 | 0.933 | 0.929 | 1.862 |
 | Go | 99,990 | <1 | <1 | <1 | 0.269 | 0.330 | 0.599 |
-| Rust | *(pending re-run with RDTSC driver)* | | | | | | |
+| Rust | 99,995 | 0.27 | 0.36 | 27.52 | 0.624 | 0.612 | 1.236 |
 
 ### Rate-limited at 10 000 rps (Named Pipe only)
 
@@ -92,9 +92,10 @@ Hyper-V scheduling jitter amplified by the blocking `ReadFile` call.
 ### CPU efficiency
 
 At the 100K rps SHM rate, Go is the most CPU-efficient (0.60 total
-cores) because its goroutine scheduler amortises the spin cost.  C and
-Rust both use ~1.8 total cores at 100K rps since their spin loops run
-on dedicated OS threads.
+cores) because its goroutine scheduler amortises the spin cost.  Rust
+uses 1.24 total cores, benefiting from efficient spin-then-sleep
+scheduling.  C uses ~1.9 total cores at 100K rps since its spin loops
+run on dedicated OS threads with higher spin counts.
 
 ## Reproducing
 
@@ -118,11 +119,6 @@ bash tests/run-live-win-bench.sh
 - **Rust server CPU reporting:** The Rust Named Pipe server does not
   always report `SERVER_CPU_CORES` before the process exits, so the
   server CPU column shows `--` for Rust Named Pipe benchmarks.
-
-- **Rust rate-limited re-run pending:** The Rust 100K rps rate-limited
-  row needs re-collection with the RDTSC-based benchmark driver.  The
-  previous 56K rps / 3.60 us figure was dominated by QPC measurement
-  overhead and is no longer representative.
 
 - **Store-load reordering (fixed):** All three implementations now
   include SeqCst / MFENCE barriers between the critical store-then-load
