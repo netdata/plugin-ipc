@@ -110,6 +110,23 @@ if(NETIPC_BUILD_HELPERS)
         )
 
         add_custom_target(netipc_live_uds_rs DEPENDS "${NETIPC_LIVE_UDS_RS_BIN}")
+
+        if(WIN32)
+            set(NETIPC_LIVE_WIN_RS_BIN "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/netipc_live_win_rs${CMAKE_EXECUTABLE_SUFFIX}")
+            add_custom_command(
+                OUTPUT "${NETIPC_LIVE_WIN_RS_BIN}"
+                COMMAND "${CARGO_EXECUTABLE}" build --release --bin netipc_live_win_rs --manifest-path "${NETIPC_RUST_BENCH_MANIFEST}"
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "${NETIPC_RUST_BENCH_TARGET}/netipc_live_win_rs${CMAKE_EXECUTABLE_SUFFIX}"
+                        "${NETIPC_LIVE_WIN_RS_BIN}"
+                DEPENDS
+                    "${NETIPC_RUST_BENCH_MANIFEST}"
+                    "${CMAKE_SOURCE_DIR}/bench/drivers/rust/netipc_live_win_rs.rs"
+                    ${NETIPC_RUST_CRATE_SOURCES}
+                VERBATIM
+            )
+            add_custom_target(netipc_live_win_rs DEPENDS "${NETIPC_LIVE_WIN_RS_BIN}")
+        endif()
     endif()
 
     if(GO_EXECUTABLE)
@@ -138,6 +155,21 @@ if(NETIPC_BUILD_HELPERS)
             VERBATIM
         )
         add_custom_target(netipc-live-go DEPENDS "${NETIPC_LIVE_GO_BIN}")
+
+        if(WIN32)
+            set(NETIPC_LIVE_GO_WIN_BIN "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/netipc-live-go-win${CMAKE_EXECUTABLE_SUFFIX}")
+            add_custom_command(
+                OUTPUT "${NETIPC_LIVE_GO_WIN_BIN}"
+                COMMAND "${CMAKE_COMMAND}" -E chdir "${CMAKE_SOURCE_DIR}/bench/drivers/go-win"
+                        "${GO_EXECUTABLE}" build -o "${NETIPC_LIVE_GO_WIN_BIN}" .
+                DEPENDS
+                    "${CMAKE_SOURCE_DIR}/bench/drivers/go-win/go.mod"
+                    "${CMAKE_SOURCE_DIR}/bench/drivers/go-win/main.go"
+                    ${NETIPC_GO_PACKAGE_SOURCES}
+                VERBATIM
+            )
+            add_custom_target(netipc-live-go-win DEPENDS "${NETIPC_LIVE_GO_WIN_BIN}")
+        endif()
     endif()
 endif()
 

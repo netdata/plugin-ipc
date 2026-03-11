@@ -89,7 +89,7 @@ run_case() {
   row=$(env \
     NETIPC_SUPPORTED_PROFILES="${supported}" \
     NETIPC_PREFERRED_PROFILES="${preferred}" \
-    "${BIN_DIR}/netipc-live-c.exe" client-bench /tmp "${service}" 5 "${target_rps}" | awk -F, '/^c-npipe,|^c-shm-hybrid,/ {print $0}')
+    "${BIN_DIR}/netipc-live-c.exe" client-bench /tmp "${service}" 5 "${target_rps}" | awk -F, '/^c-npipe,|^c-shm-hybrid,|^c-shm-busywait,/ {print $0}')
 
   printf '%s\n' "${row}"
   if [[ -n "${RESULTS_TMP}" ]]; then
@@ -102,6 +102,7 @@ run_case() {
 for target_rps in 0 100000 10000; do
   run_case 1 1 "${target_rps}" "netipc-win-npipe-${target_rps}-$$"
   run_case 3 2 "${target_rps}" "netipc-win-shm-${target_rps}-$$"
+  run_case 7 4 "${target_rps}" "netipc-win-spin-${target_rps}-$$"
 done
 
 if [[ -n "${RESULTS_TMP}" ]]; then
