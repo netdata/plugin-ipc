@@ -87,6 +87,22 @@
   - Fact: benchmark results also expose a real client-side asymmetry:
     - C and Rust clients drive SHM HYBRID at about 3.1M to 3.4M rps against C/Rust servers.
     - Go clients top out closer to about 1.1M to 1.7M rps depending on the server implementation.
+  - Fact: a Windows-specific SHM spin sweep was executed on `win11` using `rust-native -> rust-native` first, then a representative transition shortlist.
+  - Fact: the broad Rust-only sweep over `4, 8, 16, 32, 64, 128, 256, 512, 1024` showed that Windows is not in the same regime as Linux:
+    - throughput stayed in named-pipe-class territory up to `64`
+    - `128` and `256` improved but were still far from the top-end SHM behavior
+    - `512` was the first value that restored full-rate SHM behavior for both max-rate and `100k/s`
+    - `1024` added CPU with essentially no throughput gain over `512`
+  - Fact: the refined Rust-only sweep around the knee (`320, 384, 448, 512, 640, 768`) showed high Hyper-V noise but still narrowed the useful window to about `384` to `640`.
+  - Fact: representative transition validation was then run for spins `384`, `448`, `512`, and `640` on:
+    - `rust-native -> rust-native`
+    - `c-msys -> rust-native`
+    - `rust-native -> c-msys`
+    - `rust-native -> go-native`
+  - Fact: the representative results did not reveal a single clean Linux-style knee:
+    - lower spins such as `384` often reduced CPU, but produced much worse `100k/s` p99 tails on transition pairs
+    - higher spins such as `640` improved several max-rate runs, but also raised CPU and were not consistently better across all pairs
+    - `512` emerged as the most defensible current default candidate because it restored full-rate SHM behavior broadly, avoided the obvious low-spin collapse, and did not materially underperform `640`
 
 ## Current Follow-up Task (2026-03-11)
 - Goal: define how to wire Windows validation into CI for this repository.
@@ -95,12 +111,19 @@
   - verify current official GitHub Actions guidance for Windows + MSYS2 + artifacts/caching
   - recommend a CI structure that matches the validated local/`win11` workflow with low maintenance risk
   - carry forward the full transition matrix requirement rather than collapsing back to same-language-only checks
+  - determine the Windows SHM HYBRID spin sweet spot instead of assuming the Linux value applies
+  - compare maximum-throughput gain versus CPU/tail-latency cost on `win11`
+  - evaluate whether CI can identify and report Linux and Windows SHM spin sweet spots on production-like VMs
 - User clarification (2026-03-11):
   - the transition requirement is not a POSIX transport on Windows
   - the C library must compile under the MSYS runtime while still using the native Windows IPC transport
   - that MSYS-built C variant must interoperate with native Windows Rust and Go binaries
   - `benchmark-windows.md` must include both `c-native` and `c-msys`
   - benchmark scope should cover all directed implementation pairs, with each timed run capped at 5 seconds
+  - Linux already converged on `20` spins as the best throughput-inflection point after testing powers of two and then refining near `16`
+  - Windows needs its own sweep because its current SHM HYBRID default is much higher than Linux
+  - question to answer now: can CI reliably identify the Linux and Windows sweet spots on real production VMs instead of only local test hosts
+  - latest Linux decision: use a safer higher POSIX SHM default of `128` spins even if it increases CPU, because the priority is to avoid under-spinning on production VMs
 
 ## Session Handoff (2026-03-08)
 - Working repository: `/home/costa/src/plugin-ipc.git` (local git repo initialized, branch `main`).
@@ -211,6 +234,10 @@ If we manage to have an transport layer that supports millions of requests/respo
 - 6. Windows benchmark matrix breadth.
   - Option A: benchmark same-runtime self-pairs only (`c-native`, `c-msys`, `rust-native`, `go-native`).
   - Option B: benchmark mixed-runtime pairs too (`c-msys <-> rust-native`, `c-msys <-> go-native`, etc.).
+- 7. Windows SHM spin-sweep scope.
+  - Option A: tune using `rust-native -> rust-native` only.
+  - Option B: use `rust-native -> rust-native` to find the candidate knee, then validate that shortlist on representative transition pairs.
+  - Option C: sweep the full directed SHM matrix for every spin value.
 
 ### Made Decisions
 1. Transport strategy for v1 benchmark candidate set: Option C (benchmark both stream and message-oriented candidates).
@@ -330,6 +357,7 @@ If we manage to have an transport layer that supports millions of requests/respo
   - Decision `1` selected as `A`: extend the existing Windows scripts to support both `c-native` and `c-msys`.
   - Decision `2` selected as `B`: include `c-native <-> c-msys` in the transition smoke matrix in addition to `c-msys <-> rust-native/go-native`.
   - Decision `3` selected as full cross-implementation coverage: benchmark all directed combinations, while keeping each individual run capped at 5 seconds.
+  - Decision `7` selected as `B`: use `rust-native -> rust-native` to find the Windows SHM spin candidate knee, then validate the shortlist on representative transition pairs.
 
 24. Go transport must be pure Go without cgo.
    - Source: user decision "The Go implementation must not need CGO."
@@ -1563,9 +1591,9 @@ Status (2026-03-08): completed. Validation reruns passed:
 
 83. SHM client CPU investigation findings
     - Facts:
-      - the library default spin window is `20` in both C and Rust:
-        - `src/libnetdata/netipc/include/netipc/netipc_shm_hybrid.h`: `NETIPC_SHM_DEFAULT_SPIN_TRIES 20u`
-        - `src/crates/netipc/src/transport/posix.rs`: `SHM_DEFAULT_SPIN_TRIES: u32 = 20`
+      - the library default spin window is now `128` in both C and Rust:
+        - `src/libnetdata/netipc/include/netipc/netipc_shm_hybrid.h`: `NETIPC_SHM_DEFAULT_SPIN_TRIES 128u`
+        - `src/crates/netipc/src/transport/posix.rs`: `SHM_DEFAULT_SPIN_TRIES: u32 = 128`
       - the C SHM helper uses that default in `tests/fixtures/c/netipc_live_posix_c.c` via `shm_config(...).spin_tries = NETIPC_SHM_DEFAULT_SPIN_TRIES`.
       - the C benchmark pacing loop uses `sleep_until_ns()`, which intentionally busy-waits / yields close to the send deadline.
       - new direct SHM benchmark evidence shows a strong asymmetry at `10k/s`:

@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define NETIPC_SHM_DEFAULT_SPIN_TRIES 20u
+#define NETIPC_SHM_DEFAULT_SPIN_TRIES 128u
 
 typedef struct netipc_shm_server netipc_shm_server_t;
 typedef struct netipc_shm_client netipc_shm_client_t;

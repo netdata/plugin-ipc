@@ -32,7 +32,7 @@ const NEGOTIATION_FRAME_SIZE: usize = FRAME_SIZE;
 
 const SHM_REGION_MAGIC: u32 = 0x4e53_484d;
 const SHM_REGION_VERSION: u16 = 1;
-pub const SHM_DEFAULT_SPIN_TRIES: u32 = 20;
+pub const SHM_DEFAULT_SPIN_TRIES: u32 = 128;
 
 #[repr(C)]
 struct RegionLayout {
