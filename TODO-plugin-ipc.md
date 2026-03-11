@@ -1,5 +1,81 @@
 # TODO-plugin-ipc
 
+## Purpose
+- Switch the local repository to `origin/windows-transports-rust-go` without risking unrelated work.
+- Open a GitHub pull request for the Windows transport branch against `main`.
+- Keep the clean PR head branch in sync with the latest commits on `windows-transports-rust-go`.
+- Pull the repository after the PR merge and move the local worktree back to `main`.
+- Perform a production-readiness review of the full library across Linux and Windows, for C, Rust, and Go, and decide whether it is ready to merge into Netdata.
+
+## Session Handoff (2026-03-11)
+- User decision (2026-03-11, after remediation):
+  - commit the current fixes and push them
+  - use `ssh win11` for real Windows validation before finalizing the commit
+  - use `/c/Users/costa/src/plugin-ipc-win.git` on `win11` for validation
+  - reset that Windows test clone before applying the current patch and running tests
+- Fact: local repository `/home/costa/src/plugin-ipc.git` is currently clean on branch `main` (`git status --short --branch` showed `## main...origin/main`).
+- Fact: remote branch `origin/windows-transports-rust-go` exists and was fetched successfully on 2026-03-11.
+- Fact: local branch `windows-transports-rust-go` now tracks `origin/windows-transports-rust-go`.
+- Fact: `origin/windows-transports-rust-go` is 2 commits ahead of `origin/main`:
+  - `d9246b0 Add Rust/Go Windows transports, fix SHM store-load reordering race`
+  - `9f050c7 Fix Rust bench: use RDTSC timing instead of QPC per-iteration`
+- Fact: current diff versus `origin/main` touches 24 files with 4897 insertions and 97 deletions, including Windows transport code for C, Rust, and Go, Windows benchmark drivers/docs, and Windows smoke/live bench scripts.
+- Fact: `origin` remote HEAD branch is `main`.
+- Fact: GitHub currently has no open or closed PR with head `netdata:windows-transports-rust-go`.
+- Fact: both branch commits currently include `Co-Authored-By` trailers, so opening a PR directly from that head would carry disallowed attribution text into the PR commit list.
+- Fact: clean branch `windows-transports-rust-go-pr` was created from `origin/main`, replayed with sanitized commit messages, pushed to `origin`, and used to open PR `#1`.
+- Fact: PR URL is `https://github.com/netdata/plugin-ipc/pull/1`.
+- Fact: after `windows-transports-rust-go` advanced with `43ee635` and `d910ab0`, the clean PR branch was synced by replaying those commits with sanitized messages and pushing:
+  - `b95b8f5 Update benchmark docs and README with post-RDTSC Rust performance`
+  - `965879e Fill Rust rate-limited 100K rps benchmark row`
+- Fact: the synced `windows-transports-rust-go-pr` branch now matches the tree of `origin/windows-transports-rust-go`.
+- Fact: local worktree is now back on `main`, and `main` was fast-forwarded to merged commit `b2bdcd5 Add Windows IPC transports and benchmark coverage (#1)`.
+- Fact: the local `TODO-plugin-ipc.md` note was stashed for the pull and then reapplied cleanly on top of `main`.
+- Review findings (2026-03-11):
+  - `cmake --build build --target test` fails on Linux because the Rust bench-driver manifest always includes the Windows binary and CMake builds the manifest without selecting a single bin; `netipc-live-uds-interop` and `netipc-uds-negotiation-negative` both fail for this reason.
+  - `GOOS=windows GOARCH=amd64 go test ./...` fails because the Go POSIX transport package is not build-tagged out on Windows while its syscall helper definitions are unix-only.
+  - POSIX SHM stale-endpoint takeover in both C and Rust only checks `owner_pid` even though the shared region stores an `owner_generation`; PID reuse can therefore make stale endpoints appear live.
+  - Windows validation scripts remain workstation-specific (`/c/Users/costa/...`, hard-coded PATH/GOROOT), so the documented Windows validation path is not portable or CI-ready.
+  - README still documents current limitations: Go/Rust rely on helper binaries for validated live paths, and Netdata integration wiring is explicitly out of scope in this repository phase.
+- Current remediation plan:
+  - gate the Rust Windows bench binary behind an explicit feature and make CMake build explicit per-bin targets
+  - add proper unix build tags to the Go POSIX transport sources/tests
+  - strengthen POSIX SHM ownership metadata so stale-endpoint reclaim is resilient to PID reuse
+  - make Windows helper scripts path-configurable instead of Costa-workstation-specific
+  - rerun Linux validation and cross-build checks after the fixes
+  - run the smoke and live Windows checks on `win11` before committing
+- Current immediate request:
+  - switch locally to `origin/windows-transports-rust-go`
+  - create a PR from `windows-transports-rust-go` to `main`
+  - sync the clean PR branch to the latest `origin/windows-transports-rust-go`
+  - pull the repository and check out `main`
+  - review the full codebase for production readiness and Netdata merge suitability
+  - commit and push the remediation changes after Windows validation on `win11`
+- Current execution plan:
+  - keep the local repository on tracking branch `windows-transports-rust-go`
+  - keep the temporary clean PR branch available on `origin` as the PR head
+  - leave the current repository on `windows-transports-rust-go`
+  - replay any new commits from `windows-transports-rust-go` onto the clean PR branch with sanitized commit messages
+  - verify the current worktree state after the interrupted turn
+  - update local refs
+  - switch the main worktree to `main`
+  - fast-forward local `main` to `origin/main`
+  - audit repository structure, build system, and test coverage
+  - inspect Linux and Windows transports in C, Rust, and Go
+  - run Linux-side validation that is possible in this environment
+  - validate the same changes on `win11` with the real Windows runtime
+  - if that validation passes, commit the specific files changed in this task and push `main`
+  - produce a review with concrete findings, risks, and a readiness recommendation
+- Windows validation results on `win11` (2026-03-11):
+  - Fact: `/c/Users/costa/src/plugin-ipc-win.git` was reset to `origin/main`, cleaned, and used as the Windows validation clone.
+  - Fact: the current local remediation patch was applied there cleanly with `git apply`.
+  - Fact: `go test ./...` under `src/go` passed on Windows when using the official Go installation.
+  - Fact: `cargo check --manifest-path bench/drivers/rust/Cargo.toml --features windows-driver --bin netipc_live_win_rs` passed on Windows.
+  - Fact: the first smoke-script attempt failed because `win11` has two Go installations and CMake selected `/mingw64/bin/go.exe`, which is broken on that host unless `GOROOT` is set and its stdlib/tool versions match.
+  - Fact: `tests/smoke-win.sh` and `tests/run-live-win-bench.sh` were then updated to auto-prefer `/c/Program Files/Go/bin/go.exe` when present and to pass that executable into CMake configuration.
+  - Fact: after that script fix, `NETIPC_CMAKE_BUILD_DIR=build-mingw-auto bash tests/smoke-win.sh` passed on `win11` with `18 passed, 0 failed` and no manual Go override.
+  - Fact: after that script fix, `NETIPC_SKIP_BUILD=1 NETIPC_CMAKE_BUILD_DIR=build-mingw-auto bash tests/run-live-win-bench.sh` completed successfully on `win11`.
+
 ## Session Handoff (2026-03-08)
 - Working repository: `/home/costa/src/plugin-ipc.git` (local git repo initialized, branch `main`).
 - Port status: source/tests/docs/tooling copied from `/home/costa/src/ipc-test` and validated in-place.

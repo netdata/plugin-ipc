@@ -230,7 +230,6 @@ const NEG_OFF_STATUS: usize = 32;
 const SHM_REGION_MAGIC: u32 = 0x4e53_5748;
 const SHM_REGION_VERSION: u32 = 2;
 const CACHELINE: usize = 64;
-const SHM_NAME_CAP: usize = 256;
 
 /// Header: 64 bytes (1 cache line)
 ///   magic(4) + version(4) + profile(4) + spin_tries(4) + reserved(48)
@@ -1181,12 +1180,6 @@ impl Drop for NamedPipeServer {
 
 pub struct NamedPipeClient {
     pipe: HANDLE,
-    run_dir: String,
-    service_name: String,
-    supported_profiles: u32,
-    preferred_profiles: u32,
-    auth_token: u64,
-    shm_spin_tries: u32,
     negotiated_profile: u32,
     shm_client: Option<ShmClient>,
     next_request_id: u64,
@@ -1247,12 +1240,6 @@ impl NamedPipeClient {
 
         Ok(NamedPipeClient {
             pipe,
-            run_dir: config.run_dir.to_string_lossy().into_owned(),
-            service_name: config.service_name.clone(),
-            supported_profiles: supported,
-            preferred_profiles: preferred,
-            auth_token: config.auth_token,
-            shm_spin_tries: config.shm_spin_tries,
             negotiated_profile: profile,
             shm_client,
             next_request_id: 1,

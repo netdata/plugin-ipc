@@ -98,7 +98,7 @@ if(NETIPC_BUILD_HELPERS)
 
         add_custom_command(
             OUTPUT "${NETIPC_LIVE_UDS_RS_BIN}"
-            COMMAND "${CARGO_EXECUTABLE}" build --release --manifest-path "${NETIPC_RUST_BENCH_MANIFEST}"
+            COMMAND "${CARGO_EXECUTABLE}" build --release --bin netipc_live_uds_rs --manifest-path "${NETIPC_RUST_BENCH_MANIFEST}"
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                     "${NETIPC_RUST_BENCH_TARGET}/netipc_live_uds_rs"
                     "${NETIPC_LIVE_UDS_RS_BIN}"
@@ -115,7 +115,7 @@ if(NETIPC_BUILD_HELPERS)
             set(NETIPC_LIVE_WIN_RS_BIN "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/netipc_live_win_rs${CMAKE_EXECUTABLE_SUFFIX}")
             add_custom_command(
                 OUTPUT "${NETIPC_LIVE_WIN_RS_BIN}"
-                COMMAND "${CARGO_EXECUTABLE}" build --release --bin netipc_live_win_rs --manifest-path "${NETIPC_RUST_BENCH_MANIFEST}"
+                COMMAND "${CARGO_EXECUTABLE}" build --release --features windows-driver --bin netipc_live_win_rs --manifest-path "${NETIPC_RUST_BENCH_MANIFEST}"
                 COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                         "${NETIPC_RUST_BENCH_TARGET}/netipc_live_win_rs${CMAKE_EXECUTABLE_SUFFIX}"
                         "${NETIPC_LIVE_WIN_RS_BIN}"

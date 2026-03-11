@@ -1,15 +1,72 @@
 #!/usr/bin/env bash
-# Windows IPC benchmark for C, Rust, Go
-export PATH="/c/Users/costa/.cargo/bin:/c/msys64/mingw64/bin:/c/msys64/usr/bin:/c/Program Files/Go/bin:$PATH"
-export GOROOT="/c/Program Files/Go"
+set -euo pipefail
 
-BASE="/c/Users/costa/src/plugin-ipc-win.git"
-C_BIN="$BASE/build/bin/netipc-live-c.exe"
-RS_BIN="$BASE/build/bin/netipc_live_win_rs.exe"
-GO_BIN="$BASE/build/bin/netipc-live-go-win.exe"
-DIR="/tmp/bench_win"
-TOK=12345
-DUR=5
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+BUILD_DIR="${NETIPC_CMAKE_BUILD_DIR:-${BUILD_DIR:-build-mingw}}"
+BIN_DIR="${NETIPC_WINDOWS_BIN_DIR:-${BUILD_DIR}/bin}"
+C_BIN="${NETIPC_WINDOWS_C_BIN:-${BIN_DIR}/netipc-live-c.exe}"
+RS_BIN="${NETIPC_WINDOWS_RS_BIN:-${BIN_DIR}/netipc_live_win_rs.exe}"
+GO_BIN="${NETIPC_WINDOWS_GO_BIN:-${BIN_DIR}/netipc-live-go-win.exe}"
+DIR="${NETIPC_WINDOWS_TMP_DIR:-/tmp/bench_win}"
+TOK="${NETIPC_AUTH_TOKEN:-12345}"
+DUR="${NETIPC_BENCH_DURATION_SEC:-5}"
+GO_EXECUTABLE="${NETIPC_GO_EXECUTABLE:-}"
+
+if [[ -z "${GO_EXECUTABLE}" && -x /c/Program\ Files/Go/bin/go.exe ]]; then
+  GO_EXECUTABLE="/c/Program Files/Go/bin/go.exe"
+fi
+
+if [[ -n "${GO_EXECUTABLE}" ]]; then
+  if [[ -n "${NETIPC_GOROOT:-}" ]]; then
+    export GOROOT="${NETIPC_GOROOT}"
+  elif [[ -z "${GOROOT:-}" && "${GO_EXECUTABLE}" == /* ]]; then
+    export GOROOT
+    GOROOT=$(cd "$(dirname "${GO_EXECUTABLE}")/.." && pwd)
+  fi
+fi
+
+run() {
+  printf >&2 '%s\n' "+ $*"
+  "$@"
+}
+
+configure_build() {
+  if [[ "${NETIPC_SKIP_CONFIGURE:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  local cmake_args=(-S "${ROOT_DIR}" -B "${BUILD_DIR}" -G Ninja)
+  if [[ -n "${GO_EXECUTABLE}" ]]; then
+    cmake_args+=("-DGO_EXECUTABLE=${GO_EXECUTABLE}")
+  fi
+
+  run cmake "${cmake_args[@]}"
+}
+
+build_targets() {
+  if [[ "${NETIPC_SKIP_BUILD:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  configure_build
+  run cmake --build "${BUILD_DIR}" --target netipc-live-c netipc_live_win_rs netipc-live-go-win
+}
+
+case "$(uname -s)" in
+  MINGW*|MSYS*) ;;
+  *)
+    echo "skip: Windows benchmark requires MSYS2 on Windows" >&2
+    exit 0
+    ;;
+esac
+
+if [[ "${MSYSTEM:-}" == "MSYS" ]]; then
+  echo "error: run this benchmark from mingw64.exe or ucrt64.exe, not the plain msys shell" >&2
+  exit 1
+fi
+
+cd "${ROOT_DIR}"
+build_targets
 
 for bin in "$C_BIN" "$RS_BIN" "$GO_BIN"; do
   if [ ! -f "$bin" ]; then

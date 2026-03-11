@@ -57,16 +57,48 @@ struct netipc_shm_client {
     uint64_t next_request_seq;
 };
 
-static bool pid_is_alive(int32_t pid) {
-    if (pid <= 1) {
-        return false;
+static int lock_endpoint_fd(int fd) {
+    struct flock lock = {
+        .l_type = F_WRLCK,
+        .l_whence = SEEK_SET,
+        .l_start = 0,
+        .l_len = 0,
+    };
+
+    return fcntl(fd, F_SETLK, &lock);
+}
+
+static void unlock_endpoint_fd(int fd) {
+    struct flock lock = {
+        .l_type = F_UNLCK,
+        .l_whence = SEEK_SET,
+        .l_start = 0,
+        .l_len = 0,
+    };
+
+    (void)fcntl(fd, F_SETLK, &lock);
+}
+
+static int endpoint_owned_by_live_server(int fd, int32_t owner_pid) {
+    if (fd < 0) {
+        errno = EINVAL;
+        return -1;
     }
 
-    if (kill((pid_t)pid, 0) == 0) {
-        return true;
+    if (owner_pid == (int32_t)getpid()) {
+        return 1;
     }
 
-    return errno == EPERM;
+    if (lock_endpoint_fd(fd) == 0) {
+        unlock_endpoint_fd(fd);
+        return 0;
+    }
+
+    if (errno == EACCES || errno == EAGAIN) {
+        return 1;
+    }
+
+    return -1;
 }
 
 static bool config_is_valid(const struct netipc_shm_config *config) {
@@ -277,10 +309,21 @@ static int try_takeover_stale_endpoint(const char *path) {
     if (!stale && region) {
         if (region->magic != NETIPC_SHM_REGION_MAGIC || region->version != NETIPC_SHM_REGION_VERSION) {
             stale = true;
-        } else if (!pid_is_alive(region->owner_pid)) {
-            stale = true;
         } else {
-            errno = EADDRINUSE;
+            int owner_state = endpoint_owned_by_live_server(fd, region->owner_pid);
+            if (owner_state < 0) {
+                int saved = errno;
+                unmap_region(region);
+                close(fd);
+                errno = saved;
+                return -1;
+            }
+
+            if (owner_state == 0) {
+                stale = true;
+            } else {
+                errno = EADDRINUSE;
+            }
         }
     }
 
@@ -325,6 +368,13 @@ int netipc_shm_server_create(const struct netipc_shm_config *config, netipc_shm_
     for (int attempt = 0; attempt < 2; ++attempt) {
         server->fd = open(server->path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, effective_mode(config));
         if (server->fd >= 0) {
+            if (lock_endpoint_fd(server->fd) != 0) {
+                int saved = errno;
+                close(server->fd);
+                free(server);
+                errno = saved;
+                return -1;
+            }
             break;
         }
 
@@ -524,7 +574,17 @@ int netipc_shm_client_create(const struct netipc_shm_config *config, netipc_shm_
         return -1;
     }
 
-    if (!pid_is_alive(client->region->owner_pid)) {
+    int owner_state = endpoint_owned_by_live_server(client->fd, client->region->owner_pid);
+    if (owner_state < 0) {
+        int saved = errno;
+        unmap_region(client->region);
+        close(client->fd);
+        free(client);
+        errno = saved;
+        return -1;
+    }
+
+    if (owner_state == 0) {
         unmap_region(client->region);
         close(client->fd);
         free(client);

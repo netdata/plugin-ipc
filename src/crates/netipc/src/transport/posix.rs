@@ -331,17 +331,48 @@ fn effective_spin_tries(config: &ShmConfig) -> u32 {
     }
 }
 
-fn pid_is_alive(pid: i32) -> bool {
-    if pid <= 1 {
-        return false;
-    }
+fn set_endpoint_lock(fd: RawFd, lock_type: libc::c_short) -> io::Result<()> {
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = lock_type;
+    lock.l_whence = libc::SEEK_SET as libc::c_short;
+    lock.l_start = 0;
+    lock.l_len = 0;
 
-    let rc = unsafe { libc::kill(pid, 0) };
+    let rc = unsafe { libc::fcntl(fd, libc::F_SETLK, &lock) };
     if rc == 0 {
-        return true;
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn lock_endpoint_fd(fd: RawFd) -> io::Result<()> {
+    set_endpoint_lock(fd, libc::F_WRLCK as libc::c_short)
+}
+
+fn unlock_endpoint_fd(fd: RawFd) {
+    let _ = set_endpoint_lock(fd, libc::F_UNLCK as libc::c_short);
+}
+
+fn endpoint_owned_by_live_server(fd: RawFd, owner_pid: i32) -> io::Result<bool> {
+    if fd < 0 {
+        return Err(invalid_input("fd must be non-negative"));
     }
 
-    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    if owner_pid == unsafe { libc::getpid() } {
+        return Ok(true);
+    }
+
+    match lock_endpoint_fd(fd) {
+        Ok(()) => {
+            unlock_endpoint_fd(fd);
+            Ok(false)
+        }
+        Err(err) => match err.raw_os_error() {
+            Some(code) if code == libc::EACCES || code == libc::EAGAIN => Ok(true),
+            _ => Err(err),
+        },
+    }
 }
 
 fn sem_wait_timeout(sem: *mut libc::sem_t, timeout_ms: u32) -> io::Result<()> {
@@ -751,10 +782,15 @@ fn try_takeover_stale_shm_endpoint(path: &Path) -> io::Result<bool> {
     let magic = unsafe { *(mapped.ptr.add(0) as *const u32) };
     let version = unsafe { *(mapped.ptr.add(4) as *const u16) };
     let owner_pid = mapped.owner_pid();
+    let owner_state = if magic == SHM_REGION_MAGIC && version == SHM_REGION_VERSION {
+        Some(endpoint_owned_by_live_server(mapped.fd, owner_pid)?)
+    } else {
+        None
+    };
     drop(mapped);
     drop(file);
 
-    if magic == SHM_REGION_MAGIC && version == SHM_REGION_VERSION && pid_is_alive(owner_pid) {
+    if owner_state == Some(true) {
         return Err(io::Error::from_raw_os_error(libc::EADDRINUSE));
     }
 
@@ -780,8 +816,14 @@ fn create_server_region(config: &ShmConfig) -> io::Result<MappedRegion> {
                 if duplicated < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                fd = duplicated;
                 drop(file);
+                if let Err(err) = lock_endpoint_fd(duplicated) {
+                    unsafe {
+                        libc::close(duplicated);
+                    }
+                    return Err(err);
+                }
+                fd = duplicated;
                 break;
             }
             Err(err) => {
@@ -844,7 +886,7 @@ fn open_client_region(config: &ShmConfig) -> io::Result<MappedRegion> {
     if magic != SHM_REGION_MAGIC || version != SHM_REGION_VERSION {
         return Err(io::Error::from_raw_os_error(libc::EPROTO));
     }
-    if !pid_is_alive(region.owner_pid()) {
+    if !endpoint_owned_by_live_server(region.fd, region.owner_pid())? {
         return Err(io::Error::from_raw_os_error(libc::ECONNREFUSED));
     }
 
@@ -1541,6 +1583,21 @@ mod tests {
         let server = ShmServer::create(&cfg).expect("create server over stale endpoint");
         assert!(cfg.endpoint_path().exists());
         drop(server);
+        let _ = fs::remove_dir_all(run_dir);
+    }
+
+    #[test]
+    fn shm_client_rejects_unlocked_endpoint() {
+        let run_dir = temp_run_dir("shm-unlocked");
+        let cfg = ShmConfig::new(&run_dir, "service");
+        let mut region = vec![0u8; REGION_SIZE];
+        region[0..4].copy_from_slice(&SHM_REGION_MAGIC.to_ne_bytes());
+        region[4..6].copy_from_slice(&SHM_REGION_VERSION.to_ne_bytes());
+        region[OFF_OWNER_PID..OFF_OWNER_PID + 4].copy_from_slice(&424242i32.to_ne_bytes());
+        fs::write(cfg.endpoint_path(), region).expect("write synthetic region");
+
+        let err = ShmClient::connect(&cfg).expect_err("connect should fail without a live owner lock");
+        assert_eq!(err.raw_os_error(), Some(libc::ECONNREFUSED));
         let _ = fs::remove_dir_all(run_dir);
     }
 }
