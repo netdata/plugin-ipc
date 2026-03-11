@@ -147,11 +147,11 @@ run_bench() {
   fi
 
   > "${slog}"
-  "${server_bin}" server-loop "${DIR}" "${svc}" 0 2>"${slog}" &
+  MSYS2_ARG_CONV_EXCL='*' "${server_bin}" server-loop "${DIR}" "${svc}" 0 2>"${slog}" &
   sleep 2
 
   local client_out
-  client_out=$("${client_bin}" client-bench "${DIR}" "${svc}" "${DUR}" "${target_rps}" 2>/dev/null) || true
+  client_out=$(MSYS2_ARG_CONV_EXCL='*' "${client_bin}" client-bench "${DIR}" "${svc}" "${DUR}" "${target_rps}" 2>/dev/null) || true
   wait 2>/dev/null || true
 
   local server_cpu

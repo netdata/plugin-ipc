@@ -36,7 +36,7 @@ start_server() {
   SERVER_LOG=$1
   shift
   printf >&2 '%s\n' "+ $*"
-  "$@" >"${SERVER_LOG}" 2>&1 &
+  MSYS2_ARG_CONV_EXCL='*' "$@" >"${SERVER_LOG}" 2>&1 &
   SERVER_PID=$!
 }
 
@@ -83,7 +83,7 @@ rm -f "${SERVER_LOG_PATH}" "${CLIENT_LOG_PATH}"
 
 start_server "${SERVER_LOG_PATH}" "${BIN_DIR}/netipc-live-c.exe" server-once /tmp "${SERVICE}"
 sleep 0.2
-"${BIN_DIR}/netipc-live-c.exe" client-once /tmp "${SERVICE}" 41 >"${CLIENT_LOG_PATH}" 2>&1
+MSYS2_ARG_CONV_EXCL='*' "${BIN_DIR}/netipc-live-c.exe" client-once /tmp "${SERVICE}" 41 >"${CLIENT_LOG_PATH}" 2>&1
 wait_server
 
 cat "${CLIENT_LOG_PATH}" >&2

@@ -20,7 +20,7 @@ start_server() {
   SERVER_LOG=$1
   shift
   printf >&2 '%s\n' "+ $*"
-  "$@" >"${SERVER_LOG}" 2>&1 &
+  MSYS2_ARG_CONV_EXCL='*' "$@" >"${SERVER_LOG}" 2>&1 &
   SERVER_PID=$!
 }
 
@@ -86,6 +86,7 @@ run_case() {
 
   local row
   row=$(env \
+    MSYS2_ARG_CONV_EXCL='*' \
     NETIPC_SUPPORTED_PROFILES="${supported}" \
     NETIPC_PREFERRED_PROFILES="${preferred}" \
     "${BIN_DIR}/netipc-live-c.exe" client-bench /tmp "${service}" 5 "${target_rps}" | awk -F, '/^c-npipe,|^c-shm-hybrid,|^c-shm-busywait,/ {print $0}')

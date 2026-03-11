@@ -139,12 +139,12 @@ run_test() {
   unset NETIPC_SHM_SPIN_TRIES
 
   > "${SLOG}"
-  "${server_bin}" server-once "${DIR}" "${svc}" 2>"${SLOG}" &
+  MSYS2_ARG_CONV_EXCL='*' "${server_bin}" server-once "${DIR}" "${svc}" 2>"${SLOG}" &
   local sp=$!
   sleep 2
 
   local client_out
-  if client_out=$(timeout 10 "${client_bin}" client-once "${DIR}" "${svc}" 42 2>&1); then
+  if client_out=$(MSYS2_ARG_CONV_EXCL='*' timeout 10 "${client_bin}" client-once "${DIR}" "${svc}" 42 2>&1); then
     echo "  PASS: ${label}"
     echo "    server: $(cat "${SLOG}" 2>/dev/null)"
     echo "    client: ${client_out}"
