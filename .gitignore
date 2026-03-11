@@ -4,3 +4,6 @@ build-*/
 **/target/
 tests/fixtures/go/netipc-codec-go
 bench/drivers/go/netipc-live-go
+
+# Ad-hoc convenience scripts in repo root (proper scripts live in tests/)
+/run-*.sh
