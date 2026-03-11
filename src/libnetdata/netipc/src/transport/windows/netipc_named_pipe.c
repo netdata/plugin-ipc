@@ -31,7 +31,8 @@
 #define NETIPC_NEG_OFFSET_AUTH_TOKEN 24u
 #define NETIPC_NEG_OFFSET_STATUS 32u
 
-#define NETIPC_IMPLEMENTED_PROFILES (NETIPC_PROFILE_NAMED_PIPE | NETIPC_PROFILE_SHM_HYBRID)
+#define NETIPC_IMPLEMENTED_PROFILES \
+    (NETIPC_PROFILE_NAMED_PIPE | NETIPC_PROFILE_SHM_HYBRID | NETIPC_PROFILE_SHM_BUSYWAIT | NETIPC_PROFILE_SHM_WAITADDR)
 #define NETIPC_PIPE_NAME_CAPACITY 256u
 #define NETIPC_SERVICE_NAME_CAPACITY 96u
 
@@ -177,6 +178,12 @@ static int set_errno_from_win32(DWORD error) {
 static bool config_is_valid(const struct netipc_named_pipe_config *config) {
     return config && config->run_dir && config->run_dir[0] != '\0' && config->service_name &&
            config->service_name[0] != '\0';
+}
+
+static bool is_shm_profile(uint32_t profile) {
+    return profile == NETIPC_PROFILE_SHM_HYBRID ||
+           profile == NETIPC_PROFILE_SHM_BUSYWAIT ||
+           profile == NETIPC_PROFILE_SHM_WAITADDR;
 }
 
 static char *dup_string(const char *s) {
@@ -421,6 +428,12 @@ static int decode_negotiation(const uint8_t frame[NETIPC_NEGOTIATION_FRAME_SIZE]
 }
 
 static uint32_t select_profile(uint32_t candidates) {
+    if ((candidates & NETIPC_PROFILE_SHM_WAITADDR) != 0u) {
+        return NETIPC_PROFILE_SHM_WAITADDR;
+    }
+    if ((candidates & NETIPC_PROFILE_SHM_BUSYWAIT) != 0u) {
+        return NETIPC_PROFILE_SHM_BUSYWAIT;
+    }
     if ((candidates & NETIPC_PROFILE_SHM_HYBRID) != 0u) {
         return NETIPC_PROFILE_SHM_HYBRID;
     }
@@ -640,7 +653,7 @@ int netipc_named_pipe_server_accept(netipc_named_pipe_server_t *server, uint32_t
         return -1;
     }
 
-    if (server->negotiated_profile == NETIPC_PROFILE_SHM_HYBRID) {
+    if (is_shm_profile(server->negotiated_profile)) {
         struct netipc_named_pipe_config config = {
             .run_dir = server->run_dir,
             .service_name = server->service_name,
@@ -649,7 +662,9 @@ int netipc_named_pipe_server_accept(netipc_named_pipe_server_t *server, uint32_t
             .auth_token = server->auth_token,
             .shm_spin_tries = server->shm_spin_tries,
         };
-        if (netipc_win_shm_server_create(&config, &server->shm_server) != 0) {
+        if (netipc_win_shm_server_create(&config,
+                                         server->negotiated_profile,
+                                         &server->shm_server) != 0) {
             DisconnectNamedPipe(server->pipe);
             server->connected = false;
             server->negotiated_profile = 0u;
@@ -669,7 +684,7 @@ int netipc_named_pipe_server_receive_frame(netipc_named_pipe_server_t *server,
         return -1;
     }
 
-    if (server->negotiated_profile == NETIPC_PROFILE_SHM_HYBRID) {
+    if (is_shm_profile(server->negotiated_profile)) {
         return netipc_win_shm_server_receive_frame(server->shm_server, frame, timeout_ms);
     }
 
@@ -684,7 +699,7 @@ int netipc_named_pipe_server_send_frame(netipc_named_pipe_server_t *server,
         return -1;
     }
 
-    if (server->negotiated_profile == NETIPC_PROFILE_SHM_HYBRID) {
+    if (is_shm_profile(server->negotiated_profile)) {
         return netipc_win_shm_server_send_frame(server->shm_server, frame, timeout_ms);
     }
 
@@ -834,7 +849,7 @@ int netipc_named_pipe_client_create(const struct netipc_named_pipe_config *confi
         return -1;
     }
 
-    if (client->negotiated_profile == NETIPC_PROFILE_SHM_HYBRID) {
+    if (is_shm_profile(client->negotiated_profile)) {
         struct netipc_named_pipe_config shm_config = {
             .run_dir = client->run_dir,
             .service_name = client->service_name,
@@ -843,7 +858,10 @@ int netipc_named_pipe_client_create(const struct netipc_named_pipe_config *confi
             .auth_token = client->auth_token,
             .shm_spin_tries = client->shm_spin_tries,
         };
-        if (netipc_win_shm_client_create(&shm_config, &client->shm_client, timeout_ms) != 0) {
+        if (netipc_win_shm_client_create(&shm_config,
+                                         client->negotiated_profile,
+                                         &client->shm_client,
+                                         timeout_ms) != 0) {
             CloseHandle(client->pipe);
             free(client->service_name);
             free(client->run_dir);
@@ -865,7 +883,7 @@ int netipc_named_pipe_client_call_frame(netipc_named_pipe_client_t *client,
         return -1;
     }
 
-    if (client->negotiated_profile == NETIPC_PROFILE_SHM_HYBRID) {
+    if (is_shm_profile(client->negotiated_profile)) {
         return netipc_win_shm_client_call_frame(client->shm_client,
                                                 request_frame,
                                                 response_frame,

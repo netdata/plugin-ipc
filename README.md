@@ -13,13 +13,14 @@ This repository mirrors the eventual Netdata monorepo layout:
 Current implemented surfaces:
 
 - C typed frame/schema library
-- POSIX `UDS_SEQPACKET` transport with profile negotiation
-- POSIX `SHM_HYBRID` transport
-- Windows Named Pipe baseline for the C library
-- Windows negotiated `SHM_HYBRID` fast profile for the C library
-- Rust/Go helper binaries for interop and benchmark validation
+- POSIX `UDS_SEQPACKET` transport with profile negotiation (C, Rust, Go)
+- POSIX `SHM_HYBRID` transport (C, Rust)
+- Windows Named Pipe transport (C, Rust, Go)
+- Windows negotiated `SHM_HYBRID` fast profile (C, Rust, Go)
+- Windows negotiated `SHM_BUSYWAIT` fast profile (C only)
+- Cross-language interop and benchmark validation (C, Rust, Go)
 
-The reusable Go package and Rust crate locations are in place, but their full Windows transport ports are still pending.
+All three language surfaces (C, Rust, Go) have full Windows transport implementations including Named Pipes and negotiated SHM HYBRID profiles.
 
 ## Build
 
@@ -50,10 +51,12 @@ cmake --build build-mingw
 ```
 
 The Windows C backend is native Win32 code. It uses Named Pipes as the baseline
-transport and a negotiated shared-memory hybrid fast profile. The fast profile
-is intentionally limited to Win32 primitives that can be ported to Rust and pure
-Go without `cgo`. It is intended to be built from an MSYS2 MinGW/UCRT shell,
-but it must not target the MSYS runtime.
+transport plus negotiated shared-memory fast profiles. `SHM_HYBRID` keeps named
+event fallback for lower-CPU waits; `SHM_BUSYWAIT` stays entirely in shared
+memory and busy-spins for the lowest roundtrip latency. These fast profiles are
+intentionally limited to Win32 primitives that can be ported to Rust and pure
+Go without `cgo`. The Windows build is intended to run from an MSYS2
+MinGW/UCRT shell, but it must not target the MSYS runtime.
 
 Compatibility wrapper only:
 
@@ -105,7 +108,7 @@ Sources:
 
 - `src/libnetdata/netipc/src/protocol/netipc_schema.c`
 - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c` (Windows)
-- `src/libnetdata/netipc/src/transport/windows/netipc_shm_hybrid_win.c` (Windows, internal fast profile)
+- `src/libnetdata/netipc/src/transport/windows/netipc_shm_hybrid_win.c` (Windows, internal fast profiles)
 - `src/libnetdata/netipc/src/transport/posix/netipc_shm_hybrid.c`
 - `src/libnetdata/netipc/src/transport/posix/netipc_uds_seqpacket.c`
 
@@ -229,14 +232,15 @@ build/bin/netipc-codec-c decode-req /tmp/netipc.req
 build-mingw/bin/netipc-live-c.exe server-once /tmp netflow
 build-mingw/bin/netipc-live-c.exe client-once /tmp netflow 41
 
-NETIPC_SUPPORTED_PROFILES=3 NETIPC_PREFERRED_PROFILES=2 \
+NETIPC_SUPPORTED_PROFILES=7 NETIPC_PREFERRED_PROFILES=4 \
   build-mingw/bin/netipc-live-c.exe client-bench /tmp netflow 5 0
 ```
 
 ## Current Limits
 
-- The reusable C library is the only fully implemented library surface in this repo today.
+- The reusable C library is the most mature library surface.
 - Go and Rust still rely on helper binaries for the validated live interop/benchmark paths.
-- The Windows C transport is implemented for native Named Pipes plus a negotiated shared-memory hybrid fast profile, but Rust/Go Windows transports are still placeholders.
-- Windows validation is still limited to the C smoke path; cross-language Windows interop and benchmark coverage are still pending.
+- Windows transports are implemented in all three languages (C, Rust, Go) for Named Pipes and negotiated `SHM_HYBRID`. The C library additionally supports `SHM_BUSYWAIT`.
+- The Rust and Go SHM transports use kernel auto-reset events for the sleep/wake path; `WaitOnAddress` support is planned as a follow-up optimisation.
+- Cross-language Windows interop testing covers C↔Rust and C↔Go smoke paths; full matrix benchmark coverage is available via `tests/run-live-win-bench.sh`.
 - Netdata integration wiring is intentionally out of scope for this repository phase.

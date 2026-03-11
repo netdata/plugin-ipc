@@ -673,6 +673,7 @@ If we manage to have an transport layer that supports millions of requests/respo
   - Root `CMakeLists.txt` helper targets now depend on library source trees so fixture/helper rebuilds track library changes.
   - C library now contains an initial Windows Named Pipe transport and Windows live fixture build path for MSYS2 `mingw64`/`ucrt64`.
   - C library now also contains a Windows negotiated `SHM_HYBRID` fast profile backed by shared memory plus named events with bounded spin.
+  - C library now also contains a Windows negotiated `SHM_BUSYWAIT` fast profile backed by shared memory plus pure busy-spin for the single-client low-latency case.
   - Windows fast-path design is intentionally limited to Win32 primitives that can be ported to Rust and pure Go without `cgo`.
 - Validated:
   - schema interop: `C <-> Rust <-> Go`
@@ -681,8 +682,9 @@ If we manage to have an transport layer that supports millions of requests/respo
   - Windows C Named Pipe smoke under MSYS2 `mingw64`: `./tests/run-live-npipe-smoke.sh`
   - Windows C profile comparison under MSYS2 `mingw64`: `./tests/run-live-win-profile-bench.sh`
     - latest local result on `win11`, 5s, 1 client:
-      - `c-npipe`: ~16.1k req/s, p50 ~43.6us
-      - `c-shm-hybrid` (default spin `1024`): ~82.3k req/s, p50 ~3.8us
+      - `c-npipe`: ~15.2k req/s, p50 ~49.0us
+      - `c-shm-hybrid` (default spin `1024`): ~84.8k req/s, p50 ~3.7us
+      - `c-shm-busywait`: ~84.5k req/s, p50 ~3.7us, lower p99 tail than `SHM_HYBRID`
   - UDS negative negotiation coverage
   - UDS and negotiated-profile benchmark scripts
   - `cargo test -p netipc`
@@ -691,7 +693,7 @@ If we manage to have an transport layer that supports millions of requests/respo
   - Go package currently implements the reusable POSIX `UDS_SEQPACKET` path only.
   - Go negative-test helper logic for malformed/raw negotiation frames remains local to `bench/drivers/go`; this is fixture-specific coverage, not reusable API.
   - Rust and Go Windows transports remain placeholders.
-  - Windows validation is still limited to the C Named Pipe/`SHM_HYBRID` path; cross-language Windows interop and benchmark coverage are still pending.
+  - Windows validation is still limited to the C Named Pipe/`SHM_HYBRID`/`SHM_BUSYWAIT` path; cross-language Windows interop and benchmark coverage are still pending.
   - TODO/history text still contains historical references to the old prototype paths and should be cleaned once the structure is frozen.
 
 ## Auth Contract Verification (2026-03-08)
