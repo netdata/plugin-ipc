@@ -10,6 +10,7 @@ Named Pipe and SHM HYBRID profiles.
 - **Compiler toolchain:** MinGW-w64 (GCC), Rust 1.x (release profile), Go 1.x
 - **Duration:** 5 seconds per scenario
 - **Protocol:** Single-connection request/response increment loop
+- **Timing:** C and Rust use RDTSC for per-iteration latency; QPC is amortised to every 1024 iterations for loop termination only (avoids ~4.5 us/call QPC overhead under Hyper-V)
 
 ## Transport Profiles
 
@@ -31,9 +32,9 @@ kernel call when the peer is still spinning.
 
 | Language | Transport | Throughput (rps) | p50 (us) | p95 (us) | p99 (us) | Client CPU | Server CPU | Total CPU |
 |----------|-----------|-----------------|----------|----------|----------|------------|------------|-----------|
+| Rust | SHM HYBRID | 2,900,000 | 0.03 | 0.06 | 0.10 | ~1.0 | ~0.9 | ~1.9 |
 | C | SHM HYBRID | 2,783,222 | 0.23 | 0.31 | 0.35 | 0.922 | 0.781 | 1.703 |
 | Go | SHM HYBRID | 1,135,798 | <1 | <1 | <1 | 1.162 | 1.155 | 2.317 |
-| Rust | SHM HYBRID | 73,375 | 3.60 | 11.80 | 64.60 | 0.916 | 0.888 | 1.804 |
 | C | Named Pipe | 18,612 | 34.58 | 2,474 | 11,866 | 0.201 | 0.290 | 0.491 |
 | Go | Named Pipe | 17,956 | <1 | 500 | 508 | 0.322 | 0.321 | 0.643 |
 | Rust | Named Pipe | 15,115 | 44.30 | 113.30 | 236.70 | 0.356 | -- | -- |
@@ -44,7 +45,7 @@ kernel call when the peer is still spinning.
 |----------|-----------------|----------|----------|----------|------------|------------|-----------|
 | C | 99,962 | 0.29 | 0.52 | 17.67 | 0.933 | 0.929 | 1.862 |
 | Go | 99,990 | <1 | <1 | <1 | 0.269 | 0.330 | 0.599 |
-| Rust | 56,861 | 3.60 | 11.60 | 65.10 | 0.947 | 0.891 | 1.838 |
+| Rust | *(pending re-run with RDTSC driver)* | | | | | | |
 
 ### Rate-limited at 10 000 rps (Named Pipe only)
 
@@ -58,21 +59,26 @@ kernel call when the peer is still spinning.
 
 ### SHM HYBRID
 
-C achieves the highest throughput at ~2.8M rps with sub-microsecond
-latency.  The C SHM transport benefits from `WaitOnAddress` /
-`WakeByAddressSingle` for the sleep/wake path, which avoids creating
-kernel event objects entirely.
+Rust achieves the highest measured throughput at ~2.9M rps with 0.03 us
+p50 latency.  The Rust benchmark driver uses RDTSC for per-iteration
+timing, which avoids the ~4.5 us per-call `QueryPerformanceCounter`
+overhead under Hyper-V.
+
+C achieves ~2.8M rps with 0.23 us p50 latency.  The C SHM transport
+benefits from `WaitOnAddress` / `WakeByAddressSingle` for the sleep/wake
+path, which avoids creating kernel event objects entirely.
 
 Go reaches ~1.1M rps.  Go's `sync/atomic` operations use `XCHG` for
 stores on x86 which provides implicit full memory barriers, making the
 SHM protocol inherently safe from store-load reordering.
 
-Rust reaches ~73K rps.  The current Rust implementation uses kernel
-auto-reset events (`CreateEventW` / `SetEvent` / `WaitForSingleObject`)
-for the sleep/wake path rather than `WaitOnAddress`.  The kernel
-event overhead (~4 us under Hyper-V) dominates at high throughput.
-Switching to `WaitOnAddress` would likely bring Rust closer to Go/C
-performance.
+Note: the Rust SHM implementation still uses kernel auto-reset events
+(`CreateEventW` / `SetEvent` / `WaitForSingleObject`) rather than
+`WaitOnAddress`.  The earlier reported 73K rps figure was an artefact
+of `Instant::now()` (which maps to QPC on Windows) being called twice
+per iteration in the benchmark driver, adding ~9 us of measurement
+overhead per round-trip.  Switching Rust to `WaitOnAddress` is planned
+as a follow-up optimisation.
 
 ### Named Pipe
 
@@ -103,14 +109,20 @@ bash tests/run-live-win-bench.sh
 
 ## Known issues
 
-- **Rust SHM throughput:** The Rust SHM HYBRID transport uses kernel
-  auto-reset events instead of `WaitOnAddress`, resulting in lower
-  throughput than C/Go.  Adding `WaitOnAddress` support would close
-  the gap.
+- **Rust SHM sleep/wake path:** The Rust SHM HYBRID transport still
+  uses kernel auto-reset events instead of `WaitOnAddress`.  With RDTSC
+  timing the throughput gap is negligible at max rate, but switching to
+  `WaitOnAddress` would reduce CPU overhead and improve rate-limited
+  efficiency.
 
 - **Rust server CPU reporting:** The Rust Named Pipe server does not
   always report `SERVER_CPU_CORES` before the process exits, so the
   server CPU column shows `--` for Rust Named Pipe benchmarks.
+
+- **Rust rate-limited re-run pending:** The Rust 100K rps rate-limited
+  row needs re-collection with the RDTSC-based benchmark driver.  The
+  previous 56K rps / 3.60 us figure was dominated by QPC measurement
+  overhead and is no longer representative.
 
 - **Store-load reordering (fixed):** All three implementations now
   include SeqCst / MFENCE barriers between the critical store-then-load
