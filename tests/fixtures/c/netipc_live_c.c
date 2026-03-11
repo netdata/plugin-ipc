@@ -9,6 +9,108 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#pragma comment(lib, "winmm.lib")
+#include <timeapi.h>
+
+/* ------------------------------------------------------------------ */
+/* RDTSC-based timing: avoids ~4.5μs QPC overhead under Hyper-V       */
+/* ------------------------------------------------------------------ */
+
+static inline uint64_t rdtsc_now(void) {
+    __asm__ volatile("lfence" ::: "memory");
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static double g_tsc_ns_per_tick = 0.0;
+
+static int compare_double(const void *a, const void *b) {
+    double da = *(const double *)a;
+    double db = *(const double *)b;
+    return (da > db) - (da < db);
+}
+
+static void calibrate_tsc(void) {
+    LARGE_INTEGER freq, qpc0, qpc1;
+    QueryPerformanceFrequency(&freq);
+
+    /* Robust multi-pass calibration.
+     * Under Hyper-V, QPC can occasionally return wildly wrong deltas.
+     * We take 5 samples of 200ms each, discard outliers, and use the median. */
+
+    /* Warmup pass - let turbo boost settle */
+    rdtsc_now();
+    Sleep(200);
+
+    #define CAL_PASSES 5
+    double samples[CAL_PASSES];
+    for (int i = 0; i < CAL_PASSES; i++) {
+        uint64_t tsc0 = rdtsc_now();
+        QueryPerformanceCounter(&qpc0);
+        Sleep(200);
+        uint64_t tsc1 = rdtsc_now();
+        QueryPerformanceCounter(&qpc1);
+
+        double wall_sec = (double)(qpc1.QuadPart - qpc0.QuadPart) / (double)freq.QuadPart;
+        if (wall_sec < 0.05) {
+            /* QPC returned garbage - retry this sample */
+            i--;
+            continue;
+        }
+        samples[i] = (double)(tsc1 - tsc0) / wall_sec;
+    }
+
+    /* Sort and take the median */
+    qsort(samples, CAL_PASSES, sizeof(double), compare_double);
+    double tsc_hz = samples[CAL_PASSES / 2];
+
+    /* Sanity check: expect 1-10 GHz range */
+    if (tsc_hz < 1e9 || tsc_hz > 10e9) {
+        fprintf(stderr, "TSC calibration suspect: %.2f GHz, retrying with long window\n", tsc_hz / 1e9);
+        /* Fallback: single long 1-second measurement */
+        uint64_t tsc0 = rdtsc_now();
+        QueryPerformanceCounter(&qpc0);
+        Sleep(1000);
+        uint64_t tsc1 = rdtsc_now();
+        QueryPerformanceCounter(&qpc1);
+        double wall_sec = (double)(qpc1.QuadPart - qpc0.QuadPart) / (double)freq.QuadPart;
+        tsc_hz = (double)(tsc1 - tsc0) / wall_sec;
+    }
+
+    g_tsc_ns_per_tick = 1e9 / tsc_hz;
+    fprintf(stderr, "TSC calibrated: %.2f GHz (%.3f ns/tick)\n", tsc_hz / 1e9, g_tsc_ns_per_tick);
+    #undef CAL_PASSES
+}
+
+static double tsc_ticks_to_micros(uint64_t ticks) {
+    return (double)ticks * g_tsc_ns_per_tick / 1000.0;
+}
+
+static void apply_cpu_affinity(void) {
+    const char *value = getenv("NETIPC_CPU_AFFINITY");
+    if (!value || value[0] == '\0') {
+        return;
+    }
+
+    char *end = NULL;
+    unsigned long long mask = strtoull(value, &end, 0);
+    if (!end || *end != '\0' || mask == 0u) {
+        fprintf(stderr, "warning: invalid NETIPC_CPU_AFFINITY=%s\n", value);
+        return;
+    }
+
+    DWORD_PTR result = SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)mask);
+    if (result == 0) {
+        fprintf(stderr, "warning: SetThreadAffinityMask(0x%llx) failed: %lu\n",
+                mask, GetLastError());
+    }
+
+    if (getenv("NETIPC_HIGH_PRIORITY")) {
+        SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    }
+}
 
 struct latency_samples {
     uint64_t *values;
@@ -173,22 +275,27 @@ static int compare_u64(const void *a, const void *b) {
 static double percentile_micros(const struct latency_samples *samples,
                                 LARGE_INTEGER freq,
                                 double pct) {
+    (void)freq; /* latency samples now use RDTSC ticks */
     if (!samples || samples->used == 0u) {
         return 0.0;
     }
     if (pct <= 0.0) {
-        return counter_to_micros(samples->values[0], freq);
+        return tsc_ticks_to_micros(samples->values[0]);
     }
     if (pct >= 100.0) {
-        return counter_to_micros(samples->values[samples->used - 1u], freq);
+        return tsc_ticks_to_micros(samples->values[samples->used - 1u]);
     }
 
     size_t index = (size_t)((pct / 100.0) * (double)(samples->used - 1u));
-    return counter_to_micros(samples->values[index], freq);
+    return tsc_ticks_to_micros(samples->values[index]);
 }
 
 static const char *profile_label(uint32_t profile) {
     switch (profile) {
+        case NETIPC_PROFILE_SHM_WAITADDR:
+            return "c-shm-waitaddr";
+        case NETIPC_PROFILE_SHM_BUSYWAIT:
+            return "c-shm-busywait";
         case NETIPC_PROFILE_SHM_HYBRID:
             return "c-shm-hybrid";
         case NETIPC_PROFILE_NAMED_PIPE:
@@ -300,6 +407,7 @@ static int client_once(const char *run_dir, const char *service, uint64_t value)
 }
 
 static int server_loop(const char *run_dir, const char *service, uint64_t max_requests) {
+    apply_cpu_affinity();
     struct netipc_named_pipe_config config = pipe_config(run_dir, service);
     netipc_named_pipe_server_t *server = NULL;
 
@@ -313,6 +421,11 @@ static int server_loop(const char *run_dir, const char *service, uint64_t max_re
         return 1;
     }
 
+    /* Begin CPU measurement from the moment the benchmark loop starts. */
+    LARGE_INTEGER sfreq = performance_frequency();
+    uint64_t s_start_ticks = performance_counter();
+    double s_cpu_start = self_cpu_seconds();
+
     uint64_t handled = 0u;
     while (max_requests == 0u || handled < max_requests) {
         uint64_t request_id = 0u;
@@ -321,8 +434,7 @@ static int server_loop(const char *run_dir, const char *service, uint64_t max_re
 
         if (netipc_named_pipe_server_receive_increment(server, &request_id, &request, 0u) != 0) {
             if (errno == EPIPE) {
-                netipc_named_pipe_server_destroy(server);
-                return 0;
+                break;
             }
             perror("netipc_named_pipe_server_receive_increment");
             netipc_named_pipe_server_destroy(server);
@@ -339,6 +451,11 @@ static int server_loop(const char *run_dir, const char *service, uint64_t max_re
         handled++;
     }
 
+    /* Report server CPU utilization so the client can pick it up. */
+    double s_elapsed = counter_to_seconds(performance_counter() - s_start_ticks, sfreq);
+    double s_cpu = s_elapsed <= 0.0 ? 0.0 : (self_cpu_seconds() - s_cpu_start) / s_elapsed;
+    fprintf(stderr, "SERVER_CPU_CORES=%.3f\n", s_cpu);
+
     netipc_named_pipe_server_destroy(server);
     return 0;
 }
@@ -347,6 +464,9 @@ static int client_bench(const char *run_dir,
                         const char *service,
                         int32_t duration_sec,
                         int32_t target_rps) {
+    calibrate_tsc();
+    apply_cpu_affinity();
+    timeBeginPeriod(1u);
     if (duration_sec <= 0) {
         return protocol_error("duration_sec must be > 0");
     }
@@ -363,8 +483,18 @@ static int client_bench(const char *run_dir,
 
     LARGE_INTEGER freq = performance_frequency();
     uint64_t start_ticks = performance_counter();
-    uint64_t end_ticks = start_ticks + (uint64_t)duration_sec * (uint64_t)freq.QuadPart;
     double cpu_start = self_cpu_seconds();
+
+    /* Use QPC for loop termination (checked every N iterations to amortize ~4.5us cost).
+     * RDTSC is used only for per-iteration latency measurement.
+     * QPC is safe across core migrations; RDTSC alone is not. */
+    uint64_t qpc_end = start_ticks + (uint64_t)((double)duration_sec * (double)freq.QuadPart);
+    #define DEADLINE_CHECK_MASK 1023u
+
+    /* Maximum plausible latency in TSC ticks (~100ms at TSC freq).
+     * RDTSC can produce huge deltas on core migration; discard those. */
+    double tsc_hz = 1e9 / g_tsc_ns_per_tick;
+    uint64_t max_sane_tsc_delta = (uint64_t)(0.1 * tsc_hz);
 
     struct latency_samples samples = {0};
     uint64_t counter = 1u;
@@ -381,7 +511,14 @@ static int client_bench(const char *run_dir,
         }
     }
 
-    while (performance_counter() < end_ticks) {
+    for (;;) {
+        /* Check QPC deadline every 1024 iterations to amortize the ~4.5us cost */
+        if ((requests & DEADLINE_CHECK_MASK) == 0u && requests > 0u) {
+            if (performance_counter() >= qpc_end) {
+                break;
+            }
+        }
+
         if (interval_ticks != 0u) {
             sleep_until(next_send_ticks, freq);
             next_send_ticks += interval_ticks;
@@ -389,7 +526,7 @@ static int client_bench(const char *run_dir,
 
         struct netipc_increment_request request = {.value = counter};
         struct netipc_increment_response response;
-        uint64_t send_start_ticks = performance_counter();
+        uint64_t send_start_tsc = rdtsc_now();
 
         requests++;
         if (netipc_named_pipe_client_call_increment(client, &request, &response, 0u) != 0) {
@@ -405,13 +542,19 @@ static int client_bench(const char *run_dir,
 
         counter = response.value;
         responses++;
-        if (latency_samples_push(&samples, performance_counter() - send_start_ticks) != 0) {
-            fprintf(stderr, "failed to record latency sample\n");
-            free(samples.values);
-            netipc_named_pipe_client_destroy(client);
-            return 1;
+
+        uint64_t tsc_delta = rdtsc_now() - send_start_tsc;
+        /* Discard insane deltas caused by cross-core TSC offset differences */
+        if (tsc_delta < max_sane_tsc_delta) {
+            if (latency_samples_push(&samples, tsc_delta) != 0) {
+                fprintf(stderr, "failed to record latency sample\n");
+                free(samples.values);
+                netipc_named_pipe_client_destroy(client);
+                return 1;
+            }
         }
     }
+    #undef DEADLINE_CHECK_MASK
 
     uint64_t elapsed_ticks = performance_counter() - start_ticks;
     double elapsed_sec = counter_to_seconds(elapsed_ticks, freq);
