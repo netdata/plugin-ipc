@@ -75,8 +75,18 @@
   - Fact: `cargo check --manifest-path bench/drivers/rust/Cargo.toml --features windows-driver --bin netipc_live_win_rs` passed on Windows.
   - Fact: the first smoke-script attempt failed because `win11` has two Go installations and CMake selected `/mingw64/bin/go.exe`, which is broken on that host unless `GOROOT` is set and its stdlib/tool versions match.
   - Fact: `tests/smoke-win.sh` and `tests/run-live-win-bench.sh` were then updated to auto-prefer `/c/Program Files/Go/bin/go.exe` when present and to pass that executable into CMake configuration.
-  - Fact: after that script fix, `NETIPC_CMAKE_BUILD_DIR=build-mingw-auto bash tests/smoke-win.sh` passed on `win11` with `18 passed, 0 failed` and no manual Go override.
-  - Fact: after that script fix, `NETIPC_SKIP_BUILD=1 NETIPC_CMAKE_BUILD_DIR=build-mingw-auto bash tests/run-live-win-bench.sh` completed successfully on `win11`.
+  - Fact: after the MSYS/native transition changes and the argument-conversion fix, `bash tests/smoke-win.sh` passed on `win11` with `32 passed, 0 failed`.
+  - Fact: the smoke matrix covered the full directed interoperability set across:
+    - `c-native`
+    - `c-msys`
+    - `rust-native`
+    - `go-native`
+    - under both Windows transport profiles.
+  - Fact: `bash tests/run-live-win-bench.sh` completed successfully on `win11` and produced a full 64-row directed benchmark matrix in `/tmp/bench_results_4577.txt`.
+  - Fact: benchmark results confirm that `c-msys` stays in the same performance class as `c-native` on the Windows transport.
+  - Fact: benchmark results also expose a real client-side asymmetry:
+    - C and Rust clients drive SHM HYBRID at about 3.1M to 3.4M rps against C/Rust servers.
+    - Go clients top out closer to about 1.1M to 1.7M rps depending on the server implementation.
 
 ## Current Follow-up Task (2026-03-11)
 - Goal: define how to wire Windows validation into CI for this repository.
@@ -84,6 +94,13 @@
   - inspect existing workflow patterns in this repo
   - verify current official GitHub Actions guidance for Windows + MSYS2 + artifacts/caching
   - recommend a CI structure that matches the validated local/`win11` workflow with low maintenance risk
+  - carry forward the full transition matrix requirement rather than collapsing back to same-language-only checks
+- User clarification (2026-03-11):
+  - the transition requirement is not a POSIX transport on Windows
+  - the C library must compile under the MSYS runtime while still using the native Windows IPC transport
+  - that MSYS-built C variant must interoperate with native Windows Rust and Go binaries
+  - `benchmark-windows.md` must include both `c-native` and `c-msys`
+  - benchmark scope should cover all directed implementation pairs, with each timed run capped at 5 seconds
 
 ## Session Handoff (2026-03-08)
 - Working repository: `/home/costa/src/plugin-ipc.git` (local git repo initialized, branch `main`).
@@ -258,7 +275,6 @@ If we manage to have an transport layer that supports millions of requests/respo
 17. Run a sweep over multiple hybrid spin values to map impact on:
    - CPU utilization at fixed 100k req/s.
    - Maximum throughput at unlimited rate.
-   - Source: user request to understand spin-tries effect on these two parameters.
 
 18. Optimize using \"request-rate increase per spin\" as the primary tuning unit for hybrid spin window.
    - Source: user guidance that sweet spot is likely around 8 or 16.
@@ -311,9 +327,9 @@ If we manage to have an transport layer that supports millions of requests/respo
    - Source: user decision on 2026-03-11.
    - Requirement: implement locally in this repo, push the branch, then use `ssh win11` to pull, compile, and run the Windows validation there.
 - User clarification state (2026-03-11):
-  - Decision `1` appears selected as `A`: extend the existing Windows scripts to support both `c-native` and `c-msys`.
-  - Decision `2` appears selected as `B`: include `c-native <-> c-msys` in the transition smoke matrix in addition to `c-msys <-> rust-native/go-native`.
-  - Decision `3` is selected as full cross-implementation coverage: benchmark all directed combinations, while keeping each individual run capped at 5 seconds.
+  - Decision `1` selected as `A`: extend the existing Windows scripts to support both `c-native` and `c-msys`.
+  - Decision `2` selected as `B`: include `c-native <-> c-msys` in the transition smoke matrix in addition to `c-msys <-> rust-native/go-native`.
+  - Decision `3` selected as full cross-implementation coverage: benchmark all directed combinations, while keeping each individual run capped at 5 seconds.
 
 24. Go transport must be pure Go without cgo.
    - Source: user decision "The Go implementation must not need CGO."
