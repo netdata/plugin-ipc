@@ -4,7 +4,7 @@ set(NETIPC_LIBRARY_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/protocol/netipc_schema.c"
 )
 
-if(WIN32)
+if(NETIPC_WINDOWS_RUNTIME)
     list(APPEND NETIPC_LIBRARY_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/src/transport/windows/netipc_shm_hybrid_win.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/transport/windows/netipc_named_pipe.c"
@@ -19,7 +19,7 @@ endif()
 add_library(netipc STATIC ${NETIPC_LIBRARY_SOURCES})
 target_include_directories(netipc PUBLIC "${NETIPC_PUBLIC_INCLUDE_DIR}")
 target_link_libraries(netipc PUBLIC Threads::Threads)
-if(WIN32)
+if(NETIPC_WINDOWS_RUNTIME)
     target_link_libraries(netipc PUBLIC synchronization)
 endif()
 
@@ -27,7 +27,7 @@ if(NETIPC_BUILD_FIXTURES)
     add_executable(netipc-codec-c "${CMAKE_SOURCE_DIR}/tests/fixtures/c/netipc_codec_tool.c")
     target_link_libraries(netipc-codec-c PRIVATE netipc)
 
-    if(WIN32)
+    if(NETIPC_WINDOWS_RUNTIME)
         add_executable(netipc-live-c "${CMAKE_SOURCE_DIR}/tests/fixtures/c/netipc_live_c.c")
         target_link_libraries(netipc-live-c PRIVATE netipc winmm)
 

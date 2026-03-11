@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BUILD_DIR="${NETIPC_CMAKE_BUILD_DIR:-${BUILD_DIR:-build-mingw}}"
+DEFAULT_BUILD_DIR="build-mingw"
+if [[ "${MSYSTEM:-}" == "MSYS" ]]; then
+  DEFAULT_BUILD_DIR="build-msys"
+fi
+BUILD_DIR="${NETIPC_CMAKE_BUILD_DIR:-${BUILD_DIR:-${DEFAULT_BUILD_DIR}}}"
 BIN_DIR="${C_BIN_DIR:-${BUILD_DIR}/bin}"
 SERVER_PID=""
 SERVER_LOG=""
@@ -69,11 +73,6 @@ case "$(uname -s)" in
     exit 0
     ;;
 esac
-
-if [[ "${MSYSTEM:-}" == "MSYS" ]]; then
-  echo "error: run this test from mingw64.exe or ucrt64.exe, not the plain msys shell" >&2
-  exit 1
-fi
 
 build_targets
 

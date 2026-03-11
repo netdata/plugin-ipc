@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BUILD_DIR="${BUILD_DIR:-build-mingw}"
+DEFAULT_BUILD_DIR="build-mingw"
+if [[ "${MSYSTEM:-}" == "MSYS" ]]; then
+  DEFAULT_BUILD_DIR="build-msys"
+fi
+BUILD_DIR="${BUILD_DIR:-${DEFAULT_BUILD_DIR}}"
 BIN_DIR="${C_BIN_DIR:-${BUILD_DIR}/bin}"
 SERVER_PID=""
 SERVER_LOG=""
@@ -55,11 +59,6 @@ case "$(uname -s)" in
     exit 0
     ;;
 esac
-
-if [[ "${MSYSTEM:-}" == "MSYS" ]]; then
-  echo "error: run this benchmark from mingw64.exe or ucrt64.exe, not the plain msys shell" >&2
-  exit 1
-fi
 
 run cmake -S . -B "${BUILD_DIR}" -G Ninja
 run cmake --build "${BUILD_DIR}" --target netipc-live-c

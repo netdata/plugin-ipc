@@ -6,6 +6,7 @@
 - Keep the clean PR head branch in sync with the latest commits on `windows-transports-rust-go`.
 - Pull the repository after the PR merge and move the local worktree back to `main`.
 - Perform a production-readiness review of the full library across Linux and Windows, for C, Rust, and Go, and decide whether it is ready to merge into Netdata.
+- Design the Windows CI wiring needed to validate this library automatically on GitHub Actions before calling it production-ready for Netdata.
 
 ## Session Handoff (2026-03-11)
 - User decision (2026-03-11, after remediation):
@@ -13,6 +14,7 @@
   - use `ssh win11` for real Windows validation before finalizing the commit
   - use `/c/Users/costa/src/plugin-ipc-win.git` on `win11` for validation
   - reset that Windows test clone before applying the current patch and running tests
+  - next step is to wire the same Windows validation into CI
 - Fact: local repository `/home/costa/src/plugin-ipc.git` is currently clean on branch `main` (`git status --short --branch` showed `## main...origin/main`).
 - Fact: remote branch `origin/windows-transports-rust-go` exists and was fetched successfully on 2026-03-11.
 - Fact: local branch `windows-transports-rust-go` now tracks `origin/windows-transports-rust-go`.
@@ -75,6 +77,13 @@
   - Fact: `tests/smoke-win.sh` and `tests/run-live-win-bench.sh` were then updated to auto-prefer `/c/Program Files/Go/bin/go.exe` when present and to pass that executable into CMake configuration.
   - Fact: after that script fix, `NETIPC_CMAKE_BUILD_DIR=build-mingw-auto bash tests/smoke-win.sh` passed on `win11` with `18 passed, 0 failed` and no manual Go override.
   - Fact: after that script fix, `NETIPC_SKIP_BUILD=1 NETIPC_CMAKE_BUILD_DIR=build-mingw-auto bash tests/run-live-win-bench.sh` completed successfully on `win11`.
+
+## Current Follow-up Task (2026-03-11)
+- Goal: define how to wire Windows validation into CI for this repository.
+- Need:
+  - inspect existing workflow patterns in this repo
+  - verify current official GitHub Actions guidance for Windows + MSYS2 + artifacts/caching
+  - recommend a CI structure that matches the validated local/`win11` workflow with low maintenance risk
 
 ## Session Handoff (2026-03-08)
 - Working repository: `/home/costa/src/plugin-ipc.git` (local git repo initialized, branch `main`).
@@ -164,7 +173,27 @@ If we manage to have an transport layer that supports millions of requests/respo
 ## Decisions
 
 ### Pending Decisions Requiring User Input
-- None at the moment.
+- 1. CI workflow shape for Windows validation.
+  - Option A: one required PR/push workflow that runs only the Windows smoke/build checks.
+  - Option B: one workflow file with a required smoke job on PR/push plus a benchmark job gated to `workflow_dispatch`/`schedule`.
+  - Option C: run both smoke and full benchmark on every PR.
+- 2. Windows toolchain coverage for CI v1.
+  - Option A: `mingw64` only, matching the currently validated path.
+  - Option B: `mingw64` and `ucrt64` matrix.
+  - Option C: add MSVC/native Windows jobs as well.
+- 3. POSIX-emulation scope on Windows.
+  - Option A: MSYS2 `MSYS` runtime only.
+  - Option B: MSYS2 `MSYS` runtime now, standalone Cygwin later if needed.
+  - Option C: both MSYS2 `MSYS` and standalone Cygwin now.
+- 4. Windows transition script/report shape.
+  - Option A: extend the existing Windows smoke/benchmark scripts so they can cover both `c-native` and `c-msys`.
+  - Option B: keep the existing scripts native-only and add separate transition-specific scripts for the MSYS interoperability matrix.
+- 5. Transition smoke matrix breadth.
+  - Option A: require `c-msys <-> rust-native`, `c-msys <-> go-native`, and `c-msys <-> c-msys`.
+  - Option B: include Option A plus `c-native <-> c-msys` both directions.
+- 6. Windows benchmark matrix breadth.
+  - Option A: benchmark same-runtime self-pairs only (`c-native`, `c-msys`, `rust-native`, `go-native`).
+  - Option B: benchmark mixed-runtime pairs too (`c-msys <-> rust-native`, `c-msys <-> go-native`, etc.).
 
 ### Made Decisions
 1. Transport strategy for v1 benchmark candidate set: Option C (benchmark both stream and message-oriented candidates).
@@ -256,6 +285,35 @@ If we manage to have an transport layer that supports millions of requests/respo
 23. Proceed to native Rust/Go live transport implementations (no dependency on `libnetipc.a`) while preserving the same live interop matrix.
    - Source: user decision "ok, proceed".
    - Intent: validate cross-language `shm-hybrid` behavior with independent Rust/Go transport code paths.
+
+24. Windows CI scope is not ready to proceed with native-only validation.
+   - Source: user decision "The MSYS2 (CYGWIN) path must be validated before continuing".
+   - Intent: require validation of the POSIX-emulation path on Windows before finalizing CI coverage.
+
+25. The C implementation must also build for the MSYS2 POSIX runtime target and be included in the CI matrix.
+   - Source: user decision "the C version must be built for MSYS2 (CYGWIN) target too and it must be added to the matrix."
+   - Intent: validate interoperability expectations across native Rust/Go and the POSIX-emulated C build on Windows.
+
+26. Transitional Windows support model:
+   - Source: user clarification on 2026-03-11.
+   - Fact pattern to validate:
+     - the C library must compile as native Windows code under the MSYS runtime, linked with `msys.dll` / POSIX emulation, because this matches how Netdata currently runs on Windows
+     - the Rust and Go implementations must remain native Windows binaries without POSIX emulation
+     - during the transition to fully native Netdata on Windows, the MSYS-built C implementation must interoperate with the native Windows Rust and Go implementations
+   - Implication: the required Windows transition matrix is not "MSYS C talking to POSIX transports"; it is "MSYS-built C using the Windows transport, interoperating with native Rust/Go over the same Windows IPC mechanisms"
+
+27. Windows benchmark reporting scope:
+   - Source: user decision on 2026-03-11.
+   - Requirement: `benchmark-windows.md` must include results for both `c-native` and `c-msys`.
+   - Implication: benchmark tooling and documentation must distinguish the two C runtime environments explicitly instead of reporting a single generic `c` row.
+
+28. Execution workflow for the transition work:
+   - Source: user decision on 2026-03-11.
+   - Requirement: implement locally in this repo, push the branch, then use `ssh win11` to pull, compile, and run the Windows validation there.
+- User clarification state (2026-03-11):
+  - Decision `1` appears selected as `A`: extend the existing Windows scripts to support both `c-native` and `c-msys`.
+  - Decision `2` appears selected as `B`: include `c-native <-> c-msys` in the transition smoke matrix in addition to `c-msys <-> rust-native/go-native`.
+  - Decision `3` is selected as full cross-implementation coverage: benchmark all directed combinations, while keeping each individual run capped at 5 seconds.
 
 24. Go transport must be pure Go without cgo.
    - Source: user decision "The Go implementation must not need CGO."

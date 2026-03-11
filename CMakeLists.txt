@@ -1,13 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
 
-if(CMAKE_HOST_WIN32 AND DEFINED ENV{MSYSTEM} AND "$ENV{MSYSTEM}" STREQUAL "MSYS")
-    message(FATAL_ERROR
-        "On Windows, build plugin-ipc from an MSYS2 MinGW/UCRT shell "
-        "(`mingw64.exe` or `ucrt64.exe`), not the plain `msys` shell. "
-        "The Windows C backend is native Win32/Named Pipes, not an MSYS runtime build."
-    )
-endif()
-
 project(plugin_ipc LANGUAGES C)
 
 if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
@@ -17,7 +9,12 @@ endif()
 
 include(CTest)
 
-if(WIN32)
+set(NETIPC_WINDOWS_RUNTIME OFF)
+if(WIN32 OR CYGWIN OR CMAKE_SYSTEM_NAME STREQUAL "MSYS")
+    set(NETIPC_WINDOWS_RUNTIME ON)
+endif()
+
+if(NETIPC_WINDOWS_RUNTIME)
     if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         execute_process(
             COMMAND "${CMAKE_C_COMPILER}" -dumpmachine
@@ -26,12 +23,18 @@ if(WIN32)
             OUTPUT_STRIP_TRAILING_WHITESPACE
             ERROR_QUIET
         )
-        if(NETIPC_C_COMPILER_TARGET_RC EQUAL 0 AND
-           NETIPC_C_COMPILER_TARGET MATCHES "(msys|cygwin)")
-            message(FATAL_ERROR
-                "Compiler target `${NETIPC_C_COMPILER_TARGET}` is not a native Windows target. "
-                "Use an MSYS2 MinGW/UCRT toolchain such as `mingw64` or `ucrt64`."
-            )
+        if(NETIPC_C_COMPILER_TARGET_RC EQUAL 0)
+            if(NETIPC_C_COMPILER_TARGET MATCHES "(msys|cygwin)")
+                message(STATUS
+                    "Using the Windows IPC backend with a POSIX-emulated Windows C runtime target "
+                    "`${NETIPC_C_COMPILER_TARGET}`."
+                )
+            else()
+                message(STATUS
+                    "Using the Windows IPC backend with native Windows target "
+                    "`${NETIPC_C_COMPILER_TARGET}`."
+                )
+            endif()
         endif()
     endif()
 endif()
@@ -111,7 +114,7 @@ if(NETIPC_BUILD_HELPERS)
 
         add_custom_target(netipc_live_uds_rs DEPENDS "${NETIPC_LIVE_UDS_RS_BIN}")
 
-        if(WIN32)
+        if(NETIPC_WINDOWS_RUNTIME)
             set(NETIPC_LIVE_WIN_RS_BIN "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/netipc_live_win_rs${CMAKE_EXECUTABLE_SUFFIX}")
             add_custom_command(
                 OUTPUT "${NETIPC_LIVE_WIN_RS_BIN}"
@@ -156,7 +159,7 @@ if(NETIPC_BUILD_HELPERS)
         )
         add_custom_target(netipc-live-go DEPENDS "${NETIPC_LIVE_GO_BIN}")
 
-        if(WIN32)
+        if(NETIPC_WINDOWS_RUNTIME)
             set(NETIPC_LIVE_GO_WIN_BIN "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/netipc-live-go-win${CMAKE_EXECUTABLE_SUFFIX}")
             add_custom_command(
                 OUTPUT "${NETIPC_LIVE_GO_WIN_BIN}"
@@ -290,7 +293,7 @@ if(NETIPC_REGISTER_SCRIPT_WORKFLOWS)
             add_dependencies(netipc-check netipc-test-uds-negotiation-negative)
         endif()
 
-        if(WIN32)
+        if(NETIPC_WINDOWS_RUNTIME)
             netipc_add_script_workflow(
                 netipc-test-live-npipe-smoke
                 tests/run-live-npipe-smoke.sh
