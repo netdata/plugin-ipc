@@ -9,6 +9,59 @@ use std::process;
 use std::thread;
 use std::time::{Duration, Instant};
 
+// ---------------------------------------------------------------------------
+// RDTSC-based timing: avoids ~4.5us QPC overhead under Hyper-V
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn rdtsc_now() -> u64 {
+    unsafe {
+        core::arch::x86_64::_mm_lfence();
+        core::arch::x86_64::_rdtsc()
+    }
+}
+
+static mut TSC_NS_PER_TICK: f64 = 0.0;
+
+fn calibrate_tsc() {
+    // Warmup
+    let _ = rdtsc_now();
+    thread::sleep(Duration::from_millis(200));
+
+    const CAL_PASSES: usize = 5;
+    let mut samples = [0.0f64; CAL_PASSES];
+
+    for sample in samples.iter_mut() {
+        let tsc0 = rdtsc_now();
+        let wall0 = Instant::now();
+        thread::sleep(Duration::from_millis(200));
+        let tsc1 = rdtsc_now();
+        let wall_sec = wall0.elapsed().as_secs_f64();
+
+        if wall_sec < 0.05 {
+            // Bad sample, retry
+            *sample = 0.0;
+            continue;
+        }
+        *sample = (tsc1 - tsc0) as f64 / wall_sec;
+    }
+
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let tsc_hz = samples[CAL_PASSES / 2];
+
+    let ns_per_tick = 1e9 / tsc_hz;
+    eprintln!("TSC calibrated: {:.2} GHz ({:.3} ns/tick)", tsc_hz / 1e9, ns_per_tick);
+    unsafe { TSC_NS_PER_TICK = ns_per_tick; }
+}
+
+#[inline(always)]
+fn tsc_delta_ns(delta: u64) -> f64 {
+    delta as f64 * unsafe { TSC_NS_PER_TICK }
+}
+
+// ---------------------------------------------------------------------------
+
 fn usage(argv0: &str) {
     eprintln!("usage:");
     eprintln!("  {argv0} server-once <run_dir> <service>");
@@ -64,12 +117,12 @@ fn protocol_error(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn percentile_micros(lat_ns: &[i64], pct: f64) -> f64 {
+fn percentile_micros(lat_ns: &[f64], pct: f64) -> f64 {
     if lat_ns.is_empty() { return 0.0; }
-    if pct <= 0.0 { return lat_ns[0] as f64 / 1000.0; }
-    if pct >= 100.0 { return lat_ns[lat_ns.len() - 1] as f64 / 1000.0; }
+    if pct <= 0.0 { return lat_ns[0] / 1000.0; }
+    if pct >= 100.0 { return lat_ns[lat_ns.len() - 1] / 1000.0; }
     let rank = ((pct / 100.0) * (lat_ns.len() as f64 - 1.0)) as usize;
-    lat_ns[rank] as f64 / 1000.0
+    lat_ns[rank] / 1000.0
 }
 
 fn sleep_until(start: Instant, target_ns: u64) {
@@ -167,6 +220,8 @@ fn client_bench(
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "target_rps must be >= 0"));
     }
 
+    calibrate_tsc();
+
     let mut client =
         NamedPipeClient::connect(&win_config(run_dir, service), Some(Duration::from_secs(10)))?;
     let profile = client.negotiated_profile();
@@ -175,11 +230,16 @@ fn client_bench(
     let end_at = start + Duration::from_secs(duration_sec as u64);
     let cpu_start = self_cpu_seconds();
 
-    let mut lat_ns: Vec<i64> = Vec::with_capacity(1 << 20);
+    // Maximum plausible latency in TSC ticks (~100ms).
+    // Discard insane deltas caused by cross-core TSC offset differences.
+    let tsc_hz = 1e9 / unsafe { TSC_NS_PER_TICK };
+    let max_sane_tsc_delta = (0.1 * tsc_hz) as u64;
+
+    let mut lat_ns: Vec<f64> = Vec::with_capacity(1 << 20);
     let mut counter = 1u64;
-    let mut requests = 0i64;
-    let mut responses = 0i64;
-    let mut mismatches = 0i64;
+    let mut requests = 0u64;
+    let mut responses = 0u64;
+    let mut mismatches = 0u64;
 
     let interval_ns: u64 = if target_rps > 0 {
         let v = 1_000_000_000u64 / target_rps as u64;
@@ -189,13 +249,22 @@ fn client_bench(
     };
     let mut next_send_ns = 0u64;
 
-    while Instant::now() < end_at {
+    const DEADLINE_CHECK_MASK: u64 = 1023;
+
+    loop {
+        // Check QPC deadline every 1024 iterations to amortize the ~4.5us cost
+        if (requests & DEADLINE_CHECK_MASK) == 0 && requests > 0 {
+            if Instant::now() >= end_at {
+                break;
+            }
+        }
+
         if interval_ns > 0 {
             sleep_until(start, next_send_ns);
             next_send_ns = next_send_ns.saturating_add(interval_ns);
         }
 
-        let send_start = Instant::now();
+        let send_start_tsc = rdtsc_now();
         requests += 1;
 
         let response = client.call_increment(
@@ -208,14 +277,19 @@ fn client_bench(
 
         counter = response.value;
         responses += 1;
-        lat_ns.push(send_start.elapsed().as_nanos() as i64);
+
+        let tsc_delta = rdtsc_now() - send_start_tsc;
+        // Discard insane deltas caused by cross-core TSC offset differences
+        if tsc_delta < max_sane_tsc_delta {
+            lat_ns.push(tsc_delta_ns(tsc_delta));
+        }
     }
 
     let elapsed_sec = start.elapsed().as_secs_f64().max(1e-9);
     let cpu_cores = (self_cpu_seconds() - cpu_start) / elapsed_sec;
     let throughput = responses as f64 / elapsed_sec;
 
-    lat_ns.sort_unstable();
+    lat_ns.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p50 = percentile_micros(&lat_ns, 50.0);
     let p95 = percentile_micros(&lat_ns, 95.0);
     let p99 = percentile_micros(&lat_ns, 99.0);
