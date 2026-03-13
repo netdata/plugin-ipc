@@ -15,36 +15,23 @@
 #define NETIPC_NEGOTIATION_MAGIC 0x4e48534bu
 #define NETIPC_NEGOTIATION_VERSION 1u
 #define NETIPC_NEGOTIATION_FRAME_SIZE 64u
+#define NETIPC_NEGOTIATION_PAYLOAD_OFFSET 8u
+#define NETIPC_NEGOTIATION_STATUS_OFFSET 48u
 
 #define NETIPC_NEGOTIATION_HELLO 1u
 #define NETIPC_NEGOTIATION_ACK 2u
 
 #define NETIPC_NEGOTIATION_STATUS_OK 0u
+#define NETIPC_NEGOTIATION_DEFAULT_BATCH_ITEMS 1u
 
 #define NETIPC_NEG_OFFSET_MAGIC 0u
 #define NETIPC_NEG_OFFSET_VERSION 4u
 #define NETIPC_NEG_OFFSET_TYPE 6u
-#define NETIPC_NEG_OFFSET_SUPPORTED 8u
-#define NETIPC_NEG_OFFSET_PREFERRED 12u
-#define NETIPC_NEG_OFFSET_INTERSECTION 16u
-#define NETIPC_NEG_OFFSET_SELECTED 20u
-#define NETIPC_NEG_OFFSET_AUTH_TOKEN 24u
-#define NETIPC_NEG_OFFSET_STATUS 32u
 
 #define NETIPC_IMPLEMENTED_PROFILES \
     (NETIPC_PROFILE_NAMED_PIPE | NETIPC_PROFILE_SHM_HYBRID | NETIPC_PROFILE_SHM_BUSYWAIT | NETIPC_PROFILE_SHM_WAITADDR)
 #define NETIPC_PIPE_NAME_CAPACITY 256u
 #define NETIPC_SERVICE_NAME_CAPACITY 96u
-
-struct netipc_negotiation_message {
-    uint16_t type;
-    uint32_t supported_profiles;
-    uint32_t preferred_profiles;
-    uint32_t intersection_profiles;
-    uint32_t selected_profile;
-    uint64_t auth_token;
-    uint32_t status;
-};
 
 struct netipc_named_pipe_server {
     HANDLE pipe;
@@ -52,9 +39,15 @@ struct netipc_named_pipe_server {
     char *service_name;
     uint32_t supported_profiles;
     uint32_t preferred_profiles;
+    uint32_t max_request_payload_bytes;
+    uint32_t max_request_batch_items;
+    uint32_t max_response_payload_bytes;
+    uint32_t max_response_batch_items;
     uint64_t auth_token;
     uint32_t shm_spin_tries;
     uint32_t negotiated_profile;
+    size_t max_request_message_len;
+    size_t max_response_message_len;
     netipc_win_shm_server_t *shm_server;
     bool connected;
 };
@@ -65,11 +58,27 @@ struct netipc_named_pipe_client {
     char *service_name;
     uint32_t supported_profiles;
     uint32_t preferred_profiles;
+    uint32_t max_request_payload_bytes;
+    uint32_t max_request_batch_items;
+    uint32_t max_response_payload_bytes;
+    uint32_t max_response_batch_items;
     uint64_t auth_token;
     uint32_t shm_spin_tries;
     uint32_t negotiated_profile;
+    size_t max_request_message_len;
+    size_t max_response_message_len;
     netipc_win_shm_client_t *shm_client;
     uint64_t next_request_id;
+};
+
+struct handshake_result {
+    uint32_t selected_profile;
+    uint32_t agreed_max_request_payload_bytes;
+    uint32_t agreed_max_request_batch_items;
+    uint32_t agreed_max_response_payload_bytes;
+    uint32_t agreed_max_response_batch_items;
+    size_t max_request_message_len;
+    size_t max_response_message_len;
 };
 
 static uint16_t host_to_le16(uint16_t value) {
@@ -131,6 +140,41 @@ static uint64_t read_u64_le(const uint8_t *src) {
     uint64_t v;
     memcpy(&v, src, sizeof(v));
     return le64_to_host(v);
+}
+
+static uint32_t negotiate_limit_u32(uint32_t offered, uint32_t local_limit) {
+    if (offered == 0u || local_limit == 0u) {
+        return 0u;
+    }
+    return offered < local_limit ? offered : local_limit;
+}
+
+static uint32_t effective_payload_limit(uint32_t value) {
+    return value != 0u ? value : NETIPC_MAX_PAYLOAD_DEFAULT;
+}
+
+static uint32_t effective_batch_limit(uint32_t value) {
+    return value != 0u ? value : NETIPC_NEGOTIATION_DEFAULT_BATCH_ITEMS;
+}
+
+static int compute_max_message_len(uint32_t max_payload_bytes,
+                                   uint32_t max_batch_items,
+                                   size_t *out_total_size) {
+    if (!out_total_size) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    size_t total = netipc_msg_max_batch_total_size(max_payload_bytes, max_batch_items);
+    if (total == 0u) {
+        if (errno == 0) {
+            errno = EOVERFLOW;
+        }
+        return -1;
+    }
+
+    *out_total_size = total;
+    return 0;
 }
 
 static int set_errno_from_win32(DWORD error) {
@@ -317,32 +361,102 @@ static int set_pipe_wait_mode(HANDLE pipe, DWORD wait_mode) {
     return 0;
 }
 
-static int read_pipe_message(HANDLE pipe, uint8_t frame[NETIPC_FRAME_SIZE], uint32_t timeout_ms) {
-    if (timeout_ms != 0u) {
-        ULONGLONG deadline_ms = now_ms() + (ULONGLONG)timeout_ms;
-        for (;;) {
-            DWORD bytes_available = 0u;
-            if (!PeekNamedPipe(pipe, NULL, 0u, NULL, &bytes_available, NULL)) {
-                return set_errno_from_win32(GetLastError());
-            }
+static int wait_for_pipe_message(HANDLE pipe, uint32_t timeout_ms, DWORD *out_message_len) {
+    if (!out_message_len) {
+        errno = EINVAL;
+        return -1;
+    }
 
-            if (bytes_available != 0u) {
-                break;
-            }
-            if (deadline_expired(deadline_ms)) {
-                errno = ETIMEDOUT;
-                return -1;
-            }
-            sleep_millis(1u);
+    ULONGLONG deadline_ms = timeout_ms == 0u ? 0ull : now_ms() + (ULONGLONG)timeout_ms;
+    for (;;) {
+        DWORD bytes_available = 0u;
+        DWORD bytes_left_this_message = 0u;
+        if (!PeekNamedPipe(pipe, NULL, 0u, NULL, &bytes_available, &bytes_left_this_message)) {
+            return set_errno_from_win32(GetLastError());
         }
+
+        if (bytes_left_this_message != 0u || bytes_available != 0u) {
+            *out_message_len = (bytes_left_this_message != 0u) ? bytes_left_this_message : bytes_available;
+            return 0;
+        }
+        if (deadline_expired(deadline_ms)) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        sleep_millis(1u);
+    }
+}
+
+static int drain_current_pipe_message(HANDLE pipe) {
+    uint8_t scratch[256];
+
+    for (;;) {
+        DWORD bytes_read = 0u;
+        if (ReadFile(pipe, scratch, (DWORD)sizeof(scratch), &bytes_read, NULL)) {
+            return 0;
+        }
+
+        DWORD error = GetLastError();
+        if (error == ERROR_MORE_DATA) {
+            continue;
+        }
+        return set_errno_from_win32(error);
+    }
+}
+
+static int read_pipe_message(HANDLE pipe,
+                             uint8_t *message,
+                             size_t message_capacity,
+                             size_t *out_message_len,
+                             uint32_t timeout_ms) {
+    if (!message || !out_message_len || message_capacity == 0u) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    DWORD message_len = 0u;
+    if (wait_for_pipe_message(pipe, timeout_ms, &message_len) != 0) {
+        return -1;
+    }
+
+    if ((size_t)message_len > message_capacity) {
+        (void)drain_current_pipe_message(pipe);
+        errno = EMSGSIZE;
+        return -1;
     }
 
     DWORD bytes_read = 0u;
-    if (!ReadFile(pipe, frame, NETIPC_FRAME_SIZE, &bytes_read, NULL)) {
+    if (!ReadFile(pipe, message, message_len, &bytes_read, NULL)) {
+        DWORD error = GetLastError();
+        if (error == ERROR_MORE_DATA) {
+            (void)drain_current_pipe_message(pipe);
+            errno = EMSGSIZE;
+            return -1;
+        }
+        return set_errno_from_win32(error);
+    }
+
+    if (bytes_read != message_len) {
+        errno = EPROTO;
+        return -1;
+    }
+
+    *out_message_len = (size_t)bytes_read;
+    return 0;
+}
+
+static int write_pipe_message(HANDLE pipe, const uint8_t *message, size_t message_len) {
+    if (!message || message_len == 0u || message_len > (size_t)UINT32_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    DWORD bytes_written = 0u;
+    if (!WriteFile(pipe, message, (DWORD)message_len, &bytes_written, NULL)) {
         return set_errno_from_win32(GetLastError());
     }
 
-    if (bytes_read != NETIPC_FRAME_SIZE) {
+    if (bytes_written != message_len) {
         errno = EPROTO;
         return -1;
     }
@@ -350,13 +464,74 @@ static int read_pipe_message(HANDLE pipe, uint8_t frame[NETIPC_FRAME_SIZE], uint
     return 0;
 }
 
-static int write_pipe_message(HANDLE pipe, const uint8_t frame[NETIPC_FRAME_SIZE]) {
-    DWORD bytes_written = 0u;
-    if (!WriteFile(pipe, frame, NETIPC_FRAME_SIZE, &bytes_written, NULL)) {
-        return set_errno_from_win32(GetLastError());
+static int read_pipe_frame(HANDLE pipe,
+                           uint8_t frame[NETIPC_FRAME_SIZE],
+                           uint32_t timeout_ms) {
+    size_t frame_len = 0u;
+
+    if (read_pipe_message(pipe, frame, NETIPC_FRAME_SIZE, &frame_len, timeout_ms) != 0) {
+        return -1;
     }
 
-    if (bytes_written != NETIPC_FRAME_SIZE) {
+    if (frame_len != NETIPC_FRAME_SIZE) {
+        errno = EPROTO;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int write_pipe_frame(HANDLE pipe, const uint8_t frame[NETIPC_FRAME_SIZE]) {
+    return write_pipe_message(pipe, frame, NETIPC_FRAME_SIZE);
+}
+
+static int validate_message_len_for_send(const uint8_t *message,
+                                         size_t message_len,
+                                         size_t max_message_len) {
+    if (!message || message_len == 0u) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (message_len > max_message_len) {
+        errno = EMSGSIZE;
+        return -1;
+    }
+
+    struct netipc_msg_header header;
+    if (netipc_decode_msg_header(message, message_len, &header) != 0) {
+        return -1;
+    }
+
+    size_t total = netipc_msg_total_size(&header);
+    if (total != message_len) {
+        errno = EPROTO;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int validate_received_message(const uint8_t *message,
+                                     size_t message_len,
+                                     size_t max_message_len) {
+    if (!message || message_len == 0u) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (message_len > max_message_len) {
+        errno = EMSGSIZE;
+        return -1;
+    }
+
+    struct netipc_msg_header header;
+    if (netipc_decode_msg_header(message, message_len, &header) != 0) {
+        return -1;
+    }
+
+    size_t total = netipc_msg_total_size(&header);
+    if (total != message_len) {
         errno = EPROTO;
         return -1;
     }
@@ -384,25 +559,17 @@ static void disconnect_pipe(HANDLE pipe, bool connected) {
     DisconnectNamedPipe(pipe);
 }
 
-static void encode_negotiation(uint8_t frame[NETIPC_NEGOTIATION_FRAME_SIZE],
-                               const struct netipc_negotiation_message *message) {
+static void encode_negotiation_header(uint8_t frame[NETIPC_NEGOTIATION_FRAME_SIZE], uint16_t type) {
     memset(frame, 0, NETIPC_NEGOTIATION_FRAME_SIZE);
 
     write_u32_le(frame + NETIPC_NEG_OFFSET_MAGIC, NETIPC_NEGOTIATION_MAGIC);
     write_u16_le(frame + NETIPC_NEG_OFFSET_VERSION, NETIPC_NEGOTIATION_VERSION);
-    write_u16_le(frame + NETIPC_NEG_OFFSET_TYPE, message->type);
-    write_u32_le(frame + NETIPC_NEG_OFFSET_SUPPORTED, message->supported_profiles);
-    write_u32_le(frame + NETIPC_NEG_OFFSET_PREFERRED, message->preferred_profiles);
-    write_u32_le(frame + NETIPC_NEG_OFFSET_INTERSECTION, message->intersection_profiles);
-    write_u32_le(frame + NETIPC_NEG_OFFSET_SELECTED, message->selected_profile);
-    write_u64_le(frame + NETIPC_NEG_OFFSET_AUTH_TOKEN, message->auth_token);
-    write_u32_le(frame + NETIPC_NEG_OFFSET_STATUS, message->status);
+    write_u16_le(frame + NETIPC_NEG_OFFSET_TYPE, type);
 }
 
-static int decode_negotiation(const uint8_t frame[NETIPC_NEGOTIATION_FRAME_SIZE],
-                              uint16_t expected_type,
-                              struct netipc_negotiation_message *out_message) {
-    if (!frame || !out_message) {
+static int validate_negotiation_header(const uint8_t frame[NETIPC_NEGOTIATION_FRAME_SIZE],
+                                       uint16_t expected_type) {
+    if (!frame) {
         errno = EINVAL;
         return -1;
     }
@@ -416,14 +583,82 @@ static int decode_negotiation(const uint8_t frame[NETIPC_NEGOTIATION_FRAME_SIZE]
         errno = EPROTO;
         return -1;
     }
+    return 0;
+}
 
-    out_message->type = type;
-    out_message->supported_profiles = read_u32_le(frame + NETIPC_NEG_OFFSET_SUPPORTED);
-    out_message->preferred_profiles = read_u32_le(frame + NETIPC_NEG_OFFSET_PREFERRED);
-    out_message->intersection_profiles = read_u32_le(frame + NETIPC_NEG_OFFSET_INTERSECTION);
-    out_message->selected_profile = read_u32_le(frame + NETIPC_NEG_OFFSET_SELECTED);
-    out_message->auth_token = read_u64_le(frame + NETIPC_NEG_OFFSET_AUTH_TOKEN);
-    out_message->status = read_u32_le(frame + NETIPC_NEG_OFFSET_STATUS);
+static int write_hello_negotiation(HANDLE pipe, const struct netipc_hello *hello) {
+    uint8_t frame[NETIPC_NEGOTIATION_FRAME_SIZE];
+    encode_negotiation_header(frame, NETIPC_NEGOTIATION_HELLO);
+    if (netipc_encode_hello_payload(frame + NETIPC_NEGOTIATION_PAYLOAD_OFFSET,
+                                    NETIPC_CONTROL_HELLO_PAYLOAD_LEN,
+                                    hello) != 0) {
+        return -1;
+    }
+    return write_pipe_message(pipe, frame, sizeof(frame));
+}
+
+static int write_ack_negotiation(HANDLE pipe,
+                                 const struct netipc_hello_ack *hello_ack,
+                                 uint32_t status) {
+    uint8_t frame[NETIPC_NEGOTIATION_FRAME_SIZE];
+    encode_negotiation_header(frame, NETIPC_NEGOTIATION_ACK);
+    if (netipc_encode_hello_ack_payload(frame + NETIPC_NEGOTIATION_PAYLOAD_OFFSET,
+                                        NETIPC_CONTROL_HELLO_ACK_PAYLOAD_LEN,
+                                        hello_ack) != 0) {
+        return -1;
+    }
+    write_u32_le(frame + NETIPC_NEGOTIATION_STATUS_OFFSET, status);
+    return write_pipe_message(pipe, frame, sizeof(frame));
+}
+
+static int read_hello_negotiation(HANDLE pipe, struct netipc_hello *hello, uint32_t timeout_ms) {
+    uint8_t frame[NETIPC_NEGOTIATION_FRAME_SIZE];
+    if (!hello) {
+        errno = EINVAL;
+        return -1;
+    }
+    size_t frame_len = 0u;
+    if (read_pipe_message(pipe, frame, sizeof(frame), &frame_len, timeout_ms) != 0) {
+        return -1;
+    }
+    if (frame_len != sizeof(frame)) {
+        errno = EPROTO;
+        return -1;
+    }
+    if (validate_negotiation_header(frame, NETIPC_NEGOTIATION_HELLO) != 0) {
+        return -1;
+    }
+    return netipc_decode_hello_payload(frame + NETIPC_NEGOTIATION_PAYLOAD_OFFSET,
+                                       NETIPC_CONTROL_HELLO_PAYLOAD_LEN,
+                                       hello);
+}
+
+static int read_ack_negotiation(HANDLE pipe,
+                                struct netipc_hello_ack *hello_ack,
+                                uint32_t *out_status,
+                                uint32_t timeout_ms) {
+    uint8_t frame[NETIPC_NEGOTIATION_FRAME_SIZE];
+    if (!hello_ack || !out_status) {
+        errno = EINVAL;
+        return -1;
+    }
+    size_t frame_len = 0u;
+    if (read_pipe_message(pipe, frame, sizeof(frame), &frame_len, timeout_ms) != 0) {
+        return -1;
+    }
+    if (frame_len != sizeof(frame)) {
+        errno = EPROTO;
+        return -1;
+    }
+    if (validate_negotiation_header(frame, NETIPC_NEGOTIATION_ACK) != 0) {
+        return -1;
+    }
+    if (netipc_decode_hello_ack_payload(frame + NETIPC_NEGOTIATION_PAYLOAD_OFFSET,
+                                        NETIPC_CONTROL_HELLO_ACK_PAYLOAD_LEN,
+                                        hello_ack) != 0) {
+        return -1;
+    }
+    *out_status = read_u32_le(frame + NETIPC_NEGOTIATION_STATUS_OFFSET);
     return 0;
 }
 
@@ -443,109 +678,152 @@ static uint32_t select_profile(uint32_t candidates) {
     return 0u;
 }
 
-static int perform_server_handshake(HANDLE pipe,
-                                    uint32_t supported_profiles,
-                                    uint32_t preferred_profiles,
-                                    uint64_t auth_token,
+static int perform_server_handshake(const netipc_named_pipe_server_t *server,
+                                    HANDLE pipe,
                                     uint32_t timeout_ms,
-                                    uint32_t *out_profile) {
-    if (!out_profile) {
+                                    struct handshake_result *out_result) {
+    if (!server || !out_result) {
         errno = EINVAL;
         return -1;
     }
 
-    uint8_t frame[NETIPC_NEGOTIATION_FRAME_SIZE];
-    struct netipc_negotiation_message hello;
-
-    if (read_pipe_message(pipe, frame, timeout_ms) != 0) {
-        return -1;
-    }
-    if (decode_negotiation(frame, NETIPC_NEGOTIATION_HELLO, &hello) != 0) {
+    struct netipc_hello hello;
+    if (read_hello_negotiation(pipe, &hello, timeout_ms) != 0) {
         return -1;
     }
 
-    struct netipc_negotiation_message ack = {
-        .type = NETIPC_NEGOTIATION_ACK,
-        .supported_profiles = supported_profiles,
-        .preferred_profiles = preferred_profiles,
-        .intersection_profiles = hello.supported_profiles & supported_profiles,
+    struct netipc_hello_ack ack = {
+        .layout_version = hello.layout_version,
+        .flags = 0u,
+        .server_supported_profiles = server->supported_profiles,
+        .intersection_profiles = hello.supported_profiles & server->supported_profiles,
         .selected_profile = 0u,
-        .auth_token = 0u,
-        .status = NETIPC_NEGOTIATION_STATUS_OK,
+        .agreed_max_request_payload_bytes =
+            negotiate_limit_u32(hello.max_request_payload_bytes, server->max_request_payload_bytes),
+        .agreed_max_request_batch_items =
+            negotiate_limit_u32(hello.max_request_batch_items, server->max_request_batch_items),
+        .agreed_max_response_payload_bytes =
+            negotiate_limit_u32(hello.max_response_payload_bytes, server->max_response_payload_bytes),
+        .agreed_max_response_batch_items =
+            negotiate_limit_u32(hello.max_response_batch_items, server->max_response_batch_items),
+    };
+    uint32_t status = NETIPC_NEGOTIATION_STATUS_OK;
+
+    struct handshake_result result = {
+        .selected_profile = 0u,
+        .agreed_max_request_payload_bytes = 0u,
+        .agreed_max_request_batch_items = 0u,
+        .agreed_max_response_payload_bytes = 0u,
+        .agreed_max_response_batch_items = 0u,
+        .max_request_message_len = 0u,
+        .max_response_message_len = 0u,
     };
 
-    if (auth_token != 0u && hello.auth_token != auth_token) {
-        ack.status = ERROR_ACCESS_DENIED;
+    if (server->auth_token != 0u && hello.auth_token != server->auth_token) {
+        status = ERROR_ACCESS_DENIED;
     } else {
-        uint32_t candidates = ack.intersection_profiles & preferred_profiles;
+        uint32_t candidates = ack.intersection_profiles & server->preferred_profiles;
         if (candidates == 0u) {
             candidates = ack.intersection_profiles;
         }
         ack.selected_profile = select_profile(candidates);
         if (ack.selected_profile == 0u) {
-            ack.status = ERROR_NOT_SUPPORTED;
+            status = ERROR_NOT_SUPPORTED;
+        } else if (ack.agreed_max_request_payload_bytes == 0u ||
+                   ack.agreed_max_request_batch_items == 0u ||
+                   ack.agreed_max_response_payload_bytes == 0u ||
+                   ack.agreed_max_response_batch_items == 0u) {
+            status = ERROR_INVALID_PARAMETER;
+        } else if (compute_max_message_len(ack.agreed_max_request_payload_bytes,
+                                           ack.agreed_max_request_batch_items,
+                                           &result.max_request_message_len) != 0 ||
+                   compute_max_message_len(ack.agreed_max_response_payload_bytes,
+                                           ack.agreed_max_response_batch_items,
+                                           &result.max_response_message_len) != 0) {
+            status = ERROR_INVALID_PARAMETER;
+        } else {
+            result.selected_profile = ack.selected_profile;
+            result.agreed_max_request_payload_bytes = ack.agreed_max_request_payload_bytes;
+            result.agreed_max_request_batch_items = ack.agreed_max_request_batch_items;
+            result.agreed_max_response_payload_bytes = ack.agreed_max_response_payload_bytes;
+            result.agreed_max_response_batch_items = ack.agreed_max_response_batch_items;
         }
     }
 
-    encode_negotiation(frame, &ack);
-    if (write_pipe_message(pipe, frame) != 0) {
+    if (write_ack_negotiation(pipe, &ack, status) != 0) {
         return -1;
     }
 
-    if (ack.status != NETIPC_NEGOTIATION_STATUS_OK) {
-        return set_errno_from_win32(ack.status);
+    if (status != NETIPC_NEGOTIATION_STATUS_OK) {
+        return set_errno_from_win32(status);
     }
 
-    *out_profile = ack.selected_profile;
+    *out_result = result;
     return 0;
 }
 
-static int perform_client_handshake(HANDLE pipe,
-                                    uint32_t supported_profiles,
-                                    uint32_t preferred_profiles,
-                                    uint64_t auth_token,
+static int perform_client_handshake(const netipc_named_pipe_client_t *client,
+                                    HANDLE pipe,
                                     uint32_t timeout_ms,
-                                    uint32_t *out_profile) {
-    if (!out_profile) {
+                                    struct handshake_result *out_result) {
+    if (!client || !out_result) {
         errno = EINVAL;
         return -1;
     }
 
-    struct netipc_negotiation_message hello = {
-        .type = NETIPC_NEGOTIATION_HELLO,
-        .supported_profiles = supported_profiles,
-        .preferred_profiles = preferred_profiles,
-        .intersection_profiles = 0u,
-        .selected_profile = 0u,
-        .auth_token = auth_token,
-        .status = NETIPC_NEGOTIATION_STATUS_OK,
+    struct netipc_hello hello = {
+        .layout_version = NETIPC_MSG_VERSION,
+        .flags = 0u,
+        .supported_profiles = client->supported_profiles,
+        .preferred_profiles = client->preferred_profiles,
+        .max_request_payload_bytes = client->max_request_payload_bytes,
+        .max_request_batch_items = client->max_request_batch_items,
+        .max_response_payload_bytes = client->max_response_payload_bytes,
+        .max_response_batch_items = client->max_response_batch_items,
+        .auth_token = client->auth_token,
     };
-    uint8_t frame[NETIPC_NEGOTIATION_FRAME_SIZE];
-    encode_negotiation(frame, &hello);
 
-    if (write_pipe_message(pipe, frame) != 0) {
-        return -1;
-    }
-    if (read_pipe_message(pipe, frame, timeout_ms) != 0) {
+    if (write_hello_negotiation(pipe, &hello) != 0) {
         return -1;
     }
 
-    struct netipc_negotiation_message ack;
-    if (decode_negotiation(frame, NETIPC_NEGOTIATION_ACK, &ack) != 0) {
+    struct netipc_hello_ack ack;
+    uint32_t status = NETIPC_NEGOTIATION_STATUS_OK;
+    if (read_ack_negotiation(pipe, &ack, &status, timeout_ms) != 0) {
         return -1;
     }
-    if (ack.status != NETIPC_NEGOTIATION_STATUS_OK) {
-        return set_errno_from_win32(ack.status);
+    if (status != NETIPC_NEGOTIATION_STATUS_OK) {
+        return set_errno_from_win32(status);
     }
-    if ((ack.intersection_profiles & supported_profiles) == 0u ||
+    struct handshake_result result = {
+        .selected_profile = ack.selected_profile,
+        .agreed_max_request_payload_bytes = ack.agreed_max_request_payload_bytes,
+        .agreed_max_request_batch_items = ack.agreed_max_request_batch_items,
+        .agreed_max_response_payload_bytes = ack.agreed_max_response_payload_bytes,
+        .agreed_max_response_batch_items = ack.agreed_max_response_batch_items,
+        .max_request_message_len = 0u,
+        .max_response_message_len = 0u,
+    };
+
+    if ((ack.intersection_profiles & client->supported_profiles) == 0u ||
         ack.selected_profile == 0u ||
         (ack.selected_profile & ack.intersection_profiles) == 0u ||
-        (ack.selected_profile & supported_profiles) == 0u) {
+        (ack.selected_profile & client->supported_profiles) == 0u ||
+        ack.agreed_max_request_payload_bytes == 0u ||
+        ack.agreed_max_request_batch_items == 0u ||
+        ack.agreed_max_response_payload_bytes == 0u ||
+        ack.agreed_max_response_batch_items == 0u ||
+        compute_max_message_len(ack.agreed_max_request_payload_bytes,
+                                ack.agreed_max_request_batch_items,
+                                &result.max_request_message_len) != 0 ||
+        compute_max_message_len(ack.agreed_max_response_payload_bytes,
+                                ack.agreed_max_response_batch_items,
+                                &result.max_response_message_len) != 0) {
         errno = EPROTO;
         return -1;
     }
 
-    *out_profile = ack.selected_profile;
+    *out_result = result;
     return 0;
 }
 
@@ -584,14 +862,34 @@ int netipc_named_pipe_server_create(const struct netipc_named_pipe_config *confi
 
     server->supported_profiles = effective_supported_profiles(config);
     server->preferred_profiles = effective_preferred_profiles(config, server->supported_profiles);
+    server->max_request_payload_bytes = effective_payload_limit(config->max_request_payload_bytes);
+    server->max_request_batch_items = effective_batch_limit(config->max_request_batch_items);
+    server->max_response_payload_bytes = effective_payload_limit(config->max_response_payload_bytes);
+    server->max_response_batch_items = effective_batch_limit(config->max_response_batch_items);
     server->auth_token = config->auth_token;
     server->shm_spin_tries = config->shm_spin_tries;
+    size_t max_request_message_len =
+        netipc_msg_max_batch_total_size(server->max_request_payload_bytes, server->max_request_batch_items);
+    size_t max_response_message_len =
+        netipc_msg_max_batch_total_size(server->max_response_payload_bytes, server->max_response_batch_items);
+    size_t max_default_message_len =
+        max_request_message_len > max_response_message_len ? max_request_message_len : max_response_message_len;
+    if (max_request_message_len == 0u || max_response_message_len == 0u ||
+        max_default_message_len > (size_t)UINT32_MAX) {
+        int saved = (errno != 0) ? errno : EOVERFLOW;
+        free(server->service_name);
+        free(server->run_dir);
+        free(server);
+        errno = saved;
+        return -1;
+    }
+
     server->pipe = CreateNamedPipeW(pipe_name,
                                     PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
                                     PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
                                     1u,
-                                    NETIPC_FRAME_SIZE * 4u,
-                                    NETIPC_FRAME_SIZE * 4u,
+                                    (DWORD)max_default_message_len,
+                                    (DWORD)max_default_message_len,
                                     0u,
                                     NULL);
     if (server->pipe == INVALID_HANDLE_VALUE) {
@@ -642,28 +940,39 @@ int netipc_named_pipe_server_accept(netipc_named_pipe_server_t *server, uint32_t
         return -1;
     }
 
-    if (perform_server_handshake(server->pipe,
-                                 server->supported_profiles,
-                                 server->preferred_profiles,
-                                 server->auth_token,
+    struct handshake_result negotiated = {
+        .selected_profile = 0u,
+        .agreed_max_request_payload_bytes = 0u,
+        .agreed_max_request_batch_items = 0u,
+        .agreed_max_response_payload_bytes = 0u,
+        .agreed_max_response_batch_items = 0u,
+        .max_request_message_len = 0u,
+        .max_response_message_len = 0u,
+    };
+    if (perform_server_handshake(server,
+                                 server->pipe,
                                  timeout_ms,
-                                 &server->negotiated_profile) != 0) {
+                                 &negotiated) != 0) {
         DisconnectNamedPipe(server->pipe);
         server->connected = false;
         return -1;
     }
 
-    if (is_shm_profile(server->negotiated_profile)) {
+    if (is_shm_profile(negotiated.selected_profile)) {
         struct netipc_named_pipe_config config = {
             .run_dir = server->run_dir,
             .service_name = server->service_name,
             .supported_profiles = server->supported_profiles,
             .preferred_profiles = server->preferred_profiles,
+            .max_request_payload_bytes = negotiated.agreed_max_request_payload_bytes,
+            .max_request_batch_items = negotiated.agreed_max_request_batch_items,
+            .max_response_payload_bytes = negotiated.agreed_max_response_payload_bytes,
+            .max_response_batch_items = negotiated.agreed_max_response_batch_items,
             .auth_token = server->auth_token,
             .shm_spin_tries = server->shm_spin_tries,
         };
         if (netipc_win_shm_server_create(&config,
-                                         server->negotiated_profile,
+                                         negotiated.selected_profile,
                                          &server->shm_server) != 0) {
             DisconnectNamedPipe(server->pipe);
             server->connected = false;
@@ -672,8 +981,75 @@ int netipc_named_pipe_server_accept(netipc_named_pipe_server_t *server, uint32_t
         }
     }
 
+    server->negotiated_profile = negotiated.selected_profile;
+    server->max_request_message_len = negotiated.max_request_message_len;
+    server->max_response_message_len = negotiated.max_response_message_len;
     server->connected = true;
     return 0;
+}
+
+int netipc_named_pipe_server_receive_message(netipc_named_pipe_server_t *server,
+                                             uint8_t *message,
+                                             size_t message_capacity,
+                                             size_t *out_message_len,
+                                             uint32_t timeout_ms) {
+    if (!server || !message || !out_message_len || server->pipe == INVALID_HANDLE_VALUE || !server->connected) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (is_shm_profile(server->negotiated_profile)) {
+        return netipc_win_shm_server_receive_message(server->shm_server,
+                                                     message,
+                                                     message_capacity,
+                                                     out_message_len,
+                                                     timeout_ms);
+    }
+
+    if (server->max_request_message_len == 0u || message_capacity < server->max_request_message_len) {
+        errno = EMSGSIZE;
+        return -1;
+    }
+
+    size_t message_len = 0u;
+    if (read_pipe_message(server->pipe, message, message_capacity, &message_len, timeout_ms) != 0) {
+        return -1;
+    }
+    if (validate_received_message(message, message_len, server->max_request_message_len) != 0) {
+        return -1;
+    }
+
+    *out_message_len = message_len;
+    return 0;
+}
+
+int netipc_named_pipe_server_send_message(netipc_named_pipe_server_t *server,
+                                          const uint8_t *message,
+                                          size_t message_len,
+                                          uint32_t timeout_ms) {
+    (void)timeout_ms;
+
+    if (!server || !message || server->pipe == INVALID_HANDLE_VALUE || !server->connected) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (is_shm_profile(server->negotiated_profile)) {
+        return netipc_win_shm_server_send_message(server->shm_server,
+                                                  message,
+                                                  message_len,
+                                                  timeout_ms);
+    }
+
+    if (server->max_response_message_len == 0u) {
+        errno = EPROTO;
+        return -1;
+    }
+    if (validate_message_len_for_send(message, message_len, server->max_response_message_len) != 0) {
+        return -1;
+    }
+
+    return write_pipe_message(server->pipe, message, message_len);
 }
 
 int netipc_named_pipe_server_receive_frame(netipc_named_pipe_server_t *server,
@@ -688,12 +1064,14 @@ int netipc_named_pipe_server_receive_frame(netipc_named_pipe_server_t *server,
         return netipc_win_shm_server_receive_frame(server->shm_server, frame, timeout_ms);
     }
 
-    return read_pipe_message(server->pipe, frame, timeout_ms);
+    return read_pipe_frame(server->pipe, frame, timeout_ms);
 }
 
 int netipc_named_pipe_server_send_frame(netipc_named_pipe_server_t *server,
                                         const uint8_t frame[NETIPC_FRAME_SIZE],
                                         uint32_t timeout_ms) {
+    (void)timeout_ms;
+
     if (!server || !frame || server->pipe == INVALID_HANDLE_VALUE || !server->connected) {
         errno = EINVAL;
         return -1;
@@ -703,8 +1081,7 @@ int netipc_named_pipe_server_send_frame(netipc_named_pipe_server_t *server,
         return netipc_win_shm_server_send_frame(server->shm_server, frame, timeout_ms);
     }
 
-    (void)timeout_ms;
-    return write_pipe_message(server->pipe, frame);
+    return write_pipe_frame(server->pipe, frame);
 }
 
 int netipc_named_pipe_server_receive_increment(netipc_named_pipe_server_t *server,
@@ -789,6 +1166,10 @@ int netipc_named_pipe_client_create(const struct netipc_named_pipe_config *confi
 
     client->supported_profiles = effective_supported_profiles(config);
     client->preferred_profiles = effective_preferred_profiles(config, client->supported_profiles);
+    client->max_request_payload_bytes = effective_payload_limit(config->max_request_payload_bytes);
+    client->max_request_batch_items = effective_batch_limit(config->max_request_batch_items);
+    client->max_response_payload_bytes = effective_payload_limit(config->max_response_payload_bytes);
+    client->max_response_batch_items = effective_batch_limit(config->max_response_batch_items);
     client->auth_token = config->auth_token;
     client->shm_spin_tries = config->shm_spin_tries;
     client->next_request_id = 1u;
@@ -836,12 +1217,19 @@ int netipc_named_pipe_client_create(const struct netipc_named_pipe_config *confi
         return -1;
     }
 
-    if (perform_client_handshake(client->pipe,
-                                 client->supported_profiles,
-                                 client->preferred_profiles,
-                                 client->auth_token,
+    struct handshake_result negotiated = {
+        .selected_profile = 0u,
+        .agreed_max_request_payload_bytes = 0u,
+        .agreed_max_request_batch_items = 0u,
+        .agreed_max_response_payload_bytes = 0u,
+        .agreed_max_response_batch_items = 0u,
+        .max_request_message_len = 0u,
+        .max_response_message_len = 0u,
+    };
+    if (perform_client_handshake(client,
+                                 client->pipe,
                                  timeout_ms,
-                                 &client->negotiated_profile) != 0) {
+                                 &negotiated) != 0) {
         CloseHandle(client->pipe);
         free(client->service_name);
         free(client->run_dir);
@@ -849,12 +1237,20 @@ int netipc_named_pipe_client_create(const struct netipc_named_pipe_config *confi
         return -1;
     }
 
+    client->negotiated_profile = negotiated.selected_profile;
+    client->max_request_message_len = negotiated.max_request_message_len;
+    client->max_response_message_len = negotiated.max_response_message_len;
+
     if (is_shm_profile(client->negotiated_profile)) {
         struct netipc_named_pipe_config shm_config = {
             .run_dir = client->run_dir,
             .service_name = client->service_name,
             .supported_profiles = client->supported_profiles,
             .preferred_profiles = client->preferred_profiles,
+            .max_request_payload_bytes = negotiated.agreed_max_request_payload_bytes,
+            .max_request_batch_items = negotiated.agreed_max_request_batch_items,
+            .max_response_payload_bytes = negotiated.agreed_max_response_payload_bytes,
+            .max_response_batch_items = negotiated.agreed_max_response_batch_items,
             .auth_token = client->auth_token,
             .shm_spin_tries = client->shm_spin_tries,
         };
@@ -874,6 +1270,56 @@ int netipc_named_pipe_client_create(const struct netipc_named_pipe_config *confi
     return 0;
 }
 
+int netipc_named_pipe_client_call_message(netipc_named_pipe_client_t *client,
+                                          const uint8_t *request_message,
+                                          size_t request_message_len,
+                                          uint8_t *response_message,
+                                          size_t response_capacity,
+                                          size_t *out_response_len,
+                                          uint32_t timeout_ms) {
+    if (!client || !request_message || !response_message || !out_response_len ||
+        client->pipe == INVALID_HANDLE_VALUE) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (is_shm_profile(client->negotiated_profile)) {
+        return netipc_win_shm_client_call_message(client->shm_client,
+                                                  request_message,
+                                                  request_message_len,
+                                                  response_message,
+                                                  response_capacity,
+                                                  out_response_len,
+                                                  timeout_ms);
+    }
+
+    if (client->max_request_message_len == 0u || client->max_response_message_len == 0u) {
+        errno = EPROTO;
+        return -1;
+    }
+    if (response_capacity < client->max_response_message_len) {
+        errno = EMSGSIZE;
+        return -1;
+    }
+    if (validate_message_len_for_send(request_message, request_message_len, client->max_request_message_len) != 0) {
+        return -1;
+    }
+    if (write_pipe_message(client->pipe, request_message, request_message_len) != 0) {
+        return -1;
+    }
+
+    size_t response_len = 0u;
+    if (read_pipe_message(client->pipe, response_message, response_capacity, &response_len, timeout_ms) != 0) {
+        return -1;
+    }
+    if (validate_received_message(response_message, response_len, client->max_response_message_len) != 0) {
+        return -1;
+    }
+
+    *out_response_len = response_len;
+    return 0;
+}
+
 int netipc_named_pipe_client_call_frame(netipc_named_pipe_client_t *client,
                                         const uint8_t request_frame[NETIPC_FRAME_SIZE],
                                         uint8_t response_frame[NETIPC_FRAME_SIZE],
@@ -890,11 +1336,10 @@ int netipc_named_pipe_client_call_frame(netipc_named_pipe_client_t *client,
                                                 timeout_ms);
     }
 
-    if (write_pipe_message(client->pipe, request_frame) != 0) {
+    if (write_pipe_frame(client->pipe, request_frame) != 0) {
         return -1;
     }
-
-    return read_pipe_message(client->pipe, response_frame, timeout_ms);
+    return read_pipe_frame(client->pipe, response_frame, timeout_ms);
 }
 
 int netipc_named_pipe_client_call_increment(netipc_named_pipe_client_t *client,

@@ -24,6 +24,10 @@ struct netipc_named_pipe_config {
     const char *service_name;
     uint32_t supported_profiles;
     uint32_t preferred_profiles;
+    uint32_t max_request_payload_bytes;
+    uint32_t max_request_batch_items;
+    uint32_t max_response_payload_bytes;
+    uint32_t max_response_batch_items;
     uint64_t auth_token;
     uint32_t shm_spin_tries;
 };
@@ -31,6 +35,15 @@ struct netipc_named_pipe_config {
 int netipc_named_pipe_server_create(const struct netipc_named_pipe_config *config,
                                     netipc_named_pipe_server_t **out_server);
 int netipc_named_pipe_server_accept(netipc_named_pipe_server_t *server, uint32_t timeout_ms);
+int netipc_named_pipe_server_receive_message(netipc_named_pipe_server_t *server,
+                                             uint8_t *message,
+                                             size_t message_capacity,
+                                             size_t *out_message_len,
+                                             uint32_t timeout_ms);
+int netipc_named_pipe_server_send_message(netipc_named_pipe_server_t *server,
+                                          const uint8_t *message,
+                                          size_t message_len,
+                                          uint32_t timeout_ms);
 int netipc_named_pipe_server_receive_frame(netipc_named_pipe_server_t *server,
                                            uint8_t frame[NETIPC_FRAME_SIZE],
                                            uint32_t timeout_ms);
@@ -51,6 +64,13 @@ void netipc_named_pipe_server_destroy(netipc_named_pipe_server_t *server);
 int netipc_named_pipe_client_create(const struct netipc_named_pipe_config *config,
                                     netipc_named_pipe_client_t **out_client,
                                     uint32_t timeout_ms);
+int netipc_named_pipe_client_call_message(netipc_named_pipe_client_t *client,
+                                          const uint8_t *request_message,
+                                          size_t request_message_len,
+                                          uint8_t *response_message,
+                                          size_t response_capacity,
+                                          size_t *out_response_len,
+                                          uint32_t timeout_ms);
 int netipc_named_pipe_client_call_frame(netipc_named_pipe_client_t *client,
                                         const uint8_t request_frame[NETIPC_FRAME_SIZE],
                                         uint8_t response_frame[NETIPC_FRAME_SIZE],

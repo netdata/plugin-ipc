@@ -132,8 +132,10 @@ fn install_benchmark_stop_handlers() -> io::Result<()> {
     BENCH_STOP_REQUESTED.store(false, Ordering::Relaxed);
 
     unsafe {
-        if libc::signal(libc::SIGTERM, handle_bench_stop_signal as libc::sighandler_t)
-            == libc::SIG_ERR
+        if libc::signal(
+            libc::SIGTERM,
+            handle_bench_stop_signal as libc::sighandler_t,
+        ) == libc::SIG_ERR
         {
             return Err(io::Error::last_os_error());
         }
@@ -175,12 +177,21 @@ fn client_once(run_dir: &str, service: &str, value: u64) -> io::Result<()> {
         return Err(protocol_error("unexpected response value"));
     }
 
-    println!("RUST-SHM-CLIENT request={value} response={}", response.value);
+    println!(
+        "RUST-SHM-CLIENT request={value} response={}",
+        response.value
+    );
     Ok(())
 }
 
 fn server_loop(run_dir: &str, service: &str, max_requests: u64) -> io::Result<()> {
-    let _ = server_loop_internal(run_dir, service, max_requests, Duration::from_secs(10), false)?;
+    let _ = server_loop_internal(
+        run_dir,
+        service,
+        max_requests,
+        Duration::from_secs(10),
+        false,
+    )?;
     Ok(())
 }
 
@@ -265,7 +276,9 @@ fn client_bench_capture(
             Some(Duration::from_secs(10)),
         )?;
         if response.status != STATUS_OK {
-            return Err(protocol_error("server returned non-OK status during benchmark"));
+            return Err(protocol_error(
+                "server returned non-OK status during benchmark",
+            ));
         }
         if response.value != counter + 1 {
             return Err(io::Error::new(
@@ -379,11 +392,21 @@ fn server_bench(run_dir: &str, service: &str, max_requests: u64) -> io::Result<(
     install_benchmark_stop_handlers()?;
     let start = Instant::now();
     let cpu_start = self_cpu_seconds();
-    let handled_requests =
-        server_loop_internal(run_dir, service, max_requests, Duration::from_millis(100), true)?;
+    let handled_requests = server_loop_internal(
+        run_dir,
+        service,
+        max_requests,
+        Duration::from_millis(100),
+        true,
+    )?;
     let elapsed_sec = start.elapsed().as_secs_f64().max(1e-9);
     let server_cpu_cores = (self_cpu_seconds() - cpu_start) / elapsed_sec;
-    print_server_bench_row("rust-shm-hybrid", handled_requests, elapsed_sec, server_cpu_cores);
+    print_server_bench_row(
+        "rust-shm-hybrid",
+        handled_requests,
+        elapsed_sec,
+        server_cpu_cores,
+    );
     Ok(())
 }
 

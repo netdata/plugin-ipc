@@ -11,6 +11,7 @@ SERVER_PID=""
 SERVER_LOG=""
 CMAKE_BUILD_DIR="${NETIPC_CMAKE_BUILD_DIR:-build}"
 C_BIN_DIR="${CMAKE_BUILD_DIR}/bin"
+RUST_BIN="${CMAKE_BUILD_DIR}/bin/netipc_live_rs"
 
 configure_build() {
   if [[ "${NETIPC_SKIP_CONFIGURE:-0}" == "1" ]]; then
@@ -58,6 +59,19 @@ start_server() {
   SERVER_PID=$!
 }
 
+start_server_env() {
+  SERVER_LOG=$1
+  shift
+
+  printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
+  printf >&2 "${YELLOW}"
+  printf >&2 "%q " env "$@"
+  printf >&2 "${NC}\n"
+
+  env "$@" >"$SERVER_LOG" 2>&1 &
+  SERVER_PID=$!
+}
+
 wait_server() {
   if [[ -z "$SERVER_PID" ]]; then
     return 0
@@ -85,20 +99,58 @@ cleanup() {
 }
 trap cleanup EXIT
 
-build_targets netipc-live-c netipc_live_rs
+build_targets netipc-live-c
 
-# 1) C client -> Rust server
-run rm -f /tmp/netipc-live-c-rust.ipcshm
-start_server /tmp/netipc-live-c-rust.log "${C_BIN_DIR}/netipc_live_rs" server-once /tmp netipc-live-c-rust
-sleep 0.2
-run "${C_BIN_DIR}/netipc-live-c" shm-client-once /tmp netipc-live-c-rust 41
-wait_server
+direct_shm_binary_for() {
+  case "$1" in
+    c) printf '%s/netipc-live-c\n' "${C_BIN_DIR}" ;;
+    rust) printf '%s\n' "${RUST_BIN}" ;;
+    *) echo "unknown direct SHM language: $1" >&2; return 1 ;;
+  esac
+}
 
-# 2) Rust client -> C server
-run rm -f /tmp/netipc-live-rust-c.ipcshm
-start_server /tmp/netipc-live-rust-c.log "${C_BIN_DIR}/netipc-live-c" shm-server-once /tmp netipc-live-rust-c
-sleep 0.2
-run "${C_BIN_DIR}/netipc_live_rs" client-once /tmp netipc-live-rust-c 99
-wait_server
+run_direct_shm_case() {
+  local client_lang=$1
+  local server_lang=$2
+  local value=$3
+  local case_dir service server_bin client_bin client_out
 
-echo -e "${GREEN}Live shm-hybrid interop tests passed (C <-> Rust).${NC}"
+  case_dir=$(mktemp -d "/tmp/netipc-live-shm-${client_lang}-to-${server_lang}.XXXXXX")
+  service="netipc-live-shm-${client_lang}-to-${server_lang}-${RANDOM}"
+  server_bin=$(direct_shm_binary_for "${server_lang}")
+  client_bin=$(direct_shm_binary_for "${client_lang}")
+
+  if [[ "${server_lang}" == "rust" ]]; then
+    start_server_env "${case_dir}/server.log" "${server_bin}" server-once "${case_dir}" "${service}"
+  else
+    start_server "${case_dir}/server.log" "${server_bin}" shm-server-once "${case_dir}" "${service}"
+  fi
+  sleep 0.2
+
+  printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
+  printf >&2 "${YELLOW}"
+  if [[ "${client_lang}" == "rust" ]]; then
+    printf >&2 "%q " "${client_bin}" client-once "${case_dir}" "${service}" "${value}"
+    printf >&2 "${NC}\n"
+    client_out=$("${client_bin}" client-once "${case_dir}" "${service}" "${value}" 2>&1)
+  else
+    printf >&2 "%q " "${client_bin}" shm-client-once "${case_dir}" "${service}" "${value}"
+    printf >&2 "${NC}\n"
+    client_out=$("${client_bin}" shm-client-once "${case_dir}" "${service}" "${value}" 2>&1)
+  fi
+
+  printf '%s\n' "${client_out}"
+  wait_server
+
+  rm -rf "${case_dir}"
+}
+
+build_targets netipc_live_rs
+
+for client_lang in c rust; do
+  for server_lang in c rust; do
+    run_direct_shm_case "${client_lang}" "${server_lang}" 41
+  done
+done
+
+echo -e "${GREEN}Live shm-hybrid tests passed (full C/Rust direct matrix).${NC}"

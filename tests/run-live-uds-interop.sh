@@ -130,6 +130,69 @@ wait_server() {
   SERVER_LOG=""
 }
 
+start_server_uds_case() {
+  local server_lang=$1
+  local server_log=$2
+  local run_dir=$3
+  local service=$4
+  local supported_profiles=$5
+  local preferred_profiles=$6
+  local auth_token=$7
+  local server_bin
+  local server_cmd
+
+  server_bin=$(binary_for "${server_lang}")
+  server_cmd=$(server_once_cmd_for "${server_lang}")
+
+  if [[ "${server_lang}" == "rust" || "${server_lang}" == "go" ]]; then
+    start_server "${server_log}" env \
+      "NETIPC_SUPPORTED_PROFILES=${supported_profiles}" \
+      "NETIPC_PREFERRED_PROFILES=${preferred_profiles}" \
+      "NETIPC_AUTH_TOKEN=${auth_token}" \
+      "${server_bin}" "${server_cmd}" "${run_dir}" "${service}"
+  else
+    start_server "${server_log}" "${server_bin}" "${server_cmd}" "${run_dir}" "${service}" "1" \
+      "${supported_profiles}" "${preferred_profiles}" "${auth_token}"
+  fi
+}
+
+run_client_uds_case() {
+  local client_lang=$1
+  local run_dir=$2
+  local service=$3
+  local value=$4
+  local supported_profiles=$5
+  local preferred_profiles=$6
+  local auth_token=$7
+  local client_bin
+  local client_cmd
+
+  client_bin=$(binary_for "${client_lang}")
+  client_cmd=$(client_once_cmd_for "${client_lang}")
+
+  printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
+  printf >&2 "${YELLOW}"
+  if [[ "${client_lang}" == "rust" || "${client_lang}" == "go" ]]; then
+    printf >&2 "%q " env \
+      "NETIPC_SUPPORTED_PROFILES=${supported_profiles}" \
+      "NETIPC_PREFERRED_PROFILES=${preferred_profiles}" \
+      "NETIPC_AUTH_TOKEN=${auth_token}" \
+      "${client_bin}" "${client_cmd}" "${run_dir}" "${service}" "${value}"
+    printf >&2 "${NC}\n"
+    env \
+      "NETIPC_SUPPORTED_PROFILES=${supported_profiles}" \
+      "NETIPC_PREFERRED_PROFILES=${preferred_profiles}" \
+      "NETIPC_AUTH_TOKEN=${auth_token}" \
+      "${client_bin}" "${client_cmd}" "${run_dir}" "${service}" "${value}" 2>&1
+  else
+    printf >&2 "%q " "${client_bin}" "${client_cmd}" "${run_dir}" "${service}" "${value}" "1" \
+      "${supported_profiles}" "${preferred_profiles}" "${auth_token}"
+    printf >&2 "${NC}\n"
+    "${client_bin}" "${client_cmd}" "${run_dir}" "${service}" "${value}" "1" \
+      "${supported_profiles}" "${preferred_profiles}" "${auth_token}" 2>&1
+  fi
+}
+
 cleanup() {
   if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
     kill "${SERVER_PID}" || true
@@ -178,62 +241,29 @@ run_baseline_case() {
   fi
 }
 
-run_c_to_rust_shm_case() {
+run_shm_case() {
+  local client_lang=$1
+  local server_lang=$2
   local case_dir service client_out
 
-  case_dir=$(mktemp -d "${TEMP_ROOT}/shm-c-to-rust.XXXXXX")
-  service="netipc-live-uds-c-to-rust-shm-${RANDOM}"
+  case_dir=$(mktemp -d "${TEMP_ROOT}/shm-${client_lang}-to-${server_lang}.XXXXXX")
+  service="netipc-live-uds-${client_lang}-to-${server_lang}-shm-${RANDOM}"
 
-  start_server "${case_dir}/server.log" env NETIPC_SUPPORTED_PROFILES=3 NETIPC_PREFERRED_PROFILES=2 "${C_BIN_DIR}/netipc_live_uds_rs" server-once "${case_dir}" "${service}"
+  start_server_uds_case "${server_lang}" "${case_dir}/server.log" "${case_dir}" "${service}" 3 2 0
   if ! wait_for_socket "${case_dir}/${service}.sock" 500; then
     return 1
   fi
 
-  printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
-  printf >&2 "${YELLOW}"
-  printf >&2 "%q " "${C_BIN_DIR}/netipc-live-c" "uds-client-once" "${case_dir}" "${service}" "41" "1" "3" "2" "0"
-  printf >&2 "${NC}\n"
-
-  client_out=$("${C_BIN_DIR}/netipc-live-c" uds-client-once "${case_dir}" "${service}" 41 1 3 2 0 2>&1)
+  client_out=$(run_client_uds_case "${client_lang}" "${case_dir}" "${service}" 41 3 2 0)
   printf '%s\n' "${client_out}"
   if ! grep -q 'profile=2' <<<"${client_out}"; then
-    echo -e >&2 "${RED}[ERROR] expected profile=2 in C->Rust SHM case${NC}"
+    echo -e >&2 "${RED}[ERROR] expected profile=2 in ${client_lang}->${server_lang} SHM case${NC}"
     return 1
   fi
 
   wait_server
   if ! grep -q 'profile=2' "${case_dir}/server.log"; then
-    echo -e >&2 "${RED}[ERROR] Rust server did not report profile=2 for C->Rust SHM case${NC}"
-    return 1
-  fi
-}
-
-run_rust_to_c_shm_case() {
-  local case_dir service client_out
-
-  case_dir=$(mktemp -d "${TEMP_ROOT}/shm-rust-to-c.XXXXXX")
-  service="netipc-live-uds-rust-to-c-shm-${RANDOM}"
-
-  start_server "${case_dir}/server.log" "${C_BIN_DIR}/netipc-live-c" uds-server-once "${case_dir}" "${service}" 1 3 2 0
-  if ! wait_for_socket "${case_dir}/${service}.sock" 500; then
-    return 1
-  fi
-
-  printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
-  printf >&2 "${YELLOW}"
-  printf >&2 "%q " env "NETIPC_SUPPORTED_PROFILES=3" "NETIPC_PREFERRED_PROFILES=2" "${C_BIN_DIR}/netipc_live_uds_rs" client-once "${case_dir}" "${service}" "99"
-  printf >&2 "${NC}\n"
-
-  client_out=$(NETIPC_SUPPORTED_PROFILES=3 NETIPC_PREFERRED_PROFILES=2 "${C_BIN_DIR}/netipc_live_uds_rs" client-once "${case_dir}" "${service}" 99 2>&1)
-  printf '%s\n' "${client_out}"
-  if ! grep -q 'profile=2' <<<"${client_out}"; then
-    echo -e >&2 "${RED}[ERROR] expected Rust->C SHM case profile=2${NC}"
-    return 1
-  fi
-
-  wait_server
-  if ! grep -q 'profile=2' "${case_dir}/server.log"; then
-    echo -e >&2 "${RED}[ERROR] C server did not report profile=2 for Rust->C SHM case${NC}"
+    echo -e >&2 "${RED}[ERROR] ${server_lang} server did not report profile=2 for ${client_lang}->${server_lang} SHM case${NC}"
     return 1
   fi
 }
@@ -248,7 +278,10 @@ for client_lang in c rust go; do
   done
 done
 
-run_c_to_rust_shm_case
-run_rust_to_c_shm_case
+for client_lang in c rust go; do
+  for server_lang in c rust go; do
+    run_shm_case "${client_lang}" "${server_lang}"
+  done
+done
 
-echo -e "${GREEN}Live UDS seqpacket interop tests passed (full C/Rust/Go matrix plus C<->Rust SHM negotiation).${NC}"
+echo -e "${GREEN}Live UDS seqpacket interop tests passed (full C/Rust/Go baseline matrix plus full C/Rust/Go SHM negotiation matrix).${NC}"

@@ -24,30 +24,16 @@ const (
 	negHello   uint16 = 1
 	negAck     uint16 = 2
 
-	negStatusOK uint32 = 0
+	negStatusOK      uint32 = 0
+	negPayloadOffset        = 8
+	negStatusOffset         = 48
 )
 
 const (
-	negOffMagic        = 0
-	negOffVersion      = 4
-	negOffType         = 6
-	negOffSupported    = 8
-	negOffPreferred    = 12
-	negOffIntersection = 16
-	negOffSelected     = 20
-	negOffAuthToken    = 24
-	negOffStatus       = 32
+	negOffMagic   = 0
+	negOffVersion = 4
+	negOffType    = 6
 )
-
-type negMessage struct {
-	typ          uint16
-	supported    uint32
-	preferred    uint32
-	intersection uint32
-	selected     uint32
-	authToken    uint64
-	status       uint32
-}
 
 type benchResult struct {
 	durationSec    int
@@ -93,6 +79,22 @@ func parseU32(s string) uint32 {
 	return uint32(v)
 }
 
+func parseEnvU32(name string, fallback uint32) uint32 {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	return parseU32(value)
+}
+
+func parseEnvU64(name string, fallback uint64) uint64 {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	return parseU64(value)
+}
+
 func protocolError(message string) error {
 	return fmt.Errorf("protocol error: %s", message)
 }
@@ -117,37 +119,41 @@ func isSyscall(err error, target syscall.Errno) bool {
 	return err != nil && errors.Is(err, target)
 }
 
-func encodeNeg(msg negMessage) protocol.Frame {
+func encodeNegHeader(typ uint16) protocol.Frame {
 	var frame protocol.Frame
 	binary.LittleEndian.PutUint32(frame[negOffMagic:negOffMagic+4], negMagic)
 	binary.LittleEndian.PutUint16(frame[negOffVersion:negOffVersion+2], negVersion)
-	binary.LittleEndian.PutUint16(frame[negOffType:negOffType+2], msg.typ)
-	binary.LittleEndian.PutUint32(frame[negOffSupported:negOffSupported+4], msg.supported)
-	binary.LittleEndian.PutUint32(frame[negOffPreferred:negOffPreferred+4], msg.preferred)
-	binary.LittleEndian.PutUint32(frame[negOffIntersection:negOffIntersection+4], msg.intersection)
-	binary.LittleEndian.PutUint32(frame[negOffSelected:negOffSelected+4], msg.selected)
-	binary.LittleEndian.PutUint64(frame[negOffAuthToken:negOffAuthToken+8], msg.authToken)
-	binary.LittleEndian.PutUint32(frame[negOffStatus:negOffStatus+4], msg.status)
+	binary.LittleEndian.PutUint16(frame[negOffType:negOffType+2], typ)
 	return frame
 }
 
-func decodeNeg(frame protocol.Frame, expectedTyp uint16) (negMessage, error) {
+func encodeHelloNeg(payload protocol.HelloPayload) protocol.Frame {
+	frame := encodeNegHeader(negHello)
+	hello := protocol.EncodeHelloPayload(payload)
+	copy(frame[negPayloadOffset:negPayloadOffset+protocol.ControlHelloPayloadLen], hello[:])
+	return frame
+}
+
+func decodeAckNeg(frame protocol.Frame) (protocol.HelloAckPayload, uint32, error) {
+	if err := decodeNegHeader(frame, negAck); err != nil {
+		return protocol.HelloAckPayload{}, 0, err
+	}
+	ack, err := protocol.DecodeHelloAckPayload(frame[negPayloadOffset : negPayloadOffset+protocol.ControlHelloAckPayloadLen])
+	if err != nil {
+		return protocol.HelloAckPayload{}, 0, err
+	}
+	status := binary.LittleEndian.Uint32(frame[negStatusOffset : negStatusOffset+4])
+	return ack, status, nil
+}
+
+func decodeNegHeader(frame protocol.Frame, expectedTyp uint16) error {
 	magic := binary.LittleEndian.Uint32(frame[negOffMagic : negOffMagic+4])
 	version := binary.LittleEndian.Uint16(frame[negOffVersion : negOffVersion+2])
 	typ := binary.LittleEndian.Uint16(frame[negOffType : negOffType+2])
 	if magic != negMagic || version != negVersion || typ != expectedTyp {
-		return negMessage{}, syscall.EPROTO
+		return syscall.EPROTO
 	}
-
-	return negMessage{
-		typ:          typ,
-		supported:    binary.LittleEndian.Uint32(frame[negOffSupported : negOffSupported+4]),
-		preferred:    binary.LittleEndian.Uint32(frame[negOffPreferred : negOffPreferred+4]),
-		intersection: binary.LittleEndian.Uint32(frame[negOffIntersection : negOffIntersection+4]),
-		selected:     binary.LittleEndian.Uint32(frame[negOffSelected : negOffSelected+4]),
-		authToken:    binary.LittleEndian.Uint64(frame[negOffAuthToken : negOffAuthToken+8]),
-		status:       binary.LittleEndian.Uint32(frame[negOffStatus : negOffStatus+4]),
-	}, nil
+	return nil
 }
 
 func udsReadFrame(conn *net.UnixConn, timeout time.Duration) (protocol.Frame, error) {
@@ -184,7 +190,11 @@ func udsWriteFrame(conn *net.UnixConn, frame protocol.Frame, timeout time.Durati
 }
 
 func udsConfig(runDir, service string) posix.Config {
-	return posix.NewConfig(runDir, service)
+	config := posix.NewConfig(runDir, service)
+	config.SupportedProfiles = parseEnvU32("NETIPC_SUPPORTED_PROFILES", config.SupportedProfiles)
+	config.PreferredProfiles = parseEnvU32("NETIPC_PREFERRED_PROFILES", config.PreferredProfiles)
+	config.AuthToken = parseEnvU64("NETIPC_AUTH_TOKEN", config.AuthToken)
+	return config
 }
 
 func udsServerOnce(runDir, service string) error {
@@ -454,16 +464,18 @@ func udsClientRawHello(runDir, service string, supportedMask, preferredMask uint
 	}
 	defer conn.Close()
 
-	hello := negMessage{
-		typ:          negHello,
-		supported:    supportedMask,
-		preferred:    preferredMask,
-		intersection: 0,
-		selected:     0,
-		authToken:    authToken,
-		status:       negStatusOK,
+	hello := protocol.HelloPayload{
+		LayoutVersion:           protocol.MessageVersion,
+		Flags:                   0,
+		Supported:               supportedMask,
+		Preferred:               preferredMask,
+		MaxRequestPayloadBytes:  protocol.MaxPayloadDefault,
+		MaxRequestBatchItems:    1,
+		MaxResponsePayloadBytes: protocol.MaxPayloadDefault,
+		MaxResponseBatchItems:   1,
+		AuthToken:               authToken,
 	}
-	if err := udsWriteFrame(conn, encodeNeg(hello), 10*time.Second); err != nil {
+	if err := udsWriteFrame(conn, encodeHelloNeg(hello), 10*time.Second); err != nil {
 		return err
 	}
 
@@ -471,14 +483,14 @@ func udsClientRawHello(runDir, service string, supportedMask, preferredMask uint
 	if err != nil {
 		return err
 	}
-	ack, err := decodeNeg(ackFrame, negAck)
+	ack, status, err := decodeAckNeg(ackFrame)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("GO-UDS-RAWHELLO status=%d intersection=%d selected=%d\n", ack.status, ack.intersection, ack.selected)
-	if ack.status != negStatusOK {
-		return syscall.Errno(ack.status)
+	fmt.Printf("GO-UDS-RAWHELLO status=%d intersection=%d selected=%d\n", status, ack.Intersection, ack.Selected)
+	if status != negStatusOK {
+		return syscall.Errno(status)
 	}
 	return nil
 }
@@ -632,19 +644,19 @@ func main() {
 			os.Exit(2)
 		}
 		err = udsClientOnce(args[2], args[3], parseU64(args[4]))
-		case "uds-server-loop":
-			if len(args) != 5 {
-				usage(args[0])
-				os.Exit(2)
-			}
-			err = udsServerLoop(args[2], args[3], parseU64(args[4]))
-		case "uds-server-bench":
-			if len(args) != 5 {
-				usage(args[0])
-				os.Exit(2)
-			}
-			err = udsServerBench(args[2], args[3], parseU64(args[4]))
-		case "uds-client-bench":
+	case "uds-server-loop":
+		if len(args) != 5 {
+			usage(args[0])
+			os.Exit(2)
+		}
+		err = udsServerLoop(args[2], args[3], parseU64(args[4]))
+	case "uds-server-bench":
+		if len(args) != 5 {
+			usage(args[0])
+			os.Exit(2)
+		}
+		err = udsServerBench(args[2], args[3], parseU64(args[4]))
+	case "uds-client-bench":
 		if len(args) != 6 {
 			usage(args[0])
 			os.Exit(2)

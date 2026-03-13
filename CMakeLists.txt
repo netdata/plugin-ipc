@@ -70,30 +70,43 @@ if(NETIPC_BUILD_HELPERS)
 
     set(NETIPC_RUST_FIXTURES_MANIFEST "${CMAKE_SOURCE_DIR}/tests/fixtures/rust/Cargo.toml")
     set(NETIPC_RUST_FIXTURES_TARGET "${CMAKE_SOURCE_DIR}/tests/fixtures/rust/target/release")
-    set(NETIPC_CODEC_RS_BIN "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/netipc-codec-rs")
-    set(NETIPC_LIVE_RS_BIN "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/netipc_live_rs")
+    set(NETIPC_CODEC_RS_BIN "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/netipc-codec-rs${CMAKE_EXECUTABLE_SUFFIX}")
+    set(NETIPC_LIVE_RS_BIN "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/netipc_live_rs${CMAKE_EXECUTABLE_SUFFIX}")
 
     if(CARGO_EXECUTABLE)
         add_custom_command(
-            OUTPUT "${NETIPC_CODEC_RS_BIN}" "${NETIPC_LIVE_RS_BIN}"
-            COMMAND "${CARGO_EXECUTABLE}" build --release --manifest-path "${NETIPC_RUST_FIXTURES_MANIFEST}"
+            OUTPUT "${NETIPC_CODEC_RS_BIN}"
+            COMMAND "${CARGO_EXECUTABLE}" build --release --bin netipc-codec-rs --manifest-path "${NETIPC_RUST_FIXTURES_MANIFEST}"
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "${NETIPC_RUST_FIXTURES_TARGET}/netipc-codec-rs"
+                    "${NETIPC_RUST_FIXTURES_TARGET}/netipc-codec-rs${CMAKE_EXECUTABLE_SUFFIX}"
                     "${NETIPC_CODEC_RS_BIN}"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "${NETIPC_RUST_FIXTURES_TARGET}/netipc_live_rs"
-                    "${NETIPC_LIVE_RS_BIN}"
             DEPENDS
                 "${NETIPC_RUST_FIXTURES_MANIFEST}"
                 "${CMAKE_SOURCE_DIR}/tests/fixtures/rust/build.rs"
                 "${CMAKE_SOURCE_DIR}/tests/fixtures/rust/src/bin/netipc_codec_rs.rs"
-                "${CMAKE_SOURCE_DIR}/tests/fixtures/rust/src/bin/netipc_live_rs.rs"
                 ${NETIPC_RUST_CRATE_SOURCES}
             VERBATIM
         )
 
         add_custom_target(netipc-codec-rs DEPENDS "${NETIPC_CODEC_RS_BIN}")
-        add_custom_target(netipc_live_rs DEPENDS "${NETIPC_LIVE_RS_BIN}")
+
+        if(NOT NETIPC_WINDOWS_RUNTIME)
+            add_custom_command(
+                OUTPUT "${NETIPC_LIVE_RS_BIN}"
+                COMMAND "${CARGO_EXECUTABLE}" build --release --bin netipc_live_rs --manifest-path "${NETIPC_RUST_FIXTURES_MANIFEST}"
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "${NETIPC_RUST_FIXTURES_TARGET}/netipc_live_rs${CMAKE_EXECUTABLE_SUFFIX}"
+                        "${NETIPC_LIVE_RS_BIN}"
+                DEPENDS
+                    "${NETIPC_RUST_FIXTURES_MANIFEST}"
+                    "${CMAKE_SOURCE_DIR}/tests/fixtures/rust/build.rs"
+                    "${CMAKE_SOURCE_DIR}/tests/fixtures/rust/src/bin/netipc_live_rs.rs"
+                    ${NETIPC_RUST_CRATE_SOURCES}
+                VERBATIM
+            )
+
+            add_custom_target(netipc_live_rs DEPENDS "${NETIPC_LIVE_RS_BIN}")
+        endif()
 
         set(NETIPC_RUST_BENCH_MANIFEST "${CMAKE_SOURCE_DIR}/bench/drivers/rust/Cargo.toml")
         set(NETIPC_RUST_BENCH_TARGET "${CMAKE_SOURCE_DIR}/bench/drivers/rust/target/release")
@@ -133,14 +146,25 @@ if(NETIPC_BUILD_HELPERS)
     endif()
 
     if(GO_EXECUTABLE)
-        set(NETIPC_CODEC_GO_BIN "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/netipc-codec-go")
+        set(NETIPC_GO_FIXTURE_SOURCES
+            "${CMAKE_SOURCE_DIR}/tests/fixtures/go/main.go"
+            "${CMAKE_SOURCE_DIR}/tests/fixtures/go/bench_common.go"
+            "${CMAKE_SOURCE_DIR}/tests/fixtures/go/bench_time_unix.go"
+            "${CMAKE_SOURCE_DIR}/tests/fixtures/go/bench_time_windows.go"
+            "${CMAKE_SOURCE_DIR}/tests/fixtures/go/cgroups_bench.go"
+            "${CMAKE_SOURCE_DIR}/tests/fixtures/go/cgroups_server_common.go"
+            "${CMAKE_SOURCE_DIR}/tests/fixtures/go/cgroups_server_unix.go"
+            "${CMAKE_SOURCE_DIR}/tests/fixtures/go/cgroups_server_windows.go"
+        )
+
+        set(NETIPC_CODEC_GO_BIN "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/netipc-codec-go${CMAKE_EXECUTABLE_SUFFIX}")
         add_custom_command(
             OUTPUT "${NETIPC_CODEC_GO_BIN}"
             COMMAND "${CMAKE_COMMAND}" -E chdir "${CMAKE_SOURCE_DIR}/tests/fixtures/go"
                     "${GO_EXECUTABLE}" build -o "${NETIPC_CODEC_GO_BIN}" .
             DEPENDS
                 "${CMAKE_SOURCE_DIR}/tests/fixtures/go/go.mod"
-                "${CMAKE_SOURCE_DIR}/tests/fixtures/go/main.go"
+                ${NETIPC_GO_FIXTURE_SOURCES}
                 ${NETIPC_GO_PACKAGE_SOURCES}
             VERBATIM
         )
@@ -249,15 +273,17 @@ if(NETIPC_REGISTER_SCRIPT_WORKFLOWS)
             add_dependencies(netipc-check netipc-test-interop)
         endif()
 
-        netipc_add_script_workflow(
-            netipc-test-live-interop
-            tests/run-live-interop.sh
-            TEST_NAME netipc-live-interop
-            LABELS "interop;shm"
-            DEPENDS netipc-live-c netipc_live_rs
-        )
-        if(TARGET netipc-test-live-interop)
-            add_dependencies(netipc-check netipc-test-live-interop)
+        if(NOT NETIPC_WINDOWS_RUNTIME)
+            netipc_add_script_workflow(
+                netipc-test-live-interop
+                tests/run-live-interop.sh
+                TEST_NAME netipc-live-interop
+                LABELS "interop;shm"
+                DEPENDS netipc-live-c netipc_live_rs
+            )
+            if(TARGET netipc-test-live-interop)
+                add_dependencies(netipc-check netipc-test-live-interop)
+            endif()
         endif()
 
         netipc_add_script_workflow(
@@ -293,6 +319,30 @@ if(NETIPC_REGISTER_SCRIPT_WORKFLOWS)
             add_dependencies(netipc-check netipc-test-uds-negotiation-negative)
         endif()
 
+        if(NOT NETIPC_WINDOWS_RUNTIME)
+            netipc_add_script_workflow(
+                netipc-test-live-cgroups-baseline
+                tests/run-live-cgroups-baseline.sh
+                TEST_NAME netipc-live-cgroups-baseline
+                LABELS "protocol;service;cache;uds"
+                DEPENDS netipc-cgroups-live-c netipc-codec-go netipc-codec-rs
+            )
+            if(TARGET netipc-test-live-cgroups-baseline)
+                add_dependencies(netipc-check netipc-test-live-cgroups-baseline)
+            endif()
+
+            netipc_add_script_workflow(
+                netipc-test-live-cgroups-shm
+                tests/run-live-cgroups-shm.sh
+                TEST_NAME netipc-live-cgroups-shm
+                LABELS "protocol;service;cache;shm"
+                DEPENDS netipc-cgroups-live-c netipc-codec-go netipc-codec-rs
+            )
+            if(TARGET netipc-test-live-cgroups-shm)
+                add_dependencies(netipc-check netipc-test-live-cgroups-shm)
+            endif()
+        endif()
+
         if(NETIPC_WINDOWS_RUNTIME)
             netipc_add_script_workflow(
                 netipc-test-live-npipe-smoke
@@ -304,16 +354,29 @@ if(NETIPC_REGISTER_SCRIPT_WORKFLOWS)
             if(TARGET netipc-test-live-npipe-smoke)
                 add_dependencies(netipc-check netipc-test-live-npipe-smoke)
             endif()
+
+            netipc_add_script_workflow(
+                netipc-test-live-cgroups-win
+                tests/run-live-cgroups-win.sh
+                TEST_NAME netipc-live-cgroups-win
+                LABELS "service;cache;windows"
+                DEPENDS netipc-cgroups-live-c netipc-codec-go netipc-codec-rs
+            )
+            if(TARGET netipc-test-live-cgroups-win)
+                add_dependencies(netipc-check netipc-test-live-cgroups-win)
+            endif()
         endif()
 
-        netipc_add_script_workflow(
-            netipc-bench-live-shm
-            tests/run-live-shm-bench.sh
-            BENCHMARK
-            DEPENDS netipc-live-c netipc_live_rs
-        )
-        if(TARGET netipc-bench-live-shm)
-            add_dependencies(netipc-bench netipc-bench-live-shm)
+        if(NOT NETIPC_WINDOWS_RUNTIME)
+            netipc_add_script_workflow(
+                netipc-bench-live-shm
+                tests/run-live-shm-bench.sh
+                BENCHMARK
+                DEPENDS netipc-live-c netipc_live_rs
+            )
+            if(TARGET netipc-bench-live-shm)
+                add_dependencies(netipc-bench netipc-bench-live-shm)
+            endif()
         endif()
 
         netipc_add_script_workflow(
@@ -324,6 +387,40 @@ if(NETIPC_REGISTER_SCRIPT_WORKFLOWS)
         )
         if(TARGET netipc-bench-live-uds)
             add_dependencies(netipc-bench netipc-bench-live-uds)
+        endif()
+
+        if(NOT NETIPC_WINDOWS_RUNTIME)
+            netipc_add_script_workflow(
+                netipc-bench-live-cgroups
+                tests/run-live-cgroups-bench.sh
+                BENCHMARK
+                DEPENDS netipc-cgroups-live-c netipc-codec-go netipc-codec-rs
+            )
+            if(TARGET netipc-bench-live-cgroups)
+                add_dependencies(netipc-bench netipc-bench-live-cgroups)
+            endif()
+
+            netipc_add_script_workflow(
+                netipc-bench-live-cgroups-shm
+                tests/run-live-cgroups-shm-bench.sh
+                BENCHMARK
+                DEPENDS netipc-cgroups-live-c netipc-codec-go netipc-codec-rs
+            )
+            if(TARGET netipc-bench-live-cgroups-shm)
+                add_dependencies(netipc-bench netipc-bench-live-cgroups-shm)
+            endif()
+        endif()
+
+        if(NETIPC_WINDOWS_RUNTIME)
+            netipc_add_script_workflow(
+                netipc-bench-live-cgroups-win
+                tests/run-live-cgroups-win-bench.sh
+                BENCHMARK
+                DEPENDS netipc-cgroups-live-c netipc-codec-go netipc-codec-rs
+            )
+            if(TARGET netipc-bench-live-cgroups-win)
+                add_dependencies(netipc-bench netipc-bench-live-cgroups-win)
+            endif()
         endif()
 
         netipc_add_script_workflow(

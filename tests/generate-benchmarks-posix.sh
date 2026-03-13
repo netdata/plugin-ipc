@@ -56,13 +56,15 @@ require_exact_row() {
 
   local actual_count
   actual_count=$(awk -F, -v expected="${expected_count}" -v c1="${1}" -v v1="${2}" \
-    -v c2="${3:-}" -v v2="${4:-}" -v c3="${5:-}" -v v3="${6:-}" '
+    -v c2="${3:-}" -v v2="${4:-}" -v c3="${5:-}" -v v3="${6:-}" \
+    -v c4="${7:-}" -v v4="${8:-}" '
       NR == 1 { next }
       {
         ok = 1
         if (c1 != "" && $c1 != v1) ok = 0
         if (c2 != "" && $c2 != v2) ok = 0
         if (c3 != "" && $c3 != v3) ok = 0
+        if (c4 != "" && $c4 != v4) ok = 0
         if (ok) count++
       }
       END { print count + 0 }' "${file}")
@@ -74,11 +76,14 @@ render_posix_markdown() {
   local uds_csv=$1
   local shm_csv=$2
   local negotiated_csv=$3
-  local output_path=$4
+  local cgroups_baseline_csv=$4
+  local cgroups_shm_csv=$5
+  local output_path=$6
   local scenarios=(max 100k/s 10k/s)
   local languages=(c rust go)
   local shm_languages=(c rust)
   local profiles=(profile1-uds profile2-shm)
+  local cgroups_scenarios=(max 1000/s)
 
   {
     printf '# POSIX Benchmarks\n\n'
@@ -88,6 +93,8 @@ render_posix_markdown() {
     printf -- '- `tests/run-live-uds-bench.sh`\n'
     printf -- '- `tests/run-live-shm-bench.sh`\n'
     printf -- '- `tests/run-negotiated-profile-bench.sh`\n\n'
+    printf -- '- `tests/run-live-cgroups-bench.sh`\n'
+    printf -- '- `tests/run-live-cgroups-shm-bench.sh`\n\n'
 
     printf '## UDS Matrix\n\n'
     printf '| Scenario | Client | Server | Throughput (req/s) | p50 (us) | Client CPU (cores) | Server CPU (cores) | Total CPU (cores) |\n'
@@ -107,6 +114,7 @@ render_posix_markdown() {
     printf '\n'
 
     printf '## SHM Hybrid Matrix\n\n'
+    printf 'This is the legacy low-level direct `SHM_HYBRID` ping-pong benchmark scope. It currently covers `C/Rust` only.\n\n'
     printf '| Scenario | Client | Server | Throughput (req/s) | p50 (us) | Client CPU (cores) | Server CPU (cores) | Total CPU (cores) |\n'
     printf '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |\n'
     for scenario in "${scenarios[@]}"; do
@@ -119,6 +127,70 @@ render_posix_markdown() {
           printf '| %s | %s | %s | %s | %s | %s | %s | %s |\n' \
             "${_scenario}" "${_client}" "${_server}" "${throughput}" "${p50}" "${client_cpu}" "${server_cpu}" "${total_cpu}"
         done
+      done
+    done
+    printf '\n'
+
+    printf '## Cgroups Snapshot Baseline Refresh Matrix\n\n'
+    printf '| Scenario | Client | Server | Throughput (rps) | p50 (us) | p95 (us) | p99 (us) | Client CPU (cores) | Server CPU (cores) | Total CPU (cores) |\n'
+    printf '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n'
+    for scenario in "${cgroups_scenarios[@]}"; do
+      for client in "${languages[@]}"; do
+        for server in "${languages[@]}"; do
+          local row
+          row=$(awk -F, -v t="refresh" -v s="${scenario}" -v c="${client}" -v srv="${server}" \
+            'NR > 1 && $1 == t && $2 == s && $3 == c && $4 == srv { print; exit }' "${cgroups_baseline_csv}")
+          IFS=, read -r _bench _scenario _client _server throughput p50 p95 p99 client_cpu server_cpu total_cpu <<<"${row}"
+          printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+            "${_scenario}" "${_client}" "${_server}" "${throughput}" "${p50}" "${p95}" "${p99}" "${client_cpu}" "${server_cpu}" "${total_cpu}"
+        done
+      done
+    done
+    printf '\n'
+
+    printf '## Cgroups Snapshot Baseline Local Lookup Matrix\n\n'
+    printf '| Scenario | Client | Throughput (rps) | p50 (us) | p95 (us) | p99 (us) | Client CPU (cores) | Server CPU (cores) | Total CPU (cores) |\n'
+    printf '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n'
+    for scenario in "${cgroups_scenarios[@]}"; do
+      for client in "${languages[@]}"; do
+        local row
+        row=$(awk -F, -v t="lookup" -v s="${scenario}" -v c="${client}" \
+          'NR > 1 && $1 == t && $2 == s && $3 == c && $4 == c { print; exit }' "${cgroups_baseline_csv}")
+        IFS=, read -r _bench _scenario _client _server throughput p50 p95 p99 client_cpu server_cpu total_cpu <<<"${row}"
+        printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+          "${_scenario}" "${_client}" "${throughput}" "${p50}" "${p95}" "${p99}" "${client_cpu}" "${server_cpu}" "${total_cpu}"
+      done
+    done
+    printf '\n'
+
+    printf '## Cgroups Snapshot SHM Refresh Matrix\n\n'
+    printf '| Scenario | Client | Server | Throughput (rps) | p50 (us) | p95 (us) | p99 (us) | Client CPU (cores) | Server CPU (cores) | Total CPU (cores) |\n'
+    printf '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n'
+    for scenario in "${cgroups_scenarios[@]}"; do
+      for client in "${languages[@]}"; do
+        for server in "${languages[@]}"; do
+          local row
+          row=$(awk -F, -v t="refresh" -v s="${scenario}" -v c="${client}" -v srv="${server}" \
+            'NR > 1 && $1 == t && $2 == s && $3 == c && $4 == srv { print; exit }' "${cgroups_shm_csv}")
+          IFS=, read -r _bench _scenario _client _server throughput p50 p95 p99 client_cpu server_cpu total_cpu <<<"${row}"
+          printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+            "${_scenario}" "${_client}" "${_server}" "${throughput}" "${p50}" "${p95}" "${p99}" "${client_cpu}" "${server_cpu}" "${total_cpu}"
+        done
+      done
+    done
+    printf '\n'
+
+    printf '## Cgroups Snapshot SHM Local Lookup Matrix\n\n'
+    printf '| Scenario | Client | Throughput (rps) | p50 (us) | p95 (us) | p99 (us) | Client CPU (cores) | Server CPU (cores) | Total CPU (cores) |\n'
+    printf '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n'
+    for scenario in "${cgroups_scenarios[@]}"; do
+      for client in "${languages[@]}"; do
+        local row
+        row=$(awk -F, -v t="lookup" -v s="${scenario}" -v c="${client}" \
+          'NR > 1 && $1 == t && $2 == s && $3 == c && $4 == c { print; exit }' "${cgroups_shm_csv}")
+        IFS=, read -r _bench _scenario _client _server throughput p50 p95 p99 client_cpu server_cpu total_cpu <<<"${row}"
+        printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+          "${_scenario}" "${_client}" "${throughput}" "${p50}" "${p95}" "${p99}" "${client_cpu}" "${server_cpu}" "${total_cpu}"
       done
     done
     printf '\n'
@@ -143,12 +215,20 @@ main() {
   local uds_csv
   local shm_csv
   local negotiated_csv
+  local cgroups_baseline_csv
+  local cgroups_baseline_csv_export
+  local cgroups_shm_csv
+  local cgroups_shm_csv_export
   local output_tmp
 
   STAGE_DIR=$(mktemp -d "${ROOT_DIR}/.benchmarks-posix.XXXXXX")
   uds_csv="${STAGE_DIR}/uds.csv"
   shm_csv="${STAGE_DIR}/shm.csv"
   negotiated_csv="${STAGE_DIR}/negotiated.csv"
+  cgroups_baseline_csv="${STAGE_DIR}/cgroups-baseline.csv"
+  cgroups_shm_csv="${STAGE_DIR}/cgroups-shm.csv"
+  cgroups_baseline_csv_export="${cgroups_baseline_csv}.csv"
+  cgroups_shm_csv_export="${cgroups_shm_csv}.csv"
   output_tmp="${STAGE_DIR}/benchmarks-posix.md"
 
   cd "${ROOT_DIR}"
@@ -156,19 +236,29 @@ main() {
   run env NETIPC_RESULTS_FILE="${uds_csv}" "${ROOT_DIR}/tests/run-live-uds-bench.sh"
   run env NETIPC_RESULTS_FILE="${shm_csv}" "${ROOT_DIR}/tests/run-live-shm-bench.sh"
   run env NETIPC_RESULTS_FILE="${negotiated_csv}" "${ROOT_DIR}/tests/run-negotiated-profile-bench.sh"
+  run env NETIPC_RESULTS_FILE="${cgroups_baseline_csv}" "${ROOT_DIR}/tests/run-live-cgroups-bench.sh"
+  run env NETIPC_RESULTS_FILE="${cgroups_shm_csv}" bash "${ROOT_DIR}/tests/run-live-cgroups-shm-bench.sh"
 
   require_file "${uds_csv}"
   require_file "${shm_csv}"
   require_file "${negotiated_csv}"
+  require_file "${cgroups_baseline_csv}"
+  require_file "${cgroups_shm_csv}"
+  require_file "${cgroups_baseline_csv_export}"
+  require_file "${cgroups_shm_csv_export}"
 
   [[ "$(row_count "${uds_csv}")" == "27" ]] || fail "UDS benchmark matrix is incomplete"
   [[ "$(row_count "${shm_csv}")" == "12" ]] || fail "SHM benchmark matrix is incomplete"
   [[ "$(row_count "${negotiated_csv}")" == "6" ]] || fail "Negotiated profile benchmark matrix is incomplete"
+  [[ "$(row_count "${cgroups_baseline_csv_export}")" == "24" ]] || fail "Cgroups baseline benchmark matrix is incomplete"
+  [[ "$(row_count "${cgroups_shm_csv_export}")" == "24" ]] || fail "Cgroups SHM benchmark matrix is incomplete"
 
   local scenarios=(max 100k/s 10k/s)
   local languages=(c rust go)
   local shm_languages=(c rust)
   local profiles=(profile1-uds profile2-shm)
+  local cgroups_scenarios=(max 1000/s)
+  local cgroups_bench_type
 
   local scenario client server profile
   for scenario in "${scenarios[@]}"; do
@@ -189,10 +279,23 @@ main() {
     done
   done
 
-  render_posix_markdown "${uds_csv}" "${shm_csv}" "${negotiated_csv}" "${output_tmp}"
+  for scenario in "${cgroups_scenarios[@]}"; do
+    for client in "${languages[@]}"; do
+      for server in "${languages[@]}"; do
+        require_exact_row "${cgroups_baseline_csv_export}" 1 1 "refresh" 2 "${scenario}" 3 "${client}" 4 "${server}"
+        require_exact_row "${cgroups_shm_csv_export}" 1 1 "refresh" 2 "${scenario}" 3 "${client}" 4 "${server}"
+      done
+      require_exact_row "${cgroups_baseline_csv_export}" 1 1 "lookup" 2 "${scenario}" 3 "${client}" 4 "${client}"
+      require_exact_row "${cgroups_shm_csv_export}" 1 1 "lookup" 2 "${scenario}" 3 "${client}" 4 "${client}"
+    done
+  done
+
+  render_posix_markdown "${uds_csv}" "${shm_csv}" "${negotiated_csv}" "${cgroups_baseline_csv_export}" "${cgroups_shm_csv_export}" "${output_tmp}"
   run mv "${output_tmp}" "${ROOT_DIR}/benchmarks-posix.md"
 
   echo -e "${GREEN}Generated benchmarks-posix.md from a complete staged benchmark run.${NC}"
 }
 
-main "$@"
+if [[ "${NETIPC_GENERATE_BENCHMARKS_NO_MAIN:-0}" != "1" ]]; then
+  main "$@"
+fi

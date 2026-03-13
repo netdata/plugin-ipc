@@ -58,6 +58,21 @@ start_server() {
   SERVER_PID=$!
 }
 
+wait_for_socket() {
+  local path=$1
+  local attempts=$2
+
+  for ((i = 0; i < attempts; i++)); do
+    if [[ -S "${path}" ]]; then
+      return 0
+    fi
+    sleep 0.01
+  done
+
+  echo -e >&2 "${RED}[ERROR] endpoint ${path} was not created in time${NC}"
+  return 1
+}
+
 wait_server() {
   if [[ -z "${SERVER_PID}" ]]; then
     return 0
@@ -92,7 +107,7 @@ SOCK="/tmp/${SERVICE}.sock"
 run rm -f "${SOCK}"
 
 start_server /tmp/netipc-uds-server.log "${C_BIN_DIR}/netipc-live-c" uds-server-loop /tmp "${SERVICE}" 2
-sleep 0.2
+wait_for_socket "${SOCK}" 200
 
 client_out=$("${C_BIN_DIR}/netipc-live-c" uds-client-loop /tmp "${SERVICE}" 41 2)
 printf '%s\n' "${client_out}" >&2

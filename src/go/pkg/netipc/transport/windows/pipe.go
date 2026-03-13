@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"runtime"
 	"sync/atomic"
 	"syscall"
@@ -57,7 +58,7 @@ var (
 const (
 	invalidHandleValue = ^syscall.Handle(0)
 
-	pageReadWrite  = 0x04
+	pageReadWrite    = 0x04
 	fileMapAllAccess = 0xF001F
 
 	genericRead  = 0x80000000
@@ -75,15 +76,18 @@ const (
 	waitTimeout = 258
 	infinite    = 0xFFFFFFFF
 
-	errorAlreadyExists  = 183
-	errorFileNotFound   = 2
-	errorPipeBusy       = 231
-	errorPipeConnected  = 535
-	errorPipeListening  = 536
-	errorNoData         = 232
-	errorBrokenPipe     = 109
-	errorAccessDenied   = 5
-	errorNotSupported   = 50
+	errorAlreadyExists    = 183
+	errorFileNotFound     = 2
+	errorPipeBusy         = 231
+	errorPipeConnected    = 535
+	errorPipeListening    = 536
+	errorPipeNotConnected = 233
+	errorMoreData         = 234
+	errorNoData           = 232
+	errorBrokenPipe       = 109
+	errorAccessDenied     = 5
+	errorNotSupported     = 50
+	errorInvalidParameter = 87
 
 	nmpwaitWaitForever = 0xFFFFFFFF
 
@@ -96,8 +100,8 @@ const (
 // ---------------------------------------------------------------------------
 
 const (
-	ProfileNamedPipe  uint32 = 1 << 0
-	ProfileSHMHybrid  uint32 = 1 << 1
+	ProfileNamedPipe   uint32 = 1 << 0
+	ProfileSHMHybrid   uint32 = 1 << 1
 	ProfileSHMBusyWait uint32 = 1 << 2
 	ProfileSHMWaitAddr uint32 = 1 << 3
 
@@ -112,51 +116,49 @@ const (
 // ---------------------------------------------------------------------------
 
 const (
-	negMagic   uint32 = 0x4e48534b
-	negVersion uint16 = 1
-	negHello   uint16 = 1
-	negAck     uint16 = 2
-	negStatusOK uint32 = 0
+	negMagic             uint32 = 0x4e48534b
+	negVersion           uint16 = 1
+	negHello             uint16 = 1
+	negAck               uint16 = 2
+	negStatusOK          uint32 = 0
+	negPayloadOffset            = 8
+	negStatusOffset             = 48
+	negDefaultBatchItems uint32 = 1
 )
 
 const (
-	negOffMagic        = 0
-	negOffVersion      = 4
-	negOffType         = 6
-	negOffSupported    = 8
-	negOffPreferred    = 12
-	negOffIntersection = 16
-	negOffSelected     = 20
-	negOffAuthToken    = 24
-	negOffStatus       = 32
+	negOffMagic   = 0
+	negOffVersion = 4
+	negOffType    = 6
 )
 
 // ---------------------------------------------------------------------------
-// SHM region layout constants (wire-compatible with C)
+// SHM region layout constants (wire-compatible with C netipc_win_shm_header v3)
 // ---------------------------------------------------------------------------
 
 const (
 	shmRegionMagic   uint32 = 0x4e535748
-	shmRegionVersion uint32 = 2
+	shmRegionVersion uint32 = 3
 	cacheline               = 64
-	regionSize              = cacheline + (cacheline + protocol.FrameSize) + (cacheline + protocol.FrameSize) // 320 bytes
+	hdrSize                 = 128
 
-	offHdrMagic     = 0
-	offHdrVersion   = 4
-	offHdrProfile   = 8
-	offHdrSpinTries = 12
-
-	offReq             = cacheline
-	offReqSeq          = offReq
-	offReqClientClosed = offReq + 8
-	offReqServerWait   = offReq + 12
-	offReqFrame        = offReq + cacheline
-
-	offResp             = cacheline + cacheline + protocol.FrameSize
-	offRespSeq          = offResp
-	offRespServerClosed = offResp + 8
-	offRespClientWait   = offResp + 12
-	offRespFrame        = offResp + cacheline
+	offHdrMagic         = 0
+	offHdrVersion       = 4
+	offHdrHeaderLen     = 8
+	offHdrProfile       = 12
+	offHdrReqOffset     = 16
+	offHdrReqCapacity   = 20
+	offHdrRespOffset    = 24
+	offHdrRespCapacity  = 28
+	offHdrSpinTries     = 32
+	offReqLen           = 36
+	offRespLen          = 40
+	offReqClientClosed  = 44
+	offReqServerWait    = 48
+	offRespServerClosed = 52
+	offRespClientWait   = 56
+	offReqSeq           = 64
+	offRespSeq          = 72
 )
 
 // ---------------------------------------------------------------------------
@@ -165,21 +167,29 @@ const (
 
 // Config holds the configuration for a Named Pipe transport.
 type Config struct {
-	RunDir            string
-	ServiceName       string
-	SupportedProfiles uint32
-	PreferredProfiles uint32
-	AuthToken         uint64
-	SHMSpinTries      uint32
+	RunDir                  string
+	ServiceName             string
+	SupportedProfiles       uint32
+	PreferredProfiles       uint32
+	MaxRequestPayloadBytes  uint32
+	MaxRequestBatchItems    uint32
+	MaxResponsePayloadBytes uint32
+	MaxResponseBatchItems   uint32
+	AuthToken               uint64
+	SHMSpinTries            uint32
 }
 
 // NewConfig creates a new Config with default settings.
 func NewConfig(runDir, serviceName string) Config {
 	return Config{
-		RunDir:            runDir,
-		ServiceName:       serviceName,
-		SupportedProfiles: DefaultSupportedProfiles,
-		PreferredProfiles: DefaultPreferredProfiles,
+		RunDir:                  runDir,
+		ServiceName:             serviceName,
+		SupportedProfiles:       DefaultSupportedProfiles,
+		PreferredProfiles:       DefaultPreferredProfiles,
+		MaxRequestPayloadBytes:  protocol.MaxPayloadDefault,
+		MaxRequestBatchItems:    negDefaultBatchItems,
+		MaxResponsePayloadBytes: protocol.MaxPayloadDefault,
+		MaxResponseBatchItems:   negDefaultBatchItems,
 	}
 }
 
@@ -303,6 +313,20 @@ func effectiveSpinTries(config *Config) uint32 {
 	return DefaultSHMSpinTries
 }
 
+func effectivePayloadLimit(value uint32) uint32 {
+	if value == 0 {
+		return protocol.MaxPayloadDefault
+	}
+	return value
+}
+
+func effectiveBatchLimit(value uint32) uint32 {
+	if value == 0 {
+		return negDefaultBatchItems
+	}
+	return value
+}
+
 func isSHMProfile(profile uint32) bool {
 	return profile == ProfileSHMHybrid || profile == ProfileSHMBusyWait || profile == ProfileSHMWaitAddr
 }
@@ -327,105 +351,331 @@ func selectProfile(candidates uint32) uint32 {
 // Negotiation helpers
 // ---------------------------------------------------------------------------
 
-type negMessage struct {
-	typ          uint16
-	supported    uint32
-	preferred    uint32
-	intersection uint32
-	selected     uint32
-	authToken    uint64
-	status       uint32
+func negotiateLimit(offered, local uint32) uint32 {
+	if offered == 0 || local == 0 {
+		return 0
+	}
+	if offered < local {
+		return offered
+	}
+	return local
 }
 
-func encodeNeg(msg negMessage) protocol.Frame {
+type negotiationResult struct {
+	profile                       uint32
+	agreedMaxRequestPayloadBytes  uint32
+	agreedMaxRequestBatchItems    uint32
+	agreedMaxResponsePayloadBytes uint32
+	agreedMaxResponseBatchItems   uint32
+	maxRequestMessageLen          int
+	maxResponseMessageLen         int
+}
+
+func computeMaxMessageLen(maxPayloadBytes, maxBatchItems uint32) (int, error) {
+	total, err := protocol.MaxBatchTotalSize(maxPayloadBytes, maxBatchItems)
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func alignUpSize(value, alignment int) int {
+	remainder := value % alignment
+	if remainder == 0 {
+		return value
+	}
+	return value + (alignment - remainder)
+}
+
+func computeRegionLayout(requestCapacity, responseCapacity int) (int, int, int, error) {
+	if requestCapacity == 0 || responseCapacity == 0 {
+		return 0, 0, 0, fmt.Errorf("invalid SHM capacities")
+	}
+	requestOffset := alignUpSize(hdrSize, cacheline)
+	responseOffset := alignUpSize(requestOffset+requestCapacity, cacheline)
+	mappingLen := responseOffset + responseCapacity
+	return requestOffset, responseOffset, mappingLen, nil
+}
+
+func shmU32(region uintptr, off int) uint32 {
+	return binary.LittleEndian.Uint32((*[4]byte)(unsafe.Pointer(region + uintptr(off)))[:])
+}
+
+func requestArea(region uintptr) int {
+	return int(shmU32(region, offHdrReqOffset))
+}
+
+func responseArea(region uintptr) int {
+	return int(shmU32(region, offHdrRespOffset))
+}
+
+func requestCapacity(region uintptr) int {
+	return int(shmU32(region, offHdrReqCapacity))
+}
+
+func responseCapacity(region uintptr) int {
+	return int(shmU32(region, offHdrRespCapacity))
+}
+
+func validateRegionHeader(region uintptr, mappingLen int, profile uint32) (uint32, error) {
+	magic := shmU32(region, offHdrMagic)
+	version := shmU32(region, offHdrVersion)
+	headerLen := int(shmU32(region, offHdrHeaderLen))
+	prof := shmU32(region, offHdrProfile)
+	reqOff := requestArea(region)
+	reqCap := requestCapacity(region)
+	respOff := responseArea(region)
+	respCap := responseCapacity(region)
+	spin := shmU32(region, offHdrSpinTries)
+
+	if magic != shmRegionMagic || version != shmRegionVersion || headerLen != hdrSize || prof != profile || reqCap == 0 || respCap == 0 {
+		return 0, errors.New("invalid SHM header")
+	}
+	if reqOff < headerLen {
+		return 0, errors.New("invalid SHM request offset")
+	}
+	if respOff < reqOff+reqCap {
+		return 0, errors.New("invalid SHM response offset")
+	}
+	if respOff+respCap > mappingLen {
+		return 0, errors.New("invalid SHM mapping length")
+	}
+	return spin, nil
+}
+
+func encodeNegHeader(typ uint16) protocol.Frame {
 	var frame protocol.Frame
 	binary.LittleEndian.PutUint32(frame[negOffMagic:], negMagic)
 	binary.LittleEndian.PutUint16(frame[negOffVersion:], negVersion)
-	binary.LittleEndian.PutUint16(frame[negOffType:], msg.typ)
-	binary.LittleEndian.PutUint32(frame[negOffSupported:], msg.supported)
-	binary.LittleEndian.PutUint32(frame[negOffPreferred:], msg.preferred)
-	binary.LittleEndian.PutUint32(frame[negOffIntersection:], msg.intersection)
-	binary.LittleEndian.PutUint32(frame[negOffSelected:], msg.selected)
-	binary.LittleEndian.PutUint64(frame[negOffAuthToken:], msg.authToken)
-	binary.LittleEndian.PutUint32(frame[negOffStatus:], msg.status)
+	binary.LittleEndian.PutUint16(frame[negOffType:], typ)
 	return frame
 }
 
-func decodeNeg(frame protocol.Frame, expectedType uint16) (negMessage, error) {
+func encodeHelloNeg(payload protocol.HelloPayload) protocol.Frame {
+	frame := encodeNegHeader(negHello)
+	hello := protocol.EncodeHelloPayload(payload)
+	copy(frame[negPayloadOffset:negPayloadOffset+protocol.ControlHelloPayloadLen], hello[:])
+	return frame
+}
+
+func encodeAckNeg(payload protocol.HelloAckPayload, status uint32) protocol.Frame {
+	frame := encodeNegHeader(negAck)
+	ack := protocol.EncodeHelloAckPayload(payload)
+	copy(frame[negPayloadOffset:negPayloadOffset+protocol.ControlHelloAckPayloadLen], ack[:])
+	binary.LittleEndian.PutUint32(frame[negStatusOffset:negStatusOffset+4], status)
+	return frame
+}
+
+func decodeNegHeader(frame protocol.Frame, expectedType uint16) error {
 	magic := binary.LittleEndian.Uint32(frame[negOffMagic:])
 	version := binary.LittleEndian.Uint16(frame[negOffVersion:])
 	typ := binary.LittleEndian.Uint16(frame[negOffType:])
 	if magic != negMagic || version != negVersion || typ != expectedType {
-		return negMessage{}, errors.New("invalid negotiation frame")
+		return errors.New("invalid negotiation frame")
 	}
-	return negMessage{
-		typ:          typ,
-		supported:    binary.LittleEndian.Uint32(frame[negOffSupported:]),
-		preferred:    binary.LittleEndian.Uint32(frame[negOffPreferred:]),
-		intersection: binary.LittleEndian.Uint32(frame[negOffIntersection:]),
-		selected:     binary.LittleEndian.Uint32(frame[negOffSelected:]),
-		authToken:    binary.LittleEndian.Uint64(frame[negOffAuthToken:]),
-		status:       binary.LittleEndian.Uint32(frame[negOffStatus:]),
-	}, nil
+	return nil
+}
+
+func decodeHelloNeg(frame protocol.Frame) (protocol.HelloPayload, error) {
+	if err := decodeNegHeader(frame, negHello); err != nil {
+		return protocol.HelloPayload{}, err
+	}
+	return protocol.DecodeHelloPayload(frame[negPayloadOffset : negPayloadOffset+protocol.ControlHelloPayloadLen])
+}
+
+func decodeAckNeg(frame protocol.Frame) (protocol.HelloAckPayload, uint32, error) {
+	if err := decodeNegHeader(frame, negAck); err != nil {
+		return protocol.HelloAckPayload{}, 0, err
+	}
+	ack, err := protocol.DecodeHelloAckPayload(frame[negPayloadOffset : negPayloadOffset+protocol.ControlHelloAckPayloadLen])
+	if err != nil {
+		return protocol.HelloAckPayload{}, 0, err
+	}
+	status := binary.LittleEndian.Uint32(frame[negStatusOffset : negStatusOffset+4])
+	return ack, status, nil
 }
 
 // ---------------------------------------------------------------------------
 // Pipe I/O helpers
 // ---------------------------------------------------------------------------
 
-func pipeReadFrame(pipe syscall.Handle, timeoutMS uint32) (protocol.Frame, error) {
+func waitPipeMessage(pipe syscall.Handle, timeoutMS uint32) (uint32, error) {
+	var deadline uint64
 	if timeoutMS != 0 {
-		deadline := nowMS() + uint64(timeoutMS)
-		for {
-			var avail uint32
-			r, _, lastErr := procPeekNamedPipe.Call(uintptr(pipe), 0, 0, 0, uintptr(unsafe.Pointer(&avail)), 0)
-			if r == 0 {
-				return protocol.Frame{}, fmt.Errorf("PeekNamedPipe failed: %w", lastErr)
-			}
-			if avail != 0 {
-				break
-			}
-			if nowMS() >= deadline {
-				return protocol.Frame{}, errors.New("pipe read timeout")
-			}
-			sleepMS(1)
-		}
+		deadline = nowMS() + uint64(timeoutMS)
 	}
 
-	var frame protocol.Frame
+	for {
+		var avail uint32
+		var left uint32
+		r, _, lastErr := procPeekNamedPipe.Call(
+			uintptr(pipe),
+			0,
+			0,
+			0,
+			uintptr(unsafe.Pointer(&avail)),
+			uintptr(unsafe.Pointer(&left)),
+		)
+		if r == 0 {
+			if errCode, ok := lastErr.(syscall.Errno); ok &&
+				(errCode == syscall.Errno(errorBrokenPipe) ||
+					errCode == syscall.Errno(errorNoData) ||
+					errCode == syscall.Errno(errorPipeNotConnected)) {
+				return 0, io.EOF
+			}
+			return 0, fmt.Errorf("PeekNamedPipe failed: %w", lastErr)
+		}
+		if left != 0 || avail != 0 {
+			if left != 0 {
+				return left, nil
+			}
+			return avail, nil
+		}
+		if deadline != 0 && nowMS() >= deadline {
+			return 0, errors.New("pipe read timeout")
+		}
+		sleepMS(1)
+	}
+}
+
+func drainPipeMessage(pipe syscall.Handle) error {
+	var scratch [256]byte
+
+	for {
+		var bytesRead uint32
+		r, _, lastErr := procReadFile.Call(
+			uintptr(pipe),
+			uintptr(unsafe.Pointer(&scratch[0])),
+			uintptr(len(scratch)),
+			uintptr(unsafe.Pointer(&bytesRead)),
+			0,
+		)
+		if r != 0 {
+			return nil
+		}
+		errno, _ := lastErr.(syscall.Errno)
+		if uint32(errno) == errorMoreData {
+			continue
+		}
+		return fmt.Errorf("ReadFile failed: %w", lastErr)
+	}
+}
+
+func pipeReadMessage(pipe syscall.Handle, buf []byte, timeoutMS uint32) (int, error) {
+	if len(buf) == 0 {
+		return 0, errors.New("buffer must not be empty")
+	}
+
+	messageLen, err := waitPipeMessage(pipe, timeoutMS)
+	if err != nil {
+		return 0, err
+	}
+	if int(messageLen) > len(buf) {
+		_ = drainPipeMessage(pipe)
+		return 0, errors.New("message exceeds negotiated size")
+	}
+
 	var bytesRead uint32
 	r, _, lastErr := procReadFile.Call(
 		uintptr(pipe),
-		uintptr(unsafe.Pointer(&frame[0])),
-		uintptr(protocol.FrameSize),
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(messageLen),
 		uintptr(unsafe.Pointer(&bytesRead)),
 		0,
 	)
 	if r == 0 {
-		return frame, fmt.Errorf("ReadFile failed: %w", lastErr)
+		errno, _ := lastErr.(syscall.Errno)
+		if uint32(errno) == errorMoreData {
+			_ = drainPipeMessage(pipe)
+			return 0, errors.New("message exceeds negotiated size")
+		}
+		return 0, fmt.Errorf("ReadFile failed: %w", lastErr)
 	}
-	if bytesRead != protocol.FrameSize {
-		return frame, fmt.Errorf("short pipe read: %d", bytesRead)
+	if bytesRead != messageLen {
+		return 0, fmt.Errorf("short pipe read: %d", bytesRead)
 	}
-	return frame, nil
+	return int(bytesRead), nil
 }
 
-func pipeWriteFrame(pipe syscall.Handle, frame protocol.Frame) error {
+func pipeWriteMessage(pipe syscall.Handle, message []byte) error {
+	if len(message) == 0 {
+		return errors.New("message must not be empty")
+	}
 	var written uint32
 	r, _, lastErr := procWriteFile.Call(
 		uintptr(pipe),
-		uintptr(unsafe.Pointer(&frame[0])),
-		uintptr(protocol.FrameSize),
+		uintptr(unsafe.Pointer(&message[0])),
+		uintptr(len(message)),
 		uintptr(unsafe.Pointer(&written)),
 		0,
 	)
 	if r == 0 {
 		return fmt.Errorf("WriteFile failed: %w", lastErr)
 	}
-	if written != protocol.FrameSize {
+	if int(written) != len(message) {
 		return fmt.Errorf("short pipe write: %d", written)
 	}
 	return nil
+}
+
+func validateMessageForSend(message []byte, maxMessageLen int) error {
+	if len(message) == 0 {
+		return errors.New("message must not be empty")
+	}
+	if len(message) > maxMessageLen {
+		return errors.New("message exceeds negotiated size")
+	}
+	header, err := protocol.DecodeMessageHeader(message)
+	if err != nil {
+		return err
+	}
+	total, err := protocol.MessageTotalSize(header)
+	if err != nil {
+		return err
+	}
+	if total != len(message) {
+		return errors.New("message size does not match header")
+	}
+	return nil
+}
+
+func validateReceivedMessage(message []byte, messageLen int, maxMessageLen int) error {
+	if messageLen == 0 {
+		return errors.New("message must not be empty")
+	}
+	if messageLen > maxMessageLen {
+		return errors.New("message exceeds negotiated size")
+	}
+	header, err := protocol.DecodeMessageHeader(message[:messageLen])
+	if err != nil {
+		return err
+	}
+	total, err := protocol.MessageTotalSize(header)
+	if err != nil {
+		return err
+	}
+	if total != messageLen {
+		return errors.New("message size does not match header")
+	}
+	return nil
+}
+
+func pipeReadFrame(pipe syscall.Handle, timeoutMS uint32) (protocol.Frame, error) {
+	buf := make([]byte, protocol.FrameSize)
+	n, err := pipeReadMessage(pipe, buf, timeoutMS)
+	if err != nil {
+		return protocol.Frame{}, err
+	}
+	if n != protocol.FrameSize {
+		return protocol.Frame{}, errors.New("received non-frame message on frame path")
+	}
+	var frame protocol.Frame
+	copy(frame[:], buf[:n])
+	return frame, nil
+}
+
+func pipeWriteFrame(pipe syscall.Handle, frame protocol.Frame) error {
+	return pipeWriteMessage(pipe, frame[:])
 }
 
 func setPipeMode(pipe syscall.Handle, waitMode uint32) error {
@@ -441,72 +691,119 @@ func setPipeMode(pipe syscall.Handle, waitMode uint32) error {
 // Handshake
 // ---------------------------------------------------------------------------
 
-func serverHandshake(pipe syscall.Handle, supported, preferred uint32, authToken uint64, timeoutMS uint32) (uint32, error) {
+func serverHandshake(server *Server, pipe syscall.Handle, timeoutMS uint32) (negotiationResult, error) {
 	helloFrame, err := pipeReadFrame(pipe, timeoutMS)
 	if err != nil {
-		return 0, err
+		return negotiationResult{}, err
 	}
-	hello, err := decodeNeg(helloFrame, negHello)
+	hello, err := decodeHelloNeg(helloFrame)
 	if err != nil {
-		return 0, err
+		return negotiationResult{}, err
 	}
 
-	ack := negMessage{
-		typ:          negAck,
-		supported:    supported,
-		preferred:    preferred,
-		intersection: hello.supported & supported,
-		status:       negStatusOK,
+	ack := protocol.HelloAckPayload{
+		LayoutVersion:               hello.LayoutVersion,
+		Flags:                       0,
+		ServerSupported:             server.supportedProfiles,
+		Intersection:                hello.Supported & server.supportedProfiles,
+		Selected:                    0,
+		AgreedMaxRequestPayload:     negotiateLimit(hello.MaxRequestPayloadBytes, effectivePayloadLimit(server.config.MaxRequestPayloadBytes)),
+		AgreedMaxRequestBatchItems:  negotiateLimit(hello.MaxRequestBatchItems, effectiveBatchLimit(server.config.MaxRequestBatchItems)),
+		AgreedMaxResponsePayload:    negotiateLimit(hello.MaxResponsePayloadBytes, effectivePayloadLimit(server.config.MaxResponsePayloadBytes)),
+		AgreedMaxResponseBatchItems: negotiateLimit(hello.MaxResponseBatchItems, effectiveBatchLimit(server.config.MaxResponseBatchItems)),
 	}
+	status := negStatusOK
 
-	if authToken != 0 && hello.authToken != authToken {
-		ack.status = errorAccessDenied
+	if server.authToken != 0 && hello.AuthToken != server.authToken {
+		status = errorAccessDenied
 	} else {
-		candidates := ack.intersection & preferred
+		candidates := ack.Intersection & server.preferredProfiles
 		if candidates == 0 {
-			candidates = ack.intersection
+			candidates = ack.Intersection
 		}
-		ack.selected = selectProfile(candidates)
-		if ack.selected == 0 {
-			ack.status = errorNotSupported
+		ack.Selected = selectProfile(candidates)
+		if ack.Selected == 0 {
+			status = errorNotSupported
+		} else if ack.AgreedMaxRequestPayload == 0 || ack.AgreedMaxRequestBatchItems == 0 ||
+			ack.AgreedMaxResponsePayload == 0 || ack.AgreedMaxResponseBatchItems == 0 {
+			status = errorInvalidParameter
 		}
 	}
 
-	if err := pipeWriteFrame(pipe, encodeNeg(ack)); err != nil {
-		return 0, err
+	if err := pipeWriteFrame(pipe, encodeAckNeg(ack, status)); err != nil {
+		return negotiationResult{}, err
 	}
-	if ack.status != negStatusOK {
-		return 0, fmt.Errorf("negotiation failed: status %d", ack.status)
+	if status != negStatusOK {
+		return negotiationResult{}, fmt.Errorf("negotiation failed: status %d", status)
 	}
-	return ack.selected, nil
+
+	maxRequestMessageLen, err := computeMaxMessageLen(ack.AgreedMaxRequestPayload, ack.AgreedMaxRequestBatchItems)
+	if err != nil {
+		return negotiationResult{}, err
+	}
+	maxResponseMessageLen, err := computeMaxMessageLen(ack.AgreedMaxResponsePayload, ack.AgreedMaxResponseBatchItems)
+	if err != nil {
+		return negotiationResult{}, err
+	}
+	return negotiationResult{
+		profile:                       ack.Selected,
+		agreedMaxRequestPayloadBytes:  ack.AgreedMaxRequestPayload,
+		agreedMaxRequestBatchItems:    ack.AgreedMaxRequestBatchItems,
+		agreedMaxResponsePayloadBytes: ack.AgreedMaxResponsePayload,
+		agreedMaxResponseBatchItems:   ack.AgreedMaxResponseBatchItems,
+		maxRequestMessageLen:          maxRequestMessageLen,
+		maxResponseMessageLen:         maxResponseMessageLen,
+	}, nil
 }
 
-func clientHandshake(pipe syscall.Handle, supported, preferred uint32, authToken uint64, timeoutMS uint32) (uint32, error) {
-	hello := negMessage{
-		typ:       negHello,
-		supported: supported,
-		preferred: preferred,
-		authToken: authToken,
-		status:    negStatusOK,
+func clientHandshake(client *Client, pipe syscall.Handle, timeoutMS uint32) (negotiationResult, error) {
+	hello := protocol.HelloPayload{
+		LayoutVersion:           protocol.MessageVersion,
+		Flags:                   0,
+		Supported:               client.supportedProfiles,
+		Preferred:               client.preferredProfiles,
+		MaxRequestPayloadBytes:  effectivePayloadLimit(client.config.MaxRequestPayloadBytes),
+		MaxRequestBatchItems:    effectiveBatchLimit(client.config.MaxRequestBatchItems),
+		MaxResponsePayloadBytes: effectivePayloadLimit(client.config.MaxResponsePayloadBytes),
+		MaxResponseBatchItems:   effectiveBatchLimit(client.config.MaxResponseBatchItems),
+		AuthToken:               client.authToken,
 	}
-	if err := pipeWriteFrame(pipe, encodeNeg(hello)); err != nil {
-		return 0, err
+	if err := pipeWriteFrame(pipe, encodeHelloNeg(hello)); err != nil {
+		return negotiationResult{}, err
 	}
 	ackFrame, err := pipeReadFrame(pipe, timeoutMS)
 	if err != nil {
-		return 0, err
+		return negotiationResult{}, err
 	}
-	ack, err := decodeNeg(ackFrame, negAck)
+	ack, status, err := decodeAckNeg(ackFrame)
 	if err != nil {
-		return 0, err
+		return negotiationResult{}, err
 	}
-	if ack.status != negStatusOK {
-		return 0, fmt.Errorf("server rejected: status %d", ack.status)
+	if status != negStatusOK {
+		return negotiationResult{}, fmt.Errorf("server rejected: status %d", status)
 	}
-	if ack.selected == 0 || (ack.selected&supported) == 0 || (ack.intersection&supported) == 0 {
-		return 0, errors.New("invalid negotiated profile")
+	if ack.Selected == 0 || (ack.Selected&client.supportedProfiles) == 0 || (ack.Intersection&client.supportedProfiles) == 0 ||
+		ack.AgreedMaxRequestPayload == 0 || ack.AgreedMaxRequestBatchItems == 0 ||
+		ack.AgreedMaxResponsePayload == 0 || ack.AgreedMaxResponseBatchItems == 0 {
+		return negotiationResult{}, errors.New("invalid negotiated profile")
 	}
-	return ack.selected, nil
+	maxRequestMessageLen, err := computeMaxMessageLen(ack.AgreedMaxRequestPayload, ack.AgreedMaxRequestBatchItems)
+	if err != nil {
+		return negotiationResult{}, err
+	}
+	maxResponseMessageLen, err := computeMaxMessageLen(ack.AgreedMaxResponsePayload, ack.AgreedMaxResponseBatchItems)
+	if err != nil {
+		return negotiationResult{}, err
+	}
+	return negotiationResult{
+		profile:                       ack.Selected,
+		agreedMaxRequestPayloadBytes:  ack.AgreedMaxRequestPayload,
+		agreedMaxRequestBatchItems:    ack.AgreedMaxRequestBatchItems,
+		agreedMaxResponsePayloadBytes: ack.AgreedMaxResponsePayload,
+		agreedMaxResponseBatchItems:   ack.AgreedMaxResponseBatchItems,
+		maxRequestMessageLen:          maxRequestMessageLen,
+		maxResponseMessageLen:         maxResponseMessageLen,
+	}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +815,7 @@ func shmLoadI64(base uintptr, off int) int64 {
 }
 
 func shmStoreI64(base uintptr, off int, val int64) {
-	atomic.StoreInt64((*int64)(unsafe.Pointer(base + uintptr(off))), val)
+	atomic.StoreInt64((*int64)(unsafe.Pointer(base+uintptr(off))), val)
 }
 
 func shmLoadI32(base uintptr, off int) int32 {
@@ -526,7 +823,7 @@ func shmLoadI32(base uintptr, off int) int32 {
 }
 
 func shmStoreI32(base uintptr, off int, val int32) {
-	atomic.StoreInt32((*int32)(unsafe.Pointer(base + uintptr(off))), val)
+	atomic.StoreInt32((*int32)(unsafe.Pointer(base+uintptr(off))), val)
 }
 
 func shmCopyFrame(base uintptr, off int) protocol.Frame {
@@ -546,23 +843,44 @@ func shmWriteFrame(base uintptr, off int, frame protocol.Frame) {
 // ---------------------------------------------------------------------------
 
 type shmServer struct {
-	mapping       syscall.Handle
-	requestEvent  syscall.Handle
-	responseEvent syscall.Handle
-	region        uintptr
-	lastReqSeq    int64
-	activeReqSeq  int64
-	spinTries     uint32
+	mapping               syscall.Handle
+	requestEvent          syscall.Handle
+	responseEvent         syscall.Handle
+	region                uintptr
+	mappingLen            int
+	lastReqSeq            int64
+	activeReqSeq          int64
+	spinTries             uint32
+	maxRequestMessageLen  int
+	maxResponseMessageLen int
 }
 
 func newSHMServer(config *Config, profile uint32) (*shmServer, error) {
 	mappingName := buildKernelObjectName(config, profile, "shm")
 	reqEventName := buildKernelObjectName(config, profile, "req")
 	respEventName := buildKernelObjectName(config, profile, "resp")
+	maxRequestMessageLen, err := computeMaxMessageLen(
+		effectivePayloadLimit(config.MaxRequestPayloadBytes),
+		effectiveBatchLimit(config.MaxRequestBatchItems),
+	)
+	if err != nil {
+		return nil, err
+	}
+	maxResponseMessageLen, err := computeMaxMessageLen(
+		effectivePayloadLimit(config.MaxResponsePayloadBytes),
+		effectiveBatchLimit(config.MaxResponseBatchItems),
+	)
+	if err != nil {
+		return nil, err
+	}
+	requestOffset, responseOffset, mappingLen, err := computeRegionLayout(maxRequestMessageLen, maxResponseMessageLen)
+	if err != nil {
+		return nil, err
+	}
 
 	mapping, _, lastErr := procCreateFileMappingW.Call(
 		uintptr(invalidHandleValue), 0, uintptr(pageReadWrite),
-		0, uintptr(regionSize), uintptr(unsafe.Pointer(toUTF16(mappingName))),
+		uintptr(uint64(mappingLen)>>32), uintptr(uint64(mappingLen)&0xffffffff), uintptr(unsafe.Pointer(toUTF16(mappingName))),
 	)
 	if mapping == 0 {
 		return nil, fmt.Errorf("CreateFileMappingW: %w", lastErr)
@@ -572,14 +890,14 @@ func newSHMServer(config *Config, profile uint32) (*shmServer, error) {
 		return nil, errors.New("SHM already exists")
 	}
 
-	region, _, lastErr := procMapViewOfFile.Call(mapping, uintptr(fileMapAllAccess), 0, 0, uintptr(regionSize))
+	region, _, lastErr := procMapViewOfFile.Call(mapping, uintptr(fileMapAllAccess), 0, 0, uintptr(mappingLen))
 	if region == 0 {
 		closeHandle(syscall.Handle(mapping))
 		return nil, fmt.Errorf("MapViewOfFile: %w", lastErr)
 	}
 
 	// Zero region
-	for i := 0; i < regionSize; i++ {
+	for i := 0; i < mappingLen; i++ {
 		*(*byte)(unsafe.Pointer(region + uintptr(i))) = 0
 	}
 
@@ -587,7 +905,12 @@ func newSHMServer(config *Config, profile uint32) (*shmServer, error) {
 	spin := effectiveSpinTries(config)
 	binary.LittleEndian.PutUint32((*[4]byte)(unsafe.Pointer(region + uintptr(offHdrMagic)))[:], shmRegionMagic)
 	binary.LittleEndian.PutUint32((*[4]byte)(unsafe.Pointer(region + uintptr(offHdrVersion)))[:], shmRegionVersion)
+	binary.LittleEndian.PutUint32((*[4]byte)(unsafe.Pointer(region + uintptr(offHdrHeaderLen)))[:], hdrSize)
 	binary.LittleEndian.PutUint32((*[4]byte)(unsafe.Pointer(region + uintptr(offHdrProfile)))[:], profile)
+	binary.LittleEndian.PutUint32((*[4]byte)(unsafe.Pointer(region + uintptr(offHdrReqOffset)))[:], uint32(requestOffset))
+	binary.LittleEndian.PutUint32((*[4]byte)(unsafe.Pointer(region + uintptr(offHdrReqCapacity)))[:], uint32(maxRequestMessageLen))
+	binary.LittleEndian.PutUint32((*[4]byte)(unsafe.Pointer(region + uintptr(offHdrRespOffset)))[:], uint32(responseOffset))
+	binary.LittleEndian.PutUint32((*[4]byte)(unsafe.Pointer(region + uintptr(offHdrRespCapacity)))[:], uint32(maxResponseMessageLen))
 	binary.LittleEndian.PutUint32((*[4]byte)(unsafe.Pointer(region + uintptr(offHdrSpinTries)))[:], spin)
 
 	reqEvent, _, lastErr := procCreateEventW.Call(0, 0, 0, uintptr(unsafe.Pointer(toUTF16(reqEventName))))
@@ -605,15 +928,31 @@ func newSHMServer(config *Config, profile uint32) (*shmServer, error) {
 	}
 
 	return &shmServer{
-		mapping:       syscall.Handle(mapping),
-		requestEvent:  syscall.Handle(reqEvent),
-		responseEvent: syscall.Handle(respEvent),
-		region:        region,
-		spinTries:     spin,
+		mapping:               syscall.Handle(mapping),
+		requestEvent:          syscall.Handle(reqEvent),
+		responseEvent:         syscall.Handle(respEvent),
+		region:                region,
+		mappingLen:            mappingLen,
+		spinTries:             spin,
+		maxRequestMessageLen:  maxRequestMessageLen,
+		maxResponseMessageLen: maxResponseMessageLen,
 	}, nil
 }
 
-func (s *shmServer) receiveFrame(timeoutMS uint32) (protocol.Frame, error) {
+func (s *shmServer) receiveBytes(message []byte, messageCapacity int, timeoutMS uint32) (int, error) {
+	if messageCapacity > len(message) {
+		return 0, errors.New("message buffer is smaller than requested capacity")
+	}
+	if messageCapacity <= 0 {
+		return 0, errors.New("message capacity must not be zero")
+	}
+	if messageCapacity > s.maxRequestMessageLen {
+		return 0, errors.New("message capacity exceeds negotiated request size")
+	}
+	if len(message) < messageCapacity {
+		return 0, errors.New("message buffer is smaller than negotiated request size")
+	}
+
 	var deadline uint64
 	if timeoutMS != 0 {
 		deadline = nowMS() + uint64(timeoutMS)
@@ -623,14 +962,18 @@ func (s *shmServer) receiveFrame(timeoutMS uint32) (protocol.Frame, error) {
 	for {
 		current := shmLoadI64(s.region, offReqSeq)
 		if current != s.lastReqSeq {
-			frame := shmCopyFrame(s.region, offReqFrame)
+			messageLen := shmLoadI32(s.region, offReqLen)
+			if messageLen < 0 || int(messageLen) > messageCapacity || int(messageLen) > requestCapacity(s.region) {
+				return 0, errors.New("invalid SHM request length")
+			}
+			copy(message[:messageLen], unsafe.Slice((*byte)(unsafe.Pointer(s.region+uintptr(requestArea(s.region)))), int(messageLen)))
 			s.activeReqSeq = current
 			s.lastReqSeq = current
-			return frame, nil
+			return int(messageLen), nil
 		}
 
 		if shmLoadI32(s.region, offReqClientClosed) != 0 {
-			return protocol.Frame{}, errors.New("client closed")
+			return 0, io.EOF
 		}
 
 		runtime.Gosched()
@@ -646,10 +989,14 @@ func (s *shmServer) receiveFrame(timeoutMS uint32) (protocol.Frame, error) {
 		current = shmLoadI64(s.region, offReqSeq)
 		if current != s.lastReqSeq {
 			shmStoreI32(s.region, offReqServerWait, 0)
-			frame := shmCopyFrame(s.region, offReqFrame)
+			messageLen := shmLoadI32(s.region, offReqLen)
+			if messageLen < 0 || int(messageLen) > messageCapacity || int(messageLen) > requestCapacity(s.region) {
+				return 0, errors.New("invalid SHM request length")
+			}
+			copy(message[:messageLen], unsafe.Slice((*byte)(unsafe.Pointer(s.region+uintptr(requestArea(s.region)))), int(messageLen)))
 			s.activeReqSeq = current
 			s.lastReqSeq = current
-			return frame, nil
+			return int(messageLen), nil
 		}
 
 		waitMS := uint32(infinite)
@@ -657,7 +1004,7 @@ func (s *shmServer) receiveFrame(timeoutMS uint32) (protocol.Frame, error) {
 			now := nowMS()
 			if now >= deadline {
 				shmStoreI32(s.region, offReqServerWait, 0)
-				return protocol.Frame{}, errors.New("SHM receive timeout")
+				return 0, errors.New("SHM receive timeout")
 			}
 			waitMS = uint32(deadline - now)
 		}
@@ -670,17 +1017,41 @@ func (s *shmServer) receiveFrame(timeoutMS uint32) (protocol.Frame, error) {
 			continue
 		}
 		if uint32(rc) == waitTimeout {
-			return protocol.Frame{}, errors.New("SHM receive timeout")
+			return 0, errors.New("SHM receive timeout")
 		}
-		return protocol.Frame{}, fmt.Errorf("WaitForSingleObject(req): %w", lastErr)
+		return 0, fmt.Errorf("WaitForSingleObject(req): %w", lastErr)
 	}
 }
 
-func (s *shmServer) sendFrame(frame protocol.Frame) error {
+func (s *shmServer) receiveMessage(message []byte, timeoutMS uint32) (int, error) {
+	messageLen, err := s.receiveBytes(message, s.maxRequestMessageLen, timeoutMS)
+	if err != nil {
+		return 0, err
+	}
+	if err := validateReceivedMessage(message, messageLen, s.maxRequestMessageLen); err != nil {
+		return 0, err
+	}
+	return messageLen, nil
+}
+
+func (s *shmServer) sendBytes(message []byte, messageCapacity int) error {
 	if s.activeReqSeq == 0 {
 		return errors.New("no active request")
 	}
-	shmWriteFrame(s.region, offRespFrame, frame)
+	if messageCapacity <= 0 {
+		return errors.New("message capacity must not be zero")
+	}
+	if messageCapacity > s.maxResponseMessageLen {
+		return errors.New("message capacity exceeds negotiated response size")
+	}
+	if len(message) == 0 {
+		return errors.New("message must not be empty")
+	}
+	if len(message) > messageCapacity {
+		return errors.New("message exceeds negotiated size")
+	}
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(s.region+uintptr(responseArea(s.region)))), len(message)), message)
+	shmStoreI32(s.region, offRespLen, int32(len(message)))
 	shmStoreI64(s.region, offRespSeq, s.activeReqSeq)
 
 	// Conditional SetEvent
@@ -689,6 +1060,35 @@ func (s *shmServer) sendFrame(frame protocol.Frame) error {
 	}
 	s.activeReqSeq = 0
 	return nil
+}
+
+func (s *shmServer) sendMessage(message []byte) error {
+	if err := validateMessageForSend(message, s.maxResponseMessageLen); err != nil {
+		return err
+	}
+	return s.sendBytes(message, s.maxResponseMessageLen)
+}
+
+func (s *shmServer) receiveFrame(timeoutMS uint32) (protocol.Frame, error) {
+	if s.maxRequestMessageLen < protocol.FrameSize {
+		return protocol.Frame{}, errors.New("negotiated request size is smaller than frame size")
+	}
+	var message protocol.Frame
+	messageLen, err := s.receiveBytes(message[:], protocol.FrameSize, timeoutMS)
+	if err != nil {
+		return protocol.Frame{}, err
+	}
+	if messageLen != protocol.FrameSize {
+		return protocol.Frame{}, errors.New("invalid SHM frame length")
+	}
+	return message, nil
+}
+
+func (s *shmServer) sendFrame(frame protocol.Frame) error {
+	if s.maxResponseMessageLen < protocol.FrameSize {
+		return errors.New("negotiated response size is smaller than frame size")
+	}
+	return s.sendBytes(frame[:], protocol.FrameSize)
 }
 
 func (s *shmServer) close() {
@@ -708,18 +1108,39 @@ func (s *shmServer) close() {
 // ---------------------------------------------------------------------------
 
 type shmClient struct {
-	mapping       syscall.Handle
-	requestEvent  syscall.Handle
-	responseEvent syscall.Handle
-	region        uintptr
-	nextReqSeq    int64
-	spinTries     uint32
+	mapping               syscall.Handle
+	requestEvent          syscall.Handle
+	responseEvent         syscall.Handle
+	region                uintptr
+	mappingLen            int
+	nextReqSeq            int64
+	spinTries             uint32
+	maxRequestMessageLen  int
+	maxResponseMessageLen int
 }
 
 func newSHMClient(config *Config, profile uint32, timeoutMS uint32) (*shmClient, error) {
 	mappingName := buildKernelObjectName(config, profile, "shm")
 	reqEventName := buildKernelObjectName(config, profile, "req")
 	respEventName := buildKernelObjectName(config, profile, "resp")
+	maxRequestMessageLen, err := computeMaxMessageLen(
+		effectivePayloadLimit(config.MaxRequestPayloadBytes),
+		effectiveBatchLimit(config.MaxRequestBatchItems),
+	)
+	if err != nil {
+		return nil, err
+	}
+	maxResponseMessageLen, err := computeMaxMessageLen(
+		effectivePayloadLimit(config.MaxResponsePayloadBytes),
+		effectiveBatchLimit(config.MaxResponseBatchItems),
+	)
+	if err != nil {
+		return nil, err
+	}
+	requestOffset, responseOffset, mappingLen, err := computeRegionLayout(maxRequestMessageLen, maxResponseMessageLen)
+	if err != nil {
+		return nil, err
+	}
 
 	var deadline uint64
 	if timeoutMS != 0 {
@@ -748,7 +1169,7 @@ func newSHMClient(config *Config, profile uint32, timeoutMS uint32) (*shmClient,
 		sleepMS(1)
 	}
 
-	region, _, lastErr := procMapViewOfFile.Call(mapping, uintptr(fileMapAllAccess), 0, 0, uintptr(regionSize))
+	region, _, lastErr := procMapViewOfFile.Call(mapping, uintptr(fileMapAllAccess), 0, 0, uintptr(mappingLen))
 	if region == 0 {
 		closeHandle(syscall.Handle(respEvent))
 		closeHandle(syscall.Handle(reqEvent))
@@ -756,12 +1177,11 @@ func newSHMClient(config *Config, profile uint32, timeoutMS uint32) (*shmClient,
 		return nil, fmt.Errorf("MapViewOfFile: %w", lastErr)
 	}
 
-	// Wait for region ready
+	var regionSpin uint32
 	for {
-		magic := binary.LittleEndian.Uint32((*[4]byte)(unsafe.Pointer(region + uintptr(offHdrMagic)))[:])
-		ver := binary.LittleEndian.Uint32((*[4]byte)(unsafe.Pointer(region + uintptr(offHdrVersion)))[:])
-		prof := binary.LittleEndian.Uint32((*[4]byte)(unsafe.Pointer(region + uintptr(offHdrProfile)))[:])
-		if magic == shmRegionMagic && ver == shmRegionVersion && prof == profile {
+		spin, err := validateRegionHeader(region, mappingLen, profile)
+		if err == nil {
+			regionSpin = spin
 			break
 		}
 		if deadline != 0 && nowMS() >= deadline {
@@ -773,8 +1193,14 @@ func newSHMClient(config *Config, profile uint32, timeoutMS uint32) (*shmClient,
 		}
 		sleepMS(1)
 	}
-
-	regionSpin := binary.LittleEndian.Uint32((*[4]byte)(unsafe.Pointer(region + uintptr(offHdrSpinTries)))[:])
+	if requestArea(region) != requestOffset || responseArea(region) != responseOffset ||
+		requestCapacity(region) < maxRequestMessageLen || responseCapacity(region) < maxResponseMessageLen {
+		procUnmapViewOfFile.Call(region)
+		closeHandle(syscall.Handle(respEvent))
+		closeHandle(syscall.Handle(reqEvent))
+		closeHandle(syscall.Handle(mapping))
+		return nil, errors.New("SHM region capacity mismatch")
+	}
 	spin := regionSpin
 	if spin == 0 {
 		spin = effectiveSpinTries(config)
@@ -783,20 +1209,40 @@ func newSHMClient(config *Config, profile uint32, timeoutMS uint32) (*shmClient,
 	nextReqSeq := shmLoadI64(region, offReqSeq)
 
 	return &shmClient{
-		mapping:       syscall.Handle(mapping),
-		requestEvent:  syscall.Handle(reqEvent),
-		responseEvent: syscall.Handle(respEvent),
-		region:        region,
-		nextReqSeq:    nextReqSeq,
-		spinTries:     spin,
+		mapping:               syscall.Handle(mapping),
+		requestEvent:          syscall.Handle(reqEvent),
+		responseEvent:         syscall.Handle(respEvent),
+		region:                region,
+		mappingLen:            mappingLen,
+		nextReqSeq:            nextReqSeq,
+		spinTries:             spin,
+		maxRequestMessageLen:  maxRequestMessageLen,
+		maxResponseMessageLen: maxResponseMessageLen,
 	}, nil
 }
 
-func (c *shmClient) callFrame(request protocol.Frame, timeoutMS uint32) (protocol.Frame, error) {
+func (c *shmClient) callBytes(request []byte, response []byte, requestCapacity int, responseCapacityLimit int, timeoutMS uint32) (int, error) {
+	if requestCapacity <= 0 || responseCapacityLimit <= 0 {
+		return 0, errors.New("message capacity must not be zero")
+	}
+	if requestCapacity > c.maxRequestMessageLen || responseCapacityLimit > c.maxResponseMessageLen {
+		return 0, errors.New("message capacity exceeds negotiated limits")
+	}
+	if len(request) == 0 {
+		return 0, errors.New("message must not be empty")
+	}
+	if len(request) > requestCapacity {
+		return 0, errors.New("message exceeds negotiated size")
+	}
+	if len(response) < responseCapacityLimit {
+		return 0, errors.New("response buffer is smaller than negotiated response size")
+	}
+
 	reqSeq := c.nextReqSeq + 1
 	c.nextReqSeq = reqSeq
 
-	shmWriteFrame(c.region, offReqFrame, request)
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(c.region+uintptr(requestArea(c.region)))), len(request)), request)
+	shmStoreI32(c.region, offReqLen, int32(len(request)))
 	shmStoreI64(c.region, offReqSeq, reqSeq)
 
 	// Conditional SetEvent
@@ -814,11 +1260,16 @@ func (c *shmClient) callFrame(request protocol.Frame, timeoutMS uint32) (protoco
 	for {
 		current := shmLoadI64(c.region, offRespSeq)
 		if current >= reqSeq {
-			return shmCopyFrame(c.region, offRespFrame), nil
+			responseLen := shmLoadI32(c.region, offRespLen)
+			if responseLen < 0 || int(responseLen) > responseCapacityLimit || int(responseLen) > responseCapacity(c.region) {
+				return 0, errors.New("invalid SHM response length")
+			}
+			copy(response[:responseLen], unsafe.Slice((*byte)(unsafe.Pointer(c.region+uintptr(responseArea(c.region)))), int(responseLen)))
+			return int(responseLen), nil
 		}
 
 		if shmLoadI32(c.region, offRespServerClosed) != 0 {
-			return protocol.Frame{}, errors.New("server closed")
+			return 0, errors.New("server closed")
 		}
 
 		runtime.Gosched()
@@ -833,7 +1284,12 @@ func (c *shmClient) callFrame(request protocol.Frame, timeoutMS uint32) (protoco
 		current = shmLoadI64(c.region, offRespSeq)
 		if current >= reqSeq {
 			shmStoreI32(c.region, offRespClientWait, 0)
-			return shmCopyFrame(c.region, offRespFrame), nil
+			responseLen := shmLoadI32(c.region, offRespLen)
+			if responseLen < 0 || int(responseLen) > responseCapacityLimit || int(responseLen) > responseCapacity(c.region) {
+				return 0, errors.New("invalid SHM response length")
+			}
+			copy(response[:responseLen], unsafe.Slice((*byte)(unsafe.Pointer(c.region+uintptr(responseArea(c.region)))), int(responseLen)))
+			return int(responseLen), nil
 		}
 
 		waitMS := uint32(infinite)
@@ -841,7 +1297,7 @@ func (c *shmClient) callFrame(request protocol.Frame, timeoutMS uint32) (protoco
 			now := nowMS()
 			if now >= deadline {
 				shmStoreI32(c.region, offRespClientWait, 0)
-				return protocol.Frame{}, errors.New("SHM response timeout")
+				return 0, errors.New("SHM response timeout")
 			}
 			waitMS = uint32(deadline - now)
 		}
@@ -854,10 +1310,39 @@ func (c *shmClient) callFrame(request protocol.Frame, timeoutMS uint32) (protoco
 			continue
 		}
 		if uint32(rc) == waitTimeout {
-			return protocol.Frame{}, errors.New("SHM response timeout")
+			return 0, errors.New("SHM response timeout")
 		}
-		return protocol.Frame{}, fmt.Errorf("WaitForSingleObject(resp): %w", lastErr)
+		return 0, fmt.Errorf("WaitForSingleObject(resp): %w", lastErr)
 	}
+}
+
+func (c *shmClient) callMessage(request []byte, response []byte, timeoutMS uint32) (int, error) {
+	if err := validateMessageForSend(request, c.maxRequestMessageLen); err != nil {
+		return 0, err
+	}
+	responseLen, err := c.callBytes(request, response, c.maxRequestMessageLen, c.maxResponseMessageLen, timeoutMS)
+	if err != nil {
+		return 0, err
+	}
+	if err := validateReceivedMessage(response, responseLen, c.maxResponseMessageLen); err != nil {
+		return 0, err
+	}
+	return responseLen, nil
+}
+
+func (c *shmClient) callFrame(request protocol.Frame, timeoutMS uint32) (protocol.Frame, error) {
+	if c.maxRequestMessageLen < protocol.FrameSize || c.maxResponseMessageLen < protocol.FrameSize {
+		return protocol.Frame{}, errors.New("negotiated frame size exceeds SHM capacities")
+	}
+	var response protocol.Frame
+	responseLen, err := c.callBytes(request[:], response[:], protocol.FrameSize, protocol.FrameSize, timeoutMS)
+	if err != nil {
+		return protocol.Frame{}, err
+	}
+	if responseLen != protocol.FrameSize {
+		return protocol.Frame{}, errors.New("invalid SHM frame length")
+	}
+	return response, nil
 }
 
 func (c *shmClient) close() {
@@ -878,14 +1363,16 @@ func (c *shmClient) close() {
 
 // Server is a Named Pipe server that may upgrade to SHM HYBRID.
 type Server struct {
-	pipe              syscall.Handle
-	config            Config
-	supportedProfiles uint32
-	preferredProfiles uint32
-	authToken         uint64
-	negotiatedProfile uint32
-	shm               *shmServer
-	connected         bool
+	pipe                  syscall.Handle
+	config                Config
+	supportedProfiles     uint32
+	preferredProfiles     uint32
+	authToken             uint64
+	negotiatedProfile     uint32
+	maxRequestMessageLen  int
+	maxResponseMessageLen int
+	shm                   *shmServer
+	connected             bool
 }
 
 // Listen creates a Named Pipe server.
@@ -896,14 +1383,32 @@ func Listen(config Config) (*Server, error) {
 	pipeName := buildPipeName(&config)
 	supported := effectiveSupported(&config)
 	preferred := effectivePreferred(&config, supported)
+	maxRequestMessageLen, err := computeMaxMessageLen(
+		effectivePayloadLimit(config.MaxRequestPayloadBytes),
+		effectiveBatchLimit(config.MaxRequestBatchItems),
+	)
+	if err != nil {
+		return nil, err
+	}
+	maxResponseMessageLen, err := computeMaxMessageLen(
+		effectivePayloadLimit(config.MaxResponsePayloadBytes),
+		effectiveBatchLimit(config.MaxResponseBatchItems),
+	)
+	if err != nil {
+		return nil, err
+	}
+	maxDefaultMessageLen := maxRequestMessageLen
+	if maxResponseMessageLen > maxDefaultMessageLen {
+		maxDefaultMessageLen = maxResponseMessageLen
+	}
 
 	pipe, _, lastErr := procCreateNamedPipeW.Call(
 		uintptr(unsafe.Pointer(toUTF16(pipeName))),
 		uintptr(pipeAccessDuplex|fileFlagFirstPipeInstance),
 		uintptr(pipeTypeMessage|pipeReadModeMessage|pipeWait),
 		1,
-		uintptr(protocol.FrameSize*4),
-		uintptr(protocol.FrameSize*4),
+		uintptr(maxDefaultMessageLen),
+		uintptr(maxDefaultMessageLen),
 		0, 0,
 	)
 	if syscall.Handle(pipe) == invalidHandleValue {
@@ -959,14 +1464,19 @@ func (s *Server) Accept(timeout time.Duration) error {
 		return err
 	}
 
-	profile, err := serverHandshake(s.pipe, s.supportedProfiles, s.preferredProfiles, s.authToken, timeoutMS)
+	negotiated, err := serverHandshake(s, s.pipe, timeoutMS)
 	if err != nil {
 		procDisconnectNamedPipe.Call(uintptr(s.pipe))
 		return err
 	}
 
-	if isSHMProfile(profile) {
-		shm, err := newSHMServer(&s.config, profile)
+	if isSHMProfile(negotiated.profile) {
+		shmConfig := s.config
+		shmConfig.MaxRequestPayloadBytes = negotiated.agreedMaxRequestPayloadBytes
+		shmConfig.MaxRequestBatchItems = negotiated.agreedMaxRequestBatchItems
+		shmConfig.MaxResponsePayloadBytes = negotiated.agreedMaxResponsePayloadBytes
+		shmConfig.MaxResponseBatchItems = negotiated.agreedMaxResponseBatchItems
+		shm, err := newSHMServer(&shmConfig, negotiated.profile)
 		if err != nil {
 			procDisconnectNamedPipe.Call(uintptr(s.pipe))
 			return err
@@ -974,9 +1484,32 @@ func (s *Server) Accept(timeout time.Duration) error {
 		s.shm = shm
 	}
 
-	s.negotiatedProfile = profile
+	s.negotiatedProfile = negotiated.profile
+	s.maxRequestMessageLen = negotiated.maxRequestMessageLen
+	s.maxResponseMessageLen = negotiated.maxResponseMessageLen
 	s.connected = true
 	return nil
+}
+
+func (s *Server) ReceiveMessage(message []byte, timeout time.Duration) (int, error) {
+	timeoutMS := uint32(0)
+	if timeout > 0 {
+		timeoutMS = uint32(timeout.Milliseconds())
+	}
+	if s.shm != nil {
+		return s.shm.receiveMessage(message, timeoutMS)
+	}
+	if s.maxRequestMessageLen == 0 || len(message) < s.maxRequestMessageLen {
+		return 0, errors.New("message buffer is smaller than negotiated request size")
+	}
+	messageLen, err := pipeReadMessage(s.pipe, message, timeoutMS)
+	if err != nil {
+		return 0, err
+	}
+	if err := validateReceivedMessage(message, messageLen, s.maxRequestMessageLen); err != nil {
+		return 0, err
+	}
+	return messageLen, nil
 }
 
 // ReceiveFrame receives a single frame.
@@ -989,6 +1522,20 @@ func (s *Server) ReceiveFrame(timeout time.Duration) (protocol.Frame, error) {
 		return s.shm.receiveFrame(timeoutMS)
 	}
 	return pipeReadFrame(s.pipe, timeoutMS)
+}
+
+func (s *Server) SendMessage(message []byte, timeout time.Duration) error {
+	_ = timeout
+	if s.shm != nil {
+		return s.shm.sendMessage(message)
+	}
+	if s.maxResponseMessageLen == 0 {
+		return errors.New("negotiated response size is not available")
+	}
+	if err := validateMessageForSend(message, s.maxResponseMessageLen); err != nil {
+		return err
+	}
+	return pipeWriteMessage(s.pipe, message)
 }
 
 // SendFrame sends a single frame.
@@ -1038,14 +1585,16 @@ func (s *Server) Close() error {
 
 // Client is a Named Pipe client that may upgrade to SHM HYBRID.
 type Client struct {
-	pipe              syscall.Handle
-	config            Config
-	supportedProfiles uint32
-	preferredProfiles uint32
-	authToken         uint64
-	negotiatedProfile uint32
-	shm               *shmClient
-	nextRequestID     uint64
+	pipe                  syscall.Handle
+	config                Config
+	supportedProfiles     uint32
+	preferredProfiles     uint32
+	authToken             uint64
+	negotiatedProfile     uint32
+	maxRequestMessageLen  int
+	maxResponseMessageLen int
+	shm                   *shmClient
+	nextRequestID         uint64
 }
 
 // Dial connects to a Named Pipe server.
@@ -1100,15 +1649,31 @@ func Dial(config Config, timeout time.Duration) (*Client, error) {
 		return nil, err
 	}
 
-	profile, err := clientHandshake(pipe, supported, preferred, config.AuthToken, timeoutMS)
+	negotiated, err := clientHandshake(&Client{
+		pipe:                  pipe,
+		config:                config,
+		supportedProfiles:     supported,
+		preferredProfiles:     preferred,
+		authToken:             config.AuthToken,
+		negotiatedProfile:     0,
+		maxRequestMessageLen:  0,
+		maxResponseMessageLen: 0,
+		shm:                   nil,
+		nextRequestID:         1,
+	}, pipe, timeoutMS)
 	if err != nil {
 		closeHandle(pipe)
 		return nil, err
 	}
 
 	var shm *shmClient
-	if isSHMProfile(profile) {
-		shm, err = newSHMClient(&config, profile, timeoutMS)
+	if isSHMProfile(negotiated.profile) {
+		shmConfig := config
+		shmConfig.MaxRequestPayloadBytes = negotiated.agreedMaxRequestPayloadBytes
+		shmConfig.MaxRequestBatchItems = negotiated.agreedMaxRequestBatchItems
+		shmConfig.MaxResponsePayloadBytes = negotiated.agreedMaxResponsePayloadBytes
+		shmConfig.MaxResponseBatchItems = negotiated.agreedMaxResponseBatchItems
+		shm, err = newSHMClient(&shmConfig, negotiated.profile, timeoutMS)
 		if err != nil {
 			closeHandle(pipe)
 			return nil, err
@@ -1116,15 +1681,47 @@ func Dial(config Config, timeout time.Duration) (*Client, error) {
 	}
 
 	return &Client{
-		pipe:              pipe,
-		config:            config,
-		supportedProfiles: supported,
-		preferredProfiles: preferred,
-		authToken:         config.AuthToken,
-		negotiatedProfile: profile,
-		shm:               shm,
-		nextRequestID:     1,
+		pipe:                  pipe,
+		config:                config,
+		supportedProfiles:     supported,
+		preferredProfiles:     preferred,
+		authToken:             config.AuthToken,
+		negotiatedProfile:     negotiated.profile,
+		maxRequestMessageLen:  negotiated.maxRequestMessageLen,
+		maxResponseMessageLen: negotiated.maxResponseMessageLen,
+		shm:                   shm,
+		nextRequestID:         1,
 	}, nil
+}
+
+func (c *Client) CallMessage(request []byte, response []byte, timeout time.Duration) (int, error) {
+	timeoutMS := uint32(0)
+	if timeout > 0 {
+		timeoutMS = uint32(timeout.Milliseconds())
+	}
+	if c.shm != nil {
+		return c.shm.callMessage(request, response, timeoutMS)
+	}
+	if c.maxRequestMessageLen == 0 || c.maxResponseMessageLen == 0 {
+		return 0, errors.New("negotiated message limits are not available")
+	}
+	if len(response) < c.maxResponseMessageLen {
+		return 0, errors.New("response buffer is smaller than negotiated response size")
+	}
+	if err := validateMessageForSend(request, c.maxRequestMessageLen); err != nil {
+		return 0, err
+	}
+	if err := pipeWriteMessage(c.pipe, request); err != nil {
+		return 0, err
+	}
+	messageLen, err := pipeReadMessage(c.pipe, response, timeoutMS)
+	if err != nil {
+		return 0, err
+	}
+	if err := validateReceivedMessage(response, messageLen, c.maxResponseMessageLen); err != nil {
+		return 0, err
+	}
+	return messageLen, nil
 }
 
 // CallFrame sends a request and waits for the response.

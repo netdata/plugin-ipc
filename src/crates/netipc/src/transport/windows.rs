@@ -6,13 +6,17 @@
 //! with the C version.
 
 use crate::protocol::{
-    decode_increment_request, decode_increment_response, encode_increment_request,
-    encode_increment_response, Frame, IncrementRequest, IncrementResponse, FRAME_SIZE,
+    decode_hello_ack_payload, decode_hello_payload, decode_increment_request,
+    decode_increment_response, decode_message_header, encode_hello_ack_payload,
+    encode_hello_payload, encode_increment_request, encode_increment_response,
+    max_batch_total_size, message_total_size, Frame, HelloAckPayload, HelloPayload,
+    IncrementRequest, IncrementResponse, CONTROL_HELLO_ACK_PAYLOAD_LEN, CONTROL_HELLO_PAYLOAD_LEN,
+    FRAME_SIZE, MAX_PAYLOAD_DEFAULT, MESSAGE_VERSION,
 };
 use std::io;
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::atomic::{AtomicI64, AtomicI32, Ordering, fence};
+use std::sync::atomic::{fence, AtomicI32, AtomicI64, Ordering};
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
@@ -55,10 +59,12 @@ mod win32 {
     pub const ERROR_PIPE_BUSY: DWORD = 231;
     pub const ERROR_PIPE_CONNECTED: DWORD = 535;
     pub const ERROR_PIPE_LISTENING: DWORD = 536;
+    pub const ERROR_PIPE_NOT_CONNECTED: DWORD = 233;
     pub const ERROR_NO_DATA: DWORD = 232;
     pub const ERROR_BROKEN_PIPE: DWORD = 109;
     pub const ERROR_ACCESS_DENIED: DWORD = 5;
     pub const ERROR_NOT_SUPPORTED: DWORD = 50;
+    pub const ERROR_INVALID_PARAMETER: DWORD = 87;
 
     pub const NMPWAIT_WAIT_FOREVER: DWORD = 0xFFFFFFFF;
 
@@ -102,11 +108,7 @@ mod win32 {
             bInitialState: BOOL,
             lpName: LPCWSTR,
         ) -> HANDLE;
-        pub fn OpenEventW(
-            dwDesiredAccess: DWORD,
-            bInheritHandle: BOOL,
-            lpName: LPCWSTR,
-        ) -> HANDLE;
+        pub fn OpenEventW(dwDesiredAccess: DWORD, bInheritHandle: BOOL, lpName: LPCWSTR) -> HANDLE;
         pub fn SetEvent(hEvent: HANDLE) -> BOOL;
         pub fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD) -> DWORD;
 
@@ -212,56 +214,40 @@ const NEGOTIATION_VERSION: u16 = 1;
 const NEGOTIATION_HELLO: u16 = 1;
 const NEGOTIATION_ACK: u16 = 2;
 const NEGOTIATION_STATUS_OK: u32 = 0;
+const NEGOTIATION_PAYLOAD_OFFSET: usize = 8;
+const NEGOTIATION_STATUS_OFFSET: usize = 48;
+const NEGOTIATION_DEFAULT_BATCH_ITEMS: u32 = 1;
 
 const NEG_OFF_MAGIC: usize = 0;
 const NEG_OFF_VERSION: usize = 4;
 const NEG_OFF_TYPE: usize = 6;
-const NEG_OFF_SUPPORTED: usize = 8;
-const NEG_OFF_PREFERRED: usize = 12;
-const NEG_OFF_INTERSECTION: usize = 16;
-const NEG_OFF_SELECTED: usize = 20;
-const NEG_OFF_AUTH_TOKEN: usize = 24;
-const NEG_OFF_STATUS: usize = 32;
 
 // ---------------------------------------------------------------------------
-// SHM region layout (wire-compatible with the C netipc_win_shm_region)
+// SHM region layout (wire-compatible with the C netipc_win_shm_header v3)
 // ---------------------------------------------------------------------------
 
 const SHM_REGION_MAGIC: u32 = 0x4e53_5748;
-const SHM_REGION_VERSION: u32 = 2;
+const SHM_REGION_VERSION: u32 = 3;
 const CACHELINE: usize = 64;
+const HDR_SIZE: usize = 128;
 
-/// Header: 64 bytes (1 cache line)
-///   magic(4) + version(4) + profile(4) + spin_tries(4) + reserved(48)
-const HDR_SIZE: usize = CACHELINE;
-
-/// Request slot: 128 bytes (2 cache lines)
-///   seq(8) + client_closed(4) + server_waiting(4) + reserved(48) + frame(64)
-const REQ_SLOT_SIZE: usize = CACHELINE + FRAME_SIZE;
-
-/// Response slot: 128 bytes (2 cache lines)
-///   seq(8) + server_closed(4) + client_waiting(4) + reserved(48) + frame(64)
-const RESP_SLOT_SIZE: usize = CACHELINE + FRAME_SIZE;
-
-const REGION_SIZE: usize = HDR_SIZE + REQ_SLOT_SIZE + RESP_SLOT_SIZE;
-
-// Offsets within the mapped region
 const OFF_HDR_MAGIC: usize = 0;
 const OFF_HDR_VERSION: usize = 4;
-const OFF_HDR_PROFILE: usize = 8;
-const OFF_HDR_SPIN_TRIES: usize = 12;
-
-const OFF_REQ: usize = HDR_SIZE;
-const OFF_REQ_SEQ: usize = OFF_REQ;
-const OFF_REQ_CLIENT_CLOSED: usize = OFF_REQ + 8;
-const OFF_REQ_SERVER_WAITING: usize = OFF_REQ + 12;
-const OFF_REQ_FRAME: usize = OFF_REQ + CACHELINE;
-
-const OFF_RESP: usize = HDR_SIZE + REQ_SLOT_SIZE;
-const OFF_RESP_SEQ: usize = OFF_RESP;
-const OFF_RESP_SERVER_CLOSED: usize = OFF_RESP + 8;
-const OFF_RESP_CLIENT_WAITING: usize = OFF_RESP + 12;
-const OFF_RESP_FRAME: usize = OFF_RESP + CACHELINE;
+const OFF_HDR_HEADER_LEN: usize = 8;
+const OFF_HDR_PROFILE: usize = 12;
+const OFF_HDR_REQ_OFFSET: usize = 16;
+const OFF_HDR_REQ_CAPACITY: usize = 20;
+const OFF_HDR_RESP_OFFSET: usize = 24;
+const OFF_HDR_RESP_CAPACITY: usize = 28;
+const OFF_HDR_SPIN_TRIES: usize = 32;
+const OFF_REQ_LEN: usize = 36;
+const OFF_RESP_LEN: usize = 40;
+const OFF_REQ_CLIENT_CLOSED: usize = 44;
+const OFF_REQ_SERVER_WAITING: usize = 48;
+const OFF_RESP_SERVER_CLOSED: usize = 52;
+const OFF_RESP_CLIENT_WAITING: usize = 56;
+const OFF_REQ_SEQ: usize = 64;
+const OFF_RESP_SEQ: usize = 72;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -273,6 +259,10 @@ pub struct NamedPipeConfig {
     pub service_name: String,
     pub supported_profiles: u32,
     pub preferred_profiles: u32,
+    pub max_request_payload_bytes: u32,
+    pub max_request_batch_items: u32,
+    pub max_response_payload_bytes: u32,
+    pub max_response_batch_items: u32,
     pub auth_token: u64,
     pub shm_spin_tries: u32,
 }
@@ -284,6 +274,10 @@ impl NamedPipeConfig {
             service_name: service_name.into(),
             supported_profiles: DEFAULT_SUPPORTED_PROFILES,
             preferred_profiles: DEFAULT_PREFERRED_PROFILES,
+            max_request_payload_bytes: MAX_PAYLOAD_DEFAULT,
+            max_request_batch_items: NEGOTIATION_DEFAULT_BATCH_ITEMS,
+            max_response_payload_bytes: MAX_PAYLOAD_DEFAULT,
+            max_response_batch_items: NEGOTIATION_DEFAULT_BATCH_ITEMS,
             auth_token: 0,
             shm_spin_tries: 0,
         }
@@ -300,10 +294,7 @@ fn to_wide(s: &str) -> Vec<u16> {
 
 fn win32_error(msg: &str) -> io::Error {
     let code = unsafe { GetLastError() };
-    io::Error::new(
-        io::ErrorKind::Other,
-        format!("{msg}: win32 error {code}"),
-    )
+    io::Error::new(io::ErrorKind::Other, format!("{msg}: win32 error {code}"))
 }
 
 fn protocol_error(msg: &str) -> io::Error {
@@ -316,7 +307,9 @@ fn now_ms() -> u64 {
 
 fn close_handle(h: HANDLE) {
     if !h.is_null() && h != INVALID_HANDLE_VALUE {
-        unsafe { CloseHandle(h); }
+        unsafe {
+            CloseHandle(h);
+        }
     }
 }
 
@@ -383,17 +376,25 @@ fn build_kernel_object_name(config: &NamedPipeConfig, profile: u32, suffix: &str
 
 fn effective_supported(config: &NamedPipeConfig) -> u32 {
     let mut s = config.supported_profiles;
-    if s == 0 { s = DEFAULT_SUPPORTED_PROFILES; }
+    if s == 0 {
+        s = DEFAULT_SUPPORTED_PROFILES;
+    }
     s &= IMPLEMENTED_PROFILES;
-    if s == 0 { s = DEFAULT_SUPPORTED_PROFILES; }
+    if s == 0 {
+        s = DEFAULT_SUPPORTED_PROFILES;
+    }
     s
 }
 
 fn effective_preferred(config: &NamedPipeConfig, supported: u32) -> u32 {
     let mut p = config.preferred_profiles;
-    if p == 0 { p = supported; }
+    if p == 0 {
+        p = supported;
+    }
     p &= supported;
-    if p == 0 { p = supported; }
+    if p == 0 {
+        p = supported;
+    }
     p
 }
 
@@ -412,10 +413,18 @@ fn is_shm_profile(profile: u32) -> bool {
 }
 
 fn select_profile(candidates: u32) -> u32 {
-    if (candidates & PROFILE_SHM_WAITADDR) != 0 { return PROFILE_SHM_WAITADDR; }
-    if (candidates & PROFILE_SHM_BUSYWAIT) != 0 { return PROFILE_SHM_BUSYWAIT; }
-    if (candidates & PROFILE_SHM_HYBRID) != 0 { return PROFILE_SHM_HYBRID; }
-    if (candidates & PROFILE_NAMED_PIPE) != 0 { return PROFILE_NAMED_PIPE; }
+    if (candidates & PROFILE_SHM_WAITADDR) != 0 {
+        return PROFILE_SHM_WAITADDR;
+    }
+    if (candidates & PROFILE_SHM_BUSYWAIT) != 0 {
+        return PROFILE_SHM_BUSYWAIT;
+    }
+    if (candidates & PROFILE_SHM_HYBRID) != 0 {
+        return PROFILE_SHM_HYBRID;
+    }
+    if (candidates & PROFILE_NAMED_PIPE) != 0 {
+        return PROFILE_NAMED_PIPE;
+    }
     0
 }
 
@@ -423,105 +432,414 @@ fn select_profile(candidates: u32) -> u32 {
 // Negotiation frames
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
-struct NegMessage {
-    ty: u16,
-    supported: u32,
-    preferred: u32,
-    intersection: u32,
-    selected: u32,
-    auth_token: u64,
-    status: u32,
+fn negotiate_limit_u32(offered: u32, local_limit: u32) -> u32 {
+    if offered == 0 || local_limit == 0 {
+        return 0;
+    }
+    offered.min(local_limit)
 }
 
-fn encode_neg(msg: &NegMessage) -> Frame {
+fn effective_payload_limit(value: u32) -> u32 {
+    if value == 0 {
+        MAX_PAYLOAD_DEFAULT
+    } else {
+        value
+    }
+}
+
+fn effective_batch_limit(value: u32) -> u32 {
+    if value == 0 {
+        NEGOTIATION_DEFAULT_BATCH_ITEMS
+    } else {
+        value
+    }
+}
+
+fn compute_max_message_len(max_payload_bytes: u32, max_batch_items: u32) -> io::Result<usize> {
+    max_batch_total_size(max_payload_bytes, max_batch_items)
+}
+
+fn align_up_size(value: usize, alignment: usize) -> usize {
+    let remainder = value % alignment;
+    if remainder == 0 {
+        value
+    } else {
+        value + (alignment - remainder)
+    }
+}
+
+fn compute_region_layout(
+    request_capacity: usize,
+    response_capacity: usize,
+) -> io::Result<(usize, usize, usize)> {
+    if request_capacity == 0 || response_capacity == 0 {
+        return Err(io::Error::from_raw_os_error(87));
+    }
+
+    let request_offset = align_up_size(HDR_SIZE, CACHELINE);
+    let response_offset = align_up_size(request_offset + request_capacity, CACHELINE);
+    let mapping_len = response_offset + response_capacity;
+    Ok((request_offset, response_offset, mapping_len))
+}
+
+fn request_area(region: *mut u8) -> usize {
+    unsafe {
+        u32::from_le_bytes(
+            std::slice::from_raw_parts(region.add(OFF_HDR_REQ_OFFSET), 4)
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+}
+
+fn response_area(region: *mut u8) -> usize {
+    unsafe {
+        u32::from_le_bytes(
+            std::slice::from_raw_parts(region.add(OFF_HDR_RESP_OFFSET), 4)
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+}
+
+fn request_capacity(region: *mut u8) -> usize {
+    unsafe {
+        u32::from_le_bytes(
+            std::slice::from_raw_parts(region.add(OFF_HDR_REQ_CAPACITY), 4)
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+}
+
+fn response_capacity(region: *mut u8) -> usize {
+    unsafe {
+        u32::from_le_bytes(
+            std::slice::from_raw_parts(region.add(OFF_HDR_RESP_CAPACITY), 4)
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+}
+
+fn validate_region_header(region: *mut u8, mapping_len: usize, profile: u32) -> io::Result<u32> {
+    let magic = unsafe {
+        u32::from_le_bytes(
+            std::slice::from_raw_parts(region.add(OFF_HDR_MAGIC), 4)
+                .try_into()
+                .unwrap(),
+        )
+    };
+    let version = unsafe {
+        u32::from_le_bytes(
+            std::slice::from_raw_parts(region.add(OFF_HDR_VERSION), 4)
+                .try_into()
+                .unwrap(),
+        )
+    };
+    let header_len = unsafe {
+        u32::from_le_bytes(
+            std::slice::from_raw_parts(region.add(OFF_HDR_HEADER_LEN), 4)
+                .try_into()
+                .unwrap(),
+        ) as usize
+    };
+    let prof = unsafe {
+        u32::from_le_bytes(
+            std::slice::from_raw_parts(region.add(OFF_HDR_PROFILE), 4)
+                .try_into()
+                .unwrap(),
+        )
+    };
+    let req_off = request_area(region);
+    let req_cap = request_capacity(region);
+    let resp_off = response_area(region);
+    let resp_cap = response_capacity(region);
+    let spin = unsafe {
+        u32::from_le_bytes(
+            std::slice::from_raw_parts(region.add(OFF_HDR_SPIN_TRIES), 4)
+                .try_into()
+                .unwrap(),
+        )
+    };
+
+    if magic != SHM_REGION_MAGIC
+        || version != SHM_REGION_VERSION
+        || header_len != HDR_SIZE
+        || prof != profile
+        || req_cap == 0
+        || resp_cap == 0
+    {
+        return Err(protocol_error("invalid SHM header"));
+    }
+    if req_off < header_len {
+        return Err(protocol_error("invalid SHM request offset"));
+    }
+    if resp_off < req_off + req_cap {
+        return Err(protocol_error("invalid SHM response offset"));
+    }
+    if resp_off + resp_cap > mapping_len {
+        return Err(protocol_error("invalid SHM mapping length"));
+    }
+    Ok(spin)
+}
+
+fn encode_neg_header(ty: u16) -> Frame {
     let mut frame = [0u8; FRAME_SIZE];
     frame[NEG_OFF_MAGIC..NEG_OFF_MAGIC + 4].copy_from_slice(&NEGOTIATION_MAGIC.to_le_bytes());
     frame[NEG_OFF_VERSION..NEG_OFF_VERSION + 2].copy_from_slice(&NEGOTIATION_VERSION.to_le_bytes());
-    frame[NEG_OFF_TYPE..NEG_OFF_TYPE + 2].copy_from_slice(&msg.ty.to_le_bytes());
-    frame[NEG_OFF_SUPPORTED..NEG_OFF_SUPPORTED + 4].copy_from_slice(&msg.supported.to_le_bytes());
-    frame[NEG_OFF_PREFERRED..NEG_OFF_PREFERRED + 4].copy_from_slice(&msg.preferred.to_le_bytes());
-    frame[NEG_OFF_INTERSECTION..NEG_OFF_INTERSECTION + 4].copy_from_slice(&msg.intersection.to_le_bytes());
-    frame[NEG_OFF_SELECTED..NEG_OFF_SELECTED + 4].copy_from_slice(&msg.selected.to_le_bytes());
-    frame[NEG_OFF_AUTH_TOKEN..NEG_OFF_AUTH_TOKEN + 8].copy_from_slice(&msg.auth_token.to_le_bytes());
-    frame[NEG_OFF_STATUS..NEG_OFF_STATUS + 4].copy_from_slice(&msg.status.to_le_bytes());
+    frame[NEG_OFF_TYPE..NEG_OFF_TYPE + 2].copy_from_slice(&ty.to_le_bytes());
     frame
 }
 
-fn decode_neg(frame: &Frame, expected_ty: u16) -> io::Result<NegMessage> {
+fn encode_hello_neg(payload: &HelloPayload) -> Frame {
+    let mut frame = encode_neg_header(NEGOTIATION_HELLO);
+    frame[NEGOTIATION_PAYLOAD_OFFSET..NEGOTIATION_PAYLOAD_OFFSET + CONTROL_HELLO_PAYLOAD_LEN]
+        .copy_from_slice(&encode_hello_payload(payload));
+    frame
+}
+
+fn encode_ack_neg(payload: &HelloAckPayload, status: u32) -> Frame {
+    let mut frame = encode_neg_header(NEGOTIATION_ACK);
+    frame[NEGOTIATION_PAYLOAD_OFFSET..NEGOTIATION_PAYLOAD_OFFSET + CONTROL_HELLO_ACK_PAYLOAD_LEN]
+        .copy_from_slice(&encode_hello_ack_payload(payload));
+    frame[NEGOTIATION_STATUS_OFFSET..NEGOTIATION_STATUS_OFFSET + 4]
+        .copy_from_slice(&status.to_le_bytes());
+    frame
+}
+
+fn decode_neg_header(frame: &Frame, expected_ty: u16) -> io::Result<()> {
     let magic = u32::from_le_bytes(frame[NEG_OFF_MAGIC..NEG_OFF_MAGIC + 4].try_into().unwrap());
-    let version = u16::from_le_bytes(frame[NEG_OFF_VERSION..NEG_OFF_VERSION + 2].try_into().unwrap());
+    let version = u16::from_le_bytes(
+        frame[NEG_OFF_VERSION..NEG_OFF_VERSION + 2]
+            .try_into()
+            .unwrap(),
+    );
     let ty = u16::from_le_bytes(frame[NEG_OFF_TYPE..NEG_OFF_TYPE + 2].try_into().unwrap());
     if magic != NEGOTIATION_MAGIC || version != NEGOTIATION_VERSION || ty != expected_ty {
         return Err(protocol_error("invalid negotiation frame"));
     }
-    Ok(NegMessage {
-        ty,
-        supported: u32::from_le_bytes(frame[NEG_OFF_SUPPORTED..NEG_OFF_SUPPORTED + 4].try_into().unwrap()),
-        preferred: u32::from_le_bytes(frame[NEG_OFF_PREFERRED..NEG_OFF_PREFERRED + 4].try_into().unwrap()),
-        intersection: u32::from_le_bytes(frame[NEG_OFF_INTERSECTION..NEG_OFF_INTERSECTION + 4].try_into().unwrap()),
-        selected: u32::from_le_bytes(frame[NEG_OFF_SELECTED..NEG_OFF_SELECTED + 4].try_into().unwrap()),
-        auth_token: u64::from_le_bytes(frame[NEG_OFF_AUTH_TOKEN..NEG_OFF_AUTH_TOKEN + 8].try_into().unwrap()),
-        status: u32::from_le_bytes(frame[NEG_OFF_STATUS..NEG_OFF_STATUS + 4].try_into().unwrap()),
-    })
+    Ok(())
+}
+
+fn decode_hello_neg(frame: &Frame) -> io::Result<HelloPayload> {
+    decode_neg_header(frame, NEGOTIATION_HELLO)?;
+    decode_hello_payload(
+        &frame[NEGOTIATION_PAYLOAD_OFFSET..NEGOTIATION_PAYLOAD_OFFSET + CONTROL_HELLO_PAYLOAD_LEN],
+    )
+}
+
+fn decode_ack_neg(frame: &Frame) -> io::Result<(HelloAckPayload, u32)> {
+    decode_neg_header(frame, NEGOTIATION_ACK)?;
+    let payload = decode_hello_ack_payload(
+        &frame[NEGOTIATION_PAYLOAD_OFFSET
+            ..NEGOTIATION_PAYLOAD_OFFSET + CONTROL_HELLO_ACK_PAYLOAD_LEN],
+    )?;
+    let status = u32::from_le_bytes(
+        frame[NEGOTIATION_STATUS_OFFSET..NEGOTIATION_STATUS_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    );
+    Ok((payload, status))
 }
 
 // ---------------------------------------------------------------------------
 // Pipe I/O helpers
 // ---------------------------------------------------------------------------
 
-fn pipe_read_frame(pipe: HANDLE, timeout_ms: u32) -> io::Result<Frame> {
-    if timeout_ms != 0 {
-        let deadline = now_ms() + timeout_ms as u64;
-        loop {
-            let mut avail: DWORD = 0;
-            let ok = unsafe {
-                PeekNamedPipe(pipe, ptr::null_mut(), 0, ptr::null_mut(), &mut avail, ptr::null_mut())
-            };
-            if ok == 0 {
-                return Err(win32_error("PeekNamedPipe"));
+fn wait_pipe_message(pipe: HANDLE, timeout_ms: u32) -> io::Result<DWORD> {
+    let deadline = if timeout_ms == 0 {
+        0u64
+    } else {
+        now_ms() + timeout_ms as u64
+    };
+
+    loop {
+        let mut avail: DWORD = 0;
+        let mut left: DWORD = 0;
+        let ok = unsafe {
+            PeekNamedPipe(
+                pipe,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                &mut avail,
+                &mut left,
+            )
+        };
+        if ok == 0 {
+            let code = unsafe { GetLastError() };
+            if code == ERROR_BROKEN_PIPE
+                || code == ERROR_NO_DATA
+                || code == ERROR_PIPE_NOT_CONNECTED
+            {
+                return Err(io::Error::from_raw_os_error(code as i32));
             }
-            if avail != 0 { break; }
-            if now_ms() >= deadline {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "pipe read timeout"));
-            }
-            unsafe { Sleep(1); }
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("PeekNamedPipe: win32 error {code}"),
+            ));
+        }
+        if left != 0 || avail != 0 {
+            return Ok(if left != 0 { left } else { avail });
+        }
+        if deadline != 0 && now_ms() >= deadline {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "pipe read timeout"));
+        }
+        unsafe {
+            Sleep(1);
         }
     }
-
-    let mut frame = [0u8; FRAME_SIZE];
-    let mut bytes_read: DWORD = 0;
-    let ok = unsafe {
-        ReadFile(pipe, frame.as_mut_ptr() as LPVOID, FRAME_SIZE as DWORD, &mut bytes_read, ptr::null_mut())
-    };
-    if ok == 0 {
-        return Err(win32_error("ReadFile"));
-    }
-    if bytes_read as usize != FRAME_SIZE {
-        return Err(protocol_error("short pipe read"));
-    }
-    Ok(frame)
 }
 
-fn pipe_write_frame(pipe: HANDLE, frame: &Frame) -> io::Result<()> {
+fn drain_pipe_message(pipe: HANDLE) -> io::Result<()> {
+    let mut scratch = [0u8; 256];
+    loop {
+        let mut bytes_read: DWORD = 0;
+        let ok = unsafe {
+            ReadFile(
+                pipe,
+                scratch.as_mut_ptr() as LPVOID,
+                scratch.len() as DWORD,
+                &mut bytes_read,
+                ptr::null_mut(),
+            )
+        };
+        if ok != 0 {
+            return Ok(());
+        }
+
+        let error = unsafe { GetLastError() };
+        if error == 234 {
+            continue;
+        }
+        return Err(win32_error("ReadFile"));
+    }
+}
+
+fn pipe_read_message(pipe: HANDLE, message: &mut [u8], timeout_ms: u32) -> io::Result<usize> {
+    if message.is_empty() {
+        return Err(protocol_error("buffer must not be empty"));
+    }
+
+    let message_len = wait_pipe_message(pipe, timeout_ms)? as usize;
+    if message_len > message.len() {
+        let _ = drain_pipe_message(pipe);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "message exceeds negotiated size",
+        ));
+    }
+
+    let mut bytes_read: DWORD = 0;
+    let ok = unsafe {
+        ReadFile(
+            pipe,
+            message.as_mut_ptr() as LPVOID,
+            message_len as DWORD,
+            &mut bytes_read,
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        let error = unsafe { GetLastError() };
+        if error == 234 {
+            let _ = drain_pipe_message(pipe);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "message exceeds negotiated size",
+            ));
+        }
+        return Err(win32_error("ReadFile"));
+    }
+    if bytes_read as usize != message_len {
+        return Err(protocol_error("short pipe read"));
+    }
+    Ok(message_len)
+}
+
+fn pipe_write_message(pipe: HANDLE, message: &[u8]) -> io::Result<()> {
+    if message.is_empty() {
+        return Err(protocol_error("message must not be empty"));
+    }
+
     let mut written: DWORD = 0;
     let ok = unsafe {
-        WriteFile(pipe, frame.as_ptr(), FRAME_SIZE as DWORD, &mut written, ptr::null_mut())
+        WriteFile(
+            pipe,
+            message.as_ptr(),
+            message.len() as DWORD,
+            &mut written,
+            ptr::null_mut(),
+        )
     };
     if ok == 0 {
         return Err(win32_error("WriteFile"));
     }
-    if written as usize != FRAME_SIZE {
+    if written as usize != message.len() {
         return Err(protocol_error("short pipe write"));
     }
     Ok(())
 }
 
+fn validate_message_for_send(message: &[u8], max_message_len: usize) -> io::Result<()> {
+    if message.is_empty() {
+        return Err(protocol_error("message must not be empty"));
+    }
+    if message.len() > max_message_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "message exceeds negotiated size",
+        ));
+    }
+    let header = decode_message_header(message)?;
+    let total = message_total_size(&header)?;
+    if total != message.len() {
+        return Err(protocol_error("message size does not match header"));
+    }
+    Ok(())
+}
+
+fn validate_received_message(
+    message: &[u8],
+    message_len: usize,
+    max_message_len: usize,
+) -> io::Result<()> {
+    if message_len == 0 {
+        return Err(protocol_error("message must not be empty"));
+    }
+    if message_len > max_message_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "message exceeds negotiated size",
+        ));
+    }
+    let header = decode_message_header(&message[..message_len])?;
+    let total = message_total_size(&header)?;
+    if total != message_len {
+        return Err(protocol_error("message size does not match header"));
+    }
+    Ok(())
+}
+
+fn pipe_read_frame(pipe: HANDLE, timeout_ms: u32) -> io::Result<Frame> {
+    let mut buf = vec![0u8; FRAME_SIZE];
+    let message_len = pipe_read_message(pipe, &mut buf, timeout_ms)?;
+    if message_len != FRAME_SIZE {
+        return Err(protocol_error("received non-frame message on frame path"));
+    }
+    let mut frame = [0u8; FRAME_SIZE];
+    frame.copy_from_slice(&buf[..message_len]);
+    Ok(frame)
+}
+
+fn pipe_write_frame(pipe: HANDLE, frame: &Frame) -> io::Result<()> {
+    pipe_write_message(pipe, frame)
+}
+
 fn set_pipe_mode(pipe: HANDLE, wait_mode: DWORD) -> io::Result<()> {
     let mode = PIPE_READMODE_MESSAGE | wait_mode;
-    let ok = unsafe {
-        SetNamedPipeHandleState(pipe, &mode, ptr::null_mut(), ptr::null_mut())
-    };
+    let ok = unsafe { SetNamedPipeHandleState(pipe, &mode, ptr::null_mut(), ptr::null_mut()) };
     if ok == 0 {
         Err(win32_error("SetNamedPipeHandleState"))
     } else {
@@ -534,81 +852,140 @@ fn set_pipe_mode(pipe: HANDLE, wait_mode: DWORD) -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn server_handshake(
+    server: &NamedPipeServer,
     pipe: HANDLE,
-    supported: u32,
-    preferred: u32,
-    auth_token: u64,
     timeout_ms: u32,
-) -> io::Result<u32> {
+) -> io::Result<NegotiationResult> {
     let hello_frame = pipe_read_frame(pipe, timeout_ms)?;
-    let hello = decode_neg(&hello_frame, NEGOTIATION_HELLO)?;
+    let hello = decode_hello_neg(&hello_frame)?;
 
-    let mut ack = NegMessage {
-        ty: NEGOTIATION_ACK,
-        supported,
-        preferred,
-        intersection: hello.supported & supported,
-        selected: 0,
-        auth_token: 0,
-        status: NEGOTIATION_STATUS_OK,
+    let mut ack = HelloAckPayload {
+        layout_version: hello.layout_version,
+        flags: 0,
+        server_supported_profiles: server.supported_profiles,
+        intersection_profiles: hello.supported_profiles & server.supported_profiles,
+        selected_profile: 0,
+        agreed_max_request_payload_bytes: negotiate_limit_u32(
+            hello.max_request_payload_bytes,
+            server.max_request_payload_bytes,
+        ),
+        agreed_max_request_batch_items: negotiate_limit_u32(
+            hello.max_request_batch_items,
+            server.max_request_batch_items,
+        ),
+        agreed_max_response_payload_bytes: negotiate_limit_u32(
+            hello.max_response_payload_bytes,
+            server.max_response_payload_bytes,
+        ),
+        agreed_max_response_batch_items: negotiate_limit_u32(
+            hello.max_response_batch_items,
+            server.max_response_batch_items,
+        ),
     };
+    let mut status = NEGOTIATION_STATUS_OK;
 
-    if auth_token != 0 && hello.auth_token != auth_token {
-        ack.status = ERROR_ACCESS_DENIED;
+    if server.auth_token != 0 && hello.auth_token != server.auth_token {
+        status = ERROR_ACCESS_DENIED;
     } else {
-        let mut candidates = ack.intersection & preferred;
-        if candidates == 0 { candidates = ack.intersection; }
-        ack.selected = select_profile(candidates);
-        if ack.selected == 0 {
-            ack.status = ERROR_NOT_SUPPORTED;
+        let mut candidates = ack.intersection_profiles & server.preferred_profiles;
+        if candidates == 0 {
+            candidates = ack.intersection_profiles;
+        }
+        ack.selected_profile = select_profile(candidates);
+        if ack.selected_profile == 0 {
+            status = ERROR_NOT_SUPPORTED;
+        } else if ack.agreed_max_request_payload_bytes == 0
+            || ack.agreed_max_request_batch_items == 0
+            || ack.agreed_max_response_payload_bytes == 0
+            || ack.agreed_max_response_batch_items == 0
+        {
+            status = ERROR_INVALID_PARAMETER;
         }
     }
 
-    let ack_frame = encode_neg(&ack);
+    let ack_frame = encode_ack_neg(&ack, status);
     pipe_write_frame(pipe, &ack_frame)?;
 
-    if ack.status != NEGOTIATION_STATUS_OK {
+    if status != NEGOTIATION_STATUS_OK {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("negotiation failed: status {}", ack.status),
+            format!("negotiation failed: status {}", status),
         ));
     }
-    Ok(ack.selected)
+    Ok(NegotiationResult {
+        profile: ack.selected_profile,
+        agreed_max_request_payload_bytes: ack.agreed_max_request_payload_bytes,
+        agreed_max_request_batch_items: ack.agreed_max_request_batch_items,
+        agreed_max_response_payload_bytes: ack.agreed_max_response_payload_bytes,
+        agreed_max_response_batch_items: ack.agreed_max_response_batch_items,
+        max_request_message_len: compute_max_message_len(
+            ack.agreed_max_request_payload_bytes,
+            ack.agreed_max_request_batch_items,
+        )?,
+        max_response_message_len: compute_max_message_len(
+            ack.agreed_max_response_payload_bytes,
+            ack.agreed_max_response_batch_items,
+        )?,
+    })
 }
 
 fn client_handshake(
     pipe: HANDLE,
-    supported: u32,
-    preferred: u32,
+    supported_profiles: u32,
+    preferred_profiles: u32,
+    max_request_payload_bytes: u32,
+    max_request_batch_items: u32,
+    max_response_payload_bytes: u32,
+    max_response_batch_items: u32,
     auth_token: u64,
     timeout_ms: u32,
-) -> io::Result<u32> {
-    let hello = NegMessage {
-        ty: NEGOTIATION_HELLO,
-        supported,
-        preferred,
-        intersection: 0,
-        selected: 0,
+) -> io::Result<NegotiationResult> {
+    let hello = HelloPayload {
+        layout_version: MESSAGE_VERSION,
+        flags: 0,
+        supported_profiles,
+        preferred_profiles,
+        max_request_payload_bytes,
+        max_request_batch_items,
+        max_response_payload_bytes,
+        max_response_batch_items,
         auth_token,
-        status: NEGOTIATION_STATUS_OK,
     };
-    pipe_write_frame(pipe, &encode_neg(&hello))?;
+    pipe_write_frame(pipe, &encode_hello_neg(&hello))?;
     let ack_frame = pipe_read_frame(pipe, timeout_ms)?;
-    let ack = decode_neg(&ack_frame, NEGOTIATION_ACK)?;
+    let (ack, status) = decode_ack_neg(&ack_frame)?;
 
-    if ack.status != NEGOTIATION_STATUS_OK {
+    if status != NEGOTIATION_STATUS_OK {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("server rejected: status {}", ack.status),
+            format!("server rejected: status {}", status),
         ));
     }
-    if ack.selected == 0
-        || (ack.selected & supported) == 0
-        || (ack.intersection & supported) == 0
+    if ack.selected_profile == 0
+        || (ack.selected_profile & supported_profiles) == 0
+        || (ack.intersection_profiles & supported_profiles) == 0
+        || ack.agreed_max_request_payload_bytes == 0
+        || ack.agreed_max_request_batch_items == 0
+        || ack.agreed_max_response_payload_bytes == 0
+        || ack.agreed_max_response_batch_items == 0
     {
         return Err(protocol_error("invalid negotiated profile"));
     }
-    Ok(ack.selected)
+    Ok(NegotiationResult {
+        profile: ack.selected_profile,
+        agreed_max_request_payload_bytes: ack.agreed_max_request_payload_bytes,
+        agreed_max_request_batch_items: ack.agreed_max_request_batch_items,
+        agreed_max_response_payload_bytes: ack.agreed_max_response_payload_bytes,
+        agreed_max_response_batch_items: ack.agreed_max_response_batch_items,
+        max_request_message_len: compute_max_message_len(
+            ack.agreed_max_request_payload_bytes,
+            ack.agreed_max_request_batch_items,
+        )?,
+        max_response_message_len: compute_max_message_len(
+            ack.agreed_max_response_payload_bytes,
+            ack.agreed_max_response_batch_items,
+        )?,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -648,9 +1025,12 @@ struct ShmServer {
     request_event: HANDLE,
     response_event: HANDLE,
     region: *mut u8,
+    mapping_len: usize,
     last_request_seq: i64,
     active_request_seq: i64,
     spin_tries: u32,
+    max_request_message_len: usize,
+    max_response_message_len: usize,
 }
 
 impl ShmServer {
@@ -658,11 +1038,25 @@ impl ShmServer {
         let mapping_name = to_wide(&build_kernel_object_name(config, profile, "shm"));
         let req_event_name = to_wide(&build_kernel_object_name(config, profile, "req"));
         let resp_event_name = to_wide(&build_kernel_object_name(config, profile, "resp"));
+        let max_request_message_len = compute_max_message_len(
+            effective_payload_limit(config.max_request_payload_bytes),
+            effective_batch_limit(config.max_request_batch_items),
+        )?;
+        let max_response_message_len = compute_max_message_len(
+            effective_payload_limit(config.max_response_payload_bytes),
+            effective_batch_limit(config.max_response_batch_items),
+        )?;
+        let (request_offset, response_offset, mapping_len) =
+            compute_region_layout(max_request_message_len, max_response_message_len)?;
 
         let mapping = unsafe {
             CreateFileMappingW(
-                INVALID_HANDLE_VALUE, ptr::null_mut(), PAGE_READWRITE,
-                0, REGION_SIZE as DWORD, mapping_name.as_ptr(),
+                INVALID_HANDLE_VALUE,
+                ptr::null_mut(),
+                PAGE_READWRITE,
+                (mapping_len as u64 >> 32) as DWORD,
+                (mapping_len as u64 & 0xffff_ffff) as DWORD,
+                mapping_name.as_ptr(),
             )
         };
         if mapping.is_null() {
@@ -670,12 +1064,14 @@ impl ShmServer {
         }
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
             close_handle(mapping);
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "SHM already exists"));
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "SHM already exists",
+            ));
         }
 
-        let region = unsafe {
-            MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, REGION_SIZE)
-        } as *mut u8;
+        let region =
+            unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, mapping_len) } as *mut u8;
         if region.is_null() {
             close_handle(mapping);
             return Err(win32_error("MapViewOfFile"));
@@ -683,29 +1079,72 @@ impl ShmServer {
 
         // Zero and init header
         unsafe {
-            ptr::write_bytes(region, 0, REGION_SIZE);
-            ptr::copy_nonoverlapping(SHM_REGION_MAGIC.to_le_bytes().as_ptr(), region.add(OFF_HDR_MAGIC), 4);
-            ptr::copy_nonoverlapping(SHM_REGION_VERSION.to_le_bytes().as_ptr(), region.add(OFF_HDR_VERSION), 4);
-            ptr::copy_nonoverlapping(profile.to_le_bytes().as_ptr(), region.add(OFF_HDR_PROFILE), 4);
+            ptr::write_bytes(region, 0, mapping_len);
+            ptr::copy_nonoverlapping(
+                SHM_REGION_MAGIC.to_le_bytes().as_ptr(),
+                region.add(OFF_HDR_MAGIC),
+                4,
+            );
+            ptr::copy_nonoverlapping(
+                SHM_REGION_VERSION.to_le_bytes().as_ptr(),
+                region.add(OFF_HDR_VERSION),
+                4,
+            );
+            ptr::copy_nonoverlapping(
+                (HDR_SIZE as u32).to_le_bytes().as_ptr(),
+                region.add(OFF_HDR_HEADER_LEN),
+                4,
+            );
+            ptr::copy_nonoverlapping(
+                profile.to_le_bytes().as_ptr(),
+                region.add(OFF_HDR_PROFILE),
+                4,
+            );
+            ptr::copy_nonoverlapping(
+                (request_offset as u32).to_le_bytes().as_ptr(),
+                region.add(OFF_HDR_REQ_OFFSET),
+                4,
+            );
+            ptr::copy_nonoverlapping(
+                (max_request_message_len as u32).to_le_bytes().as_ptr(),
+                region.add(OFF_HDR_REQ_CAPACITY),
+                4,
+            );
+            ptr::copy_nonoverlapping(
+                (response_offset as u32).to_le_bytes().as_ptr(),
+                region.add(OFF_HDR_RESP_OFFSET),
+                4,
+            );
+            ptr::copy_nonoverlapping(
+                (max_response_message_len as u32).to_le_bytes().as_ptr(),
+                region.add(OFF_HDR_RESP_CAPACITY),
+                4,
+            );
             let spin = effective_spin_tries(config);
-            ptr::copy_nonoverlapping(spin.to_le_bytes().as_ptr(), region.add(OFF_HDR_SPIN_TRIES), 4);
+            ptr::copy_nonoverlapping(
+                spin.to_le_bytes().as_ptr(),
+                region.add(OFF_HDR_SPIN_TRIES),
+                4,
+            );
         }
 
         // Create events (auto-reset)
-        let request_event = unsafe {
-            CreateEventW(ptr::null_mut(), FALSE, FALSE, req_event_name.as_ptr())
-        };
+        let request_event =
+            unsafe { CreateEventW(ptr::null_mut(), FALSE, FALSE, req_event_name.as_ptr()) };
         if request_event.is_null() {
-            unsafe { UnmapViewOfFile(region as LPVOID); }
+            unsafe {
+                UnmapViewOfFile(region as LPVOID);
+            }
             close_handle(mapping);
             return Err(win32_error("CreateEventW(req)"));
         }
-        let response_event = unsafe {
-            CreateEventW(ptr::null_mut(), FALSE, FALSE, resp_event_name.as_ptr())
-        };
+        let response_event =
+            unsafe { CreateEventW(ptr::null_mut(), FALSE, FALSE, resp_event_name.as_ptr()) };
         if response_event.is_null() {
             close_handle(request_event);
-            unsafe { UnmapViewOfFile(region as LPVOID); }
+            unsafe {
+                UnmapViewOfFile(region as LPVOID);
+            }
             close_handle(mapping);
             return Err(win32_error("CreateEventW(resp)"));
         }
@@ -715,29 +1154,83 @@ impl ShmServer {
             request_event,
             response_event,
             region,
+            mapping_len,
             last_request_seq: 0,
             active_request_seq: 0,
             spin_tries: effective_spin_tries(config),
+            max_request_message_len,
+            max_response_message_len,
         })
     }
 
-    fn receive_frame(&mut self, timeout_ms: u32) -> io::Result<Frame> {
-        let deadline = if timeout_ms == 0 { 0u64 } else { now_ms() + timeout_ms as u64 };
+    fn receive_bytes(
+        &mut self,
+        message: &mut [u8],
+        message_capacity: usize,
+        timeout_ms: u32,
+    ) -> io::Result<usize> {
+        if message_capacity > message.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "message buffer is smaller than requested capacity",
+            ));
+        }
+        if message_capacity == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "message capacity must not be zero",
+            ));
+        }
+        if message_capacity > self.max_request_message_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "message capacity exceeds negotiated request size",
+            ));
+        }
+
+        if message.len() < message_capacity {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "message buffer is smaller than negotiated request size",
+            ));
+        }
+
+        let deadline = if timeout_ms == 0 {
+            0u64
+        } else {
+            now_ms() + timeout_ms as u64
+        };
         let mut spins = self.spin_tries;
 
         loop {
             let current = unsafe { load_i64_acquire(self.region.add(OFF_REQ_SEQ) as *const i64) };
             if current != self.last_request_seq {
-                let mut frame = [0u8; FRAME_SIZE];
+                let message_len =
+                    unsafe { load_i32_acquire(self.region.add(OFF_REQ_LEN) as *const i32) };
+                if message_len < 0
+                    || message_len as usize > message_capacity
+                    || message_len as usize > request_capacity(self.region)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid SHM request length",
+                    ));
+                }
                 unsafe {
-                    ptr::copy_nonoverlapping(self.region.add(OFF_REQ_FRAME), frame.as_mut_ptr(), FRAME_SIZE);
+                    ptr::copy_nonoverlapping(
+                        self.region.add(request_area(self.region)),
+                        message.as_mut_ptr(),
+                        message_len as usize,
+                    );
                 }
                 self.active_request_seq = current;
                 self.last_request_seq = current;
-                return Ok(frame);
+                return Ok(message_len as usize);
             }
 
-            if unsafe { load_i32_acquire(self.region.add(OFF_REQ_CLIENT_CLOSED) as *const i32) } != 0 {
+            if unsafe { load_i32_acquire(self.region.add(OFF_REQ_CLIENT_CLOSED) as *const i32) }
+                != 0
+            {
                 return Err(io::Error::new(io::ErrorKind::BrokenPipe, "client closed"));
             }
 
@@ -753,19 +1246,37 @@ impl ShmServer {
             // SERVER_WAITING=1 is globally visible before we re-read REQ_SEQ.
             // Without this, the client's store of REQ_SEQ and our store of
             // SERVER_WAITING can miss each other (classic Dekker race on x86).
-            unsafe { store_i32_release(self.region.add(OFF_REQ_SERVER_WAITING) as *mut i32, 1); }
+            unsafe {
+                store_i32_release(self.region.add(OFF_REQ_SERVER_WAITING) as *mut i32, 1);
+            }
             fence(Ordering::SeqCst);
 
             let current = unsafe { load_i64_acquire(self.region.add(OFF_REQ_SEQ) as *const i64) };
             if current != self.last_request_seq {
-                unsafe { store_i32_release(self.region.add(OFF_REQ_SERVER_WAITING) as *mut i32, 0); }
-                let mut frame = [0u8; FRAME_SIZE];
                 unsafe {
-                    ptr::copy_nonoverlapping(self.region.add(OFF_REQ_FRAME), frame.as_mut_ptr(), FRAME_SIZE);
+                    store_i32_release(self.region.add(OFF_REQ_SERVER_WAITING) as *mut i32, 0);
+                }
+                let message_len =
+                    unsafe { load_i32_acquire(self.region.add(OFF_REQ_LEN) as *const i32) };
+                if message_len < 0
+                    || message_len as usize > message_capacity
+                    || message_len as usize > request_capacity(self.region)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid SHM request length",
+                    ));
+                }
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        self.region.add(request_area(self.region)),
+                        message.as_mut_ptr(),
+                        message_len as usize,
+                    );
                 }
                 self.active_request_seq = current;
                 self.last_request_seq = current;
-                return Ok(frame);
+                return Ok(message_len as usize);
             }
 
             let wait_ms = if deadline == 0 {
@@ -773,33 +1284,82 @@ impl ShmServer {
             } else {
                 let now = now_ms();
                 if now >= deadline {
-                    unsafe { store_i32_release(self.region.add(OFF_REQ_SERVER_WAITING) as *mut i32, 0); }
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "SHM receive timeout"));
+                    unsafe {
+                        store_i32_release(self.region.add(OFF_REQ_SERVER_WAITING) as *mut i32, 0);
+                    }
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "SHM receive timeout",
+                    ));
                 }
                 (deadline - now) as DWORD
             };
 
             let rc = unsafe { WaitForSingleObject(self.request_event, wait_ms) };
-            unsafe { store_i32_release(self.region.add(OFF_REQ_SERVER_WAITING) as *mut i32, 0); }
+            unsafe {
+                store_i32_release(self.region.add(OFF_REQ_SERVER_WAITING) as *mut i32, 0);
+            }
 
             if rc == WAIT_OBJECT_0 {
                 spins = self.spin_tries;
                 continue;
             }
             if rc == WAIT_TIMEOUT {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "SHM receive timeout"));
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "SHM receive timeout",
+                ));
             }
             return Err(win32_error("WaitForSingleObject(req)"));
         }
     }
 
-    fn send_frame(&mut self, frame: &Frame) -> io::Result<()> {
+    fn receive_message(&mut self, message: &mut [u8], timeout_ms: u32) -> io::Result<usize> {
+        let message_len = self.receive_bytes(message, self.max_request_message_len, timeout_ms)?;
+        validate_received_message(message, message_len, self.max_request_message_len)?;
+        Ok(message_len)
+    }
+
+    fn send_bytes(&mut self, message: &[u8], message_capacity: usize) -> io::Result<()> {
         if self.active_request_seq == 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "no active request"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "no active request",
+            ));
         }
+        if message_capacity == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "message capacity must not be zero",
+            ));
+        }
+        if message_capacity > self.max_response_message_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "message capacity exceeds negotiated response size",
+            ));
+        }
+        if message.is_empty() {
+            return Err(protocol_error("message must not be empty"));
+        }
+        if message.len() > message_capacity {
+            return Err(protocol_error("message exceeds negotiated size"));
+        }
+
         unsafe {
-            ptr::copy_nonoverlapping(frame.as_ptr(), self.region.add(OFF_RESP_FRAME), FRAME_SIZE);
-            store_i64_release(self.region.add(OFF_RESP_SEQ) as *mut i64, self.active_request_seq);
+            ptr::copy_nonoverlapping(
+                message.as_ptr(),
+                self.region.add(response_area(self.region)),
+                message.len(),
+            );
+            store_i32_release(
+                self.region.add(OFF_RESP_LEN) as *mut i32,
+                message.len() as i32,
+            );
+            store_i64_release(
+                self.region.add(OFF_RESP_SEQ) as *mut i64,
+                self.active_request_seq,
+            );
 
             // SeqCst fence prevents store-load reordering: ensures the store of
             // RESP_SEQ is globally visible before we read CLIENT_WAITING.
@@ -813,6 +1373,36 @@ impl ShmServer {
         self.active_request_seq = 0;
         Ok(())
     }
+
+    fn send_message(&mut self, message: &[u8]) -> io::Result<()> {
+        validate_message_for_send(message, self.max_response_message_len)?;
+        self.send_bytes(message, self.max_response_message_len)
+    }
+
+    fn receive_frame(&mut self, timeout_ms: u32) -> io::Result<Frame> {
+        if self.max_request_message_len < FRAME_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "negotiated request size is smaller than frame size",
+            ));
+        }
+        let mut message = [0u8; FRAME_SIZE];
+        let message_len = self.receive_bytes(&mut message, FRAME_SIZE, timeout_ms)?;
+        if message_len != FRAME_SIZE {
+            return Err(protocol_error("invalid SHM frame length"));
+        }
+        Ok(message)
+    }
+
+    fn send_frame(&mut self, frame: &Frame) -> io::Result<()> {
+        if self.max_response_message_len < FRAME_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "negotiated response size is smaller than frame size",
+            ));
+        }
+        self.send_bytes(frame, FRAME_SIZE)
+    }
 }
 
 impl Drop for ShmServer {
@@ -823,12 +1413,18 @@ impl Drop for ShmServer {
             }
             // Wake up any waiting client
             if self.request_event != INVALID_HANDLE_VALUE && !self.request_event.is_null() {
-                unsafe { SetEvent(self.request_event); }
+                unsafe {
+                    SetEvent(self.request_event);
+                }
             }
             if self.response_event != INVALID_HANDLE_VALUE && !self.response_event.is_null() {
-                unsafe { SetEvent(self.response_event); }
+                unsafe {
+                    SetEvent(self.response_event);
+                }
             }
-            unsafe { UnmapViewOfFile(self.region as LPVOID); }
+            unsafe {
+                UnmapViewOfFile(self.region as LPVOID);
+            }
         }
         close_handle(self.response_event);
         close_handle(self.request_event);
@@ -845,8 +1441,11 @@ struct ShmClient {
     request_event: HANDLE,
     response_event: HANDLE,
     region: *mut u8,
+    mapping_len: usize,
     next_request_seq: i64,
     spin_tries: u32,
+    max_request_message_len: usize,
+    max_response_message_len: usize,
 }
 
 impl ShmClient {
@@ -854,17 +1453,39 @@ impl ShmClient {
         let mapping_name = to_wide(&build_kernel_object_name(config, profile, "shm"));
         let req_event_name = to_wide(&build_kernel_object_name(config, profile, "req"));
         let resp_event_name = to_wide(&build_kernel_object_name(config, profile, "resp"));
+        let max_request_message_len = compute_max_message_len(
+            effective_payload_limit(config.max_request_payload_bytes),
+            effective_batch_limit(config.max_request_batch_items),
+        )?;
+        let max_response_message_len = compute_max_message_len(
+            effective_payload_limit(config.max_response_payload_bytes),
+            effective_batch_limit(config.max_response_batch_items),
+        )?;
+        let (request_offset, response_offset, mapping_len) =
+            compute_region_layout(max_request_message_len, max_response_message_len)?;
 
-        let deadline = if timeout_ms == 0 { 0u64 } else { now_ms() + timeout_ms as u64 };
+        let deadline = if timeout_ms == 0 {
+            0u64
+        } else {
+            now_ms() + timeout_ms as u64
+        };
 
         let (mapping, request_event, response_event) = loop {
             let m = unsafe { OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, mapping_name.as_ptr()) };
             if !m.is_null() {
                 let re = unsafe {
-                    OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, req_event_name.as_ptr())
+                    OpenEventW(
+                        SYNCHRONIZE | EVENT_MODIFY_STATE,
+                        FALSE,
+                        req_event_name.as_ptr(),
+                    )
                 };
                 let rsp = unsafe {
-                    OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, resp_event_name.as_ptr())
+                    OpenEventW(
+                        SYNCHRONIZE | EVENT_MODIFY_STATE,
+                        FALSE,
+                        resp_event_name.as_ptr(),
+                    )
                 };
                 if !re.is_null() && !rsp.is_null() {
                     break (m, re, rsp);
@@ -874,14 +1495,18 @@ impl ShmClient {
                 close_handle(m);
             }
             if deadline != 0 && now_ms() >= deadline {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "SHM connect timeout"));
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "SHM connect timeout",
+                ));
             }
-            unsafe { Sleep(1); }
+            unsafe {
+                Sleep(1);
+            }
         };
 
-        let region = unsafe {
-            MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, REGION_SIZE)
-        } as *mut u8;
+        let region =
+            unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, mapping_len) } as *mut u8;
         if region.is_null() {
             close_handle(response_event);
             close_handle(request_event);
@@ -889,30 +1514,52 @@ impl ShmClient {
             return Err(win32_error("MapViewOfFile(client)"));
         }
 
-        // Wait for region ready
-        let ready_deadline = if timeout_ms == 0 { 0u64 } else { now_ms() + timeout_ms as u64 };
-        loop {
-            let magic = unsafe { u32::from_le_bytes(std::slice::from_raw_parts(region.add(OFF_HDR_MAGIC), 4).try_into().unwrap()) };
-            let ver = unsafe { u32::from_le_bytes(std::slice::from_raw_parts(region.add(OFF_HDR_VERSION), 4).try_into().unwrap()) };
-            let prof = unsafe { u32::from_le_bytes(std::slice::from_raw_parts(region.add(OFF_HDR_PROFILE), 4).try_into().unwrap()) };
-            if magic == SHM_REGION_MAGIC && ver == SHM_REGION_VERSION && prof == profile {
-                break;
-            }
-            if ready_deadline != 0 && now_ms() >= ready_deadline {
-                unsafe { UnmapViewOfFile(region as LPVOID); }
-                close_handle(response_event);
-                close_handle(request_event);
-                close_handle(mapping);
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "SHM region not ready"));
-            }
-            unsafe { Sleep(1); }
-        }
-
-        // Read spin_tries from region header
-        let region_spin = unsafe {
-            u32::from_le_bytes(std::slice::from_raw_parts(region.add(OFF_HDR_SPIN_TRIES), 4).try_into().unwrap())
+        let ready_deadline = if timeout_ms == 0 {
+            0u64
+        } else {
+            now_ms() + timeout_ms as u64
         };
-        let spin_tries = if region_spin != 0 { region_spin } else { effective_spin_tries(config) };
+        let region_spin = loop {
+            match validate_region_header(region, mapping_len, profile) {
+                Ok(spin) => break spin,
+                Err(_) if ready_deadline != 0 && now_ms() >= ready_deadline => {
+                    unsafe {
+                        UnmapViewOfFile(region as LPVOID);
+                    }
+                    close_handle(response_event);
+                    close_handle(request_event);
+                    close_handle(mapping);
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "SHM region not ready",
+                    ));
+                }
+                Err(_) => unsafe {
+                    Sleep(1);
+                },
+            }
+        };
+        if request_area(region) != request_offset
+            || response_area(region) != response_offset
+            || request_capacity(region) < max_request_message_len
+            || response_capacity(region) < max_response_message_len
+        {
+            unsafe {
+                UnmapViewOfFile(region as LPVOID);
+            }
+            close_handle(response_event);
+            close_handle(request_event);
+            close_handle(mapping);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SHM region capacity mismatch",
+            ));
+        }
+        let spin_tries = if region_spin != 0 {
+            region_spin
+        } else {
+            effective_spin_tries(config)
+        };
 
         let next_req_seq = unsafe { load_i64_acquire(region.add(OFF_REQ_SEQ) as *const i64) };
 
@@ -921,17 +1568,62 @@ impl ShmClient {
             request_event,
             response_event,
             region,
+            mapping_len,
             next_request_seq: next_req_seq,
             spin_tries,
+            max_request_message_len,
+            max_response_message_len,
         })
     }
 
-    fn call_frame(&mut self, request: &Frame, timeout_ms: u32) -> io::Result<Frame> {
+    fn call_bytes(
+        &mut self,
+        request: &[u8],
+        response: &mut [u8],
+        request_capacity: usize,
+        response_capacity_limit: usize,
+        timeout_ms: u32,
+    ) -> io::Result<usize> {
+        if request_capacity == 0 || response_capacity_limit == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "message capacity must not be zero",
+            ));
+        }
+        if request_capacity > self.max_request_message_len
+            || response_capacity_limit > self.max_response_message_len
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "message capacity exceeds negotiated limits",
+            ));
+        }
+        if request.is_empty() {
+            return Err(protocol_error("message must not be empty"));
+        }
+        if request.len() > request_capacity {
+            return Err(protocol_error("message exceeds negotiated size"));
+        }
+        if response.len() < response_capacity_limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "response buffer is smaller than negotiated response size",
+            ));
+        }
+
         let request_seq = self.next_request_seq + 1;
         self.next_request_seq = request_seq;
 
         unsafe {
-            ptr::copy_nonoverlapping(request.as_ptr(), self.region.add(OFF_REQ_FRAME), FRAME_SIZE);
+            ptr::copy_nonoverlapping(
+                request.as_ptr(),
+                self.region.add(request_area(self.region)),
+                request.len(),
+            );
+            store_i32_release(
+                self.region.add(OFF_REQ_LEN) as *mut i32,
+                request.len() as i32,
+            );
             store_i64_release(self.region.add(OFF_REQ_SEQ) as *mut i64, request_seq);
 
             // SeqCst fence prevents store-load reordering: ensures the store of
@@ -945,20 +1637,37 @@ impl ShmClient {
         }
 
         // Wait for response
-        let deadline = if timeout_ms == 0 { 0u64 } else { now_ms() + timeout_ms as u64 };
+        let deadline = if timeout_ms == 0 {
+            0u64
+        } else {
+            now_ms() + timeout_ms as u64
+        };
         let mut spins = self.spin_tries;
 
         loop {
             let current = unsafe { load_i64_acquire(self.region.add(OFF_RESP_SEQ) as *const i64) };
             if current >= request_seq {
-                let mut response = [0u8; FRAME_SIZE];
-                unsafe {
-                    ptr::copy_nonoverlapping(self.region.add(OFF_RESP_FRAME), response.as_mut_ptr(), FRAME_SIZE);
+                let response_len =
+                    unsafe { load_i32_acquire(self.region.add(OFF_RESP_LEN) as *const i32) };
+                if response_len < 0
+                    || response_len as usize > response_capacity_limit
+                    || response_len as usize > response_capacity(self.region)
+                {
+                    return Err(protocol_error("invalid SHM response length"));
                 }
-                return Ok(response);
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        self.region.add(response_area(self.region)),
+                        response.as_mut_ptr(),
+                        response_len as usize,
+                    );
+                }
+                return Ok(response_len as usize);
             }
 
-            if unsafe { load_i32_acquire(self.region.add(OFF_RESP_SERVER_CLOSED) as *const i32) } != 0 {
+            if unsafe { load_i32_acquire(self.region.add(OFF_RESP_SERVER_CLOSED) as *const i32) }
+                != 0
+            {
                 return Err(io::Error::new(io::ErrorKind::BrokenPipe, "server closed"));
             }
 
@@ -970,17 +1679,32 @@ impl ShmClient {
             }
 
             // Mark waiting + SeqCst fence (same Dekker race prevention)
-            unsafe { store_i32_release(self.region.add(OFF_RESP_CLIENT_WAITING) as *mut i32, 1); }
+            unsafe {
+                store_i32_release(self.region.add(OFF_RESP_CLIENT_WAITING) as *mut i32, 1);
+            }
             fence(Ordering::SeqCst);
 
             let current = unsafe { load_i64_acquire(self.region.add(OFF_RESP_SEQ) as *const i64) };
             if current >= request_seq {
-                unsafe { store_i32_release(self.region.add(OFF_RESP_CLIENT_WAITING) as *mut i32, 0); }
-                let mut response = [0u8; FRAME_SIZE];
                 unsafe {
-                    ptr::copy_nonoverlapping(self.region.add(OFF_RESP_FRAME), response.as_mut_ptr(), FRAME_SIZE);
+                    store_i32_release(self.region.add(OFF_RESP_CLIENT_WAITING) as *mut i32, 0);
                 }
-                return Ok(response);
+                let response_len =
+                    unsafe { load_i32_acquire(self.region.add(OFF_RESP_LEN) as *const i32) };
+                if response_len < 0
+                    || response_len as usize > response_capacity_limit
+                    || response_len as usize > response_capacity(self.region)
+                {
+                    return Err(protocol_error("invalid SHM response length"));
+                }
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        self.region.add(response_area(self.region)),
+                        response.as_mut_ptr(),
+                        response_len as usize,
+                    );
+                }
+                return Ok(response_len as usize);
             }
 
             let wait_ms = if deadline == 0 {
@@ -988,24 +1712,68 @@ impl ShmClient {
             } else {
                 let now = now_ms();
                 if now >= deadline {
-                    unsafe { store_i32_release(self.region.add(OFF_RESP_CLIENT_WAITING) as *mut i32, 0); }
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "SHM response timeout"));
+                    unsafe {
+                        store_i32_release(self.region.add(OFF_RESP_CLIENT_WAITING) as *mut i32, 0);
+                    }
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "SHM response timeout",
+                    ));
                 }
                 (deadline - now) as DWORD
             };
 
             let rc = unsafe { WaitForSingleObject(self.response_event, wait_ms) };
-            unsafe { store_i32_release(self.region.add(OFF_RESP_CLIENT_WAITING) as *mut i32, 0); }
+            unsafe {
+                store_i32_release(self.region.add(OFF_RESP_CLIENT_WAITING) as *mut i32, 0);
+            }
 
             if rc == WAIT_OBJECT_0 {
                 spins = self.spin_tries;
                 continue;
             }
             if rc == WAIT_TIMEOUT {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "SHM response timeout"));
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "SHM response timeout",
+                ));
             }
             return Err(win32_error("WaitForSingleObject(resp)"));
         }
+    }
+
+    fn call_message(
+        &mut self,
+        request: &[u8],
+        response: &mut [u8],
+        timeout_ms: u32,
+    ) -> io::Result<usize> {
+        validate_message_for_send(request, self.max_request_message_len)?;
+        let response_len = self.call_bytes(
+            request,
+            response,
+            self.max_request_message_len,
+            self.max_response_message_len,
+            timeout_ms,
+        )?;
+        validate_received_message(response, response_len, self.max_response_message_len)?;
+        Ok(response_len)
+    }
+
+    fn call_frame(&mut self, request: &Frame, timeout_ms: u32) -> io::Result<Frame> {
+        if self.max_request_message_len < FRAME_SIZE || self.max_response_message_len < FRAME_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "negotiated frame size exceeds SHM capacities",
+            ));
+        }
+        let mut response = [0u8; FRAME_SIZE];
+        let response_len =
+            self.call_bytes(request, &mut response, FRAME_SIZE, FRAME_SIZE, timeout_ms)?;
+        if response_len != FRAME_SIZE {
+            return Err(protocol_error("invalid SHM frame length"));
+        }
+        Ok(response)
     }
 }
 
@@ -1016,12 +1784,18 @@ impl Drop for ShmClient {
                 store_i32_release(self.region.add(OFF_REQ_CLIENT_CLOSED) as *mut i32, 1);
             }
             if self.request_event != INVALID_HANDLE_VALUE && !self.request_event.is_null() {
-                unsafe { SetEvent(self.request_event); }
+                unsafe {
+                    SetEvent(self.request_event);
+                }
             }
             if self.response_event != INVALID_HANDLE_VALUE && !self.response_event.is_null() {
-                unsafe { SetEvent(self.response_event); }
+                unsafe {
+                    SetEvent(self.response_event);
+                }
             }
-            unsafe { UnmapViewOfFile(self.region as LPVOID); }
+            unsafe {
+                UnmapViewOfFile(self.region as LPVOID);
+            }
         }
         close_handle(self.response_event);
         close_handle(self.request_event);
@@ -1039,9 +1813,15 @@ pub struct NamedPipeServer {
     service_name: String,
     supported_profiles: u32,
     preferred_profiles: u32,
+    max_request_payload_bytes: u32,
+    max_request_batch_items: u32,
+    max_response_payload_bytes: u32,
+    max_response_batch_items: u32,
     auth_token: u64,
     shm_spin_tries: u32,
     negotiated_profile: u32,
+    max_request_message_len: usize,
+    max_response_message_len: usize,
     shm_server: Option<ShmServer>,
     connected: bool,
 }
@@ -1051,6 +1831,15 @@ impl NamedPipeServer {
         let pipe_name = to_wide(&build_pipe_name(config));
         let supported = effective_supported(config);
         let preferred = effective_preferred(config, supported);
+        let max_request_payload_bytes = effective_payload_limit(config.max_request_payload_bytes);
+        let max_request_batch_items = effective_batch_limit(config.max_request_batch_items);
+        let max_response_payload_bytes = effective_payload_limit(config.max_response_payload_bytes);
+        let max_response_batch_items = effective_batch_limit(config.max_response_batch_items);
+        let max_request_message_len =
+            compute_max_message_len(max_request_payload_bytes, max_request_batch_items)?;
+        let max_response_message_len =
+            compute_max_message_len(max_response_payload_bytes, max_response_batch_items)?;
+        let max_default_message_len = max_request_message_len.max(max_response_message_len);
 
         let pipe = unsafe {
             CreateNamedPipeW(
@@ -1058,8 +1847,8 @@ impl NamedPipeServer {
                 PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
                 PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
                 1,
-                FRAME_SIZE as DWORD * 4,
-                FRAME_SIZE as DWORD * 4,
+                max_default_message_len as DWORD,
+                max_default_message_len as DWORD,
                 0,
                 ptr::null_mut(),
             )
@@ -1074,9 +1863,15 @@ impl NamedPipeServer {
             service_name: config.service_name.clone(),
             supported_profiles: supported,
             preferred_profiles: preferred,
+            max_request_payload_bytes,
+            max_request_batch_items,
+            max_response_payload_bytes,
+            max_response_batch_items,
             auth_token: config.auth_token,
             shm_spin_tries: config.shm_spin_tries,
             negotiated_profile: 0,
+            max_request_message_len: 0,
+            max_response_message_len: 0,
             shm_server: None,
             connected: false,
         })
@@ -1087,12 +1882,20 @@ impl NamedPipeServer {
 
         set_pipe_mode(self.pipe, PIPE_NOWAIT)?;
 
-        let deadline = if timeout_ms == 0 { 0u64 } else { now_ms() + timeout_ms as u64 };
+        let deadline = if timeout_ms == 0 {
+            0u64
+        } else {
+            now_ms() + timeout_ms as u64
+        };
         loop {
             let ok = unsafe { ConnectNamedPipe(self.pipe, ptr::null_mut()) };
-            if ok != 0 { break; }
+            if ok != 0 {
+                break;
+            }
             let err = unsafe { GetLastError() };
-            if err == ERROR_PIPE_CONNECTED { break; }
+            if err == ERROR_PIPE_CONNECTED {
+                break;
+            }
             if err != ERROR_PIPE_LISTENING && err != ERROR_NO_DATA {
                 let _ = set_pipe_mode(self.pipe, PIPE_WAIT);
                 return Err(win32_error("ConnectNamedPipe"));
@@ -1101,31 +1904,60 @@ impl NamedPipeServer {
                 let _ = set_pipe_mode(self.pipe, PIPE_WAIT);
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "accept timeout"));
             }
-            unsafe { Sleep(1); }
+            unsafe {
+                Sleep(1);
+            }
         }
 
         set_pipe_mode(self.pipe, PIPE_WAIT)?;
 
-        let profile = server_handshake(
-            self.pipe, self.supported_profiles, self.preferred_profiles,
-            self.auth_token, timeout_ms,
-        )?;
+        let negotiated = server_handshake(self, self.pipe, timeout_ms)?;
 
-        if is_shm_profile(profile) {
+        if is_shm_profile(negotiated.profile) {
             let shm_config = NamedPipeConfig {
                 run_dir: self.run_dir.clone().into(),
                 service_name: self.service_name.clone(),
                 supported_profiles: self.supported_profiles,
                 preferred_profiles: self.preferred_profiles,
+                max_request_payload_bytes: negotiated.agreed_max_request_payload_bytes,
+                max_request_batch_items: negotiated.agreed_max_request_batch_items,
+                max_response_payload_bytes: negotiated.agreed_max_response_payload_bytes,
+                max_response_batch_items: negotiated.agreed_max_response_batch_items,
                 auth_token: self.auth_token,
                 shm_spin_tries: self.shm_spin_tries,
             };
-            self.shm_server = Some(ShmServer::create(&shm_config, profile)?);
+            self.shm_server = Some(ShmServer::create(&shm_config, negotiated.profile)?);
         }
 
-        self.negotiated_profile = profile;
+        self.negotiated_profile = negotiated.profile;
+        self.max_request_message_len = negotiated.max_request_message_len;
+        self.max_response_message_len = negotiated.max_response_message_len;
         self.connected = true;
         Ok(())
+    }
+
+    pub fn receive_message(
+        &mut self,
+        message: &mut [u8],
+        timeout: Option<Duration>,
+    ) -> io::Result<usize> {
+        let timeout_ms = timeout.map(|d| d.as_millis() as u32).unwrap_or(0);
+        if let Some(_) = self.shm_server {
+            return self
+                .shm_server
+                .as_mut()
+                .expect("shm server exists")
+                .receive_message(message, timeout_ms);
+        }
+        if self.max_request_message_len == 0 || message.len() < self.max_request_message_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "message buffer is smaller than negotiated request size",
+            ));
+        }
+        let message_len = pipe_read_message(self.pipe, message, timeout_ms)?;
+        validate_received_message(message, message_len, self.max_request_message_len)?;
+        Ok(message_len)
     }
 
     pub fn receive_frame(&mut self, timeout: Option<Duration>) -> io::Result<Frame> {
@@ -1136,6 +1968,21 @@ impl NamedPipeServer {
         pipe_read_frame(self.pipe, timeout_ms)
     }
 
+    pub fn send_message(&mut self, message: &[u8]) -> io::Result<()> {
+        if let Some(_) = self.shm_server {
+            return self
+                .shm_server
+                .as_mut()
+                .expect("shm server exists")
+                .send_message(message);
+        }
+        if self.max_response_message_len == 0 {
+            return Err(io::Error::from_raw_os_error(87));
+        }
+        validate_message_for_send(message, self.max_response_message_len)?;
+        pipe_write_message(self.pipe, message)
+    }
+
     pub fn send_frame(&mut self, frame: &Frame) -> io::Result<()> {
         if let Some(ref mut shm) = self.shm_server {
             return shm.send_frame(frame);
@@ -1143,12 +1990,20 @@ impl NamedPipeServer {
         pipe_write_frame(self.pipe, frame)
     }
 
-    pub fn receive_increment(&mut self, timeout: Option<Duration>) -> io::Result<(u64, IncrementRequest)> {
+    pub fn receive_increment(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> io::Result<(u64, IncrementRequest)> {
         let frame = self.receive_frame(timeout)?;
         decode_increment_request(&frame)
     }
 
-    pub fn send_increment(&mut self, request_id: u64, response: &IncrementResponse, _timeout: Option<Duration>) -> io::Result<()> {
+    pub fn send_increment(
+        &mut self,
+        request_id: u64,
+        response: &IncrementResponse,
+        _timeout: Option<Duration>,
+    ) -> io::Result<()> {
         let frame = encode_increment_response(request_id, response);
         self.send_frame(&frame)
     }
@@ -1181,8 +2036,21 @@ impl Drop for NamedPipeServer {
 pub struct NamedPipeClient {
     pipe: HANDLE,
     negotiated_profile: u32,
+    max_request_message_len: usize,
+    max_response_message_len: usize,
     shm_client: Option<ShmClient>,
     next_request_id: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NegotiationResult {
+    profile: u32,
+    agreed_max_request_payload_bytes: u32,
+    agreed_max_request_batch_items: u32,
+    agreed_max_response_payload_bytes: u32,
+    agreed_max_response_batch_items: u32,
+    max_request_message_len: usize,
+    max_response_message_len: usize,
 }
 
 impl NamedPipeClient {
@@ -1191,15 +2059,26 @@ impl NamedPipeClient {
         let pipe_name = to_wide(&build_pipe_name(config));
         let supported = effective_supported(config);
         let preferred = effective_preferred(config, supported);
+        let max_request_payload_bytes = effective_payload_limit(config.max_request_payload_bytes);
+        let max_request_batch_items = effective_batch_limit(config.max_request_batch_items);
+        let max_response_payload_bytes = effective_payload_limit(config.max_response_payload_bytes);
+        let max_response_batch_items = effective_batch_limit(config.max_response_batch_items);
 
-        let deadline = if timeout_ms == 0 { 0u64 } else { now_ms() + timeout_ms as u64 };
+        let deadline = if timeout_ms == 0 {
+            0u64
+        } else {
+            now_ms() + timeout_ms as u64
+        };
         let pipe = loop {
             let h = unsafe {
                 CreateFileW(
                     pipe_name.as_ptr(),
                     GENERIC_READ | GENERIC_WRITE,
-                    0, ptr::null_mut(),
-                    OPEN_EXISTING, 0, NULL_HANDLE,
+                    0,
+                    ptr::null_mut(),
+                    OPEN_EXISTING,
+                    0,
+                    NULL_HANDLE,
                 )
             };
             if h != INVALID_HANDLE_VALUE {
@@ -1210,40 +2089,101 @@ impl NamedPipeClient {
                 return Err(win32_error("CreateFileW(pipe)"));
             }
             if deadline != 0 && now_ms() >= deadline {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "pipe connect timeout"));
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "pipe connect timeout",
+                ));
             }
             if err == ERROR_PIPE_BUSY {
-                let wait = if timeout_ms == 0 { NMPWAIT_WAIT_FOREVER } else { 50 };
-                unsafe { WaitNamedPipeW(pipe_name.as_ptr(), wait); }
+                let wait = if timeout_ms == 0 {
+                    NMPWAIT_WAIT_FOREVER
+                } else {
+                    50
+                };
+                unsafe {
+                    WaitNamedPipeW(pipe_name.as_ptr(), wait);
+                }
             } else {
-                unsafe { Sleep(1); }
+                unsafe {
+                    Sleep(1);
+                }
             }
         };
 
         set_pipe_mode(pipe, PIPE_WAIT)?;
 
-        let profile = client_handshake(pipe, supported, preferred, config.auth_token, timeout_ms)?;
+        let negotiated = client_handshake(
+            pipe,
+            supported,
+            preferred,
+            max_request_payload_bytes,
+            max_request_batch_items,
+            max_response_payload_bytes,
+            max_response_batch_items,
+            config.auth_token,
+            timeout_ms,
+        )?;
 
-        let shm_client = if is_shm_profile(profile) {
+        let shm_client = if is_shm_profile(negotiated.profile) {
             let shm_config = NamedPipeConfig {
                 run_dir: config.run_dir.clone(),
                 service_name: config.service_name.clone(),
                 supported_profiles: config.supported_profiles,
                 preferred_profiles: config.preferred_profiles,
+                max_request_payload_bytes: negotiated.agreed_max_request_payload_bytes,
+                max_request_batch_items: negotiated.agreed_max_request_batch_items,
+                max_response_payload_bytes: negotiated.agreed_max_response_payload_bytes,
+                max_response_batch_items: negotiated.agreed_max_response_batch_items,
                 auth_token: config.auth_token,
                 shm_spin_tries: config.shm_spin_tries,
             };
-            Some(ShmClient::create(&shm_config, profile, timeout_ms)?)
+            Some(ShmClient::create(
+                &shm_config,
+                negotiated.profile,
+                timeout_ms,
+            )?)
         } else {
             None
         };
 
         Ok(NamedPipeClient {
             pipe,
-            negotiated_profile: profile,
+            negotiated_profile: negotiated.profile,
+            max_request_message_len: negotiated.max_request_message_len,
+            max_response_message_len: negotiated.max_response_message_len,
             shm_client,
             next_request_id: 1,
         })
+    }
+
+    pub fn call_message(
+        &mut self,
+        request: &[u8],
+        response: &mut [u8],
+        timeout: Option<Duration>,
+    ) -> io::Result<usize> {
+        let timeout_ms = timeout.map(|d| d.as_millis() as u32).unwrap_or(0);
+        if let Some(_) = self.shm_client {
+            return self
+                .shm_client
+                .as_mut()
+                .expect("shm client exists")
+                .call_message(request, response, timeout_ms);
+        }
+        if self.max_request_message_len == 0 || self.max_response_message_len == 0 {
+            return Err(io::Error::from_raw_os_error(87));
+        }
+        if response.len() < self.max_response_message_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "response buffer is smaller than negotiated response size",
+            ));
+        }
+        validate_message_for_send(request, self.max_request_message_len)?;
+        pipe_write_message(self.pipe, request)?;
+        let response_len = pipe_read_message(self.pipe, response, timeout_ms)?;
+        validate_received_message(response, response_len, self.max_response_message_len)?;
+        Ok(response_len)
     }
 
     pub fn call_frame(&mut self, request: &Frame, timeout: Option<Duration>) -> io::Result<Frame> {
@@ -1255,7 +2195,11 @@ impl NamedPipeClient {
         pipe_read_frame(self.pipe, timeout_ms)
     }
 
-    pub fn call_increment(&mut self, request: &IncrementRequest, timeout: Option<Duration>) -> io::Result<IncrementResponse> {
+    pub fn call_increment(
+        &mut self,
+        request: &IncrementRequest,
+        timeout: Option<Duration>,
+    ) -> io::Result<IncrementResponse> {
         let id = self.next_request_id;
         self.next_request_id += 1;
         let req_frame = encode_increment_request(id, request);

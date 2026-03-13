@@ -11,6 +11,15 @@ typedef struct netipc_win_shm_client netipc_win_shm_client_t;
 int netipc_win_shm_server_create(const struct netipc_named_pipe_config *config,
                                  uint32_t profile,
                                  netipc_win_shm_server_t **out_server);
+int netipc_win_shm_server_receive_message(netipc_win_shm_server_t *server,
+                                          uint8_t *message,
+                                          size_t message_capacity,
+                                          size_t *out_message_len,
+                                          uint32_t timeout_ms);
+int netipc_win_shm_server_send_message(netipc_win_shm_server_t *server,
+                                       const uint8_t *message,
+                                       size_t message_len,
+                                       uint32_t timeout_ms);
 int netipc_win_shm_server_receive_frame(netipc_win_shm_server_t *server,
                                         uint8_t frame[NETIPC_FRAME_SIZE],
                                         uint32_t timeout_ms);
@@ -23,6 +32,13 @@ int netipc_win_shm_client_create(const struct netipc_named_pipe_config *config,
                                  uint32_t profile,
                                  netipc_win_shm_client_t **out_client,
                                  uint32_t timeout_ms);
+int netipc_win_shm_client_call_message(netipc_win_shm_client_t *client,
+                                       const uint8_t *request_message,
+                                       size_t request_message_len,
+                                       uint8_t *response_message,
+                                       size_t response_capacity,
+                                       size_t *out_response_len,
+                                       uint32_t timeout_ms);
 int netipc_win_shm_client_call_frame(netipc_win_shm_client_t *client,
                                      const uint8_t request_frame[NETIPC_FRAME_SIZE],
                                      uint8_t response_frame[NETIPC_FRAME_SIZE],

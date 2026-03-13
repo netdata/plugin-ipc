@@ -2,6 +2,7 @@ set(NETIPC_PUBLIC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 set(NETIPC_LIBRARY_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/protocol/netipc_schema.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/service/netipc_cgroups_snapshot.c"
 )
 
 if(NETIPC_WINDOWS_RUNTIME)
@@ -26,6 +27,9 @@ endif()
 if(NETIPC_BUILD_FIXTURES)
     add_executable(netipc-codec-c "${CMAKE_SOURCE_DIR}/tests/fixtures/c/netipc_codec_tool.c")
     target_link_libraries(netipc-codec-c PRIVATE netipc)
+
+    add_executable(netipc-cgroups-live-c "${CMAKE_SOURCE_DIR}/tests/fixtures/c/netipc_cgroups_live.c")
+    target_link_libraries(netipc-cgroups-live-c PRIVATE netipc)
 
     if(NETIPC_WINDOWS_RUNTIME)
         add_executable(netipc-live-c "${CMAKE_SOURCE_DIR}/tests/fixtures/c/netipc_live_c.c")

@@ -155,6 +155,8 @@ Interop and protocol tests:
 ./tests/run-live-interop.sh
 ./tests/run-live-uds-interop.sh
 ./tests/run-live-npipe-smoke.sh
+./tests/run-live-cgroups-baseline.sh
+./tests/run-live-cgroups-win.sh
 ./tests/run-live-win-profile-bench.sh
 ./tests/run-uds-seqpacket.sh
 ./tests/run-uds-negotiation-negative.sh
@@ -165,6 +167,8 @@ Benchmarks:
 ```bash
 ./tests/run-live-uds-bench.sh
 ./tests/run-live-shm-bench.sh
+./tests/run-live-cgroups-bench.sh
+./tests/run-live-cgroups-win-bench.sh
 ./tests/run-negotiated-profile-bench.sh
 ```
 
@@ -193,6 +197,28 @@ The shell scripts remain in the repository because they are library validation a
   - `max`
   - `100k/s`
   - `10k/s`
+- `./tests/run-live-cgroups-bench.sh` runs the fake `cgroups` snapshot/cache benchmark on Linux baseline transports:
+  - full directed refresh matrix for `C/Go/Rust`
+  - local lookup self/self benchmarks for `C/Go/Rust`
+  - default scenarios:
+    - `max`
+    - `1000/s`
+- `./tests/run-live-cgroups-win-bench.sh` runs the same snapshot/cache methodology on Windows baseline transports:
+  - full directed refresh matrix across:
+    - `c-native`
+    - `c-msys`
+    - `go-native`
+    - `rust-native`
+  - local lookup self/self benchmarks for the same four implementations
+  - default scenarios:
+    - `max`
+    - `1000/s`
+- `./tests/generate-benchmarks-posix.sh` now renders the complete Linux picture into `benchmarks-posix.md`, including:
+  - low-level UDS matrix
+  - legacy direct `SHM_HYBRID` matrix
+  - negotiated profile matrix
+  - fake `cgroups` snapshot/cache baseline matrix
+  - fake `cgroups` snapshot/cache SHM matrix
 - The UDS benchmark matrix fails hard on:
   - any non-OK response status
   - any `response != request + 1` mismatch
@@ -201,6 +227,8 @@ The shell scripts remain in the repository because they are library validation a
 - The direct SHM benchmark matrix fails hard on the same correctness conditions.
 - `./tests/run-live-uds-interop.sh` runs the full directed baseline profile-`1` UDS matrix, plus the negotiated C<->Rust profile-`2` SHM cases.
 - `./tests/run-live-interop.sh` runs direct `SHM_HYBRID` interop for `c->rust` and `rust->c`.
+- `./tests/run-live-cgroups-baseline.sh` runs the fake `cgroups` snapshot/cache live smoke on Linux with the full `C/Go/Rust` producer/client matrix.
+- `./tests/run-live-cgroups-win.sh` runs the same methodology on Windows with the full `c-native/c-msys/go-native/rust-native` producer/client matrix.
 
 Quick manual runs:
 
