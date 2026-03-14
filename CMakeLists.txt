@@ -44,6 +44,18 @@ if(NOT NETIPC_WINDOWS_RUNTIME)
         src/libnetdata/netipc/include
     )
     target_link_libraries(netipc_uds PUBLIC netipc_protocol)
+
+    # --- C library: L1 POSIX SHM transport (Linux only) ----------------------
+
+    if(NOT APPLE)
+        add_library(netipc_shm STATIC
+            src/libnetdata/netipc/src/transport/posix/netipc_shm.c
+        )
+        target_include_directories(netipc_shm PUBLIC
+            src/libnetdata/netipc/include
+        )
+        target_link_libraries(netipc_shm PUBLIC netipc_protocol)
+    endif()
 endif()
 
 # --- Rust crate -----------------------------------------------------------
@@ -164,6 +176,15 @@ if(NOT NETIPC_WINDOWS_RUNTIME)
     # C interop binary for cross-language UDS tests
     add_executable(interop_uds_c tests/fixtures/c/interop_uds.c)
     target_link_libraries(interop_uds_c PRIVATE netipc_uds netipc_protocol)
+endif()
+
+# --- L1 SHM transport tests (Linux only) -----------------------------------
+
+if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+    add_executable(test_shm tests/fixtures/c/test_shm.c)
+    target_link_libraries(test_shm PRIVATE netipc_shm netipc_uds netipc_protocol Threads::Threads)
+    add_test(NAME test_shm COMMAND test_shm)
+    set_tests_properties(test_shm PROPERTIES TIMEOUT 30)
 endif()
 
 # --- Rust UDS transport tests ---------------------------------------------
