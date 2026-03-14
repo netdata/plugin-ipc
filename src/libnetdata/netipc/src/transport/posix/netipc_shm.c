@@ -155,11 +155,14 @@ static int check_shm_stale(const char *path)
     }
 
     int32_t owner = hdr->owner_pid;
+    uint32_t gen = hdr->owner_generation;
     munmap(map, NIPC_SHM_HEADER_LEN);
 
     if (pid_alive((pid_t)owner)) {
         return 1; /* live */
     }
+
+    (void)gen; /* generation is cached on attach for runtime checks */
 
     /* Dead owner -- stale. */
     unlink(path);
@@ -228,7 +231,13 @@ nipc_shm_error_t nipc_shm_server_create(const char *run_dir,
     hdr->version           = NIPC_SHM_REGION_VERSION;
     hdr->header_len        = NIPC_SHM_HEADER_LEN;
     hdr->owner_pid         = (int32_t)getpid();
-    hdr->owner_generation  = 1; /* first generation */
+
+    /* Use a time-based generation to detect PID reuse across restarts. */
+    {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        hdr->owner_generation = (uint32_t)(ts.tv_sec ^ (ts.tv_nsec >> 10));
+    }
     hdr->request_offset    = req_off;
     hdr->request_capacity  = req_capacity;
     hdr->response_offset   = resp_off;
@@ -249,6 +258,7 @@ nipc_shm_error_t nipc_shm_server_create(const char *run_dir,
     out->local_req_seq     = 0;
     out->local_resp_seq    = 0;
     out->spin_tries        = NIPC_SHM_DEFAULT_SPIN;
+    out->owner_generation  = hdr->owner_generation;
     strncpy(out->path, path, sizeof(out->path) - 1);
     out->path[sizeof(out->path) - 1] = '\0';
 
@@ -383,6 +393,7 @@ nipc_shm_error_t nipc_shm_client_attach(const char *run_dir,
     out->local_req_seq     = cur_req_seq;
     out->local_resp_seq    = cur_resp_seq;
     out->spin_tries        = NIPC_SHM_DEFAULT_SPIN;
+    out->owner_generation  = hdr->owner_generation;
     strncpy(out->path, path, sizeof(out->path) - 1);
     out->path[sizeof(out->path) - 1] = '\0';
 
@@ -580,5 +591,14 @@ bool nipc_shm_owner_alive(const nipc_shm_ctx_t *ctx)
     const nipc_shm_region_header_t *hdr =
         (const nipc_shm_region_header_t *)ctx->base;
 
-    return pid_alive((pid_t)hdr->owner_pid);
+    if (!pid_alive((pid_t)hdr->owner_pid))
+        return false;
+
+    /* PID is alive; verify generation matches to detect PID reuse.
+     * If owner_generation is 0, skip the check (legacy region). */
+    if (ctx->owner_generation != 0 &&
+        hdr->owner_generation != ctx->owner_generation)
+        return false;
+
+    return true;
 }

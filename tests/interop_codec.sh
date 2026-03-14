@@ -23,8 +23,9 @@ run() {
     printf >&2 "${YELLOW}"
     printf >&2 "%q " "$@"
     printf >&2 "${NC}\n"
-    if ! "$@"; then
-        local exit_code=$?
+    local exit_code=0
+    "$@" || exit_code=$?
+    if [ $exit_code -ne 0 ]; then
         echo -e >&2 "${RED}[ERROR]${NC} Command failed with exit code ${exit_code}: ${YELLOW}$1${NC}"
         return $exit_code
     fi
@@ -57,7 +58,7 @@ run cargo build --bin interop_codec --manifest-path "${RUST_CRATE_DIR}/Cargo.tom
 
 echo ""
 echo -e "${YELLOW}=== Building Go interop binary ===${NC}"
-run env CGO_ENABLED=0 go build -C "${GO_FIXTURE_DIR}" -o "${BUILD_DIR}/bin/interop_codec_go" .
+run env CGO_ENABLED=0 go build -C "${GO_FIXTURE_DIR}" -o "${BUILD_DIR}/bin/interop_codec_go" ./cmd/interop_codec
 
 C_BIN="${BUILD_DIR}/bin/interop_codec_c"
 RUST_BIN="${RUST_CRATE_DIR}/target/debug/interop_codec"

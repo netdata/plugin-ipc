@@ -9,6 +9,15 @@
 #include "netipc/netipc_protocol.h"
 #include <string.h>
 
+/*
+ * Safe multiplication check: returns true if count * entry_size would
+ * overflow size_t. Portable across 32-bit and 64-bit without triggering
+ * -Wtype-limits.
+ */
+static inline bool mul_would_overflow(size_t count, size_t entry_size) {
+    return entry_size != 0 && count > SIZE_MAX / entry_size;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Compile-time layout assertions                                    */
 /* ------------------------------------------------------------------ */
@@ -213,6 +222,8 @@ nipc_error_t nipc_batch_dir_decode(const void *buf, size_t buf_len,
                                    uint32_t item_count,
                                    uint32_t packed_area_len,
                                    nipc_batch_entry_t *out) {
+    if (mul_would_overflow((size_t)item_count, 8))
+        return NIPC_ERR_BAD_ITEM_COUNT;
     size_t dir_size = (size_t)item_count * 8;
     if (buf_len < dir_size)
         return NIPC_ERR_TRUNCATED;
@@ -237,6 +248,8 @@ nipc_error_t nipc_batch_item_get(const void *payload, size_t payload_len,
     if (index >= item_count)
         return NIPC_ERR_OUT_OF_BOUNDS;
 
+    if (mul_would_overflow((size_t)item_count, 8))
+        return NIPC_ERR_BAD_ITEM_COUNT;
     size_t dir_size = (size_t)item_count * 8;
     size_t dir_aligned = nipc_align8(dir_size);
 
@@ -476,7 +489,9 @@ nipc_error_t nipc_cgroups_resp_decode(const void *buf, size_t buf_len,
     if (out->layout_version != 1)
         return NIPC_ERR_BAD_LAYOUT;
 
-    /* Validate directory fits */
+    /* Validate directory fits (with overflow check) */
+    if (mul_would_overflow((size_t)out->item_count, NIPC_CGROUPS_DIR_ENTRY_SIZE))
+        return NIPC_ERR_BAD_ITEM_COUNT;
     size_t dir_size = (size_t)out->item_count * NIPC_CGROUPS_DIR_ENTRY_SIZE;
     size_t dir_end  = NIPC_CGROUPS_RESP_HDR_SIZE + dir_size;
     if (dir_end > buf_len)
@@ -508,6 +523,11 @@ nipc_error_t nipc_cgroups_resp_item(const nipc_cgroups_resp_view_t *view,
                                     nipc_cgroups_item_view_t *out) {
     if (index >= view->item_count)
         return NIPC_ERR_OUT_OF_BOUNDS;
+
+    /* Overflow already checked in nipc_cgroups_resp_decode, but
+     * guard defensively since this is a public API. */
+    if (mul_would_overflow((size_t)view->item_count, NIPC_CGROUPS_DIR_ENTRY_SIZE))
+        return NIPC_ERR_BAD_ITEM_COUNT;
 
     size_t dir_start = NIPC_CGROUPS_RESP_HDR_SIZE;
     size_t dir_size  = (size_t)view->item_count * NIPC_CGROUPS_DIR_ENTRY_SIZE;

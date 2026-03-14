@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -95,8 +96,9 @@ type ShmContext struct {
 	localReqSeq  uint64
 	localRespSeq uint64
 
-	SpinTries uint32
-	path      string
+	SpinTries       uint32
+	ownerGeneration uint32 // cached for PID reuse detection
+	path            string
 }
 
 // Role returns the context role.
@@ -111,8 +113,18 @@ func (c *ShmContext) OwnerAlive() bool {
 		return false
 	}
 	pid := int32(binary.LittleEndian.Uint32(c.data[8:12]))
-	// owner_pid is i32 at offset 8; we read as u32 and cast
-	return pidAlive(int(pid))
+	if !pidAlive(int(pid)) {
+		return false
+	}
+	// Verify generation matches to detect PID reuse.
+	// Skip check if cached generation is 0 (legacy region).
+	if c.ownerGeneration != 0 {
+		curGen := binary.LittleEndian.Uint32(c.data[12:16])
+		if curGen != c.ownerGeneration {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -166,12 +178,16 @@ func ShmServerCreate(runDir, serviceName string, reqCapacity, respCapacity uint3
 		data[i] = 0
 	}
 
+	// Use a time-based generation to detect PID reuse across restarts.
+	now := time.Now()
+	generation := uint32(now.Unix()) ^ uint32(now.Nanosecond()>>10)
+
 	// Write header fields (little-endian)
 	binary.LittleEndian.PutUint32(data[0:4], shmRegionMagic)
 	binary.LittleEndian.PutUint16(data[4:6], shmRegionVersion)
 	binary.LittleEndian.PutUint16(data[6:8], uint16(shmHeaderLen))
 	binary.LittleEndian.PutUint32(data[8:12], uint32(int32(os.Getpid())))
-	binary.LittleEndian.PutUint32(data[12:16], 1) // generation
+	binary.LittleEndian.PutUint32(data[12:16], generation)
 	binary.LittleEndian.PutUint32(data[16:20], reqOff)
 	binary.LittleEndian.PutUint32(data[20:24], reqCap)
 	binary.LittleEndian.PutUint32(data[24:28], respOff)
@@ -206,6 +222,7 @@ func ShmServerCreate(runDir, serviceName string, reqCapacity, respCapacity uint3
 		localReqSeq:      0,
 		localRespSeq:     0,
 		SpinTries:        shmDefaultSpin,
+		ownerGeneration:  generation,
 		path:             path,
 	}, nil
 }
@@ -308,6 +325,7 @@ func ShmClientAttach(runDir, serviceName string) (*ShmContext, error) {
 	// Read current sequence numbers
 	curReqSeq := atomicLoadU64(data, shmOffReqSeq)
 	curRespSeq := atomicLoadU64(data, shmOffRespSeq)
+	ownerGen := binary.LittleEndian.Uint32(data[12:16])
 
 	// Dup fd and close file
 	newFd, err := syscall.Dup(fd)
@@ -329,6 +347,7 @@ func ShmClientAttach(runDir, serviceName string) (*ShmContext, error) {
 		localReqSeq:      curReqSeq,
 		localRespSeq:     curRespSeq,
 		SpinTries:        shmDefaultSpin,
+		ownerGeneration:  ownerGen,
 		path:             path,
 	}, nil
 }

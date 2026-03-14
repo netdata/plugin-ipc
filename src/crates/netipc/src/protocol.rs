@@ -612,9 +612,9 @@ pub struct StrView<'a> {
 }
 
 impl<'a> StrView<'a> {
-    /// Return the string content as a `&str` (panics if not valid UTF-8).
-    pub fn as_str(&self) -> &'a str {
-        core::str::from_utf8(&self.bytes[..self.len as usize]).unwrap()
+    /// Return the string content as a `&str`, or a UTF-8 error.
+    pub fn as_str(&self) -> Result<&'a str, core::str::Utf8Error> {
+        core::str::from_utf8(&self.bytes[..self.len as usize])
     }
 
     /// Return the string content as a byte slice (without the NUL).

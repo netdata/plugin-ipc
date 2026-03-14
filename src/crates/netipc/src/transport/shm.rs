@@ -151,6 +151,7 @@ pub struct ShmContext {
     local_resp_seq: u64,
 
     spin_tries: u32,
+    owner_generation: u32,
     path: PathBuf,
 }
 
@@ -176,7 +177,18 @@ impl ShmContext {
         }
         let hdr = self.base as *const RegionHeader;
         let pid = unsafe { (*hdr).owner_pid };
-        pid_alive(pid)
+        if !pid_alive(pid) {
+            return false;
+        }
+        // Verify generation matches to detect PID reuse.
+        // Skip check if cached generation is 0 (legacy region).
+        if self.owner_generation != 0 {
+            let cur_gen = unsafe { (*hdr).owner_generation };
+            if cur_gen != self.owner_generation {
+                return false;
+            }
+        }
+        true
     }
 
     /// Create a SHM region (server side).
@@ -250,6 +262,13 @@ impl ShmContext {
         // Zero the region
         unsafe { ptr::write_bytes(base, 0, region_size) };
 
+        // Use a time-based generation to detect PID reuse across restarts.
+        let generation = {
+            let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+            unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+            (ts.tv_sec as u32) ^ ((ts.tv_nsec >> 10) as u32)
+        };
+
         // Write header
         let hdr = base as *mut RegionHeader;
         unsafe {
@@ -257,7 +276,7 @@ impl ShmContext {
             (*hdr).version = REGION_VERSION;
             (*hdr).header_len = HEADER_LEN;
             (*hdr).owner_pid = libc::getpid();
-            (*hdr).owner_generation = 1;
+            (*hdr).owner_generation = generation;
             (*hdr).request_offset = req_off;
             (*hdr).request_capacity = req_cap;
             (*hdr).response_offset = resp_off;
@@ -279,6 +298,7 @@ impl ShmContext {
             local_req_seq: 0,
             local_resp_seq: 0,
             spin_tries: DEFAULT_SPIN_TRIES,
+            owner_generation: generation,
             path,
         })
     }
@@ -377,6 +397,7 @@ impl ShmContext {
         // Read current sequence numbers
         let cur_req_seq = atomic_load_u64(base, OFF_REQ_SEQ);
         let cur_resp_seq = atomic_load_u64(base, OFF_RESP_SEQ);
+        let generation = unsafe { (*hdr).owner_generation };
 
         Ok(ShmContext {
             role: ShmRole::Client,
@@ -390,6 +411,7 @@ impl ShmContext {
             local_req_seq: cur_req_seq,
             local_resp_seq: cur_resp_seq,
             spin_tries: DEFAULT_SPIN_TRIES,
+            owner_generation: generation,
             path,
         })
     }

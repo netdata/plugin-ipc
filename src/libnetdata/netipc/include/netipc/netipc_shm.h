@@ -117,6 +117,7 @@ typedef struct {
     uint64_t local_resp_seq;     /* last known resp_seq */
 
     uint32_t spin_tries;         /* spin count before futex wait */
+    uint32_t owner_generation;   /* cached for PID reuse detection */
 
     char     path[256];          /* stored for unlink on destroy */
 } nipc_shm_ctx_t;

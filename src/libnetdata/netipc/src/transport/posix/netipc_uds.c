@@ -710,6 +710,14 @@ nipc_uds_error_t nipc_uds_receive(nipc_uds_session_t *session,
     if (perr != NIPC_OK)
         return NIPC_UDS_ERR_PROTOCOL;
 
+    /* Validate payload_len against negotiated directional limit.
+     * Server receives requests; client receives responses. */
+    uint32_t max_payload = (session->role == NIPC_UDS_ROLE_SERVER)
+        ? session->max_request_payload_bytes
+        : session->max_response_payload_bytes;
+    if (hdr_out->payload_len > max_payload)
+        return NIPC_UDS_ERR_LIMIT_EXCEEDED;
+
     size_t total_msg = NIPC_HEADER_LEN + hdr_out->payload_len;
 
     /* Non-chunked: entire message arrived in one packet */

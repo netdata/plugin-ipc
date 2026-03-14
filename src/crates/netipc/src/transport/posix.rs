@@ -308,6 +308,17 @@ impl UdsSession {
         let hdr = Header::decode(&buf[..n])
             .map_err(|e| UdsError::Protocol(format!("header decode: {e}")))?;
 
+        // Validate payload_len against negotiated directional limit.
+        // Server receives requests; client receives responses.
+        let max_payload = if self.role == Role::Server {
+            self.max_request_payload_bytes
+        } else {
+            self.max_response_payload_bytes
+        };
+        if hdr.payload_len > max_payload {
+            return Err(UdsError::LimitExceeded);
+        }
+
         let total_msg = HEADER_SIZE + hdr.payload_len as usize;
 
         // Non-chunked: entire message in one packet

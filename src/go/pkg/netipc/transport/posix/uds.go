@@ -269,6 +269,19 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 		return protocol.Header{}, nil, wrapErr(ErrProtocol, "header decode: "+err.Error())
 	}
 
+	// Validate payload_len against negotiated directional limit.
+	// Server receives requests; client receives responses.
+	var maxPayload uint32
+	if s.role == RoleServer {
+		maxPayload = s.MaxRequestPayloadBytes
+	} else {
+		maxPayload = s.MaxResponsePayloadBytes
+	}
+	if hdr.PayloadLen > maxPayload {
+		return protocol.Header{}, nil, wrapErr(ErrLimitExceeded,
+			fmt.Sprintf("payload_len %d exceeds negotiated max %d", hdr.PayloadLen, maxPayload))
+	}
+
 	totalMsg := protocol.HeaderSize + int(hdr.PayloadLen)
 
 	// Non-chunked: entire message in one packet
