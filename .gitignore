@@ -1,9 +1,11 @@
-*.o
 build/
 build-*/
 **/target/
-tests/fixtures/go/netipc-codec-go
-bench/drivers/go/netipc-live-go
+*.o
 
-# Ad-hoc convenience scripts in repo root (proper scripts live in tests/)
+# Go binaries built outside build/
+tests/fixtures/go/netipc-*
+bench/drivers/go/netipc-*
+
+# Ad-hoc convenience scripts
 /run-*.sh

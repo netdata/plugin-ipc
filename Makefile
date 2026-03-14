@@ -3,11 +3,7 @@
 BUILD_DIR ?= build
 CMAKE ?= cmake
 GENERATED_ARTIFACTS := \
-	src/crates/target \
-	tests/fixtures/rust/target \
-	bench/drivers/rust/target \
-	tests/fixtures/go/netipc-codec-go \
-	bench/drivers/go/netipc-live-go
+	src/crates/target
 FORWARD_TARGETS := $(filter-out all configure clean,$(MAKECMDGOALS))
 
 .PHONY: all configure clean $(FORWARD_TARGETS)
