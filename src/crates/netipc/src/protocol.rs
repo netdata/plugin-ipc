@@ -2014,4 +2014,137 @@ mod tests {
         let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
         assert_eq!(view.item(0).unwrap_err(), NipcError::MissingNul);
     }
+
+    // -------------------------------------------------------------------
+    //  Proptest: fuzz / property-based tests for all decode paths
+    // -------------------------------------------------------------------
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        // Arbitrary bytes -- no decode path may panic on any input.
+
+        proptest! {
+            #[test]
+            fn decode_header_never_panics(data: Vec<u8>) {
+                let _ = Header::decode(&data);
+            }
+
+            #[test]
+            fn decode_chunk_header_never_panics(data: Vec<u8>) {
+                let _ = ChunkHeader::decode(&data);
+            }
+
+            #[test]
+            fn decode_hello_never_panics(data: Vec<u8>) {
+                let _ = Hello::decode(&data);
+            }
+
+            #[test]
+            fn decode_hello_ack_never_panics(data: Vec<u8>) {
+                let _ = HelloAck::decode(&data);
+            }
+
+            #[test]
+            fn decode_cgroups_request_never_panics(data: Vec<u8>) {
+                let _ = CgroupsRequest::decode(&data);
+            }
+
+            #[test]
+            fn decode_cgroups_response_never_panics(data: Vec<u8>) {
+                let result = CgroupsResponseView::decode(&data);
+                if let Ok(view) = result {
+                    // Exercise item access on valid decodes.
+                    let limit = view.item_count.min(64);
+                    for i in 0..limit {
+                        let _ = view.item(i);
+                    }
+                    // Out-of-bounds must not panic.
+                    let _ = view.item(view.item_count);
+                }
+            }
+
+            #[test]
+            fn batch_dir_decode_never_panics(
+                data: Vec<u8>,
+                item_count in 0u32..128,
+                packed_area_len in 0u32..65536,
+            ) {
+                let _ = batch_dir_decode(&data, item_count, packed_area_len);
+            }
+
+            #[test]
+            fn batch_item_get_never_panics(
+                data: Vec<u8>,
+                item_count in 0u32..128,
+                index in 0u32..128,
+            ) {
+                let _ = batch_item_get(&data, item_count, index);
+            }
+        }
+
+        // Roundtrip tests: encode random valid values, decode, verify match.
+
+        proptest! {
+            #[test]
+            fn encode_decode_header_roundtrip(
+                kind in 1u16..=3,
+                flags in any::<u16>(),
+                code in any::<u16>(),
+                transport_status in any::<u16>(),
+                payload_len in any::<u32>(),
+                item_count in any::<u32>(),
+                message_id in any::<u64>(),
+            ) {
+                let h = Header {
+                    magic: MAGIC_MSG,
+                    version: VERSION,
+                    header_len: HEADER_LEN,
+                    kind,
+                    flags,
+                    code,
+                    transport_status,
+                    payload_len,
+                    item_count,
+                    message_id,
+                };
+                let mut buf = [0u8; 64];
+                let n = h.encode(&mut buf);
+                prop_assert_eq!(n, HEADER_SIZE);
+                let decoded = Header::decode(&buf[..n]).unwrap();
+                prop_assert_eq!(decoded, h);
+            }
+
+            #[test]
+            fn encode_decode_hello_roundtrip(
+                supported in any::<u32>(),
+                preferred in any::<u32>(),
+                max_req_payload in any::<u32>(),
+                max_req_batch in any::<u32>(),
+                max_resp_payload in any::<u32>(),
+                max_resp_batch in any::<u32>(),
+                auth_token in any::<u64>(),
+                packet_size in any::<u32>(),
+            ) {
+                let h = Hello {
+                    layout_version: 1,
+                    flags: 0,
+                    supported_profiles: supported,
+                    preferred_profiles: preferred,
+                    max_request_payload_bytes: max_req_payload,
+                    max_request_batch_items: max_req_batch,
+                    max_response_payload_bytes: max_resp_payload,
+                    max_response_batch_items: max_resp_batch,
+                    auth_token,
+                    packet_size,
+                };
+                let mut buf = [0u8; 64];
+                let n = h.encode(&mut buf);
+                prop_assert_eq!(n, HELLO_SIZE);
+                let decoded = Hello::decode(&buf[..n]).unwrap();
+                prop_assert_eq!(decoded, h);
+            }
+        }
+    }
 }

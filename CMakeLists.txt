@@ -106,4 +106,39 @@ elseif(CARGO_EXECUTABLE)
     )
 endif()
 
+# --- Fuzz harness (standalone mode for CI) --------------------------------
+
+add_executable(fuzz_protocol tests/fuzz_protocol.c)
+target_compile_definitions(fuzz_protocol PRIVATE FUZZ_STANDALONE)
+target_link_libraries(fuzz_protocol PRIVATE netipc_protocol)
+
+# CTest fuzz targets: short 30-second runs with random input via /dev/urandom.
+# Each test generates random data and feeds it to the standalone harness.
+add_test(NAME fuzz_protocol_30s
+    COMMAND bash -c "head -c 65536 /dev/urandom | $<TARGET_FILE:fuzz_protocol>"
+)
+set_tests_properties(fuzz_protocol_30s PROPERTIES TIMEOUT 60)
+
+if(GO_EXECUTABLE)
+    # Go fuzz targets: 30-second runs each.
+    foreach(FUZZ_TARGET
+        FuzzDecodeHeader
+        FuzzDecodeChunkHeader
+        FuzzDecodeHello
+        FuzzDecodeHelloAck
+        FuzzDecodeCgroupsRequest
+        FuzzDecodeCgroupsResponse
+        FuzzBatchDirDecode
+        FuzzBatchItemGet
+    )
+        add_test(NAME go_${FUZZ_TARGET}
+            COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+                ${GO_EXECUTABLE} test -fuzz=^${FUZZ_TARGET}$ -fuzztime=30s
+                ./pkg/netipc/protocol/
+            WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
+        )
+        set_tests_properties(go_${FUZZ_TARGET} PROPERTIES TIMEOUT 120)
+    endforeach()
+endif()
+
 # --- Benchmarks (added per phase) ----------------------------------------

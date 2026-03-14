@@ -9,6 +9,9 @@ path = "src/lib.rs"
 [dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+proptest = "1"
+
 [[bin]]
 name = "interop_codec"
 path = "src/bin/interop_codec.rs"
