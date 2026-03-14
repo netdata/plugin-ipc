@@ -1,3 +1,873 @@
-// Package protocol implements the wire format codec for plugin-ipc.
-// Phase 0: empty package skeleton.
+// Package protocol implements the wire envelope and codec for the netipc
+// protocol. Pure byte-layout encode/decode. No I/O, no transport, no
+// allocation on decode. All multi-byte fields are little-endian on the wire.
+//
+// Decoded "View" types borrow the underlying buffer and are valid only while
+// that buffer lives. Copy immediately if the data is needed later.
 package protocol
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+)
+
+// ---------------------------------------------------------------------------
+//  Constants
+// ---------------------------------------------------------------------------
+
+const (
+	MagicMsg   uint32 = 0x4e495043 // "NIPC"
+	MagicChunk uint32 = 0x4e43484b // "NCHK"
+	Version    uint16 = 1
+	HeaderLen  uint16 = 32
+	HeaderSize        = 32
+
+	// Message kinds.
+	KindRequest  uint16 = 1
+	KindResponse uint16 = 2
+	KindControl  uint16 = 3
+
+	// Flags.
+	FlagBatch uint16 = 0x0001
+
+	// Transport status.
+	StatusOK            uint16 = 0
+	StatusBadEnvelope   uint16 = 1
+	StatusAuthFailed    uint16 = 2
+	StatusIncompatible  uint16 = 3
+	StatusUnsupported   uint16 = 4
+	StatusLimitExceeded uint16 = 5
+	StatusInternalError uint16 = 6
+
+	// Control opcodes.
+	CodeHello    uint16 = 1
+	CodeHelloAck uint16 = 2
+
+	// Method codes.
+	MethodIncrement       uint16 = 1
+	MethodCgroupsSnapshot uint16 = 2
+
+	// Profile bits.
+	ProfileBaseline   uint32 = 0x01
+	ProfileSHMHybrid  uint32 = 0x02
+	ProfileSHMFutex   uint32 = 0x04
+	ProfileSHMWaitAddr uint32 = 0x08
+
+	// Defaults.
+	MaxPayloadDefault uint32 = 1024
+
+	// Alignment for batch items and cgroups items.
+	Alignment = 8
+
+	// Payload sizes.
+	helloSize        = 44
+	helloAckSize     = 36
+	cgroupsReqSize   = 4
+	cgroupsRespHdr   = 24
+	cgroupsDirEntry  = 8
+	cgroupsItemHdr   = 32
+)
+
+var le = binary.LittleEndian
+
+// ---------------------------------------------------------------------------
+//  Errors
+// ---------------------------------------------------------------------------
+
+var (
+	ErrTruncated    = errors.New("buffer too short")
+	ErrBadMagic     = errors.New("magic value mismatch")
+	ErrBadVersion   = errors.New("unsupported version")
+	ErrBadHeaderLen = errors.New("header_len != 32")
+	ErrBadKind      = errors.New("unknown message kind")
+	ErrBadLayout    = errors.New("unknown layout_version")
+	ErrOutOfBounds  = errors.New("offset+length exceeds data")
+	ErrMissingNul   = errors.New("string not NUL-terminated")
+	ErrBadAlignment = errors.New("item not 8-byte aligned")
+	ErrBadItemCount = errors.New("item count inconsistent")
+	ErrOverflow     = errors.New("builder out of space")
+)
+
+// ---------------------------------------------------------------------------
+//  Utility
+// ---------------------------------------------------------------------------
+
+// Align8 rounds v up to the next multiple of 8.
+func Align8(v int) int {
+	return (v + 7) &^ 7
+}
+
+// ---------------------------------------------------------------------------
+//  Outer message header (32 bytes)
+// ---------------------------------------------------------------------------
+
+// Header is the outer message header (32 bytes on the wire).
+type Header struct {
+	Magic           uint32
+	Version         uint16
+	HeaderLen       uint16
+	Kind            uint16
+	Flags           uint16
+	Code            uint16
+	TransportStatus uint16
+	PayloadLen      uint32
+	ItemCount       uint32
+	MessageID       uint64
+}
+
+// Encode writes the header into buf. Returns 32 on success, 0 if buf is
+// too small.
+func (h *Header) Encode(buf []byte) int {
+	if len(buf) < HeaderSize {
+		return 0
+	}
+	le.PutUint32(buf[0:4], h.Magic)
+	le.PutUint16(buf[4:6], h.Version)
+	le.PutUint16(buf[6:8], h.HeaderLen)
+	le.PutUint16(buf[8:10], h.Kind)
+	le.PutUint16(buf[10:12], h.Flags)
+	le.PutUint16(buf[12:14], h.Code)
+	le.PutUint16(buf[14:16], h.TransportStatus)
+	le.PutUint32(buf[16:20], h.PayloadLen)
+	le.PutUint32(buf[20:24], h.ItemCount)
+	le.PutUint64(buf[24:32], h.MessageID)
+	return HeaderSize
+}
+
+// DecodeHeader decodes an outer message header from buf. Validates magic,
+// version, header_len, and kind.
+func DecodeHeader(buf []byte) (Header, error) {
+	if len(buf) < HeaderSize {
+		return Header{}, ErrTruncated
+	}
+	h := Header{
+		Magic:           le.Uint32(buf[0:4]),
+		Version:         le.Uint16(buf[4:6]),
+		HeaderLen:       le.Uint16(buf[6:8]),
+		Kind:            le.Uint16(buf[8:10]),
+		Flags:           le.Uint16(buf[10:12]),
+		Code:            le.Uint16(buf[12:14]),
+		TransportStatus: le.Uint16(buf[14:16]),
+		PayloadLen:      le.Uint32(buf[16:20]),
+		ItemCount:       le.Uint32(buf[20:24]),
+		MessageID:       le.Uint64(buf[24:32]),
+	}
+	if h.Magic != MagicMsg {
+		return Header{}, ErrBadMagic
+	}
+	if h.Version != Version {
+		return Header{}, ErrBadVersion
+	}
+	if h.HeaderLen != HeaderLen {
+		return Header{}, ErrBadHeaderLen
+	}
+	if h.Kind < KindRequest || h.Kind > KindControl {
+		return Header{}, ErrBadKind
+	}
+	return h, nil
+}
+
+// ---------------------------------------------------------------------------
+//  Chunk continuation header (32 bytes)
+// ---------------------------------------------------------------------------
+
+// ChunkHeader is a chunk continuation header (32 bytes on the wire).
+type ChunkHeader struct {
+	Magic           uint32
+	Version         uint16
+	Flags           uint16
+	MessageID       uint64
+	TotalMessageLen uint32
+	ChunkIndex      uint32
+	ChunkCount      uint32
+	ChunkPayloadLen uint32
+}
+
+// Encode writes the chunk header into buf. Returns 32 on success, 0 if
+// buf is too small.
+func (c *ChunkHeader) Encode(buf []byte) int {
+	if len(buf) < HeaderSize {
+		return 0
+	}
+	le.PutUint32(buf[0:4], c.Magic)
+	le.PutUint16(buf[4:6], c.Version)
+	le.PutUint16(buf[6:8], c.Flags)
+	le.PutUint64(buf[8:16], c.MessageID)
+	le.PutUint32(buf[16:20], c.TotalMessageLen)
+	le.PutUint32(buf[20:24], c.ChunkIndex)
+	le.PutUint32(buf[24:28], c.ChunkCount)
+	le.PutUint32(buf[28:32], c.ChunkPayloadLen)
+	return HeaderSize
+}
+
+// DecodeChunkHeader decodes a chunk continuation header from buf.
+// Validates magic and version.
+func DecodeChunkHeader(buf []byte) (ChunkHeader, error) {
+	if len(buf) < HeaderSize {
+		return ChunkHeader{}, ErrTruncated
+	}
+	c := ChunkHeader{
+		Magic:           le.Uint32(buf[0:4]),
+		Version:         le.Uint16(buf[4:6]),
+		Flags:           le.Uint16(buf[6:8]),
+		MessageID:       le.Uint64(buf[8:16]),
+		TotalMessageLen: le.Uint32(buf[16:20]),
+		ChunkIndex:      le.Uint32(buf[20:24]),
+		ChunkCount:      le.Uint32(buf[24:28]),
+		ChunkPayloadLen: le.Uint32(buf[28:32]),
+	}
+	if c.Magic != MagicChunk {
+		return ChunkHeader{}, ErrBadMagic
+	}
+	if c.Version != Version {
+		return ChunkHeader{}, ErrBadVersion
+	}
+	return c, nil
+}
+
+// ---------------------------------------------------------------------------
+//  Batch item directory
+// ---------------------------------------------------------------------------
+
+// BatchEntry is one entry in a batch item directory (8 bytes on wire).
+type BatchEntry struct {
+	Offset uint32
+	Length uint32
+}
+
+// BatchDirEncode encodes entries into buf. Returns total bytes written
+// (len(entries) * 8), or 0 if buf is too small.
+func BatchDirEncode(entries []BatchEntry, buf []byte) int {
+	need := len(entries) * 8
+	if len(buf) < need {
+		return 0
+	}
+	for i, e := range entries {
+		base := i * 8
+		le.PutUint32(buf[base:base+4], e.Offset)
+		le.PutUint32(buf[base+4:base+8], e.Length)
+	}
+	return need
+}
+
+// BatchDirDecode decodes itemCount directory entries from buf. Validates
+// alignment and that each entry falls within packedAreaLen.
+func BatchDirDecode(buf []byte, itemCount uint32, packedAreaLen uint32) ([]BatchEntry, error) {
+	count := int(itemCount)
+	dirSize := count * 8
+	if len(buf) < dirSize {
+		return nil, ErrTruncated
+	}
+
+	out := make([]BatchEntry, count)
+	for i := 0; i < count; i++ {
+		base := i * 8
+		off := le.Uint32(buf[base : base+4])
+		length := le.Uint32(buf[base+4 : base+8])
+
+		if int(off)%Alignment != 0 {
+			return nil, ErrBadAlignment
+		}
+		if uint64(off)+uint64(length) > uint64(packedAreaLen) {
+			return nil, ErrOutOfBounds
+		}
+		out[i] = BatchEntry{Offset: off, Length: length}
+	}
+	return out, nil
+}
+
+// BatchItemGet extracts a single batch item by index from a complete batch
+// payload. Returns the item slice on success.
+func BatchItemGet(payload []byte, itemCount uint32, index uint32) ([]byte, error) {
+	if index >= itemCount {
+		return nil, ErrOutOfBounds
+	}
+
+	dirSize := int(itemCount) * 8
+	dirAligned := Align8(dirSize)
+
+	if len(payload) < dirAligned {
+		return nil, ErrTruncated
+	}
+
+	idx := int(index)
+	base := idx * 8
+	off := le.Uint32(payload[base : base+4])
+	length := le.Uint32(payload[base+4 : base+8])
+
+	packedAreaStart := dirAligned
+	packedAreaLen := len(payload) - packedAreaStart
+
+	if int(off)%Alignment != 0 {
+		return nil, ErrBadAlignment
+	}
+	if uint64(off)+uint64(length) > uint64(packedAreaLen) {
+		return nil, ErrOutOfBounds
+	}
+
+	start := packedAreaStart + int(off)
+	end := start + int(length)
+	return payload[start:end], nil
+}
+
+// ---------------------------------------------------------------------------
+//  Batch builder
+// ---------------------------------------------------------------------------
+
+// BatchBuilder builds a batch payload: [directory] [align-pad] [packed items].
+type BatchBuilder struct {
+	buf        []byte
+	itemCount  uint32
+	maxItems   uint32
+	dirEnd     int // byte offset where directory reservation ends
+	dataOffset int // current offset within the packed data area (relative)
+}
+
+// NewBatchBuilder creates a new batch builder. buf must be large enough for
+// maxItems*8 (directory) + packed data.
+func NewBatchBuilder(buf []byte, maxItems uint32) *BatchBuilder {
+	dirEnd := Align8(int(maxItems) * 8)
+	return &BatchBuilder{
+		buf:      buf,
+		maxItems: maxItems,
+		dirEnd:   dirEnd,
+	}
+}
+
+// Add appends an item payload. Handles alignment padding.
+func (b *BatchBuilder) Add(item []byte) error {
+	if b.itemCount >= b.maxItems {
+		return ErrOverflow
+	}
+
+	alignedOff := Align8(b.dataOffset)
+	absPos := b.dirEnd + alignedOff
+
+	if absPos+len(item) > len(b.buf) {
+		return ErrOverflow
+	}
+
+	// Zero alignment padding.
+	if alignedOff > b.dataOffset {
+		padStart := b.dirEnd + b.dataOffset
+		padEnd := b.dirEnd + alignedOff
+		clear(b.buf[padStart:padEnd])
+	}
+
+	copy(b.buf[absPos:], item)
+
+	// Write directory entry.
+	idx := int(b.itemCount) * 8
+	le.PutUint32(b.buf[idx:idx+4], uint32(alignedOff))
+	le.PutUint32(b.buf[idx+4:idx+8], uint32(len(item)))
+
+	b.dataOffset = alignedOff + len(item)
+	b.itemCount++
+	return nil
+}
+
+// Finish finalizes the batch. Returns (totalPayloadSize, itemCount).
+// Compacts if fewer items were added than maxItems.
+func (b *BatchBuilder) Finish() (int, uint32) {
+	count := b.itemCount
+	finalDirAligned := Align8(int(count) * 8)
+
+	if finalDirAligned < b.dirEnd && b.dataOffset > 0 {
+		// Shift packed data left.
+		copy(b.buf[finalDirAligned:], b.buf[b.dirEnd:b.dirEnd+b.dataOffset])
+	}
+
+	total := finalDirAligned + Align8(b.dataOffset)
+	return total, count
+}
+
+// ---------------------------------------------------------------------------
+//  Hello payload (44 bytes)
+// ---------------------------------------------------------------------------
+
+// Hello is the client handshake payload (44 bytes on the wire).
+type Hello struct {
+	LayoutVersion          uint16
+	Flags                  uint16
+	SupportedProfiles      uint32
+	PreferredProfiles      uint32
+	MaxRequestPayloadBytes uint32
+	MaxRequestBatchItems   uint32
+	MaxResponsePayloadBytes uint32
+	MaxResponseBatchItems  uint32
+	AuthToken              uint64
+	PacketSize             uint32
+}
+
+// Encode writes the Hello payload into buf. Returns 44 on success, 0 if
+// buf is too small.
+func (h *Hello) Encode(buf []byte) int {
+	if len(buf) < helloSize {
+		return 0
+	}
+	le.PutUint16(buf[0:2], h.LayoutVersion)
+	le.PutUint16(buf[2:4], h.Flags)
+	le.PutUint32(buf[4:8], h.SupportedProfiles)
+	le.PutUint32(buf[8:12], h.PreferredProfiles)
+	le.PutUint32(buf[12:16], h.MaxRequestPayloadBytes)
+	le.PutUint32(buf[16:20], h.MaxRequestBatchItems)
+	le.PutUint32(buf[20:24], h.MaxResponsePayloadBytes)
+	le.PutUint32(buf[24:28], h.MaxResponseBatchItems)
+	le.PutUint32(buf[28:32], 0) // padding
+	le.PutUint64(buf[32:40], h.AuthToken)
+	le.PutUint32(buf[40:44], h.PacketSize)
+	return helloSize
+}
+
+// DecodeHello decodes a Hello payload from buf. Validates layout_version.
+func DecodeHello(buf []byte) (Hello, error) {
+	if len(buf) < helloSize {
+		return Hello{}, ErrTruncated
+	}
+	h := Hello{
+		LayoutVersion:           le.Uint16(buf[0:2]),
+		Flags:                   le.Uint16(buf[2:4]),
+		SupportedProfiles:       le.Uint32(buf[4:8]),
+		PreferredProfiles:       le.Uint32(buf[8:12]),
+		MaxRequestPayloadBytes:  le.Uint32(buf[12:16]),
+		MaxRequestBatchItems:    le.Uint32(buf[16:20]),
+		MaxResponsePayloadBytes: le.Uint32(buf[20:24]),
+		MaxResponseBatchItems:   le.Uint32(buf[24:28]),
+		// buf[28:32] is padding, ignored.
+		AuthToken:  le.Uint64(buf[32:40]),
+		PacketSize: le.Uint32(buf[40:44]),
+	}
+	if h.LayoutVersion != 1 {
+		return Hello{}, ErrBadLayout
+	}
+	return h, nil
+}
+
+// ---------------------------------------------------------------------------
+//  Hello-ack payload (36 bytes)
+// ---------------------------------------------------------------------------
+
+// HelloAck is the server handshake response payload (36 bytes on the wire).
+type HelloAck struct {
+	LayoutVersion                 uint16
+	Flags                         uint16
+	ServerSupportedProfiles       uint32
+	IntersectionProfiles          uint32
+	SelectedProfile               uint32
+	AgreedMaxRequestPayloadBytes  uint32
+	AgreedMaxRequestBatchItems    uint32
+	AgreedMaxResponsePayloadBytes uint32
+	AgreedMaxResponseBatchItems   uint32
+	AgreedPacketSize              uint32
+}
+
+// Encode writes the HelloAck payload into buf. Returns 36 on success, 0
+// if buf is too small.
+func (h *HelloAck) Encode(buf []byte) int {
+	if len(buf) < helloAckSize {
+		return 0
+	}
+	le.PutUint16(buf[0:2], h.LayoutVersion)
+	le.PutUint16(buf[2:4], h.Flags)
+	le.PutUint32(buf[4:8], h.ServerSupportedProfiles)
+	le.PutUint32(buf[8:12], h.IntersectionProfiles)
+	le.PutUint32(buf[12:16], h.SelectedProfile)
+	le.PutUint32(buf[16:20], h.AgreedMaxRequestPayloadBytes)
+	le.PutUint32(buf[20:24], h.AgreedMaxRequestBatchItems)
+	le.PutUint32(buf[24:28], h.AgreedMaxResponsePayloadBytes)
+	le.PutUint32(buf[28:32], h.AgreedMaxResponseBatchItems)
+	le.PutUint32(buf[32:36], h.AgreedPacketSize)
+	return helloAckSize
+}
+
+// DecodeHelloAck decodes a HelloAck payload from buf. Validates
+// layout_version.
+func DecodeHelloAck(buf []byte) (HelloAck, error) {
+	if len(buf) < helloAckSize {
+		return HelloAck{}, ErrTruncated
+	}
+	h := HelloAck{
+		LayoutVersion:                 le.Uint16(buf[0:2]),
+		Flags:                         le.Uint16(buf[2:4]),
+		ServerSupportedProfiles:       le.Uint32(buf[4:8]),
+		IntersectionProfiles:          le.Uint32(buf[8:12]),
+		SelectedProfile:               le.Uint32(buf[12:16]),
+		AgreedMaxRequestPayloadBytes:  le.Uint32(buf[16:20]),
+		AgreedMaxRequestBatchItems:    le.Uint32(buf[20:24]),
+		AgreedMaxResponsePayloadBytes: le.Uint32(buf[24:28]),
+		AgreedMaxResponseBatchItems:   le.Uint32(buf[28:32]),
+		AgreedPacketSize:              le.Uint32(buf[32:36]),
+	}
+	if h.LayoutVersion != 1 {
+		return HelloAck{}, ErrBadLayout
+	}
+	return h, nil
+}
+
+// ---------------------------------------------------------------------------
+//  Cgroups snapshot request (4 bytes)
+// ---------------------------------------------------------------------------
+
+// CgroupsRequest is the cgroups snapshot request payload (4 bytes).
+type CgroupsRequest struct {
+	LayoutVersion uint16
+	Flags         uint16
+}
+
+// Encode writes the request into buf. Returns 4 on success, 0 if buf is
+// too small.
+func (r *CgroupsRequest) Encode(buf []byte) int {
+	if len(buf) < cgroupsReqSize {
+		return 0
+	}
+	le.PutUint16(buf[0:2], r.LayoutVersion)
+	le.PutUint16(buf[2:4], r.Flags)
+	return cgroupsReqSize
+}
+
+// DecodeCgroupsRequest decodes a cgroups request from buf. Validates
+// layout_version.
+func DecodeCgroupsRequest(buf []byte) (CgroupsRequest, error) {
+	if len(buf) < cgroupsReqSize {
+		return CgroupsRequest{}, ErrTruncated
+	}
+	r := CgroupsRequest{
+		LayoutVersion: le.Uint16(buf[0:2]),
+		Flags:         le.Uint16(buf[2:4]),
+	}
+	if r.LayoutVersion != 1 {
+		return CgroupsRequest{}, ErrBadLayout
+	}
+	return r, nil
+}
+
+// ---------------------------------------------------------------------------
+//  CStringView - borrowed string view into payload buffer
+// ---------------------------------------------------------------------------
+
+// CStringView is a borrowed, zero-copy string view into the payload buffer.
+// It wraps a byte slice that includes the NUL terminator. The view is
+// ephemeral and valid only while the underlying payload buffer lives.
+// Copy immediately via String() if the data is needed later.
+type CStringView struct {
+	data []byte // includes trailing NUL
+	len  uint32 // length excluding NUL
+}
+
+// NewCStringView creates a CStringView from a slice that includes the NUL
+// terminator and the length excluding the NUL.
+func NewCStringView(data []byte, length uint32) CStringView {
+	return CStringView{data: data, len: length}
+}
+
+// Bytes returns the string content as a byte slice (without the NUL).
+func (v CStringView) Bytes() []byte {
+	return v.data[:v.len]
+}
+
+// Len returns the string length excluding the NUL terminator.
+func (v CStringView) Len() uint32 {
+	return v.len
+}
+
+// String returns a copy of the string content. This allocates.
+func (v CStringView) String() string {
+	return string(v.data[:v.len])
+}
+
+// GoString implements fmt.GoStringer for debug output.
+func (v CStringView) GoString() string {
+	return fmt.Sprintf("CStringView(%q)", v.data[:v.len])
+}
+
+// ---------------------------------------------------------------------------
+//  Cgroups snapshot response
+// ---------------------------------------------------------------------------
+
+// CgroupsItemView is a per-item view -- ephemeral, borrows the payload
+// buffer. Valid only while the payload buffer is alive.
+type CgroupsItemView struct {
+	LayoutVersion uint16
+	Flags         uint16
+	Hash          uint32
+	Options       uint32
+	Enabled       uint32
+	Name          CStringView
+	Path          CStringView
+}
+
+// CgroupsResponseView is a full snapshot view -- ephemeral, borrows the
+// payload buffer. Valid only during the current library call or callback.
+// Copy immediately if the data is needed later.
+type CgroupsResponseView struct {
+	LayoutVersion  uint16
+	Flags          uint16
+	ItemCount      uint32
+	SystemdEnabled uint32
+	Generation     uint64
+	payload        []byte // full payload for item access
+}
+
+// DecodeCgroupsResponse decodes the snapshot response header and validates
+// the item directory. On success, use Item() to access individual items.
+func DecodeCgroupsResponse(buf []byte) (CgroupsResponseView, error) {
+	if len(buf) < cgroupsRespHdr {
+		return CgroupsResponseView{}, ErrTruncated
+	}
+
+	layoutVersion := le.Uint16(buf[0:2])
+	flags := le.Uint16(buf[2:4])
+	itemCount := le.Uint32(buf[4:8])
+	systemdEnabled := le.Uint32(buf[8:12])
+	// buf[12:16] reserved, ignored.
+	generation := le.Uint64(buf[16:24])
+
+	if layoutVersion != 1 {
+		return CgroupsResponseView{}, ErrBadLayout
+	}
+
+	// Validate directory fits.
+	dirSize := int(itemCount) * cgroupsDirEntry
+	dirEnd := cgroupsRespHdr + dirSize
+	if dirEnd > len(buf) {
+		return CgroupsResponseView{}, ErrTruncated
+	}
+
+	packedAreaLen := len(buf) - dirEnd
+
+	// Validate each directory entry.
+	for i := 0; i < int(itemCount); i++ {
+		base := cgroupsRespHdr + i*8
+		off := le.Uint32(buf[base : base+4])
+		length := le.Uint32(buf[base+4 : base+8])
+
+		if int(off)%Alignment != 0 {
+			return CgroupsResponseView{}, ErrBadAlignment
+		}
+		if uint64(off)+uint64(length) > uint64(packedAreaLen) {
+			return CgroupsResponseView{}, ErrOutOfBounds
+		}
+		if int(length) < cgroupsItemHdr {
+			return CgroupsResponseView{}, ErrTruncated
+		}
+	}
+
+	return CgroupsResponseView{
+		LayoutVersion:  layoutVersion,
+		Flags:          flags,
+		ItemCount:      itemCount,
+		SystemdEnabled: systemdEnabled,
+		Generation:     generation,
+		payload:        buf,
+	}, nil
+}
+
+// Item accesses the item at index from a decoded snapshot view. Returns an
+// ephemeral item view.
+func (v *CgroupsResponseView) Item(index uint32) (CgroupsItemView, error) {
+	if index >= v.ItemCount {
+		return CgroupsItemView{}, ErrOutOfBounds
+	}
+
+	dirStart := cgroupsRespHdr
+	dirSize := int(v.ItemCount) * cgroupsDirEntry
+	packedAreaStart := dirStart + dirSize
+
+	dirBase := dirStart + int(index)*8
+	itemOff := int(le.Uint32(v.payload[dirBase : dirBase+4]))
+	itemLen := int(le.Uint32(v.payload[dirBase+4 : dirBase+8]))
+
+	itemStart := packedAreaStart + itemOff
+	item := v.payload[itemStart : itemStart+itemLen]
+
+	layoutVersion := le.Uint16(item[0:2])
+	flags := le.Uint16(item[2:4])
+	hash := le.Uint32(item[4:8])
+	options := le.Uint32(item[8:12])
+	enabled := le.Uint32(item[12:16])
+
+	nameOff := int(le.Uint32(item[16:20]))
+	nameLen := le.Uint32(item[20:24])
+	pathOff := int(le.Uint32(item[24:28]))
+	pathLen := le.Uint32(item[28:32])
+
+	if layoutVersion != 1 {
+		return CgroupsItemView{}, ErrBadLayout
+	}
+
+	// Validate name string.
+	if nameOff < cgroupsItemHdr {
+		return CgroupsItemView{}, ErrOutOfBounds
+	}
+	if uint64(nameOff)+uint64(nameLen)+1 > uint64(itemLen) {
+		return CgroupsItemView{}, ErrOutOfBounds
+	}
+	if item[nameOff+int(nameLen)] != 0 {
+		return CgroupsItemView{}, ErrMissingNul
+	}
+
+	// Validate path string.
+	if pathOff < cgroupsItemHdr {
+		return CgroupsItemView{}, ErrOutOfBounds
+	}
+	if uint64(pathOff)+uint64(pathLen)+1 > uint64(itemLen) {
+		return CgroupsItemView{}, ErrOutOfBounds
+	}
+	if item[pathOff+int(pathLen)] != 0 {
+		return CgroupsItemView{}, ErrMissingNul
+	}
+
+	name := NewCStringView(item[nameOff:nameOff+int(nameLen)+1], nameLen)
+	path := NewCStringView(item[pathOff:pathOff+int(pathLen)+1], pathLen)
+
+	return CgroupsItemView{
+		LayoutVersion: layoutVersion,
+		Flags:         flags,
+		Hash:          hash,
+		Options:       options,
+		Enabled:       enabled,
+		Name:          name,
+		Path:          path,
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+//  Cgroups snapshot response builder
+// ---------------------------------------------------------------------------
+
+// CgroupsBuilder builds a cgroups snapshot response payload.
+//
+// Layout during building (maxItems directory slots reserved):
+//
+//	[24-byte header space] [maxItems*8 directory] [packed items]
+//
+// Layout after Finish (compacted to actual itemCount):
+//
+//	[24-byte header] [itemCount*8 directory] [packed items]
+type CgroupsBuilder struct {
+	buf            []byte
+	systemdEnabled uint32
+	generation     uint64
+	itemCount      uint32
+	maxItems       uint32
+	dataOffset     int // current write position (absolute in buf)
+}
+
+// NewCgroupsBuilder initializes a cgroups response builder. buf must be
+// caller-owned and large enough for the expected snapshot.
+func NewCgroupsBuilder(buf []byte, maxItems uint32, systemdEnabled uint32, generation uint64) *CgroupsBuilder {
+	dataOffset := cgroupsRespHdr + int(maxItems)*cgroupsDirEntry
+	return &CgroupsBuilder{
+		buf:            buf,
+		systemdEnabled: systemdEnabled,
+		generation:     generation,
+		maxItems:       maxItems,
+		dataOffset:     dataOffset,
+	}
+}
+
+// Add adds one cgroup item. Handles offset bookkeeping, NUL termination,
+// and alignment.
+func (b *CgroupsBuilder) Add(hash, options, enabled uint32, name, path []byte) error {
+	if b.itemCount >= b.maxItems {
+		return ErrOverflow
+	}
+
+	// Align item start to 8 bytes.
+	itemStart := Align8(b.dataOffset)
+
+	// Item payload: 32-byte header + name + NUL + path + NUL.
+	itemSize := cgroupsItemHdr + len(name) + 1 + len(path) + 1
+
+	if itemStart+itemSize > len(b.buf) {
+		return ErrOverflow
+	}
+
+	// Zero alignment padding.
+	if itemStart > b.dataOffset {
+		clear(b.buf[b.dataOffset:itemStart])
+	}
+
+	nameOffset := uint32(cgroupsItemHdr)
+	pathOffset := uint32(cgroupsItemHdr) + uint32(len(name)) + 1
+
+	// Write item header.
+	p := itemStart
+	le.PutUint16(b.buf[p:p+2], 1)   // layout_version
+	le.PutUint16(b.buf[p+2:p+4], 0) // flags
+	le.PutUint32(b.buf[p+4:p+8], hash)
+	le.PutUint32(b.buf[p+8:p+12], options)
+	le.PutUint32(b.buf[p+12:p+16], enabled)
+	le.PutUint32(b.buf[p+16:p+20], nameOffset)
+	le.PutUint32(b.buf[p+20:p+24], uint32(len(name)))
+	le.PutUint32(b.buf[p+24:p+28], pathOffset)
+	le.PutUint32(b.buf[p+28:p+32], uint32(len(path)))
+
+	// Write strings with NUL terminators.
+	ns := p + int(nameOffset)
+	copy(b.buf[ns:], name)
+	b.buf[ns+len(name)] = 0
+
+	ps := p + int(pathOffset)
+	copy(b.buf[ps:], path)
+	b.buf[ps+len(path)] = 0
+
+	// Write directory entry (absolute offset stored temporarily).
+	dirEntry := cgroupsRespHdr + int(b.itemCount)*cgroupsDirEntry
+	le.PutUint32(b.buf[dirEntry:dirEntry+4], uint32(itemStart))
+	le.PutUint32(b.buf[dirEntry+4:dirEntry+8], uint32(itemSize))
+
+	b.dataOffset = itemStart + itemSize
+	b.itemCount++
+	return nil
+}
+
+// Finish finalizes the builder. Returns the total payload size. The buffer
+// now contains a complete, decodable cgroups snapshot response payload.
+func (b *CgroupsBuilder) Finish() int {
+	p := b.buf
+
+	if b.itemCount == 0 {
+		le.PutUint16(p[0:2], 1)
+		le.PutUint16(p[2:4], 0)
+		le.PutUint32(p[4:8], 0)
+		le.PutUint32(p[8:12], b.systemdEnabled)
+		le.PutUint32(p[12:16], 0)
+		le.PutUint64(p[16:24], b.generation)
+		return cgroupsRespHdr
+	}
+
+	// Where the decoder expects packed data to start.
+	finalPackedStart := cgroupsRespHdr + int(b.itemCount)*cgroupsDirEntry
+
+	// Read the first directory entry to find where packed data begins.
+	firstItemAbs := int(le.Uint32(p[cgroupsRespHdr : cgroupsRespHdr+4]))
+
+	packedDataLen := b.dataOffset - firstItemAbs
+
+	if finalPackedStart < firstItemAbs {
+		// Shift packed data left.
+		copy(p[finalPackedStart:], p[firstItemAbs:firstItemAbs+packedDataLen])
+	}
+
+	// Convert directory entries from absolute to relative offsets.
+	dirBase := cgroupsRespHdr
+	for i := 0; i < int(b.itemCount); i++ {
+		entry := dirBase + i*cgroupsDirEntry
+		absOff := le.Uint32(p[entry : entry+4])
+		relOff := absOff - uint32(firstItemAbs)
+		le.PutUint32(p[entry:entry+4], relOff)
+		// length stays the same.
+	}
+
+	// Write snapshot header.
+	le.PutUint16(p[0:2], 1)
+	le.PutUint16(p[2:4], 0)
+	le.PutUint32(p[4:8], b.itemCount)
+	le.PutUint32(p[8:12], b.systemdEnabled)
+	le.PutUint32(p[12:16], 0)
+	le.PutUint64(p[16:24], b.generation)
+
+	return finalPackedStart + packedDataLen
+}

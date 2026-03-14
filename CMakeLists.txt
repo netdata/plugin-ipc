@@ -50,6 +50,25 @@ endif()
 # --- Go package -----------------------------------------------------------
 find_program(GO_EXECUTABLE go)
 
+if(GO_EXECUTABLE)
+    set(NETIPC_GO_PKG_DIR "${CMAKE_SOURCE_DIR}/src/go")
+    set(NETIPC_GO_FIXTURE_DIR "${CMAKE_SOURCE_DIR}/tests/fixtures/go")
+
+    add_custom_target(netipc_go_test
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} test ./pkg/netipc/protocol/
+        WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
+        COMMENT "Running Go netipc protocol tests"
+    )
+
+    add_custom_target(interop_codec_go ALL
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} build -o "${CMAKE_BINARY_DIR}/bin/interop_codec_go" .
+        WORKING_DIRECTORY "${NETIPC_GO_FIXTURE_DIR}"
+        COMMENT "Building Go interop codec binary"
+    )
+endif()
+
 # --- Tests ----------------------------------------------------------------
 enable_testing()
 
@@ -65,7 +84,22 @@ if(CARGO_EXECUTABLE)
         COMMAND ${CARGO_EXECUTABLE} test
         WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
     )
+endif()
 
+if(GO_EXECUTABLE)
+    add_test(NAME test_protocol_go
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} test ./pkg/netipc/protocol/
+        WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
+    )
+endif()
+
+if(CARGO_EXECUTABLE AND GO_EXECUTABLE)
+    add_test(NAME interop_codec
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/interop_codec.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+elseif(CARGO_EXECUTABLE)
     add_test(NAME interop_codec
         COMMAND bash "${CMAKE_SOURCE_DIR}/tests/interop_codec.sh"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
