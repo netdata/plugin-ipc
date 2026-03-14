@@ -30,13 +30,22 @@ const (
 	shmHeaderLen       uint16 = 64
 	shmDefaultSpin     uint32 = 128
 
-	// Byte offsets of atomic fields in the 64-byte region header.
-	shmOffReqSeq    = 32
-	shmOffRespSeq   = 40
-	shmOffReqLen    = 48
-	shmOffRespLen   = 52
-	shmOffReqSignal = 56
-	shmOffRespSig   = 60
+	// Byte offsets of all fields in the 64-byte region header.
+	shmHeaderMagicOff      = 0
+	shmHeaderVersionOff    = 4
+	shmHeaderHeaderLenOff  = 6
+	shmHeaderOwnerPidOff   = 8
+	shmHeaderOwnerGenOff   = 12
+	shmHeaderReqOffOff     = 16
+	shmHeaderReqCapOff     = 20
+	shmHeaderRespOffOff    = 24
+	shmHeaderRespCapOff    = 28
+	shmHeaderReqSeqOff     = 32
+	shmHeaderRespSeqOff    = 40
+	shmHeaderReqLenOff     = 48
+	shmHeaderRespLenOff    = 52
+	shmHeaderReqSignalOff  = 56
+	shmHeaderRespSignalOff = 60
 
 	// futex operations
 	futexWait = 0
@@ -112,14 +121,14 @@ func (c *ShmContext) OwnerAlive() bool {
 	if len(c.data) < int(shmHeaderLen) {
 		return false
 	}
-	pid := int32(binary.LittleEndian.Uint32(c.data[8:12]))
+	pid := int32(binary.LittleEndian.Uint32(c.data[shmHeaderOwnerPidOff : shmHeaderOwnerPidOff+4]))
 	if !pidAlive(int(pid)) {
 		return false
 	}
 	// Verify generation matches to detect PID reuse.
 	// Skip check if cached generation is 0 (legacy region).
 	if c.ownerGeneration != 0 {
-		curGen := binary.LittleEndian.Uint32(c.data[12:16])
+		curGen := binary.LittleEndian.Uint32(c.data[shmHeaderOwnerGenOff : shmHeaderOwnerGenOff+4])
 		if curGen != c.ownerGeneration {
 			return false
 		}
@@ -183,18 +192,18 @@ func ShmServerCreate(runDir, serviceName string, reqCapacity, respCapacity uint3
 	generation := uint32(now.Unix()) ^ uint32(now.Nanosecond()>>10)
 
 	// Write header fields (little-endian)
-	binary.LittleEndian.PutUint32(data[0:4], shmRegionMagic)
-	binary.LittleEndian.PutUint16(data[4:6], shmRegionVersion)
-	binary.LittleEndian.PutUint16(data[6:8], uint16(shmHeaderLen))
-	binary.LittleEndian.PutUint32(data[8:12], uint32(int32(os.Getpid())))
-	binary.LittleEndian.PutUint32(data[12:16], generation)
-	binary.LittleEndian.PutUint32(data[16:20], reqOff)
-	binary.LittleEndian.PutUint32(data[20:24], reqCap)
-	binary.LittleEndian.PutUint32(data[24:28], respOff)
-	binary.LittleEndian.PutUint32(data[28:32], respCap)
+	binary.LittleEndian.PutUint32(data[shmHeaderMagicOff:shmHeaderMagicOff+4], shmRegionMagic)
+	binary.LittleEndian.PutUint16(data[shmHeaderVersionOff:shmHeaderVersionOff+2], shmRegionVersion)
+	binary.LittleEndian.PutUint16(data[shmHeaderHeaderLenOff:shmHeaderHeaderLenOff+2], uint16(shmHeaderLen))
+	binary.LittleEndian.PutUint32(data[shmHeaderOwnerPidOff:shmHeaderOwnerPidOff+4], uint32(int32(os.Getpid())))
+	binary.LittleEndian.PutUint32(data[shmHeaderOwnerGenOff:shmHeaderOwnerGenOff+4], generation)
+	binary.LittleEndian.PutUint32(data[shmHeaderReqOffOff:shmHeaderReqOffOff+4], reqOff)
+	binary.LittleEndian.PutUint32(data[shmHeaderReqCapOff:shmHeaderReqCapOff+4], reqCap)
+	binary.LittleEndian.PutUint32(data[shmHeaderRespOffOff:shmHeaderRespOffOff+4], respOff)
+	binary.LittleEndian.PutUint32(data[shmHeaderRespCapOff:shmHeaderRespCapOff+4], respCap)
 
 	// Release fence: ensure header writes are visible before clients
-	atomic.StoreUint32((*uint32)(unsafe.Pointer(&data[shmOffReqSignal])), 0)
+	atomic.StoreUint32((*uint32)(unsafe.Pointer(&data[shmHeaderReqSignalOff])), 0)
 
 	// Close the os.File but keep the fd open (Mmap holds a reference).
 	// Actually, we need to keep the fd ourselves for the context.
@@ -280,34 +289,34 @@ func ShmClientAttach(runDir, serviceName string) (*ShmContext, error) {
 	}
 
 	// Acquire fence
-	atomic.LoadUint32((*uint32)(unsafe.Pointer(&data[shmOffReqSignal])))
+	atomic.LoadUint32((*uint32)(unsafe.Pointer(&data[shmHeaderReqSignalOff])))
 
 	// Validate header
-	magic := binary.LittleEndian.Uint32(data[0:4])
+	magic := binary.LittleEndian.Uint32(data[shmHeaderMagicOff : shmHeaderMagicOff+4])
 	if magic != shmRegionMagic {
 		syscall.Munmap(data)
 		f.Close()
 		return nil, ErrShmBadMagic
 	}
 
-	version := binary.LittleEndian.Uint16(data[4:6])
+	version := binary.LittleEndian.Uint16(data[shmHeaderVersionOff : shmHeaderVersionOff+2])
 	if version != shmRegionVersion {
 		syscall.Munmap(data)
 		f.Close()
 		return nil, ErrShmBadVersion
 	}
 
-	hdrLen := binary.LittleEndian.Uint16(data[6:8])
+	hdrLen := binary.LittleEndian.Uint16(data[shmHeaderHeaderLenOff : shmHeaderHeaderLenOff+2])
 	if hdrLen != uint16(shmHeaderLen) {
 		syscall.Munmap(data)
 		f.Close()
 		return nil, ErrShmBadHeader
 	}
 
-	reqOff := binary.LittleEndian.Uint32(data[16:20])
-	reqCap := binary.LittleEndian.Uint32(data[20:24])
-	respOff := binary.LittleEndian.Uint32(data[24:28])
-	respCap := binary.LittleEndian.Uint32(data[28:32])
+	reqOff := binary.LittleEndian.Uint32(data[shmHeaderReqOffOff : shmHeaderReqOffOff+4])
+	reqCap := binary.LittleEndian.Uint32(data[shmHeaderReqCapOff : shmHeaderReqCapOff+4])
+	respOff := binary.LittleEndian.Uint32(data[shmHeaderRespOffOff : shmHeaderRespOffOff+4])
+	respCap := binary.LittleEndian.Uint32(data[shmHeaderRespCapOff : shmHeaderRespCapOff+4])
 
 	// Validate region size
 	reqEnd := int(reqOff) + int(reqCap)
@@ -323,9 +332,9 @@ func ShmClientAttach(runDir, serviceName string) (*ShmContext, error) {
 	}
 
 	// Read current sequence numbers
-	curReqSeq := atomicLoadU64(data, shmOffReqSeq)
-	curRespSeq := atomicLoadU64(data, shmOffRespSeq)
-	ownerGen := binary.LittleEndian.Uint32(data[12:16])
+	curReqSeq := atomicLoadU64(data, shmHeaderReqSeqOff)
+	curRespSeq := atomicLoadU64(data, shmHeaderRespSeqOff)
+	ownerGen := binary.LittleEndian.Uint32(data[shmHeaderOwnerGenOff : shmHeaderOwnerGenOff+4])
 
 	// Dup fd and close file
 	newFd, err := syscall.Dup(fd)
@@ -381,15 +390,15 @@ func (c *ShmContext) ShmSend(msg []byte) error {
 	if c.role == ShmRoleClient {
 		areaOff = c.requestOffset
 		areaCap = c.requestCapacity
-		seqOff = shmOffReqSeq
-		lenOff = shmOffReqLen
-		sigOff = shmOffReqSignal
+		seqOff = shmHeaderReqSeqOff
+		lenOff = shmHeaderReqLenOff
+		sigOff = shmHeaderReqSignalOff
 	} else {
 		areaOff = c.responseOffset
 		areaCap = c.responseCapacity
-		seqOff = shmOffRespSeq
-		lenOff = shmOffRespLen
-		sigOff = shmOffRespSig
+		seqOff = shmHeaderRespSeqOff
+		lenOff = shmHeaderRespLenOff
+		sigOff = shmHeaderRespSignalOff
 	}
 
 	if uint32(len(msg)) > areaCap {
@@ -432,15 +441,15 @@ func (c *ShmContext) ShmReceive(timeoutMs uint32) ([]byte, error) {
 
 	if c.role == ShmRoleServer {
 		areaOff = c.requestOffset
-		seqOff = shmOffReqSeq
-		lenOff = shmOffReqLen
-		sigOff = shmOffReqSignal
+		seqOff = shmHeaderReqSeqOff
+		lenOff = shmHeaderReqLenOff
+		sigOff = shmHeaderReqSignalOff
 		expectedSeq = c.localReqSeq + 1
 	} else {
 		areaOff = c.responseOffset
-		seqOff = shmOffRespSeq
-		lenOff = shmOffRespLen
-		sigOff = shmOffRespSig
+		seqOff = shmHeaderRespSeqOff
+		lenOff = shmHeaderRespLenOff
+		sigOff = shmHeaderRespSignalOff
 		expectedSeq = c.localRespSeq + 1
 	}
 
@@ -524,34 +533,52 @@ func pidAlive(pid int) bool {
 	return err == nil || err == syscall.EPERM
 }
 
-// Atomic operations on the mmap'd region.
+// Atomic operations on the mmap'd region with bounds checking.
 
 func atomicLoadU64(data []byte, off int) uint64 {
+	if off < 0 || off+8 > len(data) {
+		panic("atomicLoadU64: offset out of bounds")
+	}
 	ptr := (*uint64)(unsafe.Pointer(&data[off]))
 	return atomic.LoadUint64(ptr)
 }
 
 func atomicLoadU32(data []byte, off int) uint32 {
+	if off < 0 || off+4 > len(data) {
+		panic("atomicLoadU32: offset out of bounds")
+	}
 	ptr := (*uint32)(unsafe.Pointer(&data[off]))
 	return atomic.LoadUint32(ptr)
 }
 
 func atomicStoreU32(data []byte, off int, val uint32) {
+	if off < 0 || off+4 > len(data) {
+		panic("atomicStoreU32: offset out of bounds")
+	}
 	ptr := (*uint32)(unsafe.Pointer(&data[off]))
 	atomic.StoreUint32(ptr, val)
 }
 
 func atomicAddU64(data []byte, off int, val uint64) {
+	if off < 0 || off+8 > len(data) {
+		panic("atomicAddU64: offset out of bounds")
+	}
 	ptr := (*uint64)(unsafe.Pointer(&data[off]))
 	atomic.AddUint64(ptr, val)
 }
 
 func atomicAddU32(data []byte, off int, val uint32) {
+	if off < 0 || off+4 > len(data) {
+		panic("atomicAddU32: offset out of bounds")
+	}
 	ptr := (*uint32)(unsafe.Pointer(&data[off]))
 	atomic.AddUint32(ptr, val)
 }
 
 func futexWakeCall(data []byte, off int, count int) int {
+	if off < 0 || off+4 > len(data) {
+		return -1
+	}
 	addr := unsafe.Pointer(&data[off])
 	r1, _, _ := syscall.Syscall6(
 		syscall.SYS_FUTEX,
@@ -564,6 +591,9 @@ func futexWakeCall(data []byte, off int, count int) int {
 }
 
 func futexWaitCall(data []byte, off int, expected uint32, ts *syscall.Timespec) int {
+	if off < 0 || off+4 > len(data) {
+		return -1
+	}
 	addr := unsafe.Pointer(&data[off])
 	var tsPtr uintptr
 	if ts != nil {
@@ -621,14 +651,14 @@ func checkShmStale(path string) shmStaleResult {
 		return shmStaleInvalid
 	}
 
-	magic := binary.LittleEndian.Uint32(data[0:4])
+	magic := binary.LittleEndian.Uint32(data[shmHeaderMagicOff : shmHeaderMagicOff+4])
 	if magic != shmRegionMagic {
 		syscall.Munmap(data)
 		os.Remove(path)
 		return shmStaleInvalid
 	}
 
-	ownerPid := int(int32(binary.LittleEndian.Uint32(data[8:12])))
+	ownerPid := int(int32(binary.LittleEndian.Uint32(data[shmHeaderOwnerPidOff : shmHeaderOwnerPidOff+4])))
 	syscall.Munmap(data)
 
 	if pidAlive(ownerPid) {

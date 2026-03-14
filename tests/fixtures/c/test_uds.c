@@ -815,6 +815,51 @@ static void test_batch(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test 10: Invalid service name validation                            */
+/* ------------------------------------------------------------------ */
+
+static void test_invalid_service_name(void)
+{
+    printf("Test 10: Invalid service name validation\n");
+
+    nipc_uds_listener_t listener;
+    nipc_uds_server_config_t scfg = default_server_config();
+
+    /* Names with path separators */
+    check("reject name with /",
+          nipc_uds_listen(TEST_RUN_DIR, "foo/bar", &scfg, &listener)
+          == NIPC_UDS_ERR_BAD_PARAM);
+
+    check("reject name with ..",
+          nipc_uds_listen(TEST_RUN_DIR, "..", &scfg, &listener)
+          == NIPC_UDS_ERR_BAD_PARAM);
+
+    check("reject name .",
+          nipc_uds_listen(TEST_RUN_DIR, ".", &scfg, &listener)
+          == NIPC_UDS_ERR_BAD_PARAM);
+
+    check("reject empty name",
+          nipc_uds_listen(TEST_RUN_DIR, "", &scfg, &listener)
+          == NIPC_UDS_ERR_BAD_PARAM);
+
+    check("reject name with space",
+          nipc_uds_listen(TEST_RUN_DIR, "foo bar", &scfg, &listener)
+          == NIPC_UDS_ERR_BAD_PARAM);
+
+    /* Connect should also reject */
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    check("connect reject bad name",
+          nipc_uds_connect(TEST_RUN_DIR, "../etc", &ccfg, &session)
+          == NIPC_UDS_ERR_BAD_PARAM);
+
+    /* Valid names should not fail validation (may fail connect) */
+    check("accept valid name (connect may fail)",
+          nipc_uds_connect(TEST_RUN_DIR, "valid-name_123.test", &ccfg, &session)
+          != NIPC_UDS_ERR_BAD_PARAM);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -839,6 +884,7 @@ int main(void)
     test_stale_recovery();      printf("\n");
     test_disconnect_inflight(); printf("\n");
     test_batch();               printf("\n");
+    test_invalid_service_name(); printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

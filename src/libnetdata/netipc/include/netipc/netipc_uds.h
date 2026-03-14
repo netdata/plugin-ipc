@@ -38,6 +38,8 @@ typedef enum {
     NIPC_UDS_ERR_ALLOC,             /* memory allocation failed */
     NIPC_UDS_ERR_LIMIT_EXCEEDED,    /* payload/batch exceeds negotiated */
     NIPC_UDS_ERR_BAD_PARAM,         /* invalid argument */
+    NIPC_UDS_ERR_DUPLICATE_MSG_ID,  /* message_id already in-flight */
+    NIPC_UDS_ERR_UNKNOWN_MSG_ID,    /* response message_id not in-flight */
 } nipc_uds_error_t;
 
 /* ------------------------------------------------------------------ */
@@ -84,6 +86,9 @@ typedef struct {
 /*  Session                                                            */
 /* ------------------------------------------------------------------ */
 
+/* In-flight message_id tracking (L1 spec requirement) */
+#define NIPC_UDS_MAX_INFLIGHT 64
+
 typedef struct {
     int             fd;             /* connected socket (native wait object) */
     nipc_uds_role_t role;
@@ -99,6 +104,10 @@ typedef struct {
     /* Internal receive buffer for chunked reassembly */
     uint8_t *recv_buf;
     size_t   recv_buf_size;
+
+    /* In-flight message_id set (client-side only) */
+    uint64_t inflight_ids[NIPC_UDS_MAX_INFLIGHT];
+    uint32_t inflight_count;
 } nipc_uds_session_t;
 
 /* ------------------------------------------------------------------ */

@@ -434,11 +434,15 @@ func DecodeHello(buf []byte) (Hello, error) {
 		MaxRequestBatchItems:    le.Uint32(buf[16:20]),
 		MaxResponsePayloadBytes: le.Uint32(buf[20:24]),
 		MaxResponseBatchItems:   le.Uint32(buf[24:28]),
-		// buf[28:32] is padding, ignored.
+		// buf[28:32] is reserved padding, must be zero.
 		AuthToken:  le.Uint64(buf[32:40]),
 		PacketSize: le.Uint32(buf[40:44]),
 	}
 	if h.LayoutVersion != 1 {
+		return Hello{}, ErrBadLayout
+	}
+	// Validate padding bytes 28..32 are zero
+	if le.Uint32(buf[28:32]) != 0 {
 		return Hello{}, ErrBadLayout
 	}
 	return h, nil

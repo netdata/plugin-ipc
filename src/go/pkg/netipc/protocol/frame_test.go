@@ -549,6 +549,31 @@ func TestHelloPaddingIsZero(t *testing.T) {
 	}
 }
 
+func TestHelloDecodeNonzeroPadding(t *testing.T) {
+	h := Hello{
+		LayoutVersion:           1,
+		SupportedProfiles:       ProfileBaseline,
+		MaxRequestPayloadBytes:  1024,
+		MaxRequestBatchItems:    1,
+		MaxResponsePayloadBytes: 1024,
+		MaxResponseBatchItems:   1,
+		PacketSize:              65536,
+	}
+	var buf [44]byte
+	h.Encode(buf[:])
+
+	// Valid first
+	if _, err := DecodeHello(buf[:]); err != nil {
+		t.Fatalf("valid hello failed: %v", err)
+	}
+
+	// Corrupt padding
+	buf[28] = 0xFF
+	if _, err := DecodeHello(buf[:]); err != ErrBadLayout {
+		t.Errorf("nonzero padding: got %v, want ErrBadLayout", err)
+	}
+}
+
 func TestHelloWireBytes(t *testing.T) {
 	h := Hello{
 		LayoutVersion:           1,

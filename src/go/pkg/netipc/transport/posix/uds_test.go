@@ -4,6 +4,7 @@ package posix
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1216,5 +1217,174 @@ func TestAcceptWithTimeout(t *testing.T) {
 
 	if ok := <-done; !ok {
 		t.Error("accept did not complete successfully")
+	}
+}
+
+// ---------------------------------------------------------------------------
+//  Test: Invalid service names rejected
+// ---------------------------------------------------------------------------
+
+func TestInvalidServiceName(t *testing.T) {
+	runDir := testRunDir(t)
+
+	badNames := []string{
+		"",
+		".",
+		"..",
+		"foo/bar",
+		"../etc",
+		"name with spaces",
+		"name\ttab",
+		"hello@world",
+	}
+	goodNames := []string{
+		"valid-name",
+		"valid_name",
+		"valid.name",
+		"ValidName123",
+		"a",
+	}
+
+	for _, name := range badNames {
+		_, err := Listen(runDir, name, defaultServerConfig())
+		if err == nil {
+			t.Errorf("Listen(%q) should fail", name)
+		}
+		_, err = Connect(runDir, name, &ClientConfig{AuthToken: testAuthToken})
+		if err == nil {
+			t.Errorf("Connect(%q) should fail", name)
+		}
+	}
+
+	for _, name := range goodNames {
+		// These should not fail due to validation (may fail because no
+		// server is listening, but that's a different error).
+		if err := validateServiceName(name); err != nil {
+			t.Errorf("validateServiceName(%q) = %v, want nil", name, err)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+//  Test: Duplicate message_id rejected on send
+// ---------------------------------------------------------------------------
+
+func TestDuplicateMessageID(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	defer os.Remove(filepath.Join(runDir, service+".sock"))
+
+	sCfg := defaultServerConfig()
+	listener := startListener(t, runDir, service, sCfg)
+	defer listener.Close()
+
+	acceptCh := acceptAsync(listener)
+
+	cCfg := defaultClientConfig()
+	client, err := Connect(runDir, service, &cCfg)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer client.Close()
+
+	sr := <-acceptCh
+	if sr.err != nil {
+		t.Fatalf("Accept: %v", sr.err)
+	}
+	defer sr.session.Close()
+
+	hdr := protocol.Header{
+		Kind:      protocol.KindRequest,
+		Code:      protocol.MethodIncrement,
+		ItemCount: 1,
+		MessageID: 42,
+	}
+
+	// First send should succeed
+	if err := client.Send(&hdr, []byte("hello")); err != nil {
+		t.Fatalf("first Send: %v", err)
+	}
+
+	// Second send with same message_id should fail
+	hdr2 := protocol.Header{
+		Kind:      protocol.KindRequest,
+		Code:      protocol.MethodIncrement,
+		ItemCount: 1,
+		MessageID: 42,
+	}
+	err = client.Send(&hdr2, []byte("hello"))
+	if err == nil {
+		t.Fatal("duplicate message_id should fail")
+	}
+	if !errors.Is(err, ErrDuplicateMsgID) {
+		t.Errorf("error = %v, want ErrDuplicateMsgID", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+//  Test: Unknown message_id rejected on receive
+// ---------------------------------------------------------------------------
+
+func TestUnknownMessageID(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	defer os.Remove(filepath.Join(runDir, service+".sock"))
+
+	sCfg := defaultServerConfig()
+	listener := startListener(t, runDir, service, sCfg)
+	defer listener.Close()
+
+	acceptCh := acceptAsync(listener)
+
+	cCfg := defaultClientConfig()
+	client, err := Connect(runDir, service, &cCfg)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer client.Close()
+
+	sr := <-acceptCh
+	if sr.err != nil {
+		t.Fatalf("Accept: %v", sr.err)
+	}
+	server := sr.session
+	defer server.Close()
+
+	// Client sends request with message_id=10
+	hdr := protocol.Header{
+		Kind:      protocol.KindRequest,
+		Code:      protocol.MethodIncrement,
+		ItemCount: 1,
+		MessageID: 10,
+	}
+	if err := client.Send(&hdr, []byte("x")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	// Server receives
+	buf := make([]byte, 4096)
+	rHdr, rPayload, err := server.Receive(buf)
+	if err != nil {
+		t.Fatalf("server Receive: %v", err)
+	}
+
+	// Server responds with WRONG message_id (999)
+	resp := protocol.Header{
+		Kind:      protocol.KindResponse,
+		Code:      rHdr.Code,
+		ItemCount: 1,
+		MessageID: 999, // not in-flight
+	}
+	if err := server.Send(&resp, rPayload); err != nil {
+		t.Fatalf("server Send: %v", err)
+	}
+
+	// Client receive should fail with unknown message_id
+	_, _, err = client.Receive(buf)
+	if err == nil {
+		t.Fatal("expected unknown message_id error")
+	}
+	if !errors.Is(err, ErrUnknownMsgID) {
+		t.Errorf("error = %v, want ErrUnknownMsgID", err)
 	}
 }

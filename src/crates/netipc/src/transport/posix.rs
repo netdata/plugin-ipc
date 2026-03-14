@@ -5,9 +5,10 @@
 //! Wire-compatible with the C implementation in netipc_uds.c.
 
 use crate::protocol::{
-    self, ChunkHeader, Header, Hello, HelloAck, HEADER_SIZE, MAGIC_CHUNK, MAGIC_MSG,
-    MAX_PAYLOAD_DEFAULT, PROFILE_BASELINE, VERSION,
+    self, ChunkHeader, Header, Hello, HelloAck, HEADER_SIZE, KIND_REQUEST, KIND_RESPONSE,
+    MAGIC_CHUNK, MAGIC_MSG, MAX_PAYLOAD_DEFAULT, PROFILE_BASELINE, VERSION,
 };
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::io;
 use std::os::unix::io::RawFd;
@@ -60,6 +61,10 @@ pub enum UdsError {
     LimitExceeded,
     /// Invalid argument.
     BadParam(String),
+    /// Duplicate message_id on send.
+    DuplicateMsgId(u64),
+    /// Unknown message_id on receive.
+    UnknownMsgId(u64),
 }
 
 impl std::fmt::Display for UdsError {
@@ -80,6 +85,8 @@ impl std::fmt::Display for UdsError {
             UdsError::Alloc => write!(f, "memory allocation failed"),
             UdsError::LimitExceeded => write!(f, "negotiated limit exceeded"),
             UdsError::BadParam(s) => write!(f, "bad parameter: {s}"),
+            UdsError::DuplicateMsgId(id) => write!(f, "duplicate message_id: {id}"),
+            UdsError::UnknownMsgId(id) => write!(f, "unknown response message_id: {id}"),
         }
     }
 }
@@ -180,6 +187,9 @@ pub struct UdsSession {
 
     // Internal receive buffer for chunked reassembly
     recv_buf: Vec<u8>,
+
+    // In-flight message_id set (client-side only)
+    inflight_ids: HashSet<u64>,
 }
 
 impl UdsSession {
@@ -220,9 +230,16 @@ impl UdsSession {
     ///
     /// If the total message (32 + payload_len) exceeds packet_size, the
     /// message is chunked transparently.
-    pub fn send(&self, hdr: &mut Header, payload: &[u8]) -> Result<(), UdsError> {
+    pub fn send(&mut self, hdr: &mut Header, payload: &[u8]) -> Result<(), UdsError> {
         if self.fd < 0 {
             return Err(UdsError::BadParam("session closed".into()));
+        }
+
+        // Client-side: track in-flight message_ids for requests
+        if self.role == Role::Client && hdr.kind == KIND_REQUEST {
+            if !self.inflight_ids.insert(hdr.message_id) {
+                return Err(UdsError::DuplicateMsgId(hdr.message_id));
+            }
         }
 
         // Fill envelope fields
@@ -317,6 +334,13 @@ impl UdsSession {
         };
         if hdr.payload_len > max_payload {
             return Err(UdsError::LimitExceeded);
+        }
+
+        // Client-side: validate response message_id is in-flight
+        if self.role == Role::Client && hdr.kind == KIND_RESPONSE {
+            if !self.inflight_ids.remove(&hdr.message_id) {
+                return Err(UdsError::UnknownMsgId(hdr.message_id));
+            }
         }
 
         let total_msg = HEADER_SIZE + hdr.payload_len as usize;
@@ -512,8 +536,29 @@ fn errno() -> i32 {
     io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
+/// Validate service_name: only [a-zA-Z0-9._-], non-empty, not "." or "..".
+fn validate_service_name(name: &str) -> Result<(), UdsError> {
+    if name.is_empty() {
+        return Err(UdsError::BadParam("empty service name".into()));
+    }
+    if name == "." || name == ".." {
+        return Err(UdsError::BadParam("service name cannot be '.' or '..'".into()));
+    }
+    for c in name.bytes() {
+        match c {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'_' | b'-' => {}
+            _ => return Err(UdsError::BadParam(
+                format!("service name contains invalid character: {:?}", c as char),
+            )),
+        }
+    }
+    Ok(())
+}
+
 /// Build `{run_dir}/{service_name}.sock` and validate length.
 fn build_socket_path(run_dir: &str, service_name: &str) -> Result<String, UdsError> {
+    validate_service_name(service_name)?;
+
     let path = format!("{run_dir}/{service_name}.sock");
 
     // sun_path is typically 108 bytes on Linux, 104 on macOS
@@ -822,6 +867,7 @@ fn connect_and_handshake(
         packet_size: ack.agreed_packet_size,
         selected_profile: ack.selected_profile,
         recv_buf: Vec::new(),
+        inflight_ids: HashSet::new(),
     })
 }
 
@@ -965,6 +1011,7 @@ fn server_handshake(fd: RawFd, config: &ServerConfig) -> Result<UdsSession, UdsE
         packet_size: agreed_pkt,
         selected_profile: selected,
         recv_buf: Vec::new(),
+        inflight_ids: HashSet::new(),
     })
 }
 
@@ -1635,5 +1682,41 @@ mod tests {
         drop(session);
         server_thread.join().expect("server join");
         cleanup_socket(&svc);
+    }
+
+    #[test]
+    fn test_invalid_service_name() {
+        let bad_names = &["", ".", "..", "foo/bar", "../etc", "name space", "a@b"];
+        for name in bad_names {
+            let result = validate_service_name(name);
+            assert!(result.is_err(), "should reject {:?}", name);
+        }
+
+        let good_names = &["valid-name", "valid_name", "valid.name", "ValidName123", "a"];
+        for name in good_names {
+            validate_service_name(name).unwrap_or_else(|e| panic!("{:?} should be valid: {e}", name));
+        }
+    }
+
+    #[test]
+    fn test_hello_decode_nonzero_padding() {
+        let h = Hello {
+            layout_version: 1,
+            supported_profiles: PROFILE_BASELINE,
+            max_request_payload_bytes: 1024,
+            max_request_batch_items: 1,
+            max_response_payload_bytes: 1024,
+            max_response_batch_items: 1,
+            packet_size: 65536,
+            ..Default::default()
+        };
+
+        let mut buf = [0u8; 44];
+        h.encode(&mut buf);
+        Hello::decode(&buf).expect("valid hello should decode");
+
+        // Corrupt padding bytes 28..32
+        buf[28] = 0xFF;
+        assert_eq!(Hello::decode(&buf), Err(protocol::NipcError::BadLayout));
     }
 }

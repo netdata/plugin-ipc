@@ -464,6 +464,30 @@ static void test_hello_encode_too_small(void) {
     CHECK(n == 0, "hello encode too small");
 }
 
+static void test_hello_decode_nonzero_padding(void) {
+    nipc_hello_t h = {
+        .layout_version = 1,
+        .supported_profiles = NIPC_PROFILE_BASELINE,
+        .max_request_payload_bytes = 1024,
+        .max_request_batch_items = 1,
+        .max_response_payload_bytes = 1024,
+        .max_response_batch_items = 1,
+        .packet_size = 65536,
+    };
+    uint8_t buf[44];
+    nipc_hello_encode(&h, buf, sizeof(buf));
+
+    /* Verify valid decode works first */
+    nipc_hello_t out;
+    nipc_error_t err = nipc_hello_decode(buf, sizeof(buf), &out);
+    CHECK(err == NIPC_OK, "hello valid padding decode ok");
+
+    /* Corrupt padding bytes 28..32 */
+    buf[28] = 0xFF;
+    err = nipc_hello_decode(buf, sizeof(buf), &out);
+    CHECK(err == NIPC_ERR_BAD_LAYOUT, "hello nonzero padding rejected");
+}
+
 /* ================================================================== */
 /*  Hello-ack payload tests                                           */
 /* ================================================================== */
@@ -1010,6 +1034,7 @@ int main(void) {
     test_hello_decode_truncated();
     test_hello_decode_bad_layout();
     test_hello_encode_too_small();
+    test_hello_decode_nonzero_padding();
 
     /* Hello-ack tests */
     test_hello_ack_roundtrip();

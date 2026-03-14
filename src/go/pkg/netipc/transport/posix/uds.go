@@ -41,20 +41,22 @@ const (
 // ---------------------------------------------------------------------------
 
 var (
-	ErrPathTooLong   = errors.New("socket path exceeds sun_path limit")
-	ErrSocket        = errors.New("socket syscall failed")
-	ErrConnect       = errors.New("connect failed")
-	ErrAccept        = errors.New("accept failed")
-	ErrSend          = errors.New("send failed")
-	ErrRecv          = errors.New("recv failed or peer disconnected")
-	ErrHandshake     = errors.New("handshake protocol error")
-	ErrAuthFailed    = errors.New("authentication token rejected")
-	ErrNoProfile     = errors.New("no common transport profile")
-	ErrProtocol      = errors.New("wire protocol violation")
-	ErrAddrInUse     = errors.New("address already in use by live server")
-	ErrChunk         = errors.New("chunk header mismatch")
-	ErrLimitExceeded = errors.New("negotiated limit exceeded")
-	ErrBadParam      = errors.New("invalid argument")
+	ErrPathTooLong    = errors.New("socket path exceeds sun_path limit")
+	ErrSocket         = errors.New("socket syscall failed")
+	ErrConnect        = errors.New("connect failed")
+	ErrAccept         = errors.New("accept failed")
+	ErrSend           = errors.New("send failed")
+	ErrRecv           = errors.New("recv failed or peer disconnected")
+	ErrHandshake      = errors.New("handshake protocol error")
+	ErrAuthFailed     = errors.New("authentication token rejected")
+	ErrNoProfile      = errors.New("no common transport profile")
+	ErrProtocol       = errors.New("wire protocol violation")
+	ErrAddrInUse      = errors.New("address already in use by live server")
+	ErrChunk          = errors.New("chunk header mismatch")
+	ErrLimitExceeded  = errors.New("negotiated limit exceeded")
+	ErrBadParam       = errors.New("invalid argument")
+	ErrDuplicateMsgID = errors.New("duplicate message_id")
+	ErrUnknownMsgID   = errors.New("unknown response message_id")
 )
 
 // wrapErr creates a descriptive error wrapping a sentinel.
@@ -122,6 +124,9 @@ type Session struct {
 
 	// Internal receive buffer for chunked reassembly
 	recvBuf []byte
+
+	// In-flight message_id set (client-side only)
+	inflightIDs map[uint64]struct{}
 }
 
 // Fd returns the raw file descriptor for poll/epoll integration.
@@ -171,6 +176,17 @@ func Connect(runDir, serviceName string, config *ClientConfig) (*Session, error)
 func (s *Session) Send(hdr *protocol.Header, payload []byte) error {
 	if s.fd < 0 {
 		return wrapErr(ErrBadParam, "session closed")
+	}
+
+	// Client-side: track in-flight message_ids for requests
+	if s.role == RoleClient && hdr.Kind == protocol.KindRequest {
+		if s.inflightIDs == nil {
+			s.inflightIDs = make(map[uint64]struct{})
+		}
+		if _, exists := s.inflightIDs[hdr.MessageID]; exists {
+			return wrapErr(ErrDuplicateMsgID, fmt.Sprintf("message_id %d", hdr.MessageID))
+		}
+		s.inflightIDs[hdr.MessageID] = struct{}{}
 	}
 
 	// Fill envelope fields
@@ -280,6 +296,19 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 	if hdr.PayloadLen > maxPayload {
 		return protocol.Header{}, nil, wrapErr(ErrLimitExceeded,
 			fmt.Sprintf("payload_len %d exceeds negotiated max %d", hdr.PayloadLen, maxPayload))
+	}
+
+	// Client-side: validate response message_id is in-flight
+	if s.role == RoleClient && hdr.Kind == protocol.KindResponse {
+		if s.inflightIDs == nil {
+			return protocol.Header{}, nil, wrapErr(ErrUnknownMsgID,
+				fmt.Sprintf("message_id %d", hdr.MessageID))
+		}
+		if _, exists := s.inflightIDs[hdr.MessageID]; !exists {
+			return protocol.Header{}, nil, wrapErr(ErrUnknownMsgID,
+				fmt.Sprintf("message_id %d", hdr.MessageID))
+		}
+		delete(s.inflightIDs, hdr.MessageID)
 	}
 
 	totalMsg := protocol.HeaderSize + int(hdr.PayloadLen)
@@ -458,8 +487,31 @@ func (l *Listener) Close() {
 //  Internal helpers
 // ---------------------------------------------------------------------------
 
+// validateServiceName checks that name contains only [a-zA-Z0-9._-],
+// is non-empty, and is not "." or "..".
+func validateServiceName(name string) error {
+	if name == "" {
+		return wrapErr(ErrBadParam, "empty service name")
+	}
+	if name == "." || name == ".." {
+		return wrapErr(ErrBadParam, "service name cannot be '.' or '..'")
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' {
+			continue
+		}
+		return wrapErr(ErrBadParam, fmt.Sprintf("service name contains invalid character: %q", c))
+	}
+	return nil
+}
+
 // buildSocketPath constructs {runDir}/{serviceName}.sock and validates length.
 func buildSocketPath(runDir, serviceName string) (string, error) {
+	if err := validateServiceName(serviceName); err != nil {
+		return "", err
+	}
 	path := filepath.Join(runDir, serviceName+".sock")
 	// sun_path limit check. On Linux it's 108, macOS/FreeBSD 104.
 	// We use the smaller value for portability.
@@ -695,6 +747,7 @@ func connectAndHandshake(fd int, path string, config *ClientConfig) (*Session, e
 		MaxResponseBatchItems:   ack.AgreedMaxResponseBatchItems,
 		PacketSize:              ack.AgreedPacketSize,
 		SelectedProfile:         ack.SelectedProfile,
+		inflightIDs:             make(map[uint64]struct{}),
 	}, nil
 }
 
@@ -846,6 +899,7 @@ func serverHandshake(fd int, config *ServerConfig) (*Session, error) {
 		MaxResponseBatchItems:   agreedRespBat,
 		PacketSize:              agreedPkt,
 		SelectedProfile:         selected,
+		inflightIDs:             make(map[uint64]struct{}),
 	}, nil
 }
 

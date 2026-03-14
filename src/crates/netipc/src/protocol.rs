@@ -478,7 +478,7 @@ impl Hello {
             max_request_batch_items: u32::from_le_bytes(buf[16..20].try_into().unwrap()),
             max_response_payload_bytes: u32::from_le_bytes(buf[20..24].try_into().unwrap()),
             max_response_batch_items: u32::from_le_bytes(buf[24..28].try_into().unwrap()),
-            // buf[28..32] is padding, ignored
+            // buf[28..32] is reserved padding, must be zero
             auth_token: u64::from_le_bytes(buf[32..40].try_into().unwrap()),
             packet_size: u32::from_le_bytes(buf[40..44].try_into().unwrap()),
         };
@@ -486,6 +486,12 @@ impl Hello {
         if h.layout_version != 1 {
             return Err(NipcError::BadLayout);
         }
+
+        // Validate padding bytes 28..32 are zero
+        if u32::from_le_bytes(buf[28..32].try_into().unwrap()) != 0 {
+            return Err(NipcError::BadLayout);
+        }
+
         Ok(h)
     }
 }

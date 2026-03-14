@@ -379,11 +379,14 @@ nipc_error_t nipc_hello_decode(const void *buf, size_t buf_len,
     out->max_request_batch_items    = get_u32(p + 16);
     out->max_response_payload_bytes = get_u32(p + 20);
     out->max_response_batch_items   = get_u32(p + 24);
-    /* p+28: padding, ignored */
+    /* p+28..32: reserved padding, must be zero */
     out->auth_token                 = get_u64(p + 32);
     out->packet_size                = get_u32(p + 40);
 
     if (out->layout_version != 1)
+        return NIPC_ERR_BAD_LAYOUT;
+
+    if (get_u32(p + 28) != 0)
         return NIPC_ERR_BAD_LAYOUT;
 
     return NIPC_OK;

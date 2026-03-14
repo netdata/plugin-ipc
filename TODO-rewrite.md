@@ -1,5 +1,38 @@
 # TODO-rewrite: plugin-ipc Clean Rewrite
 
+## MANDATORY: Quality Standards
+
+**This library will be a core component of Netdata.** Once merged and
+integrated, it will be downloaded 1.5M+ times per day and installed
+on physical servers, VMs, IoT devices, and exotic environments. It
+will be stressed in ways we cannot predict.
+
+**The only valid approach: quality, performance, simplicity,
+maintainability, smooth + reliable + robust operations.**
+
+**The obviously invalid approaches:**
+- Overlooking "secondary" issues — there are no secondary issues in
+  a library running on 1.5M+ installations
+- Optimizing to minimize work — cutting corners creates risk at scale
+- Deferring known issues to later phases — if the spec says it, it
+  must be implemented now, not "when it becomes critical"
+- Dismissing review findings as "low priority" — every finding from
+  any reviewer must be evaluated honestly and fixed if valid
+- Taking shortcuts on validation, error handling, or edge cases —
+  every unvalidated input is a potential crash on production systems
+
+**Concrete rules:**
+- Every input from the wire must be validated before use. No exceptions.
+- Every spec requirement must be implemented in the phase where it
+  belongs. Do not defer spec requirements to later phases.
+- Every review finding must be fixed unless it is demonstrably wrong
+  (not "low priority" — wrong).
+- Every code path must be tested, including error paths and edge cases.
+- No hardcoded magic numbers — use named constants.
+- No panics, no crashes, no undefined behavior on any input.
+- Security is not optional. Path traversal, buffer overflow, integer
+  overflow, unvalidated lengths — all must be prevented by design.
+
 ## MANDATORY: Read Before Any Work
 
 **STOP. Before doing anything, read every file in `docs/` in full.**

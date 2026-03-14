@@ -31,13 +31,36 @@
 /*  Internal helpers                                                   */
 /* ------------------------------------------------------------------ */
 
+/* Validate service_name: only [a-zA-Z0-9._-], non-empty, not "." or "..". */
+static int validate_service_name(const char *name)
+{
+    if (!name || name[0] == '\0')
+        return -1;
+
+    /* Reject "." and ".." */
+    if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0')))
+        return -1;
+
+    for (const char *p = name; *p; p++) {
+        char c = *p;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')
+            continue;
+        return -1;
+    }
+    return 0;
+}
+
 /* Build socket path into dst, return 0 on success, -1 if too long. */
 static int build_socket_path(char *dst, size_t dst_len,
                              const char *run_dir, const char *service_name)
 {
+    if (validate_service_name(service_name) < 0)
+        return -2; /* invalid service name */
+
     int n = snprintf(dst, dst_len, "%s/%s.sock", run_dir, service_name);
     if (n < 0 || (size_t)n >= dst_len)
-        return -1;
+        return -1; /* path too long */
     return 0;
 }
 
@@ -436,7 +459,10 @@ nipc_uds_error_t nipc_uds_listen(const char *run_dir,
 
     /* Build path */
     char path[sizeof(((struct sockaddr_un *)0)->sun_path)];
-    if (build_socket_path(path, sizeof(path), run_dir, service_name) < 0)
+    int path_rc = build_socket_path(path, sizeof(path), run_dir, service_name);
+    if (path_rc == -2)
+        return NIPC_UDS_ERR_BAD_PARAM;
+    if (path_rc < 0)
         return NIPC_UDS_ERR_PATH_TOO_LONG;
 
     /* Stale recovery */
@@ -512,7 +538,10 @@ nipc_uds_error_t nipc_uds_connect(const char *run_dir,
 
     /* Build path */
     char path[sizeof(((struct sockaddr_un *)0)->sun_path)];
-    if (build_socket_path(path, sizeof(path), run_dir, service_name) < 0)
+    int path_rc2 = build_socket_path(path, sizeof(path), run_dir, service_name);
+    if (path_rc2 == -2)
+        return NIPC_UDS_ERR_BAD_PARAM;
+    if (path_rc2 < 0)
         return NIPC_UDS_ERR_PATH_TOO_LONG;
 
     /* Create socket */
@@ -576,6 +605,39 @@ void nipc_uds_close_listener(nipc_uds_listener_t *listener)
 }
 
 /* ------------------------------------------------------------------ */
+/*  In-flight message_id tracking (client side)                        */
+/* ------------------------------------------------------------------ */
+
+/* Add message_id to in-flight set. Returns 0 on success, -1 if duplicate,
+ * -2 if set is full. */
+static int inflight_add(nipc_uds_session_t *s, uint64_t id)
+{
+    for (uint32_t i = 0; i < s->inflight_count; i++) {
+        if (s->inflight_ids[i] == id)
+            return -1; /* duplicate */
+    }
+    if (s->inflight_count >= NIPC_UDS_MAX_INFLIGHT)
+        return -2; /* full */
+    s->inflight_ids[s->inflight_count++] = id;
+    return 0;
+}
+
+/* Remove message_id from in-flight set. Returns 0 on success, -1 if
+ * not found. */
+static int inflight_remove(nipc_uds_session_t *s, uint64_t id)
+{
+    for (uint32_t i = 0; i < s->inflight_count; i++) {
+        if (s->inflight_ids[i] == id) {
+            /* Swap with last */
+            s->inflight_ids[i] = s->inflight_ids[s->inflight_count - 1];
+            s->inflight_count--;
+            return 0;
+        }
+    }
+    return -1; /* not found */
+}
+
+/* ------------------------------------------------------------------ */
 /*  Public API: send                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -586,6 +648,16 @@ nipc_uds_error_t nipc_uds_send(nipc_uds_session_t *session,
 {
     if (!session || session->fd < 0)
         return NIPC_UDS_ERR_BAD_PARAM;
+
+    /* Client-side: track in-flight message_ids for requests */
+    if (session->role == NIPC_UDS_ROLE_CLIENT &&
+        hdr->kind == NIPC_KIND_REQUEST) {
+        int rc = inflight_add(session, hdr->message_id);
+        if (rc == -1)
+            return NIPC_UDS_ERR_DUPLICATE_MSG_ID;
+        if (rc == -2)
+            return NIPC_UDS_ERR_LIMIT_EXCEEDED;
+    }
 
     /* Fill envelope fields the caller shouldn't set */
     hdr->magic      = NIPC_MAGIC_MSG;
@@ -717,6 +789,13 @@ nipc_uds_error_t nipc_uds_receive(nipc_uds_session_t *session,
         : session->max_response_payload_bytes;
     if (hdr_out->payload_len > max_payload)
         return NIPC_UDS_ERR_LIMIT_EXCEEDED;
+
+    /* Client-side: validate response message_id is in-flight */
+    if (session->role == NIPC_UDS_ROLE_CLIENT &&
+        hdr_out->kind == NIPC_KIND_RESPONSE) {
+        if (inflight_remove(session, hdr_out->message_id) < 0)
+            return NIPC_UDS_ERR_UNKNOWN_MSG_ID;
+    }
 
     size_t total_msg = NIPC_HEADER_LEN + hdr_out->payload_len;
 
