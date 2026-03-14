@@ -34,6 +34,18 @@ target_include_directories(netipc_protocol PUBLIC
     src/libnetdata/netipc/include
 )
 
+# --- C library: L1 POSIX UDS transport ------------------------------------
+
+if(NOT NETIPC_WINDOWS_RUNTIME)
+    add_library(netipc_uds STATIC
+        src/libnetdata/netipc/src/transport/posix/netipc_uds.c
+    )
+    target_include_directories(netipc_uds PUBLIC
+        src/libnetdata/netipc/include
+    )
+    target_link_libraries(netipc_uds PUBLIC netipc_protocol)
+endif()
+
 # --- Rust crate -----------------------------------------------------------
 find_program(CARGO_EXECUTABLE cargo)
 
@@ -139,6 +151,15 @@ if(GO_EXECUTABLE)
         )
         set_tests_properties(go_${FUZZ_TARGET} PROPERTIES TIMEOUT 120)
     endforeach()
+endif()
+
+# --- L1 UDS transport tests -----------------------------------------------
+
+if(NOT NETIPC_WINDOWS_RUNTIME)
+    add_executable(test_uds tests/fixtures/c/test_uds.c)
+    target_link_libraries(test_uds PRIVATE netipc_uds netipc_protocol Threads::Threads)
+    add_test(NAME test_uds COMMAND test_uds)
+    set_tests_properties(test_uds PROPERTIES TIMEOUT 30)
 endif()
 
 # --- Benchmarks (added per phase) ----------------------------------------
