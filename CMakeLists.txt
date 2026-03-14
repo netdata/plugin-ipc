@@ -25,15 +25,51 @@ if(WIN32 OR CYGWIN OR CMAKE_SYSTEM_NAME STREQUAL "MSYS")
     set(NETIPC_WINDOWS_RUNTIME ON)
 endif()
 
-# --- C library (added per phase) -----------------------------------------
+# --- C library: protocol (Codec + L1 wire envelope) ----------------------
+
+add_library(netipc_protocol STATIC
+    src/libnetdata/netipc/src/protocol/netipc_protocol.c
+)
+target_include_directories(netipc_protocol PUBLIC
+    src/libnetdata/netipc/include
+)
 
 # --- Rust crate -----------------------------------------------------------
 find_program(CARGO_EXECUTABLE cargo)
 
+if(CARGO_EXECUTABLE)
+    set(NETIPC_RUST_CRATE_DIR "${CMAKE_SOURCE_DIR}/src/crates/netipc")
+
+    add_custom_target(netipc_rust ALL
+        COMMAND ${CARGO_EXECUTABLE} build
+        WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+        COMMENT "Building Rust netipc crate"
+    )
+endif()
+
 # --- Go package -----------------------------------------------------------
 find_program(GO_EXECUTABLE go)
 
-# --- Tests (added per phase) ---------------------------------------------
+# --- Tests ----------------------------------------------------------------
 enable_testing()
+
+add_executable(test_protocol tests/test_protocol.c)
+target_link_libraries(test_protocol PRIVATE netipc_protocol)
+add_test(NAME test_protocol COMMAND test_protocol)
+
+add_executable(interop_codec_c tests/fixtures/c/interop_codec.c)
+target_link_libraries(interop_codec_c PRIVATE netipc_protocol)
+
+if(CARGO_EXECUTABLE)
+    add_test(NAME test_protocol_rust
+        COMMAND ${CARGO_EXECUTABLE} test
+        WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+    )
+
+    add_test(NAME interop_codec
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/interop_codec.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+endif()
 
 # --- Benchmarks (added per phase) ----------------------------------------
