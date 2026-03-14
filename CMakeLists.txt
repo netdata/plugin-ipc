@@ -160,6 +160,42 @@ if(NOT NETIPC_WINDOWS_RUNTIME)
     target_link_libraries(test_uds PRIVATE netipc_uds netipc_protocol Threads::Threads)
     add_test(NAME test_uds COMMAND test_uds)
     set_tests_properties(test_uds PROPERTIES TIMEOUT 30)
+
+    # C interop binary for cross-language UDS tests
+    add_executable(interop_uds_c tests/fixtures/c/interop_uds.c)
+    target_link_libraries(interop_uds_c PRIVATE netipc_uds netipc_protocol)
+endif()
+
+# --- Rust UDS transport tests ---------------------------------------------
+
+if(CARGO_EXECUTABLE)
+    add_test(NAME test_uds_rust
+        COMMAND ${CARGO_EXECUTABLE} test transport -- --test-threads=1
+        WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+    )
+    set_tests_properties(test_uds_rust PROPERTIES TIMEOUT 30)
+
+    # Build the Rust interop binary
+    add_custom_target(interop_uds_rs ALL
+        COMMAND ${CARGO_EXECUTABLE} build --bin interop_uds
+        WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+        COMMENT "Building Rust UDS interop binary"
+    )
+endif()
+
+# --- Cross-language UDS interop tests -------------------------------------
+
+if(NOT NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
+    set(INTEROP_UDS_RS "${NETIPC_RUST_CRATE_DIR}/target/debug/interop_uds")
+
+    add_test(NAME test_uds_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_uds_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_uds_interop PROPERTIES
+        TIMEOUT 30
+        ENVIRONMENT "INTEROP_UDS_C=$<TARGET_FILE:interop_uds_c>;INTEROP_UDS_RS=${INTEROP_UDS_RS}"
+    )
 endif()
 
 # --- Benchmarks (added per phase) ----------------------------------------

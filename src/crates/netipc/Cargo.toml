@@ -15,3 +15,7 @@ proptest = "1"
 [[bin]]
 name = "interop_codec"
 path = "src/bin/interop_codec.rs"
+
+[[bin]]
+name = "interop_uds"
+path = "../../../tests/fixtures/rust/src/bin/interop_uds.rs"
