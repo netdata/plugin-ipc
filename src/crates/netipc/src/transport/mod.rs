@@ -5,3 +5,6 @@
 
 #[cfg(unix)]
 pub mod posix;
+
+#[cfg(target_os = "linux")]
+pub mod shm;

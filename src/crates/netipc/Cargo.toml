@@ -19,3 +19,7 @@ path = "src/bin/interop_codec.rs"
 [[bin]]
 name = "interop_uds"
 path = "../../../tests/fixtures/rust/src/bin/interop_uds.rs"
+
+[[bin]]
+name = "interop_shm"
+path = "../../../tests/fixtures/rust/src/bin/interop_shm.rs"

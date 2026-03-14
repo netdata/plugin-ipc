@@ -185,6 +185,10 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_link_libraries(test_shm PRIVATE netipc_shm netipc_uds netipc_protocol Threads::Threads)
     add_test(NAME test_shm COMMAND test_shm)
     set_tests_properties(test_shm PROPERTIES TIMEOUT 30)
+
+    # C SHM interop binary
+    add_executable(interop_shm_c tests/fixtures/c/interop_shm.c)
+    target_link_libraries(interop_shm_c PRIVATE netipc_shm netipc_protocol)
 endif()
 
 # --- Rust UDS transport tests ---------------------------------------------
@@ -202,6 +206,22 @@ if(CARGO_EXECUTABLE)
         WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
         COMMENT "Building Rust UDS interop binary"
     )
+
+    # Rust SHM transport tests (Linux only)
+    if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+        add_test(NAME test_shm_rust
+            COMMAND ${CARGO_EXECUTABLE} test shm -- --test-threads=1
+            WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+        )
+        set_tests_properties(test_shm_rust PROPERTIES TIMEOUT 30)
+
+        # Build the Rust SHM interop binary
+        add_custom_target(interop_shm_rs ALL
+            COMMAND ${CARGO_EXECUTABLE} build --bin interop_shm
+            WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+            COMMENT "Building Rust SHM interop binary"
+        )
+    endif()
 endif()
 
 # --- Go UDS transport tests ------------------------------------------------
@@ -221,6 +241,25 @@ if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tests/fixtures/go"
         COMMENT "Building Go UDS interop binary"
     )
+
+    # Go SHM transport tests (Linux only)
+    if(NOT APPLE)
+        add_test(NAME test_shm_go
+            COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+                ${GO_EXECUTABLE} test -count=1 -timeout=60s
+                -run TestShm ./pkg/netipc/transport/posix/
+            WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
+        )
+        set_tests_properties(test_shm_go PROPERTIES TIMEOUT 60)
+
+        # Build Go SHM interop binary
+        add_custom_target(interop_shm_go ALL
+            COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+                ${GO_EXECUTABLE} build -o "${CMAKE_BINARY_DIR}/bin/interop_shm_go" ./cmd/interop_shm
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tests/fixtures/go"
+            COMMENT "Building Go SHM interop binary"
+        )
+    endif()
 endif()
 
 # --- Cross-language UDS interop tests -------------------------------------
@@ -236,6 +275,22 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
     set_tests_properties(test_uds_interop PROPERTIES
         TIMEOUT 60
         ENVIRONMENT "INTEROP_UDS_C=$<TARGET_FILE:interop_uds_c>;INTEROP_UDS_RS=${INTEROP_UDS_RS};INTEROP_UDS_GO=${INTEROP_UDS_GO}"
+    )
+endif()
+
+# --- Cross-language SHM interop tests (Linux only) -------------------------
+
+if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
+    set(INTEROP_SHM_RS "${NETIPC_RUST_CRATE_DIR}/target/debug/interop_shm")
+    set(INTEROP_SHM_GO "${CMAKE_BINARY_DIR}/bin/interop_shm_go")
+
+    add_test(NAME test_shm_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_shm_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_shm_interop PROPERTIES
+        TIMEOUT 60
+        ENVIRONMENT "INTEROP_SHM_C=$<TARGET_FILE:interop_shm_c>;INTEROP_SHM_RS=${INTEROP_SHM_RS};INTEROP_SHM_GO=${INTEROP_SHM_GO}"
     )
 endif()
 
