@@ -75,8 +75,8 @@ if(GO_EXECUTABLE)
 
     add_custom_target(interop_codec_go ALL
         COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
-            ${GO_EXECUTABLE} build -o "${CMAKE_BINARY_DIR}/bin/interop_codec_go" .
-        WORKING_DIRECTORY "${NETIPC_GO_FIXTURE_DIR}"
+            ${GO_EXECUTABLE} build -o "${CMAKE_BINARY_DIR}/bin/interop_codec_go" ./cmd/interop_codec
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tests/fixtures/go"
         COMMENT "Building Go interop codec binary"
     )
 endif()
@@ -183,18 +183,38 @@ if(CARGO_EXECUTABLE)
     )
 endif()
 
+# --- Go UDS transport tests ------------------------------------------------
+
+if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
+    add_test(NAME test_uds_go
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} test -count=1 -timeout=60s ./pkg/netipc/transport/posix/
+        WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
+    )
+    set_tests_properties(test_uds_go PROPERTIES TIMEOUT 60)
+
+    # Build Go UDS interop binary
+    add_custom_target(interop_uds_go ALL
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} build -o "${CMAKE_BINARY_DIR}/bin/interop_uds_go" ./cmd/interop_uds
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tests/fixtures/go"
+        COMMENT "Building Go UDS interop binary"
+    )
+endif()
+
 # --- Cross-language UDS interop tests -------------------------------------
 
 if(NOT NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
     set(INTEROP_UDS_RS "${NETIPC_RUST_CRATE_DIR}/target/debug/interop_uds")
+    set(INTEROP_UDS_GO "${CMAKE_BINARY_DIR}/bin/interop_uds_go")
 
     add_test(NAME test_uds_interop
         COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_uds_interop.sh"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     )
     set_tests_properties(test_uds_interop PROPERTIES
-        TIMEOUT 30
-        ENVIRONMENT "INTEROP_UDS_C=$<TARGET_FILE:interop_uds_c>;INTEROP_UDS_RS=${INTEROP_UDS_RS}"
+        TIMEOUT 60
+        ENVIRONMENT "INTEROP_UDS_C=$<TARGET_FILE:interop_uds_c>;INTEROP_UDS_RS=${INTEROP_UDS_RS};INTEROP_UDS_GO=${INTEROP_UDS_GO}"
     )
 endif()
 

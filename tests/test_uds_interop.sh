@@ -2,12 +2,13 @@
 #
 # test_uds_interop.sh - Cross-language UDS transport interop tests.
 #
-# Tests C-server + Rust-client and Rust-server + C-client combinations.
-# Both binaries use identical wire protocol and auth tokens.
+# Tests all 9 directed pairs: C, Rust, and Go servers and clients.
+# All binaries use identical wire protocol and auth tokens.
 #
 # Expects:
 #   $INTEROP_UDS_C    path to the C interop_uds binary
 #   $INTEROP_UDS_RS   path to the Rust interop_uds binary
+#   $INTEROP_UDS_GO   path to the Go interop_uds binary (optional)
 #
 # Returns 0 on all-pass, 1 on any failure.
 
@@ -20,6 +21,7 @@ NC='\033[0m'
 
 PASS=0
 FAIL=0
+SKIP=0
 RUN_DIR="/tmp/nipc_interop_test"
 TIMEOUT=10
 
@@ -29,6 +31,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 : "${INTEROP_UDS_C:=${ROOT_DIR}/build/bin/interop_uds_c}"
 : "${INTEROP_UDS_RS:=${ROOT_DIR}/build/bin/interop_uds_rs}"
+: "${INTEROP_UDS_GO:=${ROOT_DIR}/build/bin/interop_uds_go}"
 
 # Auto-discover: try cargo target directory for Rust binary
 if [[ ! -x "$INTEROP_UDS_RS" ]]; then
@@ -36,6 +39,11 @@ if [[ ! -x "$INTEROP_UDS_RS" ]]; then
     if [[ -x "$CARGO_BIN" ]]; then
         INTEROP_UDS_RS="$CARGO_BIN"
     fi
+fi
+
+HAS_GO=0
+if [[ -x "$INTEROP_UDS_GO" ]]; then
+    HAS_GO=1
 fi
 
 cleanup() {
@@ -61,8 +69,11 @@ check_binaries() {
         missing=1
     fi
     if [[ $missing -ne 0 ]]; then
-        echo "Build both binaries first." >&2
+        echo "Build both C and Rust binaries first." >&2
         exit 1
+    fi
+    if [[ $HAS_GO -eq 0 ]]; then
+        echo -e "${YELLOW}Go binary not found: $INTEROP_UDS_GO (Go tests will be skipped)${NC}" >&2
     fi
 }
 
@@ -71,6 +82,13 @@ run_test() {
     local server_bin="$2"
     local client_bin="$3"
     local service="$4"
+
+    # Skip if either binary is missing
+    if [[ ! -x "$server_bin" || ! -x "$client_bin" ]]; then
+        echo -e "  $name ... ${YELLOW}SKIP${NC}"
+        SKIP=$((SKIP + 1))
+        return
+    fi
 
     echo -n "  $name ... "
 
@@ -134,22 +152,42 @@ main() {
 
     echo "C binary:    $INTEROP_UDS_C"
     echo "Rust binary: $INTEROP_UDS_RS"
+    echo "Go binary:   $INTEROP_UDS_GO"
     echo ""
 
-    # Test 1: C server + Rust client
-    run_test "C server, Rust client" "$INTEROP_UDS_C" "$INTEROP_UDS_RS" "interop_c_rs"
+    # --- Same-language baseline pairs (3 tests) ---
 
-    # Test 2: Rust server + C client
-    run_test "Rust server, C client" "$INTEROP_UDS_RS" "$INTEROP_UDS_C" "interop_rs_c"
+    run_test "C server, C client" \
+        "$INTEROP_UDS_C" "$INTEROP_UDS_C" "interop_c_c"
 
-    # Test 3: C server + C client (baseline sanity)
-    run_test "C server, C client (baseline)" "$INTEROP_UDS_C" "$INTEROP_UDS_C" "interop_c_c"
+    run_test "Rust server, Rust client" \
+        "$INTEROP_UDS_RS" "$INTEROP_UDS_RS" "interop_rs_rs"
 
-    # Test 4: Rust server + Rust client (baseline sanity)
-    run_test "Rust server, Rust client (baseline)" "$INTEROP_UDS_RS" "$INTEROP_UDS_RS" "interop_rs_rs"
+    run_test "Go server, Go client" \
+        "$INTEROP_UDS_GO" "$INTEROP_UDS_GO" "interop_go_go"
+
+    # --- Cross-language pairs (6 tests) ---
+
+    run_test "C server, Rust client" \
+        "$INTEROP_UDS_C" "$INTEROP_UDS_RS" "interop_c_rs"
+
+    run_test "Rust server, C client" \
+        "$INTEROP_UDS_RS" "$INTEROP_UDS_C" "interop_rs_c"
+
+    run_test "C server, Go client" \
+        "$INTEROP_UDS_C" "$INTEROP_UDS_GO" "interop_c_go"
+
+    run_test "Go server, C client" \
+        "$INTEROP_UDS_GO" "$INTEROP_UDS_C" "interop_go_c"
+
+    run_test "Rust server, Go client" \
+        "$INTEROP_UDS_RS" "$INTEROP_UDS_GO" "interop_rs_go"
+
+    run_test "Go server, Rust client" \
+        "$INTEROP_UDS_GO" "$INTEROP_UDS_RS" "interop_go_rs"
 
     echo ""
-    echo -e "=== Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC} ==="
+    echo -e "=== Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}, ${YELLOW}${SKIP} skipped${NC} ==="
 
     [[ $FAIL -eq 0 ]]
 }
