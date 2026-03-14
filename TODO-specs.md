@@ -14,6 +14,10 @@
     - level 2 strongly typed API
     - level 3 snapshot API
     - code organization guide
+- Current immediate requirement:
+  - read every `docs/*.md` file in full
+  - do not skim or pattern-scan them
+  - treat the docs as the current review baseline before any further analysis
 - These specs must be derived from:
   - `TODO-plugin-ipc.md`
   - `TODO-plugin-ipc.history.md`
@@ -21,6 +25,8 @@
   - the latest decisions win
 
 ## Analysis
+- Fact (2026-03-14): `docs/` currently contains 12 markdown files and 2696 total lines.
+- Fact (2026-03-14): all current `docs/*.md` files were read in full, not skimmed, and now form the active documentation baseline for further discussion.
 - Current known sources of truth:
   - active spec / execution plan:
     - `TODO-plugin-ipc.md`
@@ -119,22 +125,23 @@
   - none before drafting the first spec set
 
 ## Plan
-1. Audit `TODO-plugin-ipc.md` for the current binding decisions.
-2. Audit `TODO-plugin-ipc.history.md` for earlier decisions that may still matter.
-3. Extract Costa's prior responses verbatim where they clarify ambiguous architecture wording:
+1. Read every existing `docs/*.md` file in full as the current authoritative documentation baseline.
+2. Audit `TODO-plugin-ipc.md` for the current binding decisions.
+3. Audit `TODO-plugin-ipc.history.md` for earlier decisions that may still matter.
+4. Extract Costa's prior responses verbatim where they clarify ambiguous architecture wording:
    - current conversation context first
    - then `~/.codex/sessions/.../rollout-*.jsonl`
    - use `~/.codex/state_5.sqlite` only to locate the right rollout path when needed
    - use `~/.codex/history.jsonl` only as a weaker fallback
-4. Extract conflicts and resolve them by latest-decision-wins.
-5. Draft `docs/level1-transport.md` as a closed spec.
-6. Draft `docs/level2-typed-api.md` as a closed spec.
-7. Draft `docs/level3-snapshot-api.md` as a closed spec.
-8. Identify any genuine unanswered questions exposed by those 3 specs.
-9. Resolve those questions before the affected specs become normative.
-10. Only then derive and discuss `docs/code-organization.md`.
-11. Cross-check the specs against the current codebase.
-12. Summarize the resulting gap-analysis baseline.
+5. Extract conflicts and resolve them by latest-decision-wins.
+6. Draft `docs/level1-transport.md` as a closed spec.
+7. Draft `docs/level2-typed-api.md` as a closed spec.
+8. Draft `docs/level3-snapshot-api.md` as a closed spec.
+9. Identify any genuine unanswered questions exposed by those 3 specs.
+10. Resolve those questions before the affected specs become normative.
+11. Only then derive and discuss `docs/code-organization.md`.
+12. Cross-check the specs against the current codebase.
+13. Summarize the resulting gap-analysis baseline.
 
 ## Implied Decisions
 - The specs are normative:
