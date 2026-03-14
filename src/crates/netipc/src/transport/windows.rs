@@ -6,12 +6,13 @@
 //! with the C version.
 
 use crate::protocol::{
-    decode_hello_ack_payload, decode_hello_payload, decode_increment_request,
-    decode_increment_response, decode_message_header, encode_hello_ack_payload,
-    encode_hello_payload, encode_increment_request, encode_increment_response,
-    max_batch_total_size, message_total_size, Frame, HelloAckPayload, HelloPayload,
-    IncrementRequest, IncrementResponse, CONTROL_HELLO_ACK_PAYLOAD_LEN, CONTROL_HELLO_PAYLOAD_LEN,
-    FRAME_SIZE, MAX_PAYLOAD_DEFAULT, MESSAGE_VERSION,
+    decode_chunk_header, decode_hello_ack_payload, decode_hello_payload, decode_increment_request,
+    decode_increment_response, decode_message_header, encode_chunk_header,
+    encode_hello_ack_payload, encode_hello_payload, encode_increment_request,
+    encode_increment_response, max_batch_total_size, message_total_size, ChunkHeader, Frame,
+    HelloAckPayload, HelloPayload, IncrementRequest, IncrementResponse, CHUNK_HEADER_LEN,
+    CHUNK_MAGIC, CHUNK_VERSION, CONTROL_HELLO_ACK_PAYLOAD_LEN, CONTROL_HELLO_PAYLOAD_LEN,
+    FRAME_SIZE, MAX_PAYLOAD_DEFAULT, MESSAGE_HEADER_LEN, MESSAGE_VERSION,
 };
 use std::io;
 use std::path::PathBuf;
@@ -822,6 +823,165 @@ fn validate_received_message(
     Ok(())
 }
 
+fn compute_pipe_packet_size(
+    max_request_message_len: usize,
+    max_response_message_len: usize,
+) -> io::Result<u32> {
+    let logical_limit = max_request_message_len.max(max_response_message_len);
+    if logical_limit <= CHUNK_HEADER_LEN || logical_limit > u32::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid named pipe packet size",
+        ));
+    }
+    Ok(logical_limit as u32)
+}
+
+fn compute_chunk_payload_budget(packet_size: u32) -> io::Result<usize> {
+    if packet_size as usize <= CHUNK_HEADER_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "packet size is too small for chunking",
+        ));
+    }
+    Ok(packet_size as usize - CHUNK_HEADER_LEN)
+}
+
+fn send_chunked_message(pipe: HANDLE, message: &[u8], packet_size: u32) -> io::Result<()> {
+    let chunk_payload_budget = compute_chunk_payload_budget(packet_size)?;
+    let header = decode_message_header(message)?;
+    let chunk_count = message.len().div_ceil(chunk_payload_budget) as u32;
+    let mut packet = vec![0u8; packet_size as usize];
+    let mut offset = 0usize;
+
+    for chunk_index in 0..chunk_count {
+        let remaining = message.len() - offset;
+        let chunk_payload_len = remaining.min(chunk_payload_budget);
+        let chunk_header = encode_chunk_header(&ChunkHeader {
+            magic: CHUNK_MAGIC,
+            version: CHUNK_VERSION,
+            flags: 0,
+            message_id: header.message_id,
+            total_message_len: message.len() as u32,
+            chunk_index,
+            chunk_count,
+            chunk_payload_len: chunk_payload_len as u32,
+        })?;
+        packet[..CHUNK_HEADER_LEN].copy_from_slice(&chunk_header);
+        packet[CHUNK_HEADER_LEN..CHUNK_HEADER_LEN + chunk_payload_len]
+            .copy_from_slice(&message[offset..offset + chunk_payload_len]);
+        pipe_write_message(pipe, &packet[..CHUNK_HEADER_LEN + chunk_payload_len])?;
+        offset += chunk_payload_len;
+    }
+
+    Ok(())
+}
+
+fn recv_transport_message(
+    pipe: HANDLE,
+    message: &mut [u8],
+    max_message_len: usize,
+    packet_size: u32,
+    timeout_ms: u32,
+) -> io::Result<usize> {
+    let packet_capacity = if packet_size != 0 {
+        packet_size as usize
+    } else {
+        max_message_len
+    };
+    if packet_capacity == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "packet capacity must not be zero",
+        ));
+    }
+
+    let mut packet = vec![0u8; packet_capacity];
+    let packet_len = pipe_read_message(pipe, &mut packet, timeout_ms)?;
+    if packet_len >= MESSAGE_HEADER_LEN {
+        if let Ok(header) = decode_message_header(&packet[..packet_len]) {
+            let total = message_total_size(&header)?;
+            if total == packet_len {
+                if packet_len > message.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "message buffer is smaller than received message",
+                    ));
+                }
+                message[..packet_len].copy_from_slice(&packet[..packet_len]);
+                validate_received_message(message, packet_len, max_message_len)?;
+                return Ok(packet_len);
+            }
+        }
+    }
+
+    if packet_len < CHUNK_HEADER_LEN {
+        return Err(protocol_error("invalid chunk packet length"));
+    }
+
+    let first_chunk = decode_chunk_header(&packet[..CHUNK_HEADER_LEN])?;
+    if first_chunk.chunk_index != 0 || first_chunk.chunk_count < 2 {
+        return Err(protocol_error("invalid first chunk header"));
+    }
+    if first_chunk.total_message_len as usize > message.len()
+        || first_chunk.total_message_len as usize > max_message_len
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "chunked message exceeds negotiated size",
+        ));
+    }
+
+    let mut payload_len = packet_len - CHUNK_HEADER_LEN;
+    if payload_len != first_chunk.chunk_payload_len as usize {
+        return Err(protocol_error("first chunk payload length mismatch"));
+    }
+
+    message[..payload_len].copy_from_slice(&packet[CHUNK_HEADER_LEN..packet_len]);
+    let mut offset = payload_len;
+    for expected_index in 1..first_chunk.chunk_count {
+        let packet_len = pipe_read_message(pipe, &mut packet, timeout_ms)?;
+        if packet_len < CHUNK_HEADER_LEN {
+            return Err(protocol_error("invalid continuation chunk length"));
+        }
+
+        let chunk = decode_chunk_header(&packet[..CHUNK_HEADER_LEN])?;
+        payload_len = packet_len - CHUNK_HEADER_LEN;
+        if chunk.message_id != first_chunk.message_id
+            || chunk.total_message_len != first_chunk.total_message_len
+            || chunk.chunk_count != first_chunk.chunk_count
+            || chunk.chunk_index != expected_index
+            || payload_len != chunk.chunk_payload_len as usize
+            || offset + payload_len > first_chunk.total_message_len as usize
+        {
+            return Err(protocol_error("invalid continuation chunk"));
+        }
+
+        message[offset..offset + payload_len]
+            .copy_from_slice(&packet[CHUNK_HEADER_LEN..packet_len]);
+        offset += payload_len;
+    }
+
+    if offset != first_chunk.total_message_len as usize {
+        return Err(protocol_error("chunked message length mismatch"));
+    }
+    validate_received_message(message, offset, max_message_len)?;
+    Ok(offset)
+}
+
+fn send_transport_message(
+    pipe: HANDLE,
+    message: &[u8],
+    max_message_len: usize,
+    packet_size: u32,
+) -> io::Result<()> {
+    validate_message_for_send(message, max_message_len)?;
+    if packet_size != 0 && message.len() > packet_size as usize {
+        return send_chunked_message(pipe, message, packet_size);
+    }
+    pipe_write_message(pipe, message)
+}
+
 fn pipe_read_frame(pipe: HANDLE, timeout_ms: u32) -> io::Result<Frame> {
     let mut buf = vec![0u8; FRAME_SIZE];
     let message_len = pipe_read_message(pipe, &mut buf, timeout_ms)?;
@@ -852,42 +1012,56 @@ fn set_pipe_mode(pipe: HANDLE, wait_mode: DWORD) -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn server_handshake(
-    server: &NamedPipeServer,
+    listener: &NamedPipeListener,
     pipe: HANDLE,
     timeout_ms: u32,
 ) -> io::Result<NegotiationResult> {
     let hello_frame = pipe_read_frame(pipe, timeout_ms)?;
     let hello = decode_hello_neg(&hello_frame)?;
 
+    let local_max_request_message_len = compute_max_message_len(
+        listener.max_request_payload_bytes,
+        listener.max_request_batch_items,
+    )?;
+    let local_max_response_message_len = compute_max_message_len(
+        listener.max_response_payload_bytes,
+        listener.max_response_batch_items,
+    )?;
+    let local_packet_size = compute_pipe_packet_size(
+        local_max_request_message_len,
+        local_max_response_message_len,
+    )?;
+
     let mut ack = HelloAckPayload {
         layout_version: hello.layout_version,
         flags: 0,
-        server_supported_profiles: server.supported_profiles,
-        intersection_profiles: hello.supported_profiles & server.supported_profiles,
+        server_supported_profiles: listener.supported_profiles,
+        intersection_profiles: hello.supported_profiles & listener.supported_profiles,
         selected_profile: 0,
         agreed_max_request_payload_bytes: negotiate_limit_u32(
             hello.max_request_payload_bytes,
-            server.max_request_payload_bytes,
+            listener.max_request_payload_bytes,
         ),
         agreed_max_request_batch_items: negotiate_limit_u32(
             hello.max_request_batch_items,
-            server.max_request_batch_items,
+            listener.max_request_batch_items,
         ),
         agreed_max_response_payload_bytes: negotiate_limit_u32(
             hello.max_response_payload_bytes,
-            server.max_response_payload_bytes,
+            listener.max_response_payload_bytes,
         ),
         agreed_max_response_batch_items: negotiate_limit_u32(
             hello.max_response_batch_items,
-            server.max_response_batch_items,
+            listener.max_response_batch_items,
         ),
+        agreed_packet_size: negotiate_limit_u32(hello.packet_size, local_packet_size),
     };
     let mut status = NEGOTIATION_STATUS_OK;
 
-    if server.auth_token != 0 && hello.auth_token != server.auth_token {
+    if listener.auth_token != 0 && hello.auth_token != listener.auth_token {
         status = ERROR_ACCESS_DENIED;
     } else {
-        let mut candidates = ack.intersection_profiles & server.preferred_profiles;
+        let mut candidates = ack.intersection_profiles & listener.preferred_profiles;
         if candidates == 0 {
             candidates = ack.intersection_profiles;
         }
@@ -898,6 +1072,7 @@ fn server_handshake(
             || ack.agreed_max_request_batch_items == 0
             || ack.agreed_max_response_payload_bytes == 0
             || ack.agreed_max_response_batch_items == 0
+            || ack.agreed_packet_size == 0
         {
             status = ERROR_INVALID_PARAMETER;
         }
@@ -912,20 +1087,26 @@ fn server_handshake(
             format!("negotiation failed: status {}", status),
         ));
     }
+    let max_request_message_len = compute_max_message_len(
+        ack.agreed_max_request_payload_bytes,
+        ack.agreed_max_request_batch_items,
+    )?;
+    let max_response_message_len = compute_max_message_len(
+        ack.agreed_max_response_payload_bytes,
+        ack.agreed_max_response_batch_items,
+    )?;
+    if ack.agreed_packet_size as usize > max_request_message_len.max(max_response_message_len) {
+        return Err(protocol_error("invalid negotiated packet size"));
+    }
     Ok(NegotiationResult {
         profile: ack.selected_profile,
+        packet_size: ack.agreed_packet_size,
         agreed_max_request_payload_bytes: ack.agreed_max_request_payload_bytes,
         agreed_max_request_batch_items: ack.agreed_max_request_batch_items,
         agreed_max_response_payload_bytes: ack.agreed_max_response_payload_bytes,
         agreed_max_response_batch_items: ack.agreed_max_response_batch_items,
-        max_request_message_len: compute_max_message_len(
-            ack.agreed_max_request_payload_bytes,
-            ack.agreed_max_request_batch_items,
-        )?,
-        max_response_message_len: compute_max_message_len(
-            ack.agreed_max_response_payload_bytes,
-            ack.agreed_max_response_batch_items,
-        )?,
+        max_request_message_len,
+        max_response_message_len,
     })
 }
 
@@ -940,6 +1121,15 @@ fn client_handshake(
     auth_token: u64,
     timeout_ms: u32,
 ) -> io::Result<NegotiationResult> {
+    let local_max_request_message_len =
+        compute_max_message_len(max_request_payload_bytes, max_request_batch_items)?;
+    let local_max_response_message_len =
+        compute_max_message_len(max_response_payload_bytes, max_response_batch_items)?;
+    let local_packet_size = compute_pipe_packet_size(
+        local_max_request_message_len,
+        local_max_response_message_len,
+    )?;
+
     let hello = HelloPayload {
         layout_version: MESSAGE_VERSION,
         flags: 0,
@@ -950,6 +1140,7 @@ fn client_handshake(
         max_response_payload_bytes,
         max_response_batch_items,
         auth_token,
+        packet_size: local_packet_size,
     };
     pipe_write_frame(pipe, &encode_hello_neg(&hello))?;
     let ack_frame = pipe_read_frame(pipe, timeout_ms)?;
@@ -968,23 +1159,31 @@ fn client_handshake(
         || ack.agreed_max_request_batch_items == 0
         || ack.agreed_max_response_payload_bytes == 0
         || ack.agreed_max_response_batch_items == 0
+        || ack.agreed_packet_size == 0
+        || ack.agreed_packet_size > local_packet_size
     {
         return Err(protocol_error("invalid negotiated profile"));
     }
+    let max_request_message_len = compute_max_message_len(
+        ack.agreed_max_request_payload_bytes,
+        ack.agreed_max_request_batch_items,
+    )?;
+    let max_response_message_len = compute_max_message_len(
+        ack.agreed_max_response_payload_bytes,
+        ack.agreed_max_response_batch_items,
+    )?;
+    if ack.agreed_packet_size as usize > max_request_message_len.max(max_response_message_len) {
+        return Err(protocol_error("invalid negotiated packet size"));
+    }
     Ok(NegotiationResult {
         profile: ack.selected_profile,
+        packet_size: ack.agreed_packet_size,
         agreed_max_request_payload_bytes: ack.agreed_max_request_payload_bytes,
         agreed_max_request_batch_items: ack.agreed_max_request_batch_items,
         agreed_max_response_payload_bytes: ack.agreed_max_response_payload_bytes,
         agreed_max_response_batch_items: ack.agreed_max_response_batch_items,
-        max_request_message_len: compute_max_message_len(
-            ack.agreed_max_request_payload_bytes,
-            ack.agreed_max_request_batch_items,
-        )?,
-        max_response_message_len: compute_max_message_len(
-            ack.agreed_max_response_payload_bytes,
-            ack.agreed_max_response_batch_items,
-        )?,
+        max_request_message_len,
+        max_response_message_len,
     })
 }
 
@@ -1807,7 +2006,7 @@ impl Drop for ShmClient {
 // Public API: NamedPipeServer
 // ---------------------------------------------------------------------------
 
-pub struct NamedPipeServer {
+pub struct NamedPipeListener {
     pipe: HANDLE,
     run_dir: String,
     service_name: String,
@@ -1819,14 +2018,24 @@ pub struct NamedPipeServer {
     max_response_batch_items: u32,
     auth_token: u64,
     shm_spin_tries: u32,
+}
+
+pub struct NamedPipeSession {
+    pipe: HANDLE,
     negotiated_profile: u32,
+    packet_size: u32,
     max_request_message_len: usize,
     max_response_message_len: usize,
     shm_server: Option<ShmServer>,
     connected: bool,
 }
 
-impl NamedPipeServer {
+pub struct NamedPipeServer {
+    listener: NamedPipeListener,
+    session: Option<NamedPipeSession>,
+}
+
+impl NamedPipeListener {
     pub fn bind(config: &NamedPipeConfig) -> io::Result<Self> {
         let pipe_name = to_wide(&build_pipe_name(config));
         let supported = effective_supported(config);
@@ -1857,7 +2066,7 @@ impl NamedPipeServer {
             return Err(win32_error("CreateNamedPipeW"));
         }
 
-        Ok(NamedPipeServer {
+        Ok(NamedPipeListener {
             pipe,
             run_dir: config.run_dir.to_string_lossy().into_owned(),
             service_name: config.service_name.clone(),
@@ -1869,15 +2078,10 @@ impl NamedPipeServer {
             max_response_batch_items,
             auth_token: config.auth_token,
             shm_spin_tries: config.shm_spin_tries,
-            negotiated_profile: 0,
-            max_request_message_len: 0,
-            max_response_message_len: 0,
-            shm_server: None,
-            connected: false,
         })
     }
 
-    pub fn accept(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+    pub fn accept(&mut self, timeout: Option<Duration>) -> io::Result<NamedPipeSession> {
         let timeout_ms = timeout.map(|d| d.as_millis() as u32).unwrap_or(0);
 
         set_pipe_mode(self.pipe, PIPE_NOWAIT)?;
@@ -1913,6 +2117,15 @@ impl NamedPipeServer {
 
         let negotiated = server_handshake(self, self.pipe, timeout_ms)?;
 
+        let mut session = NamedPipeSession {
+            pipe: self.pipe,
+            negotiated_profile: negotiated.profile,
+            packet_size: negotiated.packet_size,
+            max_request_message_len: negotiated.max_request_message_len,
+            max_response_message_len: negotiated.max_response_message_len,
+            shm_server: None,
+            connected: true,
+        };
         if is_shm_profile(negotiated.profile) {
             let shm_config = NamedPipeConfig {
                 run_dir: self.run_dir.clone().into(),
@@ -1926,16 +2139,14 @@ impl NamedPipeServer {
                 auth_token: self.auth_token,
                 shm_spin_tries: self.shm_spin_tries,
             };
-            self.shm_server = Some(ShmServer::create(&shm_config, negotiated.profile)?);
+            session.shm_server = Some(ShmServer::create(&shm_config, negotiated.profile)?);
         }
 
-        self.negotiated_profile = negotiated.profile;
-        self.max_request_message_len = negotiated.max_request_message_len;
-        self.max_response_message_len = negotiated.max_response_message_len;
-        self.connected = true;
-        Ok(())
+        Ok(session)
     }
+}
 
+impl NamedPipeSession {
     pub fn receive_message(
         &mut self,
         message: &mut [u8],
@@ -1955,9 +2166,13 @@ impl NamedPipeServer {
                 "message buffer is smaller than negotiated request size",
             ));
         }
-        let message_len = pipe_read_message(self.pipe, message, timeout_ms)?;
-        validate_received_message(message, message_len, self.max_request_message_len)?;
-        Ok(message_len)
+        recv_transport_message(
+            self.pipe,
+            message,
+            self.max_request_message_len,
+            self.packet_size,
+            timeout_ms,
+        )
     }
 
     pub fn receive_frame(&mut self, timeout: Option<Duration>) -> io::Result<Frame> {
@@ -1979,8 +2194,12 @@ impl NamedPipeServer {
         if self.max_response_message_len == 0 {
             return Err(io::Error::from_raw_os_error(87));
         }
-        validate_message_for_send(message, self.max_response_message_len)?;
-        pipe_write_message(self.pipe, message)
+        send_transport_message(
+            self.pipe,
+            message,
+            self.max_response_message_len,
+            self.packet_size,
+        )
     }
 
     pub fn send_frame(&mut self, frame: &Frame) -> io::Result<()> {
@@ -2013,7 +2232,15 @@ impl NamedPipeServer {
     }
 }
 
-impl Drop for NamedPipeServer {
+impl Drop for NamedPipeListener {
+    fn drop(&mut self) {
+        if self.pipe != INVALID_HANDLE_VALUE {
+            close_handle(self.pipe);
+        }
+    }
+}
+
+impl Drop for NamedPipeSession {
     fn drop(&mut self) {
         // Drop SHM first
         self.shm_server.take();
@@ -2029,6 +2256,87 @@ impl Drop for NamedPipeServer {
     }
 }
 
+impl NamedPipeServer {
+    pub fn bind(config: &NamedPipeConfig) -> io::Result<Self> {
+        Ok(Self {
+            listener: NamedPipeListener::bind(config)?,
+            session: None,
+        })
+    }
+
+    pub fn accept(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        if self.session.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "server is already connected",
+            ));
+        }
+        self.session = Some(self.listener.accept(timeout)?);
+        Ok(())
+    }
+
+    pub fn receive_message(
+        &mut self,
+        message: &mut [u8],
+        timeout: Option<Duration>,
+    ) -> io::Result<usize> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "server is not connected"))?
+            .receive_message(message, timeout)
+    }
+
+    pub fn receive_frame(&mut self, timeout: Option<Duration>) -> io::Result<Frame> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "server is not connected"))?
+            .receive_frame(timeout)
+    }
+
+    pub fn send_message(&mut self, message: &[u8]) -> io::Result<()> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "server is not connected"))?
+            .send_message(message)
+    }
+
+    pub fn send_frame(&mut self, frame: &Frame) -> io::Result<()> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "server is not connected"))?
+            .send_frame(frame)
+    }
+
+    pub fn receive_increment(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> io::Result<(u64, IncrementRequest)> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "server is not connected"))?
+            .receive_increment(timeout)
+    }
+
+    pub fn send_increment(
+        &mut self,
+        request_id: u64,
+        response: &IncrementResponse,
+        timeout: Option<Duration>,
+    ) -> io::Result<()> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "server is not connected"))?
+            .send_increment(request_id, response, timeout)
+    }
+
+    pub fn negotiated_profile(&self) -> u32 {
+        self.session
+            .as_ref()
+            .map(NamedPipeSession::negotiated_profile)
+            .unwrap_or(0)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public API: NamedPipeClient
 // ---------------------------------------------------------------------------
@@ -2036,6 +2344,7 @@ impl Drop for NamedPipeServer {
 pub struct NamedPipeClient {
     pipe: HANDLE,
     negotiated_profile: u32,
+    packet_size: u32,
     max_request_message_len: usize,
     max_response_message_len: usize,
     shm_client: Option<ShmClient>,
@@ -2045,6 +2354,7 @@ pub struct NamedPipeClient {
 #[derive(Clone, Copy, Debug)]
 struct NegotiationResult {
     profile: u32,
+    packet_size: u32,
     agreed_max_request_payload_bytes: u32,
     agreed_max_request_batch_items: u32,
     agreed_max_response_payload_bytes: u32,
@@ -2149,6 +2459,7 @@ impl NamedPipeClient {
         Ok(NamedPipeClient {
             pipe,
             negotiated_profile: negotiated.profile,
+            packet_size: negotiated.packet_size,
             max_request_message_len: negotiated.max_request_message_len,
             max_response_message_len: negotiated.max_response_message_len,
             shm_client,
@@ -2179,11 +2490,19 @@ impl NamedPipeClient {
                 "response buffer is smaller than negotiated response size",
             ));
         }
-        validate_message_for_send(request, self.max_request_message_len)?;
-        pipe_write_message(self.pipe, request)?;
-        let response_len = pipe_read_message(self.pipe, response, timeout_ms)?;
-        validate_received_message(response, response_len, self.max_response_message_len)?;
-        Ok(response_len)
+        send_transport_message(
+            self.pipe,
+            request,
+            self.max_request_message_len,
+            self.packet_size,
+        )?;
+        recv_transport_message(
+            self.pipe,
+            response,
+            self.max_response_message_len,
+            self.packet_size,
+            timeout_ms,
+        )
     }
 
     pub fn call_frame(&mut self, request: &Frame, timeout: Option<Duration>) -> io::Result<Frame> {

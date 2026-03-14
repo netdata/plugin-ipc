@@ -73,35 +73,6 @@ wait_for_socket() {
   return 1
 }
 
-run_client_with_retry() {
-  local attempts=$1
-  shift
-
-  local out=""
-  local err_file=""
-  err_file=$(mktemp)
-  trap 'rm -f "${err_file}"' RETURN
-
-  for ((i = 0; i < attempts; i++)); do
-    if out=$("$@" 2>"${err_file}"); then
-      printf '%s' "${out}"
-      return 0
-    fi
-
-    if [[ -n "${SERVER_PID}" ]] && ! kill -0 "${SERVER_PID}" 2>/dev/null; then
-      echo -e >&2 "${RED}[ERROR] UDS server exited before client succeeded.${NC}"
-      cat "${err_file}" >&2 || true
-      return 1
-    fi
-
-    sleep 0.02
-  done
-
-  echo -e >&2 "${RED}[ERROR] UDS client did not succeed after ${attempts} attempts.${NC}"
-  cat "${err_file}" >&2 || true
-  return 1
-}
-
 wait_server() {
   if [[ -z "${SERVER_PID}" ]]; then
     return 0
@@ -109,26 +80,11 @@ wait_server() {
 
   if ! wait "${SERVER_PID}"; then
     local rc=$?
-    echo -e >&2 "${RED}[ERROR] UDS server failed (pid=${SERVER_PID}, rc=${rc}). Log:${NC}"
+    echo -e >&2 "${RED}[ERROR] UDS pipeline server failed (pid=${SERVER_PID}, rc=${rc}). Log:${NC}"
     cat "${SERVER_LOG}" >&2 || true
     SERVER_PID=""
     SERVER_LOG=""
     return $rc
-  fi
-
-  cat "${SERVER_LOG}" >&2 || true
-  SERVER_PID=""
-  SERVER_LOG=""
-}
-
-stop_server() {
-  if [[ -z "${SERVER_PID}" ]]; then
-    return 0
-  fi
-
-  if kill -0 "${SERVER_PID}" 2>/dev/null; then
-    kill "${SERVER_PID}" || true
-    wait "${SERVER_PID}" || true
   fi
 
   cat "${SERVER_LOG}" >&2 || true
@@ -146,31 +102,30 @@ trap cleanup EXIT
 
 build_targets netipc-live-c
 
-SERVICE="netipc-uds-test"
+SERVICE="netipc-uds-pipeline-test"
 SOCK="/tmp/${SERVICE}.sock"
 run rm -f "${SOCK}"
 
-start_server /tmp/netipc-uds-server.log "${C_BIN_DIR}/netipc-live-c" uds-server-loop /tmp "${SERVICE}" 0
+start_server /tmp/netipc-uds-pipeline-server.log "${C_BIN_DIR}/netipc-live-c" uds-server-reorder /tmp "${SERVICE}"
 wait_for_socket "${SOCK}" 200
 
-client_out=$(run_client_with_retry 50 "${C_BIN_DIR}/netipc-live-c" uds-client-loop /tmp "${SERVICE}" 41 2)
+printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
+printf >&2 "${YELLOW}"
+printf >&2 "%q " "${C_BIN_DIR}/netipc-live-c" uds-client-pipeline /tmp "${SERVICE}" 41 42
+printf >&2 "${NC}\n"
+client_out=$("${C_BIN_DIR}/netipc-live-c" uds-client-pipeline /tmp "${SERVICE}" 41 42 2>&1)
 printf '%s\n' "${client_out}" >&2
 
-if [[ $(grep -c 'profile=1' <<<"${client_out}") -ne 2 ]]; then
-  echo -e >&2 "${RED}[ERROR] client did not negotiate UDS_SEQPACKET profile.${NC}"
+if ! grep -q '^C-UDS-PIPE-CLIENT response0_id=1002 response0_value=43 profile=1$' <<<"${client_out}"; then
+  echo -e >&2 "${RED}[ERROR] missing first out-of-order pipelined response.${NC}"
   exit 1
 fi
 
-if ! grep -q '^C-UDS-CLIENT request=41 response=42 profile=1$' <<<"${client_out}"; then
-  echo -e >&2 "${RED}[ERROR] missing first increment response in client output.${NC}"
+if ! grep -q '^C-UDS-PIPE-CLIENT response1_id=1001 response1_value=42 profile=1$' <<<"${client_out}"; then
+  echo -e >&2 "${RED}[ERROR] missing second out-of-order pipelined response.${NC}"
   exit 1
 fi
 
-if ! grep -q '^C-UDS-CLIENT request=42 response=43 profile=1$' <<<"${client_out}"; then
-  echo -e >&2 "${RED}[ERROR] missing second increment response in client output.${NC}"
-  exit 1
-fi
+wait_server
 
-stop_server
-
-echo -e "${GREEN}UDS seqpacket negotiation + increment test passed.${NC}"
+echo -e "${GREEN}UDS pipelined out-of-order response test passed.${NC}"

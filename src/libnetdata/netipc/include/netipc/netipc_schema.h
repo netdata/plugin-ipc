@@ -19,8 +19,11 @@ extern "C" {
 #define NETIPC_MSG_ITEM_ALIGNMENT 8u
 #define NETIPC_MSG_FLAG_BATCH 0x0001u
 
-#define NETIPC_CONTROL_HELLO_PAYLOAD_LEN 40u
-#define NETIPC_CONTROL_HELLO_ACK_PAYLOAD_LEN 32u
+#define NETIPC_CONTROL_HELLO_PAYLOAD_LEN 44u
+#define NETIPC_CONTROL_HELLO_ACK_PAYLOAD_LEN 36u
+#define NETIPC_CHUNK_MAGIC 0x4e43484bu
+#define NETIPC_CHUNK_VERSION 1u
+#define NETIPC_CHUNK_HEADER_LEN 32u
 
 #define NETIPC_MAX_PAYLOAD_DEFAULT 1024u
 
@@ -73,6 +76,7 @@ struct netipc_hello {
     uint32_t max_response_payload_bytes;
     uint32_t max_response_batch_items;
     uint64_t auth_token;
+    uint32_t packet_size;
 };
 
 struct netipc_hello_ack {
@@ -85,6 +89,18 @@ struct netipc_hello_ack {
     uint32_t agreed_max_request_batch_items;
     uint32_t agreed_max_response_payload_bytes;
     uint32_t agreed_max_response_batch_items;
+    uint32_t agreed_packet_size;
+};
+
+struct netipc_chunk_header {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t flags;
+    uint64_t message_id;
+    uint32_t total_message_len;
+    uint32_t chunk_index;
+    uint32_t chunk_count;
+    uint32_t chunk_payload_len;
 };
 
 enum netipc_frame_kind {
@@ -144,6 +160,14 @@ int netipc_encode_hello_ack_payload(uint8_t *dst,
 int netipc_decode_hello_ack_payload(const uint8_t *src,
                                     size_t src_len,
                                     struct netipc_hello_ack *hello_ack);
+
+int netipc_encode_chunk_header(uint8_t *dst,
+                               size_t dst_len,
+                               const struct netipc_chunk_header *chunk);
+
+int netipc_decode_chunk_header(const uint8_t *src,
+                               size_t src_len,
+                               struct netipc_chunk_header *chunk);
 
 #define NETIPC_CGROUPS_SNAPSHOT_LAYOUT_VERSION 1u
 #define NETIPC_CGROUPS_SNAPSHOT_REQUEST_PAYLOAD_LEN 4u

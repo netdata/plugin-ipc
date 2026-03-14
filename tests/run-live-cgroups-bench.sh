@@ -22,6 +22,9 @@ BENCH_DURATION_SEC="${NETIPC_BENCH_DURATION_SEC:-5}"
 SERVER_IDLE_TIMEOUT_MS="${NETIPC_CGROUPS_SERVER_IDLE_TIMEOUT_MS:-1000}"
 SUPPORTED_PROFILES="${NETIPC_SUPPORTED_PROFILES:-}"
 PREFERRED_PROFILES="${NETIPC_PREFERRED_PROFILES:-}"
+TOK="${NETIPC_AUTH_TOKEN:-12345}"
+MAX_RESPONSE_PAYLOAD_BYTES="${NETIPC_MAX_RESPONSE_PAYLOAD_BYTES:-4358}"
+MAX_RESPONSE_BATCH_ITEMS="${NETIPC_MAX_RESPONSE_BATCH_ITEMS:-1000}"
 
 run() {
   printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
@@ -73,25 +76,35 @@ start_server() {
     if [[ -n "${PREFERRED_PROFILES}" ]]; then
       printf >&2 "%q " "NETIPC_PREFERRED_PROFILES=${PREFERRED_PROFILES}"
     fi
+    printf >&2 "%q " "NETIPC_MAX_RESPONSE_PAYLOAD_BYTES=${MAX_RESPONSE_PAYLOAD_BYTES}"
+    printf >&2 "%q " "NETIPC_MAX_RESPONSE_BATCH_ITEMS=${MAX_RESPONSE_BATCH_ITEMS}"
   else
-    printf >&2 "%q " env "NETIPC_CGROUPS_SERVER_IDLE_TIMEOUT_MS=${SERVER_IDLE_TIMEOUT_MS}"
+    printf >&2 "%q " env \
+      "NETIPC_CGROUPS_SERVER_IDLE_TIMEOUT_MS=${SERVER_IDLE_TIMEOUT_MS}" \
+      "NETIPC_MAX_RESPONSE_PAYLOAD_BYTES=${MAX_RESPONSE_PAYLOAD_BYTES}" \
+      "NETIPC_MAX_RESPONSE_BATCH_ITEMS=${MAX_RESPONSE_BATCH_ITEMS}"
   fi
-  printf >&2 "%q " "${server_bin}" "server-bench" "${service_namespace}" "${service}" "${max_requests}"
+  printf >&2 "%q " "${server_bin}" "server-bench" "${service_namespace}" "${service}" "${max_requests}" "${TOK}"
   printf >&2 "${NC}\n"
 
   if [[ -n "${SUPPORTED_PROFILES}" ]]; then
     local -a env_args=(
       "NETIPC_SUPPORTED_PROFILES=${SUPPORTED_PROFILES}"
       "NETIPC_CGROUPS_SERVER_IDLE_TIMEOUT_MS=${SERVER_IDLE_TIMEOUT_MS}"
+      "NETIPC_MAX_RESPONSE_PAYLOAD_BYTES=${MAX_RESPONSE_PAYLOAD_BYTES}"
+      "NETIPC_MAX_RESPONSE_BATCH_ITEMS=${MAX_RESPONSE_BATCH_ITEMS}"
     )
     if [[ -n "${PREFERRED_PROFILES}" ]]; then
       env_args+=("NETIPC_PREFERRED_PROFILES=${PREFERRED_PROFILES}")
     fi
     env "${env_args[@]}" \
-      "${server_bin}" server-bench "${service_namespace}" "${service}" "${max_requests}" >"${SERVER_LOG}" 2>&1 &
+      "${server_bin}" server-bench "${service_namespace}" "${service}" "${max_requests}" "${TOK}" >"${SERVER_LOG}" 2>&1 &
   else
-    env "NETIPC_CGROUPS_SERVER_IDLE_TIMEOUT_MS=${SERVER_IDLE_TIMEOUT_MS}" \
-      "${server_bin}" server-bench "${service_namespace}" "${service}" "${max_requests}" >"${SERVER_LOG}" 2>&1 &
+    env \
+      "NETIPC_CGROUPS_SERVER_IDLE_TIMEOUT_MS=${SERVER_IDLE_TIMEOUT_MS}" \
+      "NETIPC_MAX_RESPONSE_PAYLOAD_BYTES=${MAX_RESPONSE_PAYLOAD_BYTES}" \
+      "NETIPC_MAX_RESPONSE_BATCH_ITEMS=${MAX_RESPONSE_BATCH_ITEMS}" \
+      "${server_bin}" server-bench "${service_namespace}" "${service}" "${max_requests}" "${TOK}" >"${SERVER_LOG}" 2>&1 &
   fi
   SERVER_PID=$!
 }
@@ -242,7 +255,9 @@ run_refresh_case() {
       env_args+=("NETIPC_PREFERRED_PROFILES=${PREFERRED_PROFILES}")
     fi
     if ! env "${env_args[@]}" \
-      "${client_bin}" client-refresh-bench "${case_dir}" "${service}" "${BENCH_DURATION_SEC}" "${target}" "123" "system.slice-nginx" >"${client_log}" 2>&1; then
+      "NETIPC_MAX_RESPONSE_PAYLOAD_BYTES=${MAX_RESPONSE_PAYLOAD_BYTES}" \
+      "NETIPC_MAX_RESPONSE_BATCH_ITEMS=${MAX_RESPONSE_BATCH_ITEMS}" \
+      "${client_bin}" client-refresh-bench "${case_dir}" "${service}" "${BENCH_DURATION_SEC}" "${target}" "123" "system.slice-nginx" "${TOK}" >"${client_log}" 2>&1; then
       if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
         kill "${SERVER_PID}" || true
         wait "${SERVER_PID}" || true
@@ -250,7 +265,10 @@ run_refresh_case() {
       fi
       show_logs_and_fail "refresh benchmark failed for ${server_label}->${client_label}" "${client_log}" "${server_log}"
     fi
-  elif ! "${client_bin}" client-refresh-bench "${case_dir}" "${service}" "${BENCH_DURATION_SEC}" "${target}" "123" "system.slice-nginx" >"${client_log}" 2>&1; then
+  elif ! env \
+    "NETIPC_MAX_RESPONSE_PAYLOAD_BYTES=${MAX_RESPONSE_PAYLOAD_BYTES}" \
+    "NETIPC_MAX_RESPONSE_BATCH_ITEMS=${MAX_RESPONSE_BATCH_ITEMS}" \
+    "${client_bin}" client-refresh-bench "${case_dir}" "${service}" "${BENCH_DURATION_SEC}" "${target}" "123" "system.slice-nginx" "${TOK}" >"${client_log}" 2>&1; then
     if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
       kill "${SERVER_PID}" || true
       wait "${SERVER_PID}" || true
@@ -287,7 +305,9 @@ run_lookup_case() {
       env_args+=("NETIPC_PREFERRED_PROFILES=${PREFERRED_PROFILES}")
     fi
     if ! env "${env_args[@]}" \
-      "${bin}" client-lookup-bench "${case_dir}" "${service}" "${BENCH_DURATION_SEC}" "${target}" "123" "system.slice-nginx" >"${client_log}" 2>&1; then
+      "NETIPC_MAX_RESPONSE_PAYLOAD_BYTES=${MAX_RESPONSE_PAYLOAD_BYTES}" \
+      "NETIPC_MAX_RESPONSE_BATCH_ITEMS=${MAX_RESPONSE_BATCH_ITEMS}" \
+      "${bin}" client-lookup-bench "${case_dir}" "${service}" "${BENCH_DURATION_SEC}" "${target}" "123" "system.slice-nginx" "${TOK}" >"${client_log}" 2>&1; then
       if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
         kill "${SERVER_PID}" || true
         wait "${SERVER_PID}" || true
@@ -295,7 +315,10 @@ run_lookup_case() {
       fi
       show_logs_and_fail "lookup benchmark failed for ${label}" "${client_log}" "${server_log}"
     fi
-  elif ! "${bin}" client-lookup-bench "${case_dir}" "${service}" "${BENCH_DURATION_SEC}" "${target}" "123" "system.slice-nginx" >"${client_log}" 2>&1; then
+  elif ! env \
+    "NETIPC_MAX_RESPONSE_PAYLOAD_BYTES=${MAX_RESPONSE_PAYLOAD_BYTES}" \
+    "NETIPC_MAX_RESPONSE_BATCH_ITEMS=${MAX_RESPONSE_BATCH_ITEMS}" \
+    "${bin}" client-lookup-bench "${case_dir}" "${service}" "${BENCH_DURATION_SEC}" "${target}" "123" "system.slice-nginx" "${TOK}" >"${client_log}" 2>&1; then
     if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
       kill "${SERVER_PID}" || true
       wait "${SERVER_PID}" || true

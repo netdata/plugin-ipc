@@ -1,12 +1,14 @@
 use netipc::{
+    aligned_item_size, cgroups_snapshot_item_payload_len,
     decode_cgroups_snapshot_request_view, decode_cgroups_snapshot_view, decode_increment_request,
     decode_increment_response, decode_message_header, encode_cgroups_snapshot_request_payload,
     encode_increment_request, encode_increment_response, encode_message_header,
     CgroupsSnapshotClient, CgroupsSnapshotClientConfig, CgroupsSnapshotItem,
     CgroupsSnapshotRequest, CgroupsSnapshotResponseBuilder, Frame, IncrementRequest,
-    IncrementResponse, MessageHeader, CGROUPS_SNAPSHOT_REQUEST_PAYLOAD_LEN, FRAME_SIZE,
-    MESSAGE_FLAG_BATCH, MESSAGE_HEADER_LEN, MESSAGE_KIND_REQUEST, MESSAGE_KIND_RESPONSE,
-    MESSAGE_MAGIC, MESSAGE_VERSION, METHOD_CGROUPS_SNAPSHOT, STATUS_OK, TRANSPORT_STATUS_OK,
+    IncrementResponse, MessageHeader, CGROUPS_SNAPSHOT_REQUEST_PAYLOAD_LEN,
+    CGROUPS_SNAPSHOT_RESPONSE_HEADER_LEN, FRAME_SIZE, MESSAGE_FLAG_BATCH, MESSAGE_HEADER_LEN,
+    MESSAGE_ITEM_REF_LEN, MESSAGE_KIND_REQUEST, MESSAGE_KIND_RESPONSE, MESSAGE_MAGIC,
+    MESSAGE_VERSION, METHOD_CGROUPS_SNAPSHOT, STATUS_OK, TRANSPORT_STATUS_OK,
 };
 use std::env;
 use std::fs;
@@ -186,37 +188,223 @@ fn write_frame(path: &str, frame: &Frame) {
     write_bytes(path, frame);
 }
 
-fn fixed_cgroups_response(message_id: u64) -> Vec<u8> {
-    let mut payload = vec![0u8; 1024];
-    let mut builder = CgroupsSnapshotResponseBuilder::new(&mut payload, 42, true, 3, 2)
-        .unwrap_or_else(|e| {
-            eprintln!("snapshot builder init failed: {e}");
-            process::exit(1);
-        });
-    builder
-        .push_item(&CgroupsSnapshotItem {
+const FIXED_CGROUPS_SEED_COUNT: usize = 16;
+
+fn configured_cgroups_item_count() -> usize {
+    let count = parse_env_u32("NETIPC_CGROUPS_ITEM_COUNT", FIXED_CGROUPS_SEED_COUNT as u32) as usize;
+    if count < FIXED_CGROUPS_SEED_COUNT {
+        eprintln!(
+            "NETIPC_CGROUPS_ITEM_COUNT must be >= {} (got {})",
+            FIXED_CGROUPS_SEED_COUNT, count
+        );
+        process::exit(2);
+    }
+    count
+}
+
+fn generated_cgroups_options(index: usize) -> u32 {
+    match index % 5 {
+        0 => 0x2,
+        1 => 0x4,
+        2 => 0x6,
+        3 => 0x8,
+        _ => 0x1,
+    }
+}
+
+fn fixed_cgroups_items() -> Vec<CgroupsSnapshotItem<'static>> {
+    vec![
+        CgroupsSnapshotItem {
             hash: 123,
             options: 0x2,
             enabled: true,
             name: b"system.slice-nginx",
             path: b"/sys/fs/cgroup/system.slice/nginx.service/cgroup.procs",
-        })
-        .unwrap_or_else(|e| {
-            eprintln!("snapshot builder first item failed: {e}");
-            process::exit(1);
-        });
-    builder
-        .push_item(&CgroupsSnapshotItem {
+        },
+        CgroupsSnapshotItem {
             hash: 456,
             options: 0x4,
             enabled: false,
             name: b"docker-1234",
             path: b"",
-        })
-        .unwrap_or_else(|e| {
-            eprintln!("snapshot builder second item failed: {e}");
+        },
+        CgroupsSnapshotItem {
+            hash: 789,
+            options: 0x6,
+            enabled: true,
+            name: b"kubepods-burstable-pod01234567_89ab_cdef_0123_456789abcdef.slice",
+            path: b"/sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod01234567_89ab_cdef_0123_456789abcdef.slice/cgroup.procs",
+        },
+        CgroupsSnapshotItem {
+            hash: 1001,
+            options: 0x2,
+            enabled: true,
+            name: b"system.slice-sshd.service",
+            path: b"/sys/fs/cgroup/system.slice/sshd.service/cgroup.procs",
+        },
+        CgroupsSnapshotItem {
+            hash: 1002,
+            options: 0x2,
+            enabled: true,
+            name: b"system.slice-docker.service",
+            path: b"/sys/fs/cgroup/system.slice/docker.service/cgroup.procs",
+        },
+        CgroupsSnapshotItem {
+            hash: 1003,
+            options: 0x6,
+            enabled: true,
+            name: b"user.slice-user-1000.slice-session-3.scope",
+            path: b"/sys/fs/cgroup/user.slice/user-1000.slice/session-3.scope/cgroup.procs",
+        },
+        CgroupsSnapshotItem {
+            hash: 1004,
+            options: 0x2,
+            enabled: true,
+            name: b"machine.slice-libvirt-qemu-5-win11.scope",
+            path: b"/sys/fs/cgroup/machine.slice/libvirt-qemu-5-win11.scope/cgroup.procs",
+        },
+        CgroupsSnapshotItem {
+            hash: 1005,
+            options: 0x8,
+            enabled: false,
+            name: b"system.slice-telegraf.service",
+            path: b"/sys/fs/cgroup/system.slice/telegraf.service/cgroup.procs",
+        },
+        CgroupsSnapshotItem {
+            hash: 1006,
+            options: 0x6,
+            enabled: true,
+            name: b"podman-7f0c8e91f1ce55b0c3d1b5a4f6e8d9c0.scope",
+            path: b"/sys/fs/cgroup/system.slice/podman-7f0c8e91f1ce55b0c3d1b5a4f6e8d9c0.scope/cgroup.procs",
+        },
+        CgroupsSnapshotItem {
+            hash: 1007,
+            options: 0x4,
+            enabled: true,
+            name: b"init.scope",
+            path: b"/sys/fs/cgroup/init.scope/cgroup.procs",
+        },
+        CgroupsSnapshotItem {
+            hash: 1008,
+            options: 0x6,
+            enabled: true,
+            name: b"system.slice-containerd.service",
+            path: b"/sys/fs/cgroup/system.slice/containerd.service/cgroup.procs",
+        },
+        CgroupsSnapshotItem {
+            hash: 1009,
+            options: 0x4,
+            enabled: true,
+            name: b"machine.slice-systemd-nspawn-observability-lab.scope",
+            path: b"/sys/fs/cgroup/machine.slice/systemd-nspawn-observability-lab.scope/cgroup.procs",
+        },
+        CgroupsSnapshotItem {
+            hash: 1010,
+            options: 0x6,
+            enabled: true,
+            name: b"user.slice-user-1001.slice-user@1001.service-app.slice-observability-frontend.scope",
+            path: b"/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice/observability-frontend.scope/cgroup.procs",
+        },
+        CgroupsSnapshotItem {
+            hash: 1011,
+            options: 0x1,
+            enabled: false,
+            name: b"crio-53d2b1b5d7a04d8f9e2f6a7b8c9d0e1f.scope",
+            path: b"/sys/fs/cgroup/kubepods.slice/kubepods-pod98765432_10fe_dcba_9876_543210fedcba.slice/crio-53d2b1b5d7a04d8f9e2f6a7b8c9d0e1f.scope/cgroup.procs",
+        },
+        CgroupsSnapshotItem {
+            hash: 1012,
+            options: 0x2,
+            enabled: true,
+            name: b"system.slice-netdata.service",
+            path: b"/sys/fs/cgroup/system.slice/netdata.service/cgroup.procs",
+        },
+        CgroupsSnapshotItem {
+            hash: 1013,
+            options: 0x6,
+            enabled: true,
+            name: b"system.slice-super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service",
+            path: b"/sys/fs/cgroup/system.slice/super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service/cgroup.procs",
+        },
+    ]
+}
+
+fn fixed_cgroups_payload_capacity(item_count: usize) -> usize {
+    let fixed_items = fixed_cgroups_items();
+    let mut total = CGROUPS_SNAPSHOT_RESPONSE_HEADER_LEN + item_count * MESSAGE_ITEM_REF_LEN;
+    for item in &fixed_items {
+        let start = aligned_item_size(total as u32).unwrap_or_else(|e| {
+            eprintln!("snapshot item align failed: {e}");
             process::exit(1);
         });
+        let item_len = cgroups_snapshot_item_payload_len(item).unwrap_or_else(|e| {
+            eprintln!("snapshot item length failed: {e}");
+            process::exit(1);
+        });
+        total = start + item_len;
+    }
+    for index in fixed_items.len()..item_count {
+        let name = format!(
+            "system.slice-generated-observability-worker-{index:06}-with-long-synthetic-name.scope"
+        );
+        let path = format!(
+            "/sys/fs/cgroup/system.slice/generated-observability-worker-{index:06}-with-long-synthetic-name.scope/cgroup.procs"
+        );
+        let item = CgroupsSnapshotItem {
+            hash: 2000 + index as u32,
+            options: generated_cgroups_options(index),
+            enabled: index % 2 == 0,
+            name: name.as_bytes(),
+            path: path.as_bytes(),
+        };
+        let start = aligned_item_size(total as u32).unwrap_or_else(|e| {
+            eprintln!("snapshot item align failed: {e}");
+            process::exit(1);
+        });
+        let item_len = cgroups_snapshot_item_payload_len(&item).unwrap_or_else(|e| {
+            eprintln!("snapshot item length failed: {e}");
+            process::exit(1);
+        });
+        total = start + item_len;
+    }
+    total
+}
+
+fn fixed_cgroups_response(message_id: u64) -> Vec<u8> {
+    let item_count = configured_cgroups_item_count();
+    let fixed_items = fixed_cgroups_items();
+    let mut payload = vec![0u8; fixed_cgroups_payload_capacity(item_count)];
+    let mut builder =
+        CgroupsSnapshotResponseBuilder::new(&mut payload, 42, true, 3, item_count as u32)
+            .unwrap_or_else(|e| {
+                eprintln!("snapshot builder init failed: {e}");
+                process::exit(1);
+            });
+    for (idx, item) in fixed_items.iter().enumerate() {
+        builder.push_item(item).unwrap_or_else(|e| {
+            eprintln!("snapshot builder item {idx} failed: {e}");
+            process::exit(1);
+        });
+    }
+    for index in fixed_items.len()..item_count {
+        let name = format!(
+            "system.slice-generated-observability-worker-{index:06}-with-long-synthetic-name.scope"
+        );
+        let path = format!(
+            "/sys/fs/cgroup/system.slice/generated-observability-worker-{index:06}-with-long-synthetic-name.scope/cgroup.procs"
+        );
+        let item = CgroupsSnapshotItem {
+            hash: 2000 + index as u32,
+            options: generated_cgroups_options(index),
+            enabled: index % 2 == 0,
+            name: name.as_bytes(),
+            path: path.as_bytes(),
+        };
+        builder.push_item(&item).unwrap_or_else(|e| {
+            eprintln!("snapshot builder item {index} failed: {e}");
+            process::exit(1);
+        });
+    }
     let payload_len = builder.finish().unwrap_or_else(|e| {
         eprintln!("snapshot builder finish failed: {e}");
         process::exit(1);
@@ -231,7 +419,7 @@ fn fixed_cgroups_response(message_id: u64) -> Vec<u8> {
         code: METHOD_CGROUPS_SNAPSHOT,
         transport_status: TRANSPORT_STATUS_OK,
         payload_len: payload_len as u32,
-        item_count: 2,
+        item_count: item_count as u32,
         message_id,
     };
     let encoded_header = encode_message_header(&header).unwrap_or_else(|e| {
@@ -361,7 +549,11 @@ fn run_cgroups_server_once(service_namespace: &str, service_name: &str, auth_tok
             eprintln!("server-once failed: {e}");
             process::exit(1);
         });
-    println!("CGROUPS_SERVER\t{}\t2", header.message_id);
+    println!(
+        "CGROUPS_SERVER\t{}\t{}",
+        header.message_id,
+        configured_cgroups_item_count()
+    );
 }
 
 #[cfg(windows)]
@@ -403,7 +595,11 @@ fn run_cgroups_server_once(service_namespace: &str, service_name: &str, auth_tok
             eprintln!("server-once failed: {e}");
             process::exit(1);
         });
-    println!("CGROUPS_SERVER\t{}\t2", header.message_id);
+    println!(
+        "CGROUPS_SERVER\t{}\t{}",
+        header.message_id,
+        configured_cgroups_item_count()
+    );
 }
 
 #[cfg(unix)]
@@ -536,12 +732,7 @@ fn client_refresh_once(
     lookup_name: &str,
     auth_token: u64,
 ) {
-    let mut config = CgroupsSnapshotClientConfig::new(service_namespace, service_name);
-    config.supported_profiles =
-        parse_env_u32("NETIPC_SUPPORTED_PROFILES", config.supported_profiles);
-    config.preferred_profiles =
-        parse_env_u32("NETIPC_PREFERRED_PROFILES", config.preferred_profiles);
-    config.auth_token = auth_token;
+    let config = strict_cgroups_client_config(service_namespace, service_name, auth_token);
     let mut client = CgroupsSnapshotClient::new(config).unwrap_or_else(|e| {
         eprintln!("client-refresh-once failed: {e}");
         process::exit(1);
@@ -576,12 +767,7 @@ fn client_refresh_loop(
     lookup_name: &str,
     auth_token: u64,
 ) {
-    let mut config = CgroupsSnapshotClientConfig::new(service_namespace, service_name);
-    config.supported_profiles =
-        parse_env_u32("NETIPC_SUPPORTED_PROFILES", config.supported_profiles);
-    config.preferred_profiles =
-        parse_env_u32("NETIPC_PREFERRED_PROFILES", config.preferred_profiles);
-    config.auth_token = auth_token;
+    let config = strict_cgroups_client_config(service_namespace, service_name, auth_token);
     let mut client = CgroupsSnapshotClient::new(config).unwrap_or_else(|e| {
         eprintln!("client-refresh-loop failed: {e}");
         process::exit(1);
@@ -629,6 +815,36 @@ fn run_cgroups_server_bench(
     eprintln!("SERVER_CPU_CORES={server_cpu_cores:.3}");
 }
 
+fn strict_cgroups_client_config(
+    service_namespace: &str,
+    service_name: &str,
+    auth_token: u64,
+) -> CgroupsSnapshotClientConfig {
+    let mut config = CgroupsSnapshotClientConfig::new(service_namespace, service_name);
+    #[cfg(unix)]
+    {
+        config.supported_profiles =
+            parse_env_u32("NETIPC_SUPPORTED_PROFILES", PROFILE_UDS_SEQPACKET);
+        config.preferred_profiles =
+            parse_env_u32("NETIPC_PREFERRED_PROFILES", PROFILE_UDS_SEQPACKET);
+    }
+    #[cfg(windows)]
+    {
+        config.supported_profiles = parse_env_u32("NETIPC_SUPPORTED_PROFILES", PROFILE_NAMED_PIPE);
+        config.preferred_profiles = parse_env_u32("NETIPC_PREFERRED_PROFILES", PROFILE_NAMED_PIPE);
+    }
+    config.max_response_payload_bytes = parse_env_u32(
+        "NETIPC_MAX_RESPONSE_PAYLOAD_BYTES",
+        netipc::CGROUPS_SNAPSHOT_DEFAULT_MAX_RESPONSE_PAYLOAD_BYTES,
+    );
+    config.max_response_batch_items = parse_env_u32(
+        "NETIPC_MAX_RESPONSE_BATCH_ITEMS",
+        netipc::CGROUPS_SNAPSHOT_DEFAULT_MAX_RESPONSE_BATCH_ITEMS,
+    );
+    config.auth_token = auth_token;
+    config
+}
+
 fn client_refresh_bench(
     service_namespace: &str,
     service_name: &str,
@@ -647,12 +863,7 @@ fn client_refresh_bench(
         process::exit(2);
     }
 
-    let mut config = CgroupsSnapshotClientConfig::new(service_namespace, service_name);
-    config.supported_profiles =
-        parse_env_u32("NETIPC_SUPPORTED_PROFILES", config.supported_profiles);
-    config.preferred_profiles =
-        parse_env_u32("NETIPC_PREFERRED_PROFILES", config.preferred_profiles);
-    config.auth_token = auth_token;
+    let config = strict_cgroups_client_config(service_namespace, service_name, auth_token);
     let mut client = CgroupsSnapshotClient::new(config).unwrap_or_else(|e| {
         eprintln!("client-refresh-bench failed: {e}");
         process::exit(1);
@@ -726,12 +937,7 @@ fn client_lookup_bench(
         process::exit(2);
     }
 
-    let mut config = CgroupsSnapshotClientConfig::new(service_namespace, service_name);
-    config.supported_profiles =
-        parse_env_u32("NETIPC_SUPPORTED_PROFILES", config.supported_profiles);
-    config.preferred_profiles =
-        parse_env_u32("NETIPC_PREFERRED_PROFILES", config.preferred_profiles);
-    config.auth_token = auth_token;
+    let config = strict_cgroups_client_config(service_namespace, service_name, auth_token);
     let mut client = CgroupsSnapshotClient::new(config).unwrap_or_else(|e| {
         eprintln!("client-lookup-bench failed: {e}");
         process::exit(1);

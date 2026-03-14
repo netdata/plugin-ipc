@@ -309,6 +309,39 @@ if(NETIPC_REGISTER_SCRIPT_WORKFLOWS)
         endif()
 
         netipc_add_script_workflow(
+            netipc-test-uds-pipeline
+            tests/run-uds-pipeline.sh
+            TEST_NAME netipc-uds-pipeline
+            LABELS "protocol;uds;pipelining"
+            DEPENDS netipc-live-c
+        )
+        if(TARGET netipc-test-uds-pipeline)
+            add_dependencies(netipc-check netipc-test-uds-pipeline)
+        endif()
+
+        netipc_add_script_workflow(
+            netipc-test-uds-multi-client
+            tests/run-uds-multi-client.sh
+            TEST_NAME netipc-uds-multi-client
+            LABELS "protocol;uds;multi-client"
+            DEPENDS netipc-live-c
+        )
+        if(TARGET netipc-test-uds-multi-client)
+            add_dependencies(netipc-check netipc-test-uds-multi-client)
+        endif()
+
+        netipc_add_script_workflow(
+            netipc-test-uds-managed
+            tests/run-uds-managed.sh
+            TEST_NAME netipc-uds-managed
+            LABELS "protocol;uds;managed;multi-client;pipelining"
+            DEPENDS netipc-live-c
+        )
+        if(TARGET netipc-test-uds-managed)
+            add_dependencies(netipc-check netipc-test-uds-managed)
+        endif()
+
+        netipc_add_script_workflow(
             netipc-test-uds-negotiation-negative
             tests/run-uds-negotiation-negative.sh
             TEST_NAME netipc-uds-negotiation-negative

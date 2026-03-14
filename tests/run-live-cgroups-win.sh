@@ -14,6 +14,10 @@ DIR="${NETIPC_WINDOWS_TMP_DIR:-/tmp/cgroups_win}"
 TOK="${NETIPC_AUTH_TOKEN:-12345}"
 PROFILE_LABELS=("named-pipe" "shm-hybrid")
 PROFILE_VALUES=(1 2)
+CGROUPS_ITEM_COUNT="${NETIPC_CGROUPS_ITEM_COUNT:-16}"
+EXPECTED_LONG_ITEM=$'ITEM\t15\t1013\t6\t1\tsystem.slice-super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service\t/sys/fs/cgroup/system.slice/super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service/cgroup.procs'
+EXPECTED_CACHE_HEADER=""
+EXPECTED_LAST_ITEM=""
 GO_EXECUTABLE="${NETIPC_GO_EXECUTABLE:-}"
 NATIVE_CMAKE="${NETIPC_WINDOWS_NATIVE_CMAKE:-}"
 MSYS_CMAKE="${NETIPC_WINDOWS_MSYS_CMAKE:-}"
@@ -23,6 +27,47 @@ SERVER_PID=""
 SERVER_LOG=""
 passed=0
 failed=0
+
+generated_cgroup_options() {
+  local index=$1
+  case $(( index % 5 )) in
+    0) printf '2' ;;
+    1) printf '4' ;;
+    2) printf '6' ;;
+    3) printf '8' ;;
+    *) printf '1' ;;
+  esac
+}
+
+generated_cgroup_enabled() {
+  local index=$1
+  if (( index % 2 == 0 )); then
+    printf '1'
+  else
+    printf '0'
+  fi
+}
+
+generated_cgroup_name() {
+  local index=$1
+  printf 'system.slice-generated-observability-worker-%06d-with-long-synthetic-name.scope' "${index}"
+}
+
+generated_cgroup_path() {
+  local index=$1
+  printf '/sys/fs/cgroup/system.slice/generated-observability-worker-%06d-with-long-synthetic-name.scope/cgroup.procs' "${index}"
+}
+
+generated_cgroup_line() {
+  local index=$1
+  printf 'ITEM\t%d\t%d\t%s\t%s\t%s\t%s' \
+    "${index}" \
+    "$((2000 + index))" \
+    "$(generated_cgroup_options "${index}")" \
+    "$(generated_cgroup_enabled "${index}")" \
+    "$(generated_cgroup_name "${index}")" \
+    "$(generated_cgroup_path "${index}")"
+}
 
 if [[ -x /c/Program\ Files/Go/bin/go.exe ]]; then
   NATIVE_PATH="${NATIVE_PATH}:/c/Program Files/Go/bin"
@@ -153,6 +198,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if (( CGROUPS_ITEM_COUNT < 16 )); then
+  echo "NETIPC_CGROUPS_ITEM_COUNT must be >= 16" >&2
+  exit 1
+fi
+
+printf -v EXPECTED_CACHE_HEADER 'CGROUPS_CACHE\t42\t1\t%s' "${CGROUPS_ITEM_COUNT}"
+if (( CGROUPS_ITEM_COUNT > 16 )); then
+  EXPECTED_LAST_ITEM=$(generated_cgroup_line "$((CGROUPS_ITEM_COUNT - 1))")
+fi
+
 has_line() {
   local needle=$1
   local line
@@ -247,7 +302,21 @@ run_case() {
     return 1
   fi
 
-  if ! has_line $'CGROUPS_CACHE\t42\t1\t2'; then
+  if ! has_line "${EXPECTED_CACHE_HEADER}"; then
+    echo "  FAIL: ${label}"
+    echo "    client: ${client_out}"
+    ((failed++)) || true
+    rm -f "${log}"
+    return 1
+  fi
+  if ! has_line "${EXPECTED_LONG_ITEM}"; then
+    echo "  FAIL: ${label}"
+    echo "    client: ${client_out}"
+    ((failed++)) || true
+    rm -f "${log}"
+    return 1
+  fi
+  if [[ -n "${EXPECTED_LAST_ITEM}" ]] && ! has_line "${EXPECTED_LAST_ITEM}"; then
     echo "  FAIL: ${label}"
     echo "    client: ${client_out}"
     ((failed++)) || true

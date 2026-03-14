@@ -98,6 +98,37 @@ expect_exact() {
   fi
 }
 
+expect_cgroups_output() {
+  local label=$1
+  local out=$2
+
+  grep -Fqx -- $'CGROUPS_RESP\t404\t42\t1\t16' <<<"$out" || {
+    echo "${label}: unexpected cgroups header" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  }
+  grep -Fqx -- $'ITEM\t0\t123\t2\t1\tsystem.slice-nginx\t/sys/fs/cgroup/system.slice/nginx.service/cgroup.procs' <<<"$out" || {
+    echo "${label}: missing nginx item" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  }
+  grep -Fqx -- $'ITEM\t1\t456\t4\t0\tdocker-1234\t' <<<"$out" || {
+    echo "${label}: missing docker item" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  }
+  grep -Fqx -- $'ITEM\t2\t789\t6\t1\tkubepods-burstable-pod01234567_89ab_cdef_0123_456789abcdef.slice\t/sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod01234567_89ab_cdef_0123_456789abcdef.slice/cgroup.procs' <<<"$out" || {
+    echo "${label}: missing long kubepods item" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  }
+  grep -Fqx -- $'ITEM\t15\t1013\t6\t1\tsystem.slice-super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service\t/sys/fs/cgroup/system.slice/super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service/cgroup.procs' <<<"$out" || {
+    echo "${label}: missing super-long item" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  }
+}
+
 build_targets netipc-codec-c netipc-codec-rs netipc-codec-go
 
 TMPDIR=$(mktemp -d)
@@ -121,24 +152,22 @@ run "${C_BIN_DIR}/netipc-codec-c" serve-once "$TMPDIR/g_c.req" "$TMPDIR/g_c.resp
 out=$(run_capture "${C_BIN_DIR}/netipc-codec-go" decode-resp "$TMPDIR/g_c.resp")
 expect_resp "go->c->go" "$out" 303 0 8
 
-expected_cgroups=$'CGROUPS_RESP\t404\t42\t1\t2\nITEM\t0\t123\t2\t1\tsystem.slice-nginx\t/sys/fs/cgroup/system.slice/nginx.service/cgroup.procs\nITEM\t1\t456\t4\t0\tdocker-1234\t'
-
 # C client request -> Rust server response -> C client decode
 run "${C_BIN_DIR}/netipc-codec-c" encode-cgroups-req 404 "$TMPDIR/cgroups_c_r.req"
 run "${C_BIN_DIR}/netipc-codec-rs" serve-cgroups-once "$TMPDIR/cgroups_c_r.req" "$TMPDIR/cgroups_c_r.resp"
 out=$(run_capture "${C_BIN_DIR}/netipc-codec-c" decode-cgroups-resp "$TMPDIR/cgroups_c_r.resp")
-expect_exact "cgroups c->rust->c" "$out" "$expected_cgroups"
+expect_cgroups_output "cgroups c->rust->c" "$out"
 
 # Rust client request -> Go server response -> Rust client decode
 run "${C_BIN_DIR}/netipc-codec-rs" encode-cgroups-req 404 "$TMPDIR/cgroups_r_g.req"
 run "${C_BIN_DIR}/netipc-codec-go" serve-cgroups-once "$TMPDIR/cgroups_r_g.req" "$TMPDIR/cgroups_r_g.resp"
 out=$(run_capture "${C_BIN_DIR}/netipc-codec-rs" decode-cgroups-resp "$TMPDIR/cgroups_r_g.resp")
-expect_exact "cgroups rust->go->rust" "$out" "$expected_cgroups"
+expect_cgroups_output "cgroups rust->go->rust" "$out"
 
 # Go client request -> C server response -> Go client decode
 run "${C_BIN_DIR}/netipc-codec-go" encode-cgroups-req 404 "$TMPDIR/cgroups_g_c.req"
 run "${C_BIN_DIR}/netipc-codec-c" serve-cgroups-once "$TMPDIR/cgroups_g_c.req" "$TMPDIR/cgroups_g_c.resp"
 out=$(run_capture "${C_BIN_DIR}/netipc-codec-go" decode-cgroups-resp "$TMPDIR/cgroups_g_c.resp")
-expect_exact "cgroups go->c->go" "$out" "$expected_cgroups"
+expect_cgroups_output "cgroups go->c->go" "$out"
 
 echo -e "${GREEN}Interop schema tests passed (C <-> Rust <-> Go).${NC}"

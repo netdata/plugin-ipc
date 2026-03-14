@@ -67,8 +67,21 @@ func parseEnvU32(name string, fallback uint32) uint32 {
 }
 
 func applyCgroupsClientProfiles(config *cgroupssnapshot.Config) {
-	config.SupportedProfiles = parseEnvU32("NETIPC_SUPPORTED_PROFILES", config.SupportedProfiles)
-	config.PreferredProfiles = parseEnvU32("NETIPC_PREFERRED_PROFILES", config.PreferredProfiles)
+	config.SupportedProfiles = parseEnvU32("NETIPC_SUPPORTED_PROFILES", defaultCgroupsSupportedProfiles())
+	config.PreferredProfiles = parseEnvU32("NETIPC_PREFERRED_PROFILES", defaultCgroupsPreferredProfiles())
+}
+
+func applyCgroupsClientRequiredConfig(config *cgroupssnapshot.Config, authToken uint64) {
+	applyCgroupsClientProfiles(config)
+	config.MaxResponsePayloadBytes = parseEnvU32(
+		"NETIPC_MAX_RESPONSE_PAYLOAD_BYTES",
+		cgroupssnapshot.DefaultMaxResponsePayloadBytes,
+	)
+	config.MaxResponseBatchItems = parseEnvU32(
+		"NETIPC_MAX_RESPONSE_BATCH_ITEMS",
+		cgroupssnapshot.DefaultMaxResponseBatchItems,
+	)
+	config.AuthToken = authToken
 }
 
 func readBytes(path string) []byte {
@@ -102,32 +115,122 @@ func writeFrame(path string, frame protocol.Frame) {
 	writeBytes(path, frame[:])
 }
 
+const fixedCgroupsSeedCount = 16
+
+type fixedCgroupSeed struct {
+	Hash    uint32
+	Options uint32
+	Enabled bool
+	Name    string
+	Path    string
+}
+
+func configuredCgroupsItemCount() int {
+	count := int(parseEnvU32("NETIPC_CGROUPS_ITEM_COUNT", fixedCgroupsSeedCount))
+	if count < fixedCgroupsSeedCount {
+		fmt.Fprintf(os.Stderr, "NETIPC_CGROUPS_ITEM_COUNT must be >= %d (got %d)\n", fixedCgroupsSeedCount, count)
+		os.Exit(2)
+	}
+	return count
+}
+
+func generatedCgroupsOptions(index int) uint32 {
+	switch index % 5 {
+	case 0:
+		return 0x2
+	case 1:
+		return 0x4
+	case 2:
+		return 0x6
+	case 3:
+		return 0x8
+	default:
+		return 0x1
+	}
+}
+
+func generatedCgroupsItem(index int) protocol.CgroupsSnapshotItem {
+	name := fmt.Sprintf(
+		"system.slice-generated-observability-worker-%06d-with-long-synthetic-name.scope",
+		index,
+	)
+	path := fmt.Sprintf(
+		"/sys/fs/cgroup/system.slice/generated-observability-worker-%06d-with-long-synthetic-name.scope/cgroup.procs",
+		index,
+	)
+
+	return protocol.CgroupsSnapshotItem{
+		Hash:    2000 + uint32(index),
+		Options: generatedCgroupsOptions(index),
+		Enabled: index%2 == 0,
+		Name:    name,
+		Path:    path,
+	}
+}
+
+func fixedCgroupsItems() []protocol.CgroupsSnapshotItem {
+	seeds := []fixedCgroupSeed{
+		{Hash: 123, Options: 0x2, Enabled: true, Name: "system.slice-nginx", Path: "/sys/fs/cgroup/system.slice/nginx.service/cgroup.procs"},
+		{Hash: 456, Options: 0x4, Enabled: false, Name: "docker-1234", Path: ""},
+		{Hash: 789, Options: 0x6, Enabled: true, Name: "kubepods-burstable-pod01234567_89ab_cdef_0123_456789abcdef.slice", Path: "/sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod01234567_89ab_cdef_0123_456789abcdef.slice/cgroup.procs"},
+		{Hash: 1001, Options: 0x2, Enabled: true, Name: "system.slice-sshd.service", Path: "/sys/fs/cgroup/system.slice/sshd.service/cgroup.procs"},
+		{Hash: 1002, Options: 0x2, Enabled: true, Name: "system.slice-docker.service", Path: "/sys/fs/cgroup/system.slice/docker.service/cgroup.procs"},
+		{Hash: 1003, Options: 0x6, Enabled: true, Name: "user.slice-user-1000.slice-session-3.scope", Path: "/sys/fs/cgroup/user.slice/user-1000.slice/session-3.scope/cgroup.procs"},
+		{Hash: 1004, Options: 0x2, Enabled: true, Name: "machine.slice-libvirt-qemu-5-win11.scope", Path: "/sys/fs/cgroup/machine.slice/libvirt-qemu-5-win11.scope/cgroup.procs"},
+		{Hash: 1005, Options: 0x8, Enabled: false, Name: "system.slice-telegraf.service", Path: "/sys/fs/cgroup/system.slice/telegraf.service/cgroup.procs"},
+		{Hash: 1006, Options: 0x6, Enabled: true, Name: "podman-7f0c8e91f1ce55b0c3d1b5a4f6e8d9c0.scope", Path: "/sys/fs/cgroup/system.slice/podman-7f0c8e91f1ce55b0c3d1b5a4f6e8d9c0.scope/cgroup.procs"},
+		{Hash: 1007, Options: 0x4, Enabled: true, Name: "init.scope", Path: "/sys/fs/cgroup/init.scope/cgroup.procs"},
+		{Hash: 1008, Options: 0x6, Enabled: true, Name: "system.slice-containerd.service", Path: "/sys/fs/cgroup/system.slice/containerd.service/cgroup.procs"},
+		{Hash: 1009, Options: 0x4, Enabled: true, Name: "machine.slice-systemd-nspawn-observability-lab.scope", Path: "/sys/fs/cgroup/machine.slice/systemd-nspawn-observability-lab.scope/cgroup.procs"},
+		{Hash: 1010, Options: 0x6, Enabled: true, Name: "user.slice-user-1001.slice-user@1001.service-app.slice-observability-frontend.scope", Path: "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice/observability-frontend.scope/cgroup.procs"},
+		{Hash: 1011, Options: 0x1, Enabled: false, Name: "crio-53d2b1b5d7a04d8f9e2f6a7b8c9d0e1f.scope", Path: "/sys/fs/cgroup/kubepods.slice/kubepods-pod98765432_10fe_dcba_9876_543210fedcba.slice/crio-53d2b1b5d7a04d8f9e2f6a7b8c9d0e1f.scope/cgroup.procs"},
+		{Hash: 1012, Options: 0x2, Enabled: true, Name: "system.slice-netdata.service", Path: "/sys/fs/cgroup/system.slice/netdata.service/cgroup.procs"},
+		{Hash: 1013, Options: 0x6, Enabled: true, Name: "system.slice-super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service", Path: "/sys/fs/cgroup/system.slice/super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service/cgroup.procs"},
+	}
+
+	count := configuredCgroupsItemCount()
+	items := make([]protocol.CgroupsSnapshotItem, 0, count)
+	for _, seed := range seeds {
+		items = append(items, protocol.CgroupsSnapshotItem(seed))
+	}
+	for index := len(seeds); index < count; index++ {
+		items = append(items, generatedCgroupsItem(index))
+	}
+	return items
+}
+
+func fixedCgroupsPayloadCapacity() int {
+	items := fixedCgroupsItems()
+	total := protocol.CgroupsSnapshotResponseHeaderLen + len(items)*protocol.MessageItemRefLen
+	for _, item := range items {
+		start, err := protocol.AlignedItemSize(uint32(total))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "snapshot item align failed: %v\n", err)
+			os.Exit(1)
+		}
+		itemLen, err := protocol.CgroupsSnapshotItemPayloadLen(item)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "snapshot item length failed: %v\n", err)
+			os.Exit(1)
+		}
+		total = start + itemLen
+	}
+	return total
+}
+
 func fixedCgroupsResponse(messageID uint64) []byte {
-	payload := make([]byte, 1024)
-	builder, err := protocol.NewCgroupsSnapshotResponseBuilder(payload, 42, true, 3, 2)
+	items := fixedCgroupsItems()
+	payload := make([]byte, fixedCgroupsPayloadCapacity())
+	builder, err := protocol.NewCgroupsSnapshotResponseBuilder(payload, 42, true, 3, uint32(len(items)))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot builder init failed: %v\n", err)
 		os.Exit(1)
 	}
-	if err := builder.AddItem(protocol.CgroupsSnapshotItem{
-		Hash:    123,
-		Options: 0x2,
-		Enabled: true,
-		Name:    "system.slice-nginx",
-		Path:    "/sys/fs/cgroup/system.slice/nginx.service/cgroup.procs",
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "snapshot builder first item failed: %v\n", err)
-		os.Exit(1)
-	}
-	if err := builder.AddItem(protocol.CgroupsSnapshotItem{
-		Hash:    456,
-		Options: 0x4,
-		Enabled: false,
-		Name:    "docker-1234",
-		Path:    "",
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "snapshot builder second item failed: %v\n", err)
-		os.Exit(1)
+	for idx, item := range items {
+		if err := builder.AddItem(item); err != nil {
+			fmt.Fprintf(os.Stderr, "snapshot builder item %d failed: %v\n", idx, err)
+			os.Exit(1)
+		}
 	}
 	payloadLen, err := builder.Finish()
 	if err != nil {
@@ -144,7 +247,7 @@ func fixedCgroupsResponse(messageID uint64) []byte {
 		Code:            protocol.MethodCgroupsSnapshot,
 		TransportStatus: protocol.TransportStatusOK,
 		PayloadLen:      uint32(payloadLen),
-		ItemCount:       2,
+		ItemCount:       uint32(len(items)),
 		MessageID:       messageID,
 	})
 	if err != nil {
@@ -182,8 +285,7 @@ func printCgroupsCache(cache *cgroupssnapshot.Cache) {
 
 func clientRefreshOnce(serviceNamespace, serviceName string, lookupHash uint32, lookupName string, authToken uint64) {
 	config := cgroupssnapshot.NewConfig(serviceNamespace, serviceName)
-	applyCgroupsClientProfiles(&config)
-	config.AuthToken = authToken
+	applyCgroupsClientRequiredConfig(&config, authToken)
 	client, err := cgroupssnapshot.NewClient(config)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "client-refresh-once failed: %v\n", err)
@@ -207,8 +309,7 @@ func clientRefreshOnce(serviceNamespace, serviceName string, lookupHash uint32, 
 
 func clientRefreshLoop(serviceNamespace, serviceName string, iterations uint64, lookupHash uint32, lookupName string, authToken uint64) {
 	config := cgroupssnapshot.NewConfig(serviceNamespace, serviceName)
-	applyCgroupsClientProfiles(&config)
-	config.AuthToken = authToken
+	applyCgroupsClientRequiredConfig(&config, authToken)
 	client, err := cgroupssnapshot.NewClient(config)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "client-refresh-loop failed: %v\n", err)

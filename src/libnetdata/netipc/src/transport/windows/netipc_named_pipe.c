@@ -46,6 +46,7 @@ struct netipc_named_pipe_server {
     uint64_t auth_token;
     uint32_t shm_spin_tries;
     uint32_t negotiated_profile;
+    uint32_t packet_size;
     size_t max_request_message_len;
     size_t max_response_message_len;
     netipc_win_shm_server_t *shm_server;
@@ -65,6 +66,7 @@ struct netipc_named_pipe_client {
     uint64_t auth_token;
     uint32_t shm_spin_tries;
     uint32_t negotiated_profile;
+    uint32_t packet_size;
     size_t max_request_message_len;
     size_t max_response_message_len;
     netipc_win_shm_client_t *shm_client;
@@ -73,6 +75,7 @@ struct netipc_named_pipe_client {
 
 struct handshake_result {
     uint32_t selected_profile;
+    uint32_t packet_size;
     uint32_t agreed_max_request_payload_bytes;
     uint32_t agreed_max_request_batch_items;
     uint32_t agreed_max_response_payload_bytes;
@@ -174,6 +177,25 @@ static int compute_max_message_len(uint32_t max_payload_bytes,
     }
 
     *out_total_size = total;
+    return 0;
+}
+
+static int compute_named_pipe_packet_size(size_t max_request_message_len,
+                                          size_t max_response_message_len,
+                                          uint32_t *out_packet_size) {
+    if (!out_packet_size) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    size_t logical_limit =
+        max_request_message_len > max_response_message_len ? max_request_message_len : max_response_message_len;
+    if (logical_limit <= NETIPC_CHUNK_HEADER_LEN || logical_limit > (size_t)UINT32_MAX) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+
+    *out_packet_size = (uint32_t)logical_limit;
     return 0;
 }
 
@@ -539,6 +561,214 @@ static int validate_received_message(const uint8_t *message,
     return 0;
 }
 
+static int compute_chunk_payload_budget(uint32_t packet_size, size_t *out_budget) {
+    if (!out_budget || packet_size <= NETIPC_CHUNK_HEADER_LEN) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    *out_budget = (size_t)packet_size - NETIPC_CHUNK_HEADER_LEN;
+    return 0;
+}
+
+static int send_chunked_message(HANDLE pipe,
+                                const uint8_t *message,
+                                size_t message_len,
+                                uint32_t packet_size) {
+    if (!pipe || !message || message_len == 0u) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    size_t chunk_payload_budget = 0u;
+    if (compute_chunk_payload_budget(packet_size, &chunk_payload_budget) != 0) {
+        return -1;
+    }
+
+    struct netipc_msg_header header;
+    if (netipc_decode_msg_header(message, message_len, &header) != 0) {
+        return -1;
+    }
+
+    uint32_t chunk_count = (uint32_t)((message_len + chunk_payload_budget - 1u) / chunk_payload_budget);
+    uint8_t *packet = (uint8_t *)malloc(packet_size);
+    if (!packet) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    size_t offset = 0u;
+    int rc = 0;
+    for (uint32_t chunk_index = 0u; chunk_index < chunk_count; ++chunk_index) {
+        size_t remaining = message_len - offset;
+        size_t chunk_payload_len =
+            remaining < chunk_payload_budget ? remaining : chunk_payload_budget;
+        struct netipc_chunk_header chunk = {
+            .magic = NETIPC_CHUNK_MAGIC,
+            .version = NETIPC_CHUNK_VERSION,
+            .flags = 0u,
+            .message_id = header.message_id,
+            .total_message_len = (uint32_t)message_len,
+            .chunk_index = chunk_index,
+            .chunk_count = chunk_count,
+            .chunk_payload_len = (uint32_t)chunk_payload_len,
+        };
+        if (netipc_encode_chunk_header(packet, NETIPC_CHUNK_HEADER_LEN, &chunk) != 0) {
+            rc = -1;
+            break;
+        }
+        memcpy(packet + NETIPC_CHUNK_HEADER_LEN, message + offset, chunk_payload_len);
+        if (write_pipe_message(pipe, packet, NETIPC_CHUNK_HEADER_LEN + chunk_payload_len) != 0) {
+            rc = -1;
+            break;
+        }
+        offset += chunk_payload_len;
+    }
+
+    free(packet);
+    return rc;
+}
+
+static int recv_transport_message(HANDLE pipe,
+                                  uint8_t *message,
+                                  size_t message_capacity,
+                                  size_t max_message_len,
+                                  uint32_t packet_size,
+                                  size_t *out_message_len,
+                                  uint32_t timeout_ms) {
+    if (!pipe || !message || !out_message_len || message_capacity == 0u) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    size_t packet_capacity = packet_size != 0u ? (size_t)packet_size : max_message_len;
+    if (packet_capacity == 0u) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    uint8_t *packet = (uint8_t *)malloc(packet_capacity);
+    if (!packet) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    size_t packet_len = 0u;
+    int rc = -1;
+
+    if (read_pipe_message(pipe, packet, packet_capacity, &packet_len, timeout_ms) != 0) {
+        goto cleanup;
+    }
+
+    if (packet_len >= NETIPC_MSG_HEADER_LEN) {
+        struct netipc_msg_header header;
+        if (netipc_decode_msg_header(packet, packet_len, &header) == 0) {
+            size_t total = netipc_msg_total_size(&header);
+            if (total == packet_len) {
+                if (packet_len > message_capacity) {
+                    errno = EMSGSIZE;
+                    goto cleanup;
+                }
+                memcpy(message, packet, packet_len);
+                if (validate_received_message(message, packet_len, max_message_len) != 0) {
+                    goto cleanup;
+                }
+                *out_message_len = packet_len;
+                rc = 0;
+                goto cleanup;
+            }
+        }
+    }
+
+    if (packet_len < NETIPC_CHUNK_HEADER_LEN) {
+        errno = EPROTO;
+        goto cleanup;
+    }
+
+    struct netipc_chunk_header first_chunk;
+    if (netipc_decode_chunk_header(packet, NETIPC_CHUNK_HEADER_LEN, &first_chunk) != 0) {
+        goto cleanup;
+    }
+    if (first_chunk.chunk_index != 0u || first_chunk.chunk_count < 2u) {
+        errno = EPROTO;
+        goto cleanup;
+    }
+    if ((size_t)first_chunk.total_message_len > message_capacity ||
+        (size_t)first_chunk.total_message_len > max_message_len) {
+        errno = EMSGSIZE;
+        goto cleanup;
+    }
+
+    size_t payload_len = packet_len - NETIPC_CHUNK_HEADER_LEN;
+    if (payload_len != (size_t)first_chunk.chunk_payload_len) {
+        errno = EPROTO;
+        goto cleanup;
+    }
+
+    memcpy(message, packet + NETIPC_CHUNK_HEADER_LEN, payload_len);
+    size_t offset = payload_len;
+
+    for (uint32_t expected_index = 1u; expected_index < first_chunk.chunk_count; ++expected_index) {
+        if (read_pipe_message(pipe, packet, packet_capacity, &packet_len, timeout_ms) != 0) {
+            goto cleanup;
+        }
+        if (packet_len < NETIPC_CHUNK_HEADER_LEN) {
+            errno = EPROTO;
+            goto cleanup;
+        }
+
+        struct netipc_chunk_header chunk;
+        if (netipc_decode_chunk_header(packet, NETIPC_CHUNK_HEADER_LEN, &chunk) != 0) {
+            goto cleanup;
+        }
+
+        payload_len = packet_len - NETIPC_CHUNK_HEADER_LEN;
+        if (chunk.message_id != first_chunk.message_id ||
+            chunk.total_message_len != first_chunk.total_message_len ||
+            chunk.chunk_count != first_chunk.chunk_count ||
+            chunk.chunk_index != expected_index ||
+            payload_len != (size_t)chunk.chunk_payload_len ||
+            offset + payload_len > (size_t)first_chunk.total_message_len) {
+            errno = EPROTO;
+            goto cleanup;
+        }
+
+        memcpy(message + offset, packet + NETIPC_CHUNK_HEADER_LEN, payload_len);
+        offset += payload_len;
+    }
+
+    if (offset != (size_t)first_chunk.total_message_len) {
+        errno = EPROTO;
+        goto cleanup;
+    }
+    if (validate_received_message(message, offset, max_message_len) != 0) {
+        goto cleanup;
+    }
+
+    *out_message_len = offset;
+    rc = 0;
+
+cleanup:
+    free(packet);
+    return rc;
+}
+
+static int send_transport_message(HANDLE pipe,
+                                  const uint8_t *message,
+                                  size_t message_len,
+                                  size_t max_message_len,
+                                  uint32_t packet_size) {
+    if (validate_message_len_for_send(message, message_len, max_message_len) != 0) {
+        return -1;
+    }
+
+    if (packet_size != 0u && message_len > (size_t)packet_size) {
+        return send_chunked_message(pipe, message, message_len, packet_size);
+    }
+
+    return write_pipe_message(pipe, message, message_len);
+}
+
 static void disconnect_pipe(HANDLE pipe, bool connected) {
     if (pipe == INVALID_HANDLE_VALUE || !connected) {
         return;
@@ -692,6 +922,21 @@ static int perform_server_handshake(const netipc_named_pipe_server_t *server,
         return -1;
     }
 
+    size_t local_max_request_message_len = 0u;
+    size_t local_max_response_message_len = 0u;
+    uint32_t local_packet_size = 0u;
+    if (compute_max_message_len(server->max_request_payload_bytes,
+                                server->max_request_batch_items,
+                                &local_max_request_message_len) != 0 ||
+        compute_max_message_len(server->max_response_payload_bytes,
+                                server->max_response_batch_items,
+                                &local_max_response_message_len) != 0 ||
+        compute_named_pipe_packet_size(local_max_request_message_len,
+                                       local_max_response_message_len,
+                                       &local_packet_size) != 0) {
+        return -1;
+    }
+
     struct netipc_hello_ack ack = {
         .layout_version = hello.layout_version,
         .flags = 0u,
@@ -706,6 +951,7 @@ static int perform_server_handshake(const netipc_named_pipe_server_t *server,
             negotiate_limit_u32(hello.max_response_payload_bytes, server->max_response_payload_bytes),
         .agreed_max_response_batch_items =
             negotiate_limit_u32(hello.max_response_batch_items, server->max_response_batch_items),
+        .agreed_packet_size = negotiate_limit_u32(hello.packet_size, local_packet_size),
     };
     uint32_t status = NETIPC_NEGOTIATION_STATUS_OK;
 
@@ -732,7 +978,8 @@ static int perform_server_handshake(const netipc_named_pipe_server_t *server,
         } else if (ack.agreed_max_request_payload_bytes == 0u ||
                    ack.agreed_max_request_batch_items == 0u ||
                    ack.agreed_max_response_payload_bytes == 0u ||
-                   ack.agreed_max_response_batch_items == 0u) {
+                   ack.agreed_max_response_batch_items == 0u ||
+                   ack.agreed_packet_size == 0u) {
             status = ERROR_INVALID_PARAMETER;
         } else if (compute_max_message_len(ack.agreed_max_request_payload_bytes,
                                            ack.agreed_max_request_batch_items,
@@ -741,8 +988,14 @@ static int perform_server_handshake(const netipc_named_pipe_server_t *server,
                                            ack.agreed_max_response_batch_items,
                                            &result.max_response_message_len) != 0) {
             status = ERROR_INVALID_PARAMETER;
+        } else if ((size_t)ack.agreed_packet_size >
+                   (result.max_request_message_len > result.max_response_message_len
+                        ? result.max_request_message_len
+                        : result.max_response_message_len)) {
+            status = ERROR_INVALID_PARAMETER;
         } else {
             result.selected_profile = ack.selected_profile;
+            result.packet_size = ack.agreed_packet_size;
             result.agreed_max_request_payload_bytes = ack.agreed_max_request_payload_bytes;
             result.agreed_max_request_batch_items = ack.agreed_max_request_batch_items;
             result.agreed_max_response_payload_bytes = ack.agreed_max_response_payload_bytes;
@@ -771,6 +1024,21 @@ static int perform_client_handshake(const netipc_named_pipe_client_t *client,
         return -1;
     }
 
+    size_t local_max_request_message_len = 0u;
+    size_t local_max_response_message_len = 0u;
+    uint32_t local_packet_size = 0u;
+    if (compute_max_message_len(client->max_request_payload_bytes,
+                                client->max_request_batch_items,
+                                &local_max_request_message_len) != 0 ||
+        compute_max_message_len(client->max_response_payload_bytes,
+                                client->max_response_batch_items,
+                                &local_max_response_message_len) != 0 ||
+        compute_named_pipe_packet_size(local_max_request_message_len,
+                                       local_max_response_message_len,
+                                       &local_packet_size) != 0) {
+        return -1;
+    }
+
     struct netipc_hello hello = {
         .layout_version = NETIPC_MSG_VERSION,
         .flags = 0u,
@@ -781,6 +1049,7 @@ static int perform_client_handshake(const netipc_named_pipe_client_t *client,
         .max_response_payload_bytes = client->max_response_payload_bytes,
         .max_response_batch_items = client->max_response_batch_items,
         .auth_token = client->auth_token,
+        .packet_size = local_packet_size,
     };
 
     if (write_hello_negotiation(pipe, &hello) != 0) {
@@ -801,6 +1070,7 @@ static int perform_client_handshake(const netipc_named_pipe_client_t *client,
         .agreed_max_request_batch_items = ack.agreed_max_request_batch_items,
         .agreed_max_response_payload_bytes = ack.agreed_max_response_payload_bytes,
         .agreed_max_response_batch_items = ack.agreed_max_response_batch_items,
+        .packet_size = ack.agreed_packet_size,
         .max_request_message_len = 0u,
         .max_response_message_len = 0u,
     };
@@ -813,12 +1083,17 @@ static int perform_client_handshake(const netipc_named_pipe_client_t *client,
         ack.agreed_max_request_batch_items == 0u ||
         ack.agreed_max_response_payload_bytes == 0u ||
         ack.agreed_max_response_batch_items == 0u ||
+        ack.agreed_packet_size == 0u || ack.agreed_packet_size > local_packet_size ||
         compute_max_message_len(ack.agreed_max_request_payload_bytes,
                                 ack.agreed_max_request_batch_items,
                                 &result.max_request_message_len) != 0 ||
         compute_max_message_len(ack.agreed_max_response_payload_bytes,
                                 ack.agreed_max_response_batch_items,
-                                &result.max_response_message_len) != 0) {
+                                &result.max_response_message_len) != 0 ||
+        (size_t)ack.agreed_packet_size >
+            (result.max_request_message_len > result.max_response_message_len
+                 ? result.max_request_message_len
+                 : result.max_response_message_len)) {
         errno = EPROTO;
         return -1;
     }
@@ -942,6 +1217,7 @@ int netipc_named_pipe_server_accept(netipc_named_pipe_server_t *server, uint32_t
 
     struct handshake_result negotiated = {
         .selected_profile = 0u,
+        .packet_size = 0u,
         .agreed_max_request_payload_bytes = 0u,
         .agreed_max_request_batch_items = 0u,
         .agreed_max_response_payload_bytes = 0u,
@@ -982,6 +1258,7 @@ int netipc_named_pipe_server_accept(netipc_named_pipe_server_t *server, uint32_t
     }
 
     server->negotiated_profile = negotiated.selected_profile;
+    server->packet_size = negotiated.packet_size;
     server->max_request_message_len = negotiated.max_request_message_len;
     server->max_response_message_len = negotiated.max_response_message_len;
     server->connected = true;
@@ -1011,16 +1288,13 @@ int netipc_named_pipe_server_receive_message(netipc_named_pipe_server_t *server,
         return -1;
     }
 
-    size_t message_len = 0u;
-    if (read_pipe_message(server->pipe, message, message_capacity, &message_len, timeout_ms) != 0) {
-        return -1;
-    }
-    if (validate_received_message(message, message_len, server->max_request_message_len) != 0) {
-        return -1;
-    }
-
-    *out_message_len = message_len;
-    return 0;
+    return recv_transport_message(server->pipe,
+                                  message,
+                                  message_capacity,
+                                  server->max_request_message_len,
+                                  server->packet_size,
+                                  out_message_len,
+                                  timeout_ms);
 }
 
 int netipc_named_pipe_server_send_message(netipc_named_pipe_server_t *server,
@@ -1045,11 +1319,11 @@ int netipc_named_pipe_server_send_message(netipc_named_pipe_server_t *server,
         errno = EPROTO;
         return -1;
     }
-    if (validate_message_len_for_send(message, message_len, server->max_response_message_len) != 0) {
-        return -1;
-    }
-
-    return write_pipe_message(server->pipe, message, message_len);
+    return send_transport_message(server->pipe,
+                                  message,
+                                  message_len,
+                                  server->max_response_message_len,
+                                  server->packet_size);
 }
 
 int netipc_named_pipe_server_receive_frame(netipc_named_pipe_server_t *server,
@@ -1219,6 +1493,7 @@ int netipc_named_pipe_client_create(const struct netipc_named_pipe_config *confi
 
     struct handshake_result negotiated = {
         .selected_profile = 0u,
+        .packet_size = 0u,
         .agreed_max_request_payload_bytes = 0u,
         .agreed_max_request_batch_items = 0u,
         .agreed_max_response_payload_bytes = 0u,
@@ -1238,6 +1513,7 @@ int netipc_named_pipe_client_create(const struct netipc_named_pipe_config *confi
     }
 
     client->negotiated_profile = negotiated.selected_profile;
+    client->packet_size = negotiated.packet_size;
     client->max_request_message_len = negotiated.max_request_message_len;
     client->max_response_message_len = negotiated.max_response_message_len;
 
@@ -1301,23 +1577,21 @@ int netipc_named_pipe_client_call_message(netipc_named_pipe_client_t *client,
         errno = EMSGSIZE;
         return -1;
     }
-    if (validate_message_len_for_send(request_message, request_message_len, client->max_request_message_len) != 0) {
-        return -1;
-    }
-    if (write_pipe_message(client->pipe, request_message, request_message_len) != 0) {
-        return -1;
-    }
-
-    size_t response_len = 0u;
-    if (read_pipe_message(client->pipe, response_message, response_capacity, &response_len, timeout_ms) != 0) {
-        return -1;
-    }
-    if (validate_received_message(response_message, response_len, client->max_response_message_len) != 0) {
+    if (send_transport_message(client->pipe,
+                               request_message,
+                               request_message_len,
+                               client->max_request_message_len,
+                               client->packet_size) != 0) {
         return -1;
     }
 
-    *out_response_len = response_len;
-    return 0;
+    return recv_transport_message(client->pipe,
+                                  response_message,
+                                  response_capacity,
+                                  client->max_response_message_len,
+                                  client->packet_size,
+                                  out_response_len,
+                                  timeout_ms);
 }
 
 int netipc_named_pipe_client_call_frame(netipc_named_pipe_client_t *client,

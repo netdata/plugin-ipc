@@ -13,9 +13,57 @@ C_LIVE_BIN="${NETIPC_CGROUPS_LIVE_C_BIN:-${C_BIN_DIR}/netipc-cgroups-live-c}"
 GO_CODEC_BIN="${NETIPC_CGROUPS_GO_BIN:-${C_BIN_DIR}/netipc-codec-go}"
 RUST_CODEC_BIN="${NETIPC_CGROUPS_RUST_BIN:-${C_BIN_DIR}/netipc-codec-rs}"
 SHM_PROFILE=2
+TOK="${NETIPC_AUTH_TOKEN:-12345}"
+MAX_RESPONSE_PAYLOAD_BYTES="${NETIPC_MAX_RESPONSE_PAYLOAD_BYTES:-4358}"
+MAX_RESPONSE_BATCH_ITEMS="${NETIPC_MAX_RESPONSE_BATCH_ITEMS:-1000}"
+CGROUPS_ITEM_COUNT="${NETIPC_CGROUPS_ITEM_COUNT:-16}"
+EXPECTED_LONG_ITEM=$'ITEM\t15\t1013\t6\t1\tsystem.slice-super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service\t/sys/fs/cgroup/system.slice/super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service/cgroup.procs'
+EXPECTED_CACHE_HEADER=""
+EXPECTED_LAST_ITEM=""
 SERVER_PID=""
 SERVER_LOG=""
 TEMP_ROOT=""
+
+generated_cgroup_options() {
+  local index=$1
+  case $(( index % 5 )) in
+    0) printf '2' ;;
+    1) printf '4' ;;
+    2) printf '6' ;;
+    3) printf '8' ;;
+    *) printf '1' ;;
+  esac
+}
+
+generated_cgroup_enabled() {
+  local index=$1
+  if (( index % 2 == 0 )); then
+    printf '1'
+  else
+    printf '0'
+  fi
+}
+
+generated_cgroup_name() {
+  local index=$1
+  printf 'system.slice-generated-observability-worker-%06d-with-long-synthetic-name.scope' "${index}"
+}
+
+generated_cgroup_path() {
+  local index=$1
+  printf '/sys/fs/cgroup/system.slice/generated-observability-worker-%06d-with-long-synthetic-name.scope/cgroup.procs' "${index}"
+}
+
+generated_cgroup_line() {
+  local index=$1
+  printf 'ITEM\t%d\t%d\t%s\t%s\t%s\t%s' \
+    "${index}" \
+    "$((2000 + index))" \
+    "$(generated_cgroup_options "${index}")" \
+    "$(generated_cgroup_enabled "${index}")" \
+    "$(generated_cgroup_name "${index}")" \
+    "$(generated_cgroup_path "${index}")"
+}
 
 run() {
   printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
@@ -56,11 +104,19 @@ start_server() {
 
   printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
   printf >&2 "${YELLOW}"
-  printf >&2 "%q " env NETIPC_SUPPORTED_PROFILES="${SHM_PROFILE}" NETIPC_PREFERRED_PROFILES="${SHM_PROFILE}"
+  printf >&2 "%q " env \
+    NETIPC_SUPPORTED_PROFILES="${SHM_PROFILE}" \
+    NETIPC_PREFERRED_PROFILES="${SHM_PROFILE}" \
+    NETIPC_MAX_RESPONSE_PAYLOAD_BYTES="${MAX_RESPONSE_PAYLOAD_BYTES}" \
+    NETIPC_MAX_RESPONSE_BATCH_ITEMS="${MAX_RESPONSE_BATCH_ITEMS}"
   printf >&2 "%q " "$@"
   printf >&2 "${NC}\n"
 
-  env NETIPC_SUPPORTED_PROFILES="${SHM_PROFILE}" NETIPC_PREFERRED_PROFILES="${SHM_PROFILE}" \
+  env \
+    NETIPC_SUPPORTED_PROFILES="${SHM_PROFILE}" \
+    NETIPC_PREFERRED_PROFILES="${SHM_PROFILE}" \
+    NETIPC_MAX_RESPONSE_PAYLOAD_BYTES="${MAX_RESPONSE_PAYLOAD_BYTES}" \
+    NETIPC_MAX_RESPONSE_BATCH_ITEMS="${MAX_RESPONSE_BATCH_ITEMS}" \
     "$@" >"${SERVER_LOG}" 2>&1 &
   SERVER_PID=$!
 }
@@ -121,14 +177,33 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if (( CGROUPS_ITEM_COUNT < 16 )); then
+  echo -e >&2 "${RED}[ERROR] NETIPC_CGROUPS_ITEM_COUNT must be >= 16${NC}"
+  exit 1
+fi
+
+printf -v EXPECTED_CACHE_HEADER 'CGROUPS_CACHE\t42\t1\t%s' "${CGROUPS_ITEM_COUNT}"
+if (( CGROUPS_ITEM_COUNT > 16 )); then
+  EXPECTED_LAST_ITEM=$(generated_cgroup_line "$((CGROUPS_ITEM_COUNT - 1))")
+fi
+
 run_client() {
   printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
   printf >&2 "${YELLOW}"
-  printf >&2 "%q " env NETIPC_SUPPORTED_PROFILES="${SHM_PROFILE}" NETIPC_PREFERRED_PROFILES="${SHM_PROFILE}"
+  printf >&2 "%q " env \
+    NETIPC_SUPPORTED_PROFILES="${SHM_PROFILE}" \
+    NETIPC_PREFERRED_PROFILES="${SHM_PROFILE}" \
+    NETIPC_MAX_RESPONSE_PAYLOAD_BYTES="${MAX_RESPONSE_PAYLOAD_BYTES}" \
+    NETIPC_MAX_RESPONSE_BATCH_ITEMS="${MAX_RESPONSE_BATCH_ITEMS}"
   printf >&2 "%q " "$@"
   printf >&2 "${NC}\n"
 
-  env NETIPC_SUPPORTED_PROFILES="${SHM_PROFILE}" NETIPC_PREFERRED_PROFILES="${SHM_PROFILE}" "$@"
+  env \
+    NETIPC_SUPPORTED_PROFILES="${SHM_PROFILE}" \
+    NETIPC_PREFERRED_PROFILES="${SHM_PROFILE}" \
+    NETIPC_MAX_RESPONSE_PAYLOAD_BYTES="${MAX_RESPONSE_PAYLOAD_BYTES}" \
+    NETIPC_MAX_RESPONSE_BATCH_ITEMS="${MAX_RESPONSE_BATCH_ITEMS}" \
+    "$@"
 }
 
 run_case() {
@@ -145,18 +220,18 @@ run_case() {
   service="netipc-cgroups-shm-${mode}-${RANDOM}"
 
   if [[ "${mode}" == "once" ]]; then
-    start_server "${case_dir}/server.log" "${server_bin}" server-once "${case_dir}" "${service}"
+    start_server "${case_dir}/server.log" "${server_bin}" server-once "${case_dir}" "${service}" "${TOK}"
   else
-    start_server "${case_dir}/server.log" "${server_bin}" server-loop "${case_dir}" "${service}" 2
+    start_server "${case_dir}/server.log" "${server_bin}" server-loop "${case_dir}" "${service}" 2 "${TOK}"
   fi
   wait_for_socket "${case_dir}/${service}.sock" 500
 
   client_log="${case_dir}/client.out"
   if [[ "${mode}" == "once" ]]; then
-    run_client "${client_bin}" client-refresh-once "${case_dir}" "${service}" "${lookup_hash}" "${lookup_name}" \
+    run_client "${client_bin}" client-refresh-once "${case_dir}" "${service}" "${lookup_hash}" "${lookup_name}" "${TOK}" \
       >"${client_log}" 2>&1
   else
-    run_client "${client_bin}" client-refresh-loop "${case_dir}" "${service}" 2 "${lookup_hash}" "${lookup_name}" \
+    run_client "${client_bin}" client-refresh-loop "${case_dir}" "${service}" 2 "${lookup_hash}" "${lookup_name}" "${TOK}" \
       >"${client_log}" 2>&1
   fi
 
@@ -165,10 +240,20 @@ run_case() {
   printf '%s\n' "${client_out}"
   wait_server
 
-  grep -q $'^CGROUPS_CACHE\t42\t1\t2$' <<<"${client_out}" || {
+  grep -Fqx -- "${EXPECTED_CACHE_HEADER}" <<<"${client_out}" || {
     echo -e >&2 "${RED}[ERROR] ${label}: unexpected cache header${NC}"
     exit 1
   }
+  grep -Fqx -- "${EXPECTED_LONG_ITEM}" <<<"${client_out}" || {
+    echo -e >&2 "${RED}[ERROR] ${label}: missing long snapshot item${NC}"
+    exit 1
+  }
+  if [[ -n "${EXPECTED_LAST_ITEM}" ]]; then
+    grep -Fqx -- "${EXPECTED_LAST_ITEM}" <<<"${client_out}" || {
+      echo -e >&2 "${RED}[ERROR] ${label}: missing generated tail snapshot item${NC}"
+      exit 1
+    }
+  fi
 
   if [[ "${mode}" == "loop" ]]; then
     grep -q $'^REFRESHES\t2$' <<<"${client_out}" || {

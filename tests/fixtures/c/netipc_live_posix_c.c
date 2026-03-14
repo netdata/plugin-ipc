@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -88,7 +89,23 @@ static void usage(const char *argv0) {
             "[supported_profiles] [preferred_profiles] [auth_token]\n",
             argv0);
     fprintf(stderr,
+            "  %s uds-client-pipeline <run_dir> <service> <value_a> <value_b> "
+            "[supported_profiles] [preferred_profiles] [auth_token]\n",
+            argv0);
+    fprintf(stderr,
             "  %s uds-server-loop <run_dir> <service> <max_requests|0> [supported_profiles] "
+            "[preferred_profiles] [auth_token]\n",
+            argv0);
+    fprintf(stderr,
+            "  %s uds-server-reorder <run_dir> <service> [supported_profiles] "
+            "[preferred_profiles] [auth_token]\n",
+            argv0);
+    fprintf(stderr,
+            "  %s uds-server-multi-client <run_dir> <service> [supported_profiles] "
+            "[preferred_profiles] [auth_token]\n",
+            argv0);
+    fprintf(stderr,
+            "  %s uds-server-managed <run_dir> <service> [supported_profiles] "
             "[preferred_profiles] [auth_token]\n",
             argv0);
     fprintf(stderr,
@@ -498,7 +515,23 @@ static int shm_client_call_increment_wrapper(void *client,
                                              const struct netipc_increment_request *request,
                                              struct netipc_increment_response *response,
                                              uint32_t timeout_ms) {
-    return netipc_shm_client_call_increment(client, request, response, timeout_ms);
+    uint64_t request_id = 1001u;
+
+    if (netipc_shm_client_send_increment(client, request_id, request, timeout_ms) != 0) {
+        return -1;
+    }
+
+    uint64_t response_id = 0u;
+    if (netipc_shm_client_receive_increment(client, &response_id, response, timeout_ms) != 0) {
+        return -1;
+    }
+
+    if (response_id != request_id) {
+        errno = EPROTO;
+        return -1;
+    }
+
+    return 0;
 }
 
 static void shm_client_destroy_wrapper(void *client) {
@@ -675,6 +708,501 @@ static int run_client_once(const struct transport_ops *ops,
                            const char *service,
                            uint64_t value) {
     return run_client_iterations(ops, run_dir, service, value, 1u);
+}
+
+static int run_uds_server_reorder(const char *run_dir, const char *service) {
+    netipc_uds_seqpacket_server_t *server = NULL;
+    struct netipc_uds_seqpacket_config config = uds_config(run_dir, service);
+    uint64_t request_id_a = 0u;
+    uint64_t request_id_b = 0u;
+    struct netipc_increment_request request_a;
+    struct netipc_increment_request request_b;
+
+    if (netipc_uds_seqpacket_server_create(&config, &server) != 0) {
+        perror("netipc_uds_seqpacket_server_create");
+        return 1;
+    }
+    if (netipc_uds_seqpacket_server_accept(server, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_server_accept");
+        netipc_uds_seqpacket_server_destroy(server);
+        return 1;
+    }
+    if (netipc_uds_seqpacket_server_receive_increment(server, &request_id_a, &request_a, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_server_receive_increment");
+        netipc_uds_seqpacket_server_destroy(server);
+        return 1;
+    }
+    if (netipc_uds_seqpacket_server_receive_increment(server, &request_id_b, &request_b, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_server_receive_increment");
+        netipc_uds_seqpacket_server_destroy(server);
+        return 1;
+    }
+
+    struct netipc_increment_response response_b = {
+        .status = NETIPC_STATUS_OK,
+        .value = request_b.value + 1u,
+    };
+    struct netipc_increment_response response_a = {
+        .status = NETIPC_STATUS_OK,
+        .value = request_a.value + 1u,
+    };
+
+    if (netipc_uds_seqpacket_server_send_increment(server, request_id_b, &response_b, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_server_send_increment");
+        netipc_uds_seqpacket_server_destroy(server);
+        return 1;
+    }
+    if (netipc_uds_seqpacket_server_send_increment(server, request_id_a, &response_a, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_server_send_increment");
+        netipc_uds_seqpacket_server_destroy(server);
+        return 1;
+    }
+
+    printf("C-UDS-PIPE-SERVER request_a=%" PRIu64 " request_b=%" PRIu64 " profile=%u\n",
+           request_id_a,
+           request_id_b,
+           netipc_uds_seqpacket_server_negotiated_profile(server));
+    netipc_uds_seqpacket_server_destroy(server);
+    return 0;
+}
+
+static int run_uds_client_pipeline(const char *run_dir,
+                                   const char *service,
+                                   uint64_t value_a,
+                                   uint64_t value_b) {
+    netipc_uds_seqpacket_client_t *client = NULL;
+    struct netipc_uds_seqpacket_config config = uds_config(run_dir, service);
+    const uint64_t request_id_a = 1001u;
+    const uint64_t request_id_b = 1002u;
+    uint64_t response_id_0 = 0u;
+    uint64_t response_id_1 = 0u;
+    struct netipc_increment_request request_a = {.value = value_a};
+    struct netipc_increment_request request_b = {.value = value_b};
+    struct netipc_increment_response response_0;
+    struct netipc_increment_response response_1;
+
+    if (netipc_uds_seqpacket_client_create(&config, &client, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_client_create");
+        return 1;
+    }
+    if (netipc_uds_seqpacket_client_send_increment(client, request_id_a, &request_a, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_client_send_increment");
+        netipc_uds_seqpacket_client_destroy(client);
+        return 1;
+    }
+    if (netipc_uds_seqpacket_client_send_increment(client, request_id_b, &request_b, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_client_send_increment");
+        netipc_uds_seqpacket_client_destroy(client);
+        return 1;
+    }
+    if (netipc_uds_seqpacket_client_receive_increment(client, &response_id_0, &response_0, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_client_receive_increment");
+        netipc_uds_seqpacket_client_destroy(client);
+        return 1;
+    }
+    if (netipc_uds_seqpacket_client_receive_increment(client, &response_id_1, &response_1, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_client_receive_increment");
+        netipc_uds_seqpacket_client_destroy(client);
+        return 1;
+    }
+
+    if (response_0.status != NETIPC_STATUS_OK || response_1.status != NETIPC_STATUS_OK) {
+        fprintf(stderr, "server returned non-OK status in pipelined response\n");
+        netipc_uds_seqpacket_client_destroy(client);
+        return 1;
+    }
+    if (response_id_0 != request_id_b || response_0.value != value_b + 1u) {
+        fprintf(stderr, "unexpected first pipelined response: id=%" PRIu64 " value=%" PRIu64 "\n",
+                response_id_0,
+                response_0.value);
+        netipc_uds_seqpacket_client_destroy(client);
+        return 1;
+    }
+    if (response_id_1 != request_id_a || response_1.value != value_a + 1u) {
+        fprintf(stderr, "unexpected second pipelined response: id=%" PRIu64 " value=%" PRIu64 "\n",
+                response_id_1,
+                response_1.value);
+        netipc_uds_seqpacket_client_destroy(client);
+        return 1;
+    }
+
+    printf("C-UDS-PIPE-CLIENT response0_id=%" PRIu64 " response0_value=%" PRIu64 " profile=%u\n",
+           response_id_0,
+           response_0.value,
+           netipc_uds_seqpacket_client_negotiated_profile(client));
+    printf("C-UDS-PIPE-CLIENT response1_id=%" PRIu64 " response1_value=%" PRIu64 " profile=%u\n",
+           response_id_1,
+           response_1.value,
+           netipc_uds_seqpacket_client_negotiated_profile(client));
+    netipc_uds_seqpacket_client_destroy(client);
+    return 0;
+}
+
+static int run_uds_server_multi_client(const char *run_dir, const char *service) {
+    struct netipc_uds_seqpacket_config config = uds_config(run_dir, service);
+    netipc_uds_seqpacket_listener_t *listener = NULL;
+    netipc_uds_seqpacket_session_t *session_a = NULL;
+    netipc_uds_seqpacket_session_t *session_b = NULL;
+    uint64_t request_id_a = 0u;
+    uint64_t request_id_b = 0u;
+    struct netipc_increment_request request_a;
+    struct netipc_increment_request request_b;
+    struct netipc_increment_response response_a;
+    struct netipc_increment_response response_b;
+    int rc = 1;
+
+    if (netipc_uds_seqpacket_listener_create(&config, &listener) != 0) {
+        perror("netipc_uds_seqpacket_listener_create");
+        return 1;
+    }
+    if (netipc_uds_seqpacket_listener_accept(listener, &session_a, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_listener_accept");
+        goto cleanup;
+    }
+    if (netipc_uds_seqpacket_listener_accept(listener, &session_b, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_listener_accept");
+        goto cleanup;
+    }
+    if (netipc_uds_seqpacket_session_receive_increment(session_a, &request_id_a, &request_a, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_session_receive_increment");
+        goto cleanup;
+    }
+    if (netipc_uds_seqpacket_session_receive_increment(session_b, &request_id_b, &request_b, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_session_receive_increment");
+        goto cleanup;
+    }
+
+    response_a.status = NETIPC_STATUS_OK;
+    response_a.value = request_a.value + 1u;
+    response_b.status = NETIPC_STATUS_OK;
+    response_b.value = request_b.value + 1u;
+
+    if (netipc_uds_seqpacket_session_send_increment(session_a, request_id_a, &response_a, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_session_send_increment");
+        goto cleanup;
+    }
+    if (netipc_uds_seqpacket_session_send_increment(session_b, request_id_b, &response_b, 10000u) != 0) {
+        perror("netipc_uds_seqpacket_session_send_increment");
+        goto cleanup;
+    }
+
+    printf("C-UDS-MULTI-SERVER sessions=2 profile_a=%u profile_b=%u "
+           "request_a=%" PRIu64 " value_a=%" PRIu64 " request_b=%" PRIu64 " value_b=%" PRIu64 "\n",
+           netipc_uds_seqpacket_session_negotiated_profile(session_a),
+           netipc_uds_seqpacket_session_negotiated_profile(session_b),
+           request_id_a,
+           request_a.value,
+           request_id_b,
+           request_b.value);
+    rc = 0;
+
+cleanup:
+    if (session_b) {
+        netipc_uds_seqpacket_session_destroy(session_b);
+    }
+    if (session_a) {
+        netipc_uds_seqpacket_session_destroy(session_a);
+    }
+    if (listener) {
+        netipc_uds_seqpacket_listener_destroy(listener);
+    }
+    return rc;
+}
+
+struct managed_server_ctx;
+
+struct managed_session_ctx {
+    netipc_uds_seqpacket_session_t *session;
+    pthread_mutex_t write_mutex;
+    pthread_t thread;
+    struct managed_server_ctx *server;
+    uint64_t requests_read;
+};
+
+struct managed_job {
+    struct managed_session_ctx *session_ctx;
+    uint64_t request_id;
+    uint64_t value;
+    struct managed_job *next;
+};
+
+struct managed_server_ctx {
+    pthread_mutex_t queue_mutex;
+    pthread_cond_t queue_cond;
+    struct managed_job *job_head;
+    struct managed_job *job_tail;
+    uint64_t pending_jobs;
+    int active_readers;
+    bool shutting_down;
+    int fatal_errno;
+    pthread_t workers[2];
+    struct managed_session_ctx sessions[2];
+    uint64_t handled_requests;
+};
+
+static void managed_set_fatal(struct managed_server_ctx *server, int errnum) {
+    if (!server) {
+        return;
+    }
+
+    pthread_mutex_lock(&server->queue_mutex);
+    if (server->fatal_errno == 0) {
+        server->fatal_errno = errnum != 0 ? errnum : EPROTO;
+    }
+    server->shutting_down = true;
+    pthread_cond_broadcast(&server->queue_cond);
+    pthread_mutex_unlock(&server->queue_mutex);
+}
+
+static void managed_maybe_finish(struct managed_server_ctx *server) {
+    if (!server) {
+        return;
+    }
+
+    if (server->active_readers == 0 && server->pending_jobs == 0u) {
+        server->shutting_down = true;
+        pthread_cond_broadcast(&server->queue_cond);
+    }
+}
+
+static void managed_enqueue_job(struct managed_server_ctx *server,
+                                struct managed_session_ctx *session_ctx,
+                                uint64_t request_id,
+                                uint64_t value) {
+    struct managed_job *job = calloc(1, sizeof(*job));
+    if (!job) {
+        managed_set_fatal(server, errno);
+        return;
+    }
+
+    job->session_ctx = session_ctx;
+    job->request_id = request_id;
+    job->value = value;
+
+    pthread_mutex_lock(&server->queue_mutex);
+    if (server->job_tail) {
+        server->job_tail->next = job;
+    } else {
+        server->job_head = job;
+    }
+    server->job_tail = job;
+    server->pending_jobs++;
+    pthread_cond_signal(&server->queue_cond);
+    pthread_mutex_unlock(&server->queue_mutex);
+}
+
+static void *managed_worker_main(void *arg) {
+    struct managed_server_ctx *server = arg;
+
+    for (;;) {
+        pthread_mutex_lock(&server->queue_mutex);
+        while (!server->job_head && !server->shutting_down) {
+            pthread_cond_wait(&server->queue_cond, &server->queue_mutex);
+        }
+
+        if (!server->job_head && server->shutting_down) {
+            pthread_mutex_unlock(&server->queue_mutex);
+            return NULL;
+        }
+
+        struct managed_job *job = server->job_head;
+        server->job_head = job->next;
+        if (!server->job_head) {
+            server->job_tail = NULL;
+        }
+        pthread_mutex_unlock(&server->queue_mutex);
+
+        if (job->value == 41u) {
+            struct timespec req = {
+                .tv_sec = 0,
+                .tv_nsec = 50000000L,
+            };
+            nanosleep(&req, NULL);
+        }
+
+        struct netipc_increment_response response = {
+            .status = NETIPC_STATUS_OK,
+            .value = job->value + 1u,
+        };
+
+        pthread_mutex_lock(&job->session_ctx->write_mutex);
+        if (netipc_uds_seqpacket_session_send_increment(job->session_ctx->session,
+                                                        job->request_id,
+                                                        &response,
+                                                        10000u) != 0) {
+            int saved = errno;
+            pthread_mutex_unlock(&job->session_ctx->write_mutex);
+            free(job);
+            if (!is_disconnect_errno(saved)) {
+                perror("managed_session_send_increment");
+                managed_set_fatal(server, saved);
+            }
+
+            pthread_mutex_lock(&server->queue_mutex);
+            server->pending_jobs--;
+            managed_maybe_finish(server);
+            pthread_mutex_unlock(&server->queue_mutex);
+            continue;
+        }
+        pthread_mutex_unlock(&job->session_ctx->write_mutex);
+
+        pthread_mutex_lock(&server->queue_mutex);
+        server->handled_requests++;
+        server->pending_jobs--;
+        managed_maybe_finish(server);
+        pthread_mutex_unlock(&server->queue_mutex);
+        free(job);
+    }
+}
+
+static void *managed_reader_main(void *arg) {
+    struct managed_session_ctx *session_ctx = arg;
+    struct managed_server_ctx *server = session_ctx->server;
+
+    for (;;) {
+        uint64_t request_id = 0u;
+        struct netipc_increment_request request;
+        if (netipc_uds_seqpacket_session_receive_increment(session_ctx->session,
+                                                           &request_id,
+                                                           &request,
+                                                           10000u) != 0) {
+            int saved = errno;
+            if (!is_disconnect_errno(saved)) {
+                perror("managed_session_receive_increment");
+                managed_set_fatal(server, saved);
+            }
+            break;
+        }
+
+        session_ctx->requests_read++;
+        managed_enqueue_job(server, session_ctx, request_id, request.value);
+    }
+
+    pthread_mutex_lock(&server->queue_mutex);
+    server->active_readers--;
+    managed_maybe_finish(server);
+    pthread_mutex_unlock(&server->queue_mutex);
+    return NULL;
+}
+
+static int run_uds_server_managed(const char *run_dir, const char *service) {
+    struct netipc_uds_seqpacket_config config = uds_config(run_dir, service);
+    netipc_uds_seqpacket_listener_t *listener = NULL;
+    size_t initialized_mutexes = 0u;
+    size_t started_workers = 0u;
+    size_t started_readers = 0u;
+    size_t accepted_sessions = 0u;
+    struct managed_server_ctx server = {
+        .queue_mutex = PTHREAD_MUTEX_INITIALIZER,
+        .queue_cond = PTHREAD_COND_INITIALIZER,
+        .job_head = NULL,
+        .job_tail = NULL,
+        .pending_jobs = 0u,
+        .active_readers = 0,
+        .shutting_down = false,
+        .fatal_errno = 0,
+        .handled_requests = 0u,
+    };
+    int rc = 1;
+
+    if (netipc_uds_seqpacket_listener_create(&config, &listener) != 0) {
+        perror("netipc_uds_seqpacket_listener_create");
+        return 1;
+    }
+
+    for (size_t i = 0; i < 2u; ++i) {
+        if (pthread_mutex_init(&server.sessions[i].write_mutex, NULL) != 0) {
+            perror("pthread_mutex_init");
+            goto cleanup;
+        }
+        initialized_mutexes++;
+        server.sessions[i].server = &server;
+    }
+
+    for (size_t i = 0; i < 2u; ++i) {
+        if (pthread_create(&server.workers[i], NULL, managed_worker_main, &server) != 0) {
+            perror("pthread_create(worker)");
+            managed_set_fatal(&server, errno);
+            goto cleanup;
+        }
+        started_workers++;
+    }
+
+    for (size_t i = 0; i < 2u; ++i) {
+        if (netipc_uds_seqpacket_listener_accept(listener, &server.sessions[i].session, 10000u) != 0) {
+            perror("netipc_uds_seqpacket_listener_accept");
+            managed_set_fatal(&server, errno);
+            goto cleanup;
+        }
+        accepted_sessions++;
+        server.active_readers++;
+        if (pthread_create(&server.sessions[i].thread, NULL, managed_reader_main, &server.sessions[i]) != 0) {
+            perror("pthread_create(reader)");
+            managed_set_fatal(&server, errno);
+            server.active_readers--;
+            goto cleanup;
+        }
+        started_readers++;
+    }
+
+    for (size_t i = 0; i < started_readers; ++i) {
+        if (server.sessions[i].thread) {
+            pthread_join(server.sessions[i].thread, NULL);
+            server.sessions[i].thread = 0;
+        }
+    }
+    for (size_t i = 0; i < started_workers; ++i) {
+        if (server.workers[i]) {
+            pthread_join(server.workers[i], NULL);
+            server.workers[i] = 0;
+        }
+    }
+
+    if (server.fatal_errno != 0) {
+        errno = server.fatal_errno;
+        perror("run_uds_server_managed");
+        goto cleanup;
+    }
+
+    printf("C-UDS-MANAGED-SERVER sessions=2 requests=%" PRIu64 " "
+           "session0_requests=%" PRIu64 " session1_requests=%" PRIu64 "\n",
+           server.handled_requests,
+           server.sessions[0].requests_read,
+           server.sessions[1].requests_read);
+    rc = 0;
+
+cleanup:
+    for (size_t i = 0; i < started_readers; ++i) {
+        if (server.sessions[i].thread) {
+            pthread_join(server.sessions[i].thread, NULL);
+        }
+    }
+    managed_set_fatal(&server, server.fatal_errno);
+    for (size_t i = 0; i < started_workers; ++i) {
+        if (server.workers[i]) {
+            pthread_join(server.workers[i], NULL);
+        }
+    }
+    for (size_t i = 0; i < accepted_sessions; ++i) {
+        if (server.sessions[i].session) {
+            netipc_uds_seqpacket_session_destroy(server.sessions[i].session);
+            server.sessions[i].session = NULL;
+        }
+    }
+    for (size_t i = 0; i < initialized_mutexes; ++i) {
+        pthread_mutex_destroy(&server.sessions[i].write_mutex);
+    }
+    while (server.job_head) {
+        struct managed_job *job = server.job_head;
+        server.job_head = job->next;
+        free(job);
+    }
+    pthread_cond_destroy(&server.queue_cond);
+    pthread_mutex_destroy(&server.queue_mutex);
+    if (listener) {
+        netipc_uds_seqpacket_listener_destroy(listener);
+    }
+    return rc;
 }
 
 static int run_server_loop_internal(const struct transport_ops *ops,
@@ -1061,6 +1589,16 @@ int main(int argc, char **argv) {
         }
         return run_client_iterations(&uds_ops, argv[2], argv[3], parse_u64(argv[4]), parse_u64(argv[5]));
     }
+    if (strcmp(argv[1], "uds-client-pipeline") == 0) {
+        if (argc != 6 && argc != 9) {
+            usage(argv[0]);
+            return 2;
+        }
+        if (configure_uds_runtime_options(argc, argv, 6, false) != 0) {
+            return 2;
+        }
+        return run_uds_client_pipeline(argv[2], argv[3], parse_u64(argv[4]), parse_u64(argv[5]));
+    }
     if (strcmp(argv[1], "uds-server-loop") == 0) {
         if (argc != 5 && argc != 8) {
             usage(argv[0]);
@@ -1070,6 +1608,36 @@ int main(int argc, char **argv) {
             return 2;
         }
         return run_server_loop(&uds_ops, argv[2], argv[3], parse_u64(argv[4]));
+    }
+    if (strcmp(argv[1], "uds-server-reorder") == 0) {
+        if (argc != 4 && argc != 7) {
+            usage(argv[0]);
+            return 2;
+        }
+        if (configure_uds_runtime_options(argc, argv, 4, false) != 0) {
+            return 2;
+        }
+        return run_uds_server_reorder(argv[2], argv[3]);
+    }
+    if (strcmp(argv[1], "uds-server-multi-client") == 0) {
+        if (argc != 4 && argc != 7) {
+            usage(argv[0]);
+            return 2;
+        }
+        if (configure_uds_runtime_options(argc, argv, 4, false) != 0) {
+            return 2;
+        }
+        return run_uds_server_multi_client(argv[2], argv[3]);
+    }
+    if (strcmp(argv[1], "uds-server-managed") == 0) {
+        if (argc != 4 && argc != 7) {
+            usage(argv[0]);
+            return 2;
+        }
+        if (configure_uds_runtime_options(argc, argv, 4, false) != 0) {
+            return 2;
+        }
+        return run_uds_server_managed(argv[2], argv[3]);
     }
     if (strcmp(argv[1], "uds-server-bench") == 0) {
         if (argc != 5 && argc != 8) {

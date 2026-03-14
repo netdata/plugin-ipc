@@ -67,7 +67,7 @@ func runCgroupsServerOnce(serviceNamespace, serviceName string, authToken uint64
 		os.Exit(1)
 	}
 
-	fmt.Printf("CGROUPS_SERVER\t%d\t2\n", header.MessageID)
+	fmt.Printf("CGROUPS_SERVER\t%d\t%d\n", header.MessageID, len(fixedCgroupsItems()))
 }
 
 func runCgroupsServerLoop(serviceNamespace, serviceName string, maxRequests uint64, authToken uint64) {

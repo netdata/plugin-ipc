@@ -15,8 +15,11 @@ pub const MESSAGE_KIND_CONTROL: u16 = 3;
 
 pub const CONTROL_HELLO: u16 = 1;
 pub const CONTROL_HELLO_ACK: u16 = 2;
-pub const CONTROL_HELLO_PAYLOAD_LEN: usize = 40;
-pub const CONTROL_HELLO_ACK_PAYLOAD_LEN: usize = 32;
+pub const CONTROL_HELLO_PAYLOAD_LEN: usize = 44;
+pub const CONTROL_HELLO_ACK_PAYLOAD_LEN: usize = 36;
+pub const CHUNK_MAGIC: u32 = 0x4e43_484b;
+pub const CHUNK_VERSION: u16 = 1;
+pub const CHUNK_HEADER_LEN: usize = 32;
 
 pub const TRANSPORT_STATUS_OK: u16 = 0;
 pub const TRANSPORT_STATUS_BAD_ENVELOPE: u16 = 1;
@@ -71,6 +74,7 @@ const OFF_HELLO_MAX_REQUEST_BATCH_ITEMS: usize = 16;
 const OFF_HELLO_MAX_RESPONSE_PAYLOAD_BYTES: usize = 20;
 const OFF_HELLO_MAX_RESPONSE_BATCH_ITEMS: usize = 24;
 const OFF_HELLO_AUTH_TOKEN: usize = 32;
+const OFF_HELLO_PACKET_SIZE: usize = 40;
 
 const OFF_HELLO_ACK_LAYOUT_VERSION: usize = 0;
 const OFF_HELLO_ACK_FLAGS: usize = 2;
@@ -81,6 +85,16 @@ const OFF_HELLO_ACK_AGREED_MAX_REQUEST_PAYLOAD_BYTES: usize = 16;
 const OFF_HELLO_ACK_AGREED_MAX_REQUEST_BATCH_ITEMS: usize = 20;
 const OFF_HELLO_ACK_AGREED_MAX_RESPONSE_PAYLOAD_BYTES: usize = 24;
 const OFF_HELLO_ACK_AGREED_MAX_RESPONSE_BATCH_ITEMS: usize = 28;
+const OFF_HELLO_ACK_AGREED_PACKET_SIZE: usize = 32;
+
+const OFF_CHUNK_MAGIC: usize = 0;
+const OFF_CHUNK_VERSION: usize = 4;
+const OFF_CHUNK_FLAGS: usize = 6;
+const OFF_CHUNK_MESSAGE_ID: usize = 8;
+const OFF_CHUNK_TOTAL_MESSAGE_LEN: usize = 16;
+const OFF_CHUNK_INDEX: usize = 20;
+const OFF_CHUNK_COUNT: usize = 24;
+const OFF_CHUNK_PAYLOAD_LEN: usize = 28;
 
 const OFF_CGROUPS_SNAPSHOT_REQ_LAYOUT_VERSION: usize = 0;
 const OFF_CGROUPS_SNAPSHOT_REQ_FLAGS: usize = 2;
@@ -136,6 +150,7 @@ pub struct HelloPayload {
     pub max_response_payload_bytes: u32,
     pub max_response_batch_items: u32,
     pub auth_token: u64,
+    pub packet_size: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +164,19 @@ pub struct HelloAckPayload {
     pub agreed_max_request_batch_items: u32,
     pub agreed_max_response_payload_bytes: u32,
     pub agreed_max_response_batch_items: u32,
+    pub agreed_packet_size: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkHeader {
+    pub magic: u32,
+    pub version: u16,
+    pub flags: u16,
+    pub message_id: u64,
+    pub total_message_len: u32,
+    pub chunk_index: u32,
+    pub chunk_count: u32,
+    pub chunk_payload_len: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -433,6 +461,7 @@ pub fn encode_hello_payload(payload: &HelloPayload) -> [u8; CONTROL_HELLO_PAYLOA
         payload.max_response_batch_items,
     );
     write_u64_le(&mut buf, OFF_HELLO_AUTH_TOKEN, payload.auth_token);
+    write_u32_le(&mut buf, OFF_HELLO_PACKET_SIZE, payload.packet_size);
     buf
 }
 
@@ -451,6 +480,7 @@ pub fn decode_hello_payload(buf: &[u8]) -> io::Result<HelloPayload> {
         max_response_payload_bytes: read_u32_le(buf, OFF_HELLO_MAX_RESPONSE_PAYLOAD_BYTES),
         max_response_batch_items: read_u32_le(buf, OFF_HELLO_MAX_RESPONSE_BATCH_ITEMS),
         auth_token: read_u64_le(buf, OFF_HELLO_AUTH_TOKEN),
+        packet_size: read_u32_le(buf, OFF_HELLO_PACKET_SIZE),
     })
 }
 
@@ -497,6 +527,11 @@ pub fn encode_hello_ack_payload(payload: &HelloAckPayload) -> [u8; CONTROL_HELLO
         OFF_HELLO_ACK_AGREED_MAX_RESPONSE_BATCH_ITEMS,
         payload.agreed_max_response_batch_items,
     );
+    write_u32_le(
+        &mut buf,
+        OFF_HELLO_ACK_AGREED_PACKET_SIZE,
+        payload.agreed_packet_size,
+    );
     buf
 }
 
@@ -527,7 +562,64 @@ pub fn decode_hello_ack_payload(buf: &[u8]) -> io::Result<HelloAckPayload> {
             buf,
             OFF_HELLO_ACK_AGREED_MAX_RESPONSE_BATCH_ITEMS,
         ),
+        agreed_packet_size: read_u32_le(buf, OFF_HELLO_ACK_AGREED_PACKET_SIZE),
     })
+}
+
+pub fn encode_chunk_header(header: &ChunkHeader) -> io::Result<[u8; CHUNK_HEADER_LEN]> {
+    let mut buf = [0u8; CHUNK_HEADER_LEN];
+    if header.magic != CHUNK_MAGIC
+        || header.version != CHUNK_VERSION
+        || header.chunk_count == 0
+        || header.chunk_index >= header.chunk_count
+        || header.chunk_payload_len == 0
+        || header.total_message_len == 0
+    {
+        return Err(protocol_error("invalid chunk header"));
+    }
+
+    write_u32_le(&mut buf, OFF_CHUNK_MAGIC, header.magic);
+    write_u16_le(&mut buf, OFF_CHUNK_VERSION, header.version);
+    write_u16_le(&mut buf, OFF_CHUNK_FLAGS, header.flags);
+    write_u64_le(&mut buf, OFF_CHUNK_MESSAGE_ID, header.message_id);
+    write_u32_le(
+        &mut buf,
+        OFF_CHUNK_TOTAL_MESSAGE_LEN,
+        header.total_message_len,
+    );
+    write_u32_le(&mut buf, OFF_CHUNK_INDEX, header.chunk_index);
+    write_u32_le(&mut buf, OFF_CHUNK_COUNT, header.chunk_count);
+    write_u32_le(&mut buf, OFF_CHUNK_PAYLOAD_LEN, header.chunk_payload_len);
+    Ok(buf)
+}
+
+pub fn decode_chunk_header(buf: &[u8]) -> io::Result<ChunkHeader> {
+    if buf.len() < CHUNK_HEADER_LEN {
+        return Err(protocol_error("short chunk header"));
+    }
+
+    let header = ChunkHeader {
+        magic: read_u32_le(buf, OFF_CHUNK_MAGIC),
+        version: read_u16_le(buf, OFF_CHUNK_VERSION),
+        flags: read_u16_le(buf, OFF_CHUNK_FLAGS),
+        message_id: read_u64_le(buf, OFF_CHUNK_MESSAGE_ID),
+        total_message_len: read_u32_le(buf, OFF_CHUNK_TOTAL_MESSAGE_LEN),
+        chunk_index: read_u32_le(buf, OFF_CHUNK_INDEX),
+        chunk_count: read_u32_le(buf, OFF_CHUNK_COUNT),
+        chunk_payload_len: read_u32_le(buf, OFF_CHUNK_PAYLOAD_LEN),
+    };
+
+    if header.magic != CHUNK_MAGIC
+        || header.version != CHUNK_VERSION
+        || header.chunk_count == 0
+        || header.chunk_index >= header.chunk_count
+        || header.chunk_payload_len == 0
+        || header.total_message_len == 0
+    {
+        return Err(protocol_error("invalid chunk header"));
+    }
+
+    Ok(header)
 }
 
 pub fn cgroups_snapshot_item_payload_len(item: &CgroupsSnapshotItem<'_>) -> io::Result<usize> {
@@ -890,6 +982,123 @@ pub fn decode_increment_response(frame: &Frame) -> io::Result<(u64, IncrementRes
 mod tests {
     use super::*;
 
+    fn fixed_cgroups_items() -> Vec<CgroupsSnapshotItem<'static>> {
+        vec![
+            CgroupsSnapshotItem {
+                hash: 123,
+                options: 0x2,
+                enabled: true,
+                name: b"system.slice-nginx",
+                path: b"/sys/fs/cgroup/system.slice/nginx.service/cgroup.procs",
+            },
+            CgroupsSnapshotItem {
+                hash: 456,
+                options: 0x4,
+                enabled: false,
+                name: b"docker-1234",
+                path: b"",
+            },
+            CgroupsSnapshotItem {
+                hash: 789,
+                options: 0x6,
+                enabled: true,
+                name: b"kubepods-burstable-pod01234567_89ab_cdef_0123_456789abcdef.slice",
+                path: b"/sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod01234567_89ab_cdef_0123_456789abcdef.slice/cgroup.procs",
+            },
+            CgroupsSnapshotItem {
+                hash: 1001,
+                options: 0x2,
+                enabled: true,
+                name: b"system.slice-sshd.service",
+                path: b"/sys/fs/cgroup/system.slice/sshd.service/cgroup.procs",
+            },
+            CgroupsSnapshotItem {
+                hash: 1002,
+                options: 0x2,
+                enabled: true,
+                name: b"system.slice-docker.service",
+                path: b"/sys/fs/cgroup/system.slice/docker.service/cgroup.procs",
+            },
+            CgroupsSnapshotItem {
+                hash: 1003,
+                options: 0x6,
+                enabled: true,
+                name: b"user.slice-user-1000.slice-session-3.scope",
+                path: b"/sys/fs/cgroup/user.slice/user-1000.slice/session-3.scope/cgroup.procs",
+            },
+            CgroupsSnapshotItem {
+                hash: 1004,
+                options: 0x2,
+                enabled: true,
+                name: b"machine.slice-libvirt-qemu-5-win11.scope",
+                path: b"/sys/fs/cgroup/machine.slice/libvirt-qemu-5-win11.scope/cgroup.procs",
+            },
+            CgroupsSnapshotItem {
+                hash: 1005,
+                options: 0x8,
+                enabled: false,
+                name: b"system.slice-telegraf.service",
+                path: b"/sys/fs/cgroup/system.slice/telegraf.service/cgroup.procs",
+            },
+            CgroupsSnapshotItem {
+                hash: 1006,
+                options: 0x6,
+                enabled: true,
+                name: b"podman-7f0c8e91f1ce55b0c3d1b5a4f6e8d9c0.scope",
+                path: b"/sys/fs/cgroup/system.slice/podman-7f0c8e91f1ce55b0c3d1b5a4f6e8d9c0.scope/cgroup.procs",
+            },
+            CgroupsSnapshotItem {
+                hash: 1007,
+                options: 0x4,
+                enabled: true,
+                name: b"init.scope",
+                path: b"/sys/fs/cgroup/init.scope/cgroup.procs",
+            },
+            CgroupsSnapshotItem {
+                hash: 1008,
+                options: 0x6,
+                enabled: true,
+                name: b"system.slice-containerd.service",
+                path: b"/sys/fs/cgroup/system.slice/containerd.service/cgroup.procs",
+            },
+            CgroupsSnapshotItem {
+                hash: 1009,
+                options: 0x4,
+                enabled: true,
+                name: b"machine.slice-systemd-nspawn-observability-lab.scope",
+                path: b"/sys/fs/cgroup/machine.slice/systemd-nspawn-observability-lab.scope/cgroup.procs",
+            },
+            CgroupsSnapshotItem {
+                hash: 1010,
+                options: 0x6,
+                enabled: true,
+                name: b"user.slice-user-1001.slice-user@1001.service-app.slice-observability-frontend.scope",
+                path: b"/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice/observability-frontend.scope/cgroup.procs",
+            },
+            CgroupsSnapshotItem {
+                hash: 1011,
+                options: 0x1,
+                enabled: false,
+                name: b"crio-53d2b1b5d7a04d8f9e2f6a7b8c9d0e1f.scope",
+                path: b"/sys/fs/cgroup/kubepods.slice/kubepods-pod98765432_10fe_dcba_9876_543210fedcba.slice/crio-53d2b1b5d7a04d8f9e2f6a7b8c9d0e1f.scope/cgroup.procs",
+            },
+            CgroupsSnapshotItem {
+                hash: 1012,
+                options: 0x2,
+                enabled: true,
+                name: b"system.slice-netdata.service",
+                path: b"/sys/fs/cgroup/system.slice/netdata.service/cgroup.procs",
+            },
+            CgroupsSnapshotItem {
+                hash: 1013,
+                options: 0x6,
+                enabled: true,
+                name: b"system.slice-super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service",
+                path: b"/sys/fs/cgroup/system.slice/super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service/cgroup.procs",
+            },
+        ]
+    }
+
     #[test]
     fn message_header_roundtrip() {
         let encoded = encode_message_header(&MessageHeader {
@@ -972,6 +1181,7 @@ mod tests {
             max_response_payload_bytes: 7,
             max_response_batch_items: 8,
             auth_token: 9,
+            packet_size: 10,
         });
         let decoded = decode_hello_payload(&encoded).expect("decode hello");
         assert_eq!(decoded.layout_version, 1);
@@ -983,6 +1193,7 @@ mod tests {
         assert_eq!(decoded.max_response_payload_bytes, 7);
         assert_eq!(decoded.max_response_batch_items, 8);
         assert_eq!(decoded.auth_token, 9);
+        assert_eq!(decoded.packet_size, 10);
     }
 
     #[test]
@@ -997,6 +1208,7 @@ mod tests {
             agreed_max_request_batch_items: 7,
             agreed_max_response_payload_bytes: 8,
             agreed_max_response_batch_items: 9,
+            agreed_packet_size: 10,
         });
         let decoded = decode_hello_ack_payload(&encoded).expect("decode hello ack");
         assert_eq!(decoded.layout_version, 1);
@@ -1008,6 +1220,31 @@ mod tests {
         assert_eq!(decoded.agreed_max_request_batch_items, 7);
         assert_eq!(decoded.agreed_max_response_payload_bytes, 8);
         assert_eq!(decoded.agreed_max_response_batch_items, 9);
+        assert_eq!(decoded.agreed_packet_size, 10);
+    }
+
+    #[test]
+    fn chunk_header_roundtrip() {
+        let encoded = encode_chunk_header(&ChunkHeader {
+            magic: CHUNK_MAGIC,
+            version: CHUNK_VERSION,
+            flags: 3,
+            message_id: 99,
+            total_message_len: 1234,
+            chunk_index: 1,
+            chunk_count: 4,
+            chunk_payload_len: 512,
+        })
+        .expect("encode chunk");
+        let decoded = decode_chunk_header(&encoded).expect("decode chunk");
+        assert_eq!(decoded.magic, CHUNK_MAGIC);
+        assert_eq!(decoded.version, CHUNK_VERSION);
+        assert_eq!(decoded.flags, 3);
+        assert_eq!(decoded.message_id, 99);
+        assert_eq!(decoded.total_message_len, 1234);
+        assert_eq!(decoded.chunk_index, 1);
+        assert_eq!(decoded.chunk_count, 4);
+        assert_eq!(decoded.chunk_payload_len, 512);
     }
 
     #[test]
@@ -1021,36 +1258,28 @@ mod tests {
 
     #[test]
     fn cgroups_snapshot_response_roundtrip() {
-        let mut buf = vec![0u8; 512];
+        let items = fixed_cgroups_items();
+        let payload_cap = max_batch_payload_len(
+            CGROUPS_SNAPSHOT_ITEM_HEADER_LEN as u32 + 255 + 1 + 4096 + 1,
+            items.len() as u32,
+        )
+        .expect("batch payload len");
+        let mut buf = vec![0u8; payload_cap];
         let mut builder =
-            CgroupsSnapshotResponseBuilder::new(&mut buf, 42, true, 3, 2).expect("create builder");
-        builder
-            .push_item(&CgroupsSnapshotItem {
-                hash: 123,
-                options: 0x2,
-                enabled: true,
-                name: b"system.slice-nginx",
-                path: b"/sys/fs/cgroup/system.slice/nginx.service/cgroup.procs",
-            })
-            .expect("push first item");
-        builder
-            .push_item(&CgroupsSnapshotItem {
-                hash: 456,
-                options: 0x4,
-                enabled: false,
-                name: b"docker-1234",
-                path: b"",
-            })
-            .expect("push second item");
+            CgroupsSnapshotResponseBuilder::new(&mut buf, 42, true, 3, items.len() as u32)
+                .expect("create builder");
+        for item in &items {
+            builder.push_item(item).expect("push item");
+        }
         let payload_len = builder.finish().expect("finish builder");
 
-        let decoded = decode_cgroups_snapshot_view(&buf[..payload_len], 2)
+        let decoded = decode_cgroups_snapshot_view(&buf[..payload_len], items.len() as u32)
             .expect("decode cgroups snapshot view");
         assert_eq!(decoded.layout_version, CGROUPS_SNAPSHOT_LAYOUT_VERSION);
         assert_eq!(decoded.flags, 3);
         assert!(decoded.systemd_enabled);
         assert_eq!(decoded.generation, 42);
-        assert_eq!(decoded.item_count, 2);
+        assert_eq!(decoded.item_count, items.len() as u32);
 
         let first = decoded.item_view_at(0).expect("decode first item");
         assert_eq!(first.hash, 123);
@@ -1068,6 +1297,53 @@ mod tests {
         assert!(!second.enabled);
         assert_eq!(second.name_view.as_bytes(), b"docker-1234");
         assert!(second.path_view.is_empty());
+
+        let long_item = decoded
+            .item_view_at((items.len() - 1) as u32)
+            .expect("decode last item");
+        assert_eq!(long_item.hash, 1013);
+        assert_eq!(
+            long_item.name_view.as_bytes(),
+            b"system.slice-super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service"
+        );
+    }
+
+    fn fixed_cgroups_snapshot_payload() -> (Vec<u8>, u32) {
+        let items = fixed_cgroups_items();
+        let payload_cap = max_batch_payload_len(
+            CGROUPS_SNAPSHOT_ITEM_HEADER_LEN as u32 + 255 + 1 + 4096 + 1,
+            items.len() as u32,
+        )
+        .expect("batch payload len");
+        let mut buf = vec![0u8; payload_cap];
+        let mut builder =
+            CgroupsSnapshotResponseBuilder::new(&mut buf, 42, true, 3, items.len() as u32)
+                .expect("create builder");
+        for item in &items {
+            builder.push_item(item).expect("push item");
+        }
+        let payload_len = builder.finish().expect("finish builder");
+        (buf[..payload_len].to_vec(), items.len() as u32)
+    }
+
+    #[test]
+    fn cgroups_snapshot_decode_never_panics_on_corrupted_payloads() {
+        let (payload, item_count) = fixed_cgroups_snapshot_payload();
+
+        for idx in 0..payload.len() {
+            let mut corrupted = payload.clone();
+            corrupted[idx] ^= 0xff;
+
+            let result = std::panic::catch_unwind(|| {
+                if let Ok(view) = decode_cgroups_snapshot_view(&corrupted, item_count) {
+                    for i in 0..view.item_count {
+                        let _ = view.item_view_at(i);
+                    }
+                }
+            });
+
+            assert!(result.is_ok(), "decoder panicked for corrupted byte {idx}");
+        }
     }
 
     #[test]

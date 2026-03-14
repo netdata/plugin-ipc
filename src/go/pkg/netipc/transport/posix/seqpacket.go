@@ -41,25 +41,25 @@ const (
 )
 
 type Config struct {
-	RunDir            string
-	ServiceName       string
-	FileMode          os.FileMode
-	SupportedProfiles uint32
-	PreferredProfiles uint32
+	RunDir                  string
+	ServiceName             string
+	FileMode                os.FileMode
+	SupportedProfiles       uint32
+	PreferredProfiles       uint32
 	MaxRequestPayloadBytes  uint32
 	MaxRequestBatchItems    uint32
 	MaxResponsePayloadBytes uint32
 	MaxResponseBatchItems   uint32
-	AuthToken         uint64
+	AuthToken               uint64
 }
 
 func NewConfig(runDir, serviceName string) Config {
 	return Config{
-		RunDir:            runDir,
-		ServiceName:       serviceName,
-		FileMode:          0o600,
-		SupportedProfiles: DefaultSupportedProfiles,
-		PreferredProfiles: DefaultPreferredProfiles,
+		RunDir:                  runDir,
+		ServiceName:             serviceName,
+		FileMode:                0o600,
+		SupportedProfiles:       DefaultSupportedProfiles,
+		PreferredProfiles:       DefaultPreferredProfiles,
 		MaxRequestPayloadBytes:  protocol.MaxPayloadDefault,
 		MaxRequestBatchItems:    negDefaultBatchItems,
 		MaxResponsePayloadBytes: protocol.MaxPayloadDefault,
@@ -68,40 +68,51 @@ func NewConfig(runDir, serviceName string) Config {
 }
 
 type Server struct {
-	listener              *net.UnixListener
-	conn                  *net.UnixConn
-	shm                   *shmServer
-	path                  string
-	supportedProfiles     uint32
-	preferredProfiles     uint32
+	listener *Listener
+	session  *Session
+}
+
+type Listener struct {
+	listener                *net.UnixListener
+	path                    string
+	supportedProfiles       uint32
+	preferredProfiles       uint32
 	maxRequestPayloadBytes  uint32
 	maxRequestBatchItems    uint32
 	maxResponsePayloadBytes uint32
 	maxResponseBatchItems   uint32
-	authToken             uint64
+	authToken               uint64
+}
+
+type Session struct {
+	conn                  *net.UnixConn
+	shm                   *shmServer
 	negotiatedProfile     uint32
+	packetSize            uint32
 	maxRequestMessageLen  int
 	maxResponseMessageLen int
 }
 
 type Client struct {
-	conn                  *net.UnixConn
-	shm                   *shmClient
-	supportedProfiles     uint32
-	preferredProfiles     uint32
+	conn                    *net.UnixConn
+	shm                     *shmClient
+	supportedProfiles       uint32
+	preferredProfiles       uint32
 	maxRequestPayloadBytes  uint32
 	maxRequestBatchItems    uint32
 	maxResponsePayloadBytes uint32
 	maxResponseBatchItems   uint32
-	authToken             uint64
-	negotiatedProfile     uint32
-	maxRequestMessageLen  int
-	maxResponseMessageLen int
-	nextRequestID         uint64
+	authToken               uint64
+	negotiatedProfile       uint32
+	packetSize              uint32
+	maxRequestMessageLen    int
+	maxResponseMessageLen   int
+	nextRequestID           uint64
 }
 
 type negotiationResult struct {
 	profile               uint32
+	packetSize            uint32
 	maxRequestMessageLen  int
 	maxResponseMessageLen int
 }
@@ -177,6 +188,47 @@ func computeMaxMessageLen(maxPayloadBytes, maxBatchItems uint32) (int, error) {
 		return 0, err
 	}
 	return total, nil
+}
+
+func computeSeqpacketPacketSize(conn *net.UnixConn, maxRequestMessageLen, maxResponseMessageLen int) (uint32, error) {
+	rawConn, err := conn.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+
+	var sndbuf int
+	var controlErr error
+	if err := rawConn.Control(func(fd uintptr) {
+		sndbuf, controlErr = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF)
+	}); err != nil {
+		return 0, err
+	}
+	if controlErr != nil {
+		return 0, controlErr
+	}
+	if sndbuf <= 32 {
+		return 0, fmt.Errorf("socket send buffer too small")
+	}
+
+	logicalLimit := maxRequestMessageLen
+	if maxResponseMessageLen > logicalLimit {
+		logicalLimit = maxResponseMessageLen
+	}
+	packetSize := sndbuf - 32
+	if logicalLimit != 0 && packetSize > logicalLimit {
+		packetSize = logicalLimit
+	}
+	if packetSize <= protocol.ChunkHeaderLen {
+		return 0, fmt.Errorf("packet size too small")
+	}
+	return uint32(packetSize), nil
+}
+
+func computeChunkPayloadBudget(packetSize uint32) (int, error) {
+	if int(packetSize) <= protocol.ChunkHeaderLen {
+		return 0, fmt.Errorf("packet size too small for chunk header")
+	}
+	return int(packetSize) - protocol.ChunkHeaderLen, nil
 }
 
 func encodeNegHeader(typ uint16) protocol.Frame {
@@ -302,6 +354,51 @@ func writeMessage(conn *net.UnixConn, message []byte, timeout time.Duration) err
 	return nil
 }
 
+func sendChunkedMessage(conn *net.UnixConn, message []byte, packetSize uint32, timeout time.Duration) error {
+	chunkPayloadBudget, err := computeChunkPayloadBudget(packetSize)
+	if err != nil {
+		return err
+	}
+	header, err := protocol.DecodeMessageHeader(message)
+	if err != nil {
+		return err
+	}
+
+	chunkCount := (len(message) + chunkPayloadBudget - 1) / chunkPayloadBudget
+	packet := make([]byte, int(packetSize))
+	offset := 0
+	for chunkIndex := 0; chunkIndex < chunkCount; chunkIndex++ {
+		remaining := len(message) - offset
+		chunkPayloadLen := remaining
+		if chunkPayloadLen > chunkPayloadBudget {
+			chunkPayloadLen = chunkPayloadBudget
+		}
+
+		chunkHeader, err := protocol.EncodeChunkHeader(protocol.ChunkHeader{
+			Magic:           protocol.ChunkMagic,
+			Version:         protocol.ChunkVersion,
+			Flags:           0,
+			MessageID:       header.MessageID,
+			TotalMessageLen: uint32(len(message)),
+			ChunkIndex:      uint32(chunkIndex),
+			ChunkCount:      uint32(chunkCount),
+			ChunkPayloadLen: uint32(chunkPayloadLen),
+		})
+		if err != nil {
+			return err
+		}
+
+		copy(packet[:protocol.ChunkHeaderLen], chunkHeader[:])
+		copy(packet[protocol.ChunkHeaderLen:protocol.ChunkHeaderLen+chunkPayloadLen], message[offset:offset+chunkPayloadLen])
+		if err := writeMessage(conn, packet[:protocol.ChunkHeaderLen+chunkPayloadLen], timeout); err != nil {
+			return err
+		}
+		offset += chunkPayloadLen
+	}
+
+	return nil
+}
+
 func validateMessageForSend(message []byte, maxMessageLen int) error {
 	if len(message) == 0 {
 		return fmt.Errorf("message must not be empty")
@@ -342,6 +439,93 @@ func validateReceivedMessage(message []byte, messageLen int, maxMessageLen int) 
 		return fmt.Errorf("message size does not match header")
 	}
 	return nil
+}
+
+func recvTransportMessage(conn *net.UnixConn, message []byte, maxMessageLen int, packetSize uint32, timeout time.Duration) (int, error) {
+	firstCapacity := len(message)
+	if packetSize != 0 && firstCapacity > int(packetSize) {
+		firstCapacity = int(packetSize)
+	}
+
+	firstPacketLen, err := readMessage(conn, message[:firstCapacity], timeout)
+	if err != nil {
+		return 0, err
+	}
+	if firstPacketLen >= protocol.MessageHeaderLen {
+		header, err := protocol.DecodeMessageHeader(message[:firstPacketLen])
+		if err == nil {
+			total, err := protocol.MessageTotalSize(header)
+			if err == nil && total == firstPacketLen {
+				if err := validateReceivedMessage(message, firstPacketLen, maxMessageLen); err != nil {
+					return 0, err
+				}
+				return firstPacketLen, nil
+			}
+		}
+	}
+
+	firstChunk, err := protocol.DecodeChunkHeader(message[:firstPacketLen])
+	if err != nil {
+		return 0, err
+	}
+	if firstChunk.ChunkIndex != 0 || firstChunk.ChunkCount < 2 {
+		return 0, fmt.Errorf("invalid first chunk header")
+	}
+	if int(firstChunk.TotalMessageLen) > len(message) || int(firstChunk.TotalMessageLen) > maxMessageLen {
+		return 0, fmt.Errorf("message exceeds negotiated size")
+	}
+
+	firstPayloadLen := firstPacketLen - protocol.ChunkHeaderLen
+	if firstPayloadLen != int(firstChunk.ChunkPayloadLen) {
+		return 0, fmt.Errorf("invalid first chunk payload length")
+	}
+
+	copy(message[:firstPayloadLen], message[protocol.ChunkHeaderLen:firstPacketLen])
+	offset := firstPayloadLen
+	packet := make([]byte, int(packetSize))
+	for expectedIndex := uint32(1); expectedIndex < firstChunk.ChunkCount; expectedIndex++ {
+		packetLen, err := readMessage(conn, packet, timeout)
+		if err != nil {
+			return 0, err
+		}
+		if packetLen < protocol.ChunkHeaderLen {
+			return 0, fmt.Errorf("short chunk packet")
+		}
+
+		chunk, err := protocol.DecodeChunkHeader(packet[:protocol.ChunkHeaderLen])
+		if err != nil {
+			return 0, err
+		}
+		payloadLen := packetLen - protocol.ChunkHeaderLen
+		if chunk.MessageID != firstChunk.MessageID ||
+			chunk.TotalMessageLen != firstChunk.TotalMessageLen ||
+			chunk.ChunkCount != firstChunk.ChunkCount ||
+			chunk.ChunkIndex != expectedIndex ||
+			payloadLen != int(chunk.ChunkPayloadLen) {
+			return 0, fmt.Errorf("chunk stream desync")
+		}
+
+		copy(message[offset:offset+payloadLen], packet[protocol.ChunkHeaderLen:packetLen])
+		offset += payloadLen
+	}
+
+	if offset != int(firstChunk.TotalMessageLen) {
+		return 0, fmt.Errorf("incomplete chunked message")
+	}
+	if err := validateReceivedMessage(message, offset, maxMessageLen); err != nil {
+		return 0, err
+	}
+	return offset, nil
+}
+
+func sendTransportMessage(conn *net.UnixConn, message []byte, maxMessageLen int, packetSize uint32, timeout time.Duration) error {
+	if err := validateMessageForSend(message, maxMessageLen); err != nil {
+		return err
+	}
+	if packetSize != 0 && len(message) > int(packetSize) {
+		return sendChunkedMessage(conn, message, packetSize, timeout)
+	}
+	return writeMessage(conn, message, timeout)
 }
 
 func tryTakeoverStaleSocket(path string) (bool, error) {
@@ -424,7 +608,7 @@ func isAddrInUse(err error) bool {
 	return false
 }
 
-func udsServerHandshake(conn *net.UnixConn, server *Server, timeout time.Duration) (negotiationResult, error) {
+func udsServerHandshake(conn *net.UnixConn, listener *Listener, timeout time.Duration) (negotiationResult, error) {
 	helloFrame, err := readFrame(conn, timeout)
 	if err != nil {
 		return negotiationResult{}, err
@@ -433,26 +617,39 @@ func udsServerHandshake(conn *net.UnixConn, server *Server, timeout time.Duratio
 	if err != nil {
 		return negotiationResult{}, err
 	}
+	localMaxRequestMessageLen, err := computeMaxMessageLen(listener.maxRequestPayloadBytes, listener.maxRequestBatchItems)
+	if err != nil {
+		return negotiationResult{}, err
+	}
+	localMaxResponseMessageLen, err := computeMaxMessageLen(listener.maxResponsePayloadBytes, listener.maxResponseBatchItems)
+	if err != nil {
+		return negotiationResult{}, err
+	}
+	localPacketSize, err := computeSeqpacketPacketSize(conn, localMaxRequestMessageLen, localMaxResponseMessageLen)
+	if err != nil {
+		return negotiationResult{}, err
+	}
 
 	ack := protocol.HelloAckPayload{
 		LayoutVersion:              hello.LayoutVersion,
 		Flags:                      0,
-		ServerSupported:            server.supportedProfiles,
-		Intersection:               hello.Supported & server.supportedProfiles,
+		ServerSupported:            listener.supportedProfiles,
+		Intersection:               hello.Supported & listener.supportedProfiles,
 		Selected:                   0,
-		AgreedMaxRequestPayload:    negotiateLimit(hello.MaxRequestPayloadBytes, server.maxRequestPayloadBytes),
-		AgreedMaxRequestBatchItems: negotiateLimit(hello.MaxRequestBatchItems, server.maxRequestBatchItems),
-		AgreedMaxResponsePayload:   negotiateLimit(hello.MaxResponsePayloadBytes, server.maxResponsePayloadBytes),
+		AgreedMaxRequestPayload:    negotiateLimit(hello.MaxRequestPayloadBytes, listener.maxRequestPayloadBytes),
+		AgreedMaxRequestBatchItems: negotiateLimit(hello.MaxRequestBatchItems, listener.maxRequestBatchItems),
+		AgreedMaxResponsePayload:   negotiateLimit(hello.MaxResponsePayloadBytes, listener.maxResponsePayloadBytes),
 		AgreedMaxResponseBatchItems: negotiateLimit(
 			hello.MaxResponseBatchItems,
-			server.maxResponseBatchItems,
+			listener.maxResponseBatchItems,
 		),
+		AgreedPacketSize: negotiateLimit(hello.PacketSize, localPacketSize),
 	}
 	status := negStatusOK
-	if server.authToken != 0 && hello.AuthToken != server.authToken {
+	if listener.authToken != 0 && hello.AuthToken != listener.authToken {
 		status = uint32(syscallEACCES())
 	} else {
-		candidates := ack.Intersection & server.preferredProfiles
+		candidates := ack.Intersection & listener.preferredProfiles
 		if candidates == 0 {
 			candidates = ack.Intersection
 		}
@@ -460,7 +657,7 @@ func udsServerHandshake(conn *net.UnixConn, server *Server, timeout time.Duratio
 		if ack.Selected == 0 {
 			status = uint32(syscallENOTSUP())
 		} else if ack.AgreedMaxRequestPayload == 0 || ack.AgreedMaxRequestBatchItems == 0 ||
-			ack.AgreedMaxResponsePayload == 0 || ack.AgreedMaxResponseBatchItems == 0 {
+			ack.AgreedMaxResponsePayload == 0 || ack.AgreedMaxResponseBatchItems == 0 || ack.AgreedPacketSize == 0 {
 			status = uint32(syscallEPROTO())
 		}
 	}
@@ -480,14 +677,22 @@ func udsServerHandshake(conn *net.UnixConn, server *Server, timeout time.Duratio
 	if err != nil {
 		return negotiationResult{}, err
 	}
+	if int(ack.AgreedPacketSize) > max(maxRequestMessageLen, maxResponseMessageLen) {
+		return negotiationResult{}, syscallErrno(uint32(syscallEPROTO()))
+	}
 	return negotiationResult{
 		profile:               ack.Selected,
+		packetSize:            ack.AgreedPacketSize,
 		maxRequestMessageLen:  maxRequestMessageLen,
 		maxResponseMessageLen: maxResponseMessageLen,
 	}, nil
 }
 
 func udsClientHandshake(conn *net.UnixConn, client *Client, timeout time.Duration) (negotiationResult, error) {
+	localPacketSize, err := computeSeqpacketPacketSize(conn, client.maxRequestMessageLen, client.maxResponseMessageLen)
+	if err != nil {
+		return negotiationResult{}, err
+	}
 	hello := protocol.HelloPayload{
 		LayoutVersion:           protocol.MessageVersion,
 		Flags:                   0,
@@ -498,6 +703,7 @@ func udsClientHandshake(conn *net.UnixConn, client *Client, timeout time.Duratio
 		MaxResponsePayloadBytes: client.maxResponsePayloadBytes,
 		MaxResponseBatchItems:   client.maxResponseBatchItems,
 		AuthToken:               client.authToken,
+		PacketSize:              localPacketSize,
 	}
 	if err := writeFrame(conn, encodeHelloNeg(hello), timeout); err != nil {
 		return negotiationResult{}, err
@@ -515,7 +721,8 @@ func udsClientHandshake(conn *net.UnixConn, client *Client, timeout time.Duratio
 	}
 	if ack.Selected == 0 || (ack.Selected&client.supportedProfiles) == 0 || (ack.Intersection&client.supportedProfiles) == 0 ||
 		ack.AgreedMaxRequestPayload == 0 || ack.AgreedMaxRequestBatchItems == 0 ||
-		ack.AgreedMaxResponsePayload == 0 || ack.AgreedMaxResponseBatchItems == 0 {
+		ack.AgreedMaxResponsePayload == 0 || ack.AgreedMaxResponseBatchItems == 0 ||
+		ack.AgreedPacketSize == 0 || ack.AgreedPacketSize > localPacketSize {
 		return negotiationResult{}, errors.New("invalid negotiated profile")
 	}
 	maxRequestMessageLen, err := computeMaxMessageLen(ack.AgreedMaxRequestPayload, ack.AgreedMaxRequestBatchItems)
@@ -526,14 +733,18 @@ func udsClientHandshake(conn *net.UnixConn, client *Client, timeout time.Duratio
 	if err != nil {
 		return negotiationResult{}, err
 	}
+	if int(ack.AgreedPacketSize) > max(maxRequestMessageLen, maxResponseMessageLen) {
+		return negotiationResult{}, syscallErrno(uint32(syscallEPROTO()))
+	}
 	return negotiationResult{
 		profile:               ack.Selected,
+		packetSize:            ack.AgreedPacketSize,
 		maxRequestMessageLen:  maxRequestMessageLen,
 		maxResponseMessageLen: maxResponseMessageLen,
 	}, nil
 }
 
-func Listen(config Config) (*Server, error) {
+func NewListener(config Config) (*Listener, error) {
 	if config.RunDir == "" || config.ServiceName == "" {
 		return nil, fmt.Errorf("run_dir and service_name must be set")
 	}
@@ -544,110 +755,108 @@ func Listen(config Config) (*Server, error) {
 	}
 	supportedProfiles := effectiveSupportedProfiles(config)
 	preferredProfiles := effectivePreferredProfiles(config, supportedProfiles)
-	return &Server{
-		listener:          ln,
-		path:              path,
-		supportedProfiles: supportedProfiles,
-		preferredProfiles: preferredProfiles,
+	return &Listener{
+		listener:                ln,
+		path:                    path,
+		supportedProfiles:       supportedProfiles,
+		preferredProfiles:       preferredProfiles,
 		maxRequestPayloadBytes:  effectivePayloadLimit(config.MaxRequestPayloadBytes),
 		maxRequestBatchItems:    effectiveBatchLimit(config.MaxRequestBatchItems),
 		maxResponsePayloadBytes: effectivePayloadLimit(config.MaxResponsePayloadBytes),
 		maxResponseBatchItems:   effectiveBatchLimit(config.MaxResponseBatchItems),
-		authToken:         config.AuthToken,
+		authToken:               config.AuthToken,
 	}, nil
 }
 
-func (s *Server) Accept(timeout time.Duration) error {
-	if s.conn != nil {
-		return errors.New("server is already connected")
+func Listen(config Config) (*Server, error) {
+	listener, err := NewListener(config)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{listener: listener}, nil
+}
+
+func (l *Listener) Accept(timeout time.Duration) (*Session, error) {
+	if l.listener == nil {
+		return nil, errors.New("listener is closed")
 	}
 	if timeout > 0 {
-		_ = s.listener.SetDeadline(time.Now().Add(timeout))
+		_ = l.listener.SetDeadline(time.Now().Add(timeout))
 	} else {
-		_ = s.listener.SetDeadline(time.Time{})
+		_ = l.listener.SetDeadline(time.Time{})
 	}
-	conn, err := s.listener.AcceptUnix()
+	conn, err := l.listener.AcceptUnix()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	negotiated, err := udsServerHandshake(conn, s, timeout)
+	negotiated, err := udsServerHandshake(conn, l, timeout)
 	if err != nil {
 		_ = conn.Close()
-		return err
+		return nil, err
 	}
-	s.conn = conn
-	s.negotiatedProfile = negotiated.profile
-	s.maxRequestMessageLen = negotiated.maxRequestMessageLen
-	s.maxResponseMessageLen = negotiated.maxResponseMessageLen
-	if s.negotiatedProfile == ProfileSHMHybrid {
-		shm, err := newSHMServer(s.path, s.maxRequestMessageLen, s.maxResponseMessageLen)
+	session := &Session{
+		conn:                  conn,
+		shm:                   nil,
+		negotiatedProfile:     negotiated.profile,
+		packetSize:            negotiated.packetSize,
+		maxRequestMessageLen:  negotiated.maxRequestMessageLen,
+		maxResponseMessageLen: negotiated.maxResponseMessageLen,
+	}
+	if session.negotiatedProfile == ProfileSHMHybrid {
+		shm, err := newSHMServer(l.path, session.maxRequestMessageLen, session.maxResponseMessageLen)
 		if err != nil {
 			_ = conn.Close()
-			s.conn = nil
-			s.negotiatedProfile = 0
-			return err
+			return nil, err
 		}
-		s.shm = shm
-	} else {
-		s.shm = nil
+		session.shm = shm
 	}
-	return nil
+	return session, nil
 }
 
-func (s *Server) ReceiveMessage(message []byte, timeout time.Duration) (int, error) {
-	if s.conn == nil {
-		return 0, errors.New("server is not connected")
+func (sess *Session) ReceiveMessage(message []byte, timeout time.Duration) (int, error) {
+	if sess.conn == nil {
+		return 0, errors.New("session is closed")
 	}
-	if s.negotiatedProfile == ProfileSHMHybrid {
-		if s.shm == nil {
+	if sess.negotiatedProfile == ProfileSHMHybrid {
+		if sess.shm == nil {
 			return 0, errors.New("SHM server is not available")
 		}
-		return s.shm.receiveMessage(message, timeout)
+		return sess.shm.receiveMessage(message, timeout)
 	}
-	if s.maxRequestMessageLen == 0 || len(message) < s.maxRequestMessageLen {
+	if sess.maxRequestMessageLen == 0 || len(message) < sess.maxRequestMessageLen {
 		return 0, fmt.Errorf("message buffer is smaller than negotiated request size")
 	}
-	messageLen, err := readMessage(s.conn, message, timeout)
-	if err != nil {
-		return 0, err
-	}
-	if err := validateReceivedMessage(message, messageLen, s.maxRequestMessageLen); err != nil {
-		return 0, err
-	}
-	return messageLen, nil
+	return recvTransportMessage(sess.conn, message, sess.maxRequestMessageLen, sess.packetSize, timeout)
 }
 
-func (s *Server) SendMessage(message []byte, timeout time.Duration) error {
-	if s.conn == nil {
-		return errors.New("server is not connected")
+func (sess *Session) SendMessage(message []byte, timeout time.Duration) error {
+	if sess.conn == nil {
+		return errors.New("session is closed")
 	}
-	if s.negotiatedProfile == ProfileSHMHybrid {
-		if s.shm == nil {
+	if sess.negotiatedProfile == ProfileSHMHybrid {
+		if sess.shm == nil {
 			return errors.New("SHM server is not available")
 		}
-		return s.shm.sendMessage(message)
+		return sess.shm.sendMessage(message)
 	}
-	if s.maxResponseMessageLen == 0 {
+	if sess.maxResponseMessageLen == 0 {
 		return errors.New("negotiated response size is not available")
 	}
-	if err := validateMessageForSend(message, s.maxResponseMessageLen); err != nil {
-		return err
-	}
-	return writeMessage(s.conn, message, timeout)
+	return sendTransportMessage(sess.conn, message, sess.maxResponseMessageLen, sess.packetSize, timeout)
 }
 
-func (s *Server) ReceiveFrame(timeout time.Duration) (protocol.Frame, error) {
-	if s.conn == nil {
-		return protocol.Frame{}, errors.New("server is not connected")
+func (sess *Session) ReceiveFrame(timeout time.Duration) (protocol.Frame, error) {
+	if sess.conn == nil {
+		return protocol.Frame{}, errors.New("session is closed")
 	}
-	if s.negotiatedProfile == ProfileSHMHybrid {
-		if s.shm == nil {
+	if sess.negotiatedProfile == ProfileSHMHybrid {
+		if sess.shm == nil {
 			return protocol.Frame{}, errors.New("SHM server is not available")
 		}
-		return s.shm.receiveFrame(timeout)
+		return sess.shm.receiveFrame(timeout)
 	}
 	buf := make([]byte, protocol.FrameSize)
-	messageLen, err := readMessage(s.conn, buf, timeout)
+	messageLen, err := readMessage(sess.conn, buf, timeout)
 	if err != nil {
 		return protocol.Frame{}, err
 	}
@@ -659,59 +868,145 @@ func (s *Server) ReceiveFrame(timeout time.Duration) (protocol.Frame, error) {
 	return out, nil
 }
 
-func (s *Server) SendFrame(frame protocol.Frame, timeout time.Duration) error {
-	if s.conn == nil {
-		return errors.New("server is not connected")
+func (sess *Session) SendFrame(frame protocol.Frame, timeout time.Duration) error {
+	if sess.conn == nil {
+		return errors.New("session is closed")
 	}
-	if s.negotiatedProfile == ProfileSHMHybrid {
-		if s.shm == nil {
+	if sess.negotiatedProfile == ProfileSHMHybrid {
+		if sess.shm == nil {
 			return errors.New("SHM server is not available")
 		}
-		return s.shm.sendFrame(frame)
+		return sess.shm.sendFrame(frame)
 	}
-	return writeMessage(s.conn, frame[:], timeout)
+	return writeMessage(sess.conn, frame[:], timeout)
 }
 
-func (s *Server) ReceiveIncrement(timeout time.Duration) (uint64, protocol.IncrementRequest, error) {
-	frame, err := s.ReceiveFrame(timeout)
+func (sess *Session) ReceiveIncrement(timeout time.Duration) (uint64, protocol.IncrementRequest, error) {
+	frame, err := sess.ReceiveFrame(timeout)
 	if err != nil {
 		return 0, protocol.IncrementRequest{}, err
 	}
 	return protocol.DecodeIncrementRequest(frame)
 }
 
+func (sess *Session) SendIncrement(requestID uint64, response protocol.IncrementResponse, timeout time.Duration) error {
+	return sess.SendFrame(protocol.EncodeIncrementResponse(requestID, response), timeout)
+}
+
+func (sess *Session) NegotiatedProfile() uint32 {
+	return sess.negotiatedProfile
+}
+
+func (sess *Session) Close() error {
+	var errs []error
+	if sess.shm != nil {
+		if err := sess.shm.close(); err != nil {
+			errs = append(errs, err)
+		}
+		sess.shm = nil
+	}
+	if sess.conn != nil {
+		if err := sess.conn.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		sess.conn = nil
+	}
+	return errors.Join(errs...)
+}
+
+func (l *Listener) Close() error {
+	var errs []error
+	if l.listener != nil {
+		if err := l.listener.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		l.listener = nil
+	}
+	if l.path != "" {
+		if err := os.Remove(l.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s *Server) Accept(timeout time.Duration) error {
+	if s.listener == nil {
+		return errors.New("server is closed")
+	}
+	if s.session != nil {
+		return errors.New("server is already connected")
+	}
+	session, err := s.listener.Accept(timeout)
+	if err != nil {
+		return err
+	}
+	s.session = session
+	return nil
+}
+
+func (s *Server) ReceiveMessage(message []byte, timeout time.Duration) (int, error) {
+	if s.session == nil {
+		return 0, errors.New("server is not connected")
+	}
+	return s.session.ReceiveMessage(message, timeout)
+}
+
+func (s *Server) SendMessage(message []byte, timeout time.Duration) error {
+	if s.session == nil {
+		return errors.New("server is not connected")
+	}
+	return s.session.SendMessage(message, timeout)
+}
+
+func (s *Server) ReceiveFrame(timeout time.Duration) (protocol.Frame, error) {
+	if s.session == nil {
+		return protocol.Frame{}, errors.New("server is not connected")
+	}
+	return s.session.ReceiveFrame(timeout)
+}
+
+func (s *Server) SendFrame(frame protocol.Frame, timeout time.Duration) error {
+	if s.session == nil {
+		return errors.New("server is not connected")
+	}
+	return s.session.SendFrame(frame, timeout)
+}
+
+func (s *Server) ReceiveIncrement(timeout time.Duration) (uint64, protocol.IncrementRequest, error) {
+	if s.session == nil {
+		return 0, protocol.IncrementRequest{}, errors.New("server is not connected")
+	}
+	return s.session.ReceiveIncrement(timeout)
+}
+
 func (s *Server) SendIncrement(requestID uint64, response protocol.IncrementResponse, timeout time.Duration) error {
-	return s.SendFrame(protocol.EncodeIncrementResponse(requestID, response), timeout)
+	if s.session == nil {
+		return errors.New("server is not connected")
+	}
+	return s.session.SendIncrement(requestID, response, timeout)
 }
 
 func (s *Server) NegotiatedProfile() uint32 {
-	return s.negotiatedProfile
+	if s.session == nil {
+		return 0
+	}
+	return s.session.NegotiatedProfile()
 }
 
 func (s *Server) Close() error {
 	var errs []error
-	if s.shm != nil {
-		if err := s.shm.close(); err != nil {
+	if s.session != nil {
+		if err := s.session.Close(); err != nil {
 			errs = append(errs, err)
 		}
-		s.shm = nil
-	}
-	if s.conn != nil {
-		if err := s.conn.Close(); err != nil {
-			errs = append(errs, err)
-		}
-		s.conn = nil
+		s.session = nil
 	}
 	if s.listener != nil {
 		if err := s.listener.Close(); err != nil {
 			errs = append(errs, err)
 		}
 		s.listener = nil
-	}
-	if s.path != "" {
-		if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, err)
-		}
 	}
 	return errors.Join(errs...)
 }
@@ -726,18 +1021,33 @@ func Dial(config Config, timeout time.Duration) (*Client, error) {
 	}
 	supportedProfiles := effectiveSupportedProfiles(config)
 	preferredProfiles := effectivePreferredProfiles(config, supportedProfiles)
+	maxRequestPayloadBytes := effectivePayloadLimit(config.MaxRequestPayloadBytes)
+	maxRequestBatchItems := effectiveBatchLimit(config.MaxRequestBatchItems)
+	maxResponsePayloadBytes := effectivePayloadLimit(config.MaxResponsePayloadBytes)
+	maxResponseBatchItems := effectiveBatchLimit(config.MaxResponseBatchItems)
+	maxRequestMessageLen, err := computeMaxMessageLen(maxRequestPayloadBytes, maxRequestBatchItems)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	maxResponseMessageLen, err := computeMaxMessageLen(maxResponsePayloadBytes, maxResponseBatchItems)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 	negotiated, err := udsClientHandshake(conn, &Client{
 		conn:                    conn,
 		supportedProfiles:       supportedProfiles,
 		preferredProfiles:       preferredProfiles,
-		maxRequestPayloadBytes:  effectivePayloadLimit(config.MaxRequestPayloadBytes),
-		maxRequestBatchItems:    effectiveBatchLimit(config.MaxRequestBatchItems),
-		maxResponsePayloadBytes: effectivePayloadLimit(config.MaxResponsePayloadBytes),
-		maxResponseBatchItems:   effectiveBatchLimit(config.MaxResponseBatchItems),
+		maxRequestPayloadBytes:  maxRequestPayloadBytes,
+		maxRequestBatchItems:    maxRequestBatchItems,
+		maxResponsePayloadBytes: maxResponsePayloadBytes,
+		maxResponseBatchItems:   maxResponseBatchItems,
 		authToken:               config.AuthToken,
 		negotiatedProfile:       0,
-		maxRequestMessageLen:    0,
-		maxResponseMessageLen:   0,
+		packetSize:              0,
+		maxRequestMessageLen:    maxRequestMessageLen,
+		maxResponseMessageLen:   maxResponseMessageLen,
 		nextRequestID:           1,
 	}, timeout)
 	if err != nil {
@@ -745,19 +1055,20 @@ func Dial(config Config, timeout time.Duration) (*Client, error) {
 		return nil, err
 	}
 	client := &Client{
-		conn:                  conn,
-		shm:                   nil,
-		supportedProfiles:     supportedProfiles,
-		preferredProfiles:     preferredProfiles,
-		maxRequestPayloadBytes:  effectivePayloadLimit(config.MaxRequestPayloadBytes),
-		maxRequestBatchItems:    effectiveBatchLimit(config.MaxRequestBatchItems),
-		maxResponsePayloadBytes: effectivePayloadLimit(config.MaxResponsePayloadBytes),
-		maxResponseBatchItems:   effectiveBatchLimit(config.MaxResponseBatchItems),
-		authToken:             config.AuthToken,
-		negotiatedProfile:     negotiated.profile,
-		maxRequestMessageLen:  negotiated.maxRequestMessageLen,
-		maxResponseMessageLen: negotiated.maxResponseMessageLen,
-		nextRequestID:         1,
+		conn:                    conn,
+		shm:                     nil,
+		supportedProfiles:       supportedProfiles,
+		preferredProfiles:       preferredProfiles,
+		maxRequestPayloadBytes:  maxRequestPayloadBytes,
+		maxRequestBatchItems:    maxRequestBatchItems,
+		maxResponsePayloadBytes: maxResponsePayloadBytes,
+		maxResponseBatchItems:   maxResponseBatchItems,
+		authToken:               config.AuthToken,
+		negotiatedProfile:       negotiated.profile,
+		packetSize:              negotiated.packetSize,
+		maxRequestMessageLen:    negotiated.maxRequestMessageLen,
+		maxResponseMessageLen:   negotiated.maxResponseMessageLen,
+		nextRequestID:           1,
 	}
 	if negotiated.profile == ProfileSHMHybrid {
 		shm, err := newSHMClient(endpointSockPath(config.RunDir, config.ServiceName), negotiated.maxRequestMessageLen, negotiated.maxResponseMessageLen, timeout)
@@ -770,7 +1081,7 @@ func Dial(config Config, timeout time.Duration) (*Client, error) {
 	return client, nil
 }
 
-func (c *Client) CallMessage(requestMessage []byte, responseMessage []byte, timeout time.Duration) (int, error) {
+func (c *Client) ReceiveMessage(responseMessage []byte, timeout time.Duration) (int, error) {
 	if c.conn == nil {
 		return 0, errors.New("client is closed")
 	}
@@ -778,31 +1089,34 @@ func (c *Client) CallMessage(requestMessage []byte, responseMessage []byte, time
 		if c.shm == nil {
 			return 0, errors.New("SHM client is not available")
 		}
-		return c.shm.callMessage(requestMessage, responseMessage, timeout)
+		return c.shm.receiveMessage(responseMessage, timeout)
 	}
-	if c.maxRequestMessageLen == 0 || c.maxResponseMessageLen == 0 {
-		return 0, errors.New("negotiated message limits are not available")
+	if c.maxResponseMessageLen == 0 {
+		return 0, errors.New("negotiated response size is not available")
 	}
 	if len(responseMessage) < c.maxResponseMessageLen {
 		return 0, fmt.Errorf("response buffer is smaller than negotiated response size")
 	}
-	if err := validateMessageForSend(requestMessage, c.maxRequestMessageLen); err != nil {
-		return 0, err
-	}
-	if err := writeMessage(c.conn, requestMessage, timeout); err != nil {
-		return 0, err
-	}
-	messageLen, err := readMessage(c.conn, responseMessage, timeout)
-	if err != nil {
-		return 0, err
-	}
-	if err := validateReceivedMessage(responseMessage, messageLen, c.maxResponseMessageLen); err != nil {
-		return 0, err
-	}
-	return messageLen, nil
+	return recvTransportMessage(c.conn, responseMessage, c.maxResponseMessageLen, c.packetSize, timeout)
 }
 
-func (c *Client) CallFrame(requestFrame protocol.Frame, timeout time.Duration) (protocol.Frame, error) {
+func (c *Client) SendMessage(requestMessage []byte, timeout time.Duration) error {
+	if c.conn == nil {
+		return errors.New("client is closed")
+	}
+	if c.negotiatedProfile == ProfileSHMHybrid {
+		if c.shm == nil {
+			return errors.New("SHM client is not available")
+		}
+		return c.shm.sendMessage(requestMessage, timeout)
+	}
+	if c.maxRequestMessageLen == 0 {
+		return errors.New("negotiated request size is not available")
+	}
+	return sendTransportMessage(c.conn, requestMessage, c.maxRequestMessageLen, c.packetSize, timeout)
+}
+
+func (c *Client) ReceiveFrame(timeout time.Duration) (protocol.Frame, error) {
 	if c.conn == nil {
 		return protocol.Frame{}, errors.New("client is closed")
 	}
@@ -810,10 +1124,7 @@ func (c *Client) CallFrame(requestFrame protocol.Frame, timeout time.Duration) (
 		if c.shm == nil {
 			return protocol.Frame{}, errors.New("SHM client is not available")
 		}
-		return c.shm.callFrame(requestFrame, timeout)
-	}
-	if err := writeMessage(c.conn, requestFrame[:], timeout); err != nil {
-		return protocol.Frame{}, err
+		return c.shm.receiveFrame(timeout)
 	}
 	buf := make([]byte, protocol.FrameSize)
 	messageLen, err := readMessage(c.conn, buf, timeout)
@@ -826,6 +1137,54 @@ func (c *Client) CallFrame(requestFrame protocol.Frame, timeout time.Duration) (
 	var out protocol.Frame
 	copy(out[:], buf[:messageLen])
 	return out, nil
+}
+
+func (c *Client) SendFrame(requestFrame protocol.Frame, timeout time.Duration) error {
+	if c.conn == nil {
+		return errors.New("client is closed")
+	}
+	if c.negotiatedProfile == ProfileSHMHybrid {
+		if c.shm == nil {
+			return errors.New("SHM client is not available")
+		}
+		return c.shm.sendFrame(requestFrame, timeout)
+	}
+	return writeMessage(c.conn, requestFrame[:], timeout)
+}
+
+func (c *Client) ReceiveIncrement(timeout time.Duration) (uint64, protocol.IncrementResponse, error) {
+	responseFrame, err := c.ReceiveFrame(timeout)
+	if err != nil {
+		return 0, protocol.IncrementResponse{}, err
+	}
+	return protocol.DecodeIncrementResponse(responseFrame)
+}
+
+func (c *Client) SendIncrement(requestID uint64, request protocol.IncrementRequest, timeout time.Duration) error {
+	return c.SendFrame(protocol.EncodeIncrementRequest(requestID, request), timeout)
+}
+
+func (c *Client) CallMessage(requestMessage []byte, responseMessage []byte, timeout time.Duration) (int, error) {
+	if c.conn == nil {
+		return 0, errors.New("client is closed")
+	}
+	if c.maxRequestMessageLen == 0 || c.maxResponseMessageLen == 0 {
+		return 0, errors.New("negotiated message limits are not available")
+	}
+	if err := c.SendMessage(requestMessage, timeout); err != nil {
+		return 0, err
+	}
+	return c.ReceiveMessage(responseMessage, timeout)
+}
+
+func (c *Client) CallFrame(requestFrame protocol.Frame, timeout time.Duration) (protocol.Frame, error) {
+	if c.conn == nil {
+		return protocol.Frame{}, errors.New("client is closed")
+	}
+	if err := c.SendFrame(requestFrame, timeout); err != nil {
+		return protocol.Frame{}, err
+	}
+	return c.ReceiveFrame(timeout)
 }
 
 func (c *Client) CallIncrement(request protocol.IncrementRequest, timeout time.Duration) (protocol.IncrementResponse, error) {

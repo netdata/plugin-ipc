@@ -27,6 +27,7 @@
 #define NETIPC_HELLO_OFFSET_MAX_RESPONSE_PAYLOAD_BYTES 20u
 #define NETIPC_HELLO_OFFSET_MAX_RESPONSE_BATCH_ITEMS 24u
 #define NETIPC_HELLO_OFFSET_AUTH_TOKEN 32u
+#define NETIPC_HELLO_OFFSET_PACKET_SIZE 40u
 
 #define NETIPC_HELLO_ACK_OFFSET_LAYOUT_VERSION 0u
 #define NETIPC_HELLO_ACK_OFFSET_FLAGS 2u
@@ -37,6 +38,16 @@
 #define NETIPC_HELLO_ACK_OFFSET_AGREED_MAX_REQUEST_BATCH_ITEMS 20u
 #define NETIPC_HELLO_ACK_OFFSET_AGREED_MAX_RESPONSE_PAYLOAD_BYTES 24u
 #define NETIPC_HELLO_ACK_OFFSET_AGREED_MAX_RESPONSE_BATCH_ITEMS 28u
+#define NETIPC_HELLO_ACK_OFFSET_AGREED_PACKET_SIZE 32u
+
+#define NETIPC_CHUNK_OFFSET_MAGIC 0u
+#define NETIPC_CHUNK_OFFSET_VERSION 4u
+#define NETIPC_CHUNK_OFFSET_FLAGS 6u
+#define NETIPC_CHUNK_OFFSET_MESSAGE_ID 8u
+#define NETIPC_CHUNK_OFFSET_TOTAL_MESSAGE_LEN 16u
+#define NETIPC_CHUNK_OFFSET_CHUNK_INDEX 20u
+#define NETIPC_CHUNK_OFFSET_CHUNK_COUNT 24u
+#define NETIPC_CHUNK_OFFSET_CHUNK_PAYLOAD_LEN 28u
 
 #define NETIPC_CGROUPS_SNAPSHOT_REQ_OFFSET_LAYOUT_VERSION 0u
 #define NETIPC_CGROUPS_SNAPSHOT_REQ_OFFSET_FLAGS 2u
@@ -340,6 +351,7 @@ int netipc_encode_hello_payload(uint8_t *dst,
     write_u32_le(dst + NETIPC_HELLO_OFFSET_MAX_RESPONSE_PAYLOAD_BYTES, hello->max_response_payload_bytes);
     write_u32_le(dst + NETIPC_HELLO_OFFSET_MAX_RESPONSE_BATCH_ITEMS, hello->max_response_batch_items);
     write_u64_le(dst + NETIPC_HELLO_OFFSET_AUTH_TOKEN, hello->auth_token);
+    write_u32_le(dst + NETIPC_HELLO_OFFSET_PACKET_SIZE, hello->packet_size);
     return 0;
 }
 
@@ -365,6 +377,7 @@ int netipc_decode_hello_payload(const uint8_t *src,
     hello->max_response_payload_bytes = read_u32_le(src + NETIPC_HELLO_OFFSET_MAX_RESPONSE_PAYLOAD_BYTES);
     hello->max_response_batch_items = read_u32_le(src + NETIPC_HELLO_OFFSET_MAX_RESPONSE_BATCH_ITEMS);
     hello->auth_token = read_u64_le(src + NETIPC_HELLO_OFFSET_AUTH_TOKEN);
+    hello->packet_size = read_u32_le(src + NETIPC_HELLO_OFFSET_PACKET_SIZE);
     return 0;
 }
 
@@ -390,6 +403,7 @@ int netipc_encode_hello_ack_payload(uint8_t *dst,
     write_u32_le(dst + NETIPC_HELLO_ACK_OFFSET_AGREED_MAX_REQUEST_BATCH_ITEMS, hello_ack->agreed_max_request_batch_items);
     write_u32_le(dst + NETIPC_HELLO_ACK_OFFSET_AGREED_MAX_RESPONSE_PAYLOAD_BYTES, hello_ack->agreed_max_response_payload_bytes);
     write_u32_le(dst + NETIPC_HELLO_ACK_OFFSET_AGREED_MAX_RESPONSE_BATCH_ITEMS, hello_ack->agreed_max_response_batch_items);
+    write_u32_le(dst + NETIPC_HELLO_ACK_OFFSET_AGREED_PACKET_SIZE, hello_ack->agreed_packet_size);
     return 0;
 }
 
@@ -415,6 +429,69 @@ int netipc_decode_hello_ack_payload(const uint8_t *src,
     hello_ack->agreed_max_request_batch_items = read_u32_le(src + NETIPC_HELLO_ACK_OFFSET_AGREED_MAX_REQUEST_BATCH_ITEMS);
     hello_ack->agreed_max_response_payload_bytes = read_u32_le(src + NETIPC_HELLO_ACK_OFFSET_AGREED_MAX_RESPONSE_PAYLOAD_BYTES);
     hello_ack->agreed_max_response_batch_items = read_u32_le(src + NETIPC_HELLO_ACK_OFFSET_AGREED_MAX_RESPONSE_BATCH_ITEMS);
+    hello_ack->agreed_packet_size = read_u32_le(src + NETIPC_HELLO_ACK_OFFSET_AGREED_PACKET_SIZE);
+    return 0;
+}
+
+int netipc_encode_chunk_header(uint8_t *dst,
+                               size_t dst_len,
+                               const struct netipc_chunk_header *chunk) {
+    if (!dst || !chunk) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (dst_len < NETIPC_CHUNK_HEADER_LEN) {
+        errno = EMSGSIZE;
+        return -1;
+    }
+
+    if (chunk->magic != NETIPC_CHUNK_MAGIC || chunk->version != NETIPC_CHUNK_VERSION ||
+        chunk->chunk_count == 0u || chunk->chunk_index >= chunk->chunk_count ||
+        chunk->chunk_payload_len == 0u || chunk->total_message_len == 0u) {
+        errno = EPROTO;
+        return -1;
+    }
+
+    write_u32_le(dst + NETIPC_CHUNK_OFFSET_MAGIC, chunk->magic);
+    write_u16_le(dst + NETIPC_CHUNK_OFFSET_VERSION, chunk->version);
+    write_u16_le(dst + NETIPC_CHUNK_OFFSET_FLAGS, chunk->flags);
+    write_u64_le(dst + NETIPC_CHUNK_OFFSET_MESSAGE_ID, chunk->message_id);
+    write_u32_le(dst + NETIPC_CHUNK_OFFSET_TOTAL_MESSAGE_LEN, chunk->total_message_len);
+    write_u32_le(dst + NETIPC_CHUNK_OFFSET_CHUNK_INDEX, chunk->chunk_index);
+    write_u32_le(dst + NETIPC_CHUNK_OFFSET_CHUNK_COUNT, chunk->chunk_count);
+    write_u32_le(dst + NETIPC_CHUNK_OFFSET_CHUNK_PAYLOAD_LEN, chunk->chunk_payload_len);
+    return 0;
+}
+
+int netipc_decode_chunk_header(const uint8_t *src,
+                               size_t src_len,
+                               struct netipc_chunk_header *chunk) {
+    if (!src || !chunk) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (src_len < NETIPC_CHUNK_HEADER_LEN) {
+        errno = EMSGSIZE;
+        return -1;
+    }
+
+    chunk->magic = read_u32_le(src + NETIPC_CHUNK_OFFSET_MAGIC);
+    chunk->version = read_u16_le(src + NETIPC_CHUNK_OFFSET_VERSION);
+    chunk->flags = read_u16_le(src + NETIPC_CHUNK_OFFSET_FLAGS);
+    chunk->message_id = read_u64_le(src + NETIPC_CHUNK_OFFSET_MESSAGE_ID);
+    chunk->total_message_len = read_u32_le(src + NETIPC_CHUNK_OFFSET_TOTAL_MESSAGE_LEN);
+    chunk->chunk_index = read_u32_le(src + NETIPC_CHUNK_OFFSET_CHUNK_INDEX);
+    chunk->chunk_count = read_u32_le(src + NETIPC_CHUNK_OFFSET_CHUNK_COUNT);
+    chunk->chunk_payload_len = read_u32_le(src + NETIPC_CHUNK_OFFSET_CHUNK_PAYLOAD_LEN);
+
+    if (chunk->magic != NETIPC_CHUNK_MAGIC || chunk->version != NETIPC_CHUNK_VERSION ||
+        chunk->chunk_count == 0u || chunk->chunk_index >= chunk->chunk_count ||
+        chunk->chunk_payload_len == 0u || chunk->total_message_len == 0u) {
+        errno = EPROTO;
+        return -1;
+    }
     return 0;
 }
 

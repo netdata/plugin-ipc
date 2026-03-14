@@ -1,12 +1,13 @@
 //! POSIX transport implementation for the Rust crate.
 
 use crate::protocol::{
-    decode_hello_ack_payload, decode_hello_payload, decode_increment_request,
-    decode_increment_response, decode_message_header, encode_hello_ack_payload,
-    encode_hello_payload, encode_increment_request, encode_increment_response,
-    max_batch_total_size, message_total_size, Frame, HelloAckPayload, HelloPayload,
-    IncrementRequest, IncrementResponse, CONTROL_HELLO_ACK_PAYLOAD_LEN, CONTROL_HELLO_PAYLOAD_LEN,
-    FRAME_SIZE, MAX_PAYLOAD_DEFAULT, MESSAGE_VERSION,
+    decode_chunk_header, decode_hello_ack_payload, decode_hello_payload, decode_increment_request,
+    decode_increment_response, decode_message_header, encode_chunk_header,
+    encode_hello_ack_payload, encode_hello_payload, encode_increment_request,
+    encode_increment_response, max_batch_total_size, message_total_size, ChunkHeader, Frame,
+    HelloAckPayload, HelloPayload, IncrementRequest, IncrementResponse, CHUNK_HEADER_LEN,
+    CONTROL_HELLO_ACK_PAYLOAD_LEN, CONTROL_HELLO_PAYLOAD_LEN, FRAME_SIZE, MAX_PAYLOAD_DEFAULT,
+    MESSAGE_HEADER_LEN, MESSAGE_VERSION,
 };
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -104,12 +105,10 @@ impl UdsSeqpacketConfig {
 }
 
 #[derive(Debug)]
-pub struct UdsSeqpacketServer {
+pub struct UdsSeqpacketListener {
     listen_fd: RawFd,
-    conn_fd: Option<RawFd>,
     endpoint_path: PathBuf,
     shm_config: ShmConfig,
-    shm_server: Option<ShmServer>,
     supported_profiles: u32,
     preferred_profiles: u32,
     max_request_payload_bytes: u32,
@@ -117,9 +116,22 @@ pub struct UdsSeqpacketServer {
     max_response_payload_bytes: u32,
     max_response_batch_items: u32,
     auth_token: u64,
+}
+
+#[derive(Debug)]
+pub struct UdsSeqpacketSession {
+    conn_fd: RawFd,
+    shm_server: Option<ShmServer>,
     negotiated_profile: u32,
+    packet_size: u32,
     max_request_message_len: usize,
     max_response_message_len: usize,
+}
+
+#[derive(Debug)]
+pub struct UdsSeqpacketServer {
+    listener: UdsSeqpacketListener,
+    session: Option<UdsSeqpacketSession>,
 }
 
 #[derive(Debug)]
@@ -130,6 +142,7 @@ pub struct UdsSeqpacketClient {
     preferred_profiles: u32,
     auth_token: u64,
     negotiated_profile: u32,
+    packet_size: u32,
     max_request_message_len: usize,
     max_response_message_len: usize,
     next_request_id: u64,
@@ -138,6 +151,7 @@ pub struct UdsSeqpacketClient {
 #[derive(Clone, Copy, Debug)]
 struct NegotiationResult {
     profile: u32,
+    packet_size: u32,
     max_request_message_len: usize,
     max_response_message_len: usize,
 }
@@ -196,23 +210,27 @@ pub struct ShmClient {
     region: MappedRegion,
     spin_tries: u32,
     next_request_seq: u64,
+    pending_request_seq: Option<u64>,
     max_request_message_len: usize,
     max_response_message_len: usize,
 }
 
-impl Drop for UdsSeqpacketServer {
+impl Drop for UdsSeqpacketListener {
     fn drop(&mut self) {
-        if let Some(fd) = self.conn_fd.take() {
-            unsafe {
-                libc::close(fd);
-            }
-        }
         if self.listen_fd >= 0 {
             unsafe {
                 libc::close(self.listen_fd);
             }
         }
         let _ = fs::remove_file(&self.endpoint_path);
+    }
+}
+
+impl Drop for UdsSeqpacketSession {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.conn_fd);
+        }
     }
 }
 
@@ -817,6 +835,42 @@ fn send_seqpacket_message(fd: RawFd, buf: &[u8], _timeout: Option<Duration>) -> 
     Ok(())
 }
 
+fn send_seqpacket_iov_packet(
+    fd: RawFd,
+    parts: &[&[u8]],
+    _timeout: Option<Duration>,
+) -> io::Result<()> {
+    if parts.is_empty() {
+        return Err(invalid_input("parts must not be empty"));
+    }
+
+    let expected_len: usize = parts.iter().map(|part| part.len()).sum();
+    if expected_len == 0 {
+        return Err(invalid_input("packet must not be empty"));
+    }
+
+    let mut iovecs: Vec<libc::iovec> = parts
+        .iter()
+        .map(|part| libc::iovec {
+            iov_base: part.as_ptr() as *mut libc::c_void,
+            iov_len: part.len(),
+        })
+        .collect();
+
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = iovecs.as_mut_ptr();
+    msg.msg_iovlen = iovecs.len();
+
+    let rc = unsafe { libc::sendmsg(fd, &msg, libc::MSG_NOSIGNAL) };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if rc as usize != expected_len {
+        return Err(io::Error::from_raw_os_error(libc::EPROTO));
+    }
+    Ok(())
+}
+
 fn recv_seqpacket_message(
     fd: RawFd,
     buf: &mut [u8],
@@ -833,6 +887,45 @@ fn recv_seqpacket_message(
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
+
+    let rc = unsafe { libc::recvmsg(fd, &mut msg, 0) };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if (msg.msg_flags & libc::MSG_TRUNC) != 0 {
+        return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
+    }
+    if rc == 0 {
+        return Err(io::Error::from_raw_os_error(libc::ECONNRESET));
+    }
+    Ok(rc as usize)
+}
+
+fn recv_seqpacket_scatter_packet(
+    fd: RawFd,
+    header: &mut [u8],
+    payload: &mut [u8],
+    _timeout: Option<Duration>,
+) -> io::Result<usize> {
+    if header.is_empty() || payload.is_empty() {
+        return Err(invalid_input(
+            "header and payload buffers must not be empty",
+        ));
+    }
+
+    let mut iov = [
+        libc::iovec {
+            iov_base: header.as_mut_ptr() as *mut libc::c_void,
+            iov_len: header.len(),
+        },
+        libc::iovec {
+            iov_base: payload.as_mut_ptr() as *mut libc::c_void,
+            iov_len: payload.len(),
+        },
+    ];
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = iov.as_mut_ptr();
+    msg.msg_iovlen = iov.len();
 
     let rc = unsafe { libc::recvmsg(fd, &mut msg, 0) };
     if rc < 0 {
@@ -881,6 +974,138 @@ fn validate_received_message(
     Ok(())
 }
 
+fn send_chunked_message(
+    fd: RawFd,
+    message: &[u8],
+    packet_size: u32,
+    timeout: Option<Duration>,
+) -> io::Result<()> {
+    let chunk_payload_budget = compute_chunk_payload_budget(packet_size)?;
+    let header = decode_message_header(message)?;
+    let chunk_count = message.len().div_ceil(chunk_payload_budget) as u32;
+
+    let mut offset = 0usize;
+    for chunk_index in 0..chunk_count {
+        let remaining = message.len() - offset;
+        let chunk_payload_len = remaining.min(chunk_payload_budget);
+        let chunk_header = encode_chunk_header(&ChunkHeader {
+            magic: crate::protocol::CHUNK_MAGIC,
+            version: crate::protocol::CHUNK_VERSION,
+            flags: 0,
+            message_id: header.message_id,
+            total_message_len: message.len() as u32,
+            chunk_index,
+            chunk_count,
+            chunk_payload_len: chunk_payload_len as u32,
+        })?;
+        send_seqpacket_iov_packet(
+            fd,
+            &[
+                &chunk_header[..],
+                &message[offset..offset + chunk_payload_len],
+            ],
+            timeout,
+        )?;
+        offset += chunk_payload_len;
+    }
+
+    Ok(())
+}
+
+fn recv_transport_message(
+    fd: RawFd,
+    message: &mut [u8],
+    max_message_len: usize,
+    packet_size: u32,
+    timeout: Option<Duration>,
+) -> io::Result<usize> {
+    let first_capacity = if packet_size != 0 && message.len() > packet_size as usize {
+        packet_size as usize
+    } else {
+        message.len()
+    };
+
+    let first_packet_len = recv_seqpacket_message(fd, &mut message[..first_capacity], timeout)?;
+    if first_packet_len >= MESSAGE_HEADER_LEN {
+        if let Ok(header) = decode_message_header(&message[..first_packet_len]) {
+            let total = message_total_size(&header)?;
+            if total == first_packet_len {
+                validate_received_message(message, first_packet_len, max_message_len)?;
+                return Ok(first_packet_len);
+            }
+        }
+    }
+
+    let first_chunk = decode_chunk_header(&message[..first_packet_len])?;
+    if first_chunk.chunk_index != 0 || first_chunk.chunk_count < 2 {
+        return Err(io::Error::from_raw_os_error(libc::EPROTO));
+    }
+    if first_chunk.total_message_len as usize > message.len()
+        || first_chunk.total_message_len as usize > max_message_len
+    {
+        return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
+    }
+
+    let first_payload_len = first_packet_len - CHUNK_HEADER_LEN;
+    if first_payload_len != first_chunk.chunk_payload_len as usize {
+        return Err(io::Error::from_raw_os_error(libc::EPROTO));
+    }
+
+    message.copy_within(CHUNK_HEADER_LEN..first_packet_len, 0);
+    let mut offset = first_payload_len;
+    for expected_index in 1..first_chunk.chunk_count {
+        let remaining = first_chunk.total_message_len as usize - offset;
+        let packet_payload_cap = if packet_size as usize > CHUNK_HEADER_LEN {
+            remaining.min(packet_size as usize - CHUNK_HEADER_LEN)
+        } else {
+            remaining
+        };
+        let mut continuation_header = [0u8; CHUNK_HEADER_LEN];
+        let packet_len = recv_seqpacket_scatter_packet(
+            fd,
+            &mut continuation_header,
+            &mut message[offset..offset + packet_payload_cap],
+            timeout,
+        )?;
+        if packet_len < CHUNK_HEADER_LEN {
+            return Err(io::Error::from_raw_os_error(libc::EPROTO));
+        }
+
+        let continuation = decode_chunk_header(&continuation_header)?;
+        let payload_len = packet_len - CHUNK_HEADER_LEN;
+        if continuation.message_id != first_chunk.message_id
+            || continuation.total_message_len != first_chunk.total_message_len
+            || continuation.chunk_count != first_chunk.chunk_count
+            || continuation.chunk_index != expected_index
+            || payload_len != continuation.chunk_payload_len as usize
+        {
+            return Err(io::Error::from_raw_os_error(libc::EPROTO));
+        }
+
+        offset += payload_len;
+    }
+
+    if offset != first_chunk.total_message_len as usize {
+        return Err(io::Error::from_raw_os_error(libc::EPROTO));
+    }
+    validate_received_message(message, offset, max_message_len)?;
+    Ok(offset)
+}
+
+fn send_transport_message(
+    fd: RawFd,
+    message: &[u8],
+    max_message_len: usize,
+    packet_size: u32,
+    timeout: Option<Duration>,
+) -> io::Result<()> {
+    validate_message_for_send(message, max_message_len)?;
+    if packet_size != 0 && message.len() > packet_size as usize {
+        return send_chunked_message(fd, message, packet_size, timeout);
+    }
+    send_seqpacket_message(fd, message, timeout)
+}
+
 fn write_u16_le(frame: &mut Frame, off: usize, value: u16) {
     frame[off..off + 2].copy_from_slice(&value.to_le_bytes());
 }
@@ -922,6 +1147,48 @@ fn effective_batch_limit(value: u32) -> u32 {
 
 fn compute_max_message_len(max_payload_bytes: u32, max_batch_items: u32) -> io::Result<usize> {
     max_batch_total_size(max_payload_bytes, max_batch_items)
+}
+
+fn compute_seqpacket_packet_size(
+    fd: RawFd,
+    max_request_message_len: usize,
+    max_response_message_len: usize,
+) -> io::Result<u32> {
+    let mut sndbuf: libc::c_int = 0;
+    let mut optlen = size_of::<libc::c_int>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &mut sndbuf as *mut _ as *mut libc::c_void,
+            &mut optlen,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if sndbuf <= 32 {
+        return Err(io::Error::from_raw_os_error(libc::EOVERFLOW));
+    }
+
+    let logical_limit = max_request_message_len.max(max_response_message_len);
+    let mut packet_size = sndbuf as usize - 32usize;
+    if logical_limit != 0 && packet_size > logical_limit {
+        packet_size = logical_limit;
+    }
+    if packet_size <= CHUNK_HEADER_LEN || packet_size > u32::MAX as usize {
+        return Err(io::Error::from_raw_os_error(libc::EOVERFLOW));
+    }
+
+    Ok(packet_size as u32)
+}
+
+fn compute_chunk_payload_budget(packet_size: u32) -> io::Result<usize> {
+    if packet_size as usize <= CHUNK_HEADER_LEN {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    Ok(packet_size as usize - CHUNK_HEADER_LEN)
 }
 
 fn encode_negotiation_header(ty: u16) -> Frame {
@@ -1156,7 +1423,6 @@ fn create_server_region(config: &ShmConfig) -> io::Result<MappedRegion> {
         header.request_capacity = request_capacity as u32;
         header.response_offset = response_offset;
         header.response_capacity = response_capacity as u32;
-
     }
     Ok(region)
 }
@@ -1242,12 +1508,11 @@ fn send_response_bytes(server: &mut ShmServer, message: &[u8]) -> io::Result<()>
     Ok(())
 }
 
-fn call_request_bytes(
-    client: &mut ShmClient,
-    request_message: &[u8],
-    response_message: &mut [u8],
-    timeout: Option<Duration>,
-) -> io::Result<usize> {
+fn send_request_bytes(client: &mut ShmClient, request_message: &[u8]) -> io::Result<()> {
+    if client.pending_request_seq.is_some() {
+        return Err(io::Error::from_raw_os_error(libc::EBUSY));
+    }
+
     if request_message.len() > client.max_request_message_len
         || request_message.len() > client.region.request_capacity()
         || request_message.len() > u32::MAX as usize
@@ -1262,6 +1527,19 @@ fn call_request_bytes(
     client.region.store_req_len(request_message.len() as u32);
     client.region.store_req_seq(seq);
     signal_wake(client.region.req_signal());
+    client.pending_request_seq = Some(seq);
+
+    Ok(())
+}
+
+fn receive_response_bytes(
+    client: &mut ShmClient,
+    response_message: &mut [u8],
+    timeout: Option<Duration>,
+) -> io::Result<usize> {
+    let seq = client
+        .pending_request_seq
+        .ok_or_else(|| io::Error::from_raw_os_error(libc::EPROTO))?;
 
     wait_for_sequence(
         &client.region.header().resp_seq,
@@ -1284,46 +1562,61 @@ fn call_request_bytes(
     client
         .region
         .read_response_bytes(response_len, response_message);
+    client.pending_request_seq = None;
     Ok(response_len)
 }
 
 fn perform_server_handshake(
-    server: &UdsSeqpacketServer,
+    listener: &UdsSeqpacketListener,
     fd: RawFd,
     timeout: Option<Duration>,
 ) -> io::Result<NegotiationResult> {
     let hello = read_hello_negotiation(fd, timeout)?;
-    let intersection_profiles = hello.supported_profiles & server.supported_profiles;
+    let intersection_profiles = hello.supported_profiles & listener.supported_profiles;
+    let local_max_request_message_len = compute_max_message_len(
+        listener.max_request_payload_bytes,
+        listener.max_request_batch_items,
+    )?;
+    let local_max_response_message_len = compute_max_message_len(
+        listener.max_response_payload_bytes,
+        listener.max_response_batch_items,
+    )?;
+    let local_packet_size = compute_seqpacket_packet_size(
+        fd,
+        local_max_request_message_len,
+        local_max_response_message_len,
+    )?;
 
     let mut ack = HelloAckPayload {
         layout_version: hello.layout_version,
         flags: 0,
-        server_supported_profiles: server.supported_profiles,
+        server_supported_profiles: listener.supported_profiles,
         intersection_profiles,
         selected_profile: 0,
         agreed_max_request_payload_bytes: negotiate_limit_u32(
             hello.max_request_payload_bytes,
-            server.max_request_payload_bytes,
+            listener.max_request_payload_bytes,
         ),
         agreed_max_request_batch_items: negotiate_limit_u32(
             hello.max_request_batch_items,
-            server.max_request_batch_items,
+            listener.max_request_batch_items,
         ),
         agreed_max_response_payload_bytes: negotiate_limit_u32(
             hello.max_response_payload_bytes,
-            server.max_response_payload_bytes,
+            listener.max_response_payload_bytes,
         ),
         agreed_max_response_batch_items: negotiate_limit_u32(
             hello.max_response_batch_items,
-            server.max_response_batch_items,
+            listener.max_response_batch_items,
         ),
+        agreed_packet_size: negotiate_limit_u32(hello.packet_size, local_packet_size),
     };
     let mut status = NEGOTIATION_STATUS_OK;
 
-    if server.auth_token != 0 && hello.auth_token != server.auth_token {
+    if listener.auth_token != 0 && hello.auth_token != listener.auth_token {
         status = libc::EACCES as u32;
     } else {
-        let mut candidates = intersection_profiles & server.preferred_profiles;
+        let mut candidates = intersection_profiles & listener.preferred_profiles;
         if candidates == 0 {
             candidates = intersection_profiles;
         }
@@ -1334,6 +1627,7 @@ fn perform_server_handshake(
             || ack.agreed_max_request_batch_items == 0
             || ack.agreed_max_response_payload_bytes == 0
             || ack.agreed_max_response_batch_items == 0
+            || ack.agreed_packet_size == 0
         {
             status = libc::EPROTO as u32;
         }
@@ -1344,16 +1638,23 @@ fn perform_server_handshake(
         return Err(io::Error::from_raw_os_error(status as i32));
     }
 
+    let max_request_message_len = compute_max_message_len(
+        ack.agreed_max_request_payload_bytes,
+        ack.agreed_max_request_batch_items,
+    )?;
+    let max_response_message_len = compute_max_message_len(
+        ack.agreed_max_response_payload_bytes,
+        ack.agreed_max_response_batch_items,
+    )?;
+    if ack.agreed_packet_size as usize > max_request_message_len.max(max_response_message_len) {
+        return Err(io::Error::from_raw_os_error(libc::EPROTO));
+    }
+
     Ok(NegotiationResult {
         profile: ack.selected_profile,
-        max_request_message_len: compute_max_message_len(
-            ack.agreed_max_request_payload_bytes,
-            ack.agreed_max_request_batch_items,
-        )?,
-        max_response_message_len: compute_max_message_len(
-            ack.agreed_max_response_payload_bytes,
-            ack.agreed_max_response_batch_items,
-        )?,
+        packet_size: ack.agreed_packet_size,
+        max_request_message_len,
+        max_response_message_len,
     })
 }
 
@@ -1368,6 +1669,11 @@ fn perform_client_handshake(
     auth_token: u64,
     timeout: Option<Duration>,
 ) -> io::Result<NegotiationResult> {
+    let local_packet_size = compute_seqpacket_packet_size(
+        fd,
+        compute_max_message_len(max_request_payload_bytes, max_request_batch_items)?,
+        compute_max_message_len(max_response_payload_bytes, max_response_batch_items)?,
+    )?;
     let hello = HelloPayload {
         layout_version: MESSAGE_VERSION,
         flags: 0,
@@ -1378,6 +1684,7 @@ fn perform_client_handshake(
         max_response_payload_bytes,
         max_response_batch_items,
         auth_token,
+        packet_size: local_packet_size,
     };
     write_hello_negotiation(fd, &hello, timeout)?;
 
@@ -1392,23 +1699,31 @@ fn perform_client_handshake(
         || ack.agreed_max_request_batch_items == 0
         || ack.agreed_max_response_payload_bytes == 0
         || ack.agreed_max_response_batch_items == 0
+        || ack.agreed_packet_size == 0
+        || ack.agreed_packet_size > local_packet_size
     {
+        return Err(io::Error::from_raw_os_error(libc::EPROTO));
+    }
+    let max_request_message_len = compute_max_message_len(
+        ack.agreed_max_request_payload_bytes,
+        ack.agreed_max_request_batch_items,
+    )?;
+    let max_response_message_len = compute_max_message_len(
+        ack.agreed_max_response_payload_bytes,
+        ack.agreed_max_response_batch_items,
+    )?;
+    if ack.agreed_packet_size as usize > max_request_message_len.max(max_response_message_len) {
         return Err(io::Error::from_raw_os_error(libc::EPROTO));
     }
     Ok(NegotiationResult {
         profile: ack.selected_profile,
-        max_request_message_len: compute_max_message_len(
-            ack.agreed_max_request_payload_bytes,
-            ack.agreed_max_request_batch_items,
-        )?,
-        max_response_message_len: compute_max_message_len(
-            ack.agreed_max_response_payload_bytes,
-            ack.agreed_max_response_batch_items,
-        )?,
+        packet_size: ack.agreed_packet_size,
+        max_request_message_len,
+        max_response_message_len,
     })
 }
 
-impl UdsSeqpacketServer {
+impl UdsSeqpacketListener {
     pub fn bind(config: &UdsSeqpacketConfig) -> io::Result<Self> {
         if !config_is_valid(config) {
             return Err(invalid_input("run_dir and service_name must be set"));
@@ -1473,10 +1788,8 @@ impl UdsSeqpacketServer {
 
         Ok(Self {
             listen_fd,
-            conn_fd: None,
             endpoint_path,
             shm_config: shm_config_from_uds(config, FRAME_SIZE, FRAME_SIZE),
-            shm_server: None,
             supported_profiles,
             preferred_profiles,
             max_request_payload_bytes: effective_payload_limit(config.max_request_payload_bytes),
@@ -1484,17 +1797,10 @@ impl UdsSeqpacketServer {
             max_response_payload_bytes: effective_payload_limit(config.max_response_payload_bytes),
             max_response_batch_items: effective_batch_limit(config.max_response_batch_items),
             auth_token: config.auth_token,
-            negotiated_profile: 0,
-            max_request_message_len: 0,
-            max_response_message_len: 0,
         })
     }
 
-    pub fn accept(&mut self, timeout: Option<Duration>) -> io::Result<()> {
-        if self.conn_fd.is_some() {
-            return Err(io::Error::from_raw_os_error(libc::EISCONN));
-        }
-
+    pub fn accept(&mut self, timeout: Option<Duration>) -> io::Result<UdsSeqpacketSession> {
         if let Some(duration) = timeout {
             let mut pfd = libc::pollfd {
                 fd: self.listen_fd,
@@ -1523,34 +1829,37 @@ impl UdsSeqpacketServer {
             return Err(err);
         }
 
-        match perform_server_handshake(self, fd, timeout) {
-            Ok(negotiated) => {
-                if negotiated.profile == PROFILE_SHM_HYBRID {
-                    self.shm_server = None;
-                    let mut shm_config = self.shm_config.clone();
-                    shm_config.max_request_message_bytes =
-                        negotiated.max_request_message_len as u32;
-                    shm_config.max_response_message_bytes =
-                        negotiated.max_response_message_len as u32;
-                    self.shm_server = Some(ShmServer::create(&shm_config)?);
-                } else {
-                    self.shm_server = None;
-                }
-                self.negotiated_profile = negotiated.profile;
-                self.max_request_message_len = negotiated.max_request_message_len;
-                self.max_response_message_len = negotiated.max_response_message_len;
-                self.conn_fd = Some(fd);
-                Ok(())
-            }
+        let negotiated = match perform_server_handshake(self, fd, timeout) {
+            Ok(negotiated) => negotiated,
             Err(err) => {
                 unsafe {
                     libc::close(fd);
                 }
-                Err(err)
+                return Err(err);
             }
-        }
-    }
+        };
 
+        let shm_server = if negotiated.profile == PROFILE_SHM_HYBRID {
+            let mut shm_config = self.shm_config.clone();
+            shm_config.max_request_message_bytes = negotiated.max_request_message_len as u32;
+            shm_config.max_response_message_bytes = negotiated.max_response_message_len as u32;
+            Some(ShmServer::create(&shm_config)?)
+        } else {
+            None
+        };
+
+        Ok(UdsSeqpacketSession {
+            conn_fd: fd,
+            shm_server,
+            negotiated_profile: negotiated.profile,
+            packet_size: negotiated.packet_size,
+            max_request_message_len: negotiated.max_request_message_len,
+            max_response_message_len: negotiated.max_response_message_len,
+        })
+    }
+}
+
+impl UdsSeqpacketSession {
     pub fn receive_frame(&mut self, timeout: Option<Duration>) -> io::Result<Frame> {
         if self.negotiated_profile == PROFILE_SHM_HYBRID {
             return self
@@ -1560,9 +1869,7 @@ impl UdsSeqpacketServer {
                 .receive_frame(timeout);
         }
 
-        let fd = self
-            .conn_fd
-            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOTCONN))?;
+        let fd = self.conn_fd;
         let mut frame = [0u8; FRAME_SIZE];
         recv_exact(fd, &mut frame, timeout)?;
         Ok(frame)
@@ -1578,9 +1885,7 @@ impl UdsSeqpacketServer {
                 .send_frame(frame);
         }
 
-        let fd = self
-            .conn_fd
-            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOTCONN))?;
+        let fd = self.conn_fd;
         send_exact(fd, frame, timeout)
     }
 
@@ -1597,16 +1902,18 @@ impl UdsSeqpacketServer {
                 .receive_message(message, timeout);
         }
 
-        let fd = self
-            .conn_fd
-            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOTCONN))?;
+        let fd = self.conn_fd;
         if self.max_request_message_len == 0 || message.len() < self.max_request_message_len {
             return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
         }
 
-        let message_len = recv_seqpacket_message(fd, message, timeout)?;
-        validate_received_message(message, message_len, self.max_request_message_len)?;
-        Ok(message_len)
+        recv_transport_message(
+            fd,
+            message,
+            self.max_request_message_len,
+            self.packet_size,
+            timeout,
+        )
     }
 
     pub fn send_message(&mut self, message: &[u8], timeout: Option<Duration>) -> io::Result<()> {
@@ -1619,15 +1926,18 @@ impl UdsSeqpacketServer {
                 .send_message(message);
         }
 
-        let fd = self
-            .conn_fd
-            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOTCONN))?;
+        let fd = self.conn_fd;
         if self.max_response_message_len == 0 {
             return Err(io::Error::from_raw_os_error(libc::EPROTO));
         }
 
-        validate_message_for_send(message, self.max_response_message_len)?;
-        send_seqpacket_message(fd, message, timeout)
+        send_transport_message(
+            fd,
+            message,
+            self.max_response_message_len,
+            self.packet_size,
+            timeout,
+        )
     }
 
     pub fn receive_increment(
@@ -1649,6 +1959,84 @@ impl UdsSeqpacketServer {
 
     pub fn negotiated_profile(&self) -> u32 {
         self.negotiated_profile
+    }
+}
+
+impl UdsSeqpacketServer {
+    pub fn bind(config: &UdsSeqpacketConfig) -> io::Result<Self> {
+        Ok(Self {
+            listener: UdsSeqpacketListener::bind(config)?,
+            session: None,
+        })
+    }
+
+    pub fn accept(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        if self.session.is_some() {
+            return Err(io::Error::from_raw_os_error(libc::EISCONN));
+        }
+        self.session = Some(self.listener.accept(timeout)?);
+        Ok(())
+    }
+
+    pub fn receive_frame(&mut self, timeout: Option<Duration>) -> io::Result<Frame> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOTCONN))?
+            .receive_frame(timeout)
+    }
+
+    pub fn send_frame(&mut self, frame: &Frame, timeout: Option<Duration>) -> io::Result<()> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOTCONN))?
+            .send_frame(frame, timeout)
+    }
+
+    pub fn receive_message(
+        &mut self,
+        message: &mut [u8],
+        timeout: Option<Duration>,
+    ) -> io::Result<usize> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOTCONN))?
+            .receive_message(message, timeout)
+    }
+
+    pub fn send_message(&mut self, message: &[u8], timeout: Option<Duration>) -> io::Result<()> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOTCONN))?
+            .send_message(message, timeout)
+    }
+
+    pub fn receive_increment(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> io::Result<(u64, IncrementRequest)> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOTCONN))?
+            .receive_increment(timeout)
+    }
+
+    pub fn send_increment(
+        &mut self,
+        request_id: u64,
+        response: &IncrementResponse,
+        timeout: Option<Duration>,
+    ) -> io::Result<()> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOTCONN))?
+            .send_increment(request_id, response, timeout)
+    }
+
+    pub fn negotiated_profile(&self) -> u32 {
+        self.session
+            .as_ref()
+            .map(UdsSeqpacketSession::negotiated_profile)
+            .unwrap_or(0)
     }
 }
 
@@ -1703,6 +2091,7 @@ impl UdsSeqpacketClient {
                 preferred_profiles,
                 auth_token: config.auth_token,
                 negotiated_profile: negotiated.profile,
+                packet_size: negotiated.packet_size,
                 max_request_message_len: negotiated.max_request_message_len,
                 max_response_message_len: negotiated.max_response_message_len,
                 next_request_id: 1,
@@ -1721,18 +2110,8 @@ impl UdsSeqpacketClient {
         request_frame: &Frame,
         timeout: Option<Duration>,
     ) -> io::Result<Frame> {
-        if self.negotiated_profile == PROFILE_SHM_HYBRID {
-            return self
-                .shm_client
-                .as_mut()
-                .ok_or_else(|| io::Error::from_raw_os_error(libc::EPROTO))?
-                .call_frame(request_frame, timeout);
-        }
-
-        send_exact(self.fd, request_frame, timeout)?;
-        let mut response_frame = [0u8; FRAME_SIZE];
-        recv_exact(self.fd, &mut response_frame, timeout)?;
-        Ok(response_frame)
+        self.send_frame(request_frame, timeout)?;
+        self.receive_frame(timeout)
     }
 
     pub fn call_message(
@@ -1741,30 +2120,8 @@ impl UdsSeqpacketClient {
         response_message: &mut [u8],
         timeout: Option<Duration>,
     ) -> io::Result<usize> {
-        if self.negotiated_profile == PROFILE_SHM_HYBRID {
-            return self
-                .shm_client
-                .as_mut()
-                .ok_or_else(|| io::Error::from_raw_os_error(libc::EPROTO))?
-                .call_message(request_message, response_message, timeout);
-        }
-
-        if self.max_request_message_len == 0 || self.max_response_message_len == 0 {
-            return Err(io::Error::from_raw_os_error(libc::EPROTO));
-        }
-        if response_message.len() < self.max_response_message_len {
-            return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
-        }
-
-        validate_message_for_send(request_message, self.max_request_message_len)?;
-        send_seqpacket_message(self.fd, request_message, timeout)?;
-        let response_len = recv_seqpacket_message(self.fd, response_message, timeout)?;
-        validate_received_message(
-            response_message,
-            response_len,
-            self.max_response_message_len,
-        )?;
-        Ok(response_len)
+        self.send_message(request_message, timeout)?;
+        self.receive_message(response_message, timeout)
     }
 
     pub fn call_increment(
@@ -1782,6 +2139,106 @@ impl UdsSeqpacketClient {
             return Err(io::Error::from_raw_os_error(libc::EPROTO));
         }
         Ok(response)
+    }
+
+    pub fn receive_frame(&mut self, timeout: Option<Duration>) -> io::Result<Frame> {
+        if self.negotiated_profile == PROFILE_SHM_HYBRID {
+            return self
+                .shm_client
+                .as_mut()
+                .ok_or_else(|| io::Error::from_raw_os_error(libc::EPROTO))?
+                .receive_frame(timeout);
+        }
+
+        let mut response_frame = [0u8; FRAME_SIZE];
+        recv_exact(self.fd, &mut response_frame, timeout)?;
+        Ok(response_frame)
+    }
+
+    pub fn send_frame(
+        &mut self,
+        request_frame: &Frame,
+        timeout: Option<Duration>,
+    ) -> io::Result<()> {
+        if self.negotiated_profile == PROFILE_SHM_HYBRID {
+            return self
+                .shm_client
+                .as_mut()
+                .ok_or_else(|| io::Error::from_raw_os_error(libc::EPROTO))?
+                .send_frame(request_frame, timeout);
+        }
+
+        send_exact(self.fd, request_frame, timeout)
+    }
+
+    pub fn receive_message(
+        &mut self,
+        response_message: &mut [u8],
+        timeout: Option<Duration>,
+    ) -> io::Result<usize> {
+        if self.negotiated_profile == PROFILE_SHM_HYBRID {
+            return self
+                .shm_client
+                .as_mut()
+                .ok_or_else(|| io::Error::from_raw_os_error(libc::EPROTO))?
+                .receive_message(response_message, timeout);
+        }
+        if self.max_response_message_len == 0 {
+            return Err(io::Error::from_raw_os_error(libc::EPROTO));
+        }
+        if response_message.len() < self.max_response_message_len {
+            return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
+        }
+
+        recv_transport_message(
+            self.fd,
+            response_message,
+            self.max_response_message_len,
+            self.packet_size,
+            timeout,
+        )
+    }
+
+    pub fn send_message(
+        &mut self,
+        request_message: &[u8],
+        timeout: Option<Duration>,
+    ) -> io::Result<()> {
+        if self.negotiated_profile == PROFILE_SHM_HYBRID {
+            return self
+                .shm_client
+                .as_mut()
+                .ok_or_else(|| io::Error::from_raw_os_error(libc::EPROTO))?
+                .send_message(request_message, timeout);
+        }
+        if self.max_request_message_len == 0 {
+            return Err(io::Error::from_raw_os_error(libc::EPROTO));
+        }
+
+        send_transport_message(
+            self.fd,
+            request_message,
+            self.max_request_message_len,
+            self.packet_size,
+            timeout,
+        )
+    }
+
+    pub fn receive_increment(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> io::Result<(u64, IncrementResponse)> {
+        let response_frame = self.receive_frame(timeout)?;
+        decode_increment_response(&response_frame)
+    }
+
+    pub fn send_increment(
+        &mut self,
+        request_id: u64,
+        request: &IncrementRequest,
+        timeout: Option<Duration>,
+    ) -> io::Result<()> {
+        self.send_frame(&encode_increment_request(request_id, request), timeout)
     }
 
     pub fn negotiated_profile(&self) -> u32 {
@@ -1879,6 +2336,7 @@ impl ShmClient {
             region: open_client_region(config)?,
             spin_tries: effective_spin_tries(config),
             next_request_seq: 0,
+            pending_request_seq: None,
             max_request_message_len: effective_request_message_len(config),
             max_response_message_len: effective_response_message_len(config),
         })
@@ -1893,12 +2351,8 @@ impl ShmClient {
             return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
         }
 
-        let mut response_frame = [0u8; FRAME_SIZE];
-        let response_len = call_request_bytes(self, request_frame, &mut response_frame, timeout)?;
-        if response_len != FRAME_SIZE {
-            return Err(io::Error::from_raw_os_error(libc::EPROTO));
-        }
-        Ok(response_frame)
+        self.send_frame(request_frame, timeout)?;
+        self.receive_frame(timeout)
     }
 
     pub fn call_message(
@@ -1911,14 +2365,8 @@ impl ShmClient {
             return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
         }
 
-        validate_message_for_send(request_message, self.max_request_message_len)?;
-        let response_len = call_request_bytes(self, request_message, response_message, timeout)?;
-        validate_received_message(
-            response_message,
-            response_len,
-            self.max_response_message_len,
-        )?;
-        Ok(response_len)
+        self.send_message(request_message, timeout)?;
+        self.receive_message(response_message, timeout)
     }
 
     pub fn call_increment(
@@ -1927,13 +2375,80 @@ impl ShmClient {
         timeout: Option<Duration>,
     ) -> io::Result<IncrementResponse> {
         let request_id = self.next_request_seq + 1;
-        let response_frame =
-            self.call_frame(&encode_increment_request(request_id, request), timeout)?;
-        let (response_id, response) = decode_increment_response(&response_frame)?;
+        self.send_increment(request_id, request, timeout)?;
+        let (response_id, response) = self.receive_increment(timeout)?;
         if response_id != request_id {
             return Err(io::Error::from_raw_os_error(libc::EPROTO));
         }
         Ok(response)
+    }
+
+    pub fn receive_frame(&mut self, timeout: Option<Duration>) -> io::Result<Frame> {
+        if self.max_response_message_len < FRAME_SIZE {
+            return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
+        }
+
+        let mut response_frame = [0u8; FRAME_SIZE];
+        let response_len = receive_response_bytes(self, &mut response_frame, timeout)?;
+        if response_len != FRAME_SIZE {
+            return Err(io::Error::from_raw_os_error(libc::EPROTO));
+        }
+        Ok(response_frame)
+    }
+
+    pub fn send_frame(
+        &mut self,
+        request_frame: &Frame,
+        _timeout: Option<Duration>,
+    ) -> io::Result<()> {
+        if self.max_request_message_len < FRAME_SIZE {
+            return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
+        }
+        send_request_bytes(self, request_frame)
+    }
+
+    pub fn receive_message(
+        &mut self,
+        response_message: &mut [u8],
+        timeout: Option<Duration>,
+    ) -> io::Result<usize> {
+        if response_message.len() < self.max_response_message_len {
+            return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
+        }
+
+        let response_len = receive_response_bytes(self, response_message, timeout)?;
+        validate_received_message(
+            response_message,
+            response_len,
+            self.max_response_message_len,
+        )?;
+        Ok(response_len)
+    }
+
+    pub fn send_message(
+        &mut self,
+        request_message: &[u8],
+        _timeout: Option<Duration>,
+    ) -> io::Result<()> {
+        validate_message_for_send(request_message, self.max_request_message_len)?;
+        send_request_bytes(self, request_message)
+    }
+
+    pub fn receive_increment(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> io::Result<(u64, IncrementResponse)> {
+        let response_frame = self.receive_frame(timeout)?;
+        decode_increment_response(&response_frame)
+    }
+
+    pub fn send_increment(
+        &mut self,
+        request_id: u64,
+        request: &IncrementRequest,
+        timeout: Option<Duration>,
+    ) -> io::Result<()> {
+        self.send_frame(&encode_increment_request(request_id, request), timeout)
     }
 }
 
@@ -1994,6 +2509,164 @@ mod tests {
         assert_eq!(client.negotiated_profile(), PROFILE_UDS_SEQPACKET);
         assert_eq!(response.value, 42);
         assert_eq!(response.status, STATUS_OK);
+        handle
+            .join()
+            .expect("server thread")
+            .expect("server result");
+        let _ = fs::remove_dir_all(run_dir);
+    }
+
+    #[test]
+    fn listener_accepts_two_sessions() {
+        let run_dir = temp_run_dir("multi-client");
+        let server_cfg = UdsSeqpacketConfig::new(&run_dir, "service");
+        let client_cfg = server_cfg.clone();
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let server_handle = thread::spawn(move || -> io::Result<()> {
+            let mut listener = UdsSeqpacketListener::bind(&server_cfg)?;
+            ready_tx.send(()).expect("signal ready");
+
+            let mut session_a = listener.accept(Some(Duration::from_secs(5)))?;
+            let mut session_b = listener.accept(Some(Duration::from_secs(5)))?;
+
+            let (request_id_a, request_a) =
+                session_a.receive_increment(Some(Duration::from_secs(5)))?;
+            let (request_id_b, request_b) =
+                session_b.receive_increment(Some(Duration::from_secs(5)))?;
+            assert_eq!(request_a.value + request_b.value, 140);
+
+            session_a.send_increment(
+                request_id_a,
+                &IncrementResponse {
+                    status: STATUS_OK,
+                    value: request_a.value + 1,
+                },
+                Some(Duration::from_secs(5)),
+            )?;
+            session_b.send_increment(
+                request_id_b,
+                &IncrementResponse {
+                    status: STATUS_OK,
+                    value: request_b.value + 1,
+                },
+                Some(Duration::from_secs(5)),
+            )
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server ready");
+
+        let client_a_cfg = client_cfg.clone();
+        let client_a = thread::spawn(move || -> io::Result<()> {
+            let mut client =
+                UdsSeqpacketClient::connect(&client_a_cfg, Some(Duration::from_secs(5)))?;
+            let response = client.call_increment(
+                &IncrementRequest { value: 41 },
+                Some(Duration::from_secs(5)),
+            )?;
+            assert_eq!(response.status, STATUS_OK);
+            assert_eq!(response.value, 42);
+            Ok(())
+        });
+
+        let client_b = thread::spawn(move || -> io::Result<()> {
+            let mut client =
+                UdsSeqpacketClient::connect(&client_cfg, Some(Duration::from_secs(5)))?;
+            let response = client.call_increment(
+                &IncrementRequest { value: 99 },
+                Some(Duration::from_secs(5)),
+            )?;
+            assert_eq!(response.status, STATUS_OK);
+            assert_eq!(response.value, 100);
+            Ok(())
+        });
+
+        client_a
+            .join()
+            .expect("client A thread")
+            .expect("client A result");
+        client_b
+            .join()
+            .expect("client B thread")
+            .expect("client B result");
+        server_handle
+            .join()
+            .expect("server thread")
+            .expect("server result");
+        let _ = fs::remove_dir_all(run_dir);
+    }
+
+    #[test]
+    fn pipelined_responses_may_arrive_out_of_order() {
+        let run_dir = temp_run_dir("pipeline");
+        let server_cfg = UdsSeqpacketConfig::new(&run_dir, "service");
+        let client_cfg = server_cfg.clone();
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let handle = thread::spawn(move || -> io::Result<()> {
+            let mut server = UdsSeqpacketServer::bind(&server_cfg)?;
+            ready_tx.send(()).expect("signal ready");
+            server.accept(Some(Duration::from_secs(5)))?;
+            let (request_id_a, request_a) =
+                server.receive_increment(Some(Duration::from_secs(5)))?;
+            let (request_id_b, request_b) =
+                server.receive_increment(Some(Duration::from_secs(5)))?;
+
+            server.send_increment(
+                request_id_b,
+                &IncrementResponse {
+                    status: STATUS_OK,
+                    value: request_b.value + 1,
+                },
+                Some(Duration::from_secs(5)),
+            )?;
+            server.send_increment(
+                request_id_a,
+                &IncrementResponse {
+                    status: STATUS_OK,
+                    value: request_a.value + 1,
+                },
+                Some(Duration::from_secs(5)),
+            )
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server ready");
+        let mut client = UdsSeqpacketClient::connect(&client_cfg, Some(Duration::from_secs(5)))
+            .expect("connect client");
+
+        client
+            .send_increment(
+                1001,
+                &IncrementRequest { value: 41 },
+                Some(Duration::from_secs(5)),
+            )
+            .expect("send request A");
+        client
+            .send_increment(
+                1002,
+                &IncrementRequest { value: 42 },
+                Some(Duration::from_secs(5)),
+            )
+            .expect("send request B");
+
+        let (response_id_0, response_0) = client
+            .receive_increment(Some(Duration::from_secs(5)))
+            .expect("receive response 0");
+        let (response_id_1, response_1) = client
+            .receive_increment(Some(Duration::from_secs(5)))
+            .expect("receive response 1");
+
+        assert_eq!(response_id_0, 1002);
+        assert_eq!(response_0.status, STATUS_OK);
+        assert_eq!(response_0.value, 43);
+        assert_eq!(response_id_1, 1001);
+        assert_eq!(response_1.status, STATUS_OK);
+        assert_eq!(response_1.value, 42);
+
         handle
             .join()
             .expect("server thread")
@@ -2107,6 +2780,105 @@ mod tests {
                 Some(Duration::from_secs(5)),
             )
             .expect("call shm increment");
+        assert_eq!(response.status, STATUS_OK);
+        assert_eq!(response.value, 42);
+        handle
+            .join()
+            .expect("server thread")
+            .expect("server result");
+        let _ = fs::remove_dir_all(run_dir);
+    }
+
+    #[test]
+    fn shm_split_increment_roundtrip() {
+        let run_dir = temp_run_dir("shm-split-roundtrip");
+        let server_cfg = ShmConfig::new(&run_dir, "service");
+        let client_cfg = server_cfg.clone();
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let handle = thread::spawn(move || -> io::Result<()> {
+            let mut server = ShmServer::create(&server_cfg)?;
+            ready_tx.send(()).expect("signal ready");
+            let (request_id, request) = server.receive_increment(Some(Duration::from_secs(5)))?;
+            assert_eq!(request_id, 1001);
+            assert_eq!(request.value, 41);
+            server.send_increment(
+                request_id,
+                &IncrementResponse {
+                    status: STATUS_OK,
+                    value: 42,
+                },
+            )
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server ready");
+        let mut client = ShmClient::connect(&client_cfg).expect("connect shm client");
+        client
+            .send_increment(
+                1001,
+                &IncrementRequest { value: 41 },
+                Some(Duration::from_secs(5)),
+            )
+            .expect("send shm increment");
+        let (response_id, response) = client
+            .receive_increment(Some(Duration::from_secs(5)))
+            .expect("receive shm increment");
+        assert_eq!(response_id, 1001);
+        assert_eq!(response.status, STATUS_OK);
+        assert_eq!(response.value, 42);
+        handle
+            .join()
+            .expect("server thread")
+            .expect("server result");
+        let _ = fs::remove_dir_all(run_dir);
+    }
+
+    #[test]
+    fn negotiated_shm_split_roundtrip() {
+        let run_dir = temp_run_dir("negotiated-shm-split");
+        let mut server_cfg = UdsSeqpacketConfig::new(&run_dir, "service");
+        server_cfg.supported_profiles = PROFILE_UDS_SEQPACKET | PROFILE_SHM_HYBRID;
+        server_cfg.preferred_profiles = PROFILE_SHM_HYBRID;
+        let client_cfg = server_cfg.clone();
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let handle = thread::spawn(move || -> io::Result<()> {
+            let mut server = UdsSeqpacketServer::bind(&server_cfg)?;
+            ready_tx.send(()).expect("signal ready");
+            server.accept(Some(Duration::from_secs(5)))?;
+            assert_eq!(server.negotiated_profile(), PROFILE_SHM_HYBRID);
+            let (request_id, request) = server.receive_increment(Some(Duration::from_secs(5)))?;
+            assert_eq!(request_id, 1001);
+            assert_eq!(request.value, 41);
+            server.send_increment(
+                request_id,
+                &IncrementResponse {
+                    status: STATUS_OK,
+                    value: 42,
+                },
+                Some(Duration::from_secs(5)),
+            )
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server ready");
+        let mut client = UdsSeqpacketClient::connect(&client_cfg, Some(Duration::from_secs(5)))
+            .expect("connect client");
+        assert_eq!(client.negotiated_profile(), PROFILE_SHM_HYBRID);
+        client
+            .send_increment(
+                1001,
+                &IncrementRequest { value: 41 },
+                Some(Duration::from_secs(5)),
+            )
+            .expect("send negotiated shm increment");
+        let (response_id, response) = client
+            .receive_increment(Some(Duration::from_secs(5)))
+            .expect("receive negotiated shm increment");
+        assert_eq!(response_id, 1001);
         assert_eq!(response.status, STATUS_OK);
         assert_eq!(response.value, 42);
         handle

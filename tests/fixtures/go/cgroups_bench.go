@@ -43,8 +43,7 @@ func clientRefreshBench(serviceNamespace, serviceName string, durationSec, targe
 	}
 
 	config := cgroupssnapshot.NewConfig(serviceNamespace, serviceName)
-	applyCgroupsClientProfiles(&config)
-	config.AuthToken = authToken
+	applyCgroupsClientRequiredConfig(&config, authToken)
 	client, err := cgroupssnapshot.NewClient(config)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "client-refresh-bench failed: %v\n", err)
@@ -107,8 +106,7 @@ func clientLookupBench(serviceNamespace, serviceName string, durationSec, target
 	}
 
 	config := cgroupssnapshot.NewConfig(serviceNamespace, serviceName)
-	applyCgroupsClientProfiles(&config)
-	config.AuthToken = authToken
+	applyCgroupsClientRequiredConfig(&config, authToken)
 	client, err := cgroupssnapshot.NewClient(config)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "client-lookup-bench failed: %v\n", err)

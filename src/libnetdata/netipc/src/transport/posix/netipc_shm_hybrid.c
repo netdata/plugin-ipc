@@ -72,6 +72,7 @@ struct netipc_shm_client {
     size_t mapping_len;
     struct netipc_shm_region_header *header;
     uint64_t next_request_seq;
+    uint64_t pending_request_seq;
     size_t max_request_message_len;
     size_t max_response_message_len;
 };
@@ -564,15 +565,16 @@ static int send_response_bytes(netipc_shm_server_t *server, const uint8_t *messa
     return 0;
 }
 
-static int call_request_bytes(netipc_shm_client_t *client,
-                              const uint8_t *request_message,
-                              size_t request_message_len,
-                              uint8_t *response_message,
-                              size_t response_capacity,
-                              size_t *out_response_len,
-                              uint32_t timeout_ms) {
-    if (!client || !request_message || !response_message || !out_response_len || !client->header) {
+static int client_send_request_bytes(netipc_shm_client_t *client,
+                                     const uint8_t *request_message,
+                                     size_t request_message_len) {
+    if (!client || !request_message || !client->header) {
         errno = EINVAL;
+        return -1;
+    }
+
+    if (client->pending_request_seq != 0u) {
+        errno = EBUSY;
         return -1;
     }
 
@@ -590,9 +592,28 @@ static int call_request_bytes(netipc_shm_client_t *client,
     atomic_store_explicit(&client->header->req_len, (uint32_t)request_message_len, memory_order_relaxed);
     atomic_store_explicit(&client->header->req_seq, seq, memory_order_release);
     signal_wake(&client->header->req_signal);
+    client->pending_request_seq = seq;
+
+    return 0;
+}
+
+static int client_receive_response_bytes(netipc_shm_client_t *client,
+                                         uint8_t *response_message,
+                                         size_t response_capacity,
+                                         size_t *out_response_len,
+                                         uint32_t timeout_ms) {
+    if (!client || !response_message || !out_response_len || !client->header) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (client->pending_request_seq == 0u) {
+        errno = EPROTO;
+        return -1;
+    }
 
     if (wait_for_sequence(&client->header->resp_seq,
-                          seq,
+                          client->pending_request_seq,
                           &client->header->resp_signal,
                           client->spin_tries,
                           timeout_ms) != 0) {
@@ -612,6 +633,7 @@ static int call_request_bytes(netipc_shm_client_t *client,
 
     memcpy(response_message, response_area(client->header), (size_t)response_len);
     *out_response_len = (size_t)response_len;
+    client->pending_request_seq = 0u;
     return 0;
 }
 
@@ -960,13 +982,14 @@ int netipc_shm_client_call_message(netipc_shm_client_t *client,
     if (validate_message_len_for_send(request_message, request_message_len, client->max_request_message_len) != 0) {
         return -1;
     }
-    if (call_request_bytes(client,
-                           request_message,
-                           request_message_len,
-                           response_message,
-                           response_capacity,
-                           out_response_len,
-                           timeout_ms) != 0) {
+    if (netipc_shm_client_send_message(client, request_message, request_message_len, timeout_ms) != 0) {
+        return -1;
+    }
+    if (netipc_shm_client_receive_message(client,
+                                          response_message,
+                                          response_capacity,
+                                          out_response_len,
+                                          timeout_ms) != 0) {
         return -1;
     }
     if (validate_received_message(response_message, *out_response_len, client->max_response_message_len) != 0) {
@@ -980,8 +1003,6 @@ int netipc_shm_client_call_frame(netipc_shm_client_t *client,
                                  const uint8_t request_frame[NETIPC_FRAME_SIZE],
                                  uint8_t response_frame[NETIPC_FRAME_SIZE],
                                  uint32_t timeout_ms) {
-    size_t response_len = 0u;
-
     if (!client || !request_frame || !response_frame) {
         errno = EINVAL;
         return -1;
@@ -993,21 +1014,10 @@ int netipc_shm_client_call_frame(netipc_shm_client_t *client,
         return -1;
     }
 
-    if (call_request_bytes(client,
-                           request_frame,
-                           NETIPC_FRAME_SIZE,
-                           response_frame,
-                           NETIPC_FRAME_SIZE,
-                           &response_len,
-                           timeout_ms) != 0) {
+    if (netipc_shm_client_send_frame(client, request_frame, timeout_ms) != 0) {
         return -1;
     }
-    if (response_len != NETIPC_FRAME_SIZE) {
-        errno = EPROTO;
-        return -1;
-    }
-
-    return 0;
+    return netipc_shm_client_receive_frame(client, response_frame, timeout_ms);
 }
 
 int netipc_shm_client_call_increment(netipc_shm_client_t *client,
@@ -1027,7 +1037,11 @@ int netipc_shm_client_call_increment(netipc_shm_client_t *client,
         return -1;
     }
 
-    if (netipc_shm_client_call_frame(client, req_frame, resp_frame, timeout_ms) != 0) {
+    if (netipc_shm_client_send_frame(client, req_frame, timeout_ms) != 0) {
+        return -1;
+    }
+
+    if (netipc_shm_client_receive_frame(client, resp_frame, timeout_ms) != 0) {
         return -1;
     }
 
@@ -1041,6 +1055,130 @@ int netipc_shm_client_call_increment(netipc_shm_client_t *client,
     }
 
     return 0;
+}
+
+int netipc_shm_client_receive_message(netipc_shm_client_t *client,
+                                      uint8_t *response_message,
+                                      size_t response_capacity,
+                                      size_t *out_response_len,
+                                      uint32_t timeout_ms) {
+    if (!client || !response_message || !out_response_len) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (response_capacity < client->max_response_message_len) {
+        errno = EMSGSIZE;
+        return -1;
+    }
+
+    if (client_receive_response_bytes(client,
+                                      response_message,
+                                      response_capacity,
+                                      out_response_len,
+                                      timeout_ms) != 0) {
+        return -1;
+    }
+
+    return validate_received_message(response_message, *out_response_len, client->max_response_message_len);
+}
+
+int netipc_shm_client_send_message(netipc_shm_client_t *client,
+                                   const uint8_t *request_message,
+                                   size_t request_message_len,
+                                   uint32_t timeout_ms) {
+    (void)timeout_ms;
+
+    if (!client || !request_message) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (validate_message_len_for_send(request_message, request_message_len, client->max_request_message_len) != 0) {
+        return -1;
+    }
+
+    return client_send_request_bytes(client, request_message, request_message_len);
+}
+
+int netipc_shm_client_receive_frame(netipc_shm_client_t *client,
+                                    uint8_t response_frame[NETIPC_FRAME_SIZE],
+                                    uint32_t timeout_ms) {
+    size_t response_len = 0u;
+
+    if (!client || !response_frame) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (client->max_response_message_len < NETIPC_FRAME_SIZE) {
+        errno = EMSGSIZE;
+        return -1;
+    }
+
+    if (client_receive_response_bytes(client, response_frame, NETIPC_FRAME_SIZE, &response_len, timeout_ms) != 0) {
+        return -1;
+    }
+    if (response_len != NETIPC_FRAME_SIZE) {
+        errno = EPROTO;
+        return -1;
+    }
+
+    return 0;
+}
+
+int netipc_shm_client_send_frame(netipc_shm_client_t *client,
+                                 const uint8_t request_frame[NETIPC_FRAME_SIZE],
+                                 uint32_t timeout_ms) {
+    (void)timeout_ms;
+
+    if (!client || !request_frame) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (client->max_request_message_len < NETIPC_FRAME_SIZE) {
+        errno = EMSGSIZE;
+        return -1;
+    }
+
+    return client_send_request_bytes(client, request_frame, NETIPC_FRAME_SIZE);
+}
+
+int netipc_shm_client_receive_increment(netipc_shm_client_t *client,
+                                        uint64_t *request_id,
+                                        struct netipc_increment_response *response,
+                                        uint32_t timeout_ms) {
+    uint8_t response_frame[NETIPC_FRAME_SIZE];
+
+    if (!client || !request_id || !response) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (netipc_shm_client_receive_frame(client, response_frame, timeout_ms) != 0) {
+        return -1;
+    }
+
+    return netipc_decode_increment_response(response_frame, request_id, response);
+}
+
+int netipc_shm_client_send_increment(netipc_shm_client_t *client,
+                                     uint64_t request_id,
+                                     const struct netipc_increment_request *request,
+                                     uint32_t timeout_ms) {
+    uint8_t request_frame[NETIPC_FRAME_SIZE];
+
+    if (!client || !request) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (netipc_encode_increment_request(request_frame, request_id, request) != 0) {
+        return -1;
+    }
+
+    return netipc_shm_client_send_frame(client, request_frame, timeout_ms);
 }
 
 void netipc_shm_client_destroy(netipc_shm_client_t *client) {

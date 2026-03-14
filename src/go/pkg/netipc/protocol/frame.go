@@ -19,8 +19,11 @@ const (
 
 	ControlHello              uint16 = 1
 	ControlHelloAck           uint16 = 2
-	ControlHelloPayloadLen           = 40
-	ControlHelloAckPayloadLen        = 32
+	ControlHelloPayloadLen           = 44
+	ControlHelloAckPayloadLen        = 36
+	ChunkMagic                uint32 = 0x4e43484b
+	ChunkVersion              uint16 = 1
+	ChunkHeaderLen                   = 32
 
 	TransportStatusOK            uint16 = 0
 	TransportStatusBadEnvelope   uint16 = 1
@@ -78,6 +81,7 @@ const (
 	offHelloMaxResponsePayload    = 20
 	offHelloMaxResponseBatchItems = 24
 	offHelloAuthToken             = 32
+	offHelloPacketSize            = 40
 
 	offHelloAckLayoutVersion            = 0
 	offHelloAckFlags                    = 2
@@ -88,6 +92,16 @@ const (
 	offHelloAckAgreedMaxRequestItems    = 20
 	offHelloAckAgreedMaxResponsePayload = 24
 	offHelloAckAgreedMaxResponseItems   = 28
+	offHelloAckAgreedPacketSize         = 32
+
+	offChunkMagic           = 0
+	offChunkVersion         = 4
+	offChunkFlags           = 6
+	offChunkMessageID       = 8
+	offChunkTotalMessageLen = 16
+	offChunkIndex           = 20
+	offChunkCount           = 24
+	offChunkPayloadLen      = 28
 
 	offCgroupsSnapshotReqLayoutVersion = 0
 	offCgroupsSnapshotReqFlags         = 2
@@ -141,6 +155,7 @@ type HelloPayload struct {
 	MaxResponsePayloadBytes uint32
 	MaxResponseBatchItems   uint32
 	AuthToken               uint64
+	PacketSize              uint32
 }
 
 type HelloAckPayload struct {
@@ -153,6 +168,18 @@ type HelloAckPayload struct {
 	AgreedMaxRequestBatchItems  uint32
 	AgreedMaxResponsePayload    uint32
 	AgreedMaxResponseBatchItems uint32
+	AgreedPacketSize            uint32
+}
+
+type ChunkHeader struct {
+	Magic           uint32
+	Version         uint16
+	Flags           uint16
+	MessageID       uint64
+	TotalMessageLen uint32
+	ChunkIndex      uint32
+	ChunkCount      uint32
+	ChunkPayloadLen uint32
 }
 
 type IncrementRequest struct {
@@ -375,6 +402,7 @@ func EncodeHelloPayload(payload HelloPayload) [ControlHelloPayloadLen]byte {
 	binary.LittleEndian.PutUint32(buf[offHelloMaxResponsePayload:offHelloMaxResponsePayload+4], payload.MaxResponsePayloadBytes)
 	binary.LittleEndian.PutUint32(buf[offHelloMaxResponseBatchItems:offHelloMaxResponseBatchItems+4], payload.MaxResponseBatchItems)
 	binary.LittleEndian.PutUint64(buf[offHelloAuthToken:offHelloAuthToken+8], payload.AuthToken)
+	binary.LittleEndian.PutUint32(buf[offHelloPacketSize:offHelloPacketSize+4], payload.PacketSize)
 	return buf
 }
 
@@ -392,6 +420,7 @@ func DecodeHelloPayload(buf []byte) (HelloPayload, error) {
 		MaxResponsePayloadBytes: binary.LittleEndian.Uint32(buf[offHelloMaxResponsePayload : offHelloMaxResponsePayload+4]),
 		MaxResponseBatchItems:   binary.LittleEndian.Uint32(buf[offHelloMaxResponseBatchItems : offHelloMaxResponseBatchItems+4]),
 		AuthToken:               binary.LittleEndian.Uint64(buf[offHelloAuthToken : offHelloAuthToken+8]),
+		PacketSize:              binary.LittleEndian.Uint32(buf[offHelloPacketSize : offHelloPacketSize+4]),
 	}, nil
 }
 
@@ -406,6 +435,7 @@ func EncodeHelloAckPayload(payload HelloAckPayload) [ControlHelloAckPayloadLen]b
 	binary.LittleEndian.PutUint32(buf[offHelloAckAgreedMaxRequestItems:offHelloAckAgreedMaxRequestItems+4], payload.AgreedMaxRequestBatchItems)
 	binary.LittleEndian.PutUint32(buf[offHelloAckAgreedMaxResponsePayload:offHelloAckAgreedMaxResponsePayload+4], payload.AgreedMaxResponsePayload)
 	binary.LittleEndian.PutUint32(buf[offHelloAckAgreedMaxResponseItems:offHelloAckAgreedMaxResponseItems+4], payload.AgreedMaxResponseBatchItems)
+	binary.LittleEndian.PutUint32(buf[offHelloAckAgreedPacketSize:offHelloAckAgreedPacketSize+4], payload.AgreedPacketSize)
 	return buf
 }
 
@@ -423,7 +453,48 @@ func DecodeHelloAckPayload(buf []byte) (HelloAckPayload, error) {
 		AgreedMaxRequestBatchItems:  binary.LittleEndian.Uint32(buf[offHelloAckAgreedMaxRequestItems : offHelloAckAgreedMaxRequestItems+4]),
 		AgreedMaxResponsePayload:    binary.LittleEndian.Uint32(buf[offHelloAckAgreedMaxResponsePayload : offHelloAckAgreedMaxResponsePayload+4]),
 		AgreedMaxResponseBatchItems: binary.LittleEndian.Uint32(buf[offHelloAckAgreedMaxResponseItems : offHelloAckAgreedMaxResponseItems+4]),
+		AgreedPacketSize:            binary.LittleEndian.Uint32(buf[offHelloAckAgreedPacketSize : offHelloAckAgreedPacketSize+4]),
 	}, nil
+}
+
+func EncodeChunkHeader(header ChunkHeader) ([ChunkHeaderLen]byte, error) {
+	var buf [ChunkHeaderLen]byte
+	if header.Magic != ChunkMagic || header.Version != ChunkVersion ||
+		header.ChunkCount == 0 || header.ChunkIndex >= header.ChunkCount ||
+		header.ChunkPayloadLen == 0 || header.TotalMessageLen == 0 {
+		return buf, fmt.Errorf("invalid chunk header")
+	}
+	binary.LittleEndian.PutUint32(buf[offChunkMagic:offChunkMagic+4], header.Magic)
+	binary.LittleEndian.PutUint16(buf[offChunkVersion:offChunkVersion+2], header.Version)
+	binary.LittleEndian.PutUint16(buf[offChunkFlags:offChunkFlags+2], header.Flags)
+	binary.LittleEndian.PutUint64(buf[offChunkMessageID:offChunkMessageID+8], header.MessageID)
+	binary.LittleEndian.PutUint32(buf[offChunkTotalMessageLen:offChunkTotalMessageLen+4], header.TotalMessageLen)
+	binary.LittleEndian.PutUint32(buf[offChunkIndex:offChunkIndex+4], header.ChunkIndex)
+	binary.LittleEndian.PutUint32(buf[offChunkCount:offChunkCount+4], header.ChunkCount)
+	binary.LittleEndian.PutUint32(buf[offChunkPayloadLen:offChunkPayloadLen+4], header.ChunkPayloadLen)
+	return buf, nil
+}
+
+func DecodeChunkHeader(buf []byte) (ChunkHeader, error) {
+	if len(buf) < ChunkHeaderLen {
+		return ChunkHeader{}, fmt.Errorf("short chunk header")
+	}
+	header := ChunkHeader{
+		Magic:           binary.LittleEndian.Uint32(buf[offChunkMagic : offChunkMagic+4]),
+		Version:         binary.LittleEndian.Uint16(buf[offChunkVersion : offChunkVersion+2]),
+		Flags:           binary.LittleEndian.Uint16(buf[offChunkFlags : offChunkFlags+2]),
+		MessageID:       binary.LittleEndian.Uint64(buf[offChunkMessageID : offChunkMessageID+8]),
+		TotalMessageLen: binary.LittleEndian.Uint32(buf[offChunkTotalMessageLen : offChunkTotalMessageLen+4]),
+		ChunkIndex:      binary.LittleEndian.Uint32(buf[offChunkIndex : offChunkIndex+4]),
+		ChunkCount:      binary.LittleEndian.Uint32(buf[offChunkCount : offChunkCount+4]),
+		ChunkPayloadLen: binary.LittleEndian.Uint32(buf[offChunkPayloadLen : offChunkPayloadLen+4]),
+	}
+	if header.Magic != ChunkMagic || header.Version != ChunkVersion ||
+		header.ChunkCount == 0 || header.ChunkIndex >= header.ChunkCount ||
+		header.ChunkPayloadLen == 0 || header.TotalMessageLen == 0 {
+		return ChunkHeader{}, fmt.Errorf("invalid chunk header")
+	}
+	return header, nil
 }
 
 func CgroupsSnapshotItemPayloadLen(item CgroupsSnapshotItem) (int, error) {

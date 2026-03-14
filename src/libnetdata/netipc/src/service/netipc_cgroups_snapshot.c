@@ -129,6 +129,23 @@ static size_t effective_response_batch_limit(uint32_t configured) {
     return configured != 0u ? configured : NETIPC_CGROUPS_SNAPSHOT_DEFAULT_MAX_RESPONSE_BATCH_ITEMS;
 }
 
+int netipc_cgroups_snapshot_client_config_validate(
+    const struct netipc_cgroups_snapshot_client_config *config) {
+    if (!config || !config->service_namespace || !config->service_name) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (config->supported_profiles == 0u || config->preferred_profiles == 0u ||
+        config->max_response_payload_bytes == 0u || config->max_response_batch_items == 0u ||
+        config->auth_token == 0u) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    return 0;
+}
+
 static int ensure_transport(netipc_cgroups_snapshot_client_t *client, uint32_t timeout_ms) {
     if (!client) {
         errno = EINVAL;
@@ -207,17 +224,8 @@ void netipc_cgroups_snapshot_client_config_init(
     memset(config, 0, sizeof(*config));
     config->service_namespace = service_namespace;
     config->service_name = service_name;
-#if NETIPC_CGROUPS_WINDOWS_RUNTIME
-    config->supported_profiles = NETIPC_PROFILE_NAMED_PIPE;
-    config->preferred_profiles = NETIPC_PROFILE_NAMED_PIPE;
-#else
-    config->supported_profiles = NETIPC_PROFILE_UDS_SEQPACKET;
-    config->preferred_profiles = NETIPC_PROFILE_UDS_SEQPACKET;
-#endif
     config->max_request_payload_bytes = NETIPC_CGROUPS_SNAPSHOT_REQUEST_PAYLOAD_LEN;
     config->max_request_batch_items = 1u;
-    config->max_response_payload_bytes = NETIPC_CGROUPS_SNAPSHOT_DEFAULT_MAX_RESPONSE_PAYLOAD_BYTES;
-    config->max_response_batch_items = NETIPC_CGROUPS_SNAPSHOT_DEFAULT_MAX_RESPONSE_BATCH_ITEMS;
 }
 
 int netipc_cgroups_snapshot_client_create(
@@ -226,8 +234,12 @@ int netipc_cgroups_snapshot_client_create(
     netipc_cgroups_snapshot_client_t *client;
     size_t response_capacity;
 
-    if (!config || !out_client || !config->service_namespace || !config->service_name) {
+    if (!out_client) {
         errno = EINVAL;
+        return -1;
+    }
+
+    if (netipc_cgroups_snapshot_client_config_validate(config) != 0) {
         return -1;
     }
 

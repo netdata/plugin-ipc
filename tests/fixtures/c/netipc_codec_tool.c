@@ -200,40 +200,94 @@ static int encode_cgroups_request_message(uint64_t message_id, const char *out_p
     return write_bytes_file(out_path, message, sizeof(message));
 }
 
+#define FIXED_CGROUP_ITEM_COUNT 16u
+
+struct fixed_cgroup_seed {
+    uint32_t hash;
+    uint32_t options;
+    uint32_t enabled;
+    const char *name;
+    const char *path;
+};
+
+static const struct fixed_cgroup_seed fixed_cgroups[FIXED_CGROUP_ITEM_COUNT] = {
+    {123u, 0x2u, 1u, "system.slice-nginx",
+     "/sys/fs/cgroup/system.slice/nginx.service/cgroup.procs"},
+    {456u, 0x4u, 0u, "docker-1234", ""},
+    {789u,
+     0x6u,
+     1u,
+     "kubepods-burstable-pod01234567_89ab_cdef_0123_456789abcdef.slice",
+     "/sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/"
+     "kubepods-burstable-pod01234567_89ab_cdef_0123_456789abcdef.slice/cgroup.procs"},
+    {1001u, 0x2u, 1u, "system.slice-sshd.service",
+     "/sys/fs/cgroup/system.slice/sshd.service/cgroup.procs"},
+    {1002u, 0x2u, 1u, "system.slice-docker.service",
+     "/sys/fs/cgroup/system.slice/docker.service/cgroup.procs"},
+    {1003u, 0x6u, 1u, "user.slice-user-1000.slice-session-3.scope",
+     "/sys/fs/cgroup/user.slice/user-1000.slice/session-3.scope/cgroup.procs"},
+    {1004u, 0x2u, 1u, "machine.slice-libvirt-qemu-5-win11.scope",
+     "/sys/fs/cgroup/machine.slice/libvirt-qemu-5-win11.scope/cgroup.procs"},
+    {1005u, 0x8u, 0u, "system.slice-telegraf.service",
+     "/sys/fs/cgroup/system.slice/telegraf.service/cgroup.procs"},
+    {1006u, 0x6u, 1u, "podman-7f0c8e91f1ce55b0c3d1b5a4f6e8d9c0.scope",
+     "/sys/fs/cgroup/system.slice/podman-7f0c8e91f1ce55b0c3d1b5a4f6e8d9c0.scope/cgroup.procs"},
+    {1007u, 0x4u, 1u, "init.scope", "/sys/fs/cgroup/init.scope/cgroup.procs"},
+    {1008u, 0x6u, 1u, "system.slice-containerd.service",
+     "/sys/fs/cgroup/system.slice/containerd.service/cgroup.procs"},
+    {1009u, 0x4u, 1u, "machine.slice-systemd-nspawn-observability-lab.scope",
+     "/sys/fs/cgroup/machine.slice/systemd-nspawn-observability-lab.scope/cgroup.procs"},
+    {1010u,
+     0x6u,
+     1u,
+     "user.slice-user-1001.slice-user@1001.service-app.slice-observability-frontend.scope",
+     "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice/"
+     "observability-frontend.scope/cgroup.procs"},
+    {1011u,
+     0x1u,
+     0u,
+     "crio-53d2b1b5d7a04d8f9e2f6a7b8c9d0e1f.scope",
+     "/sys/fs/cgroup/kubepods.slice/kubepods-pod98765432_10fe_dcba_9876_543210fedcba.slice/"
+     "crio-53d2b1b5d7a04d8f9e2f6a7b8c9d0e1f.scope/cgroup.procs"},
+    {1012u, 0x2u, 1u, "system.slice-netdata.service",
+     "/sys/fs/cgroup/system.slice/netdata.service/cgroup.procs"},
+    {1013u,
+     0x6u,
+     1u,
+     "system.slice-super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service",
+     "/sys/fs/cgroup/system.slice/"
+     "super-long-observability-ingestion-gateway-with-really-long-unit-name-to-stress-view-lifetimes.service/"
+     "cgroup.procs"},
+};
+
 static int write_fixed_cgroups_response(uint64_t message_id, const char *out_path) {
-    uint8_t payload[1024];
+    uint8_t payload[8192];
     uint8_t *message = NULL;
     size_t payload_len = 0;
     size_t message_len = 0;
     struct netipc_msg_header header;
     struct netipc_cgroups_snapshot_builder builder;
     struct netipc_cgroups_snapshot_item item;
+    uint32_t i;
     int rc = -1;
 
-    if (netipc_cgroups_snapshot_builder_init(&builder, payload, sizeof(payload), 42u, 1u, 3u, 2u) != 0) {
+    if (netipc_cgroups_snapshot_builder_init(
+            &builder, payload, sizeof(payload), 42u, 1u, 3u, FIXED_CGROUP_ITEM_COUNT) != 0) {
         return -1;
     }
 
-    item.hash = 123u;
-    item.options = 0x2u;
-    item.enabled = 1u;
-    item.name = "system.slice-nginx";
-    item.name_len = (uint32_t)strlen(item.name);
-    item.path = "/sys/fs/cgroup/system.slice/nginx.service/cgroup.procs";
-    item.path_len = (uint32_t)strlen(item.path);
-    if (netipc_cgroups_snapshot_builder_add_item(&builder, &item) != 0) {
-        return -1;
-    }
-
-    item.hash = 456u;
-    item.options = 0x4u;
-    item.enabled = 0u;
-    item.name = "docker-1234";
-    item.name_len = (uint32_t)strlen(item.name);
-    item.path = "";
-    item.path_len = 0u;
-    if (netipc_cgroups_snapshot_builder_add_item(&builder, &item) != 0) {
-        return -1;
+    for (i = 0u; i < FIXED_CGROUP_ITEM_COUNT; ++i) {
+        memset(&item, 0, sizeof(item));
+        item.hash = fixed_cgroups[i].hash;
+        item.options = fixed_cgroups[i].options;
+        item.enabled = fixed_cgroups[i].enabled;
+        item.name = fixed_cgroups[i].name;
+        item.name_len = (uint32_t)strlen(item.name);
+        item.path = fixed_cgroups[i].path;
+        item.path_len = (uint32_t)strlen(item.path);
+        if (netipc_cgroups_snapshot_builder_add_item(&builder, &item) != 0) {
+            return -1;
+        }
     }
 
     if (netipc_cgroups_snapshot_builder_finish(&builder, &payload_len) != 0) {
@@ -255,7 +309,7 @@ static int write_fixed_cgroups_response(uint64_t message_id, const char *out_pat
     header.code = NETIPC_METHOD_CGROUPS_SNAPSHOT;
     header.transport_status = NETIPC_TRANSPORT_STATUS_OK;
     header.payload_len = (uint32_t)payload_len;
-    header.item_count = 2u;
+    header.item_count = FIXED_CGROUP_ITEM_COUNT;
     header.message_id = message_id;
 
     if (netipc_encode_msg_header(message, message_len, &header) != 0) {

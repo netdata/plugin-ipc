@@ -20,27 +20,27 @@ import (
 const (
 	platformImplementedProfiles = ProfileUDSSeqpacket | ProfileSHMHybrid
 
-	shmRegionMagic     uint32 = 0x4e53484d
-	shmRegionVersion   uint16 = 3
-	shmRegionAlignment        = 64
-	shmHeaderLen             = 64
-	shmDefaultSpinTries      = uint32(128)
+	shmRegionMagic      uint32 = 0x4e53484d
+	shmRegionVersion    uint16 = 3
+	shmRegionAlignment         = 64
+	shmHeaderLen               = 64
+	shmDefaultSpinTries        = uint32(128)
 
-	offHdrMagic         = 0
-	offHdrVersion       = 4
-	offHdrHeaderLen     = 6
-	offHdrOwnerPID      = 8
-	offHdrOwnerGen      = 12
-	offHdrReqOffset     = 16
-	offHdrReqCapacity   = 20
-	offHdrRespOffset    = 24
-	offHdrRespCapacity  = 28
-	offReqSeq           = 32
-	offRespSeq          = 40
-	offReqLen           = 48
-	offRespLen          = 52
-	offReqSignal        = 56
-	offRespSignal       = 60
+	offHdrMagic        = 0
+	offHdrVersion      = 4
+	offHdrHeaderLen    = 6
+	offHdrOwnerPID     = 8
+	offHdrOwnerGen     = 12
+	offHdrReqOffset    = 16
+	offHdrReqCapacity  = 20
+	offHdrRespOffset   = 24
+	offHdrRespCapacity = 28
+	offReqSeq          = 32
+	offRespSeq         = 40
+	offReqLen          = 48
+	offRespLen         = 52
+	offReqSignal       = 56
+	offRespSignal      = 60
 
 	futexWait = 0
 	futexWake = 1
@@ -63,6 +63,7 @@ type shmClient struct {
 	mapping               []byte
 	base                  uintptr
 	nextRequestSeq        uint64
+	pendingRequestSeq     uint64
 	spinTries             uint32
 	maxRequestMessageLen  int
 	maxResponseMessageLen int
@@ -566,12 +567,12 @@ func (s *shmServer) close() error {
 	return errors.Join(errs...)
 }
 
-func (c *shmClient) callBytes(request []byte, response []byte, requestCapacity int, responseCapacity int, timeout time.Duration) (int, error) {
+func (c *shmClient) sendBytes(request []byte, requestCapacity int) error {
 	if len(request) == 0 || len(request) > requestCapacity || requestCapacity > c.maxRequestMessageLen {
-		return 0, syscall.EMSGSIZE
+		return syscall.EMSGSIZE
 	}
-	if len(response) < responseCapacity || responseCapacity > c.maxResponseMessageLen {
-		return 0, syscall.EMSGSIZE
+	if c.pendingRequestSeq != 0 {
+		return syscall.EBUSY
 	}
 	seq := c.nextRequestSeq + 1
 	c.nextRequestSeq = seq
@@ -579,7 +580,18 @@ func (c *shmClient) callBytes(request []byte, response []byte, requestCapacity i
 	shmStoreU32(c.base, offReqLen, uint32(len(request)))
 	shmStoreU64(c.base, offReqSeq, seq)
 	shmWake(c.base, offReqSignal)
-	if err := shmWaitForSequence(c.base, offRespSeq, offRespSignal, seq, c.spinTries, timeout); err != nil {
+	c.pendingRequestSeq = seq
+	return nil
+}
+
+func (c *shmClient) receiveBytes(response []byte, responseCapacity int, timeout time.Duration) (int, error) {
+	if len(response) < responseCapacity || responseCapacity > c.maxResponseMessageLen {
+		return 0, syscall.EMSGSIZE
+	}
+	if c.pendingRequestSeq == 0 {
+		return 0, syscall.EPROTO
+	}
+	if err := shmWaitForSequence(c.base, offRespSeq, offRespSignal, c.pendingRequestSeq, c.spinTries, timeout); err != nil {
 		return 0, err
 	}
 	responseLen := int(shmLoadU32(c.base, offRespLen))
@@ -587,14 +599,26 @@ func (c *shmClient) callBytes(request []byte, response []byte, requestCapacity i
 		return 0, syscall.EMSGSIZE
 	}
 	copy(response[:responseLen], unsafe.Slice((*byte)(unsafe.Pointer(shmResponseArea(c.base))), responseLen))
+	c.pendingRequestSeq = 0
 	return responseLen, nil
 }
 
 func (c *shmClient) callMessage(request []byte, response []byte, timeout time.Duration) (int, error) {
-	if err := validateMessageForSend(request, c.maxRequestMessageLen); err != nil {
+	if err := c.sendMessage(request, timeout); err != nil {
 		return 0, err
 	}
-	responseLen, err := c.callBytes(request, response, c.maxRequestMessageLen, c.maxResponseMessageLen, timeout)
+	return c.receiveMessage(response, timeout)
+}
+
+func (c *shmClient) callFrame(request protocol.Frame, timeout time.Duration) (protocol.Frame, error) {
+	if err := c.sendFrame(request, timeout); err != nil {
+		return protocol.Frame{}, err
+	}
+	return c.receiveFrame(timeout)
+}
+
+func (c *shmClient) receiveMessage(response []byte, timeout time.Duration) (int, error) {
+	responseLen, err := c.receiveBytes(response, c.maxResponseMessageLen, timeout)
 	if err != nil {
 		return 0, err
 	}
@@ -604,12 +628,19 @@ func (c *shmClient) callMessage(request []byte, response []byte, timeout time.Du
 	return responseLen, nil
 }
 
-func (c *shmClient) callFrame(request protocol.Frame, timeout time.Duration) (protocol.Frame, error) {
-	if c.maxRequestMessageLen < protocol.FrameSize || c.maxResponseMessageLen < protocol.FrameSize {
+func (c *shmClient) sendMessage(request []byte, _ time.Duration) error {
+	if err := validateMessageForSend(request, c.maxRequestMessageLen); err != nil {
+		return err
+	}
+	return c.sendBytes(request, c.maxRequestMessageLen)
+}
+
+func (c *shmClient) receiveFrame(timeout time.Duration) (protocol.Frame, error) {
+	if c.maxResponseMessageLen < protocol.FrameSize {
 		return protocol.Frame{}, syscall.EMSGSIZE
 	}
 	var response protocol.Frame
-	responseLen, err := c.callBytes(request[:], response[:], protocol.FrameSize, protocol.FrameSize, timeout)
+	responseLen, err := c.receiveBytes(response[:], protocol.FrameSize, timeout)
 	if err != nil {
 		return protocol.Frame{}, err
 	}
@@ -617,6 +648,25 @@ func (c *shmClient) callFrame(request protocol.Frame, timeout time.Duration) (pr
 		return protocol.Frame{}, syscall.EPROTO
 	}
 	return response, nil
+}
+
+func (c *shmClient) sendFrame(request protocol.Frame, _ time.Duration) error {
+	if c.maxRequestMessageLen < protocol.FrameSize {
+		return syscall.EMSGSIZE
+	}
+	return c.sendBytes(request[:], protocol.FrameSize)
+}
+
+func (c *shmClient) receiveIncrement(timeout time.Duration) (uint64, protocol.IncrementResponse, error) {
+	responseFrame, err := c.receiveFrame(timeout)
+	if err != nil {
+		return 0, protocol.IncrementResponse{}, err
+	}
+	return protocol.DecodeIncrementResponse(responseFrame)
+}
+
+func (c *shmClient) sendIncrement(requestID uint64, request protocol.IncrementRequest, timeout time.Duration) error {
+	return c.sendFrame(protocol.EncodeIncrementRequest(requestID, request), timeout)
 }
 
 func (c *shmClient) close() error {

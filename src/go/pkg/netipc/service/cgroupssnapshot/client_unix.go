@@ -8,11 +8,6 @@ import (
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
 )
 
-const (
-	defaultSupportedProfiles = posix.ProfileUDSSeqpacket
-	defaultPreferredProfiles = posix.ProfileUDSSeqpacket
-)
-
 type transportClient interface {
 	CallMessage(requestMessage []byte, responseMessage []byte, timeout time.Duration) (int, error)
 	Close() error

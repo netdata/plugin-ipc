@@ -50,22 +50,27 @@ type Client struct {
 	cache           Cache
 }
 
+var connectTransportFunc = connectTransport
+
 func NewConfig(serviceNamespace, serviceName string) Config {
 	return Config{
-		ServiceNamespace:        serviceNamespace,
-		ServiceName:             serviceName,
-		SupportedProfiles:       defaultSupportedProfiles,
-		PreferredProfiles:       defaultPreferredProfiles,
-		MaxRequestPayloadBytes:  protocol.CgroupsSnapshotRequestPayloadLen,
-		MaxRequestBatchItems:    1,
-		MaxResponsePayloadBytes: DefaultMaxResponsePayloadBytes,
-		MaxResponseBatchItems:   DefaultMaxResponseBatchItems,
+		ServiceNamespace:       serviceNamespace,
+		ServiceName:            serviceName,
+		MaxRequestPayloadBytes: protocol.CgroupsSnapshotRequestPayloadLen,
+		MaxRequestBatchItems:   1,
 	}
 }
 
 func NewClient(config Config) (*Client, error) {
 	if config.ServiceNamespace == "" || config.ServiceName == "" {
 		return nil, errors.New("service_namespace and service_name must be set")
+	}
+	if config.SupportedProfiles == 0 ||
+		config.PreferredProfiles == 0 ||
+		config.MaxResponsePayloadBytes == 0 ||
+		config.MaxResponseBatchItems == 0 ||
+		config.AuthToken == 0 {
+		return nil, errors.New("auth_token, supported_profiles, preferred_profiles, max_response_payload_bytes, and max_response_batch_items must be set explicitly")
 	}
 
 	responseCapacity, err := protocol.MaxBatchTotalSize(
@@ -214,7 +219,7 @@ func (c *Client) ensureTransport(timeout time.Duration) error {
 	if c.transport != nil {
 		return nil
 	}
-	transport, err := connectTransport(c.config, timeout)
+	transport, err := connectTransportFunc(c.config, timeout)
 	if err != nil {
 		return err
 	}

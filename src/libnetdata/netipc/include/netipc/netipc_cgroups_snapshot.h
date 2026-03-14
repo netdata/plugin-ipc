@@ -51,6 +51,9 @@ void netipc_cgroups_snapshot_client_config_init(
     const char *service_namespace,
     const char *service_name);
 
+int netipc_cgroups_snapshot_client_config_validate(
+    const struct netipc_cgroups_snapshot_client_config *config);
+
 int netipc_cgroups_snapshot_client_create(
     const struct netipc_cgroups_snapshot_client_config *config,
     netipc_cgroups_snapshot_client_t **out_client);

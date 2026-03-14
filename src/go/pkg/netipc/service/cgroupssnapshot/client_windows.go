@@ -8,11 +8,6 @@ import (
 	wintransport "github.com/netdata/plugin-ipc/go/pkg/netipc/transport/windows"
 )
 
-const (
-	defaultSupportedProfiles = wintransport.ProfileNamedPipe
-	defaultPreferredProfiles = wintransport.ProfileNamedPipe
-)
-
 type transportClient interface {
 	CallMessage(requestMessage []byte, responseMessage []byte, timeout time.Duration) (int, error)
 	Close() error
