@@ -223,6 +223,9 @@ func DecodeChunkHeader(buf []byte) (ChunkHeader, error) {
 	if c.Version != Version {
 		return ChunkHeader{}, ErrBadVersion
 	}
+	if c.Flags != 0 {
+		return ChunkHeader{}, ErrBadLayout
+	}
 	if c.ChunkPayloadLen == 0 {
 		return ChunkHeader{}, ErrBadLayout
 	}
@@ -507,6 +510,9 @@ func DecodeHelloAck(buf []byte) (HelloAck, error) {
 		AgreedPacketSize:              le.Uint32(buf[32:36]),
 	}
 	if h.LayoutVersion != 1 {
+		return HelloAck{}, ErrBadLayout
+	}
+	if h.Flags != 0 {
 		return HelloAck{}, ErrBadLayout
 	}
 	return h, nil

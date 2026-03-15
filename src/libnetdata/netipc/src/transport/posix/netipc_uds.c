@@ -672,8 +672,16 @@ nipc_uds_error_t nipc_uds_send(nipc_uds_session_t *session,
         /* Single packet: encode header then send header+payload together */
         uint8_t hdr_buf[NIPC_HEADER_LEN];
         nipc_header_encode(hdr, hdr_buf, sizeof(hdr_buf));
-        return raw_send_iov(session->fd, hdr_buf, NIPC_HEADER_LEN,
+        nipc_uds_error_t send_err = raw_send_iov(session->fd, hdr_buf, NIPC_HEADER_LEN,
                             payload, payload_len);
+        if (send_err != NIPC_UDS_OK) {
+            /* Rollback: remove message_id from in-flight set */
+            if (session->role == NIPC_UDS_ROLE_CLIENT &&
+                hdr->kind == NIPC_KIND_REQUEST) {
+                inflight_remove(session, hdr->message_id);
+            }
+        }
+        return send_err;
     }
 
     /* Chunked send */
@@ -703,8 +711,14 @@ nipc_uds_error_t nipc_uds_send(nipc_uds_session_t *session,
 
     nipc_uds_error_t err = raw_send_iov(session->fd, hdr_buf, NIPC_HEADER_LEN,
                                          payload, first_chunk_payload);
-    if (err != NIPC_UDS_OK)
+    if (err != NIPC_UDS_OK) {
+        /* Rollback: remove message_id from in-flight set */
+        if (session->role == NIPC_UDS_ROLE_CLIENT &&
+            hdr->kind == NIPC_KIND_REQUEST) {
+            inflight_remove(session, hdr->message_id);
+        }
         return err;
+    }
 
     /* Send continuation chunks */
     const uint8_t *src = (const uint8_t *)payload + first_chunk_payload;
@@ -730,8 +744,14 @@ nipc_uds_error_t nipc_uds_send(nipc_uds_session_t *session,
 
         err = raw_send_iov(session->fd, chk_buf, NIPC_HEADER_LEN,
                            src, this_chunk);
-        if (err != NIPC_UDS_OK)
+        if (err != NIPC_UDS_OK) {
+            /* Rollback: remove message_id from in-flight set */
+            if (session->role == NIPC_UDS_ROLE_CLIENT &&
+                hdr->kind == NIPC_KIND_REQUEST) {
+                inflight_remove(session, hdr->message_id);
+            }
             return err;
+        }
 
         src += this_chunk;
         remaining -= this_chunk;

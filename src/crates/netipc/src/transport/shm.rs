@@ -635,7 +635,27 @@ fn align64(v: u32) -> u32 {
     (v + (REGION_ALIGNMENT - 1)) & !(REGION_ALIGNMENT - 1)
 }
 
+/// Validate service_name: only [a-zA-Z0-9._-], non-empty, not "." or "..".
+fn validate_service_name(name: &str) -> Result<(), ShmError> {
+    if name.is_empty() {
+        return Err(ShmError::BadParam("empty service name".into()));
+    }
+    if name == "." || name == ".." {
+        return Err(ShmError::BadParam("service name cannot be '.' or '..'".into()));
+    }
+    for c in name.bytes() {
+        match c {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'_' | b'-' => {}
+            _ => return Err(ShmError::BadParam(
+                format!("service name contains invalid character: {:?}", c as char),
+            )),
+        }
+    }
+    Ok(())
+}
+
 fn build_shm_path(run_dir: &str, service_name: &str) -> Result<PathBuf, ShmError> {
+    validate_service_name(service_name)?;
     let path = Path::new(run_dir).join(format!("{service_name}.ipcshm"));
     if path.to_string_lossy().len() >= 256 {
         return Err(ShmError::PathTooLong);
@@ -797,13 +817,14 @@ fn check_shm_stale(path: &Path) -> StaleResult {
     }
 
     let owner = unsafe { (*hdr).owner_pid };
+    let gen = unsafe { (*hdr).owner_generation };
     unsafe { libc::munmap(map, HEADER_LEN as usize) };
 
-    if pid_alive(owner) {
+    if pid_alive(owner) && gen != 0 {
         return StaleResult::LiveServer;
     }
 
-    // Dead owner — stale
+    // Dead owner or zero generation (PID reuse / legacy) — stale
     unsafe { libc::unlink(c_path.as_ptr()) };
     StaleResult::Recovered
 }

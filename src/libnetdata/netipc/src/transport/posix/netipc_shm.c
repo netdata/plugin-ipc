@@ -33,10 +33,33 @@ static inline uint32_t align64(uint32_t v)
     return (v + (NIPC_SHM_REGION_ALIGNMENT - 1)) & ~(uint32_t)(NIPC_SHM_REGION_ALIGNMENT - 1);
 }
 
+/* Validate service_name: only [a-zA-Z0-9._-], non-empty, not "." or "..". */
+static int validate_service_name(const char *name)
+{
+    if (!name || name[0] == '\0')
+        return -1;
+
+    /* Reject "." and ".." */
+    if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0')))
+        return -1;
+
+    for (const char *p = name; *p; p++) {
+        char c = *p;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')
+            continue;
+        return -1;
+    }
+    return 0;
+}
+
 /* Build SHM file path: {run_dir}/{service_name}.ipcshm */
 static int build_shm_path(char *dst, size_t dst_len,
                            const char *run_dir, const char *service_name)
 {
+    if (validate_service_name(service_name) < 0)
+        return -2; /* invalid service name */
+
     int n = snprintf(dst, dst_len, "%s/%s.ipcshm", run_dir, service_name);
     if (n < 0 || (size_t)n >= dst_len)
         return -1;
@@ -158,13 +181,11 @@ static int check_shm_stale(const char *path)
     uint32_t gen = hdr->owner_generation;
     munmap(map, NIPC_SHM_HEADER_LEN);
 
-    if (pid_alive((pid_t)owner)) {
-        return 1; /* live */
+    if (pid_alive((pid_t)owner) && gen != 0) {
+        return 1; /* live: PID alive and generation is valid */
     }
 
-    (void)gen; /* generation is cached on attach for runtime checks */
-
-    /* Dead owner -- stale. */
+    /* Dead owner or zero generation (PID reuse / legacy) -- stale. */
     unlink(path);
     return 0;
 }
@@ -185,9 +206,12 @@ nipc_shm_error_t nipc_shm_server_create(const char *run_dir,
     if (!run_dir || !service_name || !out)
         return NIPC_SHM_ERR_BAD_PARAM;
 
-    /* Build path */
+    /* Build path (validates service_name) */
     char path[256];
-    if (build_shm_path(path, sizeof(path), run_dir, service_name) < 0)
+    int path_rc = build_shm_path(path, sizeof(path), run_dir, service_name);
+    if (path_rc == -2)
+        return NIPC_SHM_ERR_BAD_PARAM;
+    if (path_rc < 0)
         return NIPC_SHM_ERR_PATH_TOO_LONG;
 
     /* Stale recovery */
@@ -307,7 +331,10 @@ nipc_shm_error_t nipc_shm_client_attach(const char *run_dir,
         return NIPC_SHM_ERR_BAD_PARAM;
 
     char path[256];
-    if (build_shm_path(path, sizeof(path), run_dir, service_name) < 0)
+    int path_rc = build_shm_path(path, sizeof(path), run_dir, service_name);
+    if (path_rc == -2)
+        return NIPC_SHM_ERR_BAD_PARAM;
+    if (path_rc < 0)
         return NIPC_SHM_ERR_PATH_TOO_LONG;
 
     /* Open the file. */

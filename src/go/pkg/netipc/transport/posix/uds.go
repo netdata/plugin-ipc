@@ -195,6 +195,21 @@ func (s *Session) Send(hdr *protocol.Header, payload []byte) error {
 	hdr.HeaderLen = protocol.HeaderLen
 	hdr.PayloadLen = uint32(len(payload))
 
+	tracked := s.role == RoleClient && hdr.Kind == protocol.KindRequest
+
+	sendErr := s.sendInner(hdr, payload)
+
+	// Rollback: remove message_id from in-flight set on send failure
+	if sendErr != nil && tracked {
+		delete(s.inflightIDs, hdr.MessageID)
+	}
+
+	return sendErr
+}
+
+// sendInner performs the actual send logic, separated so the caller can
+// rollback the in-flight set on failure.
+func (s *Session) sendInner(hdr *protocol.Header, payload []byte) error {
 	totalMsg := protocol.HeaderSize + len(payload)
 
 	// Single packet?

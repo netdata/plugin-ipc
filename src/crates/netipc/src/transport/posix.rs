@@ -248,6 +248,21 @@ impl UdsSession {
         hdr.header_len = protocol::HEADER_LEN;
         hdr.payload_len = payload.len() as u32;
 
+        let tracked = self.role == Role::Client && hdr.kind == KIND_REQUEST;
+        let msg_id = hdr.message_id;
+
+        let result = self.send_inner(hdr, payload);
+
+        // Rollback: remove message_id from in-flight set on send failure
+        if result.is_err() && tracked {
+            self.inflight_ids.remove(&msg_id);
+        }
+
+        result
+    }
+
+    /// Inner send logic, separated so the caller can rollback on failure.
+    fn send_inner(&mut self, hdr: &mut Header, payload: &[u8]) -> Result<(), UdsError> {
         let total_msg = HEADER_SIZE + payload.len();
 
         // Single packet?

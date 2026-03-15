@@ -247,6 +247,9 @@ impl ChunkHeader {
         if chk.version != VERSION {
             return Err(NipcError::BadVersion);
         }
+        if chk.flags != 0 {
+            return Err(NipcError::BadLayout);
+        }
         if chk.chunk_payload_len == 0 {
             return Err(NipcError::BadLayout);
         }
@@ -563,6 +566,9 @@ impl HelloAck {
         };
 
         if h.layout_version != 1 {
+            return Err(NipcError::BadLayout);
+        }
+        if h.flags != 0 {
             return Err(NipcError::BadLayout);
         }
         Ok(h)

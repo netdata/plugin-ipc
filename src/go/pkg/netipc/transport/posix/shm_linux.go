@@ -567,7 +567,30 @@ func shmAlign64(v uint32) uint32 {
 	return (v + (shmRegionAlignment - 1)) & ^(shmRegionAlignment - 1)
 }
 
+// validateShmServiceName checks that name contains only [a-zA-Z0-9._-],
+// is non-empty, and is not "." or "..".
+func validateShmServiceName(name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: empty service name", ErrShmBadParam)
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("%w: service name cannot be '.' or '..'", ErrShmBadParam)
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' {
+			continue
+		}
+		return fmt.Errorf("%w: service name contains invalid character: %q", ErrShmBadParam, c)
+	}
+	return nil
+}
+
 func buildShmPath(runDir, serviceName string) (string, error) {
+	if err := validateShmServiceName(serviceName); err != nil {
+		return "", err
+	}
 	path := filepath.Join(runDir, serviceName+".ipcshm")
 	if len(path) >= shmMaxPath {
 		return "", ErrShmPathTooLong
@@ -714,13 +737,14 @@ func checkShmStale(path string) shmStaleResult {
 	}
 
 	ownerPid := int(int32(binary.LittleEndian.Uint32(data[shmHeaderOwnerPidOff : shmHeaderOwnerPidOff+4])))
+	ownerGen := binary.LittleEndian.Uint32(data[shmHeaderOwnerGenOff : shmHeaderOwnerGenOff+4])
 	syscall.Munmap(data)
 
-	if pidAlive(ownerPid) {
+	if pidAlive(ownerPid) && ownerGen != 0 {
 		return shmStaleLive
 	}
 
-	// Dead owner — stale
+	// Dead owner or zero generation (PID reuse / legacy) — stale
 	os.Remove(path)
 	return shmStaleRecovered
 }
