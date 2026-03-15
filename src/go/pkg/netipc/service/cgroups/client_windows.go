@@ -1,4 +1,11 @@
-//go:build unix
+//go:build windows
+
+// L2 cgroups snapshot client for Windows.
+//
+// Identical state machine and retry logic as the POSIX client.
+// Uses Named Pipe + Win SHM transports instead of UDS + POSIX SHM.
+//
+// Pure Go — no cgo. Works with CGO_ENABLED=0.
 
 package cgroups
 
@@ -6,12 +13,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"sync/atomic"
-	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
-	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
+	windows "github.com/netdata/plugin-ipc/go/pkg/netipc/transport/windows"
 )
 
 // ---------------------------------------------------------------------------
@@ -19,28 +24,23 @@ import (
 // ---------------------------------------------------------------------------
 
 // Client is an L2 client context for the cgroups snapshot service.
-// Manages connection lifecycle and provides typed blocking calls
-// with at-least-once retry semantics.
 type Client struct {
 	state       ClientState
 	runDir      string
 	serviceName string
-	config      posix.ClientConfig
+	config      windows.ClientConfig
 
-	// Connection (managed internally)
-	session *posix.Session
-	shm     *posix.ShmContext
+	session *windows.Session
+	shm     *windows.WinShmContext
 
-	// Stats
 	connectCount   uint32
 	reconnectCount uint32
 	callCount      uint32
 	errorCount     uint32
 }
 
-// NewClient creates a new client context. Does NOT connect. Does NOT
-// require the server to be running.
-func NewClient(runDir, serviceName string, config posix.ClientConfig) *Client {
+// NewClient creates a new client context. Does NOT connect.
+func NewClient(runDir, serviceName string, config windows.ClientConfig) *Client {
 	return &Client{
 		state:       StateDisconnected,
 		runDir:      runDir,
@@ -50,7 +50,6 @@ func NewClient(runDir, serviceName string, config posix.ClientConfig) *Client {
 }
 
 // Refresh attempts connect if DISCONNECTED/NOT_FOUND, reconnect if BROKEN.
-// Returns true if the state changed.
 func (c *Client) Refresh() bool {
 	oldState := c.state
 
@@ -78,7 +77,6 @@ func (c *Client) Refresh() bool {
 }
 
 // Ready returns true only if the client is in the READY state.
-// Cheap cached boolean, no I/O.
 func (c *Client) Ready() bool {
 	return c.state == StateReady
 }
@@ -95,13 +93,7 @@ func (c *Client) Status() ClientStatus {
 }
 
 // CallSnapshot performs a blocking typed cgroups snapshot call.
-//
-// responseBuf must be large enough for the expected snapshot.
-//
-// Retry policy (per spec): if the call fails and the context was
-// previously READY, disconnect, reconnect (full handshake), retry ONCE.
 func (c *Client) CallSnapshot(responseBuf []byte) (*protocol.CgroupsResponseView, error) {
-	// Fail fast if not READY
 	if c.state != StateReady {
 		c.errorCount++
 		return nil, protocol.ErrBadLayout
@@ -122,7 +114,6 @@ func (c *Client) CallSnapshot(responseBuf []byte) (*protocol.CgroupsResponseView
 	c.disconnect()
 	c.state = StateBroken
 
-	// Reconnect (full handshake)
 	c.state = c.tryConnect()
 	if c.state != StateReady {
 		c.errorCount++
@@ -141,7 +132,6 @@ func (c *Client) CallSnapshot(responseBuf []byte) (*protocol.CgroupsResponseView
 		retryErr = err
 	}
 
-	// Retry also failed
 	c.disconnect()
 	c.state = StateBroken
 	c.errorCount++
@@ -160,7 +150,7 @@ func (c *Client) Close() {
 
 func (c *Client) disconnect() {
 	if c.shm != nil {
-		c.shm.ShmClose()
+		c.shm.WinShmClose()
 		c.shm = nil
 	}
 	if c.session != nil {
@@ -170,7 +160,7 @@ func (c *Client) disconnect() {
 }
 
 func (c *Client) tryConnect() ClientState {
-	session, err := posix.Connect(c.runDir, c.serviceName, &c.config)
+	session, err := windows.Connect(c.runDir, c.serviceName, &c.config)
 	if err != nil {
 		switch {
 		case isConnectError(err):
@@ -184,37 +174,34 @@ func (c *Client) tryConnect() ClientState {
 		}
 	}
 
-	// SHM upgrade if negotiated
-	if session.SelectedProfile == protocol.ProfileSHMHybrid ||
-		session.SelectedProfile == protocol.ProfileSHMFutex {
-		// Retry attach: server creates the SHM region after
-		// the UDS handshake, so it may not exist yet.
+	// Win SHM upgrade if negotiated
+	if session.SelectedProfile == windows.WinShmProfileHybrid ||
+		session.SelectedProfile == windows.WinShmProfileBusywait {
 		for i := 0; i < 200; i++ {
-			shm, serr := posix.ShmClientAttach(c.runDir, c.serviceName)
+			shm, serr := windows.WinShmClientAttach(
+				c.runDir, c.serviceName,
+				c.config.AuthToken,
+				session.SelectedProfile,
+			)
 			if serr == nil {
 				c.shm = shm
 				break
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
-		// If SHM attach failed, fall back to UDS only.
 	}
 
 	c.session = session
 	return StateReady
 }
 
-// doCgroupsCallRaw performs a single call attempt. On success, the
-// response payload is in responseBuf[:payloadLen].
 func (c *Client) doCgroupsCallRaw(responseBuf []byte) (int, error) {
-	// 1. Encode request using Codec
 	req := protocol.CgroupsRequest{LayoutVersion: 1, Flags: 0}
 	var reqBuf [4]byte
 	if req.Encode(reqBuf[:]) == 0 {
 		return 0, protocol.ErrTruncated
 	}
 
-	// 2. Build outer header
 	hdr := protocol.Header{
 		Kind:            protocol.KindRequest,
 		Code:            protocol.MethodCgroupsSnapshot,
@@ -224,18 +211,15 @@ func (c *Client) doCgroupsCallRaw(responseBuf []byte) (int, error) {
 		TransportStatus: protocol.StatusOK,
 	}
 
-	// 3. Send via L1 (SHM or UDS)
 	if err := c.transportSend(&hdr, reqBuf[:]); err != nil {
 		return 0, err
 	}
 
-	// 4. Receive via L1
 	respHdr, payloadLen, err := c.transportReceive(responseBuf)
 	if err != nil {
 		return 0, err
 	}
 
-	// 5. Check transport_status BEFORE decode (spec requirement)
 	if respHdr.TransportStatus != protocol.StatusOK {
 		return 0, protocol.ErrBadLayout
 	}
@@ -258,10 +242,9 @@ func (c *Client) transportSend(hdr *protocol.Header, payload []byte) error {
 			copy(msg[protocol.HeaderSize:], payload)
 		}
 
-		return c.shm.ShmSend(msg)
+		return c.shm.WinShmSend(msg)
 	}
 
-	// UDS path
 	if c.session == nil {
 		return protocol.ErrTruncated
 	}
@@ -271,7 +254,7 @@ func (c *Client) transportSend(hdr *protocol.Header, payload []byte) error {
 func (c *Client) transportReceive(responseBuf []byte) (protocol.Header, int, error) {
 	if c.shm != nil {
 		shmBuf := make([]byte, len(responseBuf)+protocol.HeaderSize)
-		mlen, err := c.shm.ShmReceive(shmBuf, 30000)
+		mlen, err := c.shm.WinShmReceive(shmBuf, 30000)
 		if err != nil {
 			return protocol.Header{}, 0, protocol.ErrTruncated
 		}
@@ -292,7 +275,6 @@ func (c *Client) transportReceive(responseBuf []byte) (protocol.Header, int, err
 		return hdr, payloadLen, nil
 	}
 
-	// UDS path: receive returns (Header, payload, error)
 	if c.session == nil {
 		return protocol.Header{}, 0, protocol.ErrTruncated
 	}
@@ -313,15 +295,15 @@ func (c *Client) transportReceive(responseBuf []byte) (protocol.Header, int, err
 
 // Error classification helpers
 func isConnectError(err error) bool {
-	return errors.Is(err, posix.ErrConnect) || errors.Is(err, posix.ErrSocket)
+	return errors.Is(err, windows.ErrConnect) || errors.Is(err, windows.ErrCreatePipe)
 }
 
 func isAuthError(err error) bool {
-	return errors.Is(err, posix.ErrAuthFailed)
+	return errors.Is(err, windows.ErrAuthFailed)
 }
 
 func isProfileError(err error) bool {
-	return errors.Is(err, posix.ErrNoProfile)
+	return errors.Is(err, windows.ErrNoProfile)
 }
 
 // ---------------------------------------------------------------------------
@@ -330,15 +312,15 @@ func isProfileError(err error) bool {
 
 // Server is an L2 managed server for the cgroups snapshot service.
 type Server struct {
-	runDir        string
-	serviceName   string
-	config        posix.ServerConfig
-	handler       HandlerFunc
-	running       atomic.Bool
+	runDir      string
+	serviceName string
+	config      windows.ServerConfig
+	handler     HandlerFunc
+	running     atomic.Bool
 }
 
 // NewServer creates a new managed server.
-func NewServer(runDir, serviceName string, config posix.ServerConfig, handler HandlerFunc) *Server {
+func NewServer(runDir, serviceName string, config windows.ServerConfig, handler HandlerFunc) *Server {
 	return &Server{
 		runDir:      runDir,
 		serviceName: serviceName,
@@ -347,11 +329,9 @@ func NewServer(runDir, serviceName string, config posix.ServerConfig, handler Ha
 	}
 }
 
-// Run starts the acceptor loop. Blocking. Accepts clients, reads requests,
-// dispatches to the handler, sends responses.
-// Returns when Stop() is called or on fatal error.
+// Run starts the acceptor loop. Blocking.
 func (s *Server) Run() error {
-	listener, err := posix.Listen(s.runDir, s.serviceName, s.config)
+	listener, err := windows.Listen(s.runDir, s.serviceName, s.config)
 	if err != nil {
 		return err
 	}
@@ -360,15 +340,6 @@ func (s *Server) Run() error {
 	s.running.Store(true)
 
 	for s.running.Load() {
-		// Poll the listener fd before blocking on accept
-		ready := pollFd(listener.Fd(), 500)
-		if ready < 0 {
-			break
-		}
-		if ready == 0 {
-			continue
-		}
-
 		session, err := listener.Accept()
 		if err != nil {
 			if !s.running.Load() {
@@ -378,12 +349,14 @@ func (s *Server) Run() error {
 			continue
 		}
 
-		// SHM upgrade if negotiated
-		var shm *posix.ShmContext
-		if session.SelectedProfile == protocol.ProfileSHMHybrid ||
-			session.SelectedProfile == protocol.ProfileSHMFutex {
-			shmCtx, serr := posix.ShmServerCreate(
+		// Win SHM upgrade if negotiated
+		var shm *windows.WinShmContext
+		if session.SelectedProfile == windows.WinShmProfileHybrid ||
+			session.SelectedProfile == windows.WinShmProfileBusywait {
+			shmCtx, serr := windows.WinShmServerCreate(
 				s.runDir, s.serviceName,
+				s.config.AuthToken,
+				session.SelectedProfile,
 				session.MaxRequestPayloadBytes+uint32(protocol.HeaderSize),
 				session.MaxResponsePayloadBytes+uint32(protocol.HeaderSize),
 			)
@@ -392,7 +365,6 @@ func (s *Server) Run() error {
 			}
 		}
 
-		// Handle this session (blocking, single-threaded)
 		s.handleSession(session, shm)
 	}
 
@@ -404,12 +376,12 @@ func (s *Server) Stop() {
 	s.running.Store(false)
 }
 
-func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
+func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmContext) {
 	recvBuf := make([]byte, 65536)
 
 	defer func() {
 		if shm != nil {
-			shm.ShmDestroy()
+			shm.WinShmDestroy()
 		}
 		session.Close()
 	}()
@@ -419,9 +391,9 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 		var payload []byte
 
 		if shm != nil {
-			mlen, err := shm.ShmReceive(recvBuf, 500)
+			mlen, err := shm.WinShmReceive(recvBuf, 500)
 			if err != nil {
-				if err == posix.ErrShmTimeout {
+				if err == windows.ErrWinShmTimeout {
 					continue
 				}
 				return
@@ -434,19 +406,10 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 				return
 			}
 			hdr = h
-			// Copy payload from local buffer
 			payload = make([]byte, mlen-protocol.HeaderSize)
 			copy(payload, recvBuf[protocol.HeaderSize:mlen])
 		} else {
-			// Poll the session fd before blocking on receive
-			ready := pollFd(session.Fd(), 500)
-			if ready < 0 {
-				return
-			}
-			if ready == 0 {
-				continue
-			}
-
+			// Named Pipe path
 			h, p, err := session.Receive(recvBuf)
 			if err != nil {
 				return
@@ -456,15 +419,12 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 			copy(payload, p)
 		}
 
-		// Skip non-request messages
 		if hdr.Kind != protocol.KindRequest {
 			continue
 		}
 
-		// Dispatch to handler
 		respPayload, ok := s.handler(hdr.Code, payload)
 
-		// Build response header
 		respHdr := protocol.Header{
 			Kind:      protocol.KindResponse,
 			Code:      hdr.Code,
@@ -475,12 +435,10 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 		if ok {
 			respHdr.TransportStatus = protocol.StatusOK
 		} else {
-			// Handler failure: INTERNAL_ERROR + empty payload
 			respHdr.TransportStatus = protocol.StatusInternalError
 			respPayload = nil
 		}
 
-		// Send response via the active transport
 		if shm != nil {
 			msgLen := protocol.HeaderSize + len(respPayload)
 			msg := make([]byte, msgLen)
@@ -495,7 +453,7 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 				copy(msg[protocol.HeaderSize:], respPayload)
 			}
 
-			if err := shm.ShmSend(msg); err != nil {
+			if err := shm.WinShmSend(msg); err != nil {
 				return
 			}
 		} else {
@@ -504,63 +462,6 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 			}
 		}
 	}
-}
-
-// ---------------------------------------------------------------------------
-//  Internal: poll helper (raw syscall, pure Go, no cgo)
-// ---------------------------------------------------------------------------
-
-// poll constants (not exported by Go's syscall package)
-const (
-	_POLLIN   = 0x0001
-	_POLLERR  = 0x0008
-	_POLLHUP  = 0x0010
-	_POLLNVAL = 0x0020
-)
-
-// pollfd matches struct pollfd from <poll.h>.
-type pollfd struct {
-	fd      int32
-	events  int16
-	revents int16
-}
-
-// pollFd polls a file descriptor for readability with a timeout in ms.
-// Returns: 1 = data ready, 0 = timeout, -1 = error/hangup.
-func pollFd(fd int, timeoutMs int) int {
-	pfd := pollfd{
-		fd:     int32(fd),
-		events: _POLLIN,
-	}
-
-	r, _, errno := syscall.Syscall(
-		syscall.SYS_POLL,
-		uintptr(unsafe.Pointer(&pfd)),
-		1,
-		uintptr(timeoutMs),
-	)
-
-	n := int(r)
-	if n < 0 {
-		if errno == syscall.EINTR {
-			return 0
-		}
-		return -1
-	}
-
-	if n == 0 {
-		return 0
-	}
-
-	if pfd.revents&(_POLLERR|_POLLHUP|_POLLNVAL) != 0 {
-		return -1
-	}
-
-	if pfd.revents&_POLLIN != 0 {
-		return 1
-	}
-
-	return 0
 }
 
 // Suppress unused import warnings.

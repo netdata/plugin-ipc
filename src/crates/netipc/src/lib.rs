@@ -2,6 +2,4 @@
 
 pub mod protocol;
 pub mod transport;
-
-#[cfg(unix)]
 pub mod service;

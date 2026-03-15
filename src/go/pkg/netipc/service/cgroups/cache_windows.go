@@ -1,11 +1,15 @@
-//go:build unix
+//go:build windows
 
-// L3: Client-side cgroups snapshot cache (POSIX).
+// L3: Client-side cgroups snapshot cache (Windows).
+//
+// Identical cache logic as the POSIX version. Uses Windows Client.
+//
+// Pure Go — no cgo. Works with CGO_ENABLED=0.
 
 package cgroups
 
 import (
-	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
+	windows "github.com/netdata/plugin-ipc/go/pkg/netipc/transport/windows"
 )
 
 // Cache is an L3 client-side cgroups snapshot cache.
@@ -22,21 +26,15 @@ type Cache struct {
 	responseBuf []byte
 }
 
-// NewCache creates a new L3 cache. Creates the underlying L2 client
-// context. Does NOT connect. Does NOT require the server to be running.
-// Cache starts empty (populated == false).
-func NewCache(runDir, serviceName string, config posix.ClientConfig) *Cache {
+// NewCache creates a new L3 cache.
+func NewCache(runDir, serviceName string, config windows.ClientConfig) *Cache {
 	return &Cache{
 		client:      NewClient(runDir, serviceName, config),
 		responseBuf: make([]byte, cacheResponseBufSize),
 	}
 }
 
-// Refresh drives the L2 client (connect/reconnect as needed) and
-// requests a fresh snapshot. On success, rebuilds the local cache.
-// On failure, preserves the previous cache.
-//
-// Returns true if the cache was updated.
+// Refresh drives the L2 client and requests a fresh snapshot.
 func (c *Cache) Refresh() bool {
 	c.client.Refresh()
 

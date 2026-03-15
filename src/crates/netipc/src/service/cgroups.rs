@@ -1,18 +1,34 @@
 //! L2 cgroups snapshot service: client context and managed server.
 //!
-//! Pure composition of L1 (UDS/SHM) + Codec. No direct socket/mmap calls.
+//! Pure composition of L1 (UDS/SHM on POSIX, Named Pipe/Win SHM on Windows)
+//! + Codec. No direct socket/mmap calls.
 //! Client manages connection lifecycle with at-least-once retry.
 //! Server handles accept, read, dispatch, respond.
 
 use crate::protocol::{
     self, CgroupsRequest, CgroupsResponseView, Header, NipcError, HEADER_SIZE, KIND_REQUEST,
-    KIND_RESPONSE, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT, PROFILE_SHM_FUTEX,
-    PROFILE_SHM_HYBRID, STATUS_INTERNAL_ERROR, STATUS_OK, VERSION,
+    KIND_RESPONSE, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT, STATUS_INTERNAL_ERROR, STATUS_OK, VERSION,
 };
+
+#[cfg(unix)]
+use crate::protocol::{PROFILE_SHM_FUTEX, PROFILE_SHM_HYBRID};
+
+#[cfg(unix)]
 use crate::transport::posix::{ClientConfig, ServerConfig, UdsListener, UdsSession};
 
 #[cfg(target_os = "linux")]
 use crate::transport::shm::ShmContext;
+
+#[cfg(windows)]
+use crate::transport::windows::{
+    ClientConfig, ServerConfig, NpSession, NpListener, NpError,
+};
+
+#[cfg(windows)]
+use crate::transport::win_shm::{
+    WinShmContext, PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID,
+    PROFILE_BUSYWAIT as WIN_SHM_PROFILE_BUSYWAIT,
+};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -58,9 +74,15 @@ pub struct CgroupsClient {
     transport_config: ClientConfig,
 
     // Connection (managed internally)
+    #[cfg(unix)]
     session: Option<UdsSession>,
     #[cfg(target_os = "linux")]
     shm: Option<ShmContext>,
+
+    #[cfg(windows)]
+    session: Option<NpSession>,
+    #[cfg(windows)]
+    shm: Option<WinShmContext>,
 
     // Stats
     connect_count: u32,
@@ -80,6 +102,8 @@ impl CgroupsClient {
             transport_config: config,
             session: None,
             #[cfg(target_os = "linux")]
+            shm: None,
+            #[cfg(windows)]
             shm: None,
             connect_count: 0,
             reconnect_count: 0,
@@ -203,7 +227,7 @@ impl CgroupsClient {
     //  Internal helpers
     // ------------------------------------------------------------------
 
-    /// Tear down the current connection (UDS session + SHM if any).
+    /// Tear down the current connection.
     fn disconnect(&mut self) {
         #[cfg(target_os = "linux")]
         {
@@ -212,12 +236,20 @@ impl CgroupsClient {
             }
         }
 
-        // Drop the session (closes fd via Drop impl)
+        #[cfg(windows)]
+        {
+            if let Some(mut shm) = self.shm.take() {
+                shm.close();
+            }
+        }
+
+        // Drop the session (closes handle/fd via Drop impl)
         self.session.take();
     }
 
-    /// Attempt a full connection: UDS connect + handshake, then SHM upgrade
-    /// if negotiated.
+    /// Attempt a full connection: transport connect + handshake, then SHM
+    /// upgrade if negotiated.
+    #[cfg(unix)]
     fn try_connect(&mut self) -> ClientState {
         match UdsSession::connect(&self.run_dir, &self.service_name, &self.transport_config) {
             Ok(session) => {
@@ -267,6 +299,52 @@ impl CgroupsClient {
         }
     }
 
+    /// Windows: attempt a full Named Pipe connection + Win SHM upgrade.
+    #[cfg(windows)]
+    fn try_connect(&mut self) -> ClientState {
+        match NpSession::connect(&self.run_dir, &self.service_name, &self.transport_config) {
+            Ok(session) => {
+                let selected_profile = session.selected_profile;
+
+                // Win SHM upgrade if negotiated
+                if selected_profile == WIN_SHM_PROFILE_HYBRID
+                    || selected_profile == WIN_SHM_PROFILE_BUSYWAIT
+                {
+                    let mut shm_ok = false;
+                    for _ in 0..200 {
+                        match WinShmContext::client_attach(
+                            &self.run_dir,
+                            &self.service_name,
+                            self.transport_config.auth_token,
+                            selected_profile,
+                        ) {
+                            Ok(ctx) => {
+                                self.shm = Some(ctx);
+                                shm_ok = true;
+                                break;
+                            }
+                            Err(_) => {
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                        }
+                    }
+                    if !shm_ok {
+                        self.shm = None;
+                    }
+                }
+
+                self.session = Some(session);
+                ClientState::Ready
+            }
+            Err(e) => match e {
+                NpError::Connect(_) => ClientState::NotFound,
+                NpError::AuthFailed => ClientState::AuthFailed,
+                NpError::NoProfile => ClientState::Incompatible,
+                _ => ClientState::Disconnected,
+            },
+        }
+    }
+
     /// Single attempt at a cgroups snapshot call.
     /// Returns the payload length on success. The payload bytes are in
     /// response_buf[..payload_len]. Caller decodes after this returns.
@@ -310,8 +388,9 @@ impl CgroupsClient {
         Ok(payload_len)
     }
 
-    /// Send via the active transport (SHM if available, UDS otherwise).
+    /// Send via the active transport (SHM if available, baseline otherwise).
     fn transport_send(&mut self, hdr: &mut Header, payload: &[u8]) -> Result<(), NipcError> {
+        // SHM path (POSIX or Windows)
         #[cfg(target_os = "linux")]
         {
             if let Some(ref mut shm) = self.shm {
@@ -332,7 +411,27 @@ impl CgroupsClient {
             }
         }
 
-        // UDS path
+        #[cfg(windows)]
+        {
+            if let Some(ref mut shm) = self.shm {
+                let msg_len = HEADER_SIZE + payload.len();
+                let mut msg = vec![0u8; msg_len];
+
+                hdr.magic = MAGIC_MSG;
+                hdr.version = VERSION;
+                hdr.header_len = protocol::HEADER_LEN;
+                hdr.payload_len = payload.len() as u32;
+
+                hdr.encode(&mut msg[..HEADER_SIZE]);
+                if !payload.is_empty() {
+                    msg[HEADER_SIZE..].copy_from_slice(payload);
+                }
+
+                return shm.send(&msg).map_err(|_| NipcError::Overflow);
+            }
+        }
+
+        // Baseline transport path
         let session = self.session.as_mut().ok_or(NipcError::Truncated)?;
         session.send(hdr, payload).map_err(|_| NipcError::Overflow)
     }
@@ -343,6 +442,7 @@ impl CgroupsClient {
         &mut self,
         response_buf: &mut [u8],
     ) -> Result<(Header, usize), NipcError> {
+        // SHM path (POSIX or Windows)
         #[cfg(target_os = "linux")]
         {
             if let Some(ref mut shm) = self.shm {
@@ -365,20 +465,60 @@ impl CgroupsClient {
             }
         }
 
-        // UDS path: receive returns (Header, Vec<u8>)
-        let session = self.session.as_mut().ok_or(NipcError::Truncated)?;
-        let mut scratch = vec![0u8; response_buf.len() + HEADER_SIZE];
-        let (hdr, payload_vec) = session
-            .receive(&mut scratch)
-            .map_err(|_| NipcError::Truncated)?;
+        #[cfg(windows)]
+        {
+            if let Some(ref mut shm) = self.shm {
+                let mut shm_buf = vec![0u8; response_buf.len() + HEADER_SIZE];
+                let mlen = shm.receive(&mut shm_buf, 30000).map_err(|_| NipcError::Truncated)?;
 
-        let payload_len = payload_vec.len();
-        if payload_len > response_buf.len() {
-            return Err(NipcError::Overflow);
+                if mlen < HEADER_SIZE {
+                    return Err(NipcError::Truncated);
+                }
+
+                let hdr = Header::decode(&shm_buf[..mlen])?;
+                let payload_len = mlen - HEADER_SIZE;
+
+                if payload_len > response_buf.len() {
+                    return Err(NipcError::Overflow);
+                }
+
+                response_buf[..payload_len].copy_from_slice(&shm_buf[HEADER_SIZE..mlen]);
+                return Ok((hdr, payload_len));
+            }
         }
-        response_buf[..payload_len].copy_from_slice(&payload_vec);
 
-        Ok((hdr, payload_len))
+        // Baseline transport: UDS on POSIX, Named Pipe on Windows
+        let session = self.session.as_mut().ok_or(NipcError::Truncated)?;
+
+        #[cfg(unix)]
+        {
+            let mut scratch = vec![0u8; response_buf.len() + HEADER_SIZE];
+            let (hdr, payload_vec) = session
+                .receive(&mut scratch)
+                .map_err(|_| NipcError::Truncated)?;
+
+            let payload_len = payload_vec.len();
+            if payload_len > response_buf.len() {
+                return Err(NipcError::Overflow);
+            }
+            response_buf[..payload_len].copy_from_slice(&payload_vec);
+            Ok((hdr, payload_len))
+        }
+
+        #[cfg(windows)]
+        {
+            let mut scratch = vec![0u8; response_buf.len() + HEADER_SIZE];
+            let (hdr, payload_vec) = session
+                .receive(&mut scratch)
+                .map_err(|_| NipcError::Truncated)?;
+
+            let payload_len = payload_vec.len();
+            if payload_len > response_buf.len() {
+                return Err(NipcError::Overflow);
+            }
+            response_buf[..payload_len].copy_from_slice(&payload_vec);
+            Ok((hdr, payload_len))
+        }
     }
 }
 
@@ -431,6 +571,7 @@ impl CgroupsServer {
     /// dispatches to the handler, sends responses.
     ///
     /// Returns when `stop()` is called or on fatal error.
+    #[cfg(unix)]
     pub fn run(&mut self) -> Result<(), NipcError> {
         let listener = UdsListener::bind(
             &self.run_dir,
@@ -442,16 +583,14 @@ impl CgroupsServer {
         self.running.store(true, Ordering::Release);
 
         while self.running.load(Ordering::Acquire) {
-            // Poll the listener fd before blocking on accept
             let ready = poll_fd(listener.fd(), 500);
             if ready < 0 {
                 break;
             }
             if ready == 0 {
-                continue; // timeout, check running flag
+                continue;
             }
 
-            // Accept one client via L1
             let session = match listener.accept() {
                 Ok(s) => s,
                 Err(_) => {
@@ -463,13 +602,11 @@ impl CgroupsServer {
                 }
             };
 
-            // SHM upgrade if negotiated
             #[cfg(target_os = "linux")]
             let shm = self.try_shm_upgrade(&session);
             #[cfg(not(target_os = "linux"))]
             let shm: Option<()> = None;
 
-            // Handle this session (blocking, single-threaded)
             self.handle_session(
                 session,
                 #[cfg(target_os = "linux")]
@@ -477,6 +614,37 @@ impl CgroupsServer {
                 #[cfg(not(target_os = "linux"))]
                 shm,
             );
+        }
+
+        Ok(())
+    }
+
+    /// Windows: run the acceptor loop over Named Pipes.
+    #[cfg(windows)]
+    pub fn run(&mut self) -> Result<(), NipcError> {
+        let mut listener = NpListener::bind(
+            &self.run_dir,
+            &self.service_name,
+            self.server_config.clone(),
+        )
+        .map_err(|_| NipcError::BadLayout)?;
+
+        self.running.store(true, Ordering::Release);
+
+        while self.running.load(Ordering::Acquire) {
+            let session = match listener.accept() {
+                Ok(s) => s,
+                Err(_) => {
+                    if !self.running.load(Ordering::Acquire) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+            };
+
+            let shm = self.try_win_shm_upgrade(&session);
+            self.handle_session_win(session, shm);
         }
 
         Ok(())
@@ -514,7 +682,122 @@ impl CgroupsServer {
         }
     }
 
-    /// Handle one client session.
+    /// Windows: SHM upgrade helper.
+    #[cfg(windows)]
+    fn try_win_shm_upgrade(&self, session: &NpSession) -> Option<WinShmContext> {
+        let profile = session.selected_profile;
+        if profile != WIN_SHM_PROFILE_HYBRID && profile != WIN_SHM_PROFILE_BUSYWAIT {
+            return None;
+        }
+
+        match WinShmContext::server_create(
+            &self.run_dir,
+            &self.service_name,
+            self.server_config.auth_token,
+            profile,
+            session.max_request_payload_bytes + HEADER_SIZE as u32,
+            session.max_response_payload_bytes + HEADER_SIZE as u32,
+        ) {
+            Ok(ctx) => Some(ctx),
+            Err(_) => None,
+        }
+    }
+
+    /// Windows: handle one client session over Named Pipe + optional Win SHM.
+    #[cfg(windows)]
+    fn handle_session_win(
+        &mut self,
+        mut session: NpSession,
+        mut shm: Option<WinShmContext>,
+    ) {
+        let mut recv_buf = vec![0u8; 65536];
+
+        while self.running.load(Ordering::Acquire) {
+            let (hdr, payload) = {
+                if let Some(ref mut shm_ctx) = shm {
+                    match shm_ctx.receive(&mut recv_buf, 500) {
+                        Ok(mlen) => {
+                            if mlen < HEADER_SIZE {
+                                break;
+                            }
+                            let hdr = match Header::decode(&recv_buf[..mlen]) {
+                                Ok(h) => h,
+                                Err(_) => break,
+                            };
+                            let payload = recv_buf[HEADER_SIZE..mlen].to_vec();
+                            (hdr, payload)
+                        }
+                        Err(crate::transport::win_shm::WinShmError::Timeout) => continue,
+                        Err(_) => break,
+                    }
+                } else {
+                    // Named Pipe path
+                    match session.receive(&mut recv_buf) {
+                        Ok((hdr, payload)) => (hdr, payload),
+                        Err(_) => break,
+                    }
+                }
+            };
+
+            if hdr.kind != KIND_REQUEST {
+                continue;
+            }
+
+            let handler_result = (self.handler)(hdr.code, &payload);
+
+            let mut resp_hdr = Header {
+                kind: KIND_RESPONSE,
+                code: hdr.code,
+                message_id: hdr.message_id,
+                item_count: 1,
+                flags: 0,
+                ..Header::default()
+            };
+
+            let response_payload = match handler_result {
+                Some(data) => {
+                    resp_hdr.transport_status = STATUS_OK;
+                    data
+                }
+                None => {
+                    resp_hdr.transport_status = STATUS_INTERNAL_ERROR;
+                    Vec::new()
+                }
+            };
+
+            if let Some(ref mut shm_ctx) = shm {
+                let msg_len = HEADER_SIZE + response_payload.len();
+                let mut msg = vec![0u8; msg_len];
+
+                resp_hdr.magic = MAGIC_MSG;
+                resp_hdr.version = VERSION;
+                resp_hdr.header_len = protocol::HEADER_LEN;
+                resp_hdr.payload_len = response_payload.len() as u32;
+
+                resp_hdr.encode(&mut msg[..HEADER_SIZE]);
+                if !response_payload.is_empty() {
+                    msg[HEADER_SIZE..].copy_from_slice(&response_payload);
+                }
+
+                if shm_ctx.send(&msg).is_err() {
+                    break;
+                }
+                continue;
+            }
+
+            if session.send(&mut resp_hdr, &response_payload).is_err() {
+                break;
+            }
+        }
+
+        if let Some(mut shm_ctx) = shm {
+            shm_ctx.destroy();
+        }
+        session.close();
+    }
+
+    /// POSIX: Handle one client session.
+    #[cfg(unix)]
     fn handle_session(
         &mut self,
         mut session: UdsSession,
@@ -655,6 +938,7 @@ impl CgroupsServer {
 
 /// Poll a file descriptor for readability with a timeout in milliseconds.
 /// Returns: 1 = data ready, 0 = timeout, -1 = error/hangup.
+#[cfg(unix)]
 fn poll_fd(fd: i32, timeout_ms: i32) -> i32 {
     let mut pfd = libc::pollfd {
         fd,
@@ -862,7 +1146,7 @@ impl Drop for CgroupsCache {
 //  Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::protocol::{CgroupsBuilder, PROFILE_BASELINE};

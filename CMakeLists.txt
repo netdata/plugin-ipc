@@ -90,6 +90,18 @@ if(NETIPC_WINDOWS_RUNTIME)
         src/libnetdata/netipc/include
     )
     target_link_libraries(netipc_win_shm PUBLIC netipc_protocol netipc_named_pipe)
+
+    # --- C library: L2/L3 Windows service orchestration ----------------------
+
+    add_library(netipc_service_win STATIC
+        src/libnetdata/netipc/src/service/netipc_service_win.c
+    )
+    target_include_directories(netipc_service_win PUBLIC
+        src/libnetdata/netipc/include
+    )
+    target_link_libraries(netipc_service_win PUBLIC
+        netipc_protocol netipc_named_pipe netipc_win_shm
+    )
 endif()
 
 # --- Rust crate -----------------------------------------------------------
@@ -566,6 +578,90 @@ if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
     set_tests_properties(test_win_shm_interop PROPERTIES
         TIMEOUT 60
         ENVIRONMENT "INTEROP_WIN_SHM_C=$<TARGET_FILE:interop_win_shm_c>;INTEROP_WIN_SHM_RS=${INTEROP_WIN_SHM_RS};INTEROP_WIN_SHM_GO=${INTEROP_WIN_SHM_GO}"
+    )
+endif()
+
+# --- Windows L2 service interop binaries -----------------------------------
+
+if(NETIPC_WINDOWS_RUNTIME)
+    # C Windows L2 interop binary
+    add_executable(interop_service_win_c tests/fixtures/c/interop_service_win.c)
+    target_link_libraries(interop_service_win_c PRIVATE
+        netipc_service_win netipc_win_shm netipc_named_pipe netipc_protocol
+    )
+
+    # C Windows L3 cache interop binary
+    add_executable(interop_cache_win_c tests/fixtures/c/interop_cache_win.c)
+    target_link_libraries(interop_cache_win_c PRIVATE
+        netipc_service_win netipc_win_shm netipc_named_pipe netipc_protocol
+    )
+endif()
+
+# --- Rust Windows L2/L3 interop binaries ------------------------------------
+
+if(CARGO_EXECUTABLE AND NETIPC_WINDOWS_RUNTIME)
+    add_custom_target(interop_service_win_rs ALL
+        COMMAND ${CARGO_EXECUTABLE} build --bin interop_service_win
+        WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+        COMMENT "Building Rust Windows L2 service interop binary"
+    )
+
+    add_custom_target(interop_cache_win_rs ALL
+        COMMAND ${CARGO_EXECUTABLE} build --bin interop_cache_win
+        WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+        COMMENT "Building Rust Windows L3 cache interop binary"
+    )
+endif()
+
+# --- Go Windows L2/L3 interop binaries -------------------------------------
+
+if(GO_EXECUTABLE AND NETIPC_WINDOWS_RUNTIME)
+    add_custom_target(interop_service_win_go ALL
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} build -o "${CMAKE_BINARY_DIR}/bin/interop_service_win_go.exe"
+            ./cmd/interop_service_win
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tests/fixtures/go"
+        COMMENT "Building Go Windows L2 service interop binary"
+    )
+
+    add_custom_target(interop_cache_win_go ALL
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} build -o "${CMAKE_BINARY_DIR}/bin/interop_cache_win_go.exe"
+            ./cmd/interop_cache_win
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tests/fixtures/go"
+        COMMENT "Building Go Windows L3 cache interop binary"
+    )
+endif()
+
+# --- Cross-language Windows L2 service interop tests ------------------------
+
+if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
+    set(INTEROP_SVC_WIN_RS "${NETIPC_RUST_CRATE_DIR}/target/debug/interop_service_win.exe")
+    set(INTEROP_SVC_WIN_GO "${CMAKE_BINARY_DIR}/bin/interop_service_win_go.exe")
+
+    add_test(NAME test_service_win_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_service_win_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_service_win_interop PROPERTIES
+        TIMEOUT 120
+        ENVIRONMENT "INTEROP_SVC_C=$<TARGET_FILE:interop_service_win_c>;INTEROP_SVC_RS=${INTEROP_SVC_WIN_RS};INTEROP_SVC_GO=${INTEROP_SVC_WIN_GO}"
+    )
+endif()
+
+# --- Cross-language Windows L3 cache interop tests --------------------------
+
+if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
+    set(INTEROP_CACHE_WIN_RS "${NETIPC_RUST_CRATE_DIR}/target/debug/interop_cache_win.exe")
+    set(INTEROP_CACHE_WIN_GO "${CMAKE_BINARY_DIR}/bin/interop_cache_win_go.exe")
+
+    add_test(NAME test_cache_win_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_cache_win_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_cache_win_interop PROPERTIES
+        TIMEOUT 120
+        ENVIRONMENT "INTEROP_CACHE_C=$<TARGET_FILE:interop_cache_win_c>;INTEROP_CACHE_RS=${INTEROP_CACHE_WIN_RS};INTEROP_CACHE_GO=${INTEROP_CACHE_WIN_GO}"
     )
 endif()
 

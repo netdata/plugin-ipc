@@ -41,5 +41,13 @@ name = "interop_win_shm"
 path = "../../../tests/fixtures/rust/src/bin/interop_win_shm.rs"
 
 [[bin]]
+name = "interop_service_win"
+path = "../../../tests/fixtures/rust/src/bin/interop_service_win.rs"
+
+[[bin]]
+name = "interop_cache_win"
+path = "../../../tests/fixtures/rust/src/bin/interop_cache_win.rs"
+
+[[bin]]
 name = "bench_posix"
 path = "../../../bench/drivers/rust/src/main.rs"

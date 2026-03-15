@@ -6,16 +6,27 @@
  * and a multi-client server with worker dispatch.
  *
  * L2 callers never see transports, handshakes, or chunking.
+ *
+ * Platform-specific transport types are selected at compile time:
+ *   POSIX: UDS + SHM (netipc_uds.h, netipc_shm.h)
+ *   Windows: Named Pipe + Win SHM (netipc_named_pipe.h, netipc_win_shm.h)
  */
 
 #ifndef NETIPC_SERVICE_H
 #define NETIPC_SERVICE_H
 
 #include "netipc_protocol.h"
+
+#ifdef _WIN32
+#include "netipc_named_pipe.h"
+#include "netipc_win_shm.h"
+#include <windows.h>
+#else
 #include "netipc_uds.h"
 #include "netipc_shm.h"
-
 #include <pthread.h>
+#endif
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -61,12 +72,22 @@ typedef struct {
     /* Configuration (set at init, immutable) */
     char run_dir[256];
     char service_name[128];
+
+#ifdef _WIN32
+    nipc_np_client_config_t transport_config;
+
+    /* Connection (managed internally) */
+    nipc_np_session_t session;
+    bool session_valid;
+    nipc_win_shm_ctx_t *shm;  /* non-NULL if SHM profile negotiated */
+#else
     nipc_uds_client_config_t transport_config;
 
     /* Connection (managed internally) */
     nipc_uds_session_t session;
     bool session_valid;
     nipc_shm_ctx_t *shm;  /* non-NULL if SHM profile negotiated */
+#endif
 
     /* Stats */
     uint32_t connect_count;
@@ -86,7 +107,11 @@ typedef struct {
 void nipc_client_init(nipc_client_ctx_t *ctx,
                       const char *run_dir,
                       const char *service_name,
+#ifdef _WIN32
+                      const nipc_np_client_config_t *config);
+#else
                       const nipc_uds_client_config_t *config);
+#endif
 
 /*
  * Attempt connect if DISCONNECTED, reconnect if BROKEN.
@@ -172,10 +197,18 @@ typedef struct nipc_managed_server nipc_managed_server_t;
 
 struct nipc_managed_server {
     /* Listener */
+#ifdef _WIN32
+    nipc_np_listener_t listener;
+#else
     nipc_uds_listener_t listener;
+#endif
 
     /* Workers */
+#ifdef _WIN32
+    HANDLE *workers;
+#else
     pthread_t *workers;
+#endif
     int worker_count;
 
     /* Callback */
@@ -192,6 +225,11 @@ struct nipc_managed_server {
     /* Configuration */
     char run_dir[256];
     char service_name[128];
+
+#ifdef _WIN32
+    /* Auth token needed for SHM kernel object naming */
+    uint64_t auth_token;
+#endif
 };
 
 /*
@@ -201,7 +239,11 @@ struct nipc_managed_server {
 nipc_error_t nipc_server_init(nipc_managed_server_t *server,
                                const char *run_dir,
                                const char *service_name,
+#ifdef _WIN32
+                               const nipc_np_server_config_t *config,
+#else
                                const nipc_uds_server_config_t *config,
+#endif
                                int worker_count,
                                size_t response_buf_size,
                                nipc_server_handler_fn handler,
@@ -293,7 +335,11 @@ typedef struct {
 void nipc_cgroups_cache_init(nipc_cgroups_cache_t *cache,
                               const char *run_dir,
                               const char *service_name,
+#ifdef _WIN32
+                              const nipc_np_client_config_t *config);
+#else
                               const nipc_uds_client_config_t *config);
+#endif
 
 /*
  * Refresh the cache. Drives the L2 client (connect/reconnect as
