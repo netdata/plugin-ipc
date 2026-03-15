@@ -38,7 +38,7 @@ fn build_message(kind: u16, code: u16, message_id: u64, payload: &[u8]) -> Vec<u
 #[cfg(windows)]
 fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut ctx = WinShmContext::server_create(
-        run_dir, service, AUTH_TOKEN, PROFILE_HYBRID, 65536, 65536,
+        run_dir, service, AUTH_TOKEN, 1, PROFILE_HYBRID, 65536, 65536,
     )?;
 
     // Signal readiness
@@ -72,7 +72,7 @@ fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Er
     // Retry attach -- server may not be fully ready yet
     let mut ctx = None;
     for _ in 0..500 {
-        match WinShmContext::client_attach(run_dir, service, AUTH_TOKEN, PROFILE_HYBRID) {
+        match WinShmContext::client_attach(run_dir, service, AUTH_TOKEN, 1, PROFILE_HYBRID) {
             Ok(c) => {
                 ctx = Some(c);
                 break;

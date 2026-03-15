@@ -61,7 +61,7 @@ static int run_server(const char *run_dir, const char *service)
     fflush(stdout);
 
     nipc_np_session_t session;
-    err = nipc_np_accept(&listener, &session);
+    err = nipc_np_accept(&listener, 1, &session);
     if (err != NIPC_NP_OK) {
         fprintf(stderr, "server: accept failed: %d\n", err);
         nipc_np_close_listener(&listener);

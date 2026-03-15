@@ -356,6 +356,7 @@ static int run_ping_pong_client(const char *run_dir, const char *service,
         for (int i = 0; i < 200; i++) {
             nipc_win_shm_error_t serr = nipc_win_shm_client_attach(
                 run_dir, service, AUTH_TOKEN,
+                session.session_id,
                 NIPC_WIN_SHM_PROFILE_HYBRID, shm);
             if (serr == NIPC_WIN_SHM_OK) {
                 attached = 1;

@@ -27,7 +27,7 @@ static int run_server(const char *run_dir, const char *service)
 {
     nipc_win_shm_ctx_t ctx;
     nipc_win_shm_error_t err = nipc_win_shm_server_create(
-        run_dir, service, AUTH_TOKEN, PROFILE, 65536, 65536, &ctx);
+        run_dir, service, AUTH_TOKEN, 1, PROFILE, 65536, 65536, &ctx);
     if (err != NIPC_WIN_SHM_OK) {
         fprintf(stderr, "server: shm create failed: %d\n", err);
         return 1;
@@ -86,7 +86,7 @@ static int run_client(const char *run_dir, const char *service)
     nipc_win_shm_error_t err = NIPC_WIN_SHM_ERR_OPEN_MAPPING;
     for (int i = 0; i < 500; i++) {
         err = nipc_win_shm_client_attach(run_dir, service, AUTH_TOKEN,
-                                          PROFILE, &ctx);
+                                          1, PROFILE, &ctx);
         if (err == NIPC_WIN_SHM_OK)
             break;
         if (err == NIPC_WIN_SHM_ERR_OPEN_MAPPING ||

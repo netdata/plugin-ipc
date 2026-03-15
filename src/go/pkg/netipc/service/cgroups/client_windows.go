@@ -181,6 +181,7 @@ func (c *Client) tryConnect() ClientState {
 			shm, serr := windows.WinShmClientAttach(
 				c.runDir, c.serviceName,
 				c.config.AuthToken,
+				session.SessionID,
 				session.SelectedProfile,
 			)
 			if serr == nil {
@@ -367,6 +368,7 @@ func (s *Server) Run() error {
 			shmCtx, serr := windows.WinShmServerCreate(
 				s.runDir, s.serviceName,
 				s.config.AuthToken,
+				session.SessionID,
 				session.SelectedProfile,
 				session.MaxRequestPayloadBytes+uint32(protocol.HeaderSize),
 				session.MaxResponsePayloadBytes+uint32(protocol.HeaderSize),

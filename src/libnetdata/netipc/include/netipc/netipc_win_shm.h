@@ -6,9 +6,9 @@
  * auto-reset kernel events for synchronization.
  *
  * Kernel object name derivation:
- *   Local\netipc-{FNV1a64(run_dir+"\n"+service_name+"\n"+auth_token):016llx}-{service}-p{profile}-mapping
- *   Local\netipc-{hash}-{service}-p{profile}-req_event
- *   Local\netipc-{hash}-{service}-p{profile}-resp_event
+ *   Local\netipc-{FNV1a64(run_dir+"\n"+service_name+"\n"+auth_token):016llx}-{service}-p{profile}-s{session_id:016llx}-mapping
+ *   Local\netipc-{hash}-{service}-p{profile}-s{session_id:016llx}-req_event
+ *   Local\netipc-{hash}-{service}-p{profile}-s{session_id:016llx}-resp_event
  */
 
 #ifndef NETIPC_WIN_SHM_H
@@ -168,11 +168,13 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 /*
- * Create a Windows SHM region.
+ * Create a per-session Windows SHM region.
  *
  * The kernel objects are named using the FNV-1a hash of
- * run_dir + "\n" + service_name + "\n" + auth_token_decimal.
+ * run_dir + "\n" + service_name + "\n" + auth_token_decimal,
+ * plus the session_id for per-session isolation.
  *
+ * session_id: server-assigned session identifier (from hello-ack).
  * profile: NIPC_WIN_SHM_PROFILE_HYBRID or NIPC_WIN_SHM_PROFILE_BUSYWAIT.
  * req_capacity / resp_capacity: data area sizes in bytes.
  */
@@ -180,6 +182,7 @@ nipc_win_shm_error_t nipc_win_shm_server_create(
     const char *run_dir,
     const char *service_name,
     uint64_t auth_token,
+    uint64_t session_id,
     uint32_t profile,
     uint32_t req_capacity,
     uint32_t resp_capacity,
@@ -196,15 +199,25 @@ void nipc_win_shm_destroy(nipc_win_shm_ctx_t *ctx);
 /* ------------------------------------------------------------------ */
 
 /*
- * Attach to an existing Windows SHM region.
+ * Attach to an existing per-session Windows SHM region.
+ * session_id is from the hello-ack received during handshake.
  * Validates header and opens event handles.
  */
 nipc_win_shm_error_t nipc_win_shm_client_attach(
     const char *run_dir,
     const char *service_name,
     uint64_t auth_token,
+    uint64_t session_id,
     uint32_t profile,
     nipc_win_shm_ctx_t *ctx);
+
+/*
+ * Cleanup stale Windows SHM kernel objects.
+ * On Windows, kernel objects are reference-counted and auto-cleaned
+ * when all handles close, so this is a no-op. Provided for API
+ * symmetry with the POSIX SHM transport.
+ */
+void nipc_win_shm_cleanup_stale(const char *run_dir, const char *service_name);
 
 /*
  * Close a client SHM context.

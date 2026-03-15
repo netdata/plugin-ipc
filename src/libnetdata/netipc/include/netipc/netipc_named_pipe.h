@@ -125,6 +125,7 @@ typedef struct {
     uint32_t max_response_batch_items;
     uint32_t packet_size;
     uint32_t selected_profile;
+    uint64_t session_id;             /* server-assigned, for per-session SHM */
 
     /* Internal receive buffer for chunked reassembly */
     uint8_t *recv_buf;
@@ -180,10 +181,13 @@ nipc_np_error_t nipc_np_listen(const char *run_dir,
 
 /*
  * Accept one client on a listener. Performs the full handshake.
+ * session_id is placed into the hello-ack so the client can attach
+ * to the correct per-session SHM region.
  * Blocks until a client connects and the handshake completes.
  * After accepting, creates a new pipe instance for subsequent clients.
  */
 nipc_np_error_t nipc_np_accept(nipc_np_listener_t *listener,
+                                uint64_t session_id,
                                 nipc_np_session_t *out);
 
 /*

@@ -230,11 +230,12 @@ impl WinShmContext {
         self.role
     }
 
-    /// Create a Windows SHM region (server side).
+    /// Create a per-session Windows SHM region (server side).
     pub fn server_create(
         run_dir: &str,
         service_name: &str,
         auth_token: u64,
+        session_id: u64,
         profile: u32,
         req_capacity: u32,
         resp_capacity: u32,
@@ -243,7 +244,7 @@ impl WinShmContext {
         validate_profile(profile)?;
 
         let hash = compute_shm_hash(run_dir, service_name, auth_token);
-        let mapping_name = build_object_name(hash, service_name, profile, "mapping")?;
+        let mapping_name = build_object_name(hash, service_name, profile, session_id, "mapping")?;
 
         let req_cap = align_cacheline(req_capacity);
         let resp_cap = align_cacheline(resp_capacity);
@@ -295,7 +296,7 @@ impl WinShmContext {
 
         // Create events for HYBRID
         let (req_event, resp_event) = if profile == PROFILE_HYBRID {
-            let re_name = build_object_name(hash, service_name, profile, "req_event")?;
+            let re_name = build_object_name(hash, service_name, profile, session_id, "req_event")?;
             let re = unsafe { ffi::CreateEventW(std::ptr::null(), 0, 0, re_name.as_ptr()) };
             if re == 0 {
                 let e = last_error();
@@ -306,7 +307,7 @@ impl WinShmContext {
                 return Err(WinShmError::CreateEvent(e));
             }
 
-            let rsp_name = build_object_name(hash, service_name, profile, "resp_event")?;
+            let rsp_name = build_object_name(hash, service_name, profile, session_id, "resp_event")?;
             let rsp = unsafe { ffi::CreateEventW(std::ptr::null(), 0, 0, rsp_name.as_ptr()) };
             if rsp == 0 {
                 let e = last_error();
@@ -340,18 +341,19 @@ impl WinShmContext {
         })
     }
 
-    /// Attach to an existing Windows SHM region (client side).
+    /// Attach to an existing per-session Windows SHM region (client side).
     pub fn client_attach(
         run_dir: &str,
         service_name: &str,
         auth_token: u64,
+        session_id: u64,
         profile: u32,
     ) -> Result<Self, WinShmError> {
         validate_service_name(service_name)?;
         validate_profile(profile)?;
 
         let hash = compute_shm_hash(run_dir, service_name, auth_token);
-        let mapping_name = build_object_name(hash, service_name, profile, "mapping")?;
+        let mapping_name = build_object_name(hash, service_name, profile, session_id, "mapping")?;
 
         let mapping = unsafe {
             ffi::OpenFileMappingW(ffi::FILE_MAP_ALL_ACCESS, 0, mapping_name.as_ptr())
@@ -423,7 +425,7 @@ impl WinShmContext {
 
         // Open events for HYBRID
         let (req_event, resp_event) = if profile == PROFILE_HYBRID {
-            let re_name = build_object_name(hash, service_name, profile, "req_event")?;
+            let re_name = build_object_name(hash, service_name, profile, session_id, "req_event")?;
             let re = unsafe {
                 ffi::OpenEventW(ffi::EVENT_MODIFY_STATE | ffi::SYNCHRONIZE, 0, re_name.as_ptr())
             };
@@ -436,7 +438,7 @@ impl WinShmContext {
                 return Err(WinShmError::OpenEvent(e));
             }
 
-            let rsp_name = build_object_name(hash, service_name, profile, "resp_event")?;
+            let rsp_name = build_object_name(hash, service_name, profile, session_id, "resp_event")?;
             let rsp = unsafe {
                 ffi::OpenEventW(
                     ffi::EVENT_MODIFY_STATE | ffi::SYNCHRONIZE,
@@ -546,10 +548,11 @@ impl WinShmContext {
             return Err(WinShmError::BadParam("empty buffer".into()));
         }
 
-        let (area_off, len_off, seq_off, self_waiting_off, peer_closed_off, wait_event, expected_seq) =
+        let (area_off, area_cap, len_off, seq_off, self_waiting_off, peer_closed_off, wait_event, expected_seq) =
             match self.role {
                 WinShmRole::Server => (
                     self.request_offset,
+                    self.request_capacity,
                     OFF_REQ_LEN,
                     OFF_REQ_SEQ,
                     OFF_REQ_SERVER_WAITING,
@@ -559,6 +562,7 @@ impl WinShmContext {
                 ),
                 WinShmRole::Client => (
                     self.response_offset,
+                    self.response_capacity,
                     OFF_RESP_LEN,
                     OFF_RESP_SEQ,
                     OFF_RESP_CLIENT_WAITING,
@@ -568,6 +572,10 @@ impl WinShmContext {
                 ),
             };
 
+        // The copy ceiling is the smaller of the caller buffer and the
+        // SHM area capacity. Prevents out-of-bounds reads on forged lengths.
+        let max_copy = std::cmp::min(buf.len(), area_cap as usize);
+
         // Phase 1: spin
         let mut observed = false;
         let mut mlen: i32 = 0;
@@ -575,7 +583,7 @@ impl WinShmContext {
             let cur = interlocked_read_i64(self.base, seq_off);
             if cur >= expected_seq {
                 mlen = interlocked_read_i32(self.base, len_off);
-                if mlen > 0 && (mlen as usize) <= buf.len() {
+                if mlen > 0 && (mlen as usize) <= max_copy {
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             self.base.add(area_off as usize),
@@ -630,7 +638,7 @@ impl WinShmContext {
 
                 // Copy after waking
                 mlen = interlocked_read_i32(self.base, len_off);
-                if mlen > 0 && (mlen as usize) <= buf.len() {
+                if mlen > 0 && (mlen as usize) <= max_copy {
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             self.base.add(area_off as usize),
@@ -646,7 +654,7 @@ impl WinShmContext {
                     let cur = interlocked_read_i64(self.base, seq_off);
                     if cur >= expected_seq {
                         mlen = interlocked_read_i32(self.base, len_off);
-                        if mlen > 0 && (mlen as usize) <= buf.len() {
+                        if mlen > 0 && (mlen as usize) <= max_copy {
                             unsafe {
                                 std::ptr::copy_nonoverlapping(
                                     self.base.add(area_off as usize),
@@ -677,7 +685,7 @@ impl WinShmContext {
 
         self.advance_seq(expected_seq);
 
-        if (mlen as usize) > buf.len() {
+        if (mlen as usize) > max_copy {
             return Err(WinShmError::MsgTooLarge);
         }
 
@@ -810,11 +818,12 @@ fn build_object_name(
     hash: u64,
     service_name: &str,
     profile: u32,
+    session_id: u64,
     suffix: &str,
 ) -> Result<Vec<u16>, WinShmError> {
     let narrow = format!(
-        "Local\\netipc-{:016x}-{}-p{}-{}",
-        hash, service_name, profile, suffix
+        "Local\\netipc-{:016x}-{}-p{}-s{:016x}-{}",
+        hash, service_name, profile, session_id, suffix
     );
     if narrow.len() >= 256 {
         return Err(WinShmError::BadParam("object name too long".into()));
@@ -935,7 +944,7 @@ mod tests {
 
     #[test]
     fn test_object_name_format() {
-        let name = build_object_name(0xDEADBEEF, "test-svc", 2, "mapping").unwrap();
+        let name = build_object_name(0xDEADBEEF, "test-svc", 2, 0x42, "mapping").unwrap();
         // Check it's NUL-terminated
         assert_eq!(*name.last().unwrap(), 0);
         let narrow: String = name[..name.len() - 1]
@@ -943,6 +952,6 @@ mod tests {
             .map(|&c| c as u8 as char)
             .collect();
         assert!(narrow.starts_with("Local\\netipc-"));
-        assert!(narrow.contains("-test-svc-p2-mapping"));
+        assert!(narrow.contains("-test-svc-p2-s0000000000000042-mapping"));
     }
 }

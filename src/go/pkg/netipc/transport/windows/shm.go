@@ -139,8 +139,8 @@ func (c *WinShmContext) GetRole() WinShmRole { return c.role }
 //  Server API
 // ---------------------------------------------------------------------------
 
-// WinShmServerCreate creates a Windows SHM region.
-func WinShmServerCreate(runDir, serviceName string, authToken uint64,
+// WinShmServerCreate creates a per-session Windows SHM region.
+func WinShmServerCreate(runDir, serviceName string, authToken, sessionID uint64,
 	profile, reqCapacity, respCapacity uint32) (*WinShmContext, error) {
 
 	if err := validateServiceName(serviceName); err != nil {
@@ -151,7 +151,7 @@ func WinShmServerCreate(runDir, serviceName string, authToken uint64,
 	}
 
 	hash := computeShmHash(runDir, serviceName, authToken)
-	mappingName, err := buildWinShmObjectName(hash, serviceName, profile, "mapping")
+	mappingName, err := buildWinShmObjectName(hash, serviceName, profile, sessionID, "mapping")
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +214,7 @@ func WinShmServerCreate(runDir, serviceName string, authToken uint64,
 	respEvent = syscall.InvalidHandle
 
 	if profile == WinShmProfileHybrid {
-		reqEventName, err := buildWinShmObjectName(hash, serviceName, profile, "req_event")
+		reqEventName, err := buildWinShmObjectName(hash, serviceName, profile, sessionID, "req_event")
 		if err != nil {
 			procUnmapViewOfFile.Call(base)
 			syscall.CloseHandle(mapping)
@@ -230,7 +230,7 @@ func WinShmServerCreate(runDir, serviceName string, authToken uint64,
 		}
 		reqEvent = syscall.Handle(r)
 
-		respEventName, err := buildWinShmObjectName(hash, serviceName, profile, "resp_event")
+		respEventName, err := buildWinShmObjectName(hash, serviceName, profile, sessionID, "resp_event")
 		if err != nil {
 			syscall.CloseHandle(reqEvent)
 			procUnmapViewOfFile.Call(base)
@@ -285,8 +285,8 @@ func (c *WinShmContext) WinShmDestroy() {
 //  Client API
 // ---------------------------------------------------------------------------
 
-// WinShmClientAttach attaches to an existing Windows SHM region.
-func WinShmClientAttach(runDir, serviceName string, authToken uint64,
+// WinShmClientAttach attaches to an existing per-session Windows SHM region.
+func WinShmClientAttach(runDir, serviceName string, authToken, sessionID uint64,
 	profile uint32) (*WinShmContext, error) {
 
 	if err := validateServiceName(serviceName); err != nil {
@@ -297,7 +297,7 @@ func WinShmClientAttach(runDir, serviceName string, authToken uint64,
 	}
 
 	hash := computeShmHash(runDir, serviceName, authToken)
-	mappingName, err := buildWinShmObjectName(hash, serviceName, profile, "mapping")
+	mappingName, err := buildWinShmObjectName(hash, serviceName, profile, sessionID, "mapping")
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +374,7 @@ func WinShmClientAttach(runDir, serviceName string, authToken uint64,
 	respEvent = syscall.InvalidHandle
 
 	if profile == WinShmProfileHybrid {
-		reqEventName, err := buildWinShmObjectName(hash, serviceName, profile, "req_event")
+		reqEventName, err := buildWinShmObjectName(hash, serviceName, profile, sessionID, "req_event")
 		if err != nil {
 			procUnmapViewOfFile.Call(base)
 			syscall.CloseHandle(mapping)
@@ -393,7 +393,7 @@ func WinShmClientAttach(runDir, serviceName string, authToken uint64,
 		}
 		reqEvent = syscall.Handle(r)
 
-		respEventName, err := buildWinShmObjectName(hash, serviceName, profile, "resp_event")
+		respEventName, err := buildWinShmObjectName(hash, serviceName, profile, sessionID, "resp_event")
 		if err != nil {
 			syscall.CloseHandle(reqEvent)
 			procUnmapViewOfFile.Call(base)
@@ -538,13 +538,14 @@ func (c *WinShmContext) WinShmReceive(buf []byte, timeoutMs uint32) (int, error)
 		return 0, fmt.Errorf("%w: empty buffer", ErrWinShmBadParam)
 	}
 
-	var areaOff uint32
+	var areaOff, areaCap uint32
 	var lenOff, seqOff, selfWaitingOff, peerClosedOff int
 	var waitEvent syscall.Handle
 	var expectedSeq int64
 
 	if c.role == WinShmRoleServer {
 		areaOff = c.requestOffset
+		areaCap = c.requestCapacity
 		lenOff = wshOFFReqLen
 		seqOff = wshOFFReqSeq
 		selfWaitingOff = wshOFFReqServerWaiting
@@ -553,12 +554,20 @@ func (c *WinShmContext) WinShmReceive(buf []byte, timeoutMs uint32) (int, error)
 		expectedSeq = c.localReqSeq + 1
 	} else {
 		areaOff = c.responseOffset
+		areaCap = c.responseCapacity
 		lenOff = wshOFFRespLen
 		seqOff = wshOFFRespSeq
 		selfWaitingOff = wshOFFRespClientWaiting
 		peerClosedOff = wshOFFRespServerClosed
 		waitEvent = c.respEvent
 		expectedSeq = c.localRespSeq + 1
+	}
+
+	// The copy ceiling is the smaller of the caller buffer and the
+	// SHM area capacity. Prevents out-of-bounds reads on forged lengths.
+	maxCopy := len(buf)
+	if int(areaCap) < maxCopy {
+		maxCopy = int(areaCap)
 	}
 
 	data := unsafe.Slice((*byte)(unsafe.Pointer(c.base)), c.size)
@@ -570,7 +579,7 @@ func (c *WinShmContext) WinShmReceive(buf []byte, timeoutMs uint32) (int, error)
 		cur := atomic.LoadInt64((*int64)(unsafe.Pointer(&data[seqOff])))
 		if cur >= expectedSeq {
 			mlen = atomic.LoadInt32((*int32)(unsafe.Pointer(&data[lenOff])))
-			if mlen > 0 && int(mlen) <= len(buf) {
+			if mlen > 0 && int(mlen) <= maxCopy {
 				copy(buf[:mlen], data[areaOff:areaOff+uint32(mlen)])
 			}
 			observed = true
@@ -620,7 +629,7 @@ func (c *WinShmContext) WinShmReceive(buf []byte, timeoutMs uint32) (int, error)
 
 			// Copy after waking
 			mlen = atomic.LoadInt32((*int32)(unsafe.Pointer(&data[lenOff])))
-			if mlen > 0 && int(mlen) <= len(buf) {
+			if mlen > 0 && int(mlen) <= maxCopy {
 				copy(buf[:mlen], data[areaOff:areaOff+uint32(mlen)])
 			}
 		} else {
@@ -630,7 +639,7 @@ func (c *WinShmContext) WinShmReceive(buf []byte, timeoutMs uint32) (int, error)
 				cur := atomic.LoadInt64((*int64)(unsafe.Pointer(&data[seqOff])))
 				if cur >= expectedSeq {
 					mlen = atomic.LoadInt32((*int32)(unsafe.Pointer(&data[lenOff])))
-					if mlen > 0 && int(mlen) <= len(buf) {
+					if mlen > 0 && int(mlen) <= maxCopy {
 						copy(buf[:mlen], data[areaOff:areaOff+uint32(mlen)])
 					}
 					break
@@ -656,7 +665,7 @@ func (c *WinShmContext) WinShmReceive(buf []byte, timeoutMs uint32) (int, error)
 
 	c.advanceSeq(expectedSeq)
 
-	if int(mlen) > len(buf) {
+	if int(mlen) > maxCopy {
 		return int(mlen), ErrWinShmMsgTooLarge
 	}
 
@@ -692,10 +701,10 @@ func computeShmHash(runDir, serviceName string, authToken uint64) uint64 {
 }
 
 func buildWinShmObjectName(hash uint64, serviceName string,
-	profile uint32, suffix string) ([]uint16, error) {
+	profile uint32, sessionID uint64, suffix string) ([]uint16, error) {
 
-	narrow := fmt.Sprintf(`Local\netipc-%016x-%s-p%d-%s`,
-		hash, serviceName, profile, suffix)
+	narrow := fmt.Sprintf(`Local\netipc-%016x-%s-p%d-s%016x-%s`,
+		hash, serviceName, profile, sessionID, suffix)
 	if len(narrow) >= 256 {
 		return nil, fmt.Errorf("%w: object name too long", ErrWinShmBadParam)
 	}

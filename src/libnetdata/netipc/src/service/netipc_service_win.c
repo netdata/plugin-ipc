@@ -84,6 +84,7 @@ static nipc_client_state_t client_try_connect(nipc_client_ctx_t *ctx)
                 serr = nipc_win_shm_client_attach(
                     ctx->run_dir, ctx->service_name,
                     ctx->transport_config.auth_token,
+                    session.session_id,
                     session.selected_profile,
                     shm);
                 if (serr == NIPC_WIN_SHM_OK)
@@ -634,7 +635,8 @@ void nipc_server_run(nipc_managed_server_t *server)
         memset(&session, 0, sizeof(session));
         session.pipe = INVALID_HANDLE_VALUE;
 
-        nipc_np_error_t uerr = nipc_np_accept(&server->listener, &session);
+        uint64_t sid = server->next_session_id++;
+        nipc_np_error_t uerr = nipc_np_accept(&server->listener, sid, &session);
         if (uerr != NIPC_NP_OK) {
             if (!InterlockedCompareExchange(&server->running, 0, 0))
                 break;
@@ -664,6 +666,7 @@ void nipc_server_run(nipc_managed_server_t *server)
                 nipc_win_shm_error_t serr = nipc_win_shm_server_create(
                     server->run_dir, server->service_name,
                     server->auth_token,
+                    session.session_id,
                     session.selected_profile,
                     session.max_request_payload_bytes + NIPC_HEADER_LEN,
                     session.max_response_payload_bytes + NIPC_HEADER_LEN,
@@ -688,7 +691,7 @@ void nipc_server_run(nipc_managed_server_t *server)
         sctx->server = server;
         sctx->session = session;
         sctx->shm = shm;
-        sctx->id = server->next_session_id++;
+        sctx->id = sid;
         InterlockedExchange((volatile LONG *)&sctx->active, 1);
 
         /* Grow session array if needed */

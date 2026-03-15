@@ -43,7 +43,7 @@ func buildMessage(kind, code uint16, messageID uint64, payload []byte) []byte {
 }
 
 func runServer(runDir, service string) int {
-	ctx, err := windows.WinShmServerCreate(runDir, service, authToken,
+	ctx, err := windows.WinShmServerCreate(runDir, service, authToken, 1,
 		windows.WinShmProfileHybrid, 65536, 65536)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "server: create failed: %v\n", err)
@@ -90,7 +90,7 @@ func runClient(runDir, service string) int {
 	var ctx *windows.WinShmContext
 	var err error
 	for i := 0; i < 500; i++ {
-		ctx, err = windows.WinShmClientAttach(runDir, service, authToken,
+		ctx, err = windows.WinShmClientAttach(runDir, service, authToken, 1,
 			windows.WinShmProfileHybrid)
 		if err == nil {
 			break

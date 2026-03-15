@@ -321,6 +321,7 @@ impl CgroupsClient {
                             &self.run_dir,
                             &self.service_name,
                             self.transport_config.auth_token,
+                            session.session_id,
                             selected_profile,
                         ) {
                             Ok(ctx) => {
@@ -774,6 +775,7 @@ impl CgroupsServer {
             &self.run_dir,
             &self.service_name,
             self.server_config.auth_token,
+            session.session_id,
             profile,
             session.max_request_payload_bytes + HEADER_SIZE as u32,
             session.max_response_payload_bytes + HEADER_SIZE as u32,

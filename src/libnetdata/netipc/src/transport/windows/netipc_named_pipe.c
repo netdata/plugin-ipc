@@ -356,6 +356,7 @@ static nipc_np_error_t client_handshake(HANDLE pipe,
     session->max_response_batch_items   = ack.agreed_max_response_batch_items;
     session->packet_size                = ack.agreed_packet_size;
     session->selected_profile           = ack.selected_profile;
+    session->session_id                 = ack.session_id;
     session->recv_buf                   = NULL;
     session->recv_buf_size              = 0;
     session->inflight_count             = 0;
@@ -369,6 +370,7 @@ static nipc_np_error_t client_handshake(HANDLE pipe,
 
 static nipc_np_error_t server_handshake(HANDLE pipe,
                                          const nipc_np_server_config_t *cfg,
+                                         uint64_t session_id,
                                          nipc_np_session_t *session)
 {
     uint8_t buf[128];
@@ -464,6 +466,7 @@ static nipc_np_error_t server_handshake(HANDLE pipe,
         .agreed_max_response_payload_bytes = agreed_resp_pay,
         .agreed_max_response_batch_items   = agreed_resp_bat,
         .agreed_packet_size                = agreed_pkt,
+        .session_id                        = session_id,
     };
 
     uint8_t ack_buf[48];
@@ -499,6 +502,7 @@ static nipc_np_error_t server_handshake(HANDLE pipe,
     session->max_response_batch_items   = agreed_resp_bat;
     session->packet_size                = agreed_pkt;
     session->selected_profile           = selected;
+    session->session_id                 = session_id;
     session->recv_buf                   = NULL;
     session->recv_buf_size              = 0;
     session->inflight_count             = 0;
@@ -547,6 +551,7 @@ nipc_np_error_t nipc_np_listen(const char *run_dir,
 /* ------------------------------------------------------------------ */
 
 nipc_np_error_t nipc_np_accept(nipc_np_listener_t *listener,
+                                uint64_t session_id,
                                 nipc_np_session_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -579,7 +584,8 @@ nipc_np_error_t nipc_np_accept(nipc_np_listener_t *listener,
     listener->pipe = next;
 
     /* Perform handshake */
-    nipc_np_error_t herr = server_handshake(session_pipe, &listener->config, out);
+    nipc_np_error_t herr = server_handshake(session_pipe, &listener->config,
+                                             session_id, out);
     if (herr != NIPC_NP_OK) {
         DisconnectNamedPipe(session_pipe);
         CloseHandle(session_pipe);

@@ -93,19 +93,21 @@ static uint64_t compute_shm_hash(const char *run_dir,
 
 /*
  * Build a kernel object name.
- * Format: Local\netipc-{hash:016llx}-{service}-p{profile}-{suffix}
+ * Format: Local\netipc-{hash:016llx}-{service}-p{profile}-s{session_id:016llx}-{suffix}
  */
 static int build_object_name(wchar_t *dst, size_t dst_chars,
                               uint64_t hash,
                               const char *service_name,
                               uint32_t profile,
+                              uint64_t session_id,
                               const char *suffix)
 {
     char narrow[NIPC_WIN_SHM_MAX_NAME];
     int n = snprintf(narrow, sizeof(narrow),
-                     "Local\\netipc-%016llx-%s-p%u-%s",
+                     "Local\\netipc-%016llx-%s-p%u-s%016llx-%s",
                      (unsigned long long)hash, service_name,
-                     (unsigned)profile, suffix);
+                     (unsigned)profile,
+                     (unsigned long long)session_id, suffix);
     if (n < 0 || (size_t)n >= sizeof(narrow))
         return -1;
 
@@ -126,6 +128,7 @@ nipc_win_shm_error_t nipc_win_shm_server_create(
     const char *run_dir,
     const char *service_name,
     uint64_t auth_token,
+    uint64_t session_id,
     uint32_t profile,
     uint32_t req_capacity,
     uint32_t resp_capacity,
@@ -156,7 +159,8 @@ nipc_win_shm_error_t nipc_win_shm_server_create(
 
     wchar_t mapping_name[NIPC_WIN_SHM_MAX_NAME];
     if (build_object_name(mapping_name, NIPC_WIN_SHM_MAX_NAME,
-                           hash, service_name, profile, "mapping") < 0)
+                           hash, service_name, profile, session_id,
+                           "mapping") < 0)
         return NIPC_WIN_SHM_ERR_BAD_PARAM;
 
     /* Compute aligned offsets */
@@ -212,9 +216,11 @@ nipc_win_shm_error_t nipc_win_shm_server_create(
         wchar_t resp_event_name[NIPC_WIN_SHM_MAX_NAME];
 
         if (build_object_name(req_event_name, NIPC_WIN_SHM_MAX_NAME,
-                               hash, service_name, profile, "req_event") < 0 ||
+                               hash, service_name, profile, session_id,
+                               "req_event") < 0 ||
             build_object_name(resp_event_name, NIPC_WIN_SHM_MAX_NAME,
-                               hash, service_name, profile, "resp_event") < 0) {
+                               hash, service_name, profile, session_id,
+                               "resp_event") < 0) {
             UnmapViewOfFile(base);
             CloseHandle(mapping);
             return NIPC_WIN_SHM_ERR_BAD_PARAM;
@@ -307,6 +313,7 @@ nipc_win_shm_error_t nipc_win_shm_client_attach(
     const char *run_dir,
     const char *service_name,
     uint64_t auth_token,
+    uint64_t session_id,
     uint32_t profile,
     nipc_win_shm_ctx_t *ctx)
 {
@@ -334,7 +341,8 @@ nipc_win_shm_error_t nipc_win_shm_client_attach(
 
     wchar_t mapping_name[NIPC_WIN_SHM_MAX_NAME];
     if (build_object_name(mapping_name, NIPC_WIN_SHM_MAX_NAME,
-                           hash, service_name, profile, "mapping") < 0)
+                           hash, service_name, profile, session_id,
+                           "mapping") < 0)
         return NIPC_WIN_SHM_ERR_BAD_PARAM;
 
     /* Open existing file mapping */
@@ -404,9 +412,11 @@ nipc_win_shm_error_t nipc_win_shm_client_attach(
         wchar_t resp_event_name[NIPC_WIN_SHM_MAX_NAME];
 
         if (build_object_name(req_event_name, NIPC_WIN_SHM_MAX_NAME,
-                               hash, service_name, profile, "req_event") < 0 ||
+                               hash, service_name, profile, session_id,
+                               "req_event") < 0 ||
             build_object_name(resp_event_name, NIPC_WIN_SHM_MAX_NAME,
-                               hash, service_name, profile, "resp_event") < 0) {
+                               hash, service_name, profile, session_id,
+                               "resp_event") < 0) {
             UnmapViewOfFile(base);
             CloseHandle(mapping);
             return NIPC_WIN_SHM_ERR_BAD_PARAM;
@@ -569,6 +579,7 @@ nipc_win_shm_error_t nipc_win_shm_receive(
         return NIPC_WIN_SHM_ERR_BAD_PARAM;
 
     uint32_t area_offset;
+    uint32_t area_capacity;
     volatile LONG *len_ptr;
     volatile LONG64 *seq_ptr;
     volatile LONG *self_waiting_ptr;
@@ -580,6 +591,7 @@ nipc_win_shm_error_t nipc_win_shm_receive(
 
     if (ctx->role == NIPC_WIN_SHM_ROLE_SERVER) {
         area_offset      = ctx->request_offset;
+        area_capacity    = ctx->request_capacity;
         len_ptr          = &hdr->req_len;
         seq_ptr          = &hdr->req_seq;
         self_waiting_ptr = &hdr->req_server_waiting;
@@ -588,6 +600,7 @@ nipc_win_shm_error_t nipc_win_shm_receive(
         expected_seq     = ctx->local_req_seq + 1;
     } else {
         area_offset      = ctx->response_offset;
+        area_capacity    = ctx->response_capacity;
         len_ptr          = &hdr->resp_len;
         seq_ptr          = &hdr->resp_seq;
         self_waiting_ptr = &hdr->resp_client_waiting;
@@ -595,6 +608,11 @@ nipc_win_shm_error_t nipc_win_shm_receive(
         wait_event       = ctx->resp_event;
         expected_seq     = ctx->local_resp_seq + 1;
     }
+
+    /* The copy ceiling is the smaller of the caller buffer and the
+     * SHM area capacity. This prevents out-of-bounds reads even if
+     * the peer writes a forged length value. */
+    uint32_t max_copy = (buf_size < area_capacity) ? (uint32_t)buf_size : area_capacity;
 
     void *data_ptr = region_ptr(ctx, area_offset);
 
@@ -607,7 +625,7 @@ nipc_win_shm_error_t nipc_win_shm_receive(
         LONG64 cur = InterlockedCompareExchange64(seq_ptr, 0, 0);
         if (cur >= expected_seq) {
             mlen = InterlockedCompareExchange(len_ptr, 0, 0);
-            if (mlen > 0 && (size_t)mlen <= buf_size)
+            if (mlen > 0 && (size_t)mlen <= max_copy)
                 memcpy(buf, data_ptr, (size_t)mlen);
             observed = true;
             break;
@@ -655,7 +673,7 @@ nipc_win_shm_error_t nipc_win_shm_receive(
 
             /* Copy immediately after waking */
             mlen = InterlockedCompareExchange(len_ptr, 0, 0);
-            if (mlen > 0 && (size_t)mlen <= buf_size)
+            if (mlen > 0 && (size_t)mlen <= max_copy)
                 memcpy(buf, data_ptr, (size_t)mlen);
 
         } else {
@@ -665,7 +683,7 @@ nipc_win_shm_error_t nipc_win_shm_receive(
                 LONG64 cur = InterlockedCompareExchange64(seq_ptr, 0, 0);
                 if (cur >= expected_seq) {
                     mlen = InterlockedCompareExchange(len_ptr, 0, 0);
-                    if (mlen > 0 && (size_t)mlen <= buf_size)
+                    if (mlen > 0 && (size_t)mlen <= max_copy)
                         memcpy(buf, data_ptr, (size_t)mlen);
                     break;
                 }
@@ -694,9 +712,10 @@ nipc_win_shm_error_t nipc_win_shm_receive(
         }
     }
 
-    /* Message larger than caller buffer */
-    if ((size_t)mlen > buf_size) {
+    /* Message larger than caller buffer or area capacity */
+    if ((size_t)mlen > max_copy) {
         *msg_len_out = (size_t)mlen;
+        /* Still advance tracking -- message is consumed from SHM perspective */
         if (ctx->role == NIPC_WIN_SHM_ROLE_SERVER)
             ctx->local_req_seq = expected_seq;
         else
@@ -713,6 +732,18 @@ nipc_win_shm_error_t nipc_win_shm_receive(
         ctx->local_resp_seq = expected_seq;
 
     return NIPC_WIN_SHM_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Stale cleanup (no-op on Windows)                                   */
+/* ------------------------------------------------------------------ */
+
+void nipc_win_shm_cleanup_stale(const char *run_dir, const char *service_name)
+{
+    /* Windows kernel objects are reference-counted and auto-cleaned
+     * when all handles close. No filesystem artifacts to scan. */
+    (void)run_dir;
+    (void)service_name;
 }
 
 #endif /* _WIN32 */

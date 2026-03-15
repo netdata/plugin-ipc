@@ -288,7 +288,7 @@ func runPingPongClientWin(runDir, service string, profiles uint32, durationSec i
 	var shm *windows.WinShmContext
 	if session.SelectedProfile&0x02 != 0 { // PROFILE_SHM_HYBRID
 		for i := 0; i < 200; i++ {
-			shmCtx, serr := windows.WinShmClientAttach(runDir, service, authTokenWin, 0x02)
+			shmCtx, serr := windows.WinShmClientAttach(runDir, service, authTokenWin, session.SessionID, 0x02)
 			if serr == nil {
 				shm = shmCtx
 				break

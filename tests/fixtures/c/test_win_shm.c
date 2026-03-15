@@ -118,7 +118,7 @@ static DWORD WINAPI server_thread(LPVOID arg)
 
     nipc_win_shm_ctx_t ctx;
     nipc_win_shm_error_t err = nipc_win_shm_server_create(
-        TEST_RUN_DIR, sa->service, AUTH_TOKEN,
+        TEST_RUN_DIR, sa->service, AUTH_TOKEN, 1,
         NIPC_WIN_SHM_PROFILE_HYBRID, 65536, 65536, &ctx);
     if (err != NIPC_WIN_SHM_OK) {
         fprintf(stderr, "server: create failed: %d\n", err);
@@ -182,7 +182,7 @@ static void test_basic_roundtrip(void)
     nipc_win_shm_error_t err = NIPC_WIN_SHM_ERR_OPEN_MAPPING;
     for (int i = 0; i < 100; i++) {
         err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
-                                          NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+                                          1, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
         if (err == NIPC_WIN_SHM_OK) break;
         Sleep(10);
     }
@@ -241,7 +241,7 @@ static DWORD WINAPI multi_server_thread(LPVOID arg)
 
     nipc_win_shm_ctx_t ctx;
     nipc_win_shm_error_t err = nipc_win_shm_server_create(
-        TEST_RUN_DIR, sa->service, AUTH_TOKEN,
+        TEST_RUN_DIR, sa->service, AUTH_TOKEN, 1,
         NIPC_WIN_SHM_PROFILE_HYBRID, 65536, 65536, &ctx);
     if (err != NIPC_WIN_SHM_OK) return 1;
 
@@ -292,7 +292,7 @@ static void test_multiple_roundtrips(void)
     nipc_win_shm_error_t err = NIPC_WIN_SHM_ERR_OPEN_MAPPING;
     for (int i = 0; i < 100; i++) {
         err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
-                                          NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+                                          1, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
         if (err == NIPC_WIN_SHM_OK) break;
         Sleep(10);
     }
@@ -340,27 +340,27 @@ static void test_service_name_validation(void)
     nipc_win_shm_ctx_t ctx;
 
     check("empty name rejected",
-          nipc_win_shm_server_create(TEST_RUN_DIR, "", AUTH_TOKEN,
+          nipc_win_shm_server_create(TEST_RUN_DIR, "", AUTH_TOKEN, 1,
               NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &ctx)
           == NIPC_WIN_SHM_ERR_BAD_PARAM);
 
     check("dot name rejected",
-          nipc_win_shm_server_create(TEST_RUN_DIR, ".", AUTH_TOKEN,
+          nipc_win_shm_server_create(TEST_RUN_DIR, ".", AUTH_TOKEN, 1,
               NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &ctx)
           == NIPC_WIN_SHM_ERR_BAD_PARAM);
 
     check("slash in name rejected",
-          nipc_win_shm_server_create(TEST_RUN_DIR, "bad/name", AUTH_TOKEN,
+          nipc_win_shm_server_create(TEST_RUN_DIR, "bad/name", AUTH_TOKEN, 1,
               NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &ctx)
           == NIPC_WIN_SHM_ERR_BAD_PARAM);
 
     check("space in name rejected",
-          nipc_win_shm_server_create(TEST_RUN_DIR, "bad name", AUTH_TOKEN,
+          nipc_win_shm_server_create(TEST_RUN_DIR, "bad name", AUTH_TOKEN, 1,
               NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &ctx)
           == NIPC_WIN_SHM_ERR_BAD_PARAM);
 
     check("invalid profile rejected",
-          nipc_win_shm_server_create(TEST_RUN_DIR, "good-name", AUTH_TOKEN,
+          nipc_win_shm_server_create(TEST_RUN_DIR, "good-name", AUTH_TOKEN, 1,
               0xFF, 4096, 4096, &ctx)
           == NIPC_WIN_SHM_ERR_BAD_PARAM);
 }
