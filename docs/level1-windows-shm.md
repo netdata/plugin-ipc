@@ -14,9 +14,9 @@ The shared memory region and synchronization objects are identified by
 kernel object names in the `Local\` namespace:
 
 ```
-Local\netipc-{hash:016llx}-{service}-p{profile}-mapping
-Local\netipc-{hash:016llx}-{service}-p{profile}-req_event
-Local\netipc-{hash:016llx}-{service}-p{profile}-resp_event
+Local\netipc-{hash:016llx}-{service}-p{profile}-s{session_id:016llx}-mapping
+Local\netipc-{hash:016llx}-{service}-p{profile}-s{session_id:016llx}-req_event
+Local\netipc-{hash:016llx}-{service}-p{profile}-s{session_id:016llx}-resp_event
 ```
 
 Where:
@@ -26,6 +26,12 @@ Where:
 - `service` = `service_name` (must contain only alphanumeric, dash,
   underscore, and dot; reject otherwise)
 - `profile` = selected profile number
+- `session_id` = server-assigned session identifier from the hello-ack
+  payload, formatted as a zero-padded 16-character lowercase hex string
+
+Each session gets its own set of kernel objects. The `session_id`
+ensures that multiple concurrent clients each have independent SHM
+regions and event objects.
 
 The auth token is included in the hash so that only peers sharing the
 same token derive the same object names. This provides a basic
@@ -131,7 +137,11 @@ Uses two named kernel events (`req_event`, `resp_event`) created via
    once more (avoid race), then `WaitForSingleObject(req_event,
    timeout)`.
 3. Clear `req_server_waiting` after waking.
-4. Read `req_len` and the message bytes from the request area.
+4. Read `req_len`. Validate `req_len` against `request_capacity`. If
+   `req_len` exceeds the capacity, discard the message and report an
+   error. This prevents out-of-bounds reads from a malicious or buggy
+   peer.
+5. Read the message bytes from the request area.
 
 #### Server sends a response
 
@@ -146,7 +156,10 @@ Uses two named kernel events (`req_event`, `resp_event`) created via
 2. If not advanced: set `resp_client_waiting = 1`, check `resp_seq`
    once more, then `WaitForSingleObject(resp_event, timeout)`.
 3. Clear `resp_client_waiting` after waking.
-4. Read `resp_len` and the message bytes from the response area.
+4. Read `resp_len`. Validate `resp_len` against `response_capacity`.
+   If `resp_len` exceeds the capacity, discard the message and report
+   an error.
+5. Read the message bytes from the response area.
 
 ### SHM_BUSYWAIT (pure spin, no kernel events)
 
@@ -206,31 +219,43 @@ throughput.
 
 ## Region lifecycle
 
-### Server creates the region
+### Server creates a per-session region
 
-1. Create the file mapping via `CreateFileMappingW` using the derived
+The server creates one SHM region per accepted session, after the
+handshake negotiates an SHM profile. The kernel object names are
+derived from the `session_id` assigned during the handshake.
+
+1. Derive kernel object names using `session_id` (see naming section).
+2. Create the file mapping via `CreateFileMappingW` using the derived
    mapping name.
-2. Map the view via `MapViewOfFile`.
-3. Write the header: magic, version, header_len, profile, offsets,
+3. Map the view via `MapViewOfFile`.
+4. Write the header: magic, version, header_len, profile, offsets,
    capacities, spin_tries. Initialize all volatile fields to zero.
-4. If SHM_HYBRID: create `req_event` and `resp_event` as auto-reset
+5. If SHM_HYBRID: create `req_event` and `resp_event` as auto-reset
    kernel events (`CreateEventW` with `bManualReset = FALSE`).
    Auto-reset is required: `SetEvent` wakes exactly one waiter and
    resets automatically, which matches the one-writer/one-reader-per-
    direction model.
-5. The region is now ready for clients.
+6. The region is now ready for the client.
+
+The server must track all active per-session SHM regions so they can
+be cleaned up on session close and server shutdown.
 
 ### Client attaches to the region
 
-1. Open the file mapping via `OpenFileMappingW` using the derived
+1. Derive kernel object names using the `session_id` from the
+   hello-ack.
+2. Open the file mapping via `OpenFileMappingW` using the derived
    mapping name.
-2. Map the view via `MapViewOfFile`.
-3. Validate the header: magic, version, header_len, profile.
-4. Read offsets, capacities, and spin_tries from the header.
-5. If SHM_HYBRID: open `req_event` and `resp_event` kernel events.
-6. The client is now ready to publish requests and consume responses.
+3. Map the view via `MapViewOfFile`.
+4. Validate the header: magic, version, header_len, profile.
+5. Read offsets, capacities, and spin_tries from the header.
+6. If SHM_HYBRID: open `req_event` and `resp_event` kernel events.
+7. The client is now ready to publish requests and consume responses.
 
-### Server destroys the region
+### Server destroys a per-session region
+
+When a session closes (graceful or broken):
 
 1. Unmap the view.
 2. Close the file mapping handle.

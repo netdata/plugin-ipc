@@ -8,6 +8,9 @@
 // Pure Go — no cgo. Works with CGO_ENABLED=0.
 package cgroups
 
+// Poll/receive timeout for server loops (ms). Controls shutdown detection latency.
+const serverPollTimeoutMs = 100
+
 // ---------------------------------------------------------------------------
 //  Client state (shared across platforms)
 // ---------------------------------------------------------------------------

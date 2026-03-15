@@ -128,17 +128,16 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 /*
- * Create a SHM region at {run_dir}/{service_name}.ipcshm.
+ * Create a per-session SHM region at
+ *   {run_dir}/{service_name}-{session_id:016x}.ipcshm
  *
+ * session_id is the server-assigned session identifier (from hello-ack).
  * req_capacity / resp_capacity are the data area sizes in bytes.
  * They will be rounded up to NIPC_SHM_REGION_ALIGNMENT.
- *
- * Performs stale region recovery: if the file exists and the owner is
- * dead, unlinks and recreates. If the owner is alive, fails with
- * NIPC_SHM_ERR_ADDR_IN_USE.
  */
 nipc_shm_error_t nipc_shm_server_create(const char *run_dir,
                                           const char *service_name,
+                                          uint64_t session_id,
                                           uint32_t req_capacity,
                                           uint32_t resp_capacity,
                                           nipc_shm_ctx_t *out);
@@ -153,13 +152,16 @@ void nipc_shm_destroy(nipc_shm_ctx_t *ctx);
 /* ------------------------------------------------------------------ */
 
 /*
- * Attach to an existing SHM region at {run_dir}/{service_name}.ipcshm.
+ * Attach to a per-session SHM region at
+ *   {run_dir}/{service_name}-{session_id:016x}.ipcshm
  *
+ * session_id is from the hello-ack received during handshake.
  * Validates the header (magic, version, sizes). If the file is
  * undersized (server not ready), returns NIPC_SHM_ERR_NOT_READY.
  */
 nipc_shm_error_t nipc_shm_client_attach(const char *run_dir,
                                           const char *service_name,
+                                          uint64_t session_id,
                                           nipc_shm_ctx_t *out);
 
 /*
@@ -206,6 +208,14 @@ nipc_shm_error_t nipc_shm_receive(nipc_shm_ctx_t *ctx,
 
 /* Check if the region's owner process is still alive. */
 bool nipc_shm_owner_alive(const nipc_shm_ctx_t *ctx);
+
+/*
+ * Scan for and unlink stale per-session SHM files left by a crashed
+ * server. Call once at server startup before accepting connections.
+ * Files matching {run_dir}/{service_name}-*.ipcshm whose owner_pid
+ * is dead (or whose generation mismatches) are unlinked.
+ */
+void nipc_shm_cleanup_stale(const char *run_dir, const char *service_name);
 
 /* Get the file descriptor for external event integration. */
 static inline int nipc_shm_fd(const nipc_shm_ctx_t *ctx) {

@@ -8,8 +8,10 @@
 
 #include "netipc/netipc_shm.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,14 +55,16 @@ static int validate_service_name(const char *name)
     return 0;
 }
 
-/* Build SHM file path: {run_dir}/{service_name}.ipcshm */
+/* Build per-session SHM file path: {run_dir}/{service_name}-{session_id:016x}.ipcshm */
 static int build_shm_path(char *dst, size_t dst_len,
-                           const char *run_dir, const char *service_name)
+                           const char *run_dir, const char *service_name,
+                           uint64_t session_id)
 {
     if (validate_service_name(service_name) < 0)
         return -2; /* invalid service name */
 
-    int n = snprintf(dst, dst_len, "%s/%s.ipcshm", run_dir, service_name);
+    int n = snprintf(dst, dst_len, "%s/%s-%016" PRIx64 ".ipcshm",
+                     run_dir, service_name, session_id);
     if (n < 0 || (size_t)n >= dst_len)
         return -1;
     return 0;
@@ -196,6 +200,7 @@ static int check_shm_stale(const char *path)
 
 nipc_shm_error_t nipc_shm_server_create(const char *run_dir,
                                           const char *service_name,
+                                          uint64_t session_id,
                                           uint32_t req_capacity,
                                           uint32_t resp_capacity,
                                           nipc_shm_ctx_t *out)
@@ -206,18 +211,14 @@ nipc_shm_error_t nipc_shm_server_create(const char *run_dir,
     if (!run_dir || !service_name || !out)
         return NIPC_SHM_ERR_BAD_PARAM;
 
-    /* Build path (validates service_name) */
+    /* Build per-session path (validates service_name) */
     char path[256];
-    int path_rc = build_shm_path(path, sizeof(path), run_dir, service_name);
+    int path_rc = build_shm_path(path, sizeof(path), run_dir, service_name,
+                                 session_id);
     if (path_rc == -2)
         return NIPC_SHM_ERR_BAD_PARAM;
     if (path_rc < 0)
         return NIPC_SHM_ERR_PATH_TOO_LONG;
-
-    /* Stale recovery */
-    int stale = check_shm_stale(path);
-    if (stale == 1)
-        return NIPC_SHM_ERR_ADDR_IN_USE;
 
     /* Round capacities up to alignment. */
     req_capacity  = align64(req_capacity);
@@ -227,8 +228,16 @@ nipc_shm_error_t nipc_shm_server_create(const char *run_dir,
     uint32_t resp_off = align64(req_off + req_capacity);
     size_t region_size = (size_t)resp_off + resp_capacity;
 
-    /* Create the file. */
-    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    /* Stale recovery: if the file exists, check whether the owner is alive.
+     * If the owner is dead (stale), check_shm_stale unlinks the file so
+     * our O_EXCL create below can succeed. If the owner is alive, we
+     * return ADDR_IN_USE to prevent collision. */
+    int stale = check_shm_stale(path);
+    if (stale == 1)
+        return NIPC_SHM_ERR_ADDR_IN_USE;
+
+    /* Create the file. O_EXCL prevents collision with existing regions. */
+    int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
     if (fd < 0)
         return NIPC_SHM_ERR_OPEN;
 
@@ -322,6 +331,7 @@ void nipc_shm_destroy(nipc_shm_ctx_t *ctx)
 
 nipc_shm_error_t nipc_shm_client_attach(const char *run_dir,
                                           const char *service_name,
+                                          uint64_t session_id,
                                           nipc_shm_ctx_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -331,7 +341,8 @@ nipc_shm_error_t nipc_shm_client_attach(const char *run_dir,
         return NIPC_SHM_ERR_BAD_PARAM;
 
     char path[256];
-    int path_rc = build_shm_path(path, sizeof(path), run_dir, service_name);
+    int path_rc = build_shm_path(path, sizeof(path), run_dir, service_name,
+                                 session_id);
     if (path_rc == -2)
         return NIPC_SHM_ERR_BAD_PARAM;
     if (path_rc < 0)
@@ -528,22 +539,30 @@ nipc_shm_error_t nipc_shm_receive(nipc_shm_ctx_t *ctx,
      * response area.
      */
     uint32_t area_offset;
+    uint32_t area_capacity;
     int seq_off, len_off, sig_off;
     uint64_t expected_seq;
 
     if (ctx->role == NIPC_SHM_ROLE_SERVER) {
-        area_offset  = ctx->request_offset;
-        seq_off      = SHM_OFF_REQ_SEQ;
-        len_off      = SHM_OFF_REQ_LEN;
-        sig_off      = SHM_OFF_REQ_SIGNAL;
-        expected_seq = ctx->local_req_seq + 1;
+        area_offset   = ctx->request_offset;
+        area_capacity = ctx->request_capacity;
+        seq_off       = SHM_OFF_REQ_SEQ;
+        len_off       = SHM_OFF_REQ_LEN;
+        sig_off       = SHM_OFF_REQ_SIGNAL;
+        expected_seq  = ctx->local_req_seq + 1;
     } else {
-        area_offset  = ctx->response_offset;
-        seq_off      = SHM_OFF_RESP_SEQ;
-        len_off      = SHM_OFF_RESP_LEN;
-        sig_off      = SHM_OFF_RESP_SIGNAL;
-        expected_seq = ctx->local_resp_seq + 1;
+        area_offset   = ctx->response_offset;
+        area_capacity = ctx->response_capacity;
+        seq_off       = SHM_OFF_RESP_SEQ;
+        len_off       = SHM_OFF_RESP_LEN;
+        sig_off       = SHM_OFF_RESP_SIGNAL;
+        expected_seq  = ctx->local_resp_seq + 1;
     }
+
+    /* The copy ceiling is the smaller of the caller buffer and the
+     * SHM area capacity. This prevents out-of-bounds reads even if
+     * the peer writes a forged length value. */
+    uint32_t max_copy = (buf_size < area_capacity) ? (uint32_t)buf_size : area_capacity;
 
     uint64_t *seq_ptr    = shm_seq_ptr(ctx->base, seq_off);
     uint32_t *len_ptr    = shm_u32_ptr(ctx->base, len_off);
@@ -563,7 +582,7 @@ nipc_shm_error_t nipc_shm_receive(nipc_shm_ctx_t *ctx,
         uint64_t cur = __atomic_load_n(seq_ptr, __ATOMIC_ACQUIRE);
         if (cur >= expected_seq) {
             mlen = __atomic_load_n(len_ptr, __ATOMIC_ACQUIRE);
-            if (mlen > 0 && mlen <= buf_size)
+            if (mlen > 0 && mlen <= max_copy)
                 memcpy(buf, data_ptr, mlen);
             observed = true;
             break;
@@ -620,12 +639,12 @@ nipc_shm_error_t nipc_shm_receive(nipc_shm_ctx_t *ctx,
 
         /* Copy immediately after observing the sequence advance. */
         mlen = __atomic_load_n(len_ptr, __ATOMIC_ACQUIRE);
-        if (mlen > 0 && mlen <= buf_size)
+        if (mlen > 0 && mlen <= max_copy)
             memcpy(buf, data_ptr, mlen);
     }
 
-    /* Message larger than caller buffer */
-    if (mlen > buf_size) {
+    /* Message larger than caller buffer or area capacity */
+    if (mlen > max_copy) {
         *msg_len_out = mlen;
         /* Still advance tracking -- message is consumed from SHM perspective */
         if (ctx->role == NIPC_SHM_ROLE_SERVER)
@@ -668,4 +687,56 @@ bool nipc_shm_owner_alive(const nipc_shm_ctx_t *ctx)
         return false;
 
     return true;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Stale cleanup on server startup                                    */
+/* ------------------------------------------------------------------ */
+
+void nipc_shm_cleanup_stale(const char *run_dir, const char *service_name)
+{
+    if (!run_dir || !service_name)
+        return;
+
+    if (validate_service_name(service_name) < 0)
+        return;
+
+    /* Build the prefix to match: "{service_name}-" */
+    char prefix[256];
+    int pn = snprintf(prefix, sizeof(prefix), "%s-", service_name);
+    if (pn < 0 || (size_t)pn >= sizeof(prefix))
+        return;
+
+    size_t prefix_len = (size_t)pn;
+    const char *suffix = ".ipcshm";
+    size_t suffix_len = strlen(suffix);
+
+    DIR *dir = opendir(run_dir);
+    if (!dir)
+        return;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        size_t nlen = strlen(ent->d_name);
+
+        /* Must start with "{service_name}-" and end with ".ipcshm" */
+        if (nlen <= prefix_len + suffix_len)
+            continue;
+        if (strncmp(ent->d_name, prefix, prefix_len) != 0)
+            continue;
+        if (strcmp(ent->d_name + nlen - suffix_len, suffix) != 0)
+            continue;
+
+        /* Build full path and check if stale */
+        char path[512];
+        int n = snprintf(path, sizeof(path), "%s/%s", run_dir, ent->d_name);
+        if (n < 0 || (size_t)n >= sizeof(path))
+            continue;
+
+        /* check_shm_stale unlinks stale files and returns:
+         *   0 = stale (unlinked), +1 = live, -1 = gone, -2 = invalid (unlinked) */
+        check_shm_stale(path);
+    }
+
+    closedir(dir);
 }

@@ -246,6 +246,7 @@ static nipc_uds_error_t client_handshake(int fd,
     session->max_response_batch_items  = ack.agreed_max_response_batch_items;
     session->packet_size               = ack.agreed_packet_size;
     session->selected_profile          = ack.selected_profile;
+    session->session_id                = ack.session_id;
     session->recv_buf                  = NULL;
     session->recv_buf_size             = 0;
 
@@ -258,6 +259,7 @@ static nipc_uds_error_t client_handshake(int fd,
 
 static nipc_uds_error_t server_handshake(int fd,
                                           const nipc_uds_server_config_t *cfg,
+                                          uint64_t session_id,
                                           nipc_uds_session_t *session)
 {
     uint8_t buf[128];
@@ -304,7 +306,7 @@ static nipc_uds_error_t server_handshake(int fd,
     if (intersection == 0) {
         /* Send rejection */
         nipc_hello_ack_t ack = { .layout_version = 1 };
-        uint8_t ack_buf[36];
+        uint8_t ack_buf[48];
         nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
 
         nipc_header_t ack_hdr = {
@@ -314,7 +316,7 @@ static nipc_uds_error_t server_handshake(int fd,
             .transport_status = NIPC_STATUS_UNSUPPORTED,
             .payload_len = sizeof(ack_buf), .item_count = 1,
         };
-        uint8_t pkt[68];
+        uint8_t pkt[80];
         nipc_header_encode(&ack_hdr, pkt, sizeof(pkt));
         memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
         raw_send(fd, pkt, NIPC_HEADER_LEN + sizeof(ack_buf));
@@ -324,7 +326,7 @@ static nipc_uds_error_t server_handshake(int fd,
     /* Check auth */
     if (hello.auth_token != cfg->auth_token) {
         nipc_hello_ack_t ack = { .layout_version = 1 };
-        uint8_t ack_buf[36];
+        uint8_t ack_buf[48];
         nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
 
         nipc_header_t ack_hdr = {
@@ -334,7 +336,7 @@ static nipc_uds_error_t server_handshake(int fd,
             .transport_status = NIPC_STATUS_AUTH_FAILED,
             .payload_len = sizeof(ack_buf), .item_count = 1,
         };
-        uint8_t pkt[68];
+        uint8_t pkt[80];
         nipc_header_encode(&ack_hdr, pkt, sizeof(pkt));
         memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
         raw_send(fd, pkt, NIPC_HEADER_LEN + sizeof(ack_buf));
@@ -369,9 +371,10 @@ static nipc_uds_error_t server_handshake(int fd,
         .agreed_max_response_payload_bytes = agreed_resp_pay,
         .agreed_max_response_batch_items   = agreed_resp_bat,
         .agreed_packet_size                = agreed_pkt,
+        .session_id                        = session_id,
     };
 
-    uint8_t ack_buf[36];
+    uint8_t ack_buf[48];
     nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
 
     nipc_header_t ack_hdr = {
@@ -387,7 +390,7 @@ static nipc_uds_error_t server_handshake(int fd,
         .message_id       = 0,
     };
 
-    uint8_t pkt[68];
+    uint8_t pkt[80];
     nipc_header_encode(&ack_hdr, pkt, sizeof(pkt));
     memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
 
@@ -404,6 +407,7 @@ static nipc_uds_error_t server_handshake(int fd,
     session->max_response_batch_items  = agreed_resp_bat;
     session->packet_size               = agreed_pkt;
     session->selected_profile          = selected;
+    session->session_id                = session_id;
     session->recv_buf                  = NULL;
     session->recv_buf_size             = 0;
 
@@ -505,6 +509,7 @@ nipc_uds_error_t nipc_uds_listen(const char *run_dir,
 /* ------------------------------------------------------------------ */
 
 nipc_uds_error_t nipc_uds_accept(nipc_uds_listener_t *listener,
+                                  uint64_t session_id,
                                   nipc_uds_session_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -514,7 +519,8 @@ nipc_uds_error_t nipc_uds_accept(nipc_uds_listener_t *listener,
     if (client_fd < 0)
         return NIPC_UDS_ERR_ACCEPT;
 
-    nipc_uds_error_t err = server_handshake(client_fd, &listener->config, out);
+    nipc_uds_error_t err = server_handshake(client_fd, &listener->config,
+                                             session_id, out);
     if (err != NIPC_UDS_OK) {
         close(client_fd);
         out->fd = -1;

@@ -140,17 +140,11 @@ func (c *ShmContext) OwnerAlive() bool {
 //  Server API
 // ---------------------------------------------------------------------------
 
-// ShmServerCreate creates a SHM region at {runDir}/{serviceName}.ipcshm.
-func ShmServerCreate(runDir, serviceName string, reqCapacity, respCapacity uint32) (*ShmContext, error) {
-	path, err := buildShmPath(runDir, serviceName)
+// ShmServerCreate creates a SHM region at {runDir}/{serviceName}-{sessionID}.ipcshm.
+func ShmServerCreate(runDir, serviceName string, sessionID uint64, reqCapacity, respCapacity uint32) (*ShmContext, error) {
+	path, err := buildShmPath(runDir, serviceName, sessionID)
 	if err != nil {
 		return nil, err
-	}
-
-	// Stale recovery
-	stale := checkShmStale(path)
-	if stale == shmStaleLive {
-		return nil, ErrShmAddrInUse
 	}
 
 	// Round capacities
@@ -161,8 +155,8 @@ func ShmServerCreate(runDir, serviceName string, reqCapacity, respCapacity uint3
 	respOff := shmAlign64(reqOff + reqCap)
 	regionSize := int(respOff + respCap)
 
-	// Create file
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+	// Create file (O_EXCL: fail if it already exists)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrShmOpen, err)
 	}
@@ -257,8 +251,8 @@ func (c *ShmContext) ShmDestroy() {
 // ---------------------------------------------------------------------------
 
 // ShmClientAttach attaches to an existing SHM region.
-func ShmClientAttach(runDir, serviceName string) (*ShmContext, error) {
-	path, err := buildShmPath(runDir, serviceName)
+func ShmClientAttach(runDir, serviceName string, sessionID uint64) (*ShmContext, error) {
+	path, err := buildShmPath(runDir, serviceName, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -455,22 +449,30 @@ func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 		return 0, fmt.Errorf("%w: empty buffer", ErrShmBadParam)
 	}
 
-	var areaOff uint32
+	var areaOff, areaCap uint32
 	var seqOff, lenOff, sigOff int
 	var expectedSeq uint64
 
 	if c.role == ShmRoleServer {
 		areaOff = c.requestOffset
+		areaCap = c.requestCapacity
 		seqOff = shmHeaderReqSeqOff
 		lenOff = shmHeaderReqLenOff
 		sigOff = shmHeaderReqSignalOff
 		expectedSeq = c.localReqSeq + 1
 	} else {
 		areaOff = c.responseOffset
+		areaCap = c.responseCapacity
 		seqOff = shmHeaderRespSeqOff
 		lenOff = shmHeaderRespLenOff
 		sigOff = shmHeaderRespSignalOff
 		expectedSeq = c.localRespSeq + 1
+	}
+
+	// Limit copy to the smaller of caller buffer and SHM area capacity
+	maxCopy := len(buf)
+	if int(areaCap) < maxCopy {
+		maxCopy = int(areaCap)
 	}
 
 	// Phase 1: spin. Copy immediately on observing the advance.
@@ -486,7 +488,7 @@ func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 			if err != nil {
 				return 0, fmt.Errorf("%w: load msg_len: %v", ErrShmBadParam, err)
 			}
-			if mlen > 0 && int(mlen) <= len(buf) {
+			if mlen > 0 && int(mlen) <= maxCopy {
 				copy(buf[:mlen], c.data[areaOff:areaOff+mlen])
 			}
 			observed = true
@@ -557,7 +559,7 @@ func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 		if lerr != nil {
 			return 0, fmt.Errorf("%w: load msg_len: %v", ErrShmBadParam, lerr)
 		}
-		if mlen > 0 && int(mlen) <= len(buf) {
+		if mlen > 0 && int(mlen) <= maxCopy {
 			copy(buf[:mlen], c.data[areaOff:areaOff+mlen])
 		}
 	}
@@ -569,8 +571,8 @@ func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 		c.localRespSeq = expectedSeq
 	}
 
-	// Message larger than caller buffer
-	if int(mlen) > len(buf) {
+	// Message larger than safe copy limit
+	if int(mlen) > maxCopy {
 		return int(mlen), ErrShmMsgTooLarge
 	}
 
@@ -605,11 +607,11 @@ func validateShmServiceName(name string) error {
 	return nil
 }
 
-func buildShmPath(runDir, serviceName string) (string, error) {
+func buildShmPath(runDir, serviceName string, sessionID uint64) (string, error) {
 	if err := validateShmServiceName(serviceName); err != nil {
 		return "", err
 	}
-	path := filepath.Join(runDir, serviceName+".ipcshm")
+	path := filepath.Join(runDir, fmt.Sprintf("%s-%016x.ipcshm", serviceName, sessionID))
 	if len(path) >= shmMaxPath {
 		return "", ErrShmPathTooLong
 	}
@@ -707,6 +709,36 @@ func futexWaitCall(data []byte, off int, expected uint32, ts *syscall.Timespec) 
 		return -int(errno)
 	}
 	return int(r1)
+}
+
+// ---------------------------------------------------------------------------
+//  Stale cleanup
+// ---------------------------------------------------------------------------
+
+// ShmCleanupStale scans runDir for SHM files matching {serviceName}-*.ipcshm,
+// checks if the owner PID is alive for each, and unlinks stale ones.
+func ShmCleanupStale(runDir, serviceName string) {
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		return
+	}
+	prefix := serviceName + "-"
+	suffix := ".ipcshm"
+	for _, e := range entries {
+		name := e.Name()
+		if !e.Type().IsRegular() {
+			continue
+		}
+		if len(name) < len(prefix)+len(suffix) {
+			continue
+		}
+		if name[:len(prefix)] != prefix || name[len(name)-len(suffix):] != suffix {
+			continue
+		}
+		path := filepath.Join(runDir, name)
+		result := checkShmStale(path)
+		_ = result // checkShmStale already unlinks stale/invalid files
+	}
 }
 
 // ---------------------------------------------------------------------------

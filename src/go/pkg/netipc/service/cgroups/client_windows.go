@@ -402,7 +402,7 @@ func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmCont
 		var payload []byte
 
 		if shm != nil {
-			mlen, err := shm.WinShmReceive(recvBuf, 500)
+			mlen, err := shm.WinShmReceive(recvBuf, serverPollTimeoutMs)
 			if err != nil {
 				if err == windows.ErrWinShmTimeout {
 					continue

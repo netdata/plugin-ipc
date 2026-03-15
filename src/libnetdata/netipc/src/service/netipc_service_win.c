@@ -22,7 +22,7 @@
 #include <windows.h>
 
 /* WaitForSingleObject timeout for server poll loops (ms) */
-#define SERVER_POLL_TIMEOUT_MS 500
+#define SERVER_POLL_TIMEOUT_MS 100
 
 /* ------------------------------------------------------------------ */
 /*  Internal: client connection helpers                                */
@@ -554,15 +554,6 @@ static void server_reap_sessions_locked(nipc_managed_server_t *server)
         }
     }
 
-    /* Recalculate shm_in_use based on remaining active sessions */
-    LONG any_shm = 0;
-    for (int j = 0; j < server->session_count; j++) {
-        if (server->sessions[j]->shm) {
-            any_shm = 1;
-            break;
-        }
-    }
-    InterlockedExchange(&server->shm_in_use, any_shm);
 }
 
 /* ------------------------------------------------------------------ */
@@ -606,7 +597,7 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
     server->worker_count = worker_count;
     server->response_buf_size = response_buf_size;
     server->auth_token = config->auth_token;
-    InterlockedExchange(&server->shm_in_use, 0);
+
 
     /* Initialize session tracking */
     server->session_capacity = worker_count * 2;
@@ -662,12 +653,11 @@ void nipc_server_run(nipc_managed_server_t *server)
             continue;
         }
 
-        /* Win SHM upgrade if negotiated, but only if no other session
-         * already has SHM (SHM is single-session per service). */
+        /* Win SHM upgrade if negotiated. Each session gets its own
+         * SHM region (per-session kernel objects via session_id). */
         nipc_win_shm_ctx_t *shm = NULL;
-        if ((session.selected_profile == NIPC_WIN_SHM_PROFILE_HYBRID ||
-             session.selected_profile == NIPC_WIN_SHM_PROFILE_BUSYWAIT) &&
-            !InterlockedCompareExchange(&server->shm_in_use, 0, 0)) {
+        if (session.selected_profile == NIPC_WIN_SHM_PROFILE_HYBRID ||
+            session.selected_profile == NIPC_WIN_SHM_PROFILE_BUSYWAIT) {
 
             nipc_win_shm_ctx_t *s = calloc(1, sizeof(nipc_win_shm_ctx_t));
             if (s) {
@@ -680,7 +670,6 @@ void nipc_server_run(nipc_managed_server_t *server)
                     s);
                 if (serr == NIPC_WIN_SHM_OK) {
                     shm = s;
-                    InterlockedExchange(&server->shm_in_use, 1);
                 } else {
                     free(s);
                 }
@@ -691,7 +680,7 @@ void nipc_server_run(nipc_managed_server_t *server)
         nipc_session_ctx_t *sctx = calloc(1, sizeof(nipc_session_ctx_t));
         if (!sctx) {
             LeaveCriticalSection(&server->sessions_lock);
-            if (shm) { nipc_win_shm_destroy(shm); free(shm); InterlockedExchange(&server->shm_in_use, 0); }
+            if (shm) { nipc_win_shm_destroy(shm); free(shm); }
             nipc_np_close_session(&session);
             continue;
         }
@@ -710,7 +699,7 @@ void nipc_server_run(nipc_managed_server_t *server)
                 (size_t)new_cap * sizeof(nipc_session_ctx_t *));
             if (!new_arr) {
                 LeaveCriticalSection(&server->sessions_lock);
-                if (shm) { nipc_win_shm_destroy(shm); free(shm); InterlockedExchange(&server->shm_in_use, 0); }
+                if (shm) { nipc_win_shm_destroy(shm); free(shm); }
                 nipc_np_close_session(&session);
                 free(sctx);
                 continue;
@@ -738,7 +727,7 @@ void nipc_server_run(nipc_managed_server_t *server)
             }
             LeaveCriticalSection(&server->sessions_lock);
 
-            if (shm) { nipc_win_shm_destroy(shm); free(shm); InterlockedExchange(&server->shm_in_use, 0); }
+            if (shm) { nipc_win_shm_destroy(shm); free(shm); }
             nipc_np_close_session(&session);
             free(sctx);
         }
@@ -816,7 +805,7 @@ bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms)
     }
 
     server->worker_count = 0;
-    InterlockedExchange(&server->shm_in_use, 0);
+
     return all_drained;
 }
 
@@ -846,7 +835,7 @@ void nipc_server_destroy(nipc_managed_server_t *server)
     }
 
     server->worker_count = 0;
-    InterlockedExchange(&server->shm_in_use, 0);
+
 }
 
 /* ------------------------------------------------------------------ */

@@ -504,11 +504,12 @@ static void test_hello_ack_roundtrip(void) {
         .agreed_max_response_payload_bytes = 65536,
         .agreed_max_response_batch_items   = 1,
         .agreed_packet_size                = 32768,
+        .session_id                        = 42,
     };
 
     uint8_t buf[64];
     size_t n = nipc_hello_ack_encode(&h, buf, sizeof(buf));
-    CHECK(n == 36, "hello_ack encode returns 36");
+    CHECK(n == 48, "hello_ack encode returns 48");
 
     nipc_hello_ack_t out;
     nipc_error_t err = nipc_hello_ack_decode(buf, n, &out);
@@ -522,10 +523,11 @@ static void test_hello_ack_roundtrip(void) {
     CHECK(out.agreed_max_response_payload_bytes == 65536, "hello_ack agreed_resp_payload");
     CHECK(out.agreed_max_response_batch_items == 1, "hello_ack agreed_resp_batch");
     CHECK(out.agreed_packet_size == 32768, "hello_ack agreed_pkt_size");
+    CHECK(out.session_id == 42, "hello_ack session_id");
 }
 
 static void test_hello_ack_decode_truncated(void) {
-    uint8_t buf[35] = {0};
+    uint8_t buf[47] = {0};
     nipc_hello_ack_t out;
     nipc_error_t err = nipc_hello_ack_decode(buf, sizeof(buf), &out);
     CHECK(err == NIPC_ERR_TRUNCATED, "hello_ack decode truncated");
@@ -533,7 +535,7 @@ static void test_hello_ack_decode_truncated(void) {
 
 static void test_hello_ack_decode_bad_layout(void) {
     nipc_hello_ack_t h = {.layout_version = 0};
-    uint8_t buf[36];
+    uint8_t buf[48];
     nipc_hello_ack_encode(&h, buf, sizeof(buf));
 
     nipc_hello_ack_t out;

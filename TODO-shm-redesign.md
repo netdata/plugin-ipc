@@ -75,35 +75,99 @@ Read `TODO-hardening.md` for the hardening phases completed.
    - If caller buffer < first packet, kernel truncates silently
    - Mitigated by dynamic buffer allocation but edge case exists
 
-## Decisions Needed
+## Decisions Made
 
-1. **SHM session scoping mechanism**
-   - How does the client learn the session-specific SHM path?
-   - Options:
-     a. Extend hello-ack with a session ID field (wire format change)
-     b. Add a post-handshake CONTROL message with SHM path info
-     c. Deterministic derivation from values both sides know
-   - Each option has implications for the wire spec
-   - This needs Costa's decision before implementation
+### 1. SHM session scoping — DECIDED: Extend hello-ack with session_id
 
-2. **L2 handler shape**
-   - Should the handler signature change to use typed builder pattern?
-   - Or is the raw payload pattern acceptable for v1?
-   - This is a spec-vs-implementation alignment question
+**Decision**: Option A — add `session_id` (u64) to hello-ack payload.
 
-## Plan (after decisions)
+- Hello-ack grows from 36 → 48 bytes (4 bytes padding at offset 36 + 8 bytes session_id at offset 40)
+- New field: `session_id` (u64) at offset 40, little-endian
+- Server generates session_id via monotonic counter (starts at 1, increments per accepted session)
+- Counter resets on server restart (all clients reconnect anyway, getting new session IDs)
+- No layout_version bump needed (no existing external consumers — all code is in this repo)
+- SHM path derivation:
+  - POSIX: `{run_dir}/{service_name}-{session_id:016x}.ipcshm`
+  - Windows: include `session_id` in the FNV-1a hash for kernel object names
 
-1. Update `docs/level1-posix-shm.md` and `docs/level1-windows-shm.md`
-   with the per-session SHM design
-2. Update `docs/level1-wire-envelope.md` if wire format changes
-3. Fix SHM receive length validation in all 6 implementations
-4. Implement per-session SHM in all 6 implementations
-5. Add SHM chaos tests for Rust and Go
-6. Update L2 service layer for new SHM session model
-7. Run ASAN/TSAN on updated code
-8. Run all interop tests
-9. Run stress tests with multiple SHM clients
-10. Re-run external reviewers (same scope, fourth pass)
+**Rationale**: No production deployments exist. All clients are in this repo.
+Session ID as a first-class protocol concept is cleaner than repurposing
+message_id or adding extra control messages.
+
+### 2. L2 handler shape — DECIDED: Keep raw payload for v1
+
+**Decision**: Option B — keep raw `(method_code, request_payload) → response_bytes`
+handler signature for v1. The typed builder pattern is an ergonomic improvement
+that can be added as a non-breaking wrapper later.
+
+**Rationale**: Functionally correct. Priority is the SHM security and
+multi-client fix. Typed builders are API sugar, not a correctness issue.
+
+### 3. SHM region cleanup — DECIDED: On close + on startup
+
+- **On session close/exit**: server immediately unlinks the per-session `.ipcshm` file
+- **On server startup**: server scans for and cleans up stale `.ipcshm` files
+  from previous crashes/hard reboots (using owner_pid/generation stale detection)
+- Stale detection remains the safety net for crashes; immediate cleanup is the
+  normal path
+
+### 4. Session ID generation — DECIDED: Monotonic counter
+
+- Server maintains a monotonic counter (u64), starting at 1
+- Incremented per accepted session
+- Resets to 1 on server restart (all clients reconnect, getting fresh IDs)
+- Simple, deterministic, sufficient (no need for random — no info leakage concern)
+
+## Plan
+
+### Phase 1: Spec updates — DONE
+1. ~~Update `docs/level1-wire-envelope.md`~~ — hello-ack 48 bytes (36 + 4 padding + 8 session_id)
+2. ~~Update `docs/level1-posix-shm.md`~~ — per-session paths, lifecycle, receive validation, stale cleanup
+3. ~~Update `docs/level1-windows-shm.md`~~ — per-session kernel objects, receive validation
+
+### Phase 2: SHM receive length validation fix (security) — DONE
+4. ~~Fix all 6 SHM implementations~~ — validate against `min(buf_size, area_capacity)` before memcpy
+5. SHM chaos tests for Rust/Go — deferred to Phase 6
+
+### Phase 3: Protocol — hello-ack session_id — DONE
+6. ~~Update hello-ack encode/decode in C, Rust, Go~~ — session_id at offset 40 (u64)
+7. ~~Add session_id counter~~ — atomic monotonic counter in server accept path (all 3 languages)
+8. ~~Update hello-ack size validation~~ — 36 → 48 bytes everywhere
+
+### Phase 4: Per-session SHM implementation — DONE
+9. ~~SHM path derivation~~ — `{service_name}-{session_id:016x}.ipcshm` in all implementations
+10. ~~Server SHM creation~~ — per-session with O_EXCL after handshake
+11. ~~Server SHM cleanup~~ — unlink on session close/exit (destroy unlinks path)
+12. ~~Stale SHM cleanup~~ — `cleanup_stale` function in all 3 languages
+13. ~~Client SHM attachment~~ — uses session_id from hello-ack
+14. ~~Removed single-region assumption~~ — no more shm_in_use flag
+
+### Phase 5: L2 managed server — multi-client SHM — DONE
+The architecture already spawns one handler thread per accepted client.
+Each thread reads from its own SHM region (or UDS fd), dispatches the
+handler, and sends the response. No separate "reader thread" needed.
+
+15. ~~Removed `shm_in_use` flag~~ — was gating SHM to one client; now all
+    clients get their own per-session SHM region when SHM is negotiated
+16. ~~Changed shutdown detection timeout~~ — 500ms → 100ms (poll/futex
+    timeout between `running` flag checks), named constant in all 3 languages
+17. Per-session SHM lifecycle already handled: server creates region after
+    handshake, handler thread destroys it on session close
+
+### Phase 6: Testing and validation — DONE
+18. ~~ASAN clean~~ — all 8 C tests pass (memory growth threshold adjusted for sanitizer overhead)
+19. ~~TSAN clean~~ — all 8 C tests pass
+20. ~~Multi-client SHM tests~~ — added `test_shm_multi_client` in Rust and Go (3 concurrent
+    independent SHM sessions, unique payloads, no cross-contamination)
+21. ~~SHM chaos tests~~ — added `test_shm_chaos_forged_length` in Rust and Go (forged req_len/
+    resp_len values: 0, capacity-1, capacity, capacity+1, 0xFFFFFFFF — no panic, no OOB read)
+22. ~~All interop/stress tests pass~~ — 33/33 ctest targets pass
+23. External reviewers — deferred (separate step, not blocking)
+
+## Follow-up: Eliminate endianness overhead
+- Separate TODO: remove unnecessary little-endian encoding for localhost IPC
+- Replace with native byte order (mechanical change: C memcpy, Rust to_ne_bytes, Go NativeEndian)
+- No production deployments exist — now is the cheapest time
 
 ## Files Affected
 

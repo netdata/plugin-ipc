@@ -30,7 +30,7 @@ fn build_message(kind: u16, code: u16, message_id: u64, payload: &[u8]) -> Vec<u
 }
 
 fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut ctx = ShmContext::server_create(run_dir, service, 65536, 65536)?;
+    let mut ctx = ShmContext::server_create(run_dir, service, 1, 65536, 65536)?;
 
     // Signal readiness
     println!("READY");
@@ -62,7 +62,7 @@ fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Er
     // Retry attach -- server may not be fully ready yet
     let mut ctx = None;
     for _ in 0..500 {
-        match ShmContext::client_attach(run_dir, service) {
+        match ShmContext::client_attach(run_dir, service, 1) {
             Ok(c) => {
                 ctx = Some(c);
                 break;

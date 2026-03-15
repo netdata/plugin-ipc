@@ -55,7 +55,7 @@ pub const ALIGNMENT: usize = 8;
 
 // Payload sizes
 const HELLO_SIZE: usize = 44;
-const HELLO_ACK_SIZE: usize = 36;
+const HELLO_ACK_SIZE: usize = 48;
 const CGROUPS_REQ_SIZE: usize = 4;
 const CGROUPS_RESP_HDR_SIZE: usize = 24;
 const CGROUPS_DIR_ENTRY_SIZE: usize = 8;
@@ -503,7 +503,7 @@ impl Hello {
 }
 
 // ---------------------------------------------------------------------------
-//  Hello-ack payload (36 bytes)
+//  Hello-ack payload (48 bytes)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -518,10 +518,11 @@ pub struct HelloAck {
     pub agreed_max_response_payload_bytes: u32,
     pub agreed_max_response_batch_items: u32,
     pub agreed_packet_size: u32,
+    pub session_id: u64,
 }
 
 impl HelloAck {
-    /// Encode into `buf`. Returns 36 on success, 0 if buf is too small.
+    /// Encode into `buf`. Returns 48 on success, 0 if buf is too small.
     pub fn encode(&self, buf: &mut [u8]) -> usize {
         if buf.len() < HELLO_ACK_SIZE {
             return 0;
@@ -536,6 +537,8 @@ impl HelloAck {
         buf[24..28].copy_from_slice(&self.agreed_max_response_payload_bytes.to_le_bytes());
         buf[28..32].copy_from_slice(&self.agreed_max_response_batch_items.to_le_bytes());
         buf[32..36].copy_from_slice(&self.agreed_packet_size.to_le_bytes());
+        buf[36..40].copy_from_slice(&0u32.to_le_bytes()); // padding
+        buf[40..48].copy_from_slice(&self.session_id.to_le_bytes());
         HELLO_ACK_SIZE
     }
 
@@ -563,6 +566,8 @@ impl HelloAck {
                 buf[28..32].try_into().unwrap(),
             ),
             agreed_packet_size: u32::from_le_bytes(buf[32..36].try_into().unwrap()),
+            // skip padding at 36..40
+            session_id: u64::from_le_bytes(buf[40..48].try_into().unwrap()),
         };
 
         if h.layout_version != 1 {
@@ -1427,11 +1432,12 @@ mod tests {
             agreed_max_response_payload_bytes: 65536,
             agreed_max_response_batch_items: 1,
             agreed_packet_size: 32768,
+            session_id: 42,
         };
 
         let mut buf = [0u8; 64];
         let n = h.encode(&mut buf);
-        assert_eq!(n, 36);
+        assert_eq!(n, 48);
 
         let out = HelloAck::decode(&buf[..n]).unwrap();
         assert_eq!(out, h);
@@ -1439,7 +1445,7 @@ mod tests {
 
     #[test]
     fn hello_ack_decode_truncated() {
-        let buf = [0u8; 35];
+        let buf = [0u8; 47];
         assert_eq!(HelloAck::decode(&buf), Err(NipcError::Truncated));
     }
 
@@ -1449,7 +1455,7 @@ mod tests {
             layout_version: 0,
             ..Default::default()
         };
-        let mut buf = [0u8; 36];
+        let mut buf = [0u8; 48];
         h.encode(&mut buf);
         assert_eq!(HelloAck::decode(&buf), Err(NipcError::BadLayout));
     }
@@ -1897,13 +1903,16 @@ mod tests {
             agreed_max_response_payload_bytes: 65536,
             agreed_max_response_batch_items: 1,
             agreed_packet_size: 32768,
+            session_id: 0x0000_0001_0000_0007,
         };
-        let mut rust_buf = [0u8; 36];
+        let mut rust_buf = [0u8; 48];
         h.encode(&mut rust_buf);
 
         assert_eq!(&rust_buf[0..2], &[0x01, 0x00]);
         assert_eq!(&rust_buf[4..8], &[0x07, 0x00, 0x00, 0x00]); // server_supported
         assert_eq!(&rust_buf[12..16], &[0x04, 0x00, 0x00, 0x00]); // selected = SHM_FUTEX
+        assert_eq!(&rust_buf[36..40], &[0x00, 0x00, 0x00, 0x00]); // padding
+        assert_eq!(&rust_buf[40..48], &[0x07, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]); // session_id LE
 
         let out = HelloAck::decode(&rust_buf).unwrap();
         assert_eq!(out, h);

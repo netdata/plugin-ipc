@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
@@ -29,7 +30,7 @@ const (
 	defaultBatchItems       = 1
 	defaultPacketSizeFallback uint32 = 65536
 	helloPayloadSize        = 44
-	helloAckPayloadSize     = 36
+	helloAckPayloadSize     = 48
 
 	// sun_path max — 108 on Linux, 104 on macOS/FreeBSD.
 	// We use a conservative limit.
@@ -121,6 +122,7 @@ type Session struct {
 	MaxResponseBatchItems   uint32
 	PacketSize              uint32
 	SelectedProfile         uint32
+	SessionID               uint64
 
 	// Internal receive buffer for chunked reassembly
 	recvBuf []byte
@@ -428,9 +430,10 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 
 // Listener is a listening UDS SEQPACKET endpoint.
 type Listener struct {
-	fd     int
-	config ServerConfig
-	path   string
+	fd            int
+	config        ServerConfig
+	path          string
+	nextSessionID atomic.Uint64
 }
 
 // Listen creates a listener on {runDir}/{serviceName}.sock.
@@ -490,7 +493,8 @@ func (l *Listener) Accept() (*Session, error) {
 		return nil, wrapErr(ErrAccept, err.Error())
 	}
 
-	session, herr := serverHandshake(nfd, &l.config)
+	sessionID := l.nextSessionID.Add(1)
+	session, herr := serverHandshake(nfd, &l.config, sessionID)
 	if herr != nil {
 		syscall.Close(nfd)
 		return nil, herr
@@ -774,6 +778,7 @@ func connectAndHandshake(fd int, path string, config *ClientConfig) (*Session, e
 		MaxResponseBatchItems:   ack.AgreedMaxResponseBatchItems,
 		PacketSize:              ack.AgreedPacketSize,
 		SelectedProfile:         ack.SelectedProfile,
+		SessionID:               ack.SessionID,
 		inflightIDs:             make(map[uint64]struct{}),
 	}, nil
 }
@@ -782,7 +787,7 @@ func connectAndHandshake(fd int, path string, config *ClientConfig) (*Session, e
 //  Handshake: server side
 // ---------------------------------------------------------------------------
 
-func serverHandshake(fd int, config *ServerConfig) (*Session, error) {
+func serverHandshake(fd int, config *ServerConfig, sessionID uint64) (*Session, error) {
 	serverPktSize := config.PacketSize
 	if serverPktSize == 0 {
 		serverPktSize = detectPacketSize(fd)
@@ -889,6 +894,7 @@ func serverHandshake(fd int, config *ServerConfig) (*Session, error) {
 		AgreedMaxResponsePayloadBytes: agreedRespPay,
 		AgreedMaxResponseBatchItems:   agreedRespBat,
 		AgreedPacketSize:              agreedPkt,
+		SessionID:                     sessionID,
 	}
 
 	var ackPayBuf [helloAckPayloadSize]byte
@@ -926,6 +932,7 @@ func serverHandshake(fd int, config *ServerConfig) (*Session, error) {
 		MaxResponseBatchItems:   agreedRespBat,
 		PacketSize:              agreedPkt,
 		SelectedProfile:         selected,
+		SessionID:               sessionID,
 		inflightIDs:             make(map[uint64]struct{}),
 	}, nil
 }

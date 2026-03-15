@@ -123,8 +123,9 @@ func doEncode(dir string) {
 			AgreedMaxResponsePayloadBytes: 65536,
 			AgreedMaxResponseBatchItems:   1,
 			AgreedPacketSize:              32768,
+			SessionID:                     1,
 		}
-		var buf [36]byte
+		var buf [48]byte
 		h.Encode(buf[:])
 		writeFile(dir, "hello_ack.bin", buf[:])
 	}
@@ -232,6 +233,7 @@ func doDecode(dir string) bool {
 			c.check(h.AgreedMaxResponsePayloadBytes == 65536, "hello_ack resp_payload")
 			c.check(h.AgreedMaxResponseBatchItems == 1, "hello_ack resp_batch")
 			c.check(h.AgreedPacketSize == 32768, "hello_ack pkt_size")
+			c.check(h.SessionID == 1, "hello_ack session_id")
 		}
 	}
 

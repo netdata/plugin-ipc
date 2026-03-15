@@ -22,8 +22,8 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Poll timeout for server loops: 500ms between shutdown checks */
-#define SERVER_POLL_TIMEOUT_MS 500
+/* Poll timeout for server loops: 100ms between shutdown checks */
+#define SERVER_POLL_TIMEOUT_MS 100
 
 /* ------------------------------------------------------------------ */
 /*  Internal: client connection helpers                                */
@@ -83,7 +83,8 @@ static nipc_client_state_t client_try_connect(nipc_client_ctx_t *ctx)
             nipc_shm_error_t serr = NIPC_SHM_ERR_NOT_READY;
             for (int i = 0; i < 200; i++) {
                 serr = nipc_shm_client_attach(
-                    ctx->run_dir, ctx->service_name, shm);
+                    ctx->run_dir, ctx->service_name,
+                    session.session_id, shm);
                 if (serr == NIPC_SHM_OK)
                     break;
                 if (serr == NIPC_SHM_ERR_NOT_READY ||
@@ -453,7 +454,7 @@ static void server_handle_session(nipc_managed_server_t *server,
         if (shm) {
             size_t msg_len;
             nipc_shm_error_t serr = nipc_shm_receive(shm, recv_buf, recv_size,
-                                                       &msg_len, 500);
+                                                       &msg_len, SERVER_POLL_TIMEOUT_MS);
             if (serr == NIPC_SHM_ERR_TIMEOUT)
                 continue; /* check running flag */
             if (serr != NIPC_SHM_OK)
@@ -597,15 +598,6 @@ static void server_reap_sessions_locked(nipc_managed_server_t *server)
         }
     }
 
-    /* If no active session has SHM, clear the flag so a new session can use it */
-    bool any_shm = false;
-    for (int j = 0; j < server->session_count; j++) {
-        if (server->sessions[j]->shm) {
-            any_shm = true;
-            break;
-        }
-    }
-    server->shm_in_use = any_shm;
 }
 
 /* ------------------------------------------------------------------ */
@@ -690,8 +682,9 @@ void nipc_server_run(nipc_managed_server_t *server)
         memset(&session, 0, sizeof(session));
         session.fd = -1;
 
+        uint64_t sid = server->next_session_id;
         nipc_uds_error_t uerr = nipc_uds_accept(
-            &server->listener, &session);
+            &server->listener, sid, &session);
         if (uerr != NIPC_UDS_OK) {
             if (!__atomic_load_n(&server->running, __ATOMIC_RELAXED))
                 break;
@@ -710,24 +703,22 @@ void nipc_server_run(nipc_managed_server_t *server)
             continue;
         }
 
-        /* SHM upgrade if negotiated, but only if no other session
-         * already has SHM (SHM region path is per-service, not
-         * per-session, so concurrent SHM sessions would contend). */
+        /* SHM upgrade if negotiated. Each session gets its own SHM
+         * region (per-session path via session_id). */
         nipc_shm_ctx_t *shm = NULL;
-        if ((session.selected_profile == NIPC_PROFILE_SHM_HYBRID ||
-             session.selected_profile == NIPC_PROFILE_SHM_FUTEX) &&
-            !server->shm_in_use) {
+        if (session.selected_profile == NIPC_PROFILE_SHM_HYBRID ||
+            session.selected_profile == NIPC_PROFILE_SHM_FUTEX) {
 
             nipc_shm_ctx_t *s = calloc(1, sizeof(nipc_shm_ctx_t));
             if (s) {
                 nipc_shm_error_t serr = nipc_shm_server_create(
                     server->run_dir, server->service_name,
+                    sid,
                     session.max_request_payload_bytes + NIPC_HEADER_LEN,
                     session.max_response_payload_bytes + NIPC_HEADER_LEN,
                     s);
                 if (serr == NIPC_SHM_OK) {
                     shm = s;
-                    server->shm_in_use = true;
                 } else {
                     free(s);
                 }
@@ -737,7 +728,7 @@ void nipc_server_run(nipc_managed_server_t *server)
         /* Create session context */
         nipc_session_ctx_t *sctx = calloc(1, sizeof(nipc_session_ctx_t));
         if (!sctx) {
-            if (shm) { nipc_shm_destroy(shm); free(shm); server->shm_in_use = false; }
+            if (shm) { nipc_shm_destroy(shm); free(shm); }
             pthread_mutex_unlock(&server->sessions_lock);
             nipc_uds_close_session(&session);
             continue;
@@ -756,7 +747,7 @@ void nipc_server_run(nipc_managed_server_t *server)
                 server->sessions,
                 (size_t)new_cap * sizeof(nipc_session_ctx_t *));
             if (!new_arr) {
-                if (shm) { nipc_shm_destroy(shm); free(shm); server->shm_in_use = false; }
+                if (shm) { nipc_shm_destroy(shm); free(shm); }
                 pthread_mutex_unlock(&server->sessions_lock);
                 nipc_uds_close_session(&session);
                 free(sctx);
@@ -783,7 +774,6 @@ void nipc_server_run(nipc_managed_server_t *server)
                     break;
                 }
             }
-            if (shm) server->shm_in_use = false;
             pthread_mutex_unlock(&server->sessions_lock);
 
             if (shm) { nipc_shm_destroy(shm); free(shm); }
@@ -803,7 +793,7 @@ bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms)
     /* 1. Stop accepting new clients.
      * Do NOT close the listener here — the run loop may still be
      * polling on listener.fd. Setting the flag is enough; the run
-     * loop will exit on its next poll timeout (500ms). The listener
+     * loop will exit on its next poll timeout (100ms). The listener
      * is closed later by nipc_server_destroy(). */
     __atomic_store_n(&server->running, false, __ATOMIC_RELEASE);
 
@@ -877,7 +867,6 @@ bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms)
     }
 
     server->worker_count = 0;
-    server->shm_in_use = false;
     return all_drained;
 }
 
@@ -906,7 +895,6 @@ void nipc_server_destroy(nipc_managed_server_t *server)
     }
 
     server->worker_count = 0;
-    server->shm_in_use = false;
 }
 
 /* ------------------------------------------------------------------ */

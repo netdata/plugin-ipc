@@ -101,6 +101,9 @@ typedef struct {
     uint32_t packet_size;
     uint32_t selected_profile;
 
+    /* Server-assigned session ID (from hello-ack) */
+    uint64_t session_id;
+
     /* Internal receive buffer for chunked reassembly */
     uint8_t *recv_buf;
     size_t   recv_buf_size;
@@ -136,9 +139,12 @@ nipc_uds_error_t nipc_uds_listen(const char *run_dir,
 
 /*
  * Accept one client on a listener. Performs the full handshake.
+ * session_id is placed into the hello-ack so the client can attach
+ * to the correct per-session SHM region.
  * Blocks until a client connects and the handshake completes (or fails).
  */
 nipc_uds_error_t nipc_uds_accept(nipc_uds_listener_t *listener,
+                                  uint64_t session_id,
                                   nipc_uds_session_t *out);
 
 /*

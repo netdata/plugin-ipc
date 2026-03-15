@@ -42,7 +42,7 @@ func buildMessage(kind, code uint16, messageID uint64, payload []byte) []byte {
 }
 
 func runServer(runDir, service string) int {
-	ctx, err := posix.ShmServerCreate(runDir, service, 65536, 65536)
+	ctx, err := posix.ShmServerCreate(runDir, service, 1, 65536, 65536)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "server: shm create failed: %v\n", err)
 		return 1
@@ -89,7 +89,7 @@ func runClient(runDir, service string) int {
 	var ctx *posix.ShmContext
 	var err error
 	for i := 0; i < 500; i++ {
-		ctx, err = posix.ShmClientAttach(runDir, service)
+		ctx, err = posix.ShmClientAttach(runDir, service, 1)
 		if err == nil {
 			break
 		}

@@ -23,7 +23,7 @@ static int run_server(const char *run_dir, const char *service)
 {
     nipc_shm_ctx_t shm;
     nipc_shm_error_t err = nipc_shm_server_create(
-        run_dir, service, 65536, 65536, &shm);
+        run_dir, service, 1, 65536, 65536, &shm);
     if (err != NIPC_SHM_OK) {
         fprintf(stderr, "server: shm create failed: %d\n", err);
         return 1;
@@ -81,7 +81,7 @@ static int run_client(const char *run_dir, const char *service)
     /* Retry attach -- server may not be fully ready yet. */
     nipc_shm_error_t err = NIPC_SHM_ERR_NOT_READY;
     for (int i = 0; i < 500; i++) {
-        err = nipc_shm_client_attach(run_dir, service, &shm);
+        err = nipc_shm_client_attach(run_dir, service, 1, &shm);
         if (err == NIPC_SHM_OK)
             break;
         if (err == NIPC_SHM_ERR_NOT_READY ||

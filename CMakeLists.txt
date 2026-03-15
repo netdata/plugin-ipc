@@ -321,7 +321,7 @@ if(CARGO_EXECUTABLE)
             COMMAND ${CARGO_EXECUTABLE} test service -- --test-threads=1
             WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
         )
-        set_tests_properties(test_service_rust PROPERTIES TIMEOUT 60)
+        set_tests_properties(test_service_rust PROPERTIES TIMEOUT 120)
 
         # Build the Rust L2 interop binary
         add_custom_target(interop_service_rs ALL

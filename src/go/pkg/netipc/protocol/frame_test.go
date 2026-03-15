@@ -620,8 +620,8 @@ func TestHelloAckRoundtrip(t *testing.T) {
 
 	var buf [64]byte
 	n := h.Encode(buf[:])
-	if n != 36 {
-		t.Fatalf("Encode returned %d, want 36", n)
+	if n != 48 {
+		t.Fatalf("Encode returned %d, want 48", n)
 	}
 
 	out, err := DecodeHelloAck(buf[:n])
@@ -642,7 +642,7 @@ func TestHelloAckEncodeTooSmall(t *testing.T) {
 }
 
 func TestHelloAckDecodeTruncated(t *testing.T) {
-	buf := make([]byte, 35)
+	buf := make([]byte, 47)
 	_, err := DecodeHelloAck(buf)
 	if err != ErrTruncated {
 		t.Fatalf("got %v, want ErrTruncated", err)
@@ -651,7 +651,7 @@ func TestHelloAckDecodeTruncated(t *testing.T) {
 
 func TestHelloAckDecodeBadLayout(t *testing.T) {
 	h := HelloAck{LayoutVersion: 99}
-	var buf [36]byte
+	var buf [48]byte
 	h.Encode(buf[:])
 	_, err := DecodeHelloAck(buf[:])
 	if err != ErrBadLayout {
@@ -1331,7 +1331,7 @@ func TestInteropHelloAckValues(t *testing.T) {
 		AgreedPacketSize:              32768,
 	}
 
-	var buf [36]byte
+	var buf [48]byte
 	h.Encode(buf[:])
 
 	out, err := DecodeHelloAck(buf[:])

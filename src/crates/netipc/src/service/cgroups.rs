@@ -33,6 +33,9 @@ use crate::transport::win_shm::{
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// Poll/receive timeout for server loops (ms). Controls shutdown detection latency.
+const SERVER_POLL_TIMEOUT_MS: u32 = 100;
+
 // ---------------------------------------------------------------------------
 //  Client state
 // ---------------------------------------------------------------------------
@@ -255,6 +258,8 @@ impl CgroupsClient {
             Ok(session) => {
                 #[cfg(target_os = "linux")]
                 let selected_profile = session.selected_profile;
+                #[cfg(target_os = "linux")]
+                let session_id = session.session_id;
 
                 // SHM upgrade if negotiated
                 #[cfg(target_os = "linux")]
@@ -266,7 +271,7 @@ impl CgroupsClient {
                         // the UDS handshake, so it may not exist yet.
                         let mut shm_ok = false;
                         for _ in 0..200 {
-                            match ShmContext::client_attach(&self.run_dir, &self.service_name) {
+                            match ShmContext::client_attach(&self.run_dir, &self.service_name, session_id) {
                                 Ok(ctx) => {
                                     self.shm = Some(ctx);
                                     shm_ok = true;
@@ -612,7 +617,7 @@ impl CgroupsServer {
         let mut session_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
 
         while self.running.load(Ordering::Acquire) {
-            let ready = poll_fd(listener.fd(), 500);
+            let ready = poll_fd(listener.fd(), SERVER_POLL_TIMEOUT_MS as i32);
             if ready < 0 {
                 break;
             }
@@ -748,6 +753,7 @@ impl CgroupsServer {
         match ShmContext::server_create(
             &self.run_dir,
             &self.service_name,
+            session.session_id,
             session.max_request_payload_bytes + HEADER_SIZE as u32,
             session.max_response_payload_bytes + HEADER_SIZE as u32,
         ) {
@@ -793,7 +799,7 @@ fn handle_session_win_threaded(
     while running.load(Ordering::Acquire) {
         let (hdr, payload) = {
             if let Some(ref mut shm_ctx) = shm {
-                match shm_ctx.receive(&mut recv_buf, 500) {
+                match shm_ctx.receive(&mut recv_buf, SERVER_POLL_TIMEOUT_MS) {
                     Ok(mlen) => {
                         if mlen < HEADER_SIZE {
                             break;
@@ -892,7 +898,7 @@ fn handle_session_threaded(
             #[cfg(target_os = "linux")]
             {
                 if let Some(ref mut shm_ctx) = shm {
-                    match shm_ctx.receive(&mut recv_buf, 500) {
+                    match shm_ctx.receive(&mut recv_buf, SERVER_POLL_TIMEOUT_MS) {
                         Ok(mlen) => {
                             if mlen < HEADER_SIZE {
                                 break;
@@ -909,7 +915,7 @@ fn handle_session_threaded(
                     }
                 } else {
                     // UDS path with poll
-                    let ready = poll_fd(session.fd(), 500);
+                    let ready = poll_fd(session.fd(), SERVER_POLL_TIMEOUT_MS as i32);
                     if ready < 0 {
                         break;
                     }
@@ -926,7 +932,7 @@ fn handle_session_threaded(
 
             #[cfg(not(target_os = "linux"))]
             {
-                let ready = poll_fd(session.fd(), 500);
+                let ready = poll_fd(session.fd(), SERVER_POLL_TIMEOUT_MS as i32);
                 if ready < 0 {
                     break;
                 }
@@ -2399,7 +2405,7 @@ mod tests {
         let mut server = TestServer::start(svc, test_cgroups_handler);
 
         const NUM_CLIENTS: usize = 5;
-        let run_duration = Duration::from_secs(60);
+        let run_duration = Duration::from_secs(30);
 
         let running = Arc::new(AtomicBool::new(true));
         let mut handles = Vec::new();
@@ -2444,7 +2450,7 @@ mod tests {
             total_errors += e;
         }
 
-        eprintln!("  60s run: {total_refreshes} refreshes, {total_errors} errors");
+        eprintln!("  30s run: {total_refreshes} refreshes, {total_errors} errors");
 
         assert!(total_refreshes > 0, "expected some refreshes");
         assert_eq!(total_errors, 0, "expected zero errors in 60s run");

@@ -405,10 +405,10 @@ nipc_error_t nipc_hello_decode(const void *buf, size_t buf_len,
 }
 
 /* ------------------------------------------------------------------ */
-/*  Hello-ack payload (36 bytes)                                      */
+/*  Hello-ack payload (48 bytes)                                      */
 /* ------------------------------------------------------------------ */
 
-#define NIPC_HELLO_ACK_SIZE 36u
+#define NIPC_HELLO_ACK_SIZE 48u
 
 size_t nipc_hello_ack_encode(const nipc_hello_ack_t *h,
                              void *buf, size_t buf_len) {
@@ -426,6 +426,8 @@ size_t nipc_hello_ack_encode(const nipc_hello_ack_t *h,
     put_u32(p + 24, h->agreed_max_response_payload_bytes);
     put_u32(p + 28, h->agreed_max_response_batch_items);
     put_u32(p + 32, h->agreed_packet_size);
+    put_u32(p + 36, 0); /* padding, must be zero */
+    put_u64(p + 40, h->session_id);
     return NIPC_HELLO_ACK_SIZE;
 }
 
@@ -445,6 +447,8 @@ nipc_error_t nipc_hello_ack_decode(const void *buf, size_t buf_len,
     out->agreed_max_response_payload_bytes = get_u32(p + 24);
     out->agreed_max_response_batch_items   = get_u32(p + 28);
     out->agreed_packet_size                = get_u32(p + 32);
+    /* skip padding at offset 36 */
+    out->session_id                        = get_u64(p + 40);
 
     if (out->layout_version != 1)
         return NIPC_ERR_BAD_LAYOUT;

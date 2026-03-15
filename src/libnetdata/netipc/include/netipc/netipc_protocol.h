@@ -224,7 +224,7 @@ nipc_error_t nipc_hello_decode(const void *buf, size_t buf_len,
                                nipc_hello_t *out);
 
 /* ------------------------------------------------------------------ */
-/*  Hello-ack payload (36 bytes)                                      */
+/*  Hello-ack payload (48 bytes)                                      */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
@@ -238,6 +238,7 @@ typedef struct {
     uint32_t agreed_max_response_payload_bytes;
     uint32_t agreed_max_response_batch_items;
     uint32_t agreed_packet_size;
+    uint64_t session_id;  /* server-assigned, for per-session SHM path */
 } nipc_hello_ack_t;
 
 size_t nipc_hello_ack_encode(const nipc_hello_ack_t *h,

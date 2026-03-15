@@ -13,12 +13,20 @@ baseline.
 ## Region file path
 
 ```
-{run_dir}/{service_name}.ipcshm
+{run_dir}/{service_name}-{session_id:016x}.ipcshm
 ```
 
-Created by the server via `shm_open` (or `open` + `ftruncate` on a
-filesystem path). The client opens the same path after the handshake
-negotiates an SHM profile.
+Where `session_id` is the server-assigned session identifier from the
+hello-ack payload, formatted as a zero-padded 16-character lowercase
+hex string.
+
+Each session gets its own SHM region. Multiple concurrent clients each
+have independent regions with independent request/response areas,
+sequence numbers, and futex signal words.
+
+Created by the server via `open` + `ftruncate` on a filesystem path.
+The client opens the same path after the handshake negotiates an SHM
+profile, using the `session_id` received in the hello-ack.
 
 ## Profile bits
 
@@ -108,7 +116,10 @@ signal word.
 2. If the sequence has not advanced after spinning, block on
    `futex(FUTEX_WAIT)` on `req_signal` with a timeout.
 3. Once `req_seq` has advanced, read `req_len` (atomic acquire).
-4. Read the message bytes from the request area.
+4. Validate `req_len` against `request_capacity`. If `req_len` exceeds
+   the capacity, discard the message and report an error. This prevents
+   out-of-bounds reads from a malicious or buggy peer.
+5. Read the message bytes from the request area.
 
 ### Server sends a response
 
@@ -126,7 +137,9 @@ signal word.
 2. If the sequence has not advanced after spinning, block on
    `futex(FUTEX_WAIT)` on `resp_signal` with a timeout.
 3. Once `resp_seq` has advanced, read `resp_len` (atomic acquire).
-4. Read the message bytes from the response area.
+4. Validate `resp_len` against `response_capacity`. If `resp_len`
+   exceeds the capacity, discard the message and report an error.
+5. Read the message bytes from the response area.
 
 ## Memory ordering
 
@@ -169,47 +182,68 @@ protocol prohibition.
 
 ## Region lifecycle
 
-### Server creates the region
+### Server creates a per-session region
 
-1. Create (or reclaim stale) the `.ipcshm` file.
-2. `ftruncate` to the required size (header + request area + response
+The server creates one SHM region per accepted session, after the
+handshake negotiates an SHM profile. The region path is derived from
+the `session_id` assigned during the handshake.
+
+1. Derive the region path: `{run_dir}/{service_name}-{session_id:016x}.ipcshm`.
+2. Create the file via `open(O_RDWR | O_CREAT | O_EXCL, 0600)`.
+   `O_EXCL` ensures no collision with an existing region.
+3. `ftruncate` to the required size (header + request area + response
    area).
-3. `mmap` the region.
-4. Write the header: magic, version, header_len, owner_pid,
+4. `mmap` the region with `MAP_SHARED`.
+5. Write the header: magic, version, header_len, owner_pid,
    owner_generation, offsets, capacities. Initialize all atomic fields
    to zero.
-5. The region is now ready for clients.
+6. The region is now ready for the client.
+
+The server must track all active per-session SHM regions so they can
+be cleaned up on session close and server shutdown.
 
 ### Client attaches to the region
 
-1. Open the `.ipcshm` file.
-2. Validate the file size (must be >= header_len).
-3. `mmap` the region.
-4. Validate the header: magic, version, header_len.
-5. Read offsets and capacities from the header.
-6. The client is now ready to publish requests and consume responses.
+1. Derive the region path using the `session_id` from the hello-ack.
+2. Open the `.ipcshm` file.
+3. Validate the file size (must be >= header_len).
+4. `mmap` the region.
+5. Validate the header: magic, version, header_len.
+6. Read offsets and capacities from the header.
+7. The client is now ready to publish requests and consume responses.
 
-If the file is undersized (server created it but has not yet populated
-the header), the client treats this as a retryable protocol-not-ready
-condition.
+If the file does not exist or is undersized (server has not yet
+finished creating it), the client treats this as a retryable
+protocol-not-ready condition.
 
-### Server destroys the region
+### Server destroys a per-session region
+
+When a session closes (graceful or broken):
 
 1. `munmap` the region.
-2. `unlink` the `.ipcshm` file.
+2. `unlink` the per-session `.ipcshm` file.
 
 ### Client detaches from the region
 
 1. `munmap` the region.
 2. Close the file descriptor.
 
-### Stale region recovery
+### Stale region cleanup on server startup
 
-The server checks `owner_pid` and `owner_generation` in the header:
+When a server starts, it must scan for stale per-session SHM files
+left behind by a previous server instance that crashed or was killed:
 
-- If `owner_pid` refers to a live process: the region is active, fail
-  with address-in-use.
-- If `owner_pid` refers to a dead process or the region is invalid:
-  unlink and recreate.
-- `owner_generation` prevents false positives from PID reuse: even if
-  a new process reuses the old PID, its generation will differ.
+1. Scan `{run_dir}` for files matching `{service_name}-*.ipcshm`.
+2. For each file: open, mmap, read the header.
+3. Check `owner_pid` and `owner_generation`:
+   - If `owner_pid` refers to a dead process or the generation does
+     not match: the region is stale — unlink it.
+   - If `owner_pid` refers to a live process with matching generation:
+     the region belongs to another running server instance — leave it
+     (fail with address-in-use if this server wants the same service).
+4. `owner_generation` prevents false positives from PID reuse: even if
+   a new process reuses the old PID, its generation will differ.
+
+This cleanup runs once at server startup, before the listener begins
+accepting connections. It is the safety net for crashes and hard
+reboots.

@@ -10,6 +10,7 @@ use crate::protocol::{
 };
 use std::collections::HashSet;
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 //  Win32 FFI — using windows-sys when available, raw bindings as fallback
@@ -112,7 +113,7 @@ const DEFAULT_BATCH_ITEMS: u32 = 1;
 const DEFAULT_PACKET_SIZE: u32 = 65536;
 const DEFAULT_PIPE_BUF_SIZE: u32 = 65536;
 const HELLO_PAYLOAD_SIZE: usize = 44;
-const HELLO_ACK_PAYLOAD_SIZE: usize = 36;
+const HELLO_ACK_PAYLOAD_SIZE: usize = 48;
 const MAX_PIPE_NAME_CHARS: usize = 256;
 
 // FNV-1a 64-bit constants
@@ -451,6 +452,7 @@ pub struct NpSession {
     pub max_response_batch_items: u32,
     pub packet_size: u32,
     pub selected_profile: u32,
+    pub session_id: u64,
 
     // Internal receive buffer for chunked reassembly
     recv_buf: Vec<u8>,
@@ -755,6 +757,7 @@ pub struct NpListener {
     handle: ffi::HANDLE,
     config: ServerConfig,
     pipe_name: Vec<u16>,
+    next_session_id: AtomicU64,
 }
 
 #[cfg(windows)]
@@ -775,6 +778,7 @@ impl NpListener {
             handle,
             config,
             pipe_name,
+            next_session_id: AtomicU64::new(1),
         })
     }
 
@@ -802,7 +806,8 @@ impl NpListener {
         self.handle = next;
 
         // Perform handshake
-        match server_handshake(session_handle, &self.config) {
+        let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+        match server_handshake(session_handle, &self.config, session_id) {
             Ok(session) => Ok(session),
             Err(e) => {
                 unsafe { ffi::DisconnectNamedPipe(session_handle); }
@@ -966,6 +971,7 @@ fn client_handshake(
         max_response_batch_items: ack.agreed_max_response_batch_items,
         packet_size: ack.agreed_packet_size,
         selected_profile: ack.selected_profile,
+        session_id: ack.session_id,
         recv_buf: Vec::new(),
         inflight_ids: HashSet::new(),
     })
@@ -979,6 +985,7 @@ fn client_handshake(
 fn server_handshake(
     handle: ffi::HANDLE,
     config: &ServerConfig,
+    session_id: u64,
 ) -> Result<NpSession, NpError> {
     let server_pkt_size = apply_default(config.packet_size, DEFAULT_PACKET_SIZE);
     let s_req_pay = apply_default(config.max_request_payload_bytes, MAX_PAYLOAD_DEFAULT);
@@ -1073,6 +1080,7 @@ fn server_handshake(
         agreed_max_response_payload_bytes: agreed_resp_pay,
         agreed_max_response_batch_items: agreed_resp_bat,
         agreed_packet_size: agreed_pkt,
+        session_id,
     };
 
     let mut ack_buf = [0u8; HELLO_ACK_PAYLOAD_SIZE];
@@ -1106,6 +1114,7 @@ fn server_handshake(
         max_response_batch_items: agreed_resp_bat,
         packet_size: agreed_pkt,
         selected_profile: selected,
+        session_id,
         recv_buf: Vec::new(),
         inflight_ids: HashSet::new(),
     })

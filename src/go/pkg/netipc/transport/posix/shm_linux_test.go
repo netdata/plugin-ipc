@@ -5,6 +5,7 @@ package posix
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -23,9 +24,16 @@ func ensureShmRunDir(t *testing.T) {
 	}
 }
 
-func cleanupShmFile(t *testing.T, service string) {
+func cleanupShmFiles(t *testing.T, service string) {
 	t.Helper()
-	os.Remove(fmt.Sprintf("%s/%s.ipcshm", testShmRunDir, service))
+	// Clean up SHM files with session ID pattern
+	entries, _ := os.ReadDir(testShmRunDir)
+	for _, e := range entries {
+		name := e.Name()
+		if len(name) > len(service)+1 && name[:len(service)+1] == service+"-" {
+			os.Remove(fmt.Sprintf("%s/%s", testShmRunDir, name))
+		}
+	}
 }
 
 // buildShmMessage creates a complete wire message (32-byte header + payload).
@@ -49,8 +57,8 @@ func buildShmMessage(kind, code uint16, messageID uint64, payload []byte) []byte
 func TestShmDirectRoundtrip(t *testing.T) {
 	ensureShmRunDir(t)
 	svc := "go_shm_rt"
-	cleanupShmFile(t, svc)
-	defer cleanupShmFile(t, svc)
+	cleanupShmFiles(t, svc)
+	defer cleanupShmFiles(t, svc)
 
 	var wg sync.WaitGroup
 	var serverErr error
@@ -58,7 +66,7 @@ func TestShmDirectRoundtrip(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ctx, err := ShmServerCreate(testShmRunDir, svc, 4096, 4096)
+		ctx, err := ShmServerCreate(testShmRunDir, svc, 1, 4096, 4096)
 		if err != nil {
 			serverErr = fmt.Errorf("server create: %w", err)
 			return
@@ -94,7 +102,7 @@ func TestShmDirectRoundtrip(t *testing.T) {
 	// Wait for server to create region
 	time.Sleep(50 * time.Millisecond)
 
-	client, err := ShmClientAttach(testShmRunDir, svc)
+	client, err := ShmClientAttach(testShmRunDir, svc, 1)
 	if err != nil {
 		t.Fatalf("client attach: %v", err)
 	}
@@ -140,8 +148,8 @@ func TestShmDirectRoundtrip(t *testing.T) {
 func TestShmMultipleRoundtrips(t *testing.T) {
 	ensureShmRunDir(t)
 	svc := "go_shm_multi"
-	cleanupShmFile(t, svc)
-	defer cleanupShmFile(t, svc)
+	cleanupShmFiles(t, svc)
+	defer cleanupShmFiles(t, svc)
 
 	var wg sync.WaitGroup
 	var serverErr error
@@ -149,7 +157,7 @@ func TestShmMultipleRoundtrips(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ctx, err := ShmServerCreate(testShmRunDir, svc, 4096, 4096)
+		ctx, err := ShmServerCreate(testShmRunDir, svc, 2, 4096, 4096)
 		if err != nil {
 			serverErr = fmt.Errorf("server create: %w", err)
 			return
@@ -179,7 +187,7 @@ func TestShmMultipleRoundtrips(t *testing.T) {
 	}()
 
 	time.Sleep(50 * time.Millisecond)
-	client, err := ShmClientAttach(testShmRunDir, svc)
+	client, err := ShmClientAttach(testShmRunDir, svc, 2)
 	if err != nil {
 		t.Fatalf("client attach: %v", err)
 	}
@@ -222,11 +230,11 @@ func TestShmMultipleRoundtrips(t *testing.T) {
 func TestShmStaleRecovery(t *testing.T) {
 	ensureShmRunDir(t)
 	svc := "go_shm_stale"
-	cleanupShmFile(t, svc)
-	defer cleanupShmFile(t, svc)
+	cleanupShmFiles(t, svc)
+	defer cleanupShmFiles(t, svc)
 
 	// Create a region, then corrupt owner_pid to simulate dead process
-	first, err := ShmServerCreate(testShmRunDir, svc, 1024, 1024)
+	first, err := ShmServerCreate(testShmRunDir, svc, 3, 1024, 1024)
 	if err != nil {
 		t.Fatalf("first create: %v", err)
 	}
@@ -235,8 +243,11 @@ func TestShmStaleRecovery(t *testing.T) {
 	binary.LittleEndian.PutUint32(first.data[8:12], 99999) // very unlikely alive
 	first.ShmClose() // close without unlink
 
-	// Should succeed via stale recovery
-	second, err := ShmServerCreate(testShmRunDir, svc, 2048, 2048)
+	// Clean up stale regions (as production server would)
+	ShmCleanupStale(testShmRunDir, svc)
+
+	// Should succeed after stale recovery
+	second, err := ShmServerCreate(testShmRunDir, svc, 3, 2048, 2048)
 	if err != nil {
 		t.Fatalf("stale recovery create: %v", err)
 	}
@@ -249,8 +260,8 @@ func TestShmStaleRecovery(t *testing.T) {
 func TestShmLargeMessage(t *testing.T) {
 	ensureShmRunDir(t)
 	svc := "go_shm_large"
-	cleanupShmFile(t, svc)
-	defer cleanupShmFile(t, svc)
+	cleanupShmFiles(t, svc)
+	defer cleanupShmFiles(t, svc)
 
 	var wg sync.WaitGroup
 	var serverErr error
@@ -258,7 +269,7 @@ func TestShmLargeMessage(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ctx, err := ShmServerCreate(testShmRunDir, svc, 65536, 65536)
+		ctx, err := ShmServerCreate(testShmRunDir, svc, 4, 65536, 65536)
 		if err != nil {
 			serverErr = fmt.Errorf("server create: %w", err)
 			return
@@ -286,7 +297,7 @@ func TestShmLargeMessage(t *testing.T) {
 	}()
 
 	time.Sleep(50 * time.Millisecond)
-	client, err := ShmClientAttach(testShmRunDir, svc)
+	client, err := ShmClientAttach(testShmRunDir, svc, 4)
 	if err != nil {
 		t.Fatalf("client attach: %v", err)
 	}
@@ -320,5 +331,250 @@ func TestShmLargeMessage(t *testing.T) {
 	wg.Wait()
 	if serverErr != nil {
 		t.Fatalf("server error: %v", serverErr)
+	}
+}
+
+func TestShmChaosForgedLength(t *testing.T) {
+	ensureShmRunDir(t)
+	svc := "go_shm_forged"
+	cleanupShmFiles(t, svc)
+	defer cleanupShmFiles(t, svc)
+
+	const reqCap uint32 = 1024
+	const respCap uint32 = 1024
+
+	// --- Server-side receive with forged req_len ---
+
+	srv, err := ShmServerCreate(testShmRunDir, svc, 100, reqCap, respCap)
+	if err != nil {
+		t.Fatalf("server create: %v", err)
+	}
+	defer srv.ShmDestroy()
+
+	// Attach a client so we can also test client-side forged resp_len
+	client, err := ShmClientAttach(testShmRunDir, svc, 100)
+	if err != nil {
+		t.Fatalf("client attach: %v", err)
+	}
+	defer client.ShmClose()
+
+	buf := make([]byte, 65536)
+
+	// Test forged req_len values on the server side.
+	// We directly manipulate the mapped region to simulate a malicious client.
+	forgedLengths := []uint32{0, reqCap + 1, 0xFFFFFFFF}
+
+	for _, forgedLen := range forgedLengths {
+		// Write garbage into the request area
+		for i := srv.requestOffset; i < srv.requestOffset+reqCap; i++ {
+			srv.data[i] = 0xAA
+		}
+
+		// Store forged req_len
+		if err := atomicStoreU32(srv.data, shmHeaderReqLenOff, forgedLen); err != nil {
+			t.Fatalf("store forged req_len=%d: %v", forgedLen, err)
+		}
+
+		// Bump req_seq to signal a "message" arrived
+		if err := atomicAddU64(srv.data, shmHeaderReqSeqOff, 1); err != nil {
+			t.Fatalf("add req_seq for forged=%d: %v", forgedLen, err)
+		}
+
+		// Bump req_signal to wake futex
+		if err := atomicAddU32(srv.data, shmHeaderReqSignalOff, 1); err != nil {
+			t.Fatalf("add req_signal for forged=%d: %v", forgedLen, err)
+		}
+
+		mlen, recvErr := srv.ShmReceive(buf, 1000)
+
+		if forgedLen == 0 {
+			// Zero-length: no copy, no error, returns 0 bytes
+			if recvErr != nil {
+				t.Errorf("forged req_len=0: unexpected error: %v", recvErr)
+			}
+			if mlen != 0 {
+				t.Errorf("forged req_len=0: got mlen=%d, want 0", mlen)
+			}
+		} else {
+			// Oversized: must return ErrShmMsgTooLarge, no panic
+			if !errors.Is(recvErr, ErrShmMsgTooLarge) {
+				t.Errorf("forged req_len=%d: got err=%v, want ErrShmMsgTooLarge", forgedLen, recvErr)
+			}
+		}
+	}
+
+	// --- Client-side receive with forged resp_len ---
+
+	forgedRespLengths := []uint32{0, respCap + 1, 0xFFFFFFFF}
+
+	for _, forgedLen := range forgedRespLengths {
+		// Write garbage into the response area
+		for i := srv.responseOffset; i < srv.responseOffset+respCap; i++ {
+			srv.data[i] = 0xBB
+		}
+
+		// Store forged resp_len (server and client share the same mapped region)
+		if err := atomicStoreU32(client.data, shmHeaderRespLenOff, forgedLen); err != nil {
+			t.Fatalf("store forged resp_len=%d: %v", forgedLen, err)
+		}
+
+		// Bump resp_seq
+		if err := atomicAddU64(client.data, shmHeaderRespSeqOff, 1); err != nil {
+			t.Fatalf("add resp_seq for forged=%d: %v", forgedLen, err)
+		}
+
+		// Bump resp_signal
+		if err := atomicAddU32(client.data, shmHeaderRespSignalOff, 1); err != nil {
+			t.Fatalf("add resp_signal for forged=%d: %v", forgedLen, err)
+		}
+
+		mlen, recvErr := client.ShmReceive(buf, 1000)
+
+		if forgedLen == 0 {
+			if recvErr != nil {
+				t.Errorf("forged resp_len=0: unexpected error: %v", recvErr)
+			}
+			if mlen != 0 {
+				t.Errorf("forged resp_len=0: got mlen=%d, want 0", mlen)
+			}
+		} else {
+			if !errors.Is(recvErr, ErrShmMsgTooLarge) {
+				t.Errorf("forged resp_len=%d: got err=%v, want ErrShmMsgTooLarge", forgedLen, recvErr)
+			}
+		}
+	}
+}
+
+func TestShmMultiClient(t *testing.T) {
+	ensureShmRunDir(t)
+	svc := "go_shm_mcli"
+	cleanupShmFiles(t, svc)
+	defer cleanupShmFiles(t, svc)
+
+	const numClients = 3
+
+	type serverSlot struct {
+		ctx *ShmContext
+		err error
+		got []byte // received payload
+	}
+
+	var wg sync.WaitGroup
+	slots := make([]serverSlot, numClients)
+
+	// Create server regions and start goroutines that receive + echo
+	for i := 0; i < numClients; i++ {
+		sessionID := uint64(i + 1)
+		ctx, err := ShmServerCreate(testShmRunDir, svc, sessionID, 4096, 4096)
+		if err != nil {
+			// Clean up already-created regions
+			for j := 0; j < i; j++ {
+				slots[j].ctx.ShmDestroy()
+			}
+			t.Fatalf("server create session %d: %v", sessionID, err)
+		}
+		slots[i].ctx = ctx
+
+		idx := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 65536)
+			mlen, err := slots[idx].ctx.ShmReceive(buf, 5000)
+			if err != nil {
+				slots[idx].err = fmt.Errorf("receive: %w", err)
+				return
+			}
+			// Save received payload for verification
+			slots[idx].got = make([]byte, mlen)
+			copy(slots[idx].got, buf[:mlen])
+
+			// Parse and echo back as response
+			hdr, err := protocol.DecodeHeader(buf[:mlen])
+			if err != nil {
+				slots[idx].err = fmt.Errorf("decode: %w", err)
+				return
+			}
+			payload := make([]byte, mlen-protocol.HeaderSize)
+			copy(payload, buf[protocol.HeaderSize:mlen])
+			resp := buildShmMessage(protocol.KindResponse, hdr.Code, hdr.MessageID, payload)
+			if err := slots[idx].ctx.ShmSend(resp); err != nil {
+				slots[idx].err = fmt.Errorf("send: %w", err)
+			}
+		}()
+	}
+
+	// Wait for regions to be ready
+	time.Sleep(50 * time.Millisecond)
+
+	// Attach clients and send unique messages
+	clients := make([]*ShmContext, numClients)
+	payloads := make([][]byte, numClients)
+	for i := 0; i < numClients; i++ {
+		sessionID := uint64(i + 1)
+		c, err := ShmClientAttach(testShmRunDir, svc, sessionID)
+		if err != nil {
+			t.Fatalf("client attach session %d: %v", sessionID, err)
+		}
+		defer c.ShmClose()
+		clients[i] = c
+
+		// Each client sends a unique payload: [0xC0+i, session_id_byte, 0xDE, 0xAD]
+		payloads[i] = []byte{byte(0xC0 + i), byte(sessionID), 0xDE, 0xAD}
+		msg := buildShmMessage(protocol.KindRequest, protocol.MethodIncrement, uint64(100+i), payloads[i])
+		if err := c.ShmSend(msg); err != nil {
+			t.Fatalf("client %d send: %v", i, err)
+		}
+	}
+
+	// Each client receives its own response
+	for i := 0; i < numClients; i++ {
+		respBuf := make([]byte, 65536)
+		rlen, err := clients[i].ShmReceive(respBuf, 5000)
+		if err != nil {
+			t.Fatalf("client %d receive: %v", i, err)
+		}
+
+		rhdr, err := protocol.DecodeHeader(respBuf[:rlen])
+		if err != nil {
+			t.Fatalf("client %d decode response: %v", i, err)
+		}
+
+		if rhdr.Kind != protocol.KindResponse {
+			t.Errorf("client %d: kind=%d, want %d", i, rhdr.Kind, protocol.KindResponse)
+		}
+		if rhdr.MessageID != uint64(100+i) {
+			t.Errorf("client %d: message_id=%d, want %d", i, rhdr.MessageID, 100+i)
+		}
+
+		respPayload := respBuf[protocol.HeaderSize:rlen]
+		if !bytes.Equal(respPayload, payloads[i]) {
+			t.Errorf("client %d: payload mismatch: got %x, want %x", i, respPayload, payloads[i])
+		}
+	}
+
+	// Wait for server goroutines to finish
+	wg.Wait()
+
+	// Check for server errors and verify no cross-contamination
+	for i := 0; i < numClients; i++ {
+		if slots[i].err != nil {
+			t.Errorf("server %d error: %v", i, slots[i].err)
+			continue
+		}
+		// Verify each server got the right client's message (check payload)
+		if len(slots[i].got) < protocol.HeaderSize+len(payloads[i]) {
+			t.Errorf("server %d: received too few bytes: %d", i, len(slots[i].got))
+			continue
+		}
+		srvPayload := slots[i].got[protocol.HeaderSize:]
+		if !bytes.Equal(srvPayload, payloads[i]) {
+			t.Errorf("server %d: cross-contamination: got %x, want %x", i, srvPayload, payloads[i])
+		}
+	}
+
+	// Cleanup all server regions
+	for i := 0; i < numClients; i++ {
+		slots[i].ctx.ShmDestroy()
 	}
 }

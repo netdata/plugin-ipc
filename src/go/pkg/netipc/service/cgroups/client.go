@@ -191,7 +191,7 @@ func (c *Client) tryConnect() ClientState {
 		// Retry attach: server creates the SHM region after
 		// the UDS handshake, so it may not exist yet.
 		for i := 0; i < 200; i++ {
-			shm, serr := posix.ShmClientAttach(c.runDir, c.serviceName)
+			shm, serr := posix.ShmClientAttach(c.runDir, c.serviceName, session.SessionID)
 			if serr == nil {
 				c.shm = shm
 				break
@@ -390,7 +390,7 @@ func (s *Server) Run() error {
 
 	for s.running.Load() {
 		// Poll the listener fd before blocking on accept
-		ready := pollFd(listener.Fd(), 500)
+		ready := pollFd(listener.Fd(), serverPollTimeoutMs)
 		if ready < 0 {
 			break
 		}
@@ -422,7 +422,7 @@ func (s *Server) Run() error {
 		if session.SelectedProfile == protocol.ProfileSHMHybrid ||
 			session.SelectedProfile == protocol.ProfileSHMFutex {
 			shmCtx, serr := posix.ShmServerCreate(
-				s.runDir, s.serviceName,
+				s.runDir, s.serviceName, session.SessionID,
 				session.MaxRequestPayloadBytes+uint32(protocol.HeaderSize),
 				session.MaxResponsePayloadBytes+uint32(protocol.HeaderSize),
 			)
@@ -468,7 +468,7 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 		var payload []byte
 
 		if shm != nil {
-			mlen, err := shm.ShmReceive(recvBuf, 500)
+			mlen, err := shm.ShmReceive(recvBuf, serverPollTimeoutMs)
 			if err != nil {
 				if err == posix.ErrShmTimeout {
 					continue
@@ -488,7 +488,7 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 			copy(payload, recvBuf[protocol.HeaderSize:mlen])
 		} else {
 			// Poll the session fd before blocking on receive
-			ready := pollFd(session.Fd(), 500)
+			ready := pollFd(session.Fd(), serverPollTimeoutMs)
 			if ready < 0 {
 				return
 			}

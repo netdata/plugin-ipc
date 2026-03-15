@@ -62,7 +62,7 @@ static int run_server(const char *run_dir, const char *service)
     fflush(stdout);
 
     nipc_uds_session_t session;
-    err = nipc_uds_accept(&listener, &session);
+    err = nipc_uds_accept(&listener, 0, &session);
     if (err != NIPC_UDS_OK) {
         fprintf(stderr, "server: accept failed: %d\n", err);
         nipc_uds_close_listener(&listener);
@@ -195,7 +195,7 @@ static int run_pipeline_server(const char *run_dir, const char *service, int cou
     fflush(stdout);
 
     nipc_uds_session_t session;
-    err = nipc_uds_accept(&listener, &session);
+    err = nipc_uds_accept(&listener, 0, &session);
     if (err != NIPC_UDS_OK) {
         fprintf(stderr, "server: accept failed: %d\n", err);
         nipc_uds_close_listener(&listener);

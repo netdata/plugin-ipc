@@ -13,6 +13,7 @@ use std::ffi::CString;
 use std::io;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 //  Constants
@@ -22,7 +23,7 @@ const DEFAULT_BACKLOG: i32 = 16;
 const DEFAULT_BATCH_ITEMS: u32 = 1;
 const DEFAULT_PACKET_SIZE_FALLBACK: u32 = 65536;
 const HELLO_PAYLOAD_SIZE: usize = 44;
-const HELLO_ACK_PAYLOAD_SIZE: usize = 36;
+const HELLO_ACK_PAYLOAD_SIZE: usize = 48;
 
 // ---------------------------------------------------------------------------
 //  Errors
@@ -184,6 +185,7 @@ pub struct UdsSession {
     pub max_response_batch_items: u32,
     pub packet_size: u32,
     pub selected_profile: u32,
+    pub session_id: u64,
 
     // Internal receive buffer for chunked reassembly
     recv_buf: Vec<u8>,
@@ -469,6 +471,7 @@ pub struct UdsListener {
     fd: RawFd,
     config: ServerConfig,
     path: PathBuf,
+    next_session_id: AtomicU64,
 }
 
 impl UdsListener {
@@ -515,6 +518,7 @@ impl UdsListener {
             fd,
             config,
             path: PathBuf::from(&path),
+            next_session_id: AtomicU64::new(1),
         })
     }
 
@@ -531,7 +535,8 @@ impl UdsListener {
             return Err(UdsError::Accept(errno()));
         }
 
-        match server_handshake(client_fd, &self.config) {
+        let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+        match server_handshake(client_fd, &self.config, session_id) {
             Ok(session) => Ok(session),
             Err(e) => {
                 unsafe { libc::close(client_fd); }
@@ -891,6 +896,7 @@ fn connect_and_handshake(
         max_response_batch_items: ack.agreed_max_response_batch_items,
         packet_size: ack.agreed_packet_size,
         selected_profile: ack.selected_profile,
+        session_id: ack.session_id,
         recv_buf: Vec::new(),
         inflight_ids: HashSet::new(),
     })
@@ -900,7 +906,7 @@ fn connect_and_handshake(
 //  Handshake: server side
 // ---------------------------------------------------------------------------
 
-fn server_handshake(fd: RawFd, config: &ServerConfig) -> Result<UdsSession, UdsError> {
+fn server_handshake(fd: RawFd, config: &ServerConfig, session_id: u64) -> Result<UdsSession, UdsError> {
     let server_pkt_size = if config.packet_size == 0 {
         detect_packet_size(fd)
     } else {
@@ -1003,6 +1009,7 @@ fn server_handshake(fd: RawFd, config: &ServerConfig) -> Result<UdsSession, UdsE
         agreed_max_response_payload_bytes: agreed_resp_pay,
         agreed_max_response_batch_items: agreed_resp_bat,
         agreed_packet_size: agreed_pkt,
+        session_id,
     };
 
     let mut ack_buf = [0u8; HELLO_ACK_PAYLOAD_SIZE];
@@ -1035,6 +1042,7 @@ fn server_handshake(fd: RawFd, config: &ServerConfig) -> Result<UdsSession, UdsE
         max_response_batch_items: agreed_resp_bat,
         packet_size: agreed_pkt,
         selected_profile: selected,
+        session_id,
         recv_buf: Vec::new(),
         inflight_ids: HashSet::new(),
     })

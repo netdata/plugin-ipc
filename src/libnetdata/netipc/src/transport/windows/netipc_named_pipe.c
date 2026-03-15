@@ -407,7 +407,7 @@ static nipc_np_error_t server_handshake(HANDLE pipe,
     /* Helper: send rejection HELLO_ACK */
     #define SEND_REJECTION(status_code) do {                                     \
         nipc_hello_ack_t _ack = { .layout_version = 1 };                         \
-        uint8_t _ack_buf[36];                                                    \
+        uint8_t _ack_buf[48];                                                    \
         nipc_hello_ack_encode(&_ack, _ack_buf, sizeof(_ack_buf));                \
         nipc_header_t _ack_hdr = {                                               \
             .magic = NIPC_MAGIC_MSG, .version = NIPC_VERSION,                    \
@@ -416,7 +416,7 @@ static nipc_np_error_t server_handshake(HANDLE pipe,
             .transport_status = (status_code),                                   \
             .payload_len = sizeof(_ack_buf), .item_count = 1,                    \
         };                                                                       \
-        uint8_t _pkt[68];                                                        \
+        uint8_t _pkt[80];                                                        \
         nipc_header_encode(&_ack_hdr, _pkt, sizeof(_pkt));                       \
         memcpy(_pkt + NIPC_HEADER_LEN, _ack_buf, sizeof(_ack_buf));              \
         raw_send(pipe, _pkt, NIPC_HEADER_LEN + sizeof(_ack_buf));                \
@@ -466,7 +466,7 @@ static nipc_np_error_t server_handshake(HANDLE pipe,
         .agreed_packet_size                = agreed_pkt,
     };
 
-    uint8_t ack_buf[36];
+    uint8_t ack_buf[48];
     nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
 
     nipc_header_t ack_hdr = {
@@ -482,7 +482,7 @@ static nipc_np_error_t server_handshake(HANDLE pipe,
         .message_id       = 0,
     };
 
-    uint8_t pkt[68];
+    uint8_t pkt[80];
     nipc_header_encode(&ack_hdr, pkt, sizeof(pkt));
     memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
 

@@ -118,7 +118,7 @@ static void *echo_server_thread(void *arg)
 
     for (int c = 0; c < ctx->accept_count; c++) {
         nipc_uds_session_t session;
-        err = nipc_uds_accept(&listener, &session);
+        err = nipc_uds_accept(&listener, 0, &session);
         if (err != NIPC_UDS_OK)
             continue;
 
@@ -396,7 +396,7 @@ static void *chunked_server_thread(void *arg)
     __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
 
     nipc_uds_session_t session;
-    err = nipc_uds_accept(&listener, &session);
+    err = nipc_uds_accept(&listener, 0, &session);
     if (err != NIPC_UDS_OK) {
         nipc_uds_close_listener(&listener);
         __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
@@ -637,7 +637,7 @@ static void *disconnect_server_thread(void *arg)
     __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
 
     nipc_uds_session_t session;
-    err = nipc_uds_accept(&listener, &session);
+    err = nipc_uds_accept(&listener, 0, &session);
     if (err == NIPC_UDS_OK) {
         /* Read the request but close without responding */
         uint8_t buf[4096];
@@ -1232,7 +1232,7 @@ static void *chunked_echo_server_thread(void *arg)
     __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
 
     nipc_uds_session_t session;
-    err = nipc_uds_accept(&listener, &session);
+    err = nipc_uds_accept(&listener, 0, &session);
     if (err != NIPC_UDS_OK) {
         nipc_uds_close_listener(&listener);
         __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);

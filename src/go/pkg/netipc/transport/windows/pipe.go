@@ -12,6 +12,7 @@ package windows
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"syscall"
 	"unicode/utf16"
 	"unsafe"
@@ -28,7 +29,7 @@ const (
 	defaultPacketSize  uint32 = 65536
 	defaultPipeBufSize uint32 = 65536
 	helloPayloadSize          = 44
-	helloAckPayloadSize       = 36
+	helloAckPayloadSize       = 48
 	maxPipeNameChars          = 256
 
 	// FNV-1a 64-bit constants
@@ -348,6 +349,7 @@ type Session struct {
 	MaxResponseBatchItems   uint32
 	PacketSize              uint32
 	SelectedProfile         uint32
+	SessionID               uint64
 
 	// Internal receive buffer for chunked reassembly
 	recvBuf []byte
@@ -657,9 +659,10 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 
 // Listener is a listening Named Pipe endpoint.
 type Listener struct {
-	handle   syscall.Handle
-	config   ServerConfig
-	pipeName []uint16
+	handle        syscall.Handle
+	config        ServerConfig
+	pipeName      []uint16
+	nextSessionID atomic.Uint64
 }
 
 // Listen creates a listener on a Named Pipe derived from runDir + serviceName.
@@ -713,7 +716,8 @@ func (l *Listener) Accept() (*Session, error) {
 	l.handle = next
 
 	// Handshake
-	session, herr := serverHandshake(sessionHandle, &l.config)
+	sessionID := l.nextSessionID.Add(1)
+	session, herr := serverHandshake(sessionHandle, &l.config, sessionID)
 	if herr != nil {
 		disconnectNamedPipe(sessionHandle)
 		syscall.CloseHandle(sessionHandle)
@@ -852,6 +856,7 @@ func clientHandshake(handle syscall.Handle, config *ClientConfig) (*Session, err
 		MaxResponseBatchItems:   ack.AgreedMaxResponseBatchItems,
 		PacketSize:              ack.AgreedPacketSize,
 		SelectedProfile:         ack.SelectedProfile,
+		SessionID:               ack.SessionID,
 		inflightIDs:             make(map[uint64]struct{}),
 	}, nil
 }
@@ -860,7 +865,7 @@ func clientHandshake(handle syscall.Handle, config *ClientConfig) (*Session, err
 //  Server handshake
 // ---------------------------------------------------------------------------
 
-func serverHandshake(handle syscall.Handle, config *ServerConfig) (*Session, error) {
+func serverHandshake(handle syscall.Handle, config *ServerConfig, sessionID uint64) (*Session, error) {
 	serverPktSize := applyDefault(config.PacketSize, defaultPacketSize)
 	sReqPay := applyDefault(config.MaxRequestPayloadBytes, protocol.MaxPayloadDefault)
 	sReqBat := applyDefault(config.MaxRequestBatchItems, defaultBatchItems)
@@ -956,6 +961,7 @@ func serverHandshake(handle syscall.Handle, config *ServerConfig) (*Session, err
 		AgreedMaxResponsePayloadBytes: agreedRespPay,
 		AgreedMaxResponseBatchItems:   agreedRespBat,
 		AgreedPacketSize:              agreedPkt,
+		SessionID:                     sessionID,
 	}
 
 	var ackPayBuf [helloAckPayloadSize]byte
@@ -989,6 +995,7 @@ func serverHandshake(handle syscall.Handle, config *ServerConfig) (*Session, err
 		MaxResponseBatchItems:   agreedRespBat,
 		PacketSize:              agreedPkt,
 		SelectedProfile:         selected,
+		SessionID:               sessionID,
 		inflightIDs:             make(map[uint64]struct{}),
 	}, nil
 }

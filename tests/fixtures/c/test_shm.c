@@ -13,6 +13,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -48,12 +49,15 @@ static void ensure_run_dir(void)
     mkdir(TEST_RUN_DIR, 0700);
 }
 
-/* Clean up leftover SHM and socket files. */
+/* Clean up leftover SHM files for a service (all session IDs 0..9). */
 static void cleanup_shm(const char *service)
 {
     char path[256];
-    snprintf(path, sizeof(path), "%s/%s.ipcshm", TEST_RUN_DIR, service);
-    unlink(path);
+    for (uint64_t sid = 0; sid < 10; sid++) {
+        snprintf(path, sizeof(path), "%s/%s-%016" PRIx64 ".ipcshm",
+                 TEST_RUN_DIR, service, sid);
+        unlink(path);
+    }
 }
 
 static void cleanup_socket(const char *service)
@@ -87,7 +91,7 @@ static void *shm_echo_server_thread(void *arg)
 
     nipc_shm_ctx_t shm;
     nipc_shm_error_t err = nipc_shm_server_create(
-        TEST_RUN_DIR, ctx->service, 4096, 4096, &shm);
+        TEST_RUN_DIR, ctx->service, 1, 4096, 4096, &shm);
     if (err != NIPC_SHM_OK) {
         fprintf(stderr, "shm server create failed: %d\n", err);
         __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
@@ -162,7 +166,7 @@ static void test_direct_roundtrip(void)
 
     /* Client attaches. */
     nipc_shm_ctx_t client;
-    nipc_shm_error_t err = nipc_shm_client_attach(TEST_RUN_DIR, svc, &client);
+    nipc_shm_error_t err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
     check("client attach", err == NIPC_SHM_OK);
 
     if (err == NIPC_SHM_OK) {
@@ -259,7 +263,7 @@ static void *hybrid_server_thread(void *arg)
     __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
 
     nipc_uds_session_t session;
-    uerr = nipc_uds_accept(&listener, &session);
+    uerr = nipc_uds_accept(&listener, 1, &session);
     if (uerr != NIPC_UDS_OK) {
         nipc_uds_close_listener(&listener);
         __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
@@ -272,7 +276,8 @@ static void *hybrid_server_thread(void *arg)
 
     if (session.selected_profile == NIPC_PROFILE_SHM_HYBRID) {
         nipc_shm_error_t serr = nipc_shm_server_create(
-            TEST_RUN_DIR, ctx->service, 4096, 4096, &shm);
+            TEST_RUN_DIR, ctx->service, session.session_id,
+            4096, 4096, &shm);
         if (serr == NIPC_SHM_OK) {
             ctx->shm_created = 1;
             use_shm = 1;
@@ -359,7 +364,8 @@ static void test_negotiated_shm(void)
         nipc_shm_ctx_t client_shm;
         nipc_shm_error_t serr = NIPC_SHM_ERR_NOT_READY;
         for (int i = 0; i < 500; i++) {
-            serr = nipc_shm_client_attach(TEST_RUN_DIR, svc, &client_shm);
+            serr = nipc_shm_client_attach(TEST_RUN_DIR, svc,
+                                         session.session_id, &client_shm);
             if (serr == NIPC_SHM_OK)
                 break;
             /* Retryable: file doesn't exist, header not ready, or
@@ -448,7 +454,7 @@ static void *baseline_only_server_thread(void *arg)
     __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
 
     nipc_uds_session_t session;
-    uerr = nipc_uds_accept(&listener, &session);
+    uerr = nipc_uds_accept(&listener, 1, &session);
     if (uerr == NIPC_UDS_OK) {
         /* Just accept + close, no echo needed for this test. */
         ctx->echo_ok = (session.selected_profile == NIPC_PROFILE_BASELINE);
@@ -519,13 +525,13 @@ static void test_disconnect_detection(void)
     /* Create a server SHM region in this process. */
     nipc_shm_ctx_t server;
     nipc_shm_error_t err = nipc_shm_server_create(
-        TEST_RUN_DIR, svc, 4096, 4096, &server);
+        TEST_RUN_DIR, svc, 1, 4096, 4096, &server);
     check("server create", err == NIPC_SHM_OK);
 
     if (err == NIPC_SHM_OK) {
         /* Client attaches. */
         nipc_shm_ctx_t client;
-        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, &client);
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
         check("client attach", err == NIPC_SHM_OK);
 
         if (err == NIPC_SHM_OK) {
@@ -554,7 +560,7 @@ static void test_stale_shm_recovery(void)
      * Corrupt the owner_pid to simulate a dead process. */
     nipc_shm_ctx_t first;
     nipc_shm_error_t err = nipc_shm_server_create(
-        TEST_RUN_DIR, svc, 1024, 1024, &first);
+        TEST_RUN_DIR, svc, 1, 1024, 1024, &first);
     check("first create", err == NIPC_SHM_OK);
 
     if (err == NIPC_SHM_OK) {
@@ -569,7 +575,7 @@ static void test_stale_shm_recovery(void)
         /* Now creating again should succeed (stale recovery). */
         nipc_shm_ctx_t second;
         err = nipc_shm_server_create(
-            TEST_RUN_DIR, svc, 2048, 2048, &second);
+            TEST_RUN_DIR, svc, 1, 2048, 2048, &second);
         check("stale recovery create succeeds", err == NIPC_SHM_OK);
 
         if (err == NIPC_SHM_OK) {
@@ -594,7 +600,7 @@ static void *large_msg_server_thread(void *arg)
     nipc_shm_ctx_t shm;
     /* 64 KiB areas. */
     nipc_shm_error_t err = nipc_shm_server_create(
-        TEST_RUN_DIR, ctx->service, 65536, 65536, &shm);
+        TEST_RUN_DIR, ctx->service, 1, 65536, 65536, &shm);
     if (err != NIPC_SHM_OK) {
         __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
         return NULL;
@@ -651,7 +657,7 @@ static void test_large_message(void)
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_shm_ctx_t client;
-    nipc_shm_error_t err = nipc_shm_client_attach(TEST_RUN_DIR, svc, &client);
+    nipc_shm_error_t err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
     check("client attach", err == NIPC_SHM_OK);
 
     if (err == NIPC_SHM_OK) {
@@ -728,12 +734,12 @@ static void test_msg_too_large(void)
 
     nipc_shm_ctx_t server;
     nipc_shm_error_t err = nipc_shm_server_create(
-        TEST_RUN_DIR, svc, 128, 128, &server);
+        TEST_RUN_DIR, svc, 1, 128, 128, &server);
     check("server create with small capacity", err == NIPC_SHM_OK);
 
     if (err == NIPC_SHM_OK) {
         nipc_shm_ctx_t client;
-        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, &client);
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
         check("client attach", err == NIPC_SHM_OK);
 
         if (err == NIPC_SHM_OK) {
@@ -765,14 +771,14 @@ static void test_addr_in_use(void)
 
     nipc_shm_ctx_t first;
     nipc_shm_error_t err = nipc_shm_server_create(
-        TEST_RUN_DIR, svc, 1024, 1024, &first);
+        TEST_RUN_DIR, svc, 1, 1024, 1024, &first);
     check("first server create", err == NIPC_SHM_OK);
 
     if (err == NIPC_SHM_OK) {
         /* Second create should fail: our PID owns the region. */
         nipc_shm_ctx_t second;
         err = nipc_shm_server_create(
-            TEST_RUN_DIR, svc, 1024, 1024, &second);
+            TEST_RUN_DIR, svc, 1, 1024, 1024, &second);
         check("second create fails with ADDR_IN_USE",
               err == NIPC_SHM_ERR_ADDR_IN_USE);
 
@@ -796,7 +802,7 @@ static void *multi_rt_server_thread(void *arg)
 
     nipc_shm_ctx_t shm;
     nipc_shm_error_t err = nipc_shm_server_create(
-        TEST_RUN_DIR, ctx->service, 4096, 4096, &shm);
+        TEST_RUN_DIR, ctx->service, 1, 4096, 4096, &shm);
     if (err != NIPC_SHM_OK) {
         __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
         return NULL;
@@ -860,7 +866,7 @@ static void test_multiple_roundtrips(void)
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_shm_ctx_t client;
-    nipc_shm_error_t err = nipc_shm_client_attach(TEST_RUN_DIR, svc, &client);
+    nipc_shm_error_t err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
     check("client attach", err == NIPC_SHM_OK);
 
     if (err == NIPC_SHM_OK) {
@@ -921,32 +927,32 @@ static void test_server_create_validation(void)
 
     /* NULL run_dir */
     check("null run_dir",
-          nipc_shm_server_create(NULL, "svc", 4096, 4096, &ctx)
+          nipc_shm_server_create(NULL, "svc", 1, 4096, 4096, &ctx)
               == NIPC_SHM_ERR_BAD_PARAM);
 
     /* NULL service_name */
     check("null service_name",
-          nipc_shm_server_create(TEST_RUN_DIR, NULL, 4096, 4096, &ctx)
+          nipc_shm_server_create(TEST_RUN_DIR, NULL, 1, 4096, 4096, &ctx)
               == NIPC_SHM_ERR_BAD_PARAM);
 
     /* Invalid service name (bad chars) */
     check("bad service name",
-          nipc_shm_server_create(TEST_RUN_DIR, "bad/name", 4096, 4096, &ctx)
+          nipc_shm_server_create(TEST_RUN_DIR, "bad/name", 1, 4096, 4096, &ctx)
               == NIPC_SHM_ERR_BAD_PARAM);
 
     /* Empty service name */
     check("empty service name",
-          nipc_shm_server_create(TEST_RUN_DIR, "", 4096, 4096, &ctx)
+          nipc_shm_server_create(TEST_RUN_DIR, "", 1, 4096, 4096, &ctx)
               == NIPC_SHM_ERR_BAD_PARAM);
 
     /* Dot service name */
     check("dot service name",
-          nipc_shm_server_create(TEST_RUN_DIR, ".", 4096, 4096, &ctx)
+          nipc_shm_server_create(TEST_RUN_DIR, ".", 1, 4096, 4096, &ctx)
               == NIPC_SHM_ERR_BAD_PARAM);
 
     /* Dotdot service name */
     check("dotdot service name",
-          nipc_shm_server_create(TEST_RUN_DIR, "..", 4096, 4096, &ctx)
+          nipc_shm_server_create(TEST_RUN_DIR, "..", 1, 4096, 4096, &ctx)
               == NIPC_SHM_ERR_BAD_PARAM);
 
     /* Path too long */
@@ -954,7 +960,7 @@ static void test_server_create_validation(void)
     memset(long_dir, 'a', sizeof(long_dir) - 1);
     long_dir[sizeof(long_dir) - 1] = '\0';
     check("path too long",
-          nipc_shm_server_create(long_dir, "svc", 4096, 4096, &ctx)
+          nipc_shm_server_create(long_dir, "svc", 1, 4096, 4096, &ctx)
               == NIPC_SHM_ERR_PATH_TOO_LONG);
 }
 
@@ -966,17 +972,17 @@ static void test_client_attach_validation(void)
 
     /* NULL run_dir */
     check("null run_dir",
-          nipc_shm_client_attach(NULL, "svc", &ctx)
+          nipc_shm_client_attach(NULL, "svc", 1, &ctx)
               == NIPC_SHM_ERR_BAD_PARAM);
 
     /* NULL service_name */
     check("null service_name",
-          nipc_shm_client_attach(TEST_RUN_DIR, NULL, &ctx)
+          nipc_shm_client_attach(TEST_RUN_DIR, NULL, 1, &ctx)
               == NIPC_SHM_ERR_BAD_PARAM);
 
     /* Bad service name */
     check("bad service name",
-          nipc_shm_client_attach(TEST_RUN_DIR, "bad/name", &ctx)
+          nipc_shm_client_attach(TEST_RUN_DIR, "bad/name", 1, &ctx)
               == NIPC_SHM_ERR_BAD_PARAM);
 
     /* Path too long */
@@ -984,12 +990,12 @@ static void test_client_attach_validation(void)
     memset(long_dir, 'a', sizeof(long_dir) - 1);
     long_dir[sizeof(long_dir) - 1] = '\0';
     check("path too long",
-          nipc_shm_client_attach(long_dir, "svc", &ctx)
+          nipc_shm_client_attach(long_dir, "svc", 1, &ctx)
               == NIPC_SHM_ERR_PATH_TOO_LONG);
 
     /* Non-existent file */
     check("non-existent file",
-          nipc_shm_client_attach(TEST_RUN_DIR, "does_not_exist_12345", &ctx)
+          nipc_shm_client_attach(TEST_RUN_DIR, "does_not_exist_12345", 1, &ctx)
               == NIPC_SHM_ERR_OPEN);
 }
 
@@ -1030,9 +1036,10 @@ static void test_shm_bad_magic_file(void)
     const char *svc = "shm_bad_magic";
     cleanup_shm(svc);
 
-    /* Create a file with wrong magic */
+    /* Create a file with wrong magic (use per-session path format) */
     char path[256];
-    snprintf(path, sizeof(path), "%s/%s.ipcshm", TEST_RUN_DIR, svc);
+    snprintf(path, sizeof(path), "%s/%s-%016" PRIx64 ".ipcshm",
+             TEST_RUN_DIR, svc, (uint64_t)1);
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
     if (fd >= 0) {
         /* Write enough for stat check but with bad magic */
@@ -1045,7 +1052,7 @@ static void test_shm_bad_magic_file(void)
         close(fd);
 
         nipc_shm_ctx_t ctx;
-        nipc_shm_error_t err = nipc_shm_client_attach(TEST_RUN_DIR, svc, &ctx);
+        nipc_shm_error_t err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &ctx);
         check("bad magic rejected",
               err == NIPC_SHM_ERR_BAD_MAGIC || err == NIPC_SHM_ERR_NOT_READY);
 
@@ -1064,7 +1071,7 @@ static void test_shm_bad_version_file(void)
     /* Create a valid SHM region, then corrupt the version */
     nipc_shm_ctx_t server;
     nipc_shm_error_t err = nipc_shm_server_create(
-        TEST_RUN_DIR, svc, 4096, 4096, &server);
+        TEST_RUN_DIR, svc, 1, 4096, 4096, &server);
     if (err == NIPC_SHM_OK) {
         /* Corrupt version field: offset 4 in the header */
         nipc_shm_region_header_t *hdr =
@@ -1072,7 +1079,7 @@ static void test_shm_bad_version_file(void)
         hdr->version = 999;
 
         nipc_shm_ctx_t client;
-        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, &client);
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
         check("bad version rejected", err == NIPC_SHM_ERR_BAD_VERSION);
 
         /* Restore version before destroy */
@@ -1092,7 +1099,8 @@ static void test_shm_truncated_file(void)
 
     /* Create a file that's too small to be a valid SHM region */
     char path[256];
-    snprintf(path, sizeof(path), "%s/%s.ipcshm", TEST_RUN_DIR, svc);
+    snprintf(path, sizeof(path), "%s/%s-%016" PRIx64 ".ipcshm",
+             TEST_RUN_DIR, svc, (uint64_t)1);
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
     if (fd >= 0) {
         /* Write only 10 bytes -- way too small for header check */
@@ -1101,7 +1109,7 @@ static void test_shm_truncated_file(void)
         close(fd);
 
         nipc_shm_ctx_t ctx;
-        nipc_shm_error_t err = nipc_shm_client_attach(TEST_RUN_DIR, svc, &ctx);
+        nipc_shm_error_t err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &ctx);
         check("truncated file rejected",
               err != NIPC_SHM_OK);
 

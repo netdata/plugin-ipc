@@ -62,7 +62,7 @@ const (
 
 	// Payload sizes.
 	helloSize        = 44
-	helloAckSize     = 36
+	helloAckSize     = 48
 	cgroupsReqSize   = 4
 	cgroupsRespHdr   = 24
 	cgroupsDirEntry  = 8
@@ -455,10 +455,10 @@ func DecodeHello(buf []byte) (Hello, error) {
 }
 
 // ---------------------------------------------------------------------------
-//  Hello-ack payload (36 bytes)
+//  Hello-ack payload (44 bytes)
 // ---------------------------------------------------------------------------
 
-// HelloAck is the server handshake response payload (36 bytes on the wire).
+// HelloAck is the server handshake response payload (48 bytes on the wire).
 type HelloAck struct {
 	LayoutVersion                 uint16
 	Flags                         uint16
@@ -470,9 +470,10 @@ type HelloAck struct {
 	AgreedMaxResponsePayloadBytes uint32
 	AgreedMaxResponseBatchItems   uint32
 	AgreedPacketSize              uint32
+	SessionID                     uint64
 }
 
-// Encode writes the HelloAck payload into buf. Returns 36 on success, 0
+// Encode writes the HelloAck payload into buf. Returns 48 on success, 0
 // if buf is too small.
 func (h *HelloAck) Encode(buf []byte) int {
 	if len(buf) < helloAckSize {
@@ -488,6 +489,8 @@ func (h *HelloAck) Encode(buf []byte) int {
 	le.PutUint32(buf[24:28], h.AgreedMaxResponsePayloadBytes)
 	le.PutUint32(buf[28:32], h.AgreedMaxResponseBatchItems)
 	le.PutUint32(buf[32:36], h.AgreedPacketSize)
+	le.PutUint32(buf[36:40], 0) // padding
+	le.PutUint64(buf[40:48], h.SessionID)
 	return helloAckSize
 }
 
@@ -508,6 +511,8 @@ func DecodeHelloAck(buf []byte) (HelloAck, error) {
 		AgreedMaxResponsePayloadBytes: le.Uint32(buf[24:28]),
 		AgreedMaxResponseBatchItems:   le.Uint32(buf[28:32]),
 		AgreedPacketSize:              le.Uint32(buf[32:36]),
+		// skip padding at 36:40
+		SessionID: le.Uint64(buf[40:48]),
 	}
 	if h.LayoutVersion != 1 {
 		return HelloAck{}, ErrBadLayout

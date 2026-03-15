@@ -134,6 +134,7 @@ static int do_encode(const char *dir) {
             .agreed_max_response_payload_bytes = 65536,
             .agreed_max_response_batch_items   = 1,
             .agreed_packet_size                = 32768,
+            .session_id                        = 1,
         };
         size_t n = nipc_hello_ack_encode(&h, buf, sizeof(buf));
         err |= write_file(dir, "hello_ack.bin", buf, n);
@@ -257,6 +258,7 @@ static int do_decode(const char *dir) {
         CHECK(out.agreed_max_response_payload_bytes == 65536, "hello_ack resp_payload");
         CHECK(out.agreed_max_response_batch_items == 1, "hello_ack resp_batch");
         CHECK(out.agreed_packet_size == 32768, "hello_ack pkt_size");
+        CHECK(out.session_id == 1, "hello_ack session_id");
     } else {
         g_fail++;
     }

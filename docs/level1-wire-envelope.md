@@ -175,7 +175,7 @@ Sent by the client as a CONTROL message with `code = HELLO`.
 
 Total: 44 bytes.
 
-### Hello-ack payload (36 bytes)
+### Hello-ack payload (48 bytes)
 
 Sent by the server as a CONTROL message with `code = HELLO_ACK`.
 
@@ -191,8 +191,17 @@ Sent by the server as a CONTROL message with `code = HELLO_ACK`.
 | 24 | 4 | u32 | agreed_max_response_payload_bytes | Negotiated response payload limit |
 | 28 | 4 | u32 | agreed_max_response_batch_items | Negotiated response batch item limit |
 | 32 | 4 | u32 | agreed_packet_size | Negotiated packet size = min(client, server) |
+| 36 | 4 | - | padding | Reserved, must be `0` |
+| 40 | 8 | u64 | session_id | Server-assigned session identifier |
 
-Total: 36 bytes.
+Total: 48 bytes.
+
+The `session_id` is a server-generated monotonic counter (starting at 1,
+incremented per accepted session). It uniquely identifies this session for
+the server's lifetime. When the negotiated profile is an SHM transport,
+both sides use `session_id` to derive the per-session SHM region path or
+kernel object name. See the POSIX SHM and Windows SHM transport contracts
+for derivation rules.
 
 ### Profile bitmask values
 

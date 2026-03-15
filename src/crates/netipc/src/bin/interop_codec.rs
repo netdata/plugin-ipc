@@ -121,8 +121,9 @@ fn do_encode(dir: &str) {
             agreed_max_response_payload_bytes: 65536,
             agreed_max_response_batch_items: 1,
             agreed_packet_size: 32768,
+            session_id: 1,
         };
-        let mut buf = [0u8; 36];
+        let mut buf = [0u8; 48];
         h.encode(&mut buf);
         write_file(dir, "hello_ack.bin", &buf);
     }

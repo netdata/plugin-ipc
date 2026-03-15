@@ -119,11 +119,11 @@ func FuzzDecodeHelloAck(f *testing.F) {
 		AgreedPacketSize: 32768,
 	}
 	h.Encode(seed[:])
-	f.Add(seed[:36])
+	f.Add(seed[:48])
 
 	f.Add([]byte{})
-	f.Add(make([]byte, 35))
-	f.Add(make([]byte, 36))
+	f.Add(make([]byte, 47))
+	f.Add(make([]byte, 48))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		ack, err := DecodeHelloAck(data)

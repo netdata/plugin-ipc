@@ -19,6 +19,7 @@
 #include "netipc/netipc_shm.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -866,9 +867,15 @@ static void test_long_running_stability(void)
     check("total refreshes > 0", total_refreshes > 0);
     check("zero errors in 60s run", total_errors == 0);
 
-    /* Memory growth should be stable - allow 4MB tolerance */
+    /* Memory growth should be stable. Sanitizers inflate RSS significantly
+     * (ASAN shadow memory, TSAN metadata), so use a larger tolerance. */
     long vmrss_growth = vmrss_end - vmrss_start;
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__) || \
+    (defined(__has_feature) && (__has_feature(address_sanitizer) || __has_feature(thread_sanitizer)))
+    check("memory stable (< 256MB growth, sanitizer)", vmrss_growth < 262144);
+#else
     check("memory stable (< 4MB growth)", vmrss_growth < 4096);
+#endif
 
     /* Verify all caches were populated */
     bool all_ran = true;
@@ -906,12 +913,13 @@ static void test_shm_lifecycle(void)
 
         /* Clean up any leftover */
         char shm_path[256];
-        snprintf(shm_path, sizeof(shm_path), "%s/%s.ipcshm", TEST_RUN_DIR, svc_name);
+        snprintf(shm_path, sizeof(shm_path), "%s/%s-%016" PRIx64 ".ipcshm",
+                 TEST_RUN_DIR, svc_name, (uint64_t)i);
         unlink(shm_path);
 
         nipc_shm_ctx_t ctx;
         nipc_shm_error_t err = nipc_shm_server_create(
-            TEST_RUN_DIR, svc_name, 4096, 4096, &ctx);
+            TEST_RUN_DIR, svc_name, (uint64_t)i, 4096, 4096, &ctx);
 
         if (err == NIPC_SHM_OK) {
             /* Verify the region is valid */

@@ -193,20 +193,15 @@ impl ShmContext {
 
     /// Create a SHM region (server side).
     ///
-    /// Creates `{run_dir}/{service_name}.ipcshm`, performs stale recovery.
+    /// Creates `{run_dir}/{service_name}-{session_id:016x}.ipcshm` with O_EXCL.
     pub fn server_create(
         run_dir: &str,
         service_name: &str,
+        session_id: u64,
         req_capacity: u32,
         resp_capacity: u32,
     ) -> Result<Self, ShmError> {
-        let path = build_shm_path(run_dir, service_name)?;
-
-        // Stale recovery
-        match check_shm_stale(&path) {
-            StaleResult::LiveServer => return Err(ShmError::AddrInUse),
-            _ => {}
-        }
+        let path = build_shm_path(run_dir, service_name, session_id)?;
 
         // Round capacities to alignment
         let req_cap = align64(req_capacity);
@@ -221,7 +216,7 @@ impl ShmContext {
         let fd = unsafe {
             libc::open(
                 c_path.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
                 0o600,
             )
         };
@@ -304,8 +299,8 @@ impl ShmContext {
     }
 
     /// Attach to an existing SHM region (client side).
-    pub fn client_attach(run_dir: &str, service_name: &str) -> Result<Self, ShmError> {
-        let path = build_shm_path(run_dir, service_name)?;
+    pub fn client_attach(run_dir: &str, service_name: &str, session_id: u64) -> Result<Self, ShmError> {
+        let path = build_shm_path(run_dir, service_name, session_id)?;
         let c_path = path_to_cstring(&path)?;
 
         let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR) };
@@ -486,9 +481,10 @@ impl ShmContext {
             return Err(ShmError::BadParam("empty buffer".into()));
         }
 
-        let (area_offset, seq_off, len_off, sig_off, expected_seq) = match self.role {
+        let (area_offset, area_capacity, seq_off, len_off, sig_off, expected_seq) = match self.role {
             ShmRole::Server => (
                 self.request_offset,
+                self.request_capacity,
                 OFF_REQ_SEQ,
                 OFF_REQ_LEN,
                 OFF_REQ_SIGNAL,
@@ -496,12 +492,15 @@ impl ShmContext {
             ),
             ShmRole::Client => (
                 self.response_offset,
+                self.response_capacity,
                 OFF_RESP_SEQ,
                 OFF_RESP_LEN,
                 OFF_RESP_SIGNAL,
                 self.local_resp_seq + 1,
             ),
         };
+
+        let max_copy = buf.len().min(area_capacity as usize);
 
         // Phase 1: spin. Copy immediately on observing the advance.
         let mut observed = false;
@@ -510,7 +509,7 @@ impl ShmContext {
             let cur = atomic_load_u64(self.base, seq_off);
             if cur >= expected_seq {
                 mlen = atomic_load_u32(self.base, len_off) as usize;
-                if mlen > 0 && mlen <= buf.len() {
+                if mlen > 0 && mlen <= max_copy {
                     unsafe {
                         ptr::copy_nonoverlapping(
                             self.base.add(area_offset as usize),
@@ -582,7 +581,7 @@ impl ShmContext {
 
             // Copy immediately after observing the sequence advance
             mlen = atomic_load_u32(self.base, len_off) as usize;
-            if mlen > 0 && mlen <= buf.len() {
+            if mlen > 0 && mlen <= max_copy {
                 unsafe {
                     ptr::copy_nonoverlapping(
                         self.base.add(area_offset as usize),
@@ -599,8 +598,8 @@ impl ShmContext {
             ShmRole::Client => self.local_resp_seq = expected_seq,
         }
 
-        // Message larger than caller buffer
-        if mlen > buf.len() {
+        // Message larger than caller buffer or area capacity
+        if mlen > max_copy {
             return Err(ShmError::MsgTooLarge);
         }
 
@@ -650,6 +649,92 @@ impl Drop for ShmContext {
 }
 
 // ---------------------------------------------------------------------------
+//  Stale session cleanup
+// ---------------------------------------------------------------------------
+
+/// Scan `run_dir` for files matching `{service_name}-*.ipcshm`, check
+/// owner_pid liveness for each, and unlink stale ones.
+pub fn cleanup_stale(run_dir: &str, service_name: &str) {
+    let prefix = format!("{service_name}-");
+    let suffix = ".ipcshm";
+
+    let entries = match std::fs::read_dir(run_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+
+        if !name.starts_with(&prefix) || !name.ends_with(suffix) {
+            continue;
+        }
+
+        let path = entry.path();
+        let c_path = match path_to_cstring(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Open read-only to inspect the header
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY) };
+        if fd < 0 {
+            // Cannot open — try to unlink anyway
+            unsafe { libc::unlink(c_path.as_ptr()) };
+            continue;
+        }
+
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut st) } != 0 || (st.st_size as usize) < HEADER_LEN as usize {
+            unsafe {
+                libc::close(fd);
+                libc::unlink(c_path.as_ptr());
+            }
+            continue;
+        }
+
+        let map = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                HEADER_LEN as usize,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        unsafe { libc::close(fd) };
+
+        if map == libc::MAP_FAILED {
+            unsafe { libc::unlink(c_path.as_ptr()) };
+            continue;
+        }
+
+        let hdr = map as *const RegionHeader;
+        let magic = unsafe { (*hdr).magic };
+        if magic != REGION_MAGIC {
+            unsafe {
+                libc::munmap(map, HEADER_LEN as usize);
+                libc::unlink(c_path.as_ptr());
+            }
+            continue;
+        }
+
+        let owner = unsafe { (*hdr).owner_pid };
+        let gen = unsafe { (*hdr).owner_generation };
+        unsafe { libc::munmap(map, HEADER_LEN as usize) };
+
+        // If owner is dead (or generation is zero / legacy), unlink
+        if !pid_alive(owner) || gen == 0 {
+            unsafe { libc::unlink(c_path.as_ptr()) };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -676,9 +761,9 @@ fn validate_service_name(name: &str) -> Result<(), ShmError> {
     Ok(())
 }
 
-fn build_shm_path(run_dir: &str, service_name: &str) -> Result<PathBuf, ShmError> {
+fn build_shm_path(run_dir: &str, service_name: &str, session_id: u64) -> Result<PathBuf, ShmError> {
     validate_service_name(service_name)?;
-    let path = Path::new(run_dir).join(format!("{service_name}.ipcshm"));
+    let path = Path::new(run_dir).join(format!("{service_name}-{session_id:016x}.ipcshm"));
     if path.to_string_lossy().len() >= 256 {
         return Err(ShmError::PathTooLong);
     }
@@ -782,6 +867,7 @@ fn futex_wait(addr: *mut u32, expected: u32, timeout: Option<&libc::timespec>) -
 //  Stale region recovery
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 enum StaleResult {
     NotExist,
     Recovered,
@@ -789,6 +875,7 @@ enum StaleResult {
     Invalid,
 }
 
+#[allow(dead_code)]
 fn check_shm_stale(path: &Path) -> StaleResult {
     let c_path = match path_to_cstring(path) {
         Ok(c) => c,
@@ -867,8 +954,8 @@ mod tests {
         let _ = std::fs::create_dir_all(TEST_RUN_DIR);
     }
 
-    fn cleanup_shm(service: &str) {
-        let path = format!("{TEST_RUN_DIR}/{service}.ipcshm");
+    fn cleanup_shm(service: &str, session_id: u64) {
+        let path = format!("{TEST_RUN_DIR}/{service}-{session_id:016x}.ipcshm");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -896,11 +983,12 @@ mod tests {
     fn test_direct_roundtrip() {
         ensure_run_dir();
         let svc = "rs_shm_rt";
-        cleanup_shm(svc);
+        let sid: u64 = 1;
+        cleanup_shm(svc, sid);
 
         let svc_clone = svc.to_string();
         let server_thread = thread::spawn(move || {
-            let mut ctx = ShmContext::server_create(TEST_RUN_DIR, &svc_clone, 4096, 4096)
+            let mut ctx = ShmContext::server_create(TEST_RUN_DIR, &svc_clone, sid, 4096, 4096)
                 .expect("server create");
 
             // Receive request
@@ -926,7 +1014,7 @@ mod tests {
         thread::sleep(std::time::Duration::from_millis(50));
 
         let mut client =
-            ShmContext::client_attach(TEST_RUN_DIR, svc).expect("client attach");
+            ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
 
         let payload = vec![0xCA, 0xFE, 0xBA, 0xBE];
         let msg = build_message(
@@ -949,18 +1037,19 @@ mod tests {
 
         client.close();
         server_thread.join().unwrap();
-        cleanup_shm(svc);
+        cleanup_shm(svc, sid);
     }
 
     #[test]
     fn test_multiple_roundtrips() {
         ensure_run_dir();
         let svc = "rs_shm_multi";
-        cleanup_shm(svc);
+        let sid: u64 = 2;
+        cleanup_shm(svc, sid);
 
         let svc_clone = svc.to_string();
         let server_thread = thread::spawn(move || {
-            let mut ctx = ShmContext::server_create(TEST_RUN_DIR, &svc_clone, 4096, 4096)
+            let mut ctx = ShmContext::server_create(TEST_RUN_DIR, &svc_clone, sid, 4096, 4096)
                 .expect("server create");
 
             let mut buf = vec![0u8; 65536];
@@ -982,7 +1071,7 @@ mod tests {
 
         thread::sleep(std::time::Duration::from_millis(50));
         let mut client =
-            ShmContext::client_attach(TEST_RUN_DIR, svc).expect("client attach");
+            ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
 
         let mut resp_buf = vec![0u8; 65536];
         for i in 0u64..10 {
@@ -1004,39 +1093,44 @@ mod tests {
 
         client.close();
         server_thread.join().unwrap();
-        cleanup_shm(svc);
+        cleanup_shm(svc, sid);
     }
 
     #[test]
     fn test_stale_recovery() {
         ensure_run_dir();
         let svc = "rs_shm_stale";
-        cleanup_shm(svc);
+        let sid: u64 = 3;
+        cleanup_shm(svc, sid);
 
         // Create a region, corrupt owner_pid to simulate dead process
-        let mut first = ShmContext::server_create(TEST_RUN_DIR, svc, 1024, 1024)
+        let mut first = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
             .expect("first create");
         let hdr = first.base as *mut RegionHeader;
         unsafe { (*hdr).owner_pid = 99999 }; // very unlikely alive
         first.close(); // close without unlink
 
-        // Should succeed via stale recovery
-        let mut second = ShmContext::server_create(TEST_RUN_DIR, svc, 2048, 2048)
+        // cleanup_stale should remove the stale file
+        cleanup_stale(TEST_RUN_DIR, svc);
+
+        // Now O_EXCL create should succeed
+        let mut second = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 2048, 2048)
             .expect("stale recovery create");
         assert!(second.request_capacity >= 2048);
         second.destroy();
-        cleanup_shm(svc);
+        cleanup_shm(svc, sid);
     }
 
     #[test]
     fn test_large_message() {
         ensure_run_dir();
         let svc = "rs_shm_large";
-        cleanup_shm(svc);
+        let sid: u64 = 4;
+        cleanup_shm(svc, sid);
 
         let svc_clone = svc.to_string();
         let server_thread = thread::spawn(move || {
-            let mut ctx = ShmContext::server_create(TEST_RUN_DIR, &svc_clone, 65536, 65536)
+            let mut ctx = ShmContext::server_create(TEST_RUN_DIR, &svc_clone, sid, 65536, 65536)
                 .expect("server create");
             let mut buf = vec![0u8; 65536];
             let mlen = ctx.receive(&mut buf, 5000).expect("server receive");
@@ -1055,7 +1149,7 @@ mod tests {
 
         thread::sleep(std::time::Duration::from_millis(50));
         let mut client =
-            ShmContext::client_attach(TEST_RUN_DIR, svc).expect("client attach");
+            ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
 
         // 60000 bytes of payload
         let payload: Vec<u8> = (0..60000).map(|i| (i & 0xFF) as u8).collect();
@@ -1070,6 +1164,250 @@ mod tests {
 
         client.close();
         server_thread.join().unwrap();
-        cleanup_shm(svc);
+        cleanup_shm(svc, sid);
+    }
+
+    #[test]
+    fn test_shm_chaos_forged_length() {
+        // Verify that forged/malicious req_len and resp_len values in the SHM
+        // header are handled safely: no panic, no out-of-bounds read.
+        ensure_run_dir();
+        let svc = "rs_shm_forge";
+        let sid: u64 = 100;
+        cleanup_shm(svc, sid);
+
+        let mut server_ctx = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
+            .expect("server create");
+
+        let mut client_ctx = ShmContext::client_attach(TEST_RUN_DIR, svc, sid)
+            .expect("client attach");
+
+        let base = server_ctx.base;
+        let req_cap = server_ctx.request_capacity as usize;
+        let resp_cap = server_ctx.response_capacity as usize;
+
+        // --- Test forged req_len (server-side receive) ---
+
+        // Forged lengths that exceed capacity must produce MsgTooLarge.
+        // Valid lengths (within capacity) must succeed normally.
+        let forged_req_lengths: &[(u32, bool)] = &[
+            (0,                     false), // zero: copy skipped, Ok(0)
+            (1,                     false), // tiny valid
+            (req_cap as u32 - 1,    false), // just under capacity
+            (req_cap as u32,        false), // exactly at capacity
+            (req_cap as u32 + 1,    true),  // one over capacity
+            (0x0001_0000,           true),  // moderately large
+            (0x7FFF_FFFF,           true),  // large positive
+            (0xFFFF_FFFF,           true),  // u32::MAX
+        ];
+
+        let mut recv_buf = vec![0u8; 65536];
+
+        for &(forged_len, expect_too_large) in forged_req_lengths {
+            // Write garbage into the request area
+            unsafe {
+                let req_area = base.add(server_ctx.request_offset as usize);
+                std::ptr::write_bytes(req_area, 0xAB, req_cap);
+            }
+
+            // Store forged req_len at offset 48
+            atomic_store_u32(base, OFF_REQ_LEN, forged_len);
+
+            // Increment req_seq at offset 32 to signal a new "message"
+            atomic_add_u64(base, OFF_REQ_SEQ, 1);
+
+            // Bump req_signal at offset 56 to wake futex
+            atomic_add_u32(base, OFF_REQ_SIGNAL, 1);
+
+            let result = server_ctx.receive(&mut recv_buf, 100);
+
+            if expect_too_large {
+                assert_eq!(
+                    result.unwrap_err(),
+                    ShmError::MsgTooLarge,
+                    "forged req_len={forged_len:#x} should return MsgTooLarge"
+                );
+            } else {
+                let n = result.unwrap_or_else(|e| {
+                    panic!("forged req_len={forged_len:#x} should succeed, got {e:?}")
+                });
+                assert_eq!(
+                    n, forged_len as usize,
+                    "returned length should match forged req_len={forged_len:#x}"
+                );
+            }
+        }
+
+        // --- Test forged resp_len (client-side receive) ---
+
+        let forged_resp_lengths: &[(u32, bool)] = &[
+            (0,                      false),
+            (1,                      false),
+            (resp_cap as u32 - 1,    false),
+            (resp_cap as u32,        false),
+            (resp_cap as u32 + 1,    true),
+            (0x0001_0000,            true),
+            (0x7FFF_FFFF,            true),
+            (0xFFFF_FFFF,            true),
+        ];
+
+        for &(forged_len, expect_too_large) in forged_resp_lengths {
+            // Write garbage into the response area
+            unsafe {
+                let resp_area = base.add(server_ctx.response_offset as usize);
+                std::ptr::write_bytes(resp_area, 0xCD, resp_cap);
+            }
+
+            // Store forged resp_len at offset 52
+            atomic_store_u32(base, OFF_RESP_LEN, forged_len);
+
+            // Increment resp_seq at offset 40
+            atomic_add_u64(base, OFF_RESP_SEQ, 1);
+
+            // Bump resp_signal at offset 60
+            atomic_add_u32(base, OFF_RESP_SIGNAL, 1);
+
+            let result = client_ctx.receive(&mut recv_buf, 100);
+
+            if expect_too_large {
+                assert_eq!(
+                    result.unwrap_err(),
+                    ShmError::MsgTooLarge,
+                    "forged resp_len={forged_len:#x} should return MsgTooLarge"
+                );
+            } else {
+                let n = result.unwrap_or_else(|e| {
+                    panic!("forged resp_len={forged_len:#x} should succeed, got {e:?}")
+                });
+                assert_eq!(
+                    n, forged_len as usize,
+                    "returned length should match forged resp_len={forged_len:#x}"
+                );
+            }
+        }
+
+        client_ctx.close();
+        server_ctx.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    #[test]
+    fn test_shm_multi_client() {
+        // Verify multiple clients with independent SHM regions have no
+        // cross-contamination: each client/server pair exchanges unique data.
+        ensure_run_dir();
+        let svc = "rs_shm_mc";
+        let session_ids: [u64; 3] = [1, 2, 3];
+
+        for &sid in &session_ids {
+            cleanup_shm(svc, sid);
+        }
+
+        let svc_name = svc.to_string();
+
+        // Spawn 3 server threads, one per session
+        let server_handles: Vec<_> = session_ids
+            .iter()
+            .map(|&sid| {
+                let svc_clone = svc_name.clone();
+                thread::spawn(move || {
+                    let mut ctx =
+                        ShmContext::server_create(TEST_RUN_DIR, &svc_clone, sid, 4096, 4096)
+                            .expect(&format!("server create sid={sid}"));
+
+                    // Receive request
+                    let mut buf = vec![0u8; 8192];
+                    let mlen = ctx
+                        .receive(&mut buf, 5000)
+                        .expect(&format!("server receive sid={sid}"));
+                    let msg = &buf[..mlen];
+                    let hdr = protocol::Header::decode(msg).expect("decode req");
+                    let req_payload = msg[protocol::HEADER_SIZE..].to_vec();
+
+                    // Echo back as response with same message_id
+                    let resp = build_message(
+                        protocol::KIND_RESPONSE,
+                        hdr.code,
+                        hdr.message_id,
+                        &req_payload,
+                    );
+                    ctx.send(&resp).expect(&format!("server send sid={sid}"));
+                    ctx.destroy();
+                })
+            })
+            .collect();
+
+        // Let servers initialize
+        thread::sleep(std::time::Duration::from_millis(100));
+
+        // Attach 3 clients, send unique payloads, verify isolation
+        let client_handles: Vec<_> = session_ids
+            .iter()
+            .map(|&sid| {
+                let svc_clone = svc_name.clone();
+                thread::spawn(move || {
+                    let mut client =
+                        ShmContext::client_attach(TEST_RUN_DIR, &svc_clone, sid)
+                            .expect(&format!("client attach sid={sid}"));
+
+                    // Unique payload: session_id repeated to fill a pattern
+                    let unique_byte = sid as u8;
+                    let payload: Vec<u8> = vec![unique_byte; 64];
+                    let msg_id = 1000 + sid;
+
+                    let msg = build_message(
+                        protocol::KIND_REQUEST,
+                        protocol::METHOD_INCREMENT,
+                        msg_id,
+                        &payload,
+                    );
+                    client
+                        .send(&msg)
+                        .expect(&format!("client send sid={sid}"));
+
+                    // Receive response
+                    let mut resp_buf = vec![0u8; 8192];
+                    let rlen = client
+                        .receive(&mut resp_buf, 5000)
+                        .expect(&format!("client receive sid={sid}"));
+                    let resp = &resp_buf[..rlen];
+
+                    let rhdr = protocol::Header::decode(resp).expect("decode resp");
+                    assert_eq!(rhdr.kind, protocol::KIND_RESPONSE);
+                    assert_eq!(
+                        rhdr.message_id, msg_id,
+                        "sid={sid}: message_id mismatch (cross-contamination?)"
+                    );
+
+                    // Verify the payload matches what we sent
+                    let resp_payload = &resp[protocol::HEADER_SIZE..];
+                    assert_eq!(
+                        resp_payload, &payload[..],
+                        "sid={sid}: payload mismatch (cross-contamination?)"
+                    );
+
+                    // Verify every byte is our unique marker
+                    for (i, &b) in resp_payload.iter().enumerate() {
+                        assert_eq!(
+                            b, unique_byte,
+                            "sid={sid}: byte {i} is {b:#x}, expected {unique_byte:#x}"
+                        );
+                    }
+
+                    client.close();
+                })
+            })
+            .collect();
+
+        for h in client_handles {
+            h.join().unwrap();
+        }
+        for h in server_handles {
+            h.join().unwrap();
+        }
+
+        for &sid in &session_ids {
+            cleanup_shm(svc, sid);
+        }
     }
 }
