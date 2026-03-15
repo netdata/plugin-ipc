@@ -27,3 +27,7 @@ path = "../../../tests/fixtures/rust/src/bin/interop_shm.rs"
 [[bin]]
 name = "interop_service"
 path = "../../../tests/fixtures/rust/src/bin/interop_service.rs"
+
+[[bin]]
+name = "interop_cache"
+path = "../../../tests/fixtures/rust/src/bin/interop_cache.rs"

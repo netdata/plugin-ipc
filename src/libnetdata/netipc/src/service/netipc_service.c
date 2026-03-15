@@ -656,3 +656,194 @@ void nipc_server_destroy(nipc_managed_server_t *server)
     server->workers = NULL;
     server->worker_count = 0;
 }
+
+/* ------------------------------------------------------------------ */
+/*  L3: Client-side cgroups snapshot cache                             */
+/* ------------------------------------------------------------------ */
+
+/* Free all owned strings in cache items and the items array itself. */
+static void cache_free_items(nipc_cgroups_cache_item_t *items, uint32_t count)
+{
+    if (!items)
+        return;
+
+    for (uint32_t i = 0; i < count; i++) {
+        free(items[i].name);
+        free(items[i].path);
+    }
+    free(items);
+}
+
+/*
+ * Build a new cache from a decoded snapshot view. Copies all strings
+ * from the ephemeral view into owned heap allocations.
+ *
+ * Returns the new items array and sets *count_out. Returns NULL on
+ * allocation failure.
+ */
+static nipc_cgroups_cache_item_t *cache_build_items(
+    const nipc_cgroups_resp_view_t *view,
+    uint32_t *count_out)
+{
+    uint32_t n = view->item_count;
+    *count_out = 0;
+
+    if (n == 0)
+        return NULL; /* empty snapshot is valid */
+
+    nipc_cgroups_cache_item_t *items = calloc(n, sizeof(nipc_cgroups_cache_item_t));
+    if (!items)
+        return NULL;
+
+    for (uint32_t i = 0; i < n; i++) {
+        nipc_cgroups_item_view_t iv;
+        nipc_error_t err = nipc_cgroups_resp_item(view, i, &iv);
+        if (err != NIPC_OK) {
+            /* Malformed item: abort build, free partial */
+            cache_free_items(items, i);
+            return NULL;
+        }
+
+        items[i].hash    = iv.hash;
+        items[i].options = iv.options;
+        items[i].enabled = iv.enabled;
+
+        /* Copy name (add NUL terminator) */
+        items[i].name = malloc(iv.name.len + 1);
+        if (!items[i].name) {
+            cache_free_items(items, i);
+            return NULL;
+        }
+        if (iv.name.len > 0)
+            memcpy(items[i].name, iv.name.ptr, iv.name.len);
+        items[i].name[iv.name.len] = '\0';
+
+        /* Copy path (add NUL terminator) */
+        items[i].path = malloc(iv.path.len + 1);
+        if (!items[i].path) {
+            free(items[i].name);
+            cache_free_items(items, i);
+            return NULL;
+        }
+        if (iv.path.len > 0)
+            memcpy(items[i].path, iv.path.ptr, iv.path.len);
+        items[i].path[iv.path.len] = '\0';
+    }
+
+    *count_out = n;
+    return items;
+}
+
+void nipc_cgroups_cache_init(nipc_cgroups_cache_t *cache,
+                              const char *run_dir,
+                              const char *service_name,
+                              const nipc_uds_client_config_t *config)
+{
+    memset(cache, 0, sizeof(*cache));
+
+    nipc_client_init(&cache->client, run_dir, service_name, config);
+
+    cache->items = NULL;
+    cache->item_count = 0;
+    cache->systemd_enabled = 0;
+    cache->generation = 0;
+    cache->populated = false;
+    cache->refresh_success_count = 0;
+    cache->refresh_failure_count = 0;
+
+    /* Allocate internal response buffer */
+    cache->response_buf_size = NIPC_CGROUPS_CACHE_BUF_SIZE;
+    cache->response_buf = malloc(cache->response_buf_size);
+}
+
+bool nipc_cgroups_cache_refresh(nipc_cgroups_cache_t *cache)
+{
+    if (!cache->response_buf) {
+        cache->refresh_failure_count++;
+        return false;
+    }
+
+    /* Drive L2 connection lifecycle */
+    nipc_client_refresh(&cache->client);
+
+    /* Attempt snapshot call */
+    uint8_t req_buf[4];
+    nipc_cgroups_resp_view_t view;
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(
+        &cache->client, req_buf,
+        cache->response_buf, cache->response_buf_size,
+        &view);
+
+    if (err != NIPC_OK) {
+        /* Refresh failed -- preserve previous cache */
+        cache->refresh_failure_count++;
+        return false;
+    }
+
+    /* Build new cache from the snapshot view */
+    uint32_t new_count = 0;
+    nipc_cgroups_cache_item_t *new_items = NULL;
+
+    if (view.item_count > 0) {
+        new_items = cache_build_items(&view, &new_count);
+        if (!new_items && view.item_count > 0) {
+            /* Build failed (allocation error) -- preserve old cache */
+            cache->refresh_failure_count++;
+            return false;
+        }
+    }
+
+    /* Replace old cache with new one */
+    cache_free_items(cache->items, cache->item_count);
+    cache->items = new_items;
+    cache->item_count = new_count;
+    cache->systemd_enabled = view.systemd_enabled;
+    cache->generation = view.generation;
+    cache->populated = true;
+    cache->refresh_success_count++;
+
+    return true;
+}
+
+const nipc_cgroups_cache_item_t *nipc_cgroups_cache_lookup(
+    const nipc_cgroups_cache_t *cache,
+    uint32_t hash,
+    const char *name)
+{
+    if (!cache->populated || !cache->items || !name)
+        return NULL;
+
+    for (uint32_t i = 0; i < cache->item_count; i++) {
+        if (cache->items[i].hash == hash &&
+            strcmp(cache->items[i].name, name) == 0) {
+            return &cache->items[i];
+        }
+    }
+
+    return NULL;
+}
+
+void nipc_cgroups_cache_status(const nipc_cgroups_cache_t *cache,
+                                nipc_cgroups_cache_status_t *out)
+{
+    out->populated             = cache->populated;
+    out->item_count            = cache->item_count;
+    out->systemd_enabled       = cache->systemd_enabled;
+    out->generation            = cache->generation;
+    out->refresh_success_count = cache->refresh_success_count;
+    out->refresh_failure_count = cache->refresh_failure_count;
+}
+
+void nipc_cgroups_cache_close(nipc_cgroups_cache_t *cache)
+{
+    cache_free_items(cache->items, cache->item_count);
+    cache->items = NULL;
+    cache->item_count = 0;
+    cache->populated = false;
+
+    free(cache->response_buf);
+    cache->response_buf = NULL;
+    cache->response_buf_size = 0;
+
+    nipc_client_close(&cache->client);
+}

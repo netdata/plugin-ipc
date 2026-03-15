@@ -225,6 +225,121 @@ void nipc_server_stop(nipc_managed_server_t *server);
  */
 void nipc_server_destroy(nipc_managed_server_t *server);
 
+/* ------------------------------------------------------------------ */
+/*  L3: Client-side cgroups snapshot cache                             */
+/* ------------------------------------------------------------------ */
+
+/* Default response buffer size for L3 cache refresh */
+#define NIPC_CGROUPS_CACHE_BUF_SIZE 65536
+
+/*
+ * Cached copy of a single cgroup item. Owns its strings.
+ * Built from ephemeral L2 views during cache construction.
+ */
+typedef struct {
+    uint32_t hash;
+    uint32_t options;
+    uint32_t enabled;
+    char *name;     /* owned NUL-terminated copy */
+    char *path;     /* owned NUL-terminated copy */
+} nipc_cgroups_cache_item_t;
+
+/*
+ * L3 cache status snapshot (for diagnostics, not hot path).
+ */
+typedef struct {
+    bool     populated;
+    uint32_t item_count;
+    uint32_t systemd_enabled;
+    uint64_t generation;
+    uint32_t refresh_success_count;
+    uint32_t refresh_failure_count;
+} nipc_cgroups_cache_status_t;
+
+/*
+ * L3 client-side cgroups snapshot cache.
+ *
+ * Wraps an L2 client context and maintains a local owned copy of the
+ * most recent successful snapshot. Lookup by hash+name is pure
+ * in-memory with no I/O.
+ *
+ * On refresh failure, the previous cache is preserved. The cache
+ * becomes empty only if no successful refresh has ever occurred.
+ */
+typedef struct {
+    nipc_client_ctx_t client;
+
+    /* Cache data (owned) */
+    nipc_cgroups_cache_item_t *items;
+    uint32_t item_count;
+    uint32_t systemd_enabled;
+    uint64_t generation;
+    bool     populated;
+
+    /* Counters */
+    uint32_t refresh_success_count;
+    uint32_t refresh_failure_count;
+
+    /* Internal: response buffer for L2 calls */
+    uint8_t *response_buf;
+    size_t   response_buf_size;
+} nipc_cgroups_cache_t;
+
+/*
+ * Initialize an L3 cache. Creates the underlying L2 client context.
+ * Does NOT connect. Does NOT require the server to be running.
+ * Cache starts empty (populated == false).
+ */
+void nipc_cgroups_cache_init(nipc_cgroups_cache_t *cache,
+                              const char *run_dir,
+                              const char *service_name,
+                              const nipc_uds_client_config_t *config);
+
+/*
+ * Refresh the cache. Drives the L2 client (connect/reconnect as
+ * needed) and requests a fresh snapshot. On success, rebuilds the
+ * local cache from the response (copies strings). On failure,
+ * preserves the previous cache.
+ *
+ * Caller-driven: call from your own loop at your own cadence.
+ * Returns true if the cache was updated, false otherwise.
+ */
+bool nipc_cgroups_cache_refresh(nipc_cgroups_cache_t *cache);
+
+/*
+ * Returns true if at least one successful refresh has occurred.
+ * Cheap cached boolean. No I/O, no syscalls.
+ *
+ * Note: ready means "has cached data", not "is connected."
+ */
+static inline bool nipc_cgroups_cache_ready(const nipc_cgroups_cache_t *cache) {
+    return cache->populated;
+}
+
+/*
+ * Look up a cached item by hash + name. Pure in-memory, no I/O.
+ *
+ * Returns a pointer to the cached item, or NULL if not found or
+ * cache is empty. The returned pointer is valid until the next
+ * successful refresh.
+ */
+const nipc_cgroups_cache_item_t *nipc_cgroups_cache_lookup(
+    const nipc_cgroups_cache_t *cache,
+    uint32_t hash,
+    const char *name);
+
+/*
+ * Fill a status snapshot for diagnostics.
+ */
+void nipc_cgroups_cache_status(const nipc_cgroups_cache_t *cache,
+                                nipc_cgroups_cache_status_t *out);
+
+/*
+ * Close the cache: free all cached items, close the L2 client.
+ * Safe on a zero-initialized cache.
+ */
+void nipc_cgroups_cache_close(nipc_cgroups_cache_t *cache);
+
 #ifdef __cplusplus
 }
 #endif

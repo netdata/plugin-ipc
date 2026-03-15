@@ -687,6 +687,177 @@ fn poll_fd(fd: i32, timeout_ms: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+//  L3: Client-side cgroups snapshot cache
+// ---------------------------------------------------------------------------
+
+/// Cached copy of a single cgroup item. Owns its strings.
+/// Built from ephemeral L2 views during cache construction.
+#[derive(Debug, Clone)]
+pub struct CgroupsCacheItem {
+    pub hash: u32,
+    pub options: u32,
+    pub enabled: u32,
+    pub name: String,
+    pub path: String,
+}
+
+/// L3 cache status snapshot (for diagnostics, not hot path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CgroupsCacheStatus {
+    pub populated: bool,
+    pub item_count: u32,
+    pub systemd_enabled: u32,
+    pub generation: u64,
+    pub refresh_success_count: u32,
+    pub refresh_failure_count: u32,
+}
+
+/// Default response buffer size for L3 cache refresh.
+const CACHE_RESPONSE_BUF_SIZE: usize = 65536;
+
+/// L3 client-side cgroups snapshot cache.
+///
+/// Wraps an L2 client and maintains a local owned copy of the most
+/// recent successful snapshot. Lookup by hash+name is pure in-memory
+/// with no I/O.
+///
+/// On refresh failure, the previous cache is preserved. The cache
+/// is empty only if no successful refresh has ever occurred.
+pub struct CgroupsCache {
+    client: CgroupsClient,
+    items: Vec<CgroupsCacheItem>,
+    systemd_enabled: u32,
+    generation: u64,
+    populated: bool,
+    refresh_success_count: u32,
+    refresh_failure_count: u32,
+    response_buf: Vec<u8>,
+}
+
+impl CgroupsCache {
+    /// Create a new L3 cache. Creates the underlying L2 client context.
+    /// Does NOT connect. Does NOT require the server to be running.
+    /// Cache starts empty (populated == false).
+    pub fn new(run_dir: &str, service_name: &str, config: ClientConfig) -> Self {
+        CgroupsCache {
+            client: CgroupsClient::new(run_dir, service_name, config),
+            items: Vec::new(),
+            systemd_enabled: 0,
+            generation: 0,
+            populated: false,
+            refresh_success_count: 0,
+            refresh_failure_count: 0,
+            response_buf: vec![0u8; CACHE_RESPONSE_BUF_SIZE],
+        }
+    }
+
+    /// Refresh the cache. Drives the L2 client (connect/reconnect as
+    /// needed) and requests a fresh snapshot. On success, rebuilds the
+    /// local cache. On failure, preserves the previous cache.
+    ///
+    /// Returns true if the cache was updated.
+    pub fn refresh(&mut self) -> bool {
+        // Drive L2 connection lifecycle
+        self.client.refresh();
+
+        // Attempt snapshot call
+        match self.client.call_snapshot(&mut self.response_buf) {
+            Ok(view) => {
+                // Build new cache from snapshot view
+                let mut new_items = Vec::with_capacity(view.item_count as usize);
+                for i in 0..view.item_count {
+                    match view.item(i) {
+                        Ok(iv) => {
+                            let name = match iv.name.as_str() {
+                                Ok(s) => s.to_string(),
+                                Err(_) => {
+                                    // Non-UTF8 name: use lossy conversion
+                                    String::from_utf8_lossy(iv.name.as_bytes()).into_owned()
+                                }
+                            };
+                            let path = match iv.path.as_str() {
+                                Ok(s) => s.to_string(),
+                                Err(_) => {
+                                    String::from_utf8_lossy(iv.path.as_bytes()).into_owned()
+                                }
+                            };
+                            new_items.push(CgroupsCacheItem {
+                                hash: iv.hash,
+                                options: iv.options,
+                                enabled: iv.enabled,
+                                name,
+                                path,
+                            });
+                        }
+                        Err(_) => {
+                            // Malformed item: abort, preserve old cache
+                            self.refresh_failure_count += 1;
+                            return false;
+                        }
+                    }
+                }
+
+                // Replace old cache
+                self.items = new_items;
+                self.systemd_enabled = view.systemd_enabled;
+                self.generation = view.generation;
+                self.populated = true;
+                self.refresh_success_count += 1;
+                true
+            }
+            Err(_) => {
+                // Refresh failed: preserve previous cache
+                self.refresh_failure_count += 1;
+                false
+            }
+        }
+    }
+
+    /// Returns true if at least one successful refresh has occurred.
+    /// Cheap cached boolean. No I/O, no syscalls.
+    ///
+    /// Note: ready means "has cached data", not "is connected."
+    #[inline]
+    pub fn ready(&self) -> bool {
+        self.populated
+    }
+
+    /// Look up a cached item by hash + name. Pure in-memory, no I/O.
+    /// Returns a reference to the cached item, or None if not found.
+    pub fn lookup(&self, hash: u32, name: &str) -> Option<&CgroupsCacheItem> {
+        if !self.populated {
+            return None;
+        }
+        self.items.iter().find(|item| item.hash == hash && item.name == name)
+    }
+
+    /// Fill a status snapshot for diagnostics.
+    pub fn status(&self) -> CgroupsCacheStatus {
+        CgroupsCacheStatus {
+            populated: self.populated,
+            item_count: self.items.len() as u32,
+            systemd_enabled: self.systemd_enabled,
+            generation: self.generation,
+            refresh_success_count: self.refresh_success_count,
+            refresh_failure_count: self.refresh_failure_count,
+        }
+    }
+
+    /// Close the cache: free all cached items, close the L2 client.
+    pub fn close(&mut self) {
+        self.items.clear();
+        self.populated = false;
+        self.client.close();
+    }
+}
+
+impl Drop for CgroupsCache {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  Tests
 // ---------------------------------------------------------------------------
 
@@ -813,6 +984,49 @@ mod tests {
                 thread::sleep(Duration::from_micros(500));
             }
             // Extra settle time for listener bind
+            thread::sleep(Duration::from_millis(50));
+
+            TestServer {
+                stop_flag,
+                thread: Some(thread),
+            }
+        }
+
+        fn start_with_resp_size(
+            service: &str,
+            handler: fn(u16, &[u8]) -> Option<Vec<u8>>,
+            resp_buf_size: usize,
+        ) -> Self {
+            ensure_run_dir();
+            cleanup_all(service);
+
+            let svc = service.to_string();
+            let ready_flag = Arc::new(AtomicBool::new(false));
+            let ready_clone = ready_flag.clone();
+
+            let mut scfg = server_config();
+            scfg.max_response_payload_bytes = resp_buf_size as u32;
+
+            let mut server = CgroupsServer::new(
+                TEST_RUN_DIR,
+                &svc,
+                scfg,
+                resp_buf_size,
+                Box::new(move |code, payload| handler(code, payload)),
+            );
+            let stop_flag = server.running_flag();
+
+            let thread = thread::spawn(move || {
+                ready_clone.store(true, Ordering::Release);
+                let _ = server.run();
+            });
+
+            for _ in 0..2000 {
+                if ready_flag.load(Ordering::Acquire) {
+                    break;
+                }
+                thread::sleep(Duration::from_micros(500));
+            }
             thread::sleep(Duration::from_millis(50));
 
             TestServer {
@@ -1051,6 +1265,235 @@ mod tests {
         let s2 = client.status();
         assert_eq!(s2.error_count, 1);
 
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    // ---------------------------------------------------------------
+    //  L3 Cache tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_cache_full_round_trip() {
+        let svc = "rs_cache_rt";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, test_cgroups_handler);
+
+        let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, client_config());
+        assert!(!cache.ready());
+
+        // Refresh populates the cache
+        let updated = cache.refresh();
+        assert!(updated);
+        assert!(cache.ready());
+
+        // Lookup by hash + name
+        let item = cache.lookup(1001, "docker-abc123");
+        assert!(item.is_some());
+        let item = item.unwrap();
+        assert_eq!(item.hash, 1001);
+        assert_eq!(item.options, 0);
+        assert_eq!(item.enabled, 1);
+        assert_eq!(item.name, "docker-abc123");
+        assert_eq!(item.path, "/sys/fs/cgroup/docker/abc123");
+
+        let item2 = cache.lookup(3003, "systemd-user");
+        assert!(item2.is_some());
+        assert_eq!(item2.unwrap().enabled, 0);
+
+        // Status
+        let status = cache.status();
+        assert!(status.populated);
+        assert_eq!(status.item_count, 3);
+        assert_eq!(status.systemd_enabled, 1);
+        assert_eq!(status.generation, 42);
+        assert_eq!(status.refresh_success_count, 1);
+        assert_eq!(status.refresh_failure_count, 0);
+
+        cache.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_cache_refresh_failure_preserves() {
+        let svc = "rs_cache_preserve";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, test_cgroups_handler);
+
+        let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, client_config());
+
+        // First refresh populates cache
+        assert!(cache.refresh());
+        assert!(cache.ready());
+        assert!(cache.lookup(1001, "docker-abc123").is_some());
+
+        // Kill server
+        server.stop();
+        cleanup_all(svc);
+        thread::sleep(Duration::from_millis(50));
+
+        // Refresh fails, but old cache is preserved
+        let updated = cache.refresh();
+        assert!(!updated);
+        assert!(cache.ready()); // still has cached data
+        assert!(cache.lookup(1001, "docker-abc123").is_some());
+
+        let status = cache.status();
+        assert_eq!(status.refresh_success_count, 1);
+        assert!(status.refresh_failure_count >= 1);
+
+        cache.close();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_cache_reconnect_rebuilds() {
+        let svc = "rs_cache_reconn";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server1 = TestServer::start(svc, test_cgroups_handler);
+
+        let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, client_config());
+        assert!(cache.refresh());
+        assert_eq!(cache.status().item_count, 3);
+
+        // Kill and restart server
+        server1.stop();
+        cleanup_all(svc);
+        thread::sleep(Duration::from_millis(50));
+
+        let mut server2 = TestServer::start(svc, test_cgroups_handler);
+
+        // Refresh should reconnect and rebuild cache
+        let updated = cache.refresh();
+        assert!(updated);
+        assert!(cache.ready());
+        assert_eq!(cache.status().item_count, 3);
+        assert_eq!(cache.status().refresh_success_count, 2);
+
+        cache.close();
+        server2.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_cache_lookup_not_found() {
+        let svc = "rs_cache_notfound";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, test_cgroups_handler);
+
+        let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, client_config());
+        assert!(cache.refresh());
+
+        // Non-existent hash
+        assert!(cache.lookup(9999, "nonexistent").is_none());
+
+        // Correct hash, wrong name
+        assert!(cache.lookup(1001, "wrong-name").is_none());
+
+        // Correct name, wrong hash
+        assert!(cache.lookup(9999, "docker-abc123").is_none());
+
+        cache.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_cache_empty() {
+        let svc = "rs_cache_empty";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let cache = CgroupsCache::new(TEST_RUN_DIR, svc, client_config());
+
+        // Not ready before any refresh
+        assert!(!cache.ready());
+
+        // Lookup on empty cache returns None
+        assert!(cache.lookup(1001, "docker-abc123").is_none());
+
+        let status = cache.status();
+        assert!(!status.populated);
+        assert_eq!(status.item_count, 0);
+        assert_eq!(status.refresh_success_count, 0);
+        assert_eq!(status.refresh_failure_count, 0);
+
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_cache_large_dataset() {
+        let svc = "rs_cache_large";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        const N: u32 = 1000;
+
+        // Handler that builds N items
+        fn large_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
+            if method_code != METHOD_CGROUPS_SNAPSHOT {
+                return None;
+            }
+            if CgroupsRequest::decode(request_payload).is_err() {
+                return None;
+            }
+
+            let buf_size = 256 * N as usize;
+            let mut buf = vec![0u8; buf_size];
+            let mut builder = CgroupsBuilder::new(&mut buf, N, 1, 100);
+
+            for i in 0..N {
+                let name = format!("cgroup-{i}");
+                let path = format!("/sys/fs/cgroup/test/{i}");
+                if builder
+                    .add(i + 1000, 0, if i % 3 == 0 { 0 } else { 1 },
+                         name.as_bytes(), path.as_bytes())
+                    .is_err()
+                {
+                    return None;
+                }
+            }
+
+            let total = builder.finish();
+            buf.truncate(total);
+            Some(buf)
+        }
+
+        // Use a larger response buf size
+        let mut cfg = client_config();
+        cfg.max_response_payload_bytes = 256 * N;
+
+        let mut server = TestServer::start_with_resp_size(svc, large_handler, 256 * N as usize);
+
+        let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, cfg);
+
+        // Need larger response buf
+        cache.response_buf = vec![0u8; 256 * N as usize];
+
+        assert!(cache.refresh());
+        assert_eq!(cache.status().item_count, N);
+
+        // Verify all lookups
+        for i in 0..N {
+            let name = format!("cgroup-{i}");
+            let item = cache.lookup(i + 1000, &name);
+            assert!(item.is_some(), "item {i} not found");
+            let item = item.unwrap();
+            assert_eq!(item.hash, i + 1000);
+            let expected_path = format!("/sys/fs/cgroup/test/{i}");
+            assert_eq!(item.path, expected_path);
+        }
+
+        cache.close();
         server.stop();
         cleanup_all(svc);
     }

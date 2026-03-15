@@ -370,4 +370,69 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
     )
 endif()
 
+# --- L3 cache tests (Linux only) -------------------------------------------
+
+if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+    add_executable(test_cache tests/fixtures/c/test_cache.c)
+    target_link_libraries(test_cache PRIVATE
+        netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
+    )
+    add_test(NAME test_cache COMMAND test_cache)
+    set_tests_properties(test_cache PROPERTIES TIMEOUT 120)
+
+    # C L3 interop binary
+    add_executable(interop_cache_c tests/fixtures/c/interop_cache.c)
+    target_link_libraries(interop_cache_c PRIVATE
+        netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
+    )
+endif()
+
+# --- Rust L3 cache tests ---------------------------------------------------
+
+if(CARGO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+    # Build the Rust L3 interop binary
+    add_custom_target(interop_cache_rs ALL
+        COMMAND ${CARGO_EXECUTABLE} build --bin interop_cache
+        WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+        COMMENT "Building Rust L3 cache interop binary"
+    )
+endif()
+
+# --- Go L3 cache tests -----------------------------------------------------
+
+if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
+    # Go L3 cache tests (in same package as L2)
+    add_test(NAME test_cache_go
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} test -count=1 -timeout=120s
+            -run TestCache ./pkg/netipc/service/cgroups/
+        WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
+    )
+    set_tests_properties(test_cache_go PROPERTIES TIMEOUT 180)
+
+    # Build Go L3 interop binary
+    add_custom_target(interop_cache_go ALL
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} build -o "${CMAKE_BINARY_DIR}/bin/interop_cache_go" ./cmd/interop_cache
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tests/fixtures/go"
+        COMMENT "Building Go L3 cache interop binary"
+    )
+endif()
+
+# --- Cross-language L3 cache interop tests (Linux only) ---------------------
+
+if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
+    set(INTEROP_CACHE_RS "${NETIPC_RUST_CRATE_DIR}/target/debug/interop_cache")
+    set(INTEROP_CACHE_GO "${CMAKE_BINARY_DIR}/bin/interop_cache_go")
+
+    add_test(NAME test_cache_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_cache_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_cache_interop PROPERTIES
+        TIMEOUT 120
+        ENVIRONMENT "INTEROP_CACHE_C=$<TARGET_FILE:interop_cache_c>;INTEROP_CACHE_RS=${INTEROP_CACHE_RS};INTEROP_CACHE_GO=${INTEROP_CACHE_GO}"
+    )
+endif()
+
 # --- Benchmarks (added per phase) ----------------------------------------
