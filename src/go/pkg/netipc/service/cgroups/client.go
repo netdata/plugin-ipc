@@ -613,4 +613,4 @@ func pollFd(fd int, timeoutMs int) int {
 }
 
 // Suppress unused import warnings.
-var _ = binary.LittleEndian
+var _ = binary.NativeEndian

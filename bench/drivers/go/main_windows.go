@@ -187,10 +187,10 @@ func pingPongHandlerWin(methodCode uint16, request []byte) ([]byte, bool) {
 	if len(request) < 8 {
 		return nil, false
 	}
-	counter := binary.LittleEndian.Uint64(request[:8])
+	counter := binary.NativeEndian.Uint64(request[:8])
 	counter++
 	resp := make([]byte, 8)
-	binary.LittleEndian.PutUint64(resp, counter)
+	binary.NativeEndian.PutUint64(resp, counter)
 	return resp, true
 }
 
@@ -320,7 +320,7 @@ func runPingPongClientWin(runDir, service string, profiles uint32, durationSec i
 		rl.wait()
 
 		reqPayload := make([]byte, 8)
-		binary.LittleEndian.PutUint64(reqPayload, counter)
+		binary.NativeEndian.PutUint64(reqPayload, counter)
 
 		hdr := protocol.Header{
 			Kind:            protocol.KindRequest,
@@ -356,7 +356,7 @@ func runPingPongClientWin(runDir, service string, profiles uint32, durationSec i
 				continue
 			}
 			if respLen >= protocol.HeaderSize+8 {
-				respVal := binary.LittleEndian.Uint64(respBuf[protocol.HeaderSize : protocol.HeaderSize+8])
+				respVal := binary.NativeEndian.Uint64(respBuf[protocol.HeaderSize : protocol.HeaderSize+8])
 				if respVal != counter+1 {
 					fmt.Fprintf(os.Stderr, "counter chain broken: expected %d, got %d\n", counter+1, respVal)
 					errors++
@@ -376,7 +376,7 @@ func runPingPongClientWin(runDir, service string, profiles uint32, durationSec i
 				continue
 			}
 			if len(payload) >= 8 {
-				respVal := binary.LittleEndian.Uint64(payload[:8])
+				respVal := binary.NativeEndian.Uint64(payload[:8])
 				if respVal != counter+1 {
 					fmt.Fprintf(os.Stderr, "counter chain broken: expected %d, got %d\n", counter+1, respVal)
 					errors++

@@ -479,4 +479,4 @@ func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmCont
 }
 
 // Suppress unused import warnings.
-var _ = binary.LittleEndian
+var _ = binary.NativeEndian

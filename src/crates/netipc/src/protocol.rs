@@ -1,7 +1,7 @@
 //! Wire envelope and codec for the netipc protocol.
 //!
 //! Pure byte-layout encode/decode. No I/O, no transport, no allocation on
-//! decode. All multi-byte fields are little-endian on the wire.
+//! decode. Localhost-only IPC — all multi-byte fields use host byte order.
 //!
 //! Decoded `View` types borrow the underlying buffer and are valid only while
 //! that buffer lives. Copy immediately if the data is needed later.
@@ -145,16 +145,16 @@ impl Header {
         if buf.len() < HEADER_SIZE {
             return 0;
         }
-        buf[0..4].copy_from_slice(&self.magic.to_le_bytes());
-        buf[4..6].copy_from_slice(&self.version.to_le_bytes());
-        buf[6..8].copy_from_slice(&self.header_len.to_le_bytes());
-        buf[8..10].copy_from_slice(&self.kind.to_le_bytes());
-        buf[10..12].copy_from_slice(&self.flags.to_le_bytes());
-        buf[12..14].copy_from_slice(&self.code.to_le_bytes());
-        buf[14..16].copy_from_slice(&self.transport_status.to_le_bytes());
-        buf[16..20].copy_from_slice(&self.payload_len.to_le_bytes());
-        buf[20..24].copy_from_slice(&self.item_count.to_le_bytes());
-        buf[24..32].copy_from_slice(&self.message_id.to_le_bytes());
+        buf[0..4].copy_from_slice(&self.magic.to_ne_bytes());
+        buf[4..6].copy_from_slice(&self.version.to_ne_bytes());
+        buf[6..8].copy_from_slice(&self.header_len.to_ne_bytes());
+        buf[8..10].copy_from_slice(&self.kind.to_ne_bytes());
+        buf[10..12].copy_from_slice(&self.flags.to_ne_bytes());
+        buf[12..14].copy_from_slice(&self.code.to_ne_bytes());
+        buf[14..16].copy_from_slice(&self.transport_status.to_ne_bytes());
+        buf[16..20].copy_from_slice(&self.payload_len.to_ne_bytes());
+        buf[20..24].copy_from_slice(&self.item_count.to_ne_bytes());
+        buf[24..32].copy_from_slice(&self.message_id.to_ne_bytes());
         HEADER_SIZE
     }
 
@@ -164,16 +164,16 @@ impl Header {
             return Err(NipcError::Truncated);
         }
         let hdr = Header {
-            magic: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
-            version: u16::from_le_bytes(buf[4..6].try_into().unwrap()),
-            header_len: u16::from_le_bytes(buf[6..8].try_into().unwrap()),
-            kind: u16::from_le_bytes(buf[8..10].try_into().unwrap()),
-            flags: u16::from_le_bytes(buf[10..12].try_into().unwrap()),
-            code: u16::from_le_bytes(buf[12..14].try_into().unwrap()),
-            transport_status: u16::from_le_bytes(buf[14..16].try_into().unwrap()),
-            payload_len: u32::from_le_bytes(buf[16..20].try_into().unwrap()),
-            item_count: u32::from_le_bytes(buf[20..24].try_into().unwrap()),
-            message_id: u64::from_le_bytes(buf[24..32].try_into().unwrap()),
+            magic: u32::from_ne_bytes(buf[0..4].try_into().unwrap()),
+            version: u16::from_ne_bytes(buf[4..6].try_into().unwrap()),
+            header_len: u16::from_ne_bytes(buf[6..8].try_into().unwrap()),
+            kind: u16::from_ne_bytes(buf[8..10].try_into().unwrap()),
+            flags: u16::from_ne_bytes(buf[10..12].try_into().unwrap()),
+            code: u16::from_ne_bytes(buf[12..14].try_into().unwrap()),
+            transport_status: u16::from_ne_bytes(buf[14..16].try_into().unwrap()),
+            payload_len: u32::from_ne_bytes(buf[16..20].try_into().unwrap()),
+            item_count: u32::from_ne_bytes(buf[20..24].try_into().unwrap()),
+            message_id: u64::from_ne_bytes(buf[24..32].try_into().unwrap()),
         };
 
         if hdr.magic != MAGIC_MSG {
@@ -214,14 +214,14 @@ impl ChunkHeader {
         if buf.len() < HEADER_SIZE {
             return 0;
         }
-        buf[0..4].copy_from_slice(&self.magic.to_le_bytes());
-        buf[4..6].copy_from_slice(&self.version.to_le_bytes());
-        buf[6..8].copy_from_slice(&self.flags.to_le_bytes());
-        buf[8..16].copy_from_slice(&self.message_id.to_le_bytes());
-        buf[16..20].copy_from_slice(&self.total_message_len.to_le_bytes());
-        buf[20..24].copy_from_slice(&self.chunk_index.to_le_bytes());
-        buf[24..28].copy_from_slice(&self.chunk_count.to_le_bytes());
-        buf[28..32].copy_from_slice(&self.chunk_payload_len.to_le_bytes());
+        buf[0..4].copy_from_slice(&self.magic.to_ne_bytes());
+        buf[4..6].copy_from_slice(&self.version.to_ne_bytes());
+        buf[6..8].copy_from_slice(&self.flags.to_ne_bytes());
+        buf[8..16].copy_from_slice(&self.message_id.to_ne_bytes());
+        buf[16..20].copy_from_slice(&self.total_message_len.to_ne_bytes());
+        buf[20..24].copy_from_slice(&self.chunk_index.to_ne_bytes());
+        buf[24..28].copy_from_slice(&self.chunk_count.to_ne_bytes());
+        buf[28..32].copy_from_slice(&self.chunk_payload_len.to_ne_bytes());
         HEADER_SIZE
     }
 
@@ -231,14 +231,14 @@ impl ChunkHeader {
             return Err(NipcError::Truncated);
         }
         let chk = ChunkHeader {
-            magic: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
-            version: u16::from_le_bytes(buf[4..6].try_into().unwrap()),
-            flags: u16::from_le_bytes(buf[6..8].try_into().unwrap()),
-            message_id: u64::from_le_bytes(buf[8..16].try_into().unwrap()),
-            total_message_len: u32::from_le_bytes(buf[16..20].try_into().unwrap()),
-            chunk_index: u32::from_le_bytes(buf[20..24].try_into().unwrap()),
-            chunk_count: u32::from_le_bytes(buf[24..28].try_into().unwrap()),
-            chunk_payload_len: u32::from_le_bytes(buf[28..32].try_into().unwrap()),
+            magic: u32::from_ne_bytes(buf[0..4].try_into().unwrap()),
+            version: u16::from_ne_bytes(buf[4..6].try_into().unwrap()),
+            flags: u16::from_ne_bytes(buf[6..8].try_into().unwrap()),
+            message_id: u64::from_ne_bytes(buf[8..16].try_into().unwrap()),
+            total_message_len: u32::from_ne_bytes(buf[16..20].try_into().unwrap()),
+            chunk_index: u32::from_ne_bytes(buf[20..24].try_into().unwrap()),
+            chunk_count: u32::from_ne_bytes(buf[24..28].try_into().unwrap()),
+            chunk_payload_len: u32::from_ne_bytes(buf[28..32].try_into().unwrap()),
         };
 
         if chk.magic != MAGIC_CHUNK {
@@ -277,8 +277,8 @@ pub fn batch_dir_encode(entries: &[BatchEntry], buf: &mut [u8]) -> usize {
     }
     for (i, e) in entries.iter().enumerate() {
         let base = i * 8;
-        buf[base..base + 4].copy_from_slice(&e.offset.to_le_bytes());
-        buf[base + 4..base + 8].copy_from_slice(&e.length.to_le_bytes());
+        buf[base..base + 4].copy_from_slice(&e.offset.to_ne_bytes());
+        buf[base + 4..base + 8].copy_from_slice(&e.length.to_ne_bytes());
     }
     need
 }
@@ -299,8 +299,8 @@ pub fn batch_dir_decode(
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         let base = i * 8;
-        let offset = u32::from_le_bytes(buf[base..base + 4].try_into().unwrap());
-        let length = u32::from_le_bytes(buf[base + 4..base + 8].try_into().unwrap());
+        let offset = u32::from_ne_bytes(buf[base..base + 4].try_into().unwrap());
+        let length = u32::from_ne_bytes(buf[base + 4..base + 8].try_into().unwrap());
 
         if (offset as usize) % ALIGNMENT != 0 {
             return Err(NipcError::BadAlignment);
@@ -333,8 +333,8 @@ pub fn batch_item_get(
 
     let idx = index as usize;
     let base = idx * 8;
-    let off = u32::from_le_bytes(payload[base..base + 4].try_into().unwrap());
-    let len = u32::from_le_bytes(payload[base + 4..base + 8].try_into().unwrap());
+    let off = u32::from_ne_bytes(payload[base..base + 4].try_into().unwrap());
+    let len = u32::from_ne_bytes(payload[base + 4..base + 8].try_into().unwrap());
 
     let packed_area_start = dir_aligned;
     let packed_area_len = payload.len() - packed_area_start;
@@ -404,9 +404,9 @@ impl<'a> BatchBuilder<'a> {
         let idx = self.item_count as usize;
         let dir_base = idx * 8;
         self.buf[dir_base..dir_base + 4]
-            .copy_from_slice(&(aligned_off as u32).to_le_bytes());
+            .copy_from_slice(&(aligned_off as u32).to_ne_bytes());
         self.buf[dir_base + 4..dir_base + 8]
-            .copy_from_slice(&(item.len() as u32).to_le_bytes());
+            .copy_from_slice(&(item.len() as u32).to_ne_bytes());
 
         self.data_offset = aligned_off + item.len();
         self.item_count += 1;
@@ -456,17 +456,17 @@ impl Hello {
         if buf.len() < HELLO_SIZE {
             return 0;
         }
-        buf[0..2].copy_from_slice(&self.layout_version.to_le_bytes());
-        buf[2..4].copy_from_slice(&self.flags.to_le_bytes());
-        buf[4..8].copy_from_slice(&self.supported_profiles.to_le_bytes());
-        buf[8..12].copy_from_slice(&self.preferred_profiles.to_le_bytes());
-        buf[12..16].copy_from_slice(&self.max_request_payload_bytes.to_le_bytes());
-        buf[16..20].copy_from_slice(&self.max_request_batch_items.to_le_bytes());
-        buf[20..24].copy_from_slice(&self.max_response_payload_bytes.to_le_bytes());
-        buf[24..28].copy_from_slice(&self.max_response_batch_items.to_le_bytes());
-        buf[28..32].copy_from_slice(&0u32.to_le_bytes()); // padding
-        buf[32..40].copy_from_slice(&self.auth_token.to_le_bytes());
-        buf[40..44].copy_from_slice(&self.packet_size.to_le_bytes());
+        buf[0..2].copy_from_slice(&self.layout_version.to_ne_bytes());
+        buf[2..4].copy_from_slice(&self.flags.to_ne_bytes());
+        buf[4..8].copy_from_slice(&self.supported_profiles.to_ne_bytes());
+        buf[8..12].copy_from_slice(&self.preferred_profiles.to_ne_bytes());
+        buf[12..16].copy_from_slice(&self.max_request_payload_bytes.to_ne_bytes());
+        buf[16..20].copy_from_slice(&self.max_request_batch_items.to_ne_bytes());
+        buf[20..24].copy_from_slice(&self.max_response_payload_bytes.to_ne_bytes());
+        buf[24..28].copy_from_slice(&self.max_response_batch_items.to_ne_bytes());
+        buf[28..32].copy_from_slice(&0u32.to_ne_bytes()); // padding
+        buf[32..40].copy_from_slice(&self.auth_token.to_ne_bytes());
+        buf[40..44].copy_from_slice(&self.packet_size.to_ne_bytes());
         HELLO_SIZE
     }
 
@@ -476,17 +476,17 @@ impl Hello {
             return Err(NipcError::Truncated);
         }
         let h = Hello {
-            layout_version: u16::from_le_bytes(buf[0..2].try_into().unwrap()),
-            flags: u16::from_le_bytes(buf[2..4].try_into().unwrap()),
-            supported_profiles: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
-            preferred_profiles: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
-            max_request_payload_bytes: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
-            max_request_batch_items: u32::from_le_bytes(buf[16..20].try_into().unwrap()),
-            max_response_payload_bytes: u32::from_le_bytes(buf[20..24].try_into().unwrap()),
-            max_response_batch_items: u32::from_le_bytes(buf[24..28].try_into().unwrap()),
+            layout_version: u16::from_ne_bytes(buf[0..2].try_into().unwrap()),
+            flags: u16::from_ne_bytes(buf[2..4].try_into().unwrap()),
+            supported_profiles: u32::from_ne_bytes(buf[4..8].try_into().unwrap()),
+            preferred_profiles: u32::from_ne_bytes(buf[8..12].try_into().unwrap()),
+            max_request_payload_bytes: u32::from_ne_bytes(buf[12..16].try_into().unwrap()),
+            max_request_batch_items: u32::from_ne_bytes(buf[16..20].try_into().unwrap()),
+            max_response_payload_bytes: u32::from_ne_bytes(buf[20..24].try_into().unwrap()),
+            max_response_batch_items: u32::from_ne_bytes(buf[24..28].try_into().unwrap()),
             // buf[28..32] is reserved padding, must be zero
-            auth_token: u64::from_le_bytes(buf[32..40].try_into().unwrap()),
-            packet_size: u32::from_le_bytes(buf[40..44].try_into().unwrap()),
+            auth_token: u64::from_ne_bytes(buf[32..40].try_into().unwrap()),
+            packet_size: u32::from_ne_bytes(buf[40..44].try_into().unwrap()),
         };
 
         if h.layout_version != 1 {
@@ -494,7 +494,7 @@ impl Hello {
         }
 
         // Validate padding bytes 28..32 are zero
-        if u32::from_le_bytes(buf[28..32].try_into().unwrap()) != 0 {
+        if u32::from_ne_bytes(buf[28..32].try_into().unwrap()) != 0 {
             return Err(NipcError::BadLayout);
         }
 
@@ -527,18 +527,18 @@ impl HelloAck {
         if buf.len() < HELLO_ACK_SIZE {
             return 0;
         }
-        buf[0..2].copy_from_slice(&self.layout_version.to_le_bytes());
-        buf[2..4].copy_from_slice(&self.flags.to_le_bytes());
-        buf[4..8].copy_from_slice(&self.server_supported_profiles.to_le_bytes());
-        buf[8..12].copy_from_slice(&self.intersection_profiles.to_le_bytes());
-        buf[12..16].copy_from_slice(&self.selected_profile.to_le_bytes());
-        buf[16..20].copy_from_slice(&self.agreed_max_request_payload_bytes.to_le_bytes());
-        buf[20..24].copy_from_slice(&self.agreed_max_request_batch_items.to_le_bytes());
-        buf[24..28].copy_from_slice(&self.agreed_max_response_payload_bytes.to_le_bytes());
-        buf[28..32].copy_from_slice(&self.agreed_max_response_batch_items.to_le_bytes());
-        buf[32..36].copy_from_slice(&self.agreed_packet_size.to_le_bytes());
-        buf[36..40].copy_from_slice(&0u32.to_le_bytes()); // padding
-        buf[40..48].copy_from_slice(&self.session_id.to_le_bytes());
+        buf[0..2].copy_from_slice(&self.layout_version.to_ne_bytes());
+        buf[2..4].copy_from_slice(&self.flags.to_ne_bytes());
+        buf[4..8].copy_from_slice(&self.server_supported_profiles.to_ne_bytes());
+        buf[8..12].copy_from_slice(&self.intersection_profiles.to_ne_bytes());
+        buf[12..16].copy_from_slice(&self.selected_profile.to_ne_bytes());
+        buf[16..20].copy_from_slice(&self.agreed_max_request_payload_bytes.to_ne_bytes());
+        buf[20..24].copy_from_slice(&self.agreed_max_request_batch_items.to_ne_bytes());
+        buf[24..28].copy_from_slice(&self.agreed_max_response_payload_bytes.to_ne_bytes());
+        buf[28..32].copy_from_slice(&self.agreed_max_response_batch_items.to_ne_bytes());
+        buf[32..36].copy_from_slice(&self.agreed_packet_size.to_ne_bytes());
+        buf[36..40].copy_from_slice(&0u32.to_ne_bytes()); // padding
+        buf[40..48].copy_from_slice(&self.session_id.to_ne_bytes());
         HELLO_ACK_SIZE
     }
 
@@ -548,26 +548,26 @@ impl HelloAck {
             return Err(NipcError::Truncated);
         }
         let h = HelloAck {
-            layout_version: u16::from_le_bytes(buf[0..2].try_into().unwrap()),
-            flags: u16::from_le_bytes(buf[2..4].try_into().unwrap()),
-            server_supported_profiles: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
-            intersection_profiles: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
-            selected_profile: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
-            agreed_max_request_payload_bytes: u32::from_le_bytes(
+            layout_version: u16::from_ne_bytes(buf[0..2].try_into().unwrap()),
+            flags: u16::from_ne_bytes(buf[2..4].try_into().unwrap()),
+            server_supported_profiles: u32::from_ne_bytes(buf[4..8].try_into().unwrap()),
+            intersection_profiles: u32::from_ne_bytes(buf[8..12].try_into().unwrap()),
+            selected_profile: u32::from_ne_bytes(buf[12..16].try_into().unwrap()),
+            agreed_max_request_payload_bytes: u32::from_ne_bytes(
                 buf[16..20].try_into().unwrap(),
             ),
-            agreed_max_request_batch_items: u32::from_le_bytes(
+            agreed_max_request_batch_items: u32::from_ne_bytes(
                 buf[20..24].try_into().unwrap(),
             ),
-            agreed_max_response_payload_bytes: u32::from_le_bytes(
+            agreed_max_response_payload_bytes: u32::from_ne_bytes(
                 buf[24..28].try_into().unwrap(),
             ),
-            agreed_max_response_batch_items: u32::from_le_bytes(
+            agreed_max_response_batch_items: u32::from_ne_bytes(
                 buf[28..32].try_into().unwrap(),
             ),
-            agreed_packet_size: u32::from_le_bytes(buf[32..36].try_into().unwrap()),
+            agreed_packet_size: u32::from_ne_bytes(buf[32..36].try_into().unwrap()),
             // skip padding at 36..40
-            session_id: u64::from_le_bytes(buf[40..48].try_into().unwrap()),
+            session_id: u64::from_ne_bytes(buf[40..48].try_into().unwrap()),
         };
 
         if h.layout_version != 1 {
@@ -596,8 +596,8 @@ impl CgroupsRequest {
         if buf.len() < CGROUPS_REQ_SIZE {
             return 0;
         }
-        buf[0..2].copy_from_slice(&self.layout_version.to_le_bytes());
-        buf[2..4].copy_from_slice(&self.flags.to_le_bytes());
+        buf[0..2].copy_from_slice(&self.layout_version.to_ne_bytes());
+        buf[2..4].copy_from_slice(&self.flags.to_ne_bytes());
         CGROUPS_REQ_SIZE
     }
 
@@ -607,8 +607,8 @@ impl CgroupsRequest {
             return Err(NipcError::Truncated);
         }
         let r = CgroupsRequest {
-            layout_version: u16::from_le_bytes(buf[0..2].try_into().unwrap()),
-            flags: u16::from_le_bytes(buf[2..4].try_into().unwrap()),
+            layout_version: u16::from_ne_bytes(buf[0..2].try_into().unwrap()),
+            flags: u16::from_ne_bytes(buf[2..4].try_into().unwrap()),
         };
         if r.layout_version != 1 {
             return Err(NipcError::BadLayout);
@@ -681,13 +681,13 @@ impl<'a> CgroupsResponseView<'a> {
             return Err(NipcError::Truncated);
         }
 
-        let layout_version = u16::from_le_bytes(buf[0..2].try_into().unwrap());
-        let flags = u16::from_le_bytes(buf[2..4].try_into().unwrap());
-        let item_count = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-        let systemd_enabled = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+        let layout_version = u16::from_ne_bytes(buf[0..2].try_into().unwrap());
+        let flags = u16::from_ne_bytes(buf[2..4].try_into().unwrap());
+        let item_count = u32::from_ne_bytes(buf[4..8].try_into().unwrap());
+        let systemd_enabled = u32::from_ne_bytes(buf[8..12].try_into().unwrap());
         // buf[12..16] reserved, must be zero
-        let reserved = u32::from_le_bytes(buf[12..16].try_into().unwrap());
-        let generation = u64::from_le_bytes(buf[16..24].try_into().unwrap());
+        let reserved = u32::from_ne_bytes(buf[12..16].try_into().unwrap());
+        let generation = u64::from_ne_bytes(buf[16..24].try_into().unwrap());
 
         if layout_version != 1 {
             return Err(NipcError::BadLayout);
@@ -715,8 +715,8 @@ impl<'a> CgroupsResponseView<'a> {
         // Validate each directory entry
         for i in 0..item_count as usize {
             let base = CGROUPS_RESP_HDR_SIZE + i * 8;
-            let off = u32::from_le_bytes(buf[base..base + 4].try_into().unwrap());
-            let len = u32::from_le_bytes(buf[base + 4..base + 8].try_into().unwrap());
+            let off = u32::from_ne_bytes(buf[base..base + 4].try_into().unwrap());
+            let len = u32::from_ne_bytes(buf[base + 4..base + 8].try_into().unwrap());
 
             if (off as usize) % ALIGNMENT != 0 {
                 return Err(NipcError::BadAlignment);
@@ -751,24 +751,24 @@ impl<'a> CgroupsResponseView<'a> {
 
         let dir_base = dir_start + index as usize * 8;
         let item_off =
-            u32::from_le_bytes(self.payload[dir_base..dir_base + 4].try_into().unwrap());
-        let item_len = u32::from_le_bytes(
+            u32::from_ne_bytes(self.payload[dir_base..dir_base + 4].try_into().unwrap());
+        let item_len = u32::from_ne_bytes(
             self.payload[dir_base + 4..dir_base + 8].try_into().unwrap(),
         );
 
         let item_start = packed_area_start + item_off as usize;
         let item = &self.payload[item_start..item_start + item_len as usize];
 
-        let layout_version = u16::from_le_bytes(item[0..2].try_into().unwrap());
-        let flags = u16::from_le_bytes(item[2..4].try_into().unwrap());
-        let hash = u32::from_le_bytes(item[4..8].try_into().unwrap());
-        let options = u32::from_le_bytes(item[8..12].try_into().unwrap());
-        let enabled = u32::from_le_bytes(item[12..16].try_into().unwrap());
+        let layout_version = u16::from_ne_bytes(item[0..2].try_into().unwrap());
+        let flags = u16::from_ne_bytes(item[2..4].try_into().unwrap());
+        let hash = u32::from_ne_bytes(item[4..8].try_into().unwrap());
+        let options = u32::from_ne_bytes(item[8..12].try_into().unwrap());
+        let enabled = u32::from_ne_bytes(item[12..16].try_into().unwrap());
 
-        let name_off = u32::from_le_bytes(item[16..20].try_into().unwrap()) as usize;
-        let name_len = u32::from_le_bytes(item[20..24].try_into().unwrap());
-        let path_off = u32::from_le_bytes(item[24..28].try_into().unwrap()) as usize;
-        let path_len = u32::from_le_bytes(item[28..32].try_into().unwrap());
+        let name_off = u32::from_ne_bytes(item[16..20].try_into().unwrap()) as usize;
+        let name_len = u32::from_ne_bytes(item[20..24].try_into().unwrap());
+        let path_off = u32::from_ne_bytes(item[24..28].try_into().unwrap()) as usize;
+        let path_len = u32::from_ne_bytes(item[28..32].try_into().unwrap());
 
         if layout_version != 1 {
             return Err(NipcError::BadLayout);
@@ -908,15 +908,15 @@ impl<'a> CgroupsBuilder<'a> {
 
         // Write item header
         let p = item_start;
-        self.buf[p..p + 2].copy_from_slice(&1u16.to_le_bytes()); // layout_version
-        self.buf[p + 2..p + 4].copy_from_slice(&0u16.to_le_bytes()); // flags
-        self.buf[p + 4..p + 8].copy_from_slice(&hash.to_le_bytes());
-        self.buf[p + 8..p + 12].copy_from_slice(&options.to_le_bytes());
-        self.buf[p + 12..p + 16].copy_from_slice(&enabled.to_le_bytes());
-        self.buf[p + 16..p + 20].copy_from_slice(&name_offset.to_le_bytes());
-        self.buf[p + 20..p + 24].copy_from_slice(&(name.len() as u32).to_le_bytes());
-        self.buf[p + 24..p + 28].copy_from_slice(&path_offset.to_le_bytes());
-        self.buf[p + 28..p + 32].copy_from_slice(&(path.len() as u32).to_le_bytes());
+        self.buf[p..p + 2].copy_from_slice(&1u16.to_ne_bytes()); // layout_version
+        self.buf[p + 2..p + 4].copy_from_slice(&0u16.to_ne_bytes()); // flags
+        self.buf[p + 4..p + 8].copy_from_slice(&hash.to_ne_bytes());
+        self.buf[p + 8..p + 12].copy_from_slice(&options.to_ne_bytes());
+        self.buf[p + 12..p + 16].copy_from_slice(&enabled.to_ne_bytes());
+        self.buf[p + 16..p + 20].copy_from_slice(&name_offset.to_ne_bytes());
+        self.buf[p + 20..p + 24].copy_from_slice(&(name.len() as u32).to_ne_bytes());
+        self.buf[p + 24..p + 28].copy_from_slice(&path_offset.to_ne_bytes());
+        self.buf[p + 28..p + 32].copy_from_slice(&(path.len() as u32).to_ne_bytes());
 
         // Write strings with NUL terminators
         let name_start = p + name_offset as usize;
@@ -931,9 +931,9 @@ impl<'a> CgroupsBuilder<'a> {
         let dir_entry = CGROUPS_RESP_HDR_SIZE
             + self.item_count as usize * CGROUPS_DIR_ENTRY_SIZE;
         self.buf[dir_entry..dir_entry + 4]
-            .copy_from_slice(&(item_start as u32).to_le_bytes());
+            .copy_from_slice(&(item_start as u32).to_ne_bytes());
         self.buf[dir_entry + 4..dir_entry + 8]
-            .copy_from_slice(&(item_size as u32).to_le_bytes());
+            .copy_from_slice(&(item_size as u32).to_ne_bytes());
 
         self.data_offset = item_start + item_size;
         self.item_count += 1;
@@ -946,12 +946,12 @@ impl<'a> CgroupsBuilder<'a> {
         let p = &mut *{ self.buf };
 
         if self.item_count == 0 {
-            p[0..2].copy_from_slice(&1u16.to_le_bytes());
-            p[2..4].copy_from_slice(&0u16.to_le_bytes());
-            p[4..8].copy_from_slice(&0u32.to_le_bytes());
-            p[8..12].copy_from_slice(&self.systemd_enabled.to_le_bytes());
-            p[12..16].copy_from_slice(&0u32.to_le_bytes());
-            p[16..24].copy_from_slice(&self.generation.to_le_bytes());
+            p[0..2].copy_from_slice(&1u16.to_ne_bytes());
+            p[2..4].copy_from_slice(&0u16.to_ne_bytes());
+            p[4..8].copy_from_slice(&0u32.to_ne_bytes());
+            p[8..12].copy_from_slice(&self.systemd_enabled.to_ne_bytes());
+            p[12..16].copy_from_slice(&0u32.to_ne_bytes());
+            p[16..24].copy_from_slice(&self.generation.to_ne_bytes());
             return CGROUPS_RESP_HDR_SIZE;
         }
 
@@ -960,7 +960,7 @@ impl<'a> CgroupsBuilder<'a> {
             + self.item_count as usize * CGROUPS_DIR_ENTRY_SIZE;
 
         // Read the first directory entry to find where packed data begins
-        let first_item_abs = u32::from_le_bytes(
+        let first_item_abs = u32::from_ne_bytes(
             p[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
                 .try_into()
                 .unwrap(),
@@ -978,21 +978,21 @@ impl<'a> CgroupsBuilder<'a> {
         let dir_base = CGROUPS_RESP_HDR_SIZE;
         for i in 0..self.item_count as usize {
             let entry = dir_base + i * CGROUPS_DIR_ENTRY_SIZE;
-            let abs_off = u32::from_le_bytes(
+            let abs_off = u32::from_ne_bytes(
                 p[entry..entry + 4].try_into().unwrap(),
             );
             let rel_off = abs_off - first_item_abs as u32;
-            p[entry..entry + 4].copy_from_slice(&rel_off.to_le_bytes());
+            p[entry..entry + 4].copy_from_slice(&rel_off.to_ne_bytes());
             // length stays the same
         }
 
         // Write snapshot header
-        p[0..2].copy_from_slice(&1u16.to_le_bytes());
-        p[2..4].copy_from_slice(&0u16.to_le_bytes());
-        p[4..8].copy_from_slice(&self.item_count.to_le_bytes());
-        p[8..12].copy_from_slice(&self.systemd_enabled.to_le_bytes());
-        p[12..16].copy_from_slice(&0u32.to_le_bytes());
-        p[16..24].copy_from_slice(&self.generation.to_le_bytes());
+        p[0..2].copy_from_slice(&1u16.to_ne_bytes());
+        p[2..4].copy_from_slice(&0u16.to_ne_bytes());
+        p[4..8].copy_from_slice(&self.item_count.to_ne_bytes());
+        p[8..12].copy_from_slice(&self.systemd_enabled.to_ne_bytes());
+        p[12..16].copy_from_slice(&0u32.to_ne_bytes());
+        p[16..24].copy_from_slice(&self.generation.to_ne_bytes());
 
         final_packed_start + packed_data_len
     }
@@ -1283,8 +1283,8 @@ mod tests {
     fn batch_dir_decode_bad_alignment() {
         let mut buf = [0u8; 8];
         // Manually write unaligned offset
-        buf[0..4].copy_from_slice(&3u32.to_le_bytes());
-        buf[4..8].copy_from_slice(&10u32.to_le_bytes());
+        buf[0..4].copy_from_slice(&3u32.to_ne_bytes());
+        buf[4..8].copy_from_slice(&10u32.to_ne_bytes());
         assert_eq!(
             batch_dir_decode(&buf, 1, 100),
             Err(NipcError::BadAlignment)
@@ -1621,7 +1621,7 @@ mod tests {
     #[test]
     fn cgroups_resp_decode_bad_layout() {
         let mut buf = [0u8; 24];
-        buf[0..2].copy_from_slice(&99u16.to_le_bytes());
+        buf[0..2].copy_from_slice(&99u16.to_ne_bytes());
         assert_eq!(
             CgroupsResponseView::decode(&buf).unwrap_err(),
             NipcError::BadLayout
@@ -1632,8 +1632,8 @@ mod tests {
     fn cgroups_resp_decode_truncated_dir() {
         // Header says item_count=2 but payload is only 24 bytes
         let mut buf = [0u8; 24];
-        buf[0..2].copy_from_slice(&1u16.to_le_bytes());
-        buf[4..8].copy_from_slice(&2u32.to_le_bytes());
+        buf[0..2].copy_from_slice(&1u16.to_ne_bytes());
+        buf[4..8].copy_from_slice(&2u32.to_ne_bytes());
         assert_eq!(
             CgroupsResponseView::decode(&buf).unwrap_err(),
             NipcError::Truncated
@@ -1644,11 +1644,11 @@ mod tests {
     fn cgroups_resp_decode_oob_dir() {
         // Header + 1 dir entry pointing beyond payload
         let mut buf = [0u8; 64];
-        buf[0..2].copy_from_slice(&1u16.to_le_bytes());
-        buf[4..8].copy_from_slice(&1u32.to_le_bytes());
+        buf[0..2].copy_from_slice(&1u16.to_ne_bytes());
+        buf[4..8].copy_from_slice(&1u32.to_ne_bytes());
         // Dir entry at offset 24: offset=0, length=9999
-        buf[24..28].copy_from_slice(&0u32.to_le_bytes());
-        buf[28..32].copy_from_slice(&9999u32.to_le_bytes());
+        buf[24..28].copy_from_slice(&0u32.to_ne_bytes());
+        buf[28..32].copy_from_slice(&9999u32.to_ne_bytes());
         assert_eq!(
             CgroupsResponseView::decode(&buf).unwrap_err(),
             NipcError::OutOfBounds
@@ -1659,10 +1659,10 @@ mod tests {
     fn cgroups_resp_decode_item_too_small() {
         // Dir entry with length < 32
         let mut buf = [0u8; 64];
-        buf[0..2].copy_from_slice(&1u16.to_le_bytes());
-        buf[4..8].copy_from_slice(&1u32.to_le_bytes());
-        buf[24..28].copy_from_slice(&0u32.to_le_bytes());
-        buf[28..32].copy_from_slice(&16u32.to_le_bytes());
+        buf[0..2].copy_from_slice(&1u16.to_ne_bytes());
+        buf[4..8].copy_from_slice(&1u32.to_ne_bytes());
+        buf[24..28].copy_from_slice(&0u32.to_ne_bytes());
+        buf[28..32].copy_from_slice(&16u32.to_ne_bytes());
         assert_eq!(
             CgroupsResponseView::decode(&buf).unwrap_err(),
             NipcError::Truncated
@@ -1679,17 +1679,17 @@ mod tests {
 
         // Find item data and corrupt the name's NUL terminator
         let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
-        let item_off = u32::from_le_bytes(
+        let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
                 .try_into()
                 .unwrap(),
         ) as usize;
         let item_start = dir_end + item_off;
 
-        let noff = u32::from_le_bytes(
+        let noff = u32::from_ne_bytes(
             buf[item_start + 16..item_start + 20].try_into().unwrap(),
         ) as usize;
-        let nlen = u32::from_le_bytes(
+        let nlen = u32::from_ne_bytes(
             buf[item_start + 20..item_start + 24].try_into().unwrap(),
         ) as usize;
 
@@ -1710,7 +1710,7 @@ mod tests {
 
         // Corrupt name_length to huge value
         let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
-        let item_off = u32::from_le_bytes(
+        let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
                 .try_into()
                 .unwrap(),
@@ -1718,7 +1718,7 @@ mod tests {
         let item_start = dir_end + item_off;
 
         buf[item_start + 20..item_start + 24]
-            .copy_from_slice(&99999u32.to_le_bytes());
+            .copy_from_slice(&99999u32.to_ne_bytes());
 
         // Re-decode after corruption
         let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
@@ -1965,11 +1965,11 @@ mod tests {
     fn cgroups_resp_dir_bad_alignment() {
         // Dir entry with unaligned offset
         let mut buf = [0u8; 128];
-        buf[0..2].copy_from_slice(&1u16.to_le_bytes());
-        buf[4..8].copy_from_slice(&1u32.to_le_bytes());
+        buf[0..2].copy_from_slice(&1u16.to_ne_bytes());
+        buf[4..8].copy_from_slice(&1u32.to_ne_bytes());
         // offset=3 (not 8-byte aligned), length=32
-        buf[24..28].copy_from_slice(&3u32.to_le_bytes());
-        buf[28..32].copy_from_slice(&32u32.to_le_bytes());
+        buf[24..28].copy_from_slice(&3u32.to_ne_bytes());
+        buf[28..32].copy_from_slice(&32u32.to_ne_bytes());
         assert_eq!(
             CgroupsResponseView::decode(&buf).unwrap_err(),
             NipcError::BadAlignment
@@ -1986,13 +1986,13 @@ mod tests {
 
         // Corrupt item layout_version
         let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
-        let item_off = u32::from_le_bytes(
+        let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
                 .try_into()
                 .unwrap(),
         ) as usize;
         let item_start = dir_end + item_off;
-        buf[item_start..item_start + 2].copy_from_slice(&99u16.to_le_bytes());
+        buf[item_start..item_start + 2].copy_from_slice(&99u16.to_ne_bytes());
 
         // Re-decode after corruption
         let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
@@ -2008,14 +2008,14 @@ mod tests {
         let total = b.finish();
 
         let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
-        let item_off = u32::from_le_bytes(
+        let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
                 .try_into()
                 .unwrap(),
         ) as usize;
         let item_start = dir_end + item_off;
         // Set name_offset to 0 (below header)
-        buf[item_start + 16..item_start + 20].copy_from_slice(&0u32.to_le_bytes());
+        buf[item_start + 16..item_start + 20].copy_from_slice(&0u32.to_ne_bytes());
 
         let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
         assert_eq!(view.item(0).unwrap_err(), NipcError::OutOfBounds);
@@ -2029,14 +2029,14 @@ mod tests {
         let total = b.finish();
 
         let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
-        let item_off = u32::from_le_bytes(
+        let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
                 .try_into()
                 .unwrap(),
         ) as usize;
         let item_start = dir_end + item_off;
         // Set path_offset to 16 (below header)
-        buf[item_start + 24..item_start + 28].copy_from_slice(&16u32.to_le_bytes());
+        buf[item_start + 24..item_start + 28].copy_from_slice(&16u32.to_ne_bytes());
 
         let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
         assert_eq!(view.item(0).unwrap_err(), NipcError::OutOfBounds);
@@ -2051,16 +2051,16 @@ mod tests {
 
         // Corrupt path NUL
         let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
-        let item_off = u32::from_le_bytes(
+        let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
                 .try_into()
                 .unwrap(),
         ) as usize;
         let item_start = dir_end + item_off;
-        let poff = u32::from_le_bytes(
+        let poff = u32::from_ne_bytes(
             buf[item_start + 24..item_start + 28].try_into().unwrap(),
         ) as usize;
-        let plen = u32::from_le_bytes(
+        let plen = u32::from_ne_bytes(
             buf[item_start + 28..item_start + 32].try_into().unwrap(),
         ) as usize;
         buf[item_start + poff + plen] = b'X';
@@ -2079,7 +2079,7 @@ mod tests {
         let total = b.finish();
 
         let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
-        let item_off = u32::from_le_bytes(
+        let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
                 .try_into()
                 .unwrap(),
@@ -2088,8 +2088,8 @@ mod tests {
 
         // name_off=32, name_len=5, so name region is [32..38)
         // Set path_off=34 (inside name region), path_len=1
-        buf[item_start + 24..item_start + 28].copy_from_slice(&34u32.to_le_bytes());
-        buf[item_start + 28..item_start + 32].copy_from_slice(&1u32.to_le_bytes());
+        buf[item_start + 24..item_start + 28].copy_from_slice(&34u32.to_ne_bytes());
+        buf[item_start + 28..item_start + 32].copy_from_slice(&1u32.to_ne_bytes());
         // Ensure NUL at item[34+1]=item[35]
         buf[item_start + 35] = 0;
 

@@ -195,15 +195,15 @@ func WinShmServerCreate(runDir, serviceName string, authToken, sessionID uint64,
 	}
 
 	// Write header
-	binary.LittleEndian.PutUint32(data[wshOFFMagic:], winShmMagic)
-	binary.LittleEndian.PutUint32(data[wshOFFVersion:], winShmVersion)
-	binary.LittleEndian.PutUint32(data[wshOFFHeaderLen:], winShmHeaderLen)
-	binary.LittleEndian.PutUint32(data[wshOFFProfile:], profile)
-	binary.LittleEndian.PutUint32(data[wshOFFReqOffset:], reqOff)
-	binary.LittleEndian.PutUint32(data[wshOFFReqCapacity:], reqCap)
-	binary.LittleEndian.PutUint32(data[wshOFFRespOffset:], respOff)
-	binary.LittleEndian.PutUint32(data[wshOFFRespCapacity:], respCap)
-	binary.LittleEndian.PutUint32(data[wshOFFSpinTries:], winShmDefaultSpin)
+	binary.NativeEndian.PutUint32(data[wshOFFMagic:], winShmMagic)
+	binary.NativeEndian.PutUint32(data[wshOFFVersion:], winShmVersion)
+	binary.NativeEndian.PutUint32(data[wshOFFHeaderLen:], winShmHeaderLen)
+	binary.NativeEndian.PutUint32(data[wshOFFProfile:], profile)
+	binary.NativeEndian.PutUint32(data[wshOFFReqOffset:], reqOff)
+	binary.NativeEndian.PutUint32(data[wshOFFReqCapacity:], reqCap)
+	binary.NativeEndian.PutUint32(data[wshOFFRespOffset:], respOff)
+	binary.NativeEndian.PutUint32(data[wshOFFRespCapacity:], respCap)
+	binary.NativeEndian.PutUint32(data[wshOFFSpinTries:], winShmDefaultSpin)
 
 	// Release fence
 	atomic.StoreInt32((*int32)(unsafe.Pointer(&data[wshOFFReqLen])), 0)
@@ -329,36 +329,36 @@ func WinShmClientAttach(runDir, serviceName string, authToken, sessionID uint64,
 	atomic.LoadInt32((*int32)(unsafe.Pointer(&data[wshOFFReqLen])))
 
 	// Validate header
-	magic := binary.LittleEndian.Uint32(data[wshOFFMagic:])
+	magic := binary.NativeEndian.Uint32(data[wshOFFMagic:])
 	if magic != winShmMagic {
 		procUnmapViewOfFile.Call(base)
 		syscall.CloseHandle(mapping)
 		return nil, ErrWinShmBadMagic
 	}
-	version := binary.LittleEndian.Uint32(data[wshOFFVersion:])
+	version := binary.NativeEndian.Uint32(data[wshOFFVersion:])
 	if version != winShmVersion {
 		procUnmapViewOfFile.Call(base)
 		syscall.CloseHandle(mapping)
 		return nil, ErrWinShmBadVersion
 	}
-	hdrLen := binary.LittleEndian.Uint32(data[wshOFFHeaderLen:])
+	hdrLen := binary.NativeEndian.Uint32(data[wshOFFHeaderLen:])
 	if hdrLen != winShmHeaderLen {
 		procUnmapViewOfFile.Call(base)
 		syscall.CloseHandle(mapping)
 		return nil, ErrWinShmBadHeader
 	}
-	hdrProfile := binary.LittleEndian.Uint32(data[wshOFFProfile:])
+	hdrProfile := binary.NativeEndian.Uint32(data[wshOFFProfile:])
 	if hdrProfile != profile {
 		procUnmapViewOfFile.Call(base)
 		syscall.CloseHandle(mapping)
 		return nil, ErrWinShmBadProfile
 	}
 
-	reqOff := binary.LittleEndian.Uint32(data[wshOFFReqOffset:])
-	reqCap := binary.LittleEndian.Uint32(data[wshOFFReqCapacity:])
-	respOff := binary.LittleEndian.Uint32(data[wshOFFRespOffset:])
-	respCap := binary.LittleEndian.Uint32(data[wshOFFRespCapacity:])
-	spin := binary.LittleEndian.Uint32(data[wshOFFSpinTries:])
+	reqOff := binary.NativeEndian.Uint32(data[wshOFFReqOffset:])
+	reqCap := binary.NativeEndian.Uint32(data[wshOFFReqCapacity:])
+	respOff := binary.NativeEndian.Uint32(data[wshOFFRespOffset:])
+	respCap := binary.NativeEndian.Uint32(data[wshOFFRespCapacity:])
+	spin := binary.NativeEndian.Uint32(data[wshOFFSpinTries:])
 	regionSize := uintptr(respOff + respCap)
 
 	// Now reslice to full region

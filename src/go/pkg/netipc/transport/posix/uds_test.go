@@ -1325,7 +1325,7 @@ func TestPipeline10(t *testing.T) {
 	// Client sends 10 requests before reading any
 	for i := uint64(1); i <= count; i++ {
 		payload := make([]byte, 8)
-		binary.LittleEndian.PutUint64(payload, i)
+		binary.NativeEndian.PutUint64(payload, i)
 		hdr := protocol.Header{
 			Kind:      protocol.KindRequest,
 			Code:      protocol.MethodIncrement,
@@ -1351,7 +1351,7 @@ func TestPipeline10(t *testing.T) {
 			t.Errorf("payload len = %d, want 8", len(rPayload))
 			continue
 		}
-		val := binary.LittleEndian.Uint64(rPayload)
+		val := binary.NativeEndian.Uint64(rPayload)
 		if val != i {
 			t.Errorf("payload value = %d, want %d", val, i)
 		}
@@ -1423,7 +1423,7 @@ func TestPipeline100(t *testing.T) {
 	// Client sends 100 requests
 	for i := uint64(1); i <= count; i++ {
 		payload := make([]byte, 8)
-		binary.LittleEndian.PutUint64(payload, i)
+		binary.NativeEndian.PutUint64(payload, i)
 		hdr := protocol.Header{
 			Kind:      protocol.KindRequest,
 			Code:      protocol.MethodIncrement,
@@ -1445,7 +1445,7 @@ func TestPipeline100(t *testing.T) {
 		if rHdr.MessageID != i {
 			t.Errorf("message_id = %d, want %d", rHdr.MessageID, i)
 		}
-		val := binary.LittleEndian.Uint64(rPayload)
+		val := binary.NativeEndian.Uint64(rPayload)
 		if val != i {
 			t.Errorf("payload value = %d, want %d", val, i)
 		}

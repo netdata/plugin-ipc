@@ -7,7 +7,7 @@ Every message on the wire — whether carried over UDS, Named Pipe, or SHM —
 uses these exact byte layouts. All implementations (C, Rust, Go) must
 produce and consume identical bytes for the same logical message.
 
-All multi-byte fields are little-endian.
+All multi-byte fields use host byte order (localhost-only IPC).
 
 ## Outer message header (32 bytes)
 

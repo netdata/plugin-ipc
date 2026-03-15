@@ -205,7 +205,7 @@ func runPipelineClient(runDir, service string, count int) int {
 	for i := 0; i < count; i++ {
 		val := uint64(i + 1)
 		payload := make([]byte, 8)
-		binary.LittleEndian.PutUint64(payload, val)
+		binary.NativeEndian.PutUint64(payload, val)
 
 		hdr := protocol.Header{
 			Kind:      protocol.KindRequest,
@@ -244,7 +244,7 @@ func runPipelineClient(runDir, service string, count int) int {
 			fmt.Fprintf(os.Stderr, "client: [%d] payload len %d, want 8\n", i, len(rpayload))
 			ok = false
 		} else {
-			val := binary.LittleEndian.Uint64(rpayload)
+			val := binary.NativeEndian.Uint64(rpayload)
 			if val != expected {
 				fmt.Fprintf(os.Stderr, "client: [%d] payload %d, want %d\n", i, val, expected)
 				ok = false

@@ -1,6 +1,7 @@
 // Package protocol implements the wire envelope and codec for the netipc
 // protocol. Pure byte-layout encode/decode. No I/O, no transport, no
-// allocation on decode. All multi-byte fields are little-endian on the wire.
+// allocation on decode. Localhost-only IPC — all multi-byte fields use
+// host byte order.
 //
 // Decoded "View" types borrow the underlying buffer and are valid only while
 // that buffer lives. Copy immediately if the data is needed later.
@@ -69,7 +70,7 @@ const (
 	cgroupsItemHdr   = 32
 )
 
-var le = binary.LittleEndian
+var ne = binary.NativeEndian
 
 // ---------------------------------------------------------------------------
 //  Errors
@@ -122,16 +123,16 @@ func (h *Header) Encode(buf []byte) int {
 	if len(buf) < HeaderSize {
 		return 0
 	}
-	le.PutUint32(buf[0:4], h.Magic)
-	le.PutUint16(buf[4:6], h.Version)
-	le.PutUint16(buf[6:8], h.HeaderLen)
-	le.PutUint16(buf[8:10], h.Kind)
-	le.PutUint16(buf[10:12], h.Flags)
-	le.PutUint16(buf[12:14], h.Code)
-	le.PutUint16(buf[14:16], h.TransportStatus)
-	le.PutUint32(buf[16:20], h.PayloadLen)
-	le.PutUint32(buf[20:24], h.ItemCount)
-	le.PutUint64(buf[24:32], h.MessageID)
+	ne.PutUint32(buf[0:4], h.Magic)
+	ne.PutUint16(buf[4:6], h.Version)
+	ne.PutUint16(buf[6:8], h.HeaderLen)
+	ne.PutUint16(buf[8:10], h.Kind)
+	ne.PutUint16(buf[10:12], h.Flags)
+	ne.PutUint16(buf[12:14], h.Code)
+	ne.PutUint16(buf[14:16], h.TransportStatus)
+	ne.PutUint32(buf[16:20], h.PayloadLen)
+	ne.PutUint32(buf[20:24], h.ItemCount)
+	ne.PutUint64(buf[24:32], h.MessageID)
 	return HeaderSize
 }
 
@@ -142,16 +143,16 @@ func DecodeHeader(buf []byte) (Header, error) {
 		return Header{}, ErrTruncated
 	}
 	h := Header{
-		Magic:           le.Uint32(buf[0:4]),
-		Version:         le.Uint16(buf[4:6]),
-		HeaderLen:       le.Uint16(buf[6:8]),
-		Kind:            le.Uint16(buf[8:10]),
-		Flags:           le.Uint16(buf[10:12]),
-		Code:            le.Uint16(buf[12:14]),
-		TransportStatus: le.Uint16(buf[14:16]),
-		PayloadLen:      le.Uint32(buf[16:20]),
-		ItemCount:       le.Uint32(buf[20:24]),
-		MessageID:       le.Uint64(buf[24:32]),
+		Magic:           ne.Uint32(buf[0:4]),
+		Version:         ne.Uint16(buf[4:6]),
+		HeaderLen:       ne.Uint16(buf[6:8]),
+		Kind:            ne.Uint16(buf[8:10]),
+		Flags:           ne.Uint16(buf[10:12]),
+		Code:            ne.Uint16(buf[12:14]),
+		TransportStatus: ne.Uint16(buf[14:16]),
+		PayloadLen:      ne.Uint32(buf[16:20]),
+		ItemCount:       ne.Uint32(buf[20:24]),
+		MessageID:       ne.Uint64(buf[24:32]),
 	}
 	if h.Magic != MagicMsg {
 		return Header{}, ErrBadMagic
@@ -190,14 +191,14 @@ func (c *ChunkHeader) Encode(buf []byte) int {
 	if len(buf) < HeaderSize {
 		return 0
 	}
-	le.PutUint32(buf[0:4], c.Magic)
-	le.PutUint16(buf[4:6], c.Version)
-	le.PutUint16(buf[6:8], c.Flags)
-	le.PutUint64(buf[8:16], c.MessageID)
-	le.PutUint32(buf[16:20], c.TotalMessageLen)
-	le.PutUint32(buf[20:24], c.ChunkIndex)
-	le.PutUint32(buf[24:28], c.ChunkCount)
-	le.PutUint32(buf[28:32], c.ChunkPayloadLen)
+	ne.PutUint32(buf[0:4], c.Magic)
+	ne.PutUint16(buf[4:6], c.Version)
+	ne.PutUint16(buf[6:8], c.Flags)
+	ne.PutUint64(buf[8:16], c.MessageID)
+	ne.PutUint32(buf[16:20], c.TotalMessageLen)
+	ne.PutUint32(buf[20:24], c.ChunkIndex)
+	ne.PutUint32(buf[24:28], c.ChunkCount)
+	ne.PutUint32(buf[28:32], c.ChunkPayloadLen)
 	return HeaderSize
 }
 
@@ -208,14 +209,14 @@ func DecodeChunkHeader(buf []byte) (ChunkHeader, error) {
 		return ChunkHeader{}, ErrTruncated
 	}
 	c := ChunkHeader{
-		Magic:           le.Uint32(buf[0:4]),
-		Version:         le.Uint16(buf[4:6]),
-		Flags:           le.Uint16(buf[6:8]),
-		MessageID:       le.Uint64(buf[8:16]),
-		TotalMessageLen: le.Uint32(buf[16:20]),
-		ChunkIndex:      le.Uint32(buf[20:24]),
-		ChunkCount:      le.Uint32(buf[24:28]),
-		ChunkPayloadLen: le.Uint32(buf[28:32]),
+		Magic:           ne.Uint32(buf[0:4]),
+		Version:         ne.Uint16(buf[4:6]),
+		Flags:           ne.Uint16(buf[6:8]),
+		MessageID:       ne.Uint64(buf[8:16]),
+		TotalMessageLen: ne.Uint32(buf[16:20]),
+		ChunkIndex:      ne.Uint32(buf[20:24]),
+		ChunkCount:      ne.Uint32(buf[24:28]),
+		ChunkPayloadLen: ne.Uint32(buf[28:32]),
 	}
 	if c.Magic != MagicChunk {
 		return ChunkHeader{}, ErrBadMagic
@@ -251,8 +252,8 @@ func BatchDirEncode(entries []BatchEntry, buf []byte) int {
 	}
 	for i, e := range entries {
 		base := i * 8
-		le.PutUint32(buf[base:base+4], e.Offset)
-		le.PutUint32(buf[base+4:base+8], e.Length)
+		ne.PutUint32(buf[base:base+4], e.Offset)
+		ne.PutUint32(buf[base+4:base+8], e.Length)
 	}
 	return need
 }
@@ -269,8 +270,8 @@ func BatchDirDecode(buf []byte, itemCount uint32, packedAreaLen uint32) ([]Batch
 	out := make([]BatchEntry, count)
 	for i := 0; i < count; i++ {
 		base := i * 8
-		off := le.Uint32(buf[base : base+4])
-		length := le.Uint32(buf[base+4 : base+8])
+		off := ne.Uint32(buf[base : base+4])
+		length := ne.Uint32(buf[base+4 : base+8])
 
 		if int(off)%Alignment != 0 {
 			return nil, ErrBadAlignment
@@ -299,8 +300,8 @@ func BatchItemGet(payload []byte, itemCount uint32, index uint32) ([]byte, error
 
 	idx := int(index)
 	base := idx * 8
-	off := le.Uint32(payload[base : base+4])
-	length := le.Uint32(payload[base+4 : base+8])
+	off := ne.Uint32(payload[base : base+4])
+	length := ne.Uint32(payload[base+4 : base+8])
 
 	packedAreaStart := dirAligned
 	packedAreaLen := len(payload) - packedAreaStart
@@ -365,8 +366,8 @@ func (b *BatchBuilder) Add(item []byte) error {
 
 	// Write directory entry.
 	idx := int(b.itemCount) * 8
-	le.PutUint32(b.buf[idx:idx+4], uint32(alignedOff))
-	le.PutUint32(b.buf[idx+4:idx+8], uint32(len(item)))
+	ne.PutUint32(b.buf[idx:idx+4], uint32(alignedOff))
+	ne.PutUint32(b.buf[idx+4:idx+8], uint32(len(item)))
 
 	b.dataOffset = alignedOff + len(item)
 	b.itemCount++
@@ -412,17 +413,17 @@ func (h *Hello) Encode(buf []byte) int {
 	if len(buf) < helloSize {
 		return 0
 	}
-	le.PutUint16(buf[0:2], h.LayoutVersion)
-	le.PutUint16(buf[2:4], h.Flags)
-	le.PutUint32(buf[4:8], h.SupportedProfiles)
-	le.PutUint32(buf[8:12], h.PreferredProfiles)
-	le.PutUint32(buf[12:16], h.MaxRequestPayloadBytes)
-	le.PutUint32(buf[16:20], h.MaxRequestBatchItems)
-	le.PutUint32(buf[20:24], h.MaxResponsePayloadBytes)
-	le.PutUint32(buf[24:28], h.MaxResponseBatchItems)
-	le.PutUint32(buf[28:32], 0) // padding
-	le.PutUint64(buf[32:40], h.AuthToken)
-	le.PutUint32(buf[40:44], h.PacketSize)
+	ne.PutUint16(buf[0:2], h.LayoutVersion)
+	ne.PutUint16(buf[2:4], h.Flags)
+	ne.PutUint32(buf[4:8], h.SupportedProfiles)
+	ne.PutUint32(buf[8:12], h.PreferredProfiles)
+	ne.PutUint32(buf[12:16], h.MaxRequestPayloadBytes)
+	ne.PutUint32(buf[16:20], h.MaxRequestBatchItems)
+	ne.PutUint32(buf[20:24], h.MaxResponsePayloadBytes)
+	ne.PutUint32(buf[24:28], h.MaxResponseBatchItems)
+	ne.PutUint32(buf[28:32], 0) // padding
+	ne.PutUint64(buf[32:40], h.AuthToken)
+	ne.PutUint32(buf[40:44], h.PacketSize)
 	return helloSize
 }
 
@@ -432,23 +433,23 @@ func DecodeHello(buf []byte) (Hello, error) {
 		return Hello{}, ErrTruncated
 	}
 	h := Hello{
-		LayoutVersion:           le.Uint16(buf[0:2]),
-		Flags:                   le.Uint16(buf[2:4]),
-		SupportedProfiles:       le.Uint32(buf[4:8]),
-		PreferredProfiles:       le.Uint32(buf[8:12]),
-		MaxRequestPayloadBytes:  le.Uint32(buf[12:16]),
-		MaxRequestBatchItems:    le.Uint32(buf[16:20]),
-		MaxResponsePayloadBytes: le.Uint32(buf[20:24]),
-		MaxResponseBatchItems:   le.Uint32(buf[24:28]),
+		LayoutVersion:           ne.Uint16(buf[0:2]),
+		Flags:                   ne.Uint16(buf[2:4]),
+		SupportedProfiles:       ne.Uint32(buf[4:8]),
+		PreferredProfiles:       ne.Uint32(buf[8:12]),
+		MaxRequestPayloadBytes:  ne.Uint32(buf[12:16]),
+		MaxRequestBatchItems:    ne.Uint32(buf[16:20]),
+		MaxResponsePayloadBytes: ne.Uint32(buf[20:24]),
+		MaxResponseBatchItems:   ne.Uint32(buf[24:28]),
 		// buf[28:32] is reserved padding, must be zero.
-		AuthToken:  le.Uint64(buf[32:40]),
-		PacketSize: le.Uint32(buf[40:44]),
+		AuthToken:  ne.Uint64(buf[32:40]),
+		PacketSize: ne.Uint32(buf[40:44]),
 	}
 	if h.LayoutVersion != 1 {
 		return Hello{}, ErrBadLayout
 	}
 	// Validate padding bytes 28..32 are zero
-	if le.Uint32(buf[28:32]) != 0 {
+	if ne.Uint32(buf[28:32]) != 0 {
 		return Hello{}, ErrBadLayout
 	}
 	return h, nil
@@ -479,18 +480,18 @@ func (h *HelloAck) Encode(buf []byte) int {
 	if len(buf) < helloAckSize {
 		return 0
 	}
-	le.PutUint16(buf[0:2], h.LayoutVersion)
-	le.PutUint16(buf[2:4], h.Flags)
-	le.PutUint32(buf[4:8], h.ServerSupportedProfiles)
-	le.PutUint32(buf[8:12], h.IntersectionProfiles)
-	le.PutUint32(buf[12:16], h.SelectedProfile)
-	le.PutUint32(buf[16:20], h.AgreedMaxRequestPayloadBytes)
-	le.PutUint32(buf[20:24], h.AgreedMaxRequestBatchItems)
-	le.PutUint32(buf[24:28], h.AgreedMaxResponsePayloadBytes)
-	le.PutUint32(buf[28:32], h.AgreedMaxResponseBatchItems)
-	le.PutUint32(buf[32:36], h.AgreedPacketSize)
-	le.PutUint32(buf[36:40], 0) // padding
-	le.PutUint64(buf[40:48], h.SessionID)
+	ne.PutUint16(buf[0:2], h.LayoutVersion)
+	ne.PutUint16(buf[2:4], h.Flags)
+	ne.PutUint32(buf[4:8], h.ServerSupportedProfiles)
+	ne.PutUint32(buf[8:12], h.IntersectionProfiles)
+	ne.PutUint32(buf[12:16], h.SelectedProfile)
+	ne.PutUint32(buf[16:20], h.AgreedMaxRequestPayloadBytes)
+	ne.PutUint32(buf[20:24], h.AgreedMaxRequestBatchItems)
+	ne.PutUint32(buf[24:28], h.AgreedMaxResponsePayloadBytes)
+	ne.PutUint32(buf[28:32], h.AgreedMaxResponseBatchItems)
+	ne.PutUint32(buf[32:36], h.AgreedPacketSize)
+	ne.PutUint32(buf[36:40], 0) // padding
+	ne.PutUint64(buf[40:48], h.SessionID)
 	return helloAckSize
 }
 
@@ -501,18 +502,18 @@ func DecodeHelloAck(buf []byte) (HelloAck, error) {
 		return HelloAck{}, ErrTruncated
 	}
 	h := HelloAck{
-		LayoutVersion:                 le.Uint16(buf[0:2]),
-		Flags:                         le.Uint16(buf[2:4]),
-		ServerSupportedProfiles:       le.Uint32(buf[4:8]),
-		IntersectionProfiles:          le.Uint32(buf[8:12]),
-		SelectedProfile:               le.Uint32(buf[12:16]),
-		AgreedMaxRequestPayloadBytes:  le.Uint32(buf[16:20]),
-		AgreedMaxRequestBatchItems:    le.Uint32(buf[20:24]),
-		AgreedMaxResponsePayloadBytes: le.Uint32(buf[24:28]),
-		AgreedMaxResponseBatchItems:   le.Uint32(buf[28:32]),
-		AgreedPacketSize:              le.Uint32(buf[32:36]),
+		LayoutVersion:                 ne.Uint16(buf[0:2]),
+		Flags:                         ne.Uint16(buf[2:4]),
+		ServerSupportedProfiles:       ne.Uint32(buf[4:8]),
+		IntersectionProfiles:          ne.Uint32(buf[8:12]),
+		SelectedProfile:               ne.Uint32(buf[12:16]),
+		AgreedMaxRequestPayloadBytes:  ne.Uint32(buf[16:20]),
+		AgreedMaxRequestBatchItems:    ne.Uint32(buf[20:24]),
+		AgreedMaxResponsePayloadBytes: ne.Uint32(buf[24:28]),
+		AgreedMaxResponseBatchItems:   ne.Uint32(buf[28:32]),
+		AgreedPacketSize:              ne.Uint32(buf[32:36]),
 		// skip padding at 36:40
-		SessionID: le.Uint64(buf[40:48]),
+		SessionID: ne.Uint64(buf[40:48]),
 	}
 	if h.LayoutVersion != 1 {
 		return HelloAck{}, ErrBadLayout
@@ -539,8 +540,8 @@ func (r *CgroupsRequest) Encode(buf []byte) int {
 	if len(buf) < cgroupsReqSize {
 		return 0
 	}
-	le.PutUint16(buf[0:2], r.LayoutVersion)
-	le.PutUint16(buf[2:4], r.Flags)
+	ne.PutUint16(buf[0:2], r.LayoutVersion)
+	ne.PutUint16(buf[2:4], r.Flags)
 	return cgroupsReqSize
 }
 
@@ -551,8 +552,8 @@ func DecodeCgroupsRequest(buf []byte) (CgroupsRequest, error) {
 		return CgroupsRequest{}, ErrTruncated
 	}
 	r := CgroupsRequest{
-		LayoutVersion: le.Uint16(buf[0:2]),
-		Flags:         le.Uint16(buf[2:4]),
+		LayoutVersion: ne.Uint16(buf[0:2]),
+		Flags:         ne.Uint16(buf[2:4]),
 	}
 	if r.LayoutVersion != 1 {
 		return CgroupsRequest{}, ErrBadLayout
@@ -638,12 +639,12 @@ func DecodeCgroupsResponse(buf []byte) (CgroupsResponseView, error) {
 		return CgroupsResponseView{}, ErrTruncated
 	}
 
-	layoutVersion := le.Uint16(buf[0:2])
-	flags := le.Uint16(buf[2:4])
-	itemCount := le.Uint32(buf[4:8])
-	systemdEnabled := le.Uint32(buf[8:12])
-	reserved := le.Uint32(buf[12:16])
-	generation := le.Uint64(buf[16:24])
+	layoutVersion := ne.Uint16(buf[0:2])
+	flags := ne.Uint16(buf[2:4])
+	itemCount := ne.Uint32(buf[4:8])
+	systemdEnabled := ne.Uint32(buf[8:12])
+	reserved := ne.Uint32(buf[12:16])
+	generation := ne.Uint64(buf[16:24])
 
 	if layoutVersion != 1 {
 		return CgroupsResponseView{}, ErrBadLayout
@@ -671,8 +672,8 @@ func DecodeCgroupsResponse(buf []byte) (CgroupsResponseView, error) {
 	// Validate each directory entry.
 	for i := 0; i < int(itemCount); i++ {
 		base := cgroupsRespHdr + i*8
-		off := le.Uint32(buf[base : base+4])
-		length := le.Uint32(buf[base+4 : base+8])
+		off := ne.Uint32(buf[base : base+4])
+		length := ne.Uint32(buf[base+4 : base+8])
 
 		if int(off)%Alignment != 0 {
 			return CgroupsResponseView{}, ErrBadAlignment
@@ -707,22 +708,22 @@ func (v *CgroupsResponseView) Item(index uint32) (CgroupsItemView, error) {
 	packedAreaStart := dirStart + dirSize
 
 	dirBase := dirStart + int(index)*8
-	itemOff := int(le.Uint32(v.payload[dirBase : dirBase+4]))
-	itemLen := int(le.Uint32(v.payload[dirBase+4 : dirBase+8]))
+	itemOff := int(ne.Uint32(v.payload[dirBase : dirBase+4]))
+	itemLen := int(ne.Uint32(v.payload[dirBase+4 : dirBase+8]))
 
 	itemStart := packedAreaStart + itemOff
 	item := v.payload[itemStart : itemStart+itemLen]
 
-	layoutVersion := le.Uint16(item[0:2])
-	flags := le.Uint16(item[2:4])
-	hash := le.Uint32(item[4:8])
-	options := le.Uint32(item[8:12])
-	enabled := le.Uint32(item[12:16])
+	layoutVersion := ne.Uint16(item[0:2])
+	flags := ne.Uint16(item[2:4])
+	hash := ne.Uint32(item[4:8])
+	options := ne.Uint32(item[8:12])
+	enabled := ne.Uint32(item[12:16])
 
-	nameOff := int(le.Uint32(item[16:20]))
-	nameLen := le.Uint32(item[20:24])
-	pathOff := int(le.Uint32(item[24:28]))
-	pathLen := le.Uint32(item[28:32])
+	nameOff := int(ne.Uint32(item[16:20]))
+	nameLen := ne.Uint32(item[20:24])
+	pathOff := int(ne.Uint32(item[24:28]))
+	pathLen := ne.Uint32(item[28:32])
 
 	if layoutVersion != 1 {
 		return CgroupsItemView{}, ErrBadLayout
@@ -842,15 +843,15 @@ func (b *CgroupsBuilder) Add(hash, options, enabled uint32, name, path []byte) e
 
 	// Write item header.
 	p := itemStart
-	le.PutUint16(b.buf[p:p+2], 1)   // layout_version
-	le.PutUint16(b.buf[p+2:p+4], 0) // flags
-	le.PutUint32(b.buf[p+4:p+8], hash)
-	le.PutUint32(b.buf[p+8:p+12], options)
-	le.PutUint32(b.buf[p+12:p+16], enabled)
-	le.PutUint32(b.buf[p+16:p+20], nameOffset)
-	le.PutUint32(b.buf[p+20:p+24], uint32(len(name)))
-	le.PutUint32(b.buf[p+24:p+28], pathOffset)
-	le.PutUint32(b.buf[p+28:p+32], uint32(len(path)))
+	ne.PutUint16(b.buf[p:p+2], 1)   // layout_version
+	ne.PutUint16(b.buf[p+2:p+4], 0) // flags
+	ne.PutUint32(b.buf[p+4:p+8], hash)
+	ne.PutUint32(b.buf[p+8:p+12], options)
+	ne.PutUint32(b.buf[p+12:p+16], enabled)
+	ne.PutUint32(b.buf[p+16:p+20], nameOffset)
+	ne.PutUint32(b.buf[p+20:p+24], uint32(len(name)))
+	ne.PutUint32(b.buf[p+24:p+28], pathOffset)
+	ne.PutUint32(b.buf[p+28:p+32], uint32(len(path)))
 
 	// Write strings with NUL terminators.
 	ns := p + int(nameOffset)
@@ -863,8 +864,8 @@ func (b *CgroupsBuilder) Add(hash, options, enabled uint32, name, path []byte) e
 
 	// Write directory entry (absolute offset stored temporarily).
 	dirEntry := cgroupsRespHdr + int(b.itemCount)*cgroupsDirEntry
-	le.PutUint32(b.buf[dirEntry:dirEntry+4], uint32(itemStart))
-	le.PutUint32(b.buf[dirEntry+4:dirEntry+8], uint32(itemSize))
+	ne.PutUint32(b.buf[dirEntry:dirEntry+4], uint32(itemStart))
+	ne.PutUint32(b.buf[dirEntry+4:dirEntry+8], uint32(itemSize))
 
 	b.dataOffset = itemStart + itemSize
 	b.itemCount++
@@ -877,12 +878,12 @@ func (b *CgroupsBuilder) Finish() int {
 	p := b.buf
 
 	if b.itemCount == 0 {
-		le.PutUint16(p[0:2], 1)
-		le.PutUint16(p[2:4], 0)
-		le.PutUint32(p[4:8], 0)
-		le.PutUint32(p[8:12], b.systemdEnabled)
-		le.PutUint32(p[12:16], 0)
-		le.PutUint64(p[16:24], b.generation)
+		ne.PutUint16(p[0:2], 1)
+		ne.PutUint16(p[2:4], 0)
+		ne.PutUint32(p[4:8], 0)
+		ne.PutUint32(p[8:12], b.systemdEnabled)
+		ne.PutUint32(p[12:16], 0)
+		ne.PutUint64(p[16:24], b.generation)
 		return cgroupsRespHdr
 	}
 
@@ -890,7 +891,7 @@ func (b *CgroupsBuilder) Finish() int {
 	finalPackedStart := cgroupsRespHdr + int(b.itemCount)*cgroupsDirEntry
 
 	// Read the first directory entry to find where packed data begins.
-	firstItemAbs := int(le.Uint32(p[cgroupsRespHdr : cgroupsRespHdr+4]))
+	firstItemAbs := int(ne.Uint32(p[cgroupsRespHdr : cgroupsRespHdr+4]))
 
 	packedDataLen := b.dataOffset - firstItemAbs
 
@@ -903,19 +904,19 @@ func (b *CgroupsBuilder) Finish() int {
 	dirBase := cgroupsRespHdr
 	for i := 0; i < int(b.itemCount); i++ {
 		entry := dirBase + i*cgroupsDirEntry
-		absOff := le.Uint32(p[entry : entry+4])
+		absOff := ne.Uint32(p[entry : entry+4])
 		relOff := absOff - uint32(firstItemAbs)
-		le.PutUint32(p[entry:entry+4], relOff)
+		ne.PutUint32(p[entry:entry+4], relOff)
 		// length stays the same.
 	}
 
 	// Write snapshot header.
-	le.PutUint16(p[0:2], 1)
-	le.PutUint16(p[2:4], 0)
-	le.PutUint32(p[4:8], b.itemCount)
-	le.PutUint32(p[8:12], b.systemdEnabled)
-	le.PutUint32(p[12:16], 0)
-	le.PutUint64(p[16:24], b.generation)
+	ne.PutUint16(p[0:2], 1)
+	ne.PutUint16(p[2:4], 0)
+	ne.PutUint32(p[4:8], b.itemCount)
+	ne.PutUint32(p[8:12], b.systemdEnabled)
+	ne.PutUint32(p[12:16], 0)
+	ne.PutUint64(p[16:24], b.generation)
 
 	return finalPackedStart + packedDataLen
 }

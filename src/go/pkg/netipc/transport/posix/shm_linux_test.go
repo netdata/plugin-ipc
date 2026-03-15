@@ -240,7 +240,7 @@ func TestShmStaleRecovery(t *testing.T) {
 	}
 
 	// Write a dead PID into the header
-	binary.LittleEndian.PutUint32(first.data[8:12], 99999) // very unlikely alive
+	binary.NativeEndian.PutUint32(first.data[8:12], 99999) // very unlikely alive
 	first.ShmClose() // close without unlink
 
 	// Clean up stale regions (as production server would)

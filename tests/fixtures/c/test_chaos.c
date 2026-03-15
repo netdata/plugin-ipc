@@ -439,7 +439,7 @@ static void test_wrong_magic(void)
 
         uint8_t msg[48];
         nipc_header_encode(&hdr, msg, sizeof(msg));
-        /* Overwrite magic field at offset 0 (little-endian) */
+        /* Overwrite magic field at offset 0 (native endian) */
         uint32_t bad_magic = 0xDEADDEADu;
         memcpy(msg, &bad_magic, 4);
 

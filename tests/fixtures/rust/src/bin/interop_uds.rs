@@ -142,7 +142,7 @@ fn run_pipeline_client(run_dir: &str, service: &str, count: usize) -> Result<(),
     // Send all requests before reading any response
     for i in 0..count {
         let val = (i + 1) as u64;
-        let payload = val.to_le_bytes();
+        let payload = val.to_ne_bytes();
 
         let mut hdr = Header {
             kind: protocol::KIND_REQUEST,
@@ -175,7 +175,7 @@ fn run_pipeline_client(run_dir: &str, service: &str, count: usize) -> Result<(),
             eprintln!("client: [{i}] payload len {}, want 8", rpayload.len());
             ok = false;
         } else {
-            let val = u64::from_le_bytes(rpayload.try_into().unwrap());
+            let val = u64::from_ne_bytes(rpayload.try_into().unwrap());
             if val != expected {
                 eprintln!("client: [{i}] payload {val}, want {expected}");
                 ok = false;

@@ -216,10 +216,10 @@ func FuzzDecodeCgroupsResponse(f *testing.F) {
 func FuzzBatchDirDecode(f *testing.F) {
 	// Seed: valid 2-entry directory.
 	var seed [16]byte
-	le.PutUint32(seed[0:4], 0)   // offset=0, aligned
-	le.PutUint32(seed[4:8], 10)  // length=10
-	le.PutUint32(seed[8:12], 16) // offset=16, aligned
-	le.PutUint32(seed[12:16], 5) // length=5
+	ne.PutUint32(seed[0:4], 0)   // offset=0, aligned
+	ne.PutUint32(seed[4:8], 10)  // length=10
+	ne.PutUint32(seed[8:12], 16) // offset=16, aligned
+	ne.PutUint32(seed[12:16], 5) // length=5
 	f.Add(seed[:], uint32(2), uint32(100))
 
 	// Seed: empty.

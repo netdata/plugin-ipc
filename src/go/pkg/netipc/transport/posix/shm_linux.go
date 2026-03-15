@@ -121,14 +121,14 @@ func (c *ShmContext) OwnerAlive() bool {
 	if len(c.data) < int(shmHeaderLen) {
 		return false
 	}
-	pid := int32(binary.LittleEndian.Uint32(c.data[shmHeaderOwnerPidOff : shmHeaderOwnerPidOff+4]))
+	pid := int32(binary.NativeEndian.Uint32(c.data[shmHeaderOwnerPidOff : shmHeaderOwnerPidOff+4]))
 	if !pidAlive(int(pid)) {
 		return false
 	}
 	// Verify generation matches to detect PID reuse.
 	// Skip check if cached generation is 0 (legacy region).
 	if c.ownerGeneration != 0 {
-		curGen := binary.LittleEndian.Uint32(c.data[shmHeaderOwnerGenOff : shmHeaderOwnerGenOff+4])
+		curGen := binary.NativeEndian.Uint32(c.data[shmHeaderOwnerGenOff : shmHeaderOwnerGenOff+4])
 		if curGen != c.ownerGeneration {
 			return false
 		}
@@ -185,16 +185,16 @@ func ShmServerCreate(runDir, serviceName string, sessionID uint64, reqCapacity, 
 	now := time.Now()
 	generation := uint32(now.Unix()) ^ uint32(now.Nanosecond()>>10)
 
-	// Write header fields (little-endian)
-	binary.LittleEndian.PutUint32(data[shmHeaderMagicOff:shmHeaderMagicOff+4], shmRegionMagic)
-	binary.LittleEndian.PutUint16(data[shmHeaderVersionOff:shmHeaderVersionOff+2], shmRegionVersion)
-	binary.LittleEndian.PutUint16(data[shmHeaderHeaderLenOff:shmHeaderHeaderLenOff+2], uint16(shmHeaderLen))
-	binary.LittleEndian.PutUint32(data[shmHeaderOwnerPidOff:shmHeaderOwnerPidOff+4], uint32(int32(os.Getpid())))
-	binary.LittleEndian.PutUint32(data[shmHeaderOwnerGenOff:shmHeaderOwnerGenOff+4], generation)
-	binary.LittleEndian.PutUint32(data[shmHeaderReqOffOff:shmHeaderReqOffOff+4], reqOff)
-	binary.LittleEndian.PutUint32(data[shmHeaderReqCapOff:shmHeaderReqCapOff+4], reqCap)
-	binary.LittleEndian.PutUint32(data[shmHeaderRespOffOff:shmHeaderRespOffOff+4], respOff)
-	binary.LittleEndian.PutUint32(data[shmHeaderRespCapOff:shmHeaderRespCapOff+4], respCap)
+	// Write header fields (host byte order)
+	binary.NativeEndian.PutUint32(data[shmHeaderMagicOff:shmHeaderMagicOff+4], shmRegionMagic)
+	binary.NativeEndian.PutUint16(data[shmHeaderVersionOff:shmHeaderVersionOff+2], shmRegionVersion)
+	binary.NativeEndian.PutUint16(data[shmHeaderHeaderLenOff:shmHeaderHeaderLenOff+2], uint16(shmHeaderLen))
+	binary.NativeEndian.PutUint32(data[shmHeaderOwnerPidOff:shmHeaderOwnerPidOff+4], uint32(int32(os.Getpid())))
+	binary.NativeEndian.PutUint32(data[shmHeaderOwnerGenOff:shmHeaderOwnerGenOff+4], generation)
+	binary.NativeEndian.PutUint32(data[shmHeaderReqOffOff:shmHeaderReqOffOff+4], reqOff)
+	binary.NativeEndian.PutUint32(data[shmHeaderReqCapOff:shmHeaderReqCapOff+4], reqCap)
+	binary.NativeEndian.PutUint32(data[shmHeaderRespOffOff:shmHeaderRespOffOff+4], respOff)
+	binary.NativeEndian.PutUint32(data[shmHeaderRespCapOff:shmHeaderRespCapOff+4], respCap)
 
 	// Release fence: ensure header writes are visible before clients
 	atomic.StoreUint32((*uint32)(unsafe.Pointer(&data[shmHeaderReqSignalOff])), 0)
@@ -286,31 +286,31 @@ func ShmClientAttach(runDir, serviceName string, sessionID uint64) (*ShmContext,
 	atomic.LoadUint32((*uint32)(unsafe.Pointer(&data[shmHeaderReqSignalOff])))
 
 	// Validate header
-	magic := binary.LittleEndian.Uint32(data[shmHeaderMagicOff : shmHeaderMagicOff+4])
+	magic := binary.NativeEndian.Uint32(data[shmHeaderMagicOff : shmHeaderMagicOff+4])
 	if magic != shmRegionMagic {
 		syscall.Munmap(data)
 		f.Close()
 		return nil, ErrShmBadMagic
 	}
 
-	version := binary.LittleEndian.Uint16(data[shmHeaderVersionOff : shmHeaderVersionOff+2])
+	version := binary.NativeEndian.Uint16(data[shmHeaderVersionOff : shmHeaderVersionOff+2])
 	if version != shmRegionVersion {
 		syscall.Munmap(data)
 		f.Close()
 		return nil, ErrShmBadVersion
 	}
 
-	hdrLen := binary.LittleEndian.Uint16(data[shmHeaderHeaderLenOff : shmHeaderHeaderLenOff+2])
+	hdrLen := binary.NativeEndian.Uint16(data[shmHeaderHeaderLenOff : shmHeaderHeaderLenOff+2])
 	if hdrLen != uint16(shmHeaderLen) {
 		syscall.Munmap(data)
 		f.Close()
 		return nil, ErrShmBadHeader
 	}
 
-	reqOff := binary.LittleEndian.Uint32(data[shmHeaderReqOffOff : shmHeaderReqOffOff+4])
-	reqCap := binary.LittleEndian.Uint32(data[shmHeaderReqCapOff : shmHeaderReqCapOff+4])
-	respOff := binary.LittleEndian.Uint32(data[shmHeaderRespOffOff : shmHeaderRespOffOff+4])
-	respCap := binary.LittleEndian.Uint32(data[shmHeaderRespCapOff : shmHeaderRespCapOff+4])
+	reqOff := binary.NativeEndian.Uint32(data[shmHeaderReqOffOff : shmHeaderReqOffOff+4])
+	reqCap := binary.NativeEndian.Uint32(data[shmHeaderReqCapOff : shmHeaderReqCapOff+4])
+	respOff := binary.NativeEndian.Uint32(data[shmHeaderRespOffOff : shmHeaderRespOffOff+4])
+	respCap := binary.NativeEndian.Uint32(data[shmHeaderRespCapOff : shmHeaderRespCapOff+4])
 
 	// Validate region size
 	reqEnd := int(reqOff) + int(reqCap)
@@ -338,7 +338,7 @@ func ShmClientAttach(runDir, serviceName string, sessionID uint64) (*ShmContext,
 		f.Close()
 		return nil, fmt.Errorf("%w: load resp_seq: %v", ErrShmBadParam, err)
 	}
-	ownerGen := binary.LittleEndian.Uint32(data[shmHeaderOwnerGenOff : shmHeaderOwnerGenOff+4])
+	ownerGen := binary.NativeEndian.Uint32(data[shmHeaderOwnerGenOff : shmHeaderOwnerGenOff+4])
 
 	// Dup fd and close file
 	newFd, err := syscall.Dup(fd)
@@ -779,15 +779,15 @@ func checkShmStale(path string) shmStaleResult {
 		return shmStaleInvalid
 	}
 
-	magic := binary.LittleEndian.Uint32(data[shmHeaderMagicOff : shmHeaderMagicOff+4])
+	magic := binary.NativeEndian.Uint32(data[shmHeaderMagicOff : shmHeaderMagicOff+4])
 	if magic != shmRegionMagic {
 		syscall.Munmap(data)
 		os.Remove(path)
 		return shmStaleInvalid
 	}
 
-	ownerPid := int(int32(binary.LittleEndian.Uint32(data[shmHeaderOwnerPidOff : shmHeaderOwnerPidOff+4])))
-	ownerGen := binary.LittleEndian.Uint32(data[shmHeaderOwnerGenOff : shmHeaderOwnerGenOff+4])
+	ownerPid := int(int32(binary.NativeEndian.Uint32(data[shmHeaderOwnerPidOff : shmHeaderOwnerPidOff+4])))
+	ownerGen := binary.NativeEndian.Uint32(data[shmHeaderOwnerGenOff : shmHeaderOwnerGenOff+4])
 	syscall.Munmap(data)
 
 	if pidAlive(ownerPid) && ownerGen != 0 {

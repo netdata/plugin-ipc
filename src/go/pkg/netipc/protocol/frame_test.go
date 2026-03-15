@@ -346,8 +346,8 @@ func TestBatchDirDecodeTruncated(t *testing.T) {
 
 func TestBatchDirDecodeBadAlignment(t *testing.T) {
 	buf := make([]byte, 8)
-	le.PutUint32(buf[0:4], 3) // offset not aligned to 8
-	le.PutUint32(buf[4:8], 10)
+	ne.PutUint32(buf[0:4], 3) // offset not aligned to 8
+	ne.PutUint32(buf[4:8], 10)
 	_, err := BatchDirDecode(buf, 1, 100)
 	if err != ErrBadAlignment {
 		t.Fatalf("got %v, want ErrBadAlignment", err)
@@ -356,8 +356,8 @@ func TestBatchDirDecodeBadAlignment(t *testing.T) {
 
 func TestBatchDirDecodeOutOfBounds(t *testing.T) {
 	buf := make([]byte, 8)
-	le.PutUint32(buf[0:4], 0)
-	le.PutUint32(buf[4:8], 200) // exceeds packed area
+	ne.PutUint32(buf[0:4], 0)
+	ne.PutUint32(buf[4:8], 200) // exceeds packed area
 	_, err := BatchDirDecode(buf, 1, 100)
 	if err != ErrOutOfBounds {
 		t.Fatalf("got %v, want ErrOutOfBounds", err)
@@ -972,7 +972,7 @@ func TestCgroupsResponseDecodeTruncated(t *testing.T) {
 
 func TestCgroupsResponseDecodeBadLayout(t *testing.T) {
 	buf := make([]byte, 24)
-	le.PutUint16(buf[0:2], 99) // bad layout_version
+	ne.PutUint16(buf[0:2], 99) // bad layout_version
 	_, err := DecodeCgroupsResponse(buf)
 	if err != ErrBadLayout {
 		t.Fatalf("got %v, want ErrBadLayout", err)
@@ -981,12 +981,12 @@ func TestCgroupsResponseDecodeBadLayout(t *testing.T) {
 
 func TestCgroupsResponseDecodeDirectoryTruncated(t *testing.T) {
 	buf := make([]byte, 28) // 24 header + 4 bytes, not enough for 1 dir entry (8)
-	le.PutUint16(buf[0:2], 1)    // layout_version
-	le.PutUint16(buf[2:4], 0)    // flags
-	le.PutUint32(buf[4:8], 1)    // item_count = 1
-	le.PutUint32(buf[8:12], 0)   // systemd_enabled
-	le.PutUint32(buf[12:16], 0)  // reserved
-	le.PutUint64(buf[16:24], 0)  // generation
+	ne.PutUint16(buf[0:2], 1)    // layout_version
+	ne.PutUint16(buf[2:4], 0)    // flags
+	ne.PutUint32(buf[4:8], 1)    // item_count = 1
+	ne.PutUint32(buf[8:12], 0)   // systemd_enabled
+	ne.PutUint32(buf[12:16], 0)  // reserved
+	ne.PutUint64(buf[16:24], 0)  // generation
 
 	_, err := DecodeCgroupsResponse(buf)
 	if err != ErrTruncated {
@@ -997,16 +997,16 @@ func TestCgroupsResponseDecodeDirectoryTruncated(t *testing.T) {
 func TestCgroupsResponseDecodeItemBadAlignment(t *testing.T) {
 	// Create a payload with a directory entry that has a non-aligned offset.
 	buf := make([]byte, 128)
-	le.PutUint16(buf[0:2], 1)    // layout_version
-	le.PutUint16(buf[2:4], 0)    // flags
-	le.PutUint32(buf[4:8], 1)    // item_count = 1
-	le.PutUint32(buf[8:12], 0)   // systemd_enabled
-	le.PutUint32(buf[12:16], 0)  // reserved
-	le.PutUint64(buf[16:24], 0)  // generation
+	ne.PutUint16(buf[0:2], 1)    // layout_version
+	ne.PutUint16(buf[2:4], 0)    // flags
+	ne.PutUint32(buf[4:8], 1)    // item_count = 1
+	ne.PutUint32(buf[8:12], 0)   // systemd_enabled
+	ne.PutUint32(buf[12:16], 0)  // reserved
+	ne.PutUint64(buf[16:24], 0)  // generation
 
 	// Directory entry at offset 24: offset=3 (not aligned), length=32
-	le.PutUint32(buf[24:28], 3)  // bad alignment
-	le.PutUint32(buf[28:32], 32)
+	ne.PutUint32(buf[24:28], 3)  // bad alignment
+	ne.PutUint32(buf[28:32], 32)
 
 	_, err := DecodeCgroupsResponse(buf)
 	if err != ErrBadAlignment {
@@ -1016,16 +1016,16 @@ func TestCgroupsResponseDecodeItemBadAlignment(t *testing.T) {
 
 func TestCgroupsResponseDecodeItemOutOfBounds(t *testing.T) {
 	buf := make([]byte, 64)
-	le.PutUint16(buf[0:2], 1)
-	le.PutUint16(buf[2:4], 0)
-	le.PutUint32(buf[4:8], 1)   // item_count = 1
-	le.PutUint32(buf[8:12], 0)
-	le.PutUint32(buf[12:16], 0)
-	le.PutUint64(buf[16:24], 0)
+	ne.PutUint16(buf[0:2], 1)
+	ne.PutUint16(buf[2:4], 0)
+	ne.PutUint32(buf[4:8], 1)   // item_count = 1
+	ne.PutUint32(buf[8:12], 0)
+	ne.PutUint32(buf[12:16], 0)
+	ne.PutUint64(buf[16:24], 0)
 
 	// Dir entry: offset=0, length=1000 (exceeds buffer)
-	le.PutUint32(buf[24:28], 0)
-	le.PutUint32(buf[28:32], 1000)
+	ne.PutUint32(buf[24:28], 0)
+	ne.PutUint32(buf[28:32], 1000)
 
 	_, err := DecodeCgroupsResponse(buf)
 	if err != ErrOutOfBounds {
@@ -1036,16 +1036,16 @@ func TestCgroupsResponseDecodeItemOutOfBounds(t *testing.T) {
 func TestCgroupsResponseDecodeItemTooSmall(t *testing.T) {
 	// Item is present but smaller than 32-byte item header.
 	buf := make([]byte, 64)
-	le.PutUint16(buf[0:2], 1)
-	le.PutUint16(buf[2:4], 0)
-	le.PutUint32(buf[4:8], 1)   // item_count = 1
-	le.PutUint32(buf[8:12], 0)
-	le.PutUint32(buf[12:16], 0)
-	le.PutUint64(buf[16:24], 0)
+	ne.PutUint16(buf[0:2], 1)
+	ne.PutUint16(buf[2:4], 0)
+	ne.PutUint32(buf[4:8], 1)   // item_count = 1
+	ne.PutUint32(buf[8:12], 0)
+	ne.PutUint32(buf[12:16], 0)
+	ne.PutUint64(buf[16:24], 0)
 
 	// Dir entry: offset=0, length=16 (< 32 item header)
-	le.PutUint32(buf[24:28], 0)
-	le.PutUint32(buf[28:32], 16)
+	ne.PutUint32(buf[24:28], 0)
+	ne.PutUint32(buf[28:32], 16)
 
 	_, err := DecodeCgroupsResponse(buf)
 	if err != ErrTruncated {
@@ -1064,10 +1064,10 @@ func TestCgroupsResponseItemBadLayout(t *testing.T) {
 
 	// Find the item start and corrupt layout_version.
 	dirBase := cgroupsRespHdr
-	itemOff := int(le.Uint32(buf[dirBase : dirBase+4]))
+	itemOff := int(ne.Uint32(buf[dirBase : dirBase+4]))
 	packedStart := cgroupsRespHdr + 1*cgroupsDirEntry
 	itemStart := packedStart + itemOff
-	le.PutUint16(buf[itemStart:itemStart+2], 99) // corrupt layout_version
+	ne.PutUint16(buf[itemStart:itemStart+2], 99) // corrupt layout_version
 
 	view, err := DecodeCgroupsResponse(buf[:total])
 	if err != nil {
@@ -1091,7 +1091,7 @@ func TestCgroupsResponseItemMissingNul(t *testing.T) {
 
 	// Find item and overwrite the NUL after "test".
 	dirBase := cgroupsRespHdr
-	itemOff := int(le.Uint32(buf[dirBase : dirBase+4]))
+	itemOff := int(ne.Uint32(buf[dirBase : dirBase+4]))
 	packedStart := cgroupsRespHdr + 1*cgroupsDirEntry
 	itemStart := packedStart + itemOff
 	// name is at offset 32 within the item, length 4, NUL at 36.
@@ -1117,11 +1117,11 @@ func TestCgroupsResponseItemNameOutOfBounds(t *testing.T) {
 	total := b.Finish()
 
 	dirBase := cgroupsRespHdr
-	itemOff := int(le.Uint32(buf[dirBase : dirBase+4]))
+	itemOff := int(ne.Uint32(buf[dirBase : dirBase+4]))
 	packedStart := cgroupsRespHdr + 1*cgroupsDirEntry
 	itemStart := packedStart + itemOff
 	// Corrupt name_offset to a huge value.
-	le.PutUint32(buf[itemStart+16:itemStart+20], 9999)
+	ne.PutUint32(buf[itemStart+16:itemStart+20], 9999)
 
 	view, err := DecodeCgroupsResponse(buf[:total])
 	if err != nil {
@@ -1143,10 +1143,10 @@ func TestCgroupsResponseItemNameOffsetBelowHeader(t *testing.T) {
 	total := b.Finish()
 
 	dirBase := cgroupsRespHdr
-	itemOff := int(le.Uint32(buf[dirBase : dirBase+4]))
+	itemOff := int(ne.Uint32(buf[dirBase : dirBase+4]))
 	packedStart := cgroupsRespHdr + 1*cgroupsDirEntry
 	itemStart := packedStart + itemOff
-	le.PutUint32(buf[itemStart+16:itemStart+20], 4) // below 32
+	ne.PutUint32(buf[itemStart+16:itemStart+20], 4) // below 32
 
 	view, err := DecodeCgroupsResponse(buf[:total])
 	if err != nil {
@@ -1587,13 +1587,13 @@ func TestCgroupsResponseItemPathMissingNul(t *testing.T) {
 
 	// Overwrite the NUL after "bad" (the path string).
 	dirBase := cgroupsRespHdr
-	itemOff := int(le.Uint32(buf[dirBase : dirBase+4]))
+	itemOff := int(ne.Uint32(buf[dirBase : dirBase+4]))
 	packedStart := cgroupsRespHdr + 1*cgroupsDirEntry
 	itemStart := packedStart + itemOff
 
 	// path_offset is at item+24, path_len at item+28.
-	pathOff := int(le.Uint32(buf[itemStart+24 : itemStart+28]))
-	pathLen := int(le.Uint32(buf[itemStart+28 : itemStart+32]))
+	pathOff := int(ne.Uint32(buf[itemStart+24 : itemStart+28]))
+	pathLen := int(ne.Uint32(buf[itemStart+28 : itemStart+32]))
 	buf[itemStart+pathOff+pathLen] = 'X' // corrupt NUL
 
 	view, err := DecodeCgroupsResponse(buf[:total])
@@ -1615,10 +1615,10 @@ func TestCgroupsResponseItemPathOutOfBounds(t *testing.T) {
 	total := b.Finish()
 
 	dirBase := cgroupsRespHdr
-	itemOff := int(le.Uint32(buf[dirBase : dirBase+4]))
+	itemOff := int(ne.Uint32(buf[dirBase : dirBase+4]))
 	packedStart := cgroupsRespHdr + 1*cgroupsDirEntry
 	itemStart := packedStart + itemOff
-	le.PutUint32(buf[itemStart+24:itemStart+28], 9999) // corrupt path_offset
+	ne.PutUint32(buf[itemStart+24:itemStart+28], 9999) // corrupt path_offset
 
 	view, err := DecodeCgroupsResponse(buf[:total])
 	if err != nil {
@@ -1639,10 +1639,10 @@ func TestCgroupsResponseItemPathOffsetBelowHeader(t *testing.T) {
 	total := b.Finish()
 
 	dirBase := cgroupsRespHdr
-	itemOff := int(le.Uint32(buf[dirBase : dirBase+4]))
+	itemOff := int(ne.Uint32(buf[dirBase : dirBase+4]))
 	packedStart := cgroupsRespHdr + 1*cgroupsDirEntry
 	itemStart := packedStart + itemOff
-	le.PutUint32(buf[itemStart+24:itemStart+28], 4) // below 32
+	ne.PutUint32(buf[itemStart+24:itemStart+28], 4) // below 32
 
 	view, err := DecodeCgroupsResponse(buf[:total])
 	if err != nil {
@@ -1663,14 +1663,14 @@ func TestCgroupsResponseItemOverlapRejected(t *testing.T) {
 	total := b.Finish()
 
 	dirBase := cgroupsRespHdr
-	itemOff := int(le.Uint32(buf[dirBase : dirBase+4]))
+	itemOff := int(ne.Uint32(buf[dirBase : dirBase+4]))
 	packedStart := cgroupsRespHdr + 1*cgroupsDirEntry
 	itemStart := packedStart + itemOff
 
 	// name region is [32..38) (name_off=32, name_len=5, +1 for NUL)
 	// Set path_off=34 (inside name), path_len=1
-	le.PutUint32(buf[itemStart+24:itemStart+28], 34)
-	le.PutUint32(buf[itemStart+28:itemStart+32], 1)
+	ne.PutUint32(buf[itemStart+24:itemStart+28], 34)
+	ne.PutUint32(buf[itemStart+28:itemStart+32], 1)
 	// Ensure NUL at item[35]
 	buf[itemStart+35] = 0
 

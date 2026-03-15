@@ -2,7 +2,9 @@
  * netipc_protocol.h - Wire envelope and codec for the netipc protocol.
  *
  * Pure byte-layout encode/decode. No I/O, no transport, no allocation on
- * decode. All multi-byte fields are little-endian on the wire.
+ * decode. Localhost-only IPC — all multi-byte fields use host byte order.
+ * Struct layouts match wire format exactly; encode/decode is a single memcpy
+ * plus validation.
  *
  * Decoded "View" types borrow the underlying buffer and are valid only while
  * that buffer lives. Copy immediately if the data is needed later.
@@ -214,9 +216,13 @@ typedef struct {
     uint32_t max_request_batch_items;
     uint32_t max_response_payload_bytes;
     uint32_t max_response_batch_items;
+    uint32_t _reserved;  /* wire offset 28, must be 0 */
     uint64_t auth_token;
     uint32_t packet_size;
 } nipc_hello_t;
+
+/* Wire size (44) differs from sizeof (48) due to trailing alignment. */
+#define NIPC_HELLO_WIRE_SIZE 44u
 
 size_t nipc_hello_encode(const nipc_hello_t *h, void *buf, size_t buf_len);
 
@@ -238,6 +244,7 @@ typedef struct {
     uint32_t agreed_max_response_payload_bytes;
     uint32_t agreed_max_response_batch_items;
     uint32_t agreed_packet_size;
+    uint32_t _reserved;   /* wire offset 36, must be 0 */
     uint64_t session_id;  /* server-assigned, for per-session SHM path */
 } nipc_hello_ack_t;
 

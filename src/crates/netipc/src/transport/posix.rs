@@ -1757,7 +1757,7 @@ mod tests {
 
         // Send 10 requests before reading any response
         for i in 1u64..=10 {
-            let payload = i.to_le_bytes();
+            let payload = i.to_ne_bytes();
             let mut hdr = Header {
                 kind: protocol::KIND_REQUEST,
                 code: 1,
@@ -1774,7 +1774,7 @@ mod tests {
             let (rhdr, rpayload) = session.receive(&mut rbuf).expect("recv");
             assert_eq!(rhdr.message_id, i, "message_id mismatch at {i}");
             assert_eq!(rpayload.len(), 8, "payload len at {i}");
-            let val = u64::from_le_bytes(rpayload.try_into().unwrap());
+            let val = u64::from_ne_bytes(rpayload.try_into().unwrap());
             assert_eq!(val, i, "payload value at {i}");
         }
 
@@ -1833,7 +1833,7 @@ mod tests {
 
         // Send 100 requests
         for i in 1u64..=100 {
-            let payload = i.to_le_bytes();
+            let payload = i.to_ne_bytes();
             let mut hdr = Header {
                 kind: protocol::KIND_REQUEST,
                 code: 1,
@@ -1849,7 +1849,7 @@ mod tests {
             let mut rbuf = [0u8; 4096];
             let (rhdr, rpayload) = session.receive(&mut rbuf).expect("recv");
             assert_eq!(rhdr.message_id, i);
-            let val = u64::from_le_bytes(rpayload.try_into().unwrap());
+            let val = u64::from_ne_bytes(rpayload.try_into().unwrap());
             assert_eq!(val, i);
         }
 
