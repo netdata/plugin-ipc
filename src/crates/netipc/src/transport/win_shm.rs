@@ -75,22 +75,8 @@ mod ffi {
 
         pub fn GetTickCount() -> DWORD;
 
-        // Interlocked operations
-        pub fn InterlockedExchange(Target: *mut LONG, Value: LONG) -> LONG;
-
-        pub fn InterlockedCompareExchange(
-            Destination: *mut LONG,
-            Exchange: LONG,
-            Comparand: LONG,
-        ) -> LONG;
-
-        pub fn InterlockedIncrement64(Addend: *mut LONG64) -> LONG64;
-
-        pub fn InterlockedCompareExchange64(
-            Destination: *mut LONG64,
-            Exchange: LONG64,
-            Comparand: LONG64,
-        ) -> LONG64;
+        // Note: InterlockedXxx are MSVC compiler intrinsics, not linkable
+        // symbols. We use Rust's std::sync::atomic instead (see helpers below).
     }
 }
 
@@ -850,29 +836,37 @@ fn write_u32(base: *mut u8, offset: usize, val: u32) {
 
 #[cfg(windows)]
 fn interlocked_read_i32(base: *mut u8, offset: usize) -> i32 {
+    use std::sync::atomic::{AtomicI32, Ordering};
     unsafe {
-        ffi::InterlockedCompareExchange(base.add(offset) as *mut ffi::LONG, 0, 0)
+        let ptr = base.add(offset) as *const AtomicI32;
+        (*ptr).load(Ordering::Acquire)
     }
 }
 
 #[cfg(windows)]
 fn interlocked_exchange_i32(base: *mut u8, offset: usize, val: i32) {
+    use std::sync::atomic::{AtomicI32, Ordering};
     unsafe {
-        ffi::InterlockedExchange(base.add(offset) as *mut ffi::LONG, val);
+        let ptr = base.add(offset) as *const AtomicI32;
+        (*ptr).store(val, Ordering::Release);
     }
 }
 
 #[cfg(windows)]
 fn interlocked_read_i64(base: *mut u8, offset: usize) -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
     unsafe {
-        ffi::InterlockedCompareExchange64(base.add(offset) as *mut ffi::LONG64, 0, 0)
+        let ptr = base.add(offset) as *const AtomicI64;
+        (*ptr).load(Ordering::Acquire)
     }
 }
 
 #[cfg(windows)]
 fn interlocked_increment_i64(base: *mut u8, offset: usize) {
+    use std::sync::atomic::{AtomicI64, Ordering};
     unsafe {
-        ffi::InterlockedIncrement64(base.add(offset) as *mut ffi::LONG64);
+        let ptr = base.add(offset) as *const AtomicI64;
+        (*ptr).fetch_add(1, Ordering::Release);
     }
 }
 
