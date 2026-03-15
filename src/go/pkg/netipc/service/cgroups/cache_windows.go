@@ -9,6 +9,7 @@
 package cgroups
 
 import (
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	windows "github.com/netdata/plugin-ipc/go/pkg/netipc/transport/windows"
 )
 
@@ -36,9 +37,13 @@ type Cache struct {
 
 // NewCache creates a new L3 cache.
 func NewCache(runDir, serviceName string, config windows.ClientConfig) *Cache {
+	bufSize := cacheResponseBufSize
+	if config.MaxResponsePayloadBytes > 0 {
+		bufSize = protocol.HeaderSize + int(config.MaxResponsePayloadBytes)
+	}
 	return &Cache{
 		client:      NewClient(runDir, serviceName, config),
-		responseBuf: make([]byte, cacheResponseBufSize),
+		responseBuf: make([]byte, bufSize),
 	}
 }
 

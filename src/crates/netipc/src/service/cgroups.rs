@@ -764,6 +764,8 @@ impl CgroupsServer {
     /// Windows: run the acceptor loop over Named Pipes.
     #[cfg(windows)]
     pub fn run(&mut self) -> Result<(), NipcError> {
+        // Win SHM cleanup is a no-op: kernel objects auto-clean on handle close.
+
         let mut listener = NpListener::bind(
             &self.run_dir,
             &self.service_name,
@@ -795,6 +797,15 @@ impl CgroupsServer {
             }
 
             let shm = self.try_win_shm_upgrade(&session);
+
+            // If SHM was negotiated but create failed, reject the session
+            if shm.is_none()
+                && (session.selected_profile == WIN_SHM_PROFILE_HYBRID
+                    || session.selected_profile == WIN_SHM_PROFILE_BUSYWAIT)
+            {
+                drop(session);
+                continue;
+            }
 
             let handler = self.handler.clone();
             let running = self.running.clone();
@@ -878,7 +889,7 @@ fn handle_session_win_threaded(
     handler: HandlerFn,
     running: Arc<AtomicBool>,
 ) {
-    let mut recv_buf = vec![0u8; 65536];
+    let mut recv_buf = vec![0u8; HEADER_SIZE + session.max_request_payload_bytes as usize];
 
     while running.load(Ordering::Acquire) {
         let (hdr, payload) = {

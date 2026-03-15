@@ -6,7 +6,8 @@
 
 use crate::protocol::{
     self, ChunkHeader, Header, Hello, HelloAck, HEADER_SIZE, KIND_REQUEST, KIND_RESPONSE,
-    MAGIC_CHUNK, MAGIC_MSG, MAX_PAYLOAD_DEFAULT, PROFILE_BASELINE, VERSION,
+    MAGIC_CHUNK, MAGIC_MSG, MAX_PAYLOAD_DEFAULT, PROFILE_BASELINE, VERSION, FLAG_BATCH,
+    align8,
 };
 use std::collections::HashSet;
 use std::ptr;
@@ -654,6 +655,19 @@ impl NpSession {
         // Non-chunked
         if n >= total_msg {
             let payload = buf[HEADER_SIZE..HEADER_SIZE + hdr.payload_len as usize].to_vec();
+
+            // Validate batch directory
+            if hdr.flags & FLAG_BATCH != 0 && hdr.item_count > 1 {
+                let dir_bytes = hdr.item_count as usize * 8;
+                let dir_aligned = align8(dir_bytes);
+                if payload.len() < dir_aligned {
+                    return Err(NpError::Protocol("batch directory exceeds payload".into()));
+                }
+                let packed_area_len = (payload.len() - dir_aligned) as u32;
+                protocol::batch_dir_validate(&payload[..dir_bytes], hdr.item_count, packed_area_len)
+                    .map_err(|e| NpError::Protocol(format!("batch directory: {e:?}")))?;
+            }
+
             return Ok((hdr, payload));
         }
 
@@ -722,6 +736,19 @@ impl NpSession {
         }
 
         let payload = self.recv_buf[..hdr.payload_len as usize].to_vec();
+
+        // Validate batch directory
+        if hdr.flags & FLAG_BATCH != 0 && hdr.item_count > 1 {
+            let dir_bytes = hdr.item_count as usize * 8;
+            let dir_aligned = align8(dir_bytes);
+            if payload.len() < dir_aligned {
+                return Err(NpError::Protocol("batch directory exceeds payload".into()));
+            }
+            let packed_area_len = (payload.len() - dir_aligned) as u32;
+            protocol::batch_dir_validate(&payload[..dir_bytes], hdr.item_count, packed_area_len)
+                .map_err(|e| NpError::Protocol(format!("batch directory: {e:?}")))?;
+        }
+
         Ok((hdr, payload))
     }
 

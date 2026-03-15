@@ -100,8 +100,13 @@ static nipc_client_state_t client_try_connect(nipc_client_ctx_t *ctx)
             if (serr == NIPC_WIN_SHM_OK) {
                 ctx->shm = shm;
             } else {
-                /* SHM attach failed -- fall back to Named Pipe only. */
+                /* SHM attach failed after retries. The handshake selected
+                 * SHM but we can't use it. Fail the session to avoid
+                 * transport desync (server on SHM, client on NP). */
                 free(shm);
+                nipc_np_close_session(&ctx->session);
+                ctx->session_valid = false;
+                return NIPC_CLIENT_DISCONNECTED;
             }
         }
     }
@@ -612,6 +617,10 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
     server->next_session_id = 0;
     InitializeCriticalSection(&server->sessions_lock);
 
+    /* Clean up stale SHM kernel objects from previous crashes (no-op on
+     * Windows but maintains API symmetry with the POSIX transport). */
+    nipc_win_shm_cleanup_stale(run_dir, service_name);
+
     /* Start listening via L1 */
     nipc_np_error_t uerr = nipc_np_listen(
         run_dir, service_name, config, &server->listener);
@@ -674,7 +683,12 @@ void nipc_server_run(nipc_managed_server_t *server)
                 if (serr == NIPC_WIN_SHM_OK) {
                     shm = s;
                 } else {
+                    /* SHM create failed for a session that negotiated SHM.
+                     * Reject the session to avoid transport desync. */
                     free(s);
+                    LeaveCriticalSection(&server->sessions_lock);
+                    nipc_np_close_session(&session);
+                    continue;
                 }
             }
         }
@@ -988,7 +1002,12 @@ void nipc_cgroups_cache_init(nipc_cgroups_cache_t *cache,
     cache->refresh_success_count = 0;
     cache->refresh_failure_count = 0;
 
-    cache->response_buf_size = NIPC_CGROUPS_CACHE_BUF_SIZE;
+    /* Allocate internal response buffer sized from negotiated limits.
+     * Falls back to default if config specifies 0. */
+    uint32_t max_resp = config ? config->max_response_payload_bytes : 0;
+    cache->response_buf_size = (max_resp > 0)
+        ? (size_t)max_resp + NIPC_HEADER_LEN
+        : NIPC_CGROUPS_CACHE_BUF_SIZE_DEFAULT;
     cache->response_buf = malloc(cache->response_buf_size);
 }
 

@@ -190,6 +190,11 @@ func (c *Client) tryConnect() ClientState {
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
+		if c.shm == nil {
+			// SHM attach failed. Fail the session to avoid transport desync.
+			session.Close()
+			return StateDisconnected
+		}
 	}
 
 	c.session = session
@@ -373,9 +378,12 @@ func (s *Server) Run() error {
 				session.MaxRequestPayloadBytes+uint32(protocol.HeaderSize),
 				session.MaxResponsePayloadBytes+uint32(protocol.HeaderSize),
 			)
-			if serr == nil {
-				shm = shmCtx
+			if serr != nil {
+				// SHM create failed for negotiated SHM — reject session
+				session.Close()
+				continue
 			}
+			shm = shmCtx
 		}
 
 		s.handleSession(session, shm)
@@ -390,7 +398,7 @@ func (s *Server) Stop() {
 }
 
 func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmContext) {
-	recvBuf := make([]byte, 65536)
+	recvBuf := make([]byte, protocol.HeaderSize+int(session.MaxRequestPayloadBytes))
 
 	defer func() {
 		if shm != nil {
