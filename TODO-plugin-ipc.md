@@ -17,6 +17,33 @@
 - The historical transcript was moved to [TODO-plugin-ipc.history.md](/home/costa/src/plugin-ipc.git/TODO-plugin-ipc.history.md). This file is now the active specification and execution plan only.
 
 ## Current Status (Fact-Based)
+- Current investigation (2026-03-15):
+  - analyze the Windows SHM interop failure pattern without making code changes
+  - read and compare:
+    - `docs/level1-windows-shm.md`
+    - C / Rust / Go Windows SHM transports
+    - C / Rust / Go Windows SHM interop fixtures
+  - reported failing live pairs:
+    - Rust server + Rust client:
+      - Rust client reports `peer closed SHM session`
+    - Rust server + C client:
+      - C client reports `receive failed: 13`
+    - Go server + C client:
+      - C client reports `receive failed: 13`
+    - Go server + Rust client:
+      - Rust client reports `peer closed SHM session`
+  - reported working live pairs:
+    - C server + C client
+    - C server + Rust client
+    - C server + Go client
+    - Rust server + Go client
+    - Go server + Go client
+  - initial evidence from the failure pattern:
+    - the problem is server-side
+    - the failing shape is:
+      - server is Rust or Go
+      - client is C or Rust
+    - the observed error codes/messages align with the response-side close flag becoming visible before the client consumes the response
 - Protocol core:
   - variable-length outer envelope implemented in C, Rust, and Go
   - directional handshake implemented:

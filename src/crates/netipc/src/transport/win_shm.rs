@@ -607,18 +607,21 @@ impl WinShmContext {
 
                     interlocked_exchange_i32(self.base, self_waiting_off, 0);
 
-                    // Check peer close
-                    if interlocked_read_i32(self.base, peer_closed_off) != 0 {
-                        self.advance_seq(expected_seq);
-                        return Err(WinShmError::Disconnected);
-                    }
-
-                    if ret == ffi::WAIT_TIMEOUT {
-                        return Err(WinShmError::Timeout);
-                    }
-
+                    // Check sequence FIRST — data may be available even
+                    // if the peer has also set its close flag.
                     let cur = interlocked_read_i64(self.base, seq_off);
                     if cur < expected_seq {
+                        // No data available — now check peer close.
+                        if interlocked_read_i32(self.base, peer_closed_off) != 0 {
+                            self.advance_seq(expected_seq);
+                            return Err(WinShmError::Disconnected);
+                        }
+
+                        if ret == ffi::WAIT_TIMEOUT {
+                            return Err(WinShmError::Timeout);
+                        }
+
+                        // Spurious wake — still no data.
                         return Err(WinShmError::Timeout);
                     }
                 } else {

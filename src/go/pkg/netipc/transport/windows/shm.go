@@ -596,19 +596,23 @@ func (c *WinShmContext) WinShmReceive(buf []byte, timeoutMs uint32) (int, error)
 
 				atomic.StoreInt32((*int32)(unsafe.Pointer(&data[selfWaitingOff])), 0)
 
-				// Check peer close
-				if atomic.LoadInt32((*int32)(unsafe.Pointer(&data[peerClosedOff]))) != 0 {
-					c.advanceSeq(expectedSeq)
-					return 0, ErrWinShmDisconnected
-				}
-
-				if ret == _WAIT_TIMEOUT {
-					return 0, ErrWinShmTimeout
-				}
-
+				// Check sequence FIRST — data may be available even if
+				// the peer has also set its close flag.
 				cur = atomic.LoadInt64((*int64)(unsafe.Pointer(&data[seqOff])))
-				if cur < expectedSeq {
-					return 0, ErrWinShmTimeout
+				if cur >= expectedSeq {
+					observed = true
+				}
+
+				if !observed {
+					// Only check peer close if no data is available.
+					if atomic.LoadInt32((*int32)(unsafe.Pointer(&data[peerClosedOff]))) != 0 {
+						c.advanceSeq(expectedSeq)
+						return 0, ErrWinShmDisconnected
+					}
+
+					if ret == _WAIT_TIMEOUT {
+						return 0, ErrWinShmTimeout
+					}
 				}
 			} else {
 				atomic.StoreInt32((*int32)(unsafe.Pointer(&data[selfWaitingOff])), 0)
