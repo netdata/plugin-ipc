@@ -72,8 +72,9 @@ Used in the `code` field when `kind = REQUEST` or `kind = RESPONSE`:
 
 | Value | Name | Meaning |
 |-------|------|---------|
-| 1 | INCREMENT | Test/benchmark method |
+| 1 | INCREMENT | Test/benchmark method (u64 ping-pong) |
 | 2 | CGROUPS_SNAPSHOT | Cgroups snapshot refresh |
+| 3 | STRING_REVERSE | Test method (variable-length string ping-pong) |
 
 New methods are assigned sequential codes. The method code space is
 shared across all services — each method has a globally unique code.

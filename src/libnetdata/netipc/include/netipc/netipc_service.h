@@ -170,6 +170,47 @@ nipc_error_t nipc_client_call_cgroups_snapshot(
     nipc_cgroups_resp_view_t *view_out);
 
 /* ------------------------------------------------------------------ */
+/*  Typed INCREMENT call                                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Blocking typed call: send value, receive incremented value.
+ *
+ * response_buf: caller-owned buffer (>= 8 + NIPC_HEADER_LEN bytes).
+ * value_out:    on success, the response value.
+ *
+ * Same retry policy as cgroups snapshot.
+ */
+nipc_error_t nipc_client_call_increment(
+    nipc_client_ctx_t *ctx,
+    uint64_t request_value,
+    uint8_t *response_buf,
+    size_t response_buf_size,
+    uint64_t *value_out);
+
+/* ------------------------------------------------------------------ */
+/*  Typed STRING_REVERSE call                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Blocking typed call: send string, receive reversed string.
+ *
+ * response_buf: caller-owned buffer (large enough for header + reversed
+ *   string + NUL).
+ * view_out:     on success, ephemeral view into response_buf. Valid
+ *   only until the next call on this context.
+ *
+ * Same retry policy as cgroups snapshot.
+ */
+nipc_error_t nipc_client_call_string_reverse(
+    nipc_client_ctx_t *ctx,
+    const char *request_str,
+    uint32_t request_str_len,
+    uint8_t *response_buf,
+    size_t response_buf_size,
+    nipc_string_reverse_view_t *view_out);
+
+/* ------------------------------------------------------------------ */
 /*  Managed server                                                     */
 /* ------------------------------------------------------------------ */
 

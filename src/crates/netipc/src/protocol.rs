@@ -40,6 +40,7 @@ pub const CODE_HELLO_ACK: u16 = 2;
 // Method codes
 pub const METHOD_INCREMENT: u16 = 1;
 pub const METHOD_CGROUPS_SNAPSHOT: u16 = 2;
+pub const METHOD_STRING_REVERSE: u16 = 3;
 
 // Profile bits
 pub const PROFILE_BASELINE: u32 = 0x01;
@@ -996,6 +997,68 @@ impl<'a> CgroupsBuilder<'a> {
 
         final_packed_start + packed_data_len
     }
+}
+
+// ---------------------------------------------------------------------------
+//  INCREMENT codec: { u64 value } = 8 bytes
+// ---------------------------------------------------------------------------
+
+pub const INCREMENT_PAYLOAD_SIZE: usize = 8;
+
+pub fn increment_encode(value: u64, buf: &mut [u8]) -> usize {
+    if buf.len() < INCREMENT_PAYLOAD_SIZE { return 0; }
+    buf[..8].copy_from_slice(&value.to_ne_bytes());
+    INCREMENT_PAYLOAD_SIZE
+}
+
+pub fn increment_decode(buf: &[u8]) -> Result<u64, NipcError> {
+    if buf.len() < INCREMENT_PAYLOAD_SIZE { return Err(NipcError::Truncated); }
+    Ok(u64::from_ne_bytes(buf[..8].try_into().unwrap()))
+}
+
+// ---------------------------------------------------------------------------
+//  STRING_REVERSE codec
+// ---------------------------------------------------------------------------
+
+pub const STRING_REVERSE_HDR_SIZE: usize = 8;
+
+/// Ephemeral view into a decoded STRING_REVERSE payload.
+#[derive(Debug, Clone)]
+pub struct StringReverseView<'a> {
+    pub str_data: &'a [u8],  // slice into payload, NUL-terminated
+    pub str_len: u32,
+}
+
+impl<'a> StringReverseView<'a> {
+    pub fn as_str(&self) -> &'a str {
+        std::str::from_utf8(self.str_data).unwrap_or("")
+    }
+}
+
+pub fn string_reverse_encode(s: &[u8], buf: &mut [u8]) -> usize {
+    let total = STRING_REVERSE_HDR_SIZE + s.len() + 1;
+    if buf.len() < total { return 0; }
+    let offset: u32 = STRING_REVERSE_HDR_SIZE as u32;
+    let length: u32 = s.len() as u32;
+    buf[0..4].copy_from_slice(&offset.to_ne_bytes());
+    buf[4..8].copy_from_slice(&length.to_ne_bytes());
+    if !s.is_empty() {
+        buf[8..8 + s.len()].copy_from_slice(s);
+    }
+    buf[8 + s.len()] = 0; // NUL
+    total
+}
+
+pub fn string_reverse_decode(buf: &[u8]) -> Result<StringReverseView<'_>, NipcError> {
+    if buf.len() < STRING_REVERSE_HDR_SIZE { return Err(NipcError::Truncated); }
+    let str_offset = u32::from_ne_bytes(buf[0..4].try_into().unwrap()) as usize;
+    let str_length = u32::from_ne_bytes(buf[4..8].try_into().unwrap()) as usize;
+    if str_offset + str_length + 1 > buf.len() { return Err(NipcError::OutOfBounds); }
+    if buf[str_offset + str_length] != 0 { return Err(NipcError::MissingNul); }
+    Ok(StringReverseView {
+        str_data: &buf[str_offset..str_offset + str_length],
+        str_len: str_length as u32,
+    })
 }
 
 // ===========================================================================

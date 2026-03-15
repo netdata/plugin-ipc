@@ -6,8 +6,11 @@
 //! Server handles accept, read, dispatch, respond.
 
 use crate::protocol::{
-    self, CgroupsRequest, CgroupsResponseView, Header, NipcError, HEADER_SIZE, KIND_REQUEST,
-    KIND_RESPONSE, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT, STATUS_INTERNAL_ERROR, STATUS_OK, VERSION,
+    self, CgroupsRequest, CgroupsResponseView, Header, NipcError, HEADER_SIZE,
+    KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT,
+    METHOD_STRING_REVERSE, STATUS_INTERNAL_ERROR, STATUS_OK, VERSION,
+    increment_decode, increment_encode, INCREMENT_PAYLOAD_SIZE,
+    string_reverse_decode, string_reverse_encode, STRING_REVERSE_HDR_SIZE,
 };
 
 #[cfg(unix)]
@@ -173,28 +176,98 @@ impl CgroupsClient {
         &mut self,
         response_buf: &'a mut [u8],
     ) -> Result<CgroupsResponseView<'a>, NipcError> {
-        // Fail fast if not READY
+        let req = CgroupsRequest {
+            layout_version: 1,
+            flags: 0,
+        };
+        let mut req_buf = [0u8; 4];
+        let req_len = req.encode(&mut req_buf);
+        if req_len == 0 {
+            return Err(NipcError::Truncated);
+        }
+
+        let payload_len = self.call_with_retry(|client| {
+            client.do_raw_call(
+                METHOD_CGROUPS_SNAPSHOT,
+                &req_buf[..req_len],
+                response_buf,
+            )
+        })?;
+
+        CgroupsResponseView::decode(&response_buf[..payload_len])
+    }
+
+    /// Blocking typed call: INCREMENT method.
+    /// Sends a u64 value, receives the incremented u64 back.
+    pub fn call_increment(&mut self, value: u64) -> Result<u64, NipcError> {
+        let mut req_buf = [0u8; INCREMENT_PAYLOAD_SIZE];
+        let req_len = increment_encode(value, &mut req_buf);
+        if req_len == 0 {
+            return Err(NipcError::Truncated);
+        }
+
+        let mut response_buf = [0u8; INCREMENT_PAYLOAD_SIZE];
+        let payload_len = self.call_with_retry(|client| {
+            client.do_raw_call(
+                METHOD_INCREMENT,
+                &req_buf[..req_len],
+                &mut response_buf,
+            )
+        })?;
+
+        increment_decode(&response_buf[..payload_len])
+    }
+
+    /// Blocking typed call: STRING_REVERSE method.
+    /// Sends a string, receives the reversed string back.
+    /// Returns the reversed string as an owned `String`.
+    pub fn call_string_reverse(&mut self, s: &str) -> Result<String, NipcError> {
+        let req_size = STRING_REVERSE_HDR_SIZE + s.len() + 1;
+        let mut req_buf = vec![0u8; req_size];
+        let req_len = string_reverse_encode(s.as_bytes(), &mut req_buf);
+        if req_len == 0 {
+            return Err(NipcError::Truncated);
+        }
+
+        let resp_size = STRING_REVERSE_HDR_SIZE + s.len() + 1;
+        let mut response_buf = vec![0u8; resp_size];
+        let payload_len = self.call_with_retry(|client| {
+            client.do_raw_call(
+                METHOD_STRING_REVERSE,
+                &req_buf[..req_len],
+                &mut response_buf,
+            )
+        })?;
+
+        let view = string_reverse_decode(&response_buf[..payload_len])?;
+        Ok(view.as_str().to_string())
+    }
+
+    // ------------------------------------------------------------------
+    //  Generic retry wrapper
+    // ------------------------------------------------------------------
+
+    /// Execute `attempt` with at-least-once retry semantics.
+    /// If the first attempt fails and the client was READY, disconnect,
+    /// reconnect (full handshake), and retry ONCE.
+    fn call_with_retry<F, T>(&mut self, mut attempt: F) -> Result<T, NipcError>
+    where
+        F: FnMut(&mut Self) -> Result<T, NipcError>,
+    {
         if self.state != ClientState::Ready {
             self.error_count += 1;
             return Err(NipcError::BadLayout);
         }
 
-        // First attempt: send/receive into response_buf, get payload length
-        let first_result = self.do_cgroups_call_raw(response_buf);
-
-        match first_result {
-            Ok(payload_len) => {
-                // Decode from response_buf
-                let view = CgroupsResponseView::decode(&response_buf[..payload_len])?;
+        match attempt(self) {
+            Ok(val) => {
                 self.call_count += 1;
-                return Ok(view);
+                Ok(val)
             }
             Err(first_err) => {
-                // Call failed. Was previously READY: disconnect, reconnect, retry ONCE.
                 self.disconnect();
                 self.state = ClientState::Broken;
 
-                // Reconnect (full handshake)
                 self.state = self.try_connect();
                 if self.state != ClientState::Ready {
                     self.error_count += 1;
@@ -202,12 +275,10 @@ impl CgroupsClient {
                 }
                 self.reconnect_count += 1;
 
-                // Retry once
-                match self.do_cgroups_call_raw(response_buf) {
-                    Ok(payload_len) => {
-                        let view = CgroupsResponseView::decode(&response_buf[..payload_len])?;
+                match attempt(self) {
+                    Ok(val) => {
                         self.call_count += 1;
-                        Ok(view)
+                        Ok(val)
                     }
                     Err(retry_err) => {
                         self.disconnect();
@@ -351,28 +422,21 @@ impl CgroupsClient {
         }
     }
 
-    /// Single attempt at a cgroups snapshot call.
-    /// Returns the payload length on success. The payload bytes are in
-    /// response_buf[..payload_len]. Caller decodes after this returns.
-    fn do_cgroups_call_raw(
+    /// Single attempt at a raw call for any method.
+    /// `method_code` identifies the method. `request_payload` is the
+    /// already-encoded request payload. Returns the response payload
+    /// length on success. The payload bytes are in
+    /// response_buf[..payload_len].
+    fn do_raw_call(
         &mut self,
+        method_code: u16,
+        request_payload: &[u8],
         response_buf: &mut [u8],
     ) -> Result<usize, NipcError> {
-        // 1. Encode request using Codec
-        let req = CgroupsRequest {
-            layout_version: 1,
-            flags: 0,
-        };
-        let mut req_buf = [0u8; 4];
-        let req_len = req.encode(&mut req_buf);
-        if req_len == 0 {
-            return Err(NipcError::Truncated);
-        }
-
-        // 2. Build outer header
+        // 1. Build outer header
         let mut hdr = Header {
             kind: KIND_REQUEST,
-            code: METHOD_CGROUPS_SNAPSHOT,
+            code: method_code,
             flags: 0,
             item_count: 1,
             message_id: (self.call_count as u64) + 1,
@@ -380,24 +444,24 @@ impl CgroupsClient {
             ..Header::default()
         };
 
-        // 3. Send via L1 (SHM or UDS)
-        self.transport_send(&mut hdr, &req_buf[..req_len])?;
+        // 2. Send via L1 (SHM or UDS)
+        self.transport_send(&mut hdr, request_payload)?;
 
-        // 4. Receive via L1 (payload written into response_buf)
+        // 3. Receive via L1 (payload written into response_buf)
         let (resp_hdr, payload_len) = self.transport_receive(response_buf)?;
 
-        // 5. Verify response envelope fields before decode
+        // 4. Verify response envelope fields before decode
         if resp_hdr.kind != KIND_RESPONSE {
             return Err(NipcError::BadKind);
         }
-        if resp_hdr.code != METHOD_CGROUPS_SNAPSHOT {
+        if resp_hdr.code != method_code {
             return Err(NipcError::BadLayout);
         }
         if resp_hdr.message_id != hdr.message_id {
             return Err(NipcError::BadLayout);
         }
 
-        // 6. Check transport_status BEFORE decode (spec requirement)
+        // 5. Check transport_status BEFORE decode (spec requirement)
         if resp_hdr.transport_status != STATUS_OK {
             return Err(NipcError::BadLayout);
         }
@@ -2457,6 +2521,135 @@ mod tests {
         assert!(total_refreshes > 0, "expected some refreshes");
         assert_eq!(total_errors, 0, "expected zero errors in 60s run");
 
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    // ---------------------------------------------------------------
+    //  Ping-pong tests (INCREMENT + STRING_REVERSE)
+    // ---------------------------------------------------------------
+
+    /// Multi-method handler: INCREMENT (method 1) and STRING_REVERSE (method 3).
+    fn pingpong_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
+        match method_code {
+            METHOD_INCREMENT => {
+                let value = increment_decode(request_payload).ok()?;
+                let mut buf = [0u8; INCREMENT_PAYLOAD_SIZE];
+                let len = increment_encode(value + 1, &mut buf);
+                if len == 0 { return None; }
+                Some(buf[..len].to_vec())
+            }
+            METHOD_STRING_REVERSE => {
+                let view = string_reverse_decode(request_payload).ok()?;
+                let reversed: Vec<u8> = view.str_data.iter().rev().copied().collect();
+                let total = STRING_REVERSE_HDR_SIZE + reversed.len() + 1;
+                let mut buf = vec![0u8; total];
+                let len = string_reverse_encode(&reversed, &mut buf);
+                if len == 0 { return None; }
+                Some(buf[..len].to_vec())
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_increment_ping_pong() {
+        let svc = "rs_pp_incr";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, pingpong_handler);
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
+        client.refresh();
+        assert!(client.ready(), "client not ready");
+
+        // Ping-pong: send 0 -> get 1 -> send 1 -> get 2 -> ... -> 10
+        let mut value = 0u64;
+        let mut responses_received = 0u64;
+        for round in 0..10 {
+            let sent = value;
+            let result = client.call_increment(sent)
+                .unwrap_or_else(|e| panic!("round {round}: call_increment({sent}) failed: {e:?}"));
+            assert_eq!(result, sent + 1, "round {round}: expected {} got {result}", sent + 1);
+            responses_received += 1;
+            value = result;
+        }
+        assert_eq!(responses_received, 10, "expected 10 responses, got {responses_received}");
+        assert_eq!(value, 10, "final value after 10 rounds");
+
+        client.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_string_reverse_ping_pong() {
+        let svc = "rs_pp_strrev";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, pingpong_handler);
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
+        client.refresh();
+        assert!(client.ready(), "client not ready");
+
+        let original = "abcdefghijklmnopqrstuvwxyz";
+        let mut current = original.to_string();
+        let mut responses_received = 0u64;
+
+        // 6 rounds: feed each response back as next request
+        for round in 0..6 {
+            let sent = current.clone();
+            let expected: String = sent.chars().rev().collect();
+            let result = client.call_string_reverse(&sent)
+                .unwrap_or_else(|e| panic!("round {round}: call_string_reverse({sent:?}) failed: {e:?}"));
+            assert_eq!(result, expected, "round {round}: reverse of {sent:?} should be {expected:?}, got {result:?}");
+            responses_received += 1;
+            current = result;
+        }
+        assert_eq!(responses_received, 6, "expected 6 responses, got {responses_received}");
+        // even number of reversals = identity
+        assert_eq!(current, original, "6 reversals should restore original string");
+
+        client.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_mixed_methods() {
+        let svc = "rs_pp_mixed";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, pingpong_handler);
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
+        client.refresh();
+        assert!(client.ready(), "client not ready");
+
+        // Interleave increment and string_reverse calls
+        let inc_input_1 = 100u64;
+        let v1 = client.call_increment(inc_input_1).expect("increment(100)");
+        assert_eq!(v1, inc_input_1 + 1, "increment({inc_input_1}) should be {}", inc_input_1 + 1);
+
+        let str_input_1 = "hello";
+        let expected_s1: String = str_input_1.chars().rev().collect();
+        let s1 = client.call_string_reverse(str_input_1).expect("reverse(hello)");
+        assert_eq!(s1, expected_s1, "reverse of {str_input_1:?} should be {expected_s1:?}");
+
+        let inc_input_2 = v1;
+        let v2 = client.call_increment(inc_input_2).expect("increment(101)");
+        assert_eq!(v2, inc_input_2 + 1, "increment({inc_input_2}) should be {}", inc_input_2 + 1);
+
+        let str_input_2 = "world";
+        let expected_s2: String = str_input_2.chars().rev().collect();
+        let s2 = client.call_string_reverse(str_input_2).expect("reverse(world)");
+        assert_eq!(s2, expected_s2, "reverse of {str_input_2:?} should be {expected_s2:?}");
+
+        client.close();
         server.stop();
         cleanup_all(svc);
     }

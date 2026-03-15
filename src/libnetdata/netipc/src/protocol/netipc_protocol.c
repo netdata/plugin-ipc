@@ -664,3 +664,63 @@ size_t nipc_cgroups_builder_finish(nipc_cgroups_builder_t *b) {
 
     return final_packed_start + packed_data_len;
 }
+
+/* ------------------------------------------------------------------ */
+/*  INCREMENT codec                                                    */
+/* ------------------------------------------------------------------ */
+
+size_t nipc_increment_encode(uint64_t value, void *buf, size_t buf_len) {
+    if (buf_len < NIPC_INCREMENT_PAYLOAD_SIZE)
+        return 0;
+    memcpy(buf, &value, 8);
+    return NIPC_INCREMENT_PAYLOAD_SIZE;
+}
+
+nipc_error_t nipc_increment_decode(const void *buf, size_t buf_len,
+                                    uint64_t *value_out) {
+    if (buf_len < NIPC_INCREMENT_PAYLOAD_SIZE)
+        return NIPC_ERR_TRUNCATED;
+    memcpy(value_out, buf, 8);
+    return NIPC_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/*  STRING_REVERSE codec                                               */
+/* ------------------------------------------------------------------ */
+
+size_t nipc_string_reverse_encode(const char *str, uint32_t str_len,
+                                   void *buf, size_t buf_len) {
+    size_t total = NIPC_STRING_REVERSE_HDR_SIZE + str_len + 1;
+    if (buf_len < total)
+        return 0;
+
+    uint8_t *p = (uint8_t *)buf;
+    uint32_t offset = NIPC_STRING_REVERSE_HDR_SIZE;
+    memcpy(p + 0, &offset, 4);
+    memcpy(p + 4, &str_len, 4);
+    if (str_len > 0)
+        memcpy(p + offset, str, str_len);
+    p[offset + str_len] = '\0';
+    return total;
+}
+
+nipc_error_t nipc_string_reverse_decode(const void *buf, size_t buf_len,
+                                         nipc_string_reverse_view_t *view_out) {
+    if (buf_len < NIPC_STRING_REVERSE_HDR_SIZE)
+        return NIPC_ERR_TRUNCATED;
+
+    const uint8_t *p = (const uint8_t *)buf;
+    uint32_t str_offset, str_length;
+    memcpy(&str_offset, p + 0, 4);
+    memcpy(&str_length, p + 4, 4);
+
+    if ((uint64_t)str_offset + str_length + 1 > buf_len)
+        return NIPC_ERR_OUT_OF_BOUNDS;
+
+    if (p[str_offset + str_length] != '\0')
+        return NIPC_ERR_MISSING_NUL;
+
+    view_out->str     = (const char *)(p + str_offset);
+    view_out->str_len = str_length;
+    return NIPC_OK;
+}

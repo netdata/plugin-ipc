@@ -276,6 +276,14 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     add_test(NAME test_stress COMMAND test_stress)
     set_tests_properties(test_stress PROPERTIES TIMEOUT 180)
 
+    # Ping-pong tests: INCREMENT + STRING_REVERSE L2 typed calls
+    add_executable(test_ping_pong tests/fixtures/c/test_ping_pong.c)
+    target_link_libraries(test_ping_pong PRIVATE
+        netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
+    )
+    add_test(NAME test_ping_pong COMMAND test_ping_pong)
+    set_tests_properties(test_ping_pong PROPERTIES TIMEOUT 30)
+
     # Chaos tests (Phase H9: transport-level and SHM chaos testing)
     add_executable(test_chaos tests/fixtures/c/test_chaos.c)
     target_link_libraries(test_chaos PRIVATE

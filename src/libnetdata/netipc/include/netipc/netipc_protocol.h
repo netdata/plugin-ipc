@@ -55,6 +55,7 @@ extern "C" {
 /* Method codes */
 #define NIPC_METHOD_INCREMENT        1u
 #define NIPC_METHOD_CGROUPS_SNAPSHOT 2u
+#define NIPC_METHOD_STRING_REVERSE   3u
 
 /* Profile bits */
 #define NIPC_PROFILE_BASELINE    0x01u
@@ -379,6 +380,55 @@ nipc_error_t nipc_cgroups_builder_add(nipc_cgroups_builder_t *b,
  * cgroups snapshot response payload.
  */
 size_t nipc_cgroups_builder_finish(nipc_cgroups_builder_t *b);
+
+/* ------------------------------------------------------------------ */
+/*  INCREMENT codec (8 bytes)                                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * INCREMENT payload: { uint64_t value }.
+ * Same layout for both request and response.
+ */
+#define NIPC_INCREMENT_PAYLOAD_SIZE 8u
+
+/* Encode value into buf. Returns 8 on success, 0 if buf too small. */
+size_t nipc_increment_encode(uint64_t value, void *buf, size_t buf_len);
+
+/* Decode value from buf. Returns NIPC_OK or NIPC_ERR_TRUNCATED. */
+nipc_error_t nipc_increment_decode(const void *buf, size_t buf_len,
+                                    uint64_t *value_out);
+
+/* ------------------------------------------------------------------ */
+/*  STRING_REVERSE codec (variable length)                            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * STRING_REVERSE payload wire layout:
+ *   | 0 | 4 | u32  | str_offset (from payload start, always 8) |
+ *   | 4 | 4 | u32  | str_length (excluding NUL)                 |
+ *   | 8 | N+1 | bytes | string data + NUL                       |
+ *
+ * Same layout for both request and response.
+ * Total size = 8 + str_length + 1.
+ */
+#define NIPC_STRING_REVERSE_HDR_SIZE 8u
+
+/* Ephemeral view into a decoded STRING_REVERSE payload.
+ * Borrows the payload buffer — valid only during the current call. */
+typedef struct {
+    const char *str;   /* pointer into payload, NUL-terminated */
+    uint32_t str_len;  /* length excluding NUL */
+} nipc_string_reverse_view_t;
+
+/* Encode str (str_len bytes) into buf. Returns total bytes written,
+ * or 0 if buf too small. Appends trailing NUL. */
+size_t nipc_string_reverse_encode(const char *str, uint32_t str_len,
+                                   void *buf, size_t buf_len);
+
+/* Decode payload into an ephemeral view. Validates bounds and NUL.
+ * Returns NIPC_OK or error. */
+nipc_error_t nipc_string_reverse_decode(const void *buf, size_t buf_len,
+                                         nipc_string_reverse_view_t *view_out);
 
 /* ------------------------------------------------------------------ */
 /*  Utility: 8-byte alignment                                         */
