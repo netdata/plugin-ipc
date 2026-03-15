@@ -33,5 +33,9 @@ name = "interop_cache"
 path = "../../../tests/fixtures/rust/src/bin/interop_cache.rs"
 
 [[bin]]
+name = "interop_named_pipe"
+path = "../../../tests/fixtures/rust/src/bin/interop_named_pipe.rs"
+
+[[bin]]
 name = "bench_posix"
 path = "../../../bench/drivers/rust/src/main.rs"

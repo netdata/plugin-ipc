@@ -8,3 +8,6 @@ pub mod posix;
 
 #[cfg(target_os = "linux")]
 pub mod shm;
+
+#[cfg(windows)]
+pub mod windows;

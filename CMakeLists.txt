@@ -70,6 +70,18 @@ if(NOT NETIPC_WINDOWS_RUNTIME)
     endif()
 endif()
 
+# --- C library: L1 Windows Named Pipe transport ----------------------------
+
+if(NETIPC_WINDOWS_RUNTIME)
+    add_library(netipc_named_pipe STATIC
+        src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c
+    )
+    target_include_directories(netipc_named_pipe PUBLIC
+        src/libnetdata/netipc/include
+    )
+    target_link_libraries(netipc_named_pipe PUBLIC netipc_protocol)
+endif()
+
 # --- Rust crate -----------------------------------------------------------
 find_program(CARGO_EXECUTABLE cargo)
 
@@ -432,6 +444,66 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
     set_tests_properties(test_cache_interop PROPERTIES
         TIMEOUT 120
         ENVIRONMENT "INTEROP_CACHE_C=$<TARGET_FILE:interop_cache_c>;INTEROP_CACHE_RS=${INTEROP_CACHE_RS};INTEROP_CACHE_GO=${INTEROP_CACHE_GO}"
+    )
+endif()
+
+# --- L1 Windows Named Pipe transport tests ---------------------------------
+
+if(NETIPC_WINDOWS_RUNTIME)
+    add_executable(test_named_pipe tests/fixtures/c/test_named_pipe.c)
+    target_link_libraries(test_named_pipe PRIVATE netipc_named_pipe netipc_protocol)
+    add_test(NAME test_named_pipe COMMAND test_named_pipe)
+    set_tests_properties(test_named_pipe PROPERTIES TIMEOUT 30)
+
+    # C Named Pipe interop binary
+    add_executable(interop_named_pipe_c tests/fixtures/c/interop_named_pipe.c)
+    target_link_libraries(interop_named_pipe_c PRIVATE netipc_named_pipe netipc_protocol)
+endif()
+
+# --- Rust Named Pipe transport (Windows) -----------------------------------
+
+if(CARGO_EXECUTABLE AND NETIPC_WINDOWS_RUNTIME)
+    add_custom_target(interop_named_pipe_rs ALL
+        COMMAND ${CARGO_EXECUTABLE} build --bin interop_named_pipe
+        WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+        COMMENT "Building Rust Named Pipe interop binary"
+    )
+endif()
+
+# --- Go Named Pipe transport (Windows) ------------------------------------
+
+if(GO_EXECUTABLE AND NETIPC_WINDOWS_RUNTIME)
+    add_test(NAME test_named_pipe_go
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} test -count=1 -timeout=60s
+            ./pkg/netipc/transport/windows/
+        WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
+    )
+    set_tests_properties(test_named_pipe_go PROPERTIES TIMEOUT 60)
+
+    # Build Go Named Pipe interop binary
+    add_custom_target(interop_named_pipe_go ALL
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} build -o "${CMAKE_BINARY_DIR}/bin/interop_named_pipe_go.exe"
+            ./cmd/interop_named_pipe
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tests/fixtures/go"
+        COMMENT "Building Go Named Pipe interop binary"
+    )
+endif()
+
+# --- Cross-language Named Pipe interop tests (Windows) ---------------------
+
+if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
+    set(INTEROP_NP_RS "${NETIPC_RUST_CRATE_DIR}/target/debug/interop_named_pipe.exe")
+    set(INTEROP_NP_GO "${CMAKE_BINARY_DIR}/bin/interop_named_pipe_go.exe")
+
+    add_test(NAME test_named_pipe_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_named_pipe_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_named_pipe_interop PROPERTIES
+        TIMEOUT 60
+        ENVIRONMENT "INTEROP_NP_C=$<TARGET_FILE:interop_named_pipe_c>;INTEROP_NP_RS=${INTEROP_NP_RS};INTEROP_NP_GO=${INTEROP_NP_GO}"
     )
 endif()
 
