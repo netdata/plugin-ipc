@@ -247,6 +247,14 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     add_test(NAME test_service COMMAND test_service)
     set_tests_properties(test_service PROPERTIES TIMEOUT 60)
 
+    # Multi-client multi-worker server tests
+    add_executable(test_multi_server tests/fixtures/c/test_multi_server.c)
+    target_link_libraries(test_multi_server PRIVATE
+        netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
+    )
+    add_test(NAME test_multi_server COMMAND test_multi_server)
+    set_tests_properties(test_multi_server PROPERTIES TIMEOUT 120)
+
     # C L2 interop binary
     add_executable(interop_service_c tests/fixtures/c/interop_service.c)
     target_link_libraries(interop_service_c PRIVATE

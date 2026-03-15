@@ -535,18 +535,21 @@ impl Drop for CgroupsClient {
 /// Handler function type. Receives (method_code, request_payload).
 /// Returns Some(response_payload) on success, None on failure
 /// (which maps to INTERNAL_ERROR + empty payload).
-pub type HandlerFn = Box<dyn FnMut(u16, &[u8]) -> Option<Vec<u8>> + Send>;
+///
+/// Must be Fn (not FnMut) + Send + Sync for multi-client concurrency.
+pub type HandlerFn = Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync>;
 
 /// L2 managed server for the cgroups snapshot service.
 ///
-/// Handles accept, read, dispatch to handler, respond.
-/// Single-threaded acceptor loop (mirrors C implementation).
+/// Handles accept, spawns a thread per session (up to worker_count),
+/// reads requests, dispatches to handler, sends responses.
 pub struct CgroupsServer {
     run_dir: String,
     service_name: String,
     server_config: ServerConfig,
     handler: HandlerFn,
     running: Arc<AtomicBool>,
+    worker_count: usize,
 }
 
 impl CgroupsServer {
@@ -558,17 +561,30 @@ impl CgroupsServer {
         _response_buf_size: usize,
         handler: HandlerFn,
     ) -> Self {
+        Self::with_workers(run_dir, service_name, config, _response_buf_size, handler, 8)
+    }
+
+    /// Create a server with an explicit worker count limit.
+    pub fn with_workers(
+        run_dir: &str,
+        service_name: &str,
+        config: ServerConfig,
+        _response_buf_size: usize,
+        handler: HandlerFn,
+        worker_count: usize,
+    ) -> Self {
         CgroupsServer {
             run_dir: run_dir.to_string(),
             service_name: service_name.to_string(),
             server_config: config,
             handler,
             running: Arc::new(AtomicBool::new(false)),
+            worker_count: if worker_count < 1 { 1 } else { worker_count },
         }
     }
 
-    /// Run the acceptor loop. Blocking. Accepts clients, reads requests,
-    /// dispatches to the handler, sends responses.
+    /// Run the acceptor loop. Blocking. Accepts clients, spawns a
+    /// thread per session (up to worker_count concurrent sessions).
     ///
     /// Returns when `stop()` is called or on fatal error.
     #[cfg(unix)]
@@ -582,12 +598,16 @@ impl CgroupsServer {
 
         self.running.store(true, Ordering::Release);
 
+        let mut session_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
+
         while self.running.load(Ordering::Acquire) {
             let ready = poll_fd(listener.fd(), 500);
             if ready < 0 {
                 break;
             }
             if ready == 0 {
+                // Reap finished threads periodically
+                session_threads.retain(|t| !t.is_finished());
                 continue;
             }
 
@@ -602,18 +622,41 @@ impl CgroupsServer {
                 }
             };
 
+            // Check worker count limit (non-blocking)
+            // Reap finished threads first
+            session_threads.retain(|t| !t.is_finished());
+            if session_threads.len() >= self.worker_count {
+                // At capacity: reject client
+                drop(session);
+                continue;
+            }
+
             #[cfg(target_os = "linux")]
             let shm = self.try_shm_upgrade(&session);
             #[cfg(not(target_os = "linux"))]
             let shm: Option<()> = None;
 
-            self.handle_session(
-                session,
-                #[cfg(target_os = "linux")]
-                shm,
-                #[cfg(not(target_os = "linux"))]
-                shm,
-            );
+            // Spawn a handler thread for this session
+            let handler = self.handler.clone();
+            let running = self.running.clone();
+
+            let t = std::thread::spawn(move || {
+                handle_session_threaded(
+                    session,
+                    #[cfg(target_os = "linux")]
+                    shm,
+                    #[cfg(not(target_os = "linux"))]
+                    shm,
+                    handler,
+                    running,
+                );
+            });
+            session_threads.push(t);
+        }
+
+        // Wait for all active session threads
+        for t in session_threads {
+            let _ = t.join();
         }
 
         Ok(())
@@ -631,6 +674,8 @@ impl CgroupsServer {
 
         self.running.store(true, Ordering::Release);
 
+        let mut session_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
+
         while self.running.load(Ordering::Acquire) {
             let session = match listener.accept() {
                 Ok(s) => s,
@@ -643,8 +688,26 @@ impl CgroupsServer {
                 }
             };
 
+            // Reap finished threads
+            session_threads.retain(|t| !t.is_finished());
+            if session_threads.len() >= self.worker_count {
+                drop(session);
+                continue;
+            }
+
             let shm = self.try_win_shm_upgrade(&session);
-            self.handle_session_win(session, shm);
+
+            let handler = self.handler.clone();
+            let running = self.running.clone();
+
+            let t = std::thread::spawn(move || {
+                handle_session_win_threaded(session, shm, handler, running);
+            });
+            session_threads.push(t);
+        }
+
+        for t in session_threads {
+            let _ = t.join();
         }
 
         Ok(())
@@ -703,17 +766,119 @@ impl CgroupsServer {
         }
     }
 
-    /// Windows: handle one client session over Named Pipe + optional Win SHM.
-    #[cfg(windows)]
-    fn handle_session_win(
-        &mut self,
-        mut session: NpSession,
-        mut shm: Option<WinShmContext>,
-    ) {
-        let mut recv_buf = vec![0u8; 65536];
+}
 
-        while self.running.load(Ordering::Acquire) {
-            let (hdr, payload) = {
+/// Windows: handle one client session over Named Pipe + optional Win SHM.
+/// Standalone function for use in per-session threads.
+#[cfg(windows)]
+fn handle_session_win_threaded(
+    mut session: NpSession,
+    mut shm: Option<WinShmContext>,
+    handler: HandlerFn,
+    running: Arc<AtomicBool>,
+) {
+    let mut recv_buf = vec![0u8; 65536];
+
+    while running.load(Ordering::Acquire) {
+        let (hdr, payload) = {
+            if let Some(ref mut shm_ctx) = shm {
+                match shm_ctx.receive(&mut recv_buf, 500) {
+                    Ok(mlen) => {
+                        if mlen < HEADER_SIZE {
+                            break;
+                        }
+                        let hdr = match Header::decode(&recv_buf[..mlen]) {
+                            Ok(h) => h,
+                            Err(_) => break,
+                        };
+                        let payload = recv_buf[HEADER_SIZE..mlen].to_vec();
+                        (hdr, payload)
+                    }
+                    Err(crate::transport::win_shm::WinShmError::Timeout) => continue,
+                    Err(_) => break,
+                }
+            } else {
+                // Named Pipe path
+                match session.receive(&mut recv_buf) {
+                    Ok((hdr, payload)) => (hdr, payload),
+                    Err(_) => break,
+                }
+            }
+        };
+
+        if hdr.kind != KIND_REQUEST {
+            continue;
+        }
+
+        let handler_result = handler(hdr.code, &payload);
+
+        let mut resp_hdr = Header {
+            kind: KIND_RESPONSE,
+            code: hdr.code,
+            message_id: hdr.message_id,
+            item_count: 1,
+            flags: 0,
+            ..Header::default()
+        };
+
+        let response_payload = match handler_result {
+            Some(data) => {
+                resp_hdr.transport_status = STATUS_OK;
+                data
+            }
+            None => {
+                resp_hdr.transport_status = STATUS_INTERNAL_ERROR;
+                Vec::new()
+            }
+        };
+
+        if let Some(ref mut shm_ctx) = shm {
+            let msg_len = HEADER_SIZE + response_payload.len();
+            let mut msg = vec![0u8; msg_len];
+
+            resp_hdr.magic = MAGIC_MSG;
+            resp_hdr.version = VERSION;
+            resp_hdr.header_len = protocol::HEADER_LEN;
+            resp_hdr.payload_len = response_payload.len() as u32;
+
+            resp_hdr.encode(&mut msg[..HEADER_SIZE]);
+            if !response_payload.is_empty() {
+                msg[HEADER_SIZE..].copy_from_slice(&response_payload);
+            }
+
+            if shm_ctx.send(&msg).is_err() {
+                break;
+            }
+            continue;
+        }
+
+        if session.send(&mut resp_hdr, &response_payload).is_err() {
+            break;
+        }
+    }
+
+    if let Some(mut shm_ctx) = shm {
+        shm_ctx.destroy();
+    }
+    session.close();
+}
+
+/// POSIX: Handle one client session in its own thread.
+#[cfg(unix)]
+fn handle_session_threaded(
+    mut session: UdsSession,
+    #[cfg(target_os = "linux")] mut shm: Option<ShmContext>,
+    #[cfg(not(target_os = "linux"))] _shm: Option<()>,
+    handler: HandlerFn,
+    running: Arc<AtomicBool>,
+) {
+    let mut recv_buf = vec![0u8; 65536];
+
+    while running.load(Ordering::Acquire) {
+        // Receive request via the active transport
+        let (hdr, payload) = {
+            #[cfg(target_os = "linux")]
+            {
                 if let Some(ref mut shm_ctx) = shm {
                     match shm_ctx.receive(&mut recv_buf, 500) {
                         Ok(mlen) => {
@@ -727,44 +892,76 @@ impl CgroupsServer {
                             let payload = recv_buf[HEADER_SIZE..mlen].to_vec();
                             (hdr, payload)
                         }
-                        Err(crate::transport::win_shm::WinShmError::Timeout) => continue,
+                        Err(crate::transport::shm::ShmError::Timeout) => continue,
                         Err(_) => break,
                     }
                 } else {
-                    // Named Pipe path
+                    // UDS path with poll
+                    let ready = poll_fd(session.fd(), 500);
+                    if ready < 0 {
+                        break;
+                    }
+                    if ready == 0 {
+                        continue;
+                    }
+
                     match session.receive(&mut recv_buf) {
-                        Ok((hdr, payload)) => (hdr, payload),
+                        Ok((hdr, payload)) => (hdr, payload.to_vec()),
                         Err(_) => break,
                     }
                 }
-            };
-
-            if hdr.kind != KIND_REQUEST {
-                continue;
             }
 
-            let handler_result = (self.handler)(hdr.code, &payload);
-
-            let mut resp_hdr = Header {
-                kind: KIND_RESPONSE,
-                code: hdr.code,
-                message_id: hdr.message_id,
-                item_count: 1,
-                flags: 0,
-                ..Header::default()
-            };
-
-            let response_payload = match handler_result {
-                Some(data) => {
-                    resp_hdr.transport_status = STATUS_OK;
-                    data
+            #[cfg(not(target_os = "linux"))]
+            {
+                let ready = poll_fd(session.fd(), 500);
+                if ready < 0 {
+                    break;
                 }
-                None => {
-                    resp_hdr.transport_status = STATUS_INTERNAL_ERROR;
-                    Vec::new()
+                if ready == 0 {
+                    continue;
                 }
-            };
 
+                match session.receive(&mut recv_buf) {
+                    Ok((hdr, payload)) => (hdr, payload.to_vec()),
+                    Err(_) => break,
+                }
+            }
+        };
+
+        // Skip non-request messages
+        if hdr.kind != KIND_REQUEST {
+            continue;
+        }
+
+        // Dispatch to handler
+        let handler_result = handler(hdr.code, &payload);
+
+        // Build response header
+        let mut resp_hdr = Header {
+            kind: KIND_RESPONSE,
+            code: hdr.code,
+            message_id: hdr.message_id,
+            item_count: 1,
+            flags: 0,
+            ..Header::default()
+        };
+
+        let response_payload = match handler_result {
+            Some(data) => {
+                resp_hdr.transport_status = STATUS_OK;
+                data
+            }
+            None => {
+                // Handler failure: INTERNAL_ERROR + empty payload
+                resp_hdr.transport_status = STATUS_INTERNAL_ERROR;
+                Vec::new()
+            }
+        };
+
+        // Send response via the active transport
+        #[cfg(target_os = "linux")]
+        {
             if let Some(ref mut shm_ctx) = shm {
                 let msg_len = HEADER_SIZE + response_payload.len();
                 let mut msg = vec![0u8; msg_len];
@@ -784,152 +981,22 @@ impl CgroupsServer {
                 }
                 continue;
             }
-
-            if session.send(&mut resp_hdr, &response_payload).is_err() {
-                break;
-            }
         }
 
+        // UDS path
+        if session.send(&mut resp_hdr, &response_payload).is_err() {
+            break;
+        }
+    }
+
+    // Cleanup
+    #[cfg(target_os = "linux")]
+    {
         if let Some(mut shm_ctx) = shm {
             shm_ctx.destroy();
         }
-        session.close();
     }
-
-    /// POSIX: Handle one client session.
-    #[cfg(unix)]
-    fn handle_session(
-        &mut self,
-        mut session: UdsSession,
-        #[cfg(target_os = "linux")] mut shm: Option<ShmContext>,
-        #[cfg(not(target_os = "linux"))] _shm: Option<()>,
-    ) {
-        let mut recv_buf = vec![0u8; 65536];
-
-        while self.running.load(Ordering::Acquire) {
-            // Receive request via the active transport
-            let (hdr, payload) = {
-                #[cfg(target_os = "linux")]
-                {
-                    if let Some(ref mut shm_ctx) = shm {
-                        match shm_ctx.receive(&mut recv_buf, 500) {
-                            Ok(mlen) => {
-                                if mlen < HEADER_SIZE {
-                                    break;
-                                }
-                                let hdr = match Header::decode(&recv_buf[..mlen]) {
-                                    Ok(h) => h,
-                                    Err(_) => break,
-                                };
-                                let payload = recv_buf[HEADER_SIZE..mlen].to_vec();
-                                (hdr, payload)
-                            }
-                            Err(crate::transport::shm::ShmError::Timeout) => continue,
-                            Err(_) => break,
-                        }
-                    } else {
-                        // UDS path with poll
-                        let ready = poll_fd(session.fd(), 500);
-                        if ready < 0 {
-                            break;
-                        }
-                        if ready == 0 {
-                            continue;
-                        }
-
-                        match session.receive(&mut recv_buf) {
-                            Ok((hdr, payload)) => (hdr, payload.to_vec()),
-                            Err(_) => break,
-                        }
-                    }
-                }
-
-                #[cfg(not(target_os = "linux"))]
-                {
-                    let ready = poll_fd(session.fd(), 500);
-                    if ready < 0 {
-                        break;
-                    }
-                    if ready == 0 {
-                        continue;
-                    }
-
-                    match session.receive(&mut recv_buf) {
-                        Ok((hdr, payload)) => (hdr, payload.to_vec()),
-                        Err(_) => break,
-                    }
-                }
-            };
-
-            // Skip non-request messages
-            if hdr.kind != KIND_REQUEST {
-                continue;
-            }
-
-            // Dispatch to handler
-            let handler_result = (self.handler)(hdr.code, &payload);
-
-            // Build response header
-            let mut resp_hdr = Header {
-                kind: KIND_RESPONSE,
-                code: hdr.code,
-                message_id: hdr.message_id,
-                item_count: 1,
-                flags: 0,
-                ..Header::default()
-            };
-
-            let response_payload = match handler_result {
-                Some(data) => {
-                    resp_hdr.transport_status = STATUS_OK;
-                    data
-                }
-                None => {
-                    // Handler failure: INTERNAL_ERROR + empty payload
-                    resp_hdr.transport_status = STATUS_INTERNAL_ERROR;
-                    Vec::new()
-                }
-            };
-
-            // Send response via the active transport
-            #[cfg(target_os = "linux")]
-            {
-                if let Some(ref mut shm_ctx) = shm {
-                    let msg_len = HEADER_SIZE + response_payload.len();
-                    let mut msg = vec![0u8; msg_len];
-
-                    resp_hdr.magic = MAGIC_MSG;
-                    resp_hdr.version = VERSION;
-                    resp_hdr.header_len = protocol::HEADER_LEN;
-                    resp_hdr.payload_len = response_payload.len() as u32;
-
-                    resp_hdr.encode(&mut msg[..HEADER_SIZE]);
-                    if !response_payload.is_empty() {
-                        msg[HEADER_SIZE..].copy_from_slice(&response_payload);
-                    }
-
-                    if shm_ctx.send(&msg).is_err() {
-                        break;
-                    }
-                    continue;
-                }
-            }
-
-            // UDS path
-            if session.send(&mut resp_hdr, &response_payload).is_err() {
-                break;
-            }
-        }
-
-        // Cleanup
-        #[cfg(target_os = "linux")]
-        {
-            if let Some(mut shm_ctx) = shm {
-                shm_ctx.destroy();
-            }
-        }
-        drop(session);
-    }
+    drop(session);
 }
 
 // ---------------------------------------------------------------------------
@@ -1249,7 +1316,7 @@ mod tests {
                 &svc,
                 server_config(),
                 RESPONSE_BUF_SIZE,
-                Box::new(move |code, payload| handler(code, payload)),
+                Arc::new(move |code, payload| handler(code, payload)),
             );
             let stop_flag = server.running_flag();
 
@@ -1297,7 +1364,7 @@ mod tests {
                 &svc,
                 scfg,
                 resp_buf_size,
-                Box::new(move |code, payload| handler(code, payload)),
+                Arc::new(move |code, payload| handler(code, payload)),
             );
             let stop_flag = server.running_flag();
 
@@ -1471,10 +1538,7 @@ mod tests {
         let view1 = client1.call_snapshot(&mut resp_buf1).expect("client 1 call");
         assert_eq!(view1.item_count, 3);
 
-        // Close client 1 so server can accept client 2 (single-threaded)
-        client1.close();
-
-        // Create and connect client 2
+        // Now multi-client: keep client 1 open, connect client 2
         let mut client2 = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
         client2.refresh();
         assert!(client2.ready());
@@ -1483,7 +1547,75 @@ mod tests {
         let view2 = client2.call_snapshot(&mut resp_buf2).expect("client 2 call");
         assert_eq!(view2.item_count, 3);
 
+        client1.close();
         client2.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_concurrent_clients() {
+        let svc = "rs_svc_concurrent";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, test_cgroups_handler);
+
+        const NUM_CLIENTS: usize = 5;
+        const REQUESTS_PER: usize = 10;
+
+        let mut handles = Vec::new();
+
+        for _ in 0..NUM_CLIENTS {
+            let svc_name = svc.to_string();
+            let handle = thread::spawn(move || {
+                let mut client = CgroupsClient::new(TEST_RUN_DIR, &svc_name, client_config());
+
+                // Connect with retry
+                for _ in 0..100 {
+                    client.refresh();
+                    if client.ready() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+
+                assert!(client.ready(), "client must be ready");
+
+                let mut successes = 0usize;
+                for _ in 0..REQUESTS_PER {
+                    let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
+                    match client.call_snapshot(&mut resp_buf) {
+                        Ok(view) => {
+                            assert_eq!(view.item_count, 3);
+                            assert_eq!(view.generation, 42);
+
+                            // Verify first item content
+                            let item0 = view.item(0).expect("item 0");
+                            assert_eq!(item0.hash, 1001);
+                            assert_eq!(
+                                std::str::from_utf8(item0.name.as_bytes()).unwrap(),
+                                "docker-abc123"
+                            );
+
+                            successes += 1;
+                        }
+                        Err(e) => panic!("call failed: {:?}", e),
+                    }
+                }
+                client.close();
+                successes
+            });
+            handles.push(handle);
+        }
+
+        let mut total = 0usize;
+        for h in handles {
+            total += h.join().expect("client thread panicked");
+        }
+
+        assert_eq!(total, NUM_CLIENTS * REQUESTS_PER);
+
         server.stop();
         cleanup_all(svc);
     }

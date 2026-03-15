@@ -421,15 +421,16 @@ static int poll_with_shutdown(int fd, volatile bool *running)
 
 /*
  * Handle one client session: read requests, dispatch to handler,
- * send responses. Runs until the client disconnects or server stops.
+ * send responses. Each session gets its own response buffer.
+ * Runs until the client disconnects or server stops.
  */
 static void server_handle_session(nipc_managed_server_t *server,
                                    nipc_uds_session_t *session,
-                                   nipc_shm_ctx_t *shm)
+                                   nipc_shm_ctx_t *shm,
+                                   uint8_t *resp_buf,
+                                   size_t resp_buf_size)
 {
     uint8_t recv_buf[65536];
-    uint8_t *resp_buf = server->response_buf;
-    size_t resp_buf_size = server->response_buf_size;
 
     while (server->running) {
         nipc_header_t hdr;
@@ -498,8 +499,6 @@ static void server_handle_session(nipc_managed_server_t *server,
 
         /* Send response via the active transport */
         if (shm) {
-            /* Build full message in recv_buf (it's large enough since
-             * we already received into it and resp_buf_size >= recv_buf size). */
             size_t msg_len = NIPC_HEADER_LEN + response_len;
 
             resp_hdr.magic      = NIPC_MAGIC_MSG;
@@ -532,6 +531,80 @@ static void server_handle_session(nipc_managed_server_t *server,
 }
 
 /* ------------------------------------------------------------------ */
+/*  Internal: per-session handler thread                                */
+/* ------------------------------------------------------------------ */
+
+/* Remove a session from the server's tracking array. */
+static void server_remove_session(nipc_managed_server_t *server,
+                                   nipc_session_ctx_t *sctx)
+{
+    pthread_mutex_lock(&server->sessions_lock);
+    for (int i = 0; i < server->session_count; i++) {
+        if (server->sessions[i] == sctx) {
+            /* Swap with last element for O(1) removal */
+            server->sessions[i] = server->sessions[server->session_count - 1];
+            server->session_count--;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&server->sessions_lock);
+}
+
+/* Thread function: handles one client session from accept to disconnect. */
+static void *session_handler_thread(void *arg)
+{
+    nipc_session_ctx_t *sctx = (nipc_session_ctx_t *)arg;
+    nipc_managed_server_t *server = sctx->server;
+
+    /* Allocate a per-session response buffer */
+    uint8_t *resp_buf = malloc(server->response_buf_size);
+    if (resp_buf) {
+        server_handle_session(server, &sctx->session, sctx->shm,
+                              resp_buf, server->response_buf_size);
+        free(resp_buf);
+    }
+
+    /* Cleanup SHM and session */
+    if (sctx->shm) {
+        nipc_shm_destroy(sctx->shm);
+        free(sctx->shm);
+    }
+    nipc_uds_close_session(&sctx->session);
+
+    sctx->active = false;
+
+    /* Remove from server tracking */
+    server_remove_session(server, sctx);
+
+    /* The acceptor thread owns the sctx memory and will free it
+     * after joining this thread, or on server destroy. We leave
+     * sctx allocated here — the acceptor reaps it. */
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Internal: reap finished session threads                             */
+/* ------------------------------------------------------------------ */
+
+/* Reap all finished (inactive) session threads. Called with lock held. */
+static void server_reap_sessions_locked(nipc_managed_server_t *server)
+{
+    int i = 0;
+    while (i < server->session_count) {
+        nipc_session_ctx_t *s = server->sessions[i];
+        if (!s->active) {
+            pthread_join(s->thread, NULL);
+            /* Swap with last, free */
+            server->sessions[i] = server->sessions[server->session_count - 1];
+            server->session_count--;
+            free(s);
+        } else {
+            i++;
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /*  Public API: managed server                                         */
 /* ------------------------------------------------------------------ */
 
@@ -547,6 +620,7 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
     memset(server, 0, sizeof(*server));
     server->listener.fd = -1;
     server->running = false;
+    server->acceptor_started = false;
 
     if (!run_dir || !service_name || !handler || worker_count < 1)
         return NIPC_ERR_BAD_LAYOUT;
@@ -570,19 +644,27 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
     server->handler = handler;
     server->handler_user = user;
     server->worker_count = worker_count;
-
-    /* Allocate response buffer */
     server->response_buf_size = response_buf_size;
-    server->response_buf = malloc(response_buf_size);
-    if (!server->response_buf)
+
+    /* Initialize session tracking */
+    server->session_capacity = worker_count * 2; /* room for slots being reaped */
+    if (server->session_capacity < 16)
+        server->session_capacity = 16;
+    server->sessions = calloc((size_t)server->session_capacity,
+                              sizeof(nipc_session_ctx_t *));
+    if (!server->sessions)
         return NIPC_ERR_OVERFLOW;
+    server->session_count = 0;
+    server->next_session_id = 0;
+    pthread_mutex_init(&server->sessions_lock, NULL);
 
     /* Start listening via L1 */
     nipc_uds_error_t uerr = nipc_uds_listen(
         run_dir, service_name, config, &server->listener);
     if (uerr != NIPC_UDS_OK) {
-        free(server->response_buf);
-        server->response_buf = NULL;
+        free(server->sessions);
+        server->sessions = NULL;
+        pthread_mutex_destroy(&server->sessions_lock);
         return NIPC_ERR_BAD_LAYOUT;
     }
 
@@ -613,6 +695,17 @@ void nipc_server_run(nipc_managed_server_t *server)
             continue;
         }
 
+        /* Enforce worker_count limit: reap finished sessions, check count */
+        pthread_mutex_lock(&server->sessions_lock);
+        server_reap_sessions_locked(server);
+
+        if (server->session_count >= server->worker_count) {
+            /* At capacity: reject this client by closing the session */
+            pthread_mutex_unlock(&server->sessions_lock);
+            nipc_uds_close_session(&session);
+            continue;
+        }
+
         /* SHM upgrade if negotiated */
         nipc_shm_ctx_t *shm = NULL;
         if (session.selected_profile == NIPC_PROFILE_SHM_HYBRID ||
@@ -632,15 +725,61 @@ void nipc_server_run(nipc_managed_server_t *server)
             }
         }
 
-        /* Handle this session (blocking, single-threaded for now) */
-        server_handle_session(server, &session, shm);
-
-        /* Cleanup */
-        if (shm) {
-            nipc_shm_destroy(shm);
-            free(shm);
+        /* Create session context */
+        nipc_session_ctx_t *sctx = calloc(1, sizeof(nipc_session_ctx_t));
+        if (!sctx) {
+            pthread_mutex_unlock(&server->sessions_lock);
+            if (shm) { nipc_shm_destroy(shm); free(shm); }
+            nipc_uds_close_session(&session);
+            continue;
         }
-        nipc_uds_close_session(&session);
+
+        sctx->server = server;
+        sctx->session = session;
+        sctx->shm = shm;
+        sctx->id = server->next_session_id++;
+        sctx->active = true;
+
+        /* Grow session array if needed */
+        if (server->session_count >= server->session_capacity) {
+            int new_cap = server->session_capacity * 2;
+            nipc_session_ctx_t **new_arr = realloc(
+                server->sessions,
+                (size_t)new_cap * sizeof(nipc_session_ctx_t *));
+            if (!new_arr) {
+                pthread_mutex_unlock(&server->sessions_lock);
+                if (shm) { nipc_shm_destroy(shm); free(shm); }
+                nipc_uds_close_session(&session);
+                free(sctx);
+                continue;
+            }
+            server->sessions = new_arr;
+            server->session_capacity = new_cap;
+        }
+
+        server->sessions[server->session_count++] = sctx;
+        pthread_mutex_unlock(&server->sessions_lock);
+
+        /* Spawn handler thread for this session */
+        int rc = pthread_create(&sctx->thread, NULL,
+                                session_handler_thread, sctx);
+        if (rc != 0) {
+            /* Thread creation failed: clean up */
+            pthread_mutex_lock(&server->sessions_lock);
+            /* Remove the sctx we just added */
+            for (int i = 0; i < server->session_count; i++) {
+                if (server->sessions[i] == sctx) {
+                    server->sessions[i] = server->sessions[server->session_count - 1];
+                    server->session_count--;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&server->sessions_lock);
+
+            if (shm) { nipc_shm_destroy(shm); free(shm); }
+            nipc_uds_close_session(&session);
+            free(sctx);
+        }
     }
 }
 
@@ -654,12 +793,25 @@ void nipc_server_destroy(nipc_managed_server_t *server)
     server->running = false;
     nipc_uds_close_listener(&server->listener);
 
-    free(server->response_buf);
-    server->response_buf = NULL;
-    server->response_buf_size = 0;
+    /* Join all active session threads */
+    if (server->sessions) {
+        pthread_mutex_lock(&server->sessions_lock);
+        for (int i = 0; i < server->session_count; i++) {
+            nipc_session_ctx_t *s = server->sessions[i];
+            pthread_mutex_unlock(&server->sessions_lock);
+            pthread_join(s->thread, NULL);
+            free(s);
+            pthread_mutex_lock(&server->sessions_lock);
+        }
+        server->session_count = 0;
+        pthread_mutex_unlock(&server->sessions_lock);
 
-    free(server->workers);
-    server->workers = NULL;
+        free(server->sessions);
+        server->sessions = NULL;
+        server->session_capacity = 0;
+        pthread_mutex_destroy(&server->sessions_lock);
+    }
+
     server->worker_count = 0;
 }
 

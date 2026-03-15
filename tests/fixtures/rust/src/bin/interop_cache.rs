@@ -79,7 +79,7 @@ fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Er
         service,
         server_config(),
         RESPONSE_BUF_SIZE,
-        Box::new(|code, payload| cgroups_handler(code, payload)),
+        std::sync::Arc::new(|code, payload| cgroups_handler(code, payload)),
     );
 
     println!("READY");

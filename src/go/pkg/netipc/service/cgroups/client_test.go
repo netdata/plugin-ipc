@@ -327,10 +327,7 @@ func TestMultipleClients(t *testing.T) {
 		t.Fatalf("client 1: expected 3 items, got %d", view1.ItemCount)
 	}
 
-	// Close client 1 so server can accept client 2 (single-threaded)
-	client1.Close()
-
-	// Client 2
+	// Now multi-client: keep client 1 open, connect client 2
 	client2 := NewClient(testRunDir, svc, testClientConfig())
 	client2.Refresh()
 	if !client2.Ready() {
@@ -346,7 +343,84 @@ func TestMultipleClients(t *testing.T) {
 		t.Fatalf("client 2: expected 3 items, got %d", view2.ItemCount)
 	}
 
+	client1.Close()
 	client2.Close()
+	cleanupAll(svc)
+}
+
+func TestConcurrentClients(t *testing.T) {
+	svc := "go_svc_concurrent"
+	ensureRunDir()
+	cleanupAll(svc)
+
+	ts := startTestServer(svc, testCgroupsHandler)
+	defer ts.stop()
+
+	const numClients = 5
+	const requestsPerClient = 10
+
+	type result struct {
+		successes int
+		failures  int
+	}
+
+	results := make(chan result, numClients)
+
+	for i := 0; i < numClients; i++ {
+		go func() {
+			r := result{}
+			client := NewClient(testRunDir, svc, testClientConfig())
+			defer client.Close()
+
+			for retry := 0; retry < 100; retry++ {
+				client.Refresh()
+				if client.Ready() {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+
+			if !client.Ready() {
+				r.failures = requestsPerClient
+				results <- r
+				return
+			}
+
+			for j := 0; j < requestsPerClient; j++ {
+				respBuf := make([]byte, responseBufSize)
+				view, err := client.CallSnapshot(respBuf)
+				if err != nil || view.ItemCount != 3 {
+					r.failures++
+					continue
+				}
+				// Verify content
+				item0, err := view.Item(0)
+				if err != nil || item0.Hash != 1001 || item0.Name.String() != "docker-abc123" {
+					r.failures++
+					continue
+				}
+				r.successes++
+			}
+			results <- r
+		}()
+	}
+
+	totalSuccess := 0
+	totalFailure := 0
+	for i := 0; i < numClients; i++ {
+		r := <-results
+		totalSuccess += r.successes
+		totalFailure += r.failures
+	}
+
+	expected := numClients * requestsPerClient
+	if totalSuccess != expected {
+		t.Fatalf("expected %d successes, got %d (failures: %d)", expected, totalSuccess, totalFailure)
+	}
+	if totalFailure != 0 {
+		t.Fatalf("expected 0 failures, got %d", totalFailure)
+	}
+
 	cleanupAll(svc)
 }
 

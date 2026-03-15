@@ -65,7 +65,7 @@ fn run_server(run_dir: &str, service: &str) -> i32 {
         service,
         config,
         RESPONSE_BUF_SIZE,
-        Box::new(test_handler),
+        std::sync::Arc::new(test_handler),
     );
 
     let stop_flag = server.running_flag();

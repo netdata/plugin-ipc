@@ -5,6 +5,7 @@ package cgroups
 import (
 	"encoding/binary"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -329,26 +330,40 @@ func isProfileError(err error) bool {
 // ---------------------------------------------------------------------------
 
 // Server is an L2 managed server for the cgroups snapshot service.
+// Supports multiple concurrent client sessions up to workerCount.
 type Server struct {
-	runDir        string
-	serviceName   string
-	config        posix.ServerConfig
-	handler       HandlerFunc
-	running       atomic.Bool
+	runDir      string
+	serviceName string
+	config      posix.ServerConfig
+	handler     HandlerFunc
+	running     atomic.Bool
+	workerCount int
+	wg          sync.WaitGroup
 }
 
-// NewServer creates a new managed server.
+// NewServer creates a new managed server. workerCount limits the
+// maximum number of concurrent client sessions (default 1 if <= 0).
 func NewServer(runDir, serviceName string, config posix.ServerConfig, handler HandlerFunc) *Server {
+	return NewServerWithWorkers(runDir, serviceName, config, handler, 8)
+}
+
+// NewServerWithWorkers creates a server with an explicit worker count limit.
+func NewServerWithWorkers(runDir, serviceName string, config posix.ServerConfig,
+	handler HandlerFunc, workerCount int) *Server {
+	if workerCount < 1 {
+		workerCount = 1
+	}
 	return &Server{
 		runDir:      runDir,
 		serviceName: serviceName,
 		config:      config,
 		handler:     handler,
+		workerCount: workerCount,
 	}
 }
 
-// Run starts the acceptor loop. Blocking. Accepts clients, reads requests,
-// dispatches to the handler, sends responses.
+// Run starts the acceptor loop. Blocking. Accepts clients, spawns a
+// goroutine per session (up to workerCount concurrently).
 // Returns when Stop() is called or on fatal error.
 func (s *Server) Run() error {
 	listener, err := posix.Listen(s.runDir, s.serviceName, s.config)
@@ -358,6 +373,9 @@ func (s *Server) Run() error {
 	defer listener.Close()
 
 	s.running.Store(true)
+
+	/* Semaphore channel limits concurrent sessions */
+	sem := make(chan struct{}, s.workerCount)
 
 	for s.running.Load() {
 		// Poll the listener fd before blocking on accept
@@ -378,6 +396,16 @@ func (s *Server) Run() error {
 			continue
 		}
 
+		// Try to acquire a worker slot (non-blocking check)
+		select {
+		case sem <- struct{}{}:
+			// Got a slot
+		default:
+			// At capacity: reject client
+			session.Close()
+			continue
+		}
+
 		// SHM upgrade if negotiated
 		var shm *posix.ShmContext
 		if session.SelectedProfile == protocol.ProfileSHMHybrid ||
@@ -392,9 +420,19 @@ func (s *Server) Run() error {
 			}
 		}
 
-		// Handle this session (blocking, single-threaded)
-		s.handleSession(session, shm)
+		// Handle this session in a goroutine
+		s.wg.Add(1)
+		go func(sess *posix.Session, shmCtx *posix.ShmContext) {
+			defer func() {
+				<-sem // release worker slot
+				s.wg.Done()
+			}()
+			s.handleSession(sess, shmCtx)
+		}(session, shm)
 	}
+
+	// Wait for all active session goroutines to finish
+	s.wg.Wait()
 
 	return nil
 }

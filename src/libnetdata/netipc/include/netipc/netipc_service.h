@@ -195,6 +195,21 @@ typedef bool (*nipc_server_handler_fn)(
 
 typedef struct nipc_managed_server nipc_managed_server_t;
 
+/* Per-session context for multi-client server */
+typedef struct nipc_session_ctx {
+    nipc_managed_server_t *server;   /* back-pointer */
+#ifdef _WIN32
+    nipc_np_session_t session;
+    /* TODO: win SHM */
+#else
+    nipc_uds_session_t session;
+    nipc_shm_ctx_t *shm;            /* non-NULL if SHM negotiated */
+    pthread_t thread;
+#endif
+    int id;
+    volatile bool active;
+} nipc_session_ctx_t;
+
 struct nipc_managed_server {
     /* Listener */
 #ifdef _WIN32
@@ -203,24 +218,29 @@ struct nipc_managed_server {
     nipc_uds_listener_t listener;
 #endif
 
-    /* Workers */
-#ifdef _WIN32
-    HANDLE *workers;
-#else
-    pthread_t *workers;
-#endif
-    int worker_count;
+    /* Concurrency control */
+    int worker_count;                /* max concurrent sessions */
 
     /* Callback */
     nipc_server_handler_fn handler;
     void *handler_user;
 
-    /* Per-worker response buffers */
-    uint8_t *response_buf;
+    /* Response buffer size (per-session allocation) */
     size_t   response_buf_size;
 
     /* State */
     volatile bool running;
+
+    /* Session tracking */
+#ifndef _WIN32
+    nipc_session_ctx_t **sessions;   /* dynamic array of active sessions */
+    int session_count;               /* current active session count */
+    int session_capacity;            /* allocated slots */
+    int next_session_id;             /* monotonic session ID counter */
+    pthread_mutex_t sessions_lock;   /* protects session array + count */
+    pthread_t acceptor_thread;
+    bool acceptor_started;
+#endif
 
     /* Configuration */
     char run_dir[256];
