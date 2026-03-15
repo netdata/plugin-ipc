@@ -755,3 +755,37 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
         COMMENT "Generating benchmarks-posix.md from CSV data"
     )
 endif()
+
+# --- Windows Benchmarks ---------------------------------------------------
+
+if(NETIPC_WINDOWS_RUNTIME)
+    # C Windows benchmark binary
+    add_executable(bench_windows_c bench/drivers/c/bench_windows.c)
+    target_link_libraries(bench_windows_c PRIVATE
+        netipc_service netipc_named_pipe netipc_win_shm netipc_protocol
+    )
+    target_compile_options(bench_windows_c PRIVATE /O2)
+
+    # Go Windows benchmark binary
+    if(GO_EXECUTABLE)
+        add_custom_target(bench_windows_go ALL
+            COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+                ${GO_EXECUTABLE} build -o "${CMAKE_BINARY_DIR}/bin/bench_windows_go.exe" .
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/bench/drivers/go"
+            COMMENT "Building Go Windows benchmark binary"
+        )
+    endif()
+
+    add_custom_target(run-windows-bench
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/run-windows-bench.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Running full Windows benchmark suite"
+        DEPENDS bench_windows_c
+    )
+
+    add_custom_target(generate-benchmarks-windows
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/generate-benchmarks-windows.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Generating benchmarks-windows.md from CSV data"
+    )
+endif()

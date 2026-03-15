@@ -525,17 +525,43 @@ impl ShmContext {
             cpu_relax();
         }
 
-        // Phase 2: futex wait
+        // Phase 2: futex wait with deadline-based retry loop.
+        //
+        // Handles spurious wakeups (EAGAIN when signal word changed
+        // between read and syscall, or EINTR from signal delivery).
+        // Computes a wall-clock deadline so total wait never exceeds
+        // timeout_ms regardless of retries.
         if !observed {
-            let sig_val = atomic_load_u32(self.base, sig_off);
+            let deadline_ns: u64 = if timeout_ms > 0 {
+                let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+                unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+                ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+                    + timeout_ms as u64 * 1_000_000
+            } else {
+                0
+            };
 
-            // Check once more after reading signal
-            let cur = atomic_load_u64(self.base, seq_off);
-            if cur < expected_seq {
-                let timeout = if timeout_ms > 0 {
+            loop {
+                let sig_val = atomic_load_u32(self.base, sig_off);
+
+                let cur = atomic_load_u64(self.base, seq_off);
+                if cur >= expected_seq {
+                    break; // response arrived
+                }
+
+                // Compute remaining timeout for this futex_wait call
+                let timeout = if deadline_ns > 0 {
+                    let mut now_ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+                    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now_ts) };
+                    let now_val = now_ts.tv_sec as u64 * 1_000_000_000
+                        + now_ts.tv_nsec as u64;
+                    if now_val >= deadline_ns {
+                        return Err(ShmError::Timeout);
+                    }
+                    let remain = deadline_ns - now_val;
                     Some(libc::timespec {
-                        tv_sec: (timeout_ms / 1000) as libc::time_t,
-                        tv_nsec: ((timeout_ms % 1000) as libc::c_long) * 1_000_000,
+                        tv_sec: (remain / 1_000_000_000) as libc::time_t,
+                        tv_nsec: (remain % 1_000_000_000) as libc::c_long,
                     })
                 } else {
                     None
@@ -551,14 +577,10 @@ impl ShmContext {
                     return Err(ShmError::Timeout);
                 }
 
-                // After waking, verify sequence advanced
-                let cur = atomic_load_u64(self.base, seq_off);
-                if cur < expected_seq {
-                    return Err(ShmError::Timeout);
-                }
+                // EAGAIN (value changed) or EINTR (signal): re-check seq
             }
 
-            // Copy immediately after waking
+            // Copy immediately after observing the sequence advance
             mlen = atomic_load_u32(self.base, len_off) as usize;
             if mlen > 0 && mlen <= buf.len() {
                 unsafe {

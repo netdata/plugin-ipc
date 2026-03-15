@@ -495,24 +495,48 @@ func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 		spinPause()
 	}
 
-	// Phase 2: futex wait
+	// Phase 2: futex wait with deadline-based retry loop.
+	//
+	// Handles spurious wakeups (EAGAIN when signal word changed
+	// between read and syscall, or EINTR from signal delivery).
+	// Computes a wall-clock deadline so total wait never exceeds
+	// timeoutMs regardless of retries.
 	if !observed {
-		sigVal, err := atomicLoadU32(c.data, sigOff)
-		if err != nil {
-			return 0, fmt.Errorf("%w: load signal: %v", ErrShmBadParam, err)
+		var deadlineNs uint64
+		if timeoutMs > 0 {
+			var nowTs syscall.Timespec
+			syscall.Syscall(syscall.SYS_CLOCK_GETTIME, 1 /* CLOCK_MONOTONIC */, uintptr(unsafe.Pointer(&nowTs)), 0)
+			deadlineNs = uint64(nowTs.Sec)*1_000_000_000 + uint64(nowTs.Nsec) +
+				uint64(timeoutMs)*1_000_000
 		}
 
-		// Check once more after reading signal
-		cur, err := atomicLoadU64(c.data, seqOff)
-		if err != nil {
-			return 0, fmt.Errorf("%w: load seq: %v", ErrShmBadParam, err)
-		}
-		if cur < expectedSeq {
+		for {
+			sigVal, serr := atomicLoadU32(c.data, sigOff)
+			if serr != nil {
+				return 0, fmt.Errorf("%w: load signal: %v", ErrShmBadParam, serr)
+			}
+
+			cur, serr := atomicLoadU64(c.data, seqOff)
+			if serr != nil {
+				return 0, fmt.Errorf("%w: load seq: %v", ErrShmBadParam, serr)
+			}
+			if cur >= expectedSeq {
+				break // response arrived
+			}
+
+			// Compute remaining timeout for this futex_wait call
 			var ts *syscall.Timespec
-			if timeoutMs > 0 {
+			if deadlineNs > 0 {
+				var nowTs syscall.Timespec
+				syscall.Syscall(syscall.SYS_CLOCK_GETTIME, 1 /* CLOCK_MONOTONIC */, uintptr(unsafe.Pointer(&nowTs)), 0)
+				nowVal := uint64(nowTs.Sec)*1_000_000_000 + uint64(nowTs.Nsec)
+				if nowVal >= deadlineNs {
+					return 0, ErrShmTimeout
+				}
+				remain := deadlineNs - nowVal
 				ts = &syscall.Timespec{
-					Sec:  int64(timeoutMs / 1000),
-					Nsec: int64(timeoutMs%1000) * 1_000_000,
+					Sec:  int64(remain / 1_000_000_000),
+					Nsec: int64(remain % 1_000_000_000),
 				}
 			}
 
@@ -524,20 +548,14 @@ func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 				}
 			}
 
-			// After waking, verify sequence advanced
-			cur, err = atomicLoadU64(c.data, seqOff)
-			if err != nil {
-				return 0, fmt.Errorf("%w: load seq: %v", ErrShmBadParam, err)
-			}
-			if cur < expectedSeq {
-				return 0, ErrShmTimeout
-			}
+			// EAGAIN (value changed) or EINTR (signal): re-check seq
 		}
 
-		// Copy immediately after waking
-		mlen, err = atomicLoadU32(c.data, lenOff)
-		if err != nil {
-			return 0, fmt.Errorf("%w: load msg_len: %v", ErrShmBadParam, err)
+		// Copy immediately after observing the sequence advance
+		var lerr error
+		mlen, lerr = atomicLoadU32(c.data, lenOff)
+		if lerr != nil {
+			return 0, fmt.Errorf("%w: load msg_len: %v", ErrShmBadParam, lerr)
 		}
 		if mlen > 0 && int(mlen) <= len(buf) {
 			copy(buf[:mlen], c.data[areaOff:areaOff+mlen])
