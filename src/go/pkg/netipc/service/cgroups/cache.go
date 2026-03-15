@@ -5,6 +5,7 @@
 package cgroups
 
 import (
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
 )
 
@@ -34,9 +35,13 @@ type Cache struct {
 // context. Does NOT connect. Does NOT require the server to be running.
 // Cache starts empty (populated == false).
 func NewCache(runDir, serviceName string, config posix.ClientConfig) *Cache {
+	bufSize := cacheResponseBufSize
+	if config.MaxResponsePayloadBytes > 0 {
+		bufSize = protocol.HeaderSize + int(config.MaxResponsePayloadBytes)
+	}
 	return &Cache{
 		client:      NewClient(runDir, serviceName, config),
-		responseBuf: make([]byte, cacheResponseBufSize),
+		responseBuf: make([]byte, bufSize),
 	}
 }
 

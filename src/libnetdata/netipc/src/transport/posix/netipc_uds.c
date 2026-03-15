@@ -786,6 +786,26 @@ static nipc_uds_error_t ensure_recv_buf(nipc_uds_session_t *session,
     return NIPC_UDS_OK;
 }
 
+/* Validate batch directory if the message has BATCH flag and item_count > 1.
+ * Called after the full payload is assembled, before returning to caller. */
+static nipc_uds_error_t validate_batch(const nipc_header_t *hdr,
+                                        const void *payload, size_t payload_len)
+{
+    if (!(hdr->flags & NIPC_FLAG_BATCH) || hdr->item_count <= 1)
+        return NIPC_UDS_OK;
+
+    uint32_t dir_bytes = hdr->item_count * 8;
+    uint32_t dir_aligned = (uint32_t)nipc_align8(dir_bytes);
+    if (payload_len < dir_aligned)
+        return NIPC_UDS_ERR_PROTOCOL;
+
+    uint32_t packed_area_len = (uint32_t)(payload_len - dir_aligned);
+    nipc_error_t perr = nipc_batch_dir_validate(payload, dir_bytes,
+                                                  hdr->item_count,
+                                                  packed_area_len);
+    return (perr == NIPC_OK) ? NIPC_UDS_OK : NIPC_UDS_ERR_PROTOCOL;
+}
+
 nipc_uds_error_t nipc_uds_receive(nipc_uds_session_t *session,
                                    void *buf, size_t buf_size,
                                    nipc_header_t *hdr_out,
@@ -836,6 +856,11 @@ nipc_uds_error_t nipc_uds_receive(nipc_uds_session_t *session,
     if ((size_t)n >= total_msg) {
         *payload_out = (const uint8_t *)buf + NIPC_HEADER_LEN;
         *payload_len_out = hdr_out->payload_len;
+
+        nipc_uds_error_t berr = validate_batch(hdr_out, *payload_out, *payload_len_out);
+        if (berr != NIPC_UDS_OK)
+            return berr;
+
         return NIPC_UDS_OK;
     }
 
@@ -919,5 +944,10 @@ nipc_uds_error_t nipc_uds_receive(nipc_uds_session_t *session,
 
     *payload_out = session->recv_buf;
     *payload_len_out = hdr_out->payload_len;
+
+    nipc_uds_error_t berr = validate_batch(hdr_out, *payload_out, *payload_len_out);
+    if (berr != NIPC_UDS_OK)
+        return berr;
+
     return NIPC_UDS_OK;
 }

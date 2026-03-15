@@ -312,7 +312,11 @@ func (c *Client) tryConnect() ClientState {
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
-		// If SHM attach failed, fall back to UDS only.
+		if c.shm == nil {
+			// SHM attach failed. Fail the session to avoid transport desync.
+			session.Close()
+			return StateDisconnected
+		}
 	}
 
 	c.session = session
@@ -441,6 +445,8 @@ func NewServerWithWorkers(runDir, serviceName string, config posix.ServerConfig,
 // goroutine per session (up to workerCount concurrently).
 // Returns when Stop() is called or on fatal error.
 func (s *Server) Run() error {
+	posix.ShmCleanupStale(s.runDir, s.serviceName)
+
 	listener, err := posix.Listen(s.runDir, s.serviceName, s.config)
 	if err != nil {
 		return err
@@ -490,9 +496,13 @@ func (s *Server) Run() error {
 				session.MaxRequestPayloadBytes+uint32(protocol.HeaderSize),
 				session.MaxResponsePayloadBytes+uint32(protocol.HeaderSize),
 			)
-			if serr == nil {
-				shm = shmCtx
+			if serr != nil {
+				// SHM create failed for negotiated SHM — reject session
+				session.Close()
+				<-sem // release worker slot
+				continue
 			}
+			shm = shmCtx
 		}
 
 		// Handle this session in a goroutine
@@ -518,7 +528,7 @@ func (s *Server) Stop() {
 }
 
 func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
-	recvBuf := make([]byte, 65536)
+	recvBuf := make([]byte, protocol.HeaderSize+int(session.MaxRequestPayloadBytes))
 
 	defer func() {
 		if shm != nil {

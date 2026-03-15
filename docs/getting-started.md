@@ -128,18 +128,39 @@ if client.Ready() {
 
 ## Managed Server (L2)
 
+The server handler dispatches by method code and delegates to typed
+dispatch helpers. Typed handlers receive decoded data and never touch
+wire format.
+
 ### C
 
 ```c
 #include "netipc/netipc_service.h"
 
+/* Typed business-logic handlers — pure logic, no wire format */
+bool on_increment(void *user, uint64_t req, uint64_t *resp) {
+    *resp = req + 1;
+    return true;
+}
+
+bool on_cgroups(void *user, const nipc_cgroups_req_t *req,
+                nipc_cgroups_builder_t *builder) {
+    /* Fill builder with cgroup items */
+    return true;
+}
+
+/* Raw handler dispatches to typed helpers */
 bool my_handler(void *user, uint16_t method_code,
                 const uint8_t *req, size_t req_len,
                 uint8_t *resp, size_t resp_size,
                 size_t *resp_len_out) {
-    /* Decode request, build response using Codec builder */
-    /* Return true on success, false on failure */
-    return true;
+    switch (method_code) {
+    case NIPC_METHOD_INCREMENT:
+        return nipc_dispatch_increment(req, req_len, resp, resp_size,
+                                       resp_len_out, on_increment, user);
+    default:
+        return false;
+    }
 }
 
 nipc_uds_server_config_t scfg = {
@@ -173,40 +194,47 @@ nipc_server_destroy(&server);
 
 ```rust
 use netipc::service::cgroups::{CgroupsServer, ServerConfig};
+use netipc::protocol;
 
-fn handler(method: u16, request: &[u8], response: &mut [u8])
-    -> Result<usize, ()> {
-    /* Decode request, encode response */
-    Ok(response_len)
-}
+let handler = Arc::new(|method: u16, req: &[u8]| -> Option<Vec<u8>> {
+    match method {
+        protocol::METHOD_INCREMENT => {
+            protocol::dispatch_increment(req, &mut resp, |v| Some(v + 1))
+                .map(|n| resp[..n].to_vec())
+        }
+        _ => None,
+    }
+});
 
 let config = ServerConfig { /* ... */ };
 let mut server = CgroupsServer::new(
     "/run/netdata", "cgroups", config, 65536, handler);
 
-// Blocking: run in a thread
 server.run().unwrap();
-
-// From another thread:
 server.stop();
 ```
 
 ### Go
 
 ```go
-handler := func(methodCode uint16, req []byte, resp []byte) (int, bool) {
-    /* Decode request, encode response */
-    return responseLen, true
+handler := func(methodCode uint16, req []byte) ([]byte, bool) {
+    switch methodCode {
+    case protocol.MethodIncrement:
+        resp := make([]byte, 8)
+        n, ok := protocol.DispatchIncrement(req, resp,
+            func(v uint64) (uint64, bool) { return v + 1, true })
+        if !ok { return nil, false }
+        return resp[:n], true
+    default:
+        return nil, false
+    }
 }
 
 config := posix.ServerConfig{ /* ... */ }
 server := cgroups.NewServerWithWorkers(
     "/run/netdata", "cgroups", config, handler, 4)
 
-// Blocking: run in a goroutine
 go server.Run()
-
-// Graceful shutdown:
 server.Stop()
 ```
 

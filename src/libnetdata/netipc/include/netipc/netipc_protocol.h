@@ -163,6 +163,17 @@ nipc_error_t nipc_batch_dir_decode(const void *buf, size_t buf_len,
                                    nipc_batch_entry_t *out);
 
 /*
+ * Validate a batch directory without allocating an output array.
+ * Checks alignment and bounds for each entry. For use in L1 receive
+ * paths where allocation is undesirable.
+ * buf/buf_len: the directory bytes (item_count * 8).
+ * packed_area_len: size of the packed item area after the directory.
+ */
+nipc_error_t nipc_batch_dir_validate(const void *buf, size_t buf_len,
+                                      uint32_t item_count,
+                                      uint32_t packed_area_len);
+
+/*
  * Extract a single batch item by index from a complete batch payload.
  * payload points to the first byte after the outer header.
  * On success, *item_ptr and *item_len are set.
@@ -429,6 +440,51 @@ size_t nipc_string_reverse_encode(const char *str, uint32_t str_len,
  * Returns NIPC_OK or error. */
 nipc_error_t nipc_string_reverse_decode(const void *buf, size_t buf_len,
                                          nipc_string_reverse_view_t *view_out);
+
+/* ------------------------------------------------------------------ */
+/*  Server-side typed dispatch helpers                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Per-method dispatch: decode request → call typed handler → encode
+ * response. Handlers never touch wire format — pure business logic.
+ *
+ * Each helper takes (raw_request, raw_response_buf, handler_fn, user).
+ * Returns true on success (response written), false on failure.
+ */
+
+/* INCREMENT: handler receives decoded u64, returns u64. */
+typedef bool (*nipc_increment_handler_fn)(
+    void *user, uint64_t request, uint64_t *response);
+
+bool nipc_dispatch_increment(
+    const uint8_t *req, size_t req_len,
+    uint8_t *resp, size_t resp_size, size_t *resp_len,
+    nipc_increment_handler_fn handler, void *user);
+
+/* STRING_REVERSE: handler receives decoded string, writes response string. */
+typedef bool (*nipc_string_reverse_handler_fn)(
+    void *user,
+    const char *request_str, uint32_t request_str_len,
+    char *response_str, uint32_t response_capacity,
+    uint32_t *response_str_len);
+
+bool nipc_dispatch_string_reverse(
+    const uint8_t *req, size_t req_len,
+    uint8_t *resp, size_t resp_size, size_t *resp_len,
+    nipc_string_reverse_handler_fn handler, void *user);
+
+/* CGROUPS_SNAPSHOT: handler receives decoded request, fills builder. */
+typedef bool (*nipc_cgroups_handler_fn)(
+    void *user,
+    const nipc_cgroups_req_t *request,
+    nipc_cgroups_builder_t *builder);
+
+bool nipc_dispatch_cgroups_snapshot(
+    const uint8_t *req, size_t req_len,
+    uint8_t *resp, size_t resp_size, size_t *resp_len,
+    uint32_t max_items,
+    nipc_cgroups_handler_fn handler, void *user);
 
 /* ------------------------------------------------------------------ */
 /*  Utility: 8-byte alignment                                         */

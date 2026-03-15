@@ -216,6 +216,28 @@ nipc_error_t nipc_batch_dir_decode(const void *buf, size_t buf_len,
     return NIPC_OK;
 }
 
+nipc_error_t nipc_batch_dir_validate(const void *buf, size_t buf_len,
+                                      uint32_t item_count,
+                                      uint32_t packed_area_len) {
+    if (mul_would_overflow((size_t)item_count, sizeof(nipc_batch_entry_t)))
+        return NIPC_ERR_BAD_ITEM_COUNT;
+    size_t dir_size = (size_t)item_count * sizeof(nipc_batch_entry_t);
+    if (buf_len < dir_size)
+        return NIPC_ERR_TRUNCATED;
+
+    const uint8_t *p = (const uint8_t *)buf;
+    for (uint32_t i = 0; i < item_count; i++) {
+        uint32_t off, len;
+        memcpy(&off, p + i * 8, 4);
+        memcpy(&len, p + i * 8 + 4, 4);
+        if (off % NIPC_ALIGNMENT != 0)
+            return NIPC_ERR_BAD_ALIGNMENT;
+        if ((uint64_t)off + len > packed_area_len)
+            return NIPC_ERR_OUT_OF_BOUNDS;
+    }
+    return NIPC_OK;
+}
+
 nipc_error_t nipc_batch_item_get(const void *payload, size_t payload_len,
                                  uint32_t item_count, uint32_t index,
                                  const void **item_ptr, uint32_t *item_len) {
@@ -723,4 +745,72 @@ nipc_error_t nipc_string_reverse_decode(const void *buf, size_t buf_len,
     view_out->str     = (const char *)(p + str_offset);
     view_out->str_len = str_length;
     return NIPC_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Server-side typed dispatch helpers                                 */
+/* ------------------------------------------------------------------ */
+
+bool nipc_dispatch_increment(
+    const uint8_t *req, size_t req_len,
+    uint8_t *resp, size_t resp_size, size_t *resp_len,
+    nipc_increment_handler_fn handler, void *user)
+{
+    uint64_t value;
+    if (nipc_increment_decode(req, req_len, &value) != NIPC_OK)
+        return false;
+
+    uint64_t result;
+    if (!handler(user, value, &result))
+        return false;
+
+    *resp_len = nipc_increment_encode(result, resp, resp_size);
+    return *resp_len > 0;
+}
+
+bool nipc_dispatch_string_reverse(
+    const uint8_t *req, size_t req_len,
+    uint8_t *resp, size_t resp_size, size_t *resp_len,
+    nipc_string_reverse_handler_fn handler, void *user)
+{
+    nipc_string_reverse_view_t view;
+    if (nipc_string_reverse_decode(req, req_len, &view) != NIPC_OK)
+        return false;
+
+    /* Provide a scratch buffer for the handler's response string.
+     * The handler writes the response string into it; we encode after. */
+    uint32_t capacity = (resp_size > NIPC_STRING_REVERSE_HDR_SIZE + 1)
+                            ? (uint32_t)(resp_size - NIPC_STRING_REVERSE_HDR_SIZE - 1)
+                            : 0;
+    char *scratch = (char *)(resp + NIPC_STRING_REVERSE_HDR_SIZE);
+
+    uint32_t response_str_len = 0;
+    if (!handler(user, view.str, view.str_len,
+                 scratch, capacity, &response_str_len))
+        return false;
+
+    /* Encode from the scratch area (already at the right offset) */
+    *resp_len = nipc_string_reverse_encode(scratch, response_str_len,
+                                            resp, resp_size);
+    return *resp_len > 0;
+}
+
+bool nipc_dispatch_cgroups_snapshot(
+    const uint8_t *req, size_t req_len,
+    uint8_t *resp, size_t resp_size, size_t *resp_len,
+    uint32_t max_items,
+    nipc_cgroups_handler_fn handler, void *user)
+{
+    nipc_cgroups_req_t request;
+    if (nipc_cgroups_req_decode(req, req_len, &request) != NIPC_OK)
+        return false;
+
+    nipc_cgroups_builder_t builder;
+    nipc_cgroups_builder_init(&builder, resp, resp_size, max_items, 0, 0);
+
+    if (!handler(user, &request, &builder))
+        return false;
+
+    *resp_len = nipc_cgroups_builder_finish(&builder);
+    return *resp_len > 0;
 }

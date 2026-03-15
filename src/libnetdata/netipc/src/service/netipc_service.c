@@ -98,9 +98,13 @@ static nipc_client_state_t client_try_connect(nipc_client_ctx_t *ctx)
             if (serr == NIPC_SHM_OK) {
                 ctx->shm = shm;
             } else {
-                /* SHM attach failed -- fall back to UDS only.
-                 * The session is still valid for baseline transport. */
+                /* SHM attach failed after retries. The handshake selected
+                 * SHM but we can't use it. Fail the session to avoid
+                 * transport desync (server on SHM, client on UDS). */
                 free(shm);
+                nipc_uds_close_session(&ctx->session);
+                ctx->session_valid = false;
+                return NIPC_CLIENT_DISCONNECTED;
             }
         }
     }
@@ -791,6 +795,10 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
     server->next_session_id = 0;
     pthread_mutex_init(&server->sessions_lock, NULL);
 
+    /* Clean up stale SHM regions from previous crashes (spec requirement:
+     * runs once at server startup, before the listener begins accepting). */
+    nipc_shm_cleanup_stale(run_dir, service_name);
+
     /* Start listening via L1 */
     nipc_uds_error_t uerr = nipc_uds_listen(
         run_dir, service_name, config, &server->listener);
@@ -857,7 +865,12 @@ void nipc_server_run(nipc_managed_server_t *server)
                 if (serr == NIPC_SHM_OK) {
                     shm = s;
                 } else {
+                    /* SHM create failed for a session that negotiated SHM.
+                     * Reject the session to avoid transport desync. */
                     free(s);
+                    pthread_mutex_unlock(&server->sessions_lock);
+                    nipc_uds_close_session(&session);
+                    continue;
                 }
             }
         }
@@ -1191,8 +1204,12 @@ void nipc_cgroups_cache_init(nipc_cgroups_cache_t *cache,
     cache->refresh_success_count = 0;
     cache->refresh_failure_count = 0;
 
-    /* Allocate internal response buffer */
-    cache->response_buf_size = NIPC_CGROUPS_CACHE_BUF_SIZE;
+    /* Allocate internal response buffer sized from negotiated limits.
+     * Falls back to default if config specifies 0. */
+    uint32_t max_resp = config ? config->max_response_payload_bytes : 0;
+    cache->response_buf_size = (max_resp > 0)
+        ? (size_t)max_resp + NIPC_HEADER_LEN
+        : NIPC_CGROUPS_CACHE_BUF_SIZE_DEFAULT;
     cache->response_buf = malloc(cache->response_buf_size);
 }
 

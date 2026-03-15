@@ -351,8 +351,8 @@ void nipc_server_destroy(nipc_managed_server_t *server);
 /*  L3: Client-side cgroups snapshot cache                             */
 /* ------------------------------------------------------------------ */
 
-/* Default response buffer size for L3 cache refresh */
-#define NIPC_CGROUPS_CACHE_BUF_SIZE 65536
+/* Default response buffer size for L3 cache refresh (when config is 0) */
+#define NIPC_CGROUPS_CACHE_BUF_SIZE_DEFAULT 65536
 
 /*
  * Cached copy of a single cgroup item. Owns its strings.

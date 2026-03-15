@@ -346,6 +346,20 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 	if n >= totalMsg {
 		payload := make([]byte, hdr.PayloadLen)
 		copy(payload, buf[protocol.HeaderSize:protocol.HeaderSize+int(hdr.PayloadLen)])
+
+		// Validate batch directory
+		if hdr.Flags&protocol.FlagBatch != 0 && hdr.ItemCount > 1 {
+			dirBytes := int(hdr.ItemCount) * 8
+			dirAligned := protocol.Align8(dirBytes)
+			if len(payload) < dirAligned {
+				return protocol.Header{}, nil, wrapErr(ErrProtocol, "batch dir exceeds payload")
+			}
+			packedAreaLen := uint32(len(payload) - dirAligned)
+			if err := protocol.BatchDirValidate(payload[:dirBytes], hdr.ItemCount, packedAreaLen); err != nil {
+				return protocol.Header{}, nil, wrapErr(ErrProtocol, "batch dir: "+err.Error())
+			}
+		}
+
 		return hdr, payload, nil
 	}
 
@@ -421,6 +435,20 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 
 	payload := make([]byte, hdr.PayloadLen)
 	copy(payload, s.recvBuf[:hdr.PayloadLen])
+
+	// Validate batch directory
+	if hdr.Flags&protocol.FlagBatch != 0 && hdr.ItemCount > 1 {
+		dirBytes := int(hdr.ItemCount) * 8
+		dirAligned := protocol.Align8(dirBytes)
+		if len(payload) < dirAligned {
+			return protocol.Header{}, nil, wrapErr(ErrProtocol, "batch dir exceeds payload")
+		}
+		packedAreaLen := uint32(len(payload) - dirAligned)
+		if err := protocol.BatchDirValidate(payload[:dirBytes], hdr.ItemCount, packedAreaLen); err != nil {
+			return protocol.Header{}, nil, wrapErr(ErrProtocol, "batch dir: "+err.Error())
+		}
+	}
+
 	return hdr, payload, nil
 }
 

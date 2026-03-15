@@ -353,9 +353,10 @@ impl CgroupsClient {
                                 }
                             }
                         }
-                        // If SHM attach failed, fall back to UDS only.
                         if !shm_ok {
-                            self.shm = None;
+                            // SHM attach failed. Fail the session to avoid transport desync.
+                            self.session.take();
+                            return ClientState::Disconnected;
                         }
                     }
                 }
@@ -406,7 +407,9 @@ impl CgroupsClient {
                         }
                     }
                     if !shm_ok {
-                        self.shm = None;
+                        // SHM attach failed. Fail the session to avoid transport desync.
+                        self.session.take();
+                        return ClientState::Disconnected;
                     }
                 }
 
@@ -670,6 +673,9 @@ impl CgroupsServer {
     /// Returns when `stop()` is called or on fatal error.
     #[cfg(unix)]
     pub fn run(&mut self) -> Result<(), NipcError> {
+        #[cfg(target_os = "linux")]
+        crate::transport::shm::cleanup_stale(&self.run_dir, &self.service_name);
+
         let listener = UdsListener::bind(
             &self.run_dir,
             &self.service_name,
@@ -716,6 +722,18 @@ impl CgroupsServer {
             let shm = self.try_shm_upgrade(&session);
             #[cfg(not(target_os = "linux"))]
             let shm: Option<()> = None;
+
+            // If SHM was negotiated but create failed, reject the session
+            #[cfg(target_os = "linux")]
+            {
+                if shm.is_none()
+                    && (session.selected_profile == PROFILE_SHM_HYBRID
+                        || session.selected_profile == PROFILE_SHM_FUTEX)
+                {
+                    drop(session);
+                    continue;
+                }
+            }
 
             // Spawn a handler thread for this session
             let handler = self.handler.clone();
@@ -956,7 +974,7 @@ fn handle_session_threaded(
     handler: HandlerFn,
     running: Arc<AtomicBool>,
 ) {
-    let mut recv_buf = vec![0u8; 65536];
+    let mut recv_buf = vec![0u8; HEADER_SIZE + session.max_request_payload_bytes as usize];
 
     while running.load(Ordering::Acquire) {
         // Receive request via the active transport
@@ -1176,6 +1194,11 @@ impl CgroupsCache {
     /// Does NOT connect. Does NOT require the server to be running.
     /// Cache starts empty (populated == false).
     pub fn new(run_dir: &str, service_name: &str, config: ClientConfig) -> Self {
+        let buf_size = if config.max_response_payload_bytes > 0 {
+            HEADER_SIZE + config.max_response_payload_bytes as usize
+        } else {
+            CACHE_RESPONSE_BUF_SIZE
+        };
         CgroupsCache {
             client: CgroupsClient::new(run_dir, service_name, config),
             items: Vec::new(),
@@ -1185,7 +1208,7 @@ impl CgroupsCache {
             populated: false,
             refresh_success_count: 0,
             refresh_failure_count: 0,
-            response_buf: vec![0u8; CACHE_RESPONSE_BUF_SIZE],
+            response_buf: vec![0u8; buf_size],
         }
     }
 
@@ -2530,22 +2553,21 @@ mod tests {
     // ---------------------------------------------------------------
 
     /// Multi-method handler: INCREMENT (method 1) and STRING_REVERSE (method 3).
+    /// Uses typed dispatch helpers from protocol.
     fn pingpong_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
         match method_code {
             METHOD_INCREMENT => {
-                let value = increment_decode(request_payload).ok()?;
                 let mut buf = [0u8; INCREMENT_PAYLOAD_SIZE];
-                let len = increment_encode(value + 1, &mut buf);
-                if len == 0 { return None; }
+                let len = protocol::dispatch_increment(request_payload, &mut buf, |v| Some(v + 1))?;
                 Some(buf[..len].to_vec())
             }
             METHOD_STRING_REVERSE => {
-                let view = string_reverse_decode(request_payload).ok()?;
-                let reversed: Vec<u8> = view.str_data.iter().rev().copied().collect();
-                let total = STRING_REVERSE_HDR_SIZE + reversed.len() + 1;
-                let mut buf = vec![0u8; total];
-                let len = string_reverse_encode(&reversed, &mut buf);
-                if len == 0 { return None; }
+                // Need a buffer large enough for the response
+                let resp_size = STRING_REVERSE_HDR_SIZE + request_payload.len() + 1;
+                let mut buf = vec![0u8; resp_size];
+                let len = protocol::dispatch_string_reverse(request_payload, &mut buf, |data| {
+                    Some(data.iter().rev().copied().collect())
+                })?;
                 Some(buf[..len].to_vec())
             }
             _ => None,

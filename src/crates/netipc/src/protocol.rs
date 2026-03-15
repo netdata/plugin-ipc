@@ -314,6 +314,29 @@ pub fn batch_dir_decode(
     Ok(out)
 }
 
+/// Validate a batch directory without allocating. Checks alignment and
+/// that each entry falls within `packed_area_len`. Mirrors C's
+/// `nipc_batch_dir_validate`.
+pub fn batch_dir_validate(buf: &[u8], item_count: u32, packed_area_len: u32) -> Result<(), NipcError> {
+    let count = item_count as usize;
+    let dir_size = count * 8;
+    if buf.len() < dir_size {
+        return Err(NipcError::Truncated);
+    }
+    for i in 0..count {
+        let base = i * 8;
+        let offset = u32::from_ne_bytes(buf[base..base + 4].try_into().unwrap());
+        let length = u32::from_ne_bytes(buf[base + 4..base + 8].try_into().unwrap());
+        if (offset as usize) % ALIGNMENT != 0 {
+            return Err(NipcError::BadAlignment);
+        }
+        if (offset as u64) + (length as u64) > packed_area_len as u64 {
+            return Err(NipcError::OutOfBounds);
+        }
+    }
+    Ok(())
+}
+
 /// Extract a single batch item by index from a complete batch payload.
 /// Returns (item_slice, item_len) on success.
 pub fn batch_item_get(
@@ -1059,6 +1082,38 @@ pub fn string_reverse_decode(buf: &[u8]) -> Result<StringReverseView<'_>, NipcEr
         str_data: &buf[str_offset..str_offset + str_length],
         str_len: str_length as u32,
     })
+}
+
+// ---------------------------------------------------------------------------
+//  Typed dispatch helpers
+// ---------------------------------------------------------------------------
+
+/// INCREMENT dispatch: decode -> handler -> encode.
+pub fn dispatch_increment<F>(req: &[u8], resp: &mut [u8], handler: F) -> Option<usize>
+where
+    F: FnOnce(u64) -> Option<u64>,
+{
+    let value = increment_decode(req).ok()?;
+    let result = handler(value)?;
+    let n = increment_encode(result, resp);
+    if n == 0 {
+        return None;
+    }
+    Some(n)
+}
+
+/// STRING_REVERSE dispatch: decode -> handler -> encode.
+pub fn dispatch_string_reverse<F>(req: &[u8], resp: &mut [u8], handler: F) -> Option<usize>
+where
+    F: FnOnce(&[u8]) -> Option<Vec<u8>>,
+{
+    let view = string_reverse_decode(req).ok()?;
+    let result = handler(view.str_data)?;
+    let n = string_reverse_encode(&result, resp);
+    if n == 0 {
+        return None;
+    }
+    Some(n)
 }
 
 // ===========================================================================

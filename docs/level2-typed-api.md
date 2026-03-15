@@ -222,46 +222,63 @@ The managed server internally:
 
 ### Handler contract
 
-Each handler callback:
+The managed server uses a raw-byte handler at the transport level:
 
-- Receives one decoded typed request view (valid only during the callback)
-- Receives one response builder for that method type
-- Sets scalar fields and appends variable-length fields through builder
-  methods
+```
+handler(method_code, request_payload_bytes, response_buffer) → success/failure
+```
+
+Each method type provides a **typed dispatch helper** in the Codec layer
+that wraps decode → typed handler → encode. The raw handler dispatches
+by `method_code` and delegates to the appropriate typed helper:
+
+```
+handler(method_code, req, resp) {
+    switch(method_code) {
+        INCREMENT:      dispatch_increment(req, resp, on_increment)
+        STRING_REVERSE: dispatch_string_reverse(req, resp, on_reverse)
+        CGROUPS:        dispatch_cgroups(req, resp, on_cgroups)
+    }
+}
+```
+
+The typed business-logic handler:
+
+- Receives decoded typed data (not raw bytes)
+- For simple types (INCREMENT): receives and returns scalar values
+- For complex types (CGROUPS_SNAPSHOT): receives a decoded request
+  and fills a response builder
 - Returns success or failure
-- Never sees transport details, batch structure, or pipelining state
-- Never does raw offset/length math — the builder handles wire layout
+- Never sees transport details, wire format, or raw offsets
+- Never does encode/decode — the dispatch helper handles it
 
 Handler failure semantics:
 
-- If the handler returns success, the builder's output becomes the
-  response payload and the outer envelope carries `transport_status = OK`.
+- If the handler returns success, the dispatch helper's encoded output
+  becomes the response payload and the outer envelope carries
+  `transport_status = OK`.
 - If the handler returns failure, the library sends a response with
   `transport_status = INTERNAL_ERROR` and an empty payload
-  (`payload_len = 0`, `item_count = 1`). For batch messages, a
-  handler failure on any item fails the entire batch response — the
-  whole batch gets `transport_status = INTERNAL_ERROR` with empty
-  payload. This matches the wire model where one outer header carries
-  one transport_status per message. Clients receiving INTERNAL_ERROR
-  must not attempt to decode the payload.
+  (`payload_len = 0`, `item_count = 1`). Clients receiving
+  INTERNAL_ERROR must not attempt to decode the payload.
 - Business-level result codes (e.g., "item not found") are not handler
   failures — they are expressed as fields inside the response payload
   via the builder. The handler returns success in that case.
 
-### Batch splitting
+### Batch splitting (planned)
 
-When a batch message arrives, the managed server may split it into
-contiguous parts and assign each part to a worker. Each worker calls the
-typed handler callback once per item in its slice.
+Batch orchestration — splitting a batch request into per-item handler
+calls and reassembling the responses — is planned but not yet
+implemented. Current method types use single-item messages only.
 
-Splitting is simple and deterministic (contiguous ranges), not per-item
-work-stealing. This works well because request handling is expected to
-be mostly uniform memory-lookup work. If a single worker handles the
-full batch (worker count = 1 or batch size <= worker count), the
-degenerate case is clean.
+When implemented, the managed server will:
 
-Responses are always reassembled in original request order before being
-sent as one batch response.
+- Detect batch messages (BATCH flag, item_count > 1)
+- Extract each item using Level 1 batch extraction
+- Decode each item using the Codec
+- Call the typed handler once per item
+- Reassemble responses in request order
+- Send one batch response
 
 ### Shutdown
 

@@ -55,11 +55,33 @@ static void cleanup_socket(void)
 /*  Multi-method server handler                                        */
 /* ------------------------------------------------------------------ */
 
-/*
- * Handles both INCREMENT and STRING_REVERSE on the same connection.
- * Demonstrates a generic handler that dispatches by method_code and
- * uses per-method codec functions.
- */
+/* ---- Typed business-logic handlers (never touch wire format) ---- */
+
+static bool on_increment(void *user, uint64_t request, uint64_t *response)
+{
+    (void)user;
+    *response = request + 1;
+    return true;
+}
+
+static bool on_string_reverse(void *user,
+                                const char *request_str, uint32_t request_str_len,
+                                char *response_str, uint32_t response_capacity,
+                                uint32_t *response_str_len)
+{
+    (void)user;
+    if (request_str_len > response_capacity)
+        return false;
+
+    for (uint32_t i = 0; i < request_str_len; i++)
+        response_str[i] = request_str[request_str_len - 1 - i];
+
+    *response_str_len = request_str_len;
+    return true;
+}
+
+/* ---- Thin dispatcher: routes method_code to typed helpers ---- */
+
 static bool multi_method_handler(
     void *user,
     uint16_t method_code,
@@ -67,43 +89,15 @@ static bool multi_method_handler(
     uint8_t *response_buf, size_t response_buf_size,
     size_t *response_len_out)
 {
-    (void)user;
-
     switch (method_code) {
-    case NIPC_METHOD_INCREMENT: {
-        uint64_t value;
-        if (nipc_increment_decode(request_payload, request_len, &value) != NIPC_OK)
-            return false;
-
-        value++;
-
-        size_t n = nipc_increment_encode(value, response_buf, response_buf_size);
-        if (n == 0) return false;
-        *response_len_out = n;
-        return true;
-    }
-
-    case NIPC_METHOD_STRING_REVERSE: {
-        nipc_string_reverse_view_t view;
-        if (nipc_string_reverse_decode(request_payload, request_len, &view) != NIPC_OK)
-            return false;
-
-        /* Reverse the string into response buffer (after header space) */
-        char reversed[4096];
-        if (view.str_len >= sizeof(reversed))
-            return false;
-
-        for (uint32_t i = 0; i < view.str_len; i++)
-            reversed[i] = view.str[view.str_len - 1 - i];
-        reversed[view.str_len] = '\0';
-
-        size_t n = nipc_string_reverse_encode(reversed, view.str_len,
-                                               response_buf, response_buf_size);
-        if (n == 0) return false;
-        *response_len_out = n;
-        return true;
-    }
-
+    case NIPC_METHOD_INCREMENT:
+        return nipc_dispatch_increment(request_payload, request_len,
+                                        response_buf, response_buf_size,
+                                        response_len_out, on_increment, user);
+    case NIPC_METHOD_STRING_REVERSE:
+        return nipc_dispatch_string_reverse(request_payload, request_len,
+                                             response_buf, response_buf_size,
+                                             response_len_out, on_string_reverse, user);
     default:
         return false;
     }

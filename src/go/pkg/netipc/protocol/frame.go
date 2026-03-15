@@ -285,6 +285,28 @@ func BatchDirDecode(buf []byte, itemCount uint32, packedAreaLen uint32) ([]Batch
 	return out, nil
 }
 
+// BatchDirValidate validates the batch directory without allocating.
+// Checks alignment and that each entry falls within packedAreaLen.
+func BatchDirValidate(buf []byte, itemCount uint32, packedAreaLen uint32) error {
+	count := int(itemCount)
+	dirSize := count * 8
+	if len(buf) < dirSize {
+		return ErrTruncated
+	}
+	for i := 0; i < count; i++ {
+		base := i * 8
+		off := ne.Uint32(buf[base : base+4])
+		length := ne.Uint32(buf[base+4 : base+8])
+		if int(off)%Alignment != 0 {
+			return ErrBadAlignment
+		}
+		if uint64(off)+uint64(length) > uint64(packedAreaLen) {
+			return ErrOutOfBounds
+		}
+	}
+	return nil
+}
+
 // BatchItemGet extracts a single batch item by index from a complete batch
 // payload. Returns the item slice on success.
 func BatchItemGet(payload []byte, itemCount uint32, index uint32) ([]byte, error) {
@@ -994,4 +1016,36 @@ func StringReverseDecode(buf []byte) (StringReverseView, error) {
 		Str:    string(buf[strOffset : strOffset+strLength]),
 		StrLen: uint32(strLength),
 	}, nil
+}
+
+// ---------------------------------------------------------------------------
+//  Dispatch helpers
+// ---------------------------------------------------------------------------
+
+// DispatchIncrement decodes request, calls handler, encodes response.
+func DispatchIncrement(req []byte, resp []byte, handler func(uint64) (uint64, bool)) (int, bool) {
+	value, err := IncrementDecode(req)
+	if err != nil {
+		return 0, false
+	}
+	result, ok := handler(value)
+	if !ok {
+		return 0, false
+	}
+	n := IncrementEncode(result, resp)
+	return n, n > 0
+}
+
+// DispatchStringReverse decodes request, calls handler, encodes response.
+func DispatchStringReverse(req []byte, resp []byte, handler func(string) (string, bool)) (int, bool) {
+	view, err := StringReverseDecode(req)
+	if err != nil {
+		return 0, false
+	}
+	result, ok := handler(view.Str)
+	if !ok {
+		return 0, false
+	}
+	n := StringReverseEncode(result, resp)
+	return n, n > 0
 }

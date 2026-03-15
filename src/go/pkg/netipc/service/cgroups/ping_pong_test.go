@@ -14,27 +14,24 @@ import (
 func pingPongHandler(methodCode uint16, request []byte) ([]byte, bool) {
 	switch methodCode {
 	case protocol.MethodIncrement:
-		val, err := protocol.IncrementDecode(request)
-		if err != nil {
-			return nil, false
-		}
 		var buf [protocol.IncrementPayloadSize]byte
-		if protocol.IncrementEncode(val+1, buf[:]) == 0 {
+		n, ok := protocol.DispatchIncrement(request, buf[:], func(v uint64) (uint64, bool) {
+			return v + 1, true
+		})
+		if !ok {
 			return nil, false
 		}
-		return buf[:], true
+		return buf[:n], true
 
 	case protocol.MethodStringReverse:
-		view, err := protocol.StringReverseDecode(request)
-		if err != nil {
+		buf := make([]byte, protocol.StringReverseHdrSize+len(request)+1)
+		n, ok := protocol.DispatchStringReverse(request, buf, func(s string) (string, bool) {
+			return reverseString(s), true
+		})
+		if !ok {
 			return nil, false
 		}
-		reversed := reverseString(view.Str)
-		buf := make([]byte, protocol.StringReverseHdrSize+len(reversed)+1)
-		if protocol.StringReverseEncode(reversed, buf) == 0 {
-			return nil, false
-		}
-		return buf, true
+		return buf[:n], true
 
 	default:
 		return nil, false
