@@ -1,0 +1,368 @@
+# TODO-hardening: plugin-ipc Pre-Integration Hardening
+
+## Purpose
+
+Close every gap between the current implementation and production
+readiness for Netdata integration. This library will be downloaded
+1.5M+ times per day and installed on physical servers, VMs, IoT
+devices, and exotic environments.
+
+**We ship ONLY when 100% confident in quality, reliability,
+performance, and security. Not before.**
+
+## MANDATORY: Read Before Any Work
+
+Read every file in `docs/` in full. Read `TODO-rewrite.md` for the
+quality mandate. Then read this file.
+
+## Rules
+
+1. Each phase is completed fully, tested, reviewed, committed.
+2. Between phases: multi-agent review (Codex, Qwen, Kimi).
+3. If a phase goes wrong: git reset to last checkpoint, retry.
+4. No shortcuts, no deferring, no "good enough."
+5. Costa reviews between phases.
+
+---
+
+## Phase H1: Multi-Client Multi-Worker Managed Server
+
+**The #1 gap. The managed server is single-session, single-worker.**
+
+### Problem
+The current managed server accepts one client, handles it until
+disconnect, then accepts the next. The `worker_count` field exists
+but is unused. There is no concurrent client handling, no worker
+pool, no batch dispatch.
+
+### Requirements (from docs/level2-typed-api.md)
+- Multiple concurrent client sessions
+- Fixed worker pool (configured at init, no runtime scaling)
+- Per-method-type callback dispatch, one item at a time
+- Batch messages split across workers, responses reassembled in order
+- Per-connection write serialization (one complete response at a time)
+- Handler failure on any batch item fails the entire batch
+
+### Implementation plan
+1. Redesign the managed server in C:
+   - Acceptor thread: accepts clients, creates sessions
+   - Per-session reader thread: reads requests from a session
+   - Shared work queue: reader threads push work items
+   - Worker threads (fixed count): pull from work queue, call handler
+   - Per-session writer: workers push responses, writer serializes
+   - Shutdown: set flag, join all threads
+2. Same design in Rust (using std::thread, crossbeam or mpsc channels)
+3. Same design in Go (using goroutines, channels)
+4. Tests:
+   - 10 concurrent clients, all getting correct responses
+   - Batch of 100 items split across 4 workers, responses in order
+   - Worker failure on one batch item → entire batch INTERNAL_ERROR
+   - Graceful shutdown with in-flight requests
+   - Stress: 100 clients, 1000 requests each, verify all responses
+
+### Validation
+- All existing L2/L3 tests still pass
+- New multi-client/multi-worker tests pass
+- Cross-language interop with concurrent clients
+- No deadlocks, no data races (TSAN on C, --release with debug on Rust)
+
+### Files affected
+- src/libnetdata/netipc/src/service/netipc_service.c
+- src/libnetdata/netipc/src/service/netipc_service_win.c
+- src/crates/netipc/src/service/cgroups.rs
+- src/go/pkg/netipc/service/cgroups/client.go
+- src/go/pkg/netipc/service/cgroups/client_windows.go
+- Tests in all languages
+
+---
+
+## Phase H2: Coverage Measurement and Gaps
+
+**We have ~600 test assertions but zero proof of coverage percentage.**
+
+### Implementation plan
+1. C: Add CMake option for coverage build (`-fprofile-arcs -ftest-coverage`)
+   - Run all C tests with coverage enabled
+   - Generate report with `gcov` or `lcov`
+   - Target: 100% line, 100% branch on library source files
+   - Identify uncovered lines/branches and write targeted tests
+2. Rust: Add `cargo-tarpaulin` or `cargo-llvm-cov`
+   - Run `cargo tarpaulin` with all tests
+   - Target: 100% line coverage on src/
+   - Write tests for any uncovered paths
+3. Go: Add `-coverprofile` to go test
+   - Run `go test -coverprofile=coverage.out ./...`
+   - Target: 100% line coverage on pkg/netipc/
+   - Write tests for any uncovered paths
+4. Add coverage CI targets to CMakeLists.txt
+5. Document the coverage methodology
+
+### Validation
+- Coverage reports generated for all 3 languages
+- All library source files at 100% line coverage
+- Branch coverage documented (may be <100% for defensive unreachable paths)
+
+---
+
+## Phase H3: Sanitizer Validation
+
+**No valgrind, ASAN, MSAN, or TSAN has ever been run.**
+
+### Implementation plan
+1. C: Add CMake option for ASAN build (`-fsanitize=address,undefined`)
+   - Run all C tests and interop tests under ASAN
+   - Fix any findings
+2. C: Add CMake option for TSAN build (`-fsanitize=thread`)
+   - Run multi-client/multi-worker tests under TSAN
+   - Fix any data races
+3. C: Run valgrind memcheck on all C test binaries
+   - Fix any leaks or invalid reads/writes
+4. Rust: Run with `RUSTFLAGS="-Z sanitizer=address"` (nightly)
+   - Or use Miri for unsafe code validation
+5. Go: Run with `-race` flag
+   - `go test -race ./...`
+   - Fix any data races
+6. Add sanitizer CI targets
+
+### Validation
+- Zero ASAN findings
+- Zero TSAN findings
+- Zero valgrind errors (no leaks, no invalid accesses)
+- Go race detector clean
+- All sanitizer runs documented
+
+---
+
+## Phase H4: Large-Scale and Stress Testing
+
+**Current tests use 2-3 clients and 3-16 items. Production will have
+hundreds of clients and thousands of items.**
+
+### Implementation plan
+1. Snapshot scale tests:
+   - 1000 items: encode, send, receive, decode, verify all fields
+   - 5000 items: same
+   - 10000 items: same (stress the protocol at extreme scale)
+   - Cross-language: C server → Go client with 5000 items
+2. Multi-client scale tests:
+   - 10 concurrent clients
+   - 50 concurrent clients
+   - 100 concurrent clients (stress test)
+   - Each client does 100 snapshot refreshes
+   - Verify all responses are correct (no cross-talk, no corruption)
+3. Rapid connect/disconnect cycling:
+   - Client connects, does one call, disconnects, repeats 10000 times
+   - Server must not leak resources (fd, memory, SHM regions)
+   - Verify with valgrind
+4. Long-running stability test:
+   - 1 server, 5 clients, continuous refresh for 10 minutes
+   - Verify zero errors, zero leaks, stable memory usage
+5. SHM region lifecycle test:
+   - Create/destroy SHM region 10000 times
+   - Verify no leaked mappings or files
+6. Mixed transport test:
+   - Some clients use UDS baseline, others use SHM
+   - Concurrent access, verify correctness
+
+### Validation
+- All scale tests pass without errors
+- Memory stable over long runs (no growth)
+- No resource leaks
+
+---
+
+## Phase H5: Pipelining Performance and Correctness
+
+**We have one pipelining test (3 messages on C UDS). No performance
+data. No comparison with SHM.**
+
+### Implementation plan
+1. Expand pipelining correctness tests:
+   - 10 pipelined requests, verify all 10 responses matched by message_id
+   - 100 pipelined requests
+   - Pipelining with mixed message sizes
+   - Pipelining with chunked messages
+   - Cross-language pipelining (C client → Rust server, etc.)
+2. Pipelining performance benchmarks:
+   - UDS baseline: pipeline depth 1 (ping-pong), 4, 8, 16, 32
+   - Measure throughput and latency at each depth
+   - Compare with SHM ping-pong throughput
+   - Document the crossover point (where pipelining approaches SHM speed)
+3. Batch performance benchmarks:
+   - Batch size 1, 10, 50, 100
+   - Compare with pipelining at equivalent throughput
+4. Add to benchmarks-posix.md
+
+### Validation
+- Pipelining throughput scales with depth
+- No corruption at any pipeline depth
+- Comparison with SHM is documented and understood
+
+---
+
+## Phase H6: SHM Benchmark Correctness
+
+**The SHM benchmark required spin_tries=4096 workaround. Root cause
+unknown.**
+
+### Implementation plan
+1. Root-cause investigation:
+   - Build a minimal reproducer that shows the counter chain error
+   - Instrument the SHM send/receive with sequence number logging
+   - Determine if the error is: data race, stale read, wrong sequence
+     tracking, or benchmark logic error
+2. Fix the root cause:
+   - If it's a library bug: fix and prove with zero errors at default spin
+   - If it's a benchmark bug: fix the benchmark and remove the workaround
+3. Verify at scale:
+   - 10 million iterations with zero errors at default spin count
+   - All 9 C/Rust/Go pairs
+   - Both POSIX and Windows SHM
+
+### Validation
+- Zero counter chain errors at default spin count
+- No workarounds in benchmark drivers
+- Root cause documented
+
+---
+
+## Phase H7: Complete Benchmark Suite
+
+**benchmarks-posix.md is stale. benchmarks-windows.md doesn't exist.**
+
+### Implementation plan
+1. POSIX benchmark suite:
+   - UDS ping-pong: full 9-pair matrix at max, 100k/s, 10k/s
+   - SHM ping-pong: full 9-pair matrix at max, 100k/s, 10k/s
+   - UDS pipelining: depth 1/4/8/16/32 (C/Rust/Go)
+   - Negotiated profile: UDS vs SHM comparison
+   - Snapshot baseline refresh: full 9-pair matrix
+   - Snapshot SHM refresh: full 9-pair matrix
+   - Local cache lookup: C, Rust, Go
+   - Multi-client throughput: 1, 5, 10 clients
+   - All benchmarks verify correctness (counter chain or item verification)
+2. Windows benchmark suite:
+   - Named Pipe ping-pong: full matrix (c-native, c-msys, rust, go)
+   - Windows SHM ping-pong: full matrix
+   - Snapshot Named Pipe refresh: full matrix
+   - Snapshot SHM refresh: full matrix
+   - Local cache lookup
+3. Benchmark document generation:
+   - `tests/generate-benchmarks-posix.sh` regenerated
+   - `tests/generate-benchmarks-windows.sh` created and run
+   - Atomic write (temp file → rename)
+4. Performance floors verified:
+   - SHM max: >= 1M req/s for all pairs (POSIX and Windows)
+   - UDS max: >= 150k req/s for all pairs
+   - Named Pipe max: documented baseline
+   - Local cache lookup: >= 10M lookups/s
+
+### Validation
+- Both benchmark documents generated from complete runs
+- All performance floors met
+- Results committed to repo
+
+---
+
+## Phase H8: Code Organization and Quality
+
+**Large files, no developer docs, linear-scan cache lookup.**
+
+### Implementation plan
+1. Split large transport files:
+   - C: split netipc_uds.c into connection.c, handshake.c, send_recv.c
+   - Rust: split posix.rs into uds.rs, handshake.rs, chunking.rs
+   - Go: split uds.go similarly
+   - Target: no file exceeds 500 lines
+2. C L3 cache: replace linear scan with hash table lookup
+   - Use simple open-addressing hash table keyed by hash+name
+   - Benchmark improvement for 1000+ item datasets
+3. Add developer documentation:
+   - `docs/getting-started.md`: how to use the library from C/Rust/Go
+   - Examples for: connect, call, batch, cache, managed server
+4. Graceful server drain:
+   - Server stop waits for in-flight requests to complete (with timeout)
+   - Then closes sessions and exits
+
+### Validation
+- No source file exceeds 500 lines
+- Hash table lookup benchmarks show improvement
+- Developer docs are usable
+
+---
+
+## Phase H9: Extended Fuzz Testing
+
+**Current fuzz runs are 30 seconds. Need longer runs and transport-
+level fuzzing.**
+
+### Implementation plan
+1. Extended codec fuzz (10 minutes per target):
+   - Go: all 8 fuzz targets
+   - Rust: all proptest targets with 100000 iterations
+   - C: libfuzzer with corpus for 10 minutes
+2. Transport-level fuzz:
+   - Create a "chaos client" that sends random bytes after handshake
+   - Verify the server doesn't crash, leak, or hang
+   - Test with malformed headers, truncated messages, wrong message_ids
+   - Test mid-chunking disconnect
+3. SHM fuzz:
+   - Write random data into SHM request area
+   - Verify the server rejects it cleanly
+4. Save interesting corpus entries for regression
+
+### Validation
+- No crashes or panics in extended runs
+- Chaos client tests pass
+- Corpus saved in tests/corpus/
+
+---
+
+## Phase H10: Final Multi-Agent Review
+
+**The last gate before declaring production-ready.**
+
+### Implementation plan
+1. Run all 4 external reviewers (Codex, GLM-5, Kimi, Qwen) on the
+   full implementation
+2. Each reviewer checks:
+   - Spec compliance (every docs/*.md requirement)
+   - Wire compatibility (identical bytes across languages)
+   - Test coverage (100% proven)
+   - Security (every input validated, no overflows, no panics)
+   - Concurrency (multi-client, multi-worker correct)
+   - Performance (meets all floors)
+   - Code quality (clean, maintainable, fits Netdata patterns)
+3. Fix every finding
+4. Re-review until clean
+5. Costa final review
+
+### Validation
+- All reviewers agree: production-ready
+- Costa approves
+
+---
+
+## Completion Criteria
+
+The library is production-ready when ALL of the following are true:
+
+- [ ] Multi-client multi-worker managed server implemented and tested
+- [ ] 100% line coverage proven in all 3 languages
+- [ ] Zero ASAN/TSAN/valgrind findings
+- [ ] Zero Go race detector findings
+- [ ] 1000+ item snapshot tests pass in all languages
+- [ ] 100 concurrent client stress test passes
+- [ ] 10-minute long-running stability test passes
+- [ ] Pipelining correctness and performance documented
+- [ ] SHM benchmark root cause resolved (no workarounds)
+- [ ] benchmarks-posix.md generated from current code
+- [ ] benchmarks-windows.md generated from current code
+- [ ] All performance floors met
+- [ ] No source file exceeds 500 lines
+- [ ] Hash table cache lookup implemented
+- [ ] Developer documentation written
+- [ ] Extended fuzz testing (10+ minutes per target) clean
+- [ ] Transport-level chaos testing clean
+- [ ] All 4 external reviewers agree: production-ready
+- [ ] Costa approves
