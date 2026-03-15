@@ -571,17 +571,43 @@ nipc_shm_error_t nipc_shm_receive(nipc_shm_ctx_t *ctx,
         cpu_relax();
     }
 
-    /* Phase 2: futex wait (if spinning didn't observe the advance). */
+    /* Phase 2: futex wait (if spinning didn't observe the advance).
+     *
+     * The futex_wait loop handles spurious wakeups (EAGAIN when the
+     * signal word changed between our read and the syscall, or EINTR
+     * from signal delivery).  We compute a wall-clock deadline so the
+     * total wait never exceeds timeout_ms regardless of retries. */
     if (!observed) {
-        uint32_t sig_val = __atomic_load_n(signal_ptr, __ATOMIC_ACQUIRE);
+        uint64_t deadline_ns = 0; /* 0 = no timeout */
+        if (timeout_ms > 0) {
+            struct timespec now_ts;
+            clock_gettime(CLOCK_MONOTONIC, &now_ts);
+            deadline_ns = (uint64_t)now_ts.tv_sec * 1000000000ull
+                        + (uint64_t)now_ts.tv_nsec
+                        + (uint64_t)timeout_ms * 1000000ull;
+        }
 
-        uint64_t cur = __atomic_load_n(seq_ptr, __ATOMIC_ACQUIRE);
-        if (cur < expected_seq) {
+        for (;;) {
+            uint32_t sig_val = __atomic_load_n(signal_ptr, __ATOMIC_ACQUIRE);
+
+            uint64_t cur = __atomic_load_n(seq_ptr, __ATOMIC_ACQUIRE);
+            if (cur >= expected_seq)
+                break; /* response arrived */
+
+            /* Compute remaining timeout for this futex_wait call. */
             struct timespec ts;
             struct timespec *tsp = NULL;
-            if (timeout_ms > 0) {
-                ts.tv_sec  = timeout_ms / 1000;
-                ts.tv_nsec = (long)(timeout_ms % 1000) * 1000000L;
+            if (deadline_ns > 0) {
+                struct timespec now_ts;
+                clock_gettime(CLOCK_MONOTONIC, &now_ts);
+                uint64_t now_val = (uint64_t)now_ts.tv_sec * 1000000000ull
+                                 + (uint64_t)now_ts.tv_nsec;
+                if (now_val >= deadline_ns)
+                    return NIPC_SHM_ERR_TIMEOUT;
+
+                uint64_t remain = deadline_ns - now_val;
+                ts.tv_sec  = (time_t)(remain / 1000000000ull);
+                ts.tv_nsec = (long)(remain % 1000000000ull);
                 tsp = &ts;
             }
 
@@ -589,12 +615,10 @@ nipc_shm_error_t nipc_shm_receive(nipc_shm_ctx_t *ctx,
             if (ret < 0 && errno == ETIMEDOUT)
                 return NIPC_SHM_ERR_TIMEOUT;
 
-            cur = __atomic_load_n(seq_ptr, __ATOMIC_ACQUIRE);
-            if (cur < expected_seq)
-                return NIPC_SHM_ERR_TIMEOUT;
+            /* EAGAIN (value changed) or EINTR (signal): re-check seq. */
         }
 
-        /* Copy immediately after waking. */
+        /* Copy immediately after observing the sequence advance. */
         mlen = __atomic_load_n(len_ptr, __ATOMIC_ACQUIRE);
         if (mlen > 0 && mlen <= buf_size)
             memcpy(buf, data_ptr, mlen);
