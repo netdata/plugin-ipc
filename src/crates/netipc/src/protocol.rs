@@ -1116,6 +1116,28 @@ where
     Some(n)
 }
 
+/// CGROUPS_SNAPSHOT dispatch: decode request, build response via handler.
+pub fn dispatch_cgroups_snapshot<F>(
+    req: &[u8],
+    resp: &mut [u8],
+    max_items: u32,
+    handler: F,
+) -> Option<usize>
+where
+    F: FnOnce(&CgroupsRequest, &mut CgroupsBuilder) -> bool,
+{
+    let request = CgroupsRequest::decode(req).ok()?;
+    let mut builder = CgroupsBuilder::new(resp, max_items, 0, 0);
+    if !handler(&request, &mut builder) {
+        return None;
+    }
+    let n = builder.finish();
+    if n == 0 {
+        return None;
+    }
+    Some(n)
+}
+
 // ===========================================================================
 //  Tests
 // ===========================================================================

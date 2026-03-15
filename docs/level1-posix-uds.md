@@ -82,12 +82,17 @@ See the wire envelope spec for chunk header layout and validation rules.
 
 ## SHM file path derivation
 
-When the handshake negotiates a SHM profile, the shared memory region
-file is:
+When the handshake negotiates a SHM profile, the server creates a
+per-session shared memory region file:
 
 ```
-{run_dir}/{service_name}.ipcshm
+{run_dir}/{service_name}-{session_id:016x}.ipcshm
 ```
+
+Where `session_id` is the server-assigned session identifier from the
+hello-ack, formatted as a zero-padded 16-character lowercase hex string.
+Each session gets its own SHM region. See the POSIX SHM transport
+contract for full region layout and lifecycle details.
 
 The UDS connection remains open for the session lifetime (it carried
 the handshake and is used for SHM lifecycle coordination). The data

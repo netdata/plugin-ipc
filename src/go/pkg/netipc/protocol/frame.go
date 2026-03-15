@@ -1049,3 +1049,21 @@ func DispatchStringReverse(req []byte, resp []byte, handler func(string) (string
 	n := StringReverseEncode(result, resp)
 	return n, n > 0
 }
+
+// DispatchCgroupsSnapshot decodes request, builds response via handler.
+func DispatchCgroupsSnapshot(req []byte, resp []byte, maxItems uint32,
+	handler func(*CgroupsRequest, *CgroupsBuilder) bool) (int, bool) {
+	request, err := DecodeCgroupsRequest(req)
+	if err != nil {
+		return 0, false
+	}
+	builder := NewCgroupsBuilder(resp, maxItems, 0, 0)
+	if !handler(&request, builder) {
+		return 0, false
+	}
+	n := builder.Finish()
+	if n == 0 {
+		return 0, false
+	}
+	return n, true
+}

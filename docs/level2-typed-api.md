@@ -165,22 +165,20 @@ only inside the callback. This is the recommended path for performance.
 is unavailable, returns a "no response" result instead of forcing a
 separate readiness branch at every call site.
 
-### Typed batch calls
+### Typed batch calls (planned)
 
-Level 2 exposes per-method-type batch call functions. Each batch call:
+Typed batch call wrappers — encoding multiple items into one Level 1
+batch message and decoding the batch response — are planned but not
+yet implemented. Current method types use single-item messages only.
 
-1. Encodes each typed request item using the Codec
-2. Assembles them into one Level 1 batch message
-3. Sends the batch via Level 1
-4. Receives the batch response via Level 1
-5. Checks outer `transport_status` — if not OK, reports failure for
-   the entire batch without attempting to decode
-6. Extracts each response item using Level 1 batch extraction
-7. Decodes each response item using the Codec
-8. Delivers each decoded view to the caller (by callback or return)
+When implemented, batch calls will:
 
-Items are correlated by position: response item 0 corresponds to request
-item 0.
+1. Encode each typed request item using the Codec
+2. Assemble them into one Level 1 batch message
+3. Send the batch via Level 1
+4. Receive the batch response via Level 1
+5. Extract and decode each response item
+6. Correlate by position: response item 0 corresponds to request item 0
 
 ## Managed server
 

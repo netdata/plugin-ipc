@@ -95,8 +95,10 @@ Transport modules must NOT contain:
 - Retry or reconnect policy
 - Cache or snapshot logic
 
-Transport modules must NOT import codec modules. Level 1 treats all
-payloads as opaque bytes.
+Transport modules import the protocol module for L1 wire primitives
+(header encode/decode, chunk header, batch directory validation) but
+must NOT use method-specific codec functions. Level 1 treats all
+method payloads as opaque bytes.
 
 ### Service modules (`service/`)
 
@@ -117,17 +119,19 @@ Service modules must NOT contain:
 
 ## Separation rules
 
-### Level 1 and Codec are parallel
+### Protocol module is shared infrastructure
 
-Neither imports the other. A transport module never calls an encode/decode
-function. A codec module never calls a send/receive function. They are
-connected only at Level 2 and above.
+The protocol module (`protocol/`) contains both L1 wire primitives
+(header, chunk header, batch directory) and method-specific codec
+functions. Transport modules import the protocol module for L1 wire
+primitives only. They must not call method-specific codec functions.
+Codec modules never call transport functions.
 
 ### No upward dependencies
 
-- Codec depends on nothing
-- Level 1 depends on nothing
-- Level 2 depends on Level 1 + Codec
+- Protocol depends on nothing
+- Level 1 depends on protocol (wire primitives only)
+- Level 2 depends on Level 1 + protocol (wire + method codecs)
 - Level 3 depends on Level 2
 
 No module may depend on a higher layer. Transport code must never import

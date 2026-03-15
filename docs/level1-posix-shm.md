@@ -235,14 +235,21 @@ left behind by a previous server instance that crashed or was killed:
 
 1. Scan `{run_dir}` for files matching `{service_name}-*.ipcshm`.
 2. For each file: open, mmap, read the header.
-3. Check `owner_pid` and `owner_generation`:
-   - If `owner_pid` refers to a dead process or the generation does
-     not match: the region is stale — unlink it.
-   - If `owner_pid` refers to a live process with matching generation:
-     the region belongs to another running server instance — leave it
-     (fail with address-in-use if this server wants the same service).
-4. `owner_generation` prevents false positives from PID reuse: even if
-   a new process reuses the old PID, its generation will differ.
+3. Check `owner_pid`:
+   - If `owner_pid` refers to a dead process: the region is stale —
+     unlink it.
+   - If `owner_pid` refers to a live process: the region belongs to
+     another running server instance — leave it (fail with
+     address-in-use if this server wants the same service).
+   - If the header is invalid (bad magic, undersized file): treat as
+     stale — unlink it.
+
+`owner_generation` is used by the per-session `server_create` path
+(not the startup cleanup) to detect PID reuse: when a server creates a
+new region and finds an existing file with a live `owner_pid`, it
+compares `owner_generation` to distinguish a genuinely live owner from
+a reused PID. The startup cleanup path cannot perform this comparison
+because it has no reference generation — it relies on PID liveness only.
 
 This cleanup runs once at server startup, before the listener begins
 accepting connections. It is the safety net for crashes and hard

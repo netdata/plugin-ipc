@@ -792,7 +792,7 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
     if (!server->sessions)
         return NIPC_ERR_OVERFLOW;
     server->session_count = 0;
-    server->next_session_id = 0;
+    server->next_session_id = 1; /* spec: monotonic counter starting at 1 */
     pthread_mutex_init(&server->sessions_lock, NULL);
 
     /* Clean up stale SHM regions from previous crashes (spec requirement:
