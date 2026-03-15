@@ -275,6 +275,14 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     )
     add_test(NAME test_stress COMMAND test_stress)
     set_tests_properties(test_stress PROPERTIES TIMEOUT 180)
+
+    # Chaos tests (Phase H9: transport-level and SHM chaos testing)
+    add_executable(test_chaos tests/fixtures/c/test_chaos.c)
+    target_link_libraries(test_chaos PRIVATE
+        netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
+    )
+    add_test(NAME test_chaos COMMAND test_chaos)
+    set_tests_properties(test_chaos PROPERTIES TIMEOUT 120)
 endif()
 
 # --- Rust UDS transport tests ---------------------------------------------
