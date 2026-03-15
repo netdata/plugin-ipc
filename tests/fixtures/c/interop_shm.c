@@ -34,9 +34,9 @@ static int run_server(const char *run_dir, const char *service)
     fflush(stdout);
 
     /* Receive one message */
-    const void *msg;
+    uint8_t msg[65536];
     size_t msg_len;
-    err = nipc_shm_receive(&shm, &msg, &msg_len, 10000);
+    err = nipc_shm_receive(&shm, msg, sizeof(msg), &msg_len, 10000);
     if (err != NIPC_SHM_OK) {
         fprintf(stderr, "server: receive failed: %d\n", err);
         nipc_shm_destroy(&shm);
@@ -57,7 +57,7 @@ static int run_server(const char *run_dir, const char *service)
             nipc_header_encode(&hdr, resp_buf, NIPC_HEADER_LEN);
             if (payload_len > 0)
                 memcpy(resp_buf + NIPC_HEADER_LEN,
-                       (const uint8_t *)msg + NIPC_HEADER_LEN,
+                       msg + NIPC_HEADER_LEN,
                        payload_len);
 
             err = nipc_shm_send(&shm, resp_buf, resp_len);
@@ -127,9 +127,9 @@ static int run_client(const char *run_dir, const char *service)
     }
 
     /* Receive response */
-    const void *resp;
+    uint8_t resp[65536];
     size_t resp_len;
-    err = nipc_shm_receive(&shm, &resp, &resp_len, 10000);
+    err = nipc_shm_receive(&shm, resp, sizeof(resp), &resp_len, 10000);
     if (err != NIPC_SHM_OK) {
         fprintf(stderr, "client: receive failed: %d\n", err);
         nipc_shm_close(&shm);
@@ -161,7 +161,7 @@ static int run_client(const char *run_dir, const char *service)
             ok = 0;
         }
         if (rpayload_len == sizeof(payload) &&
-            memcmp((const uint8_t *)resp + NIPC_HEADER_LEN, payload, sizeof(payload)) != 0) {
+            memcmp(resp + NIPC_HEADER_LEN, payload, sizeof(payload)) != 0) {
             fprintf(stderr, "client: payload data mismatch\n");
             ok = 0;
         }

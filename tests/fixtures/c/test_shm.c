@@ -96,9 +96,9 @@ static void *shm_echo_server_thread(void *arg)
     ctx->ready = 1;
 
     /* Receive a request. */
-    const void *msg;
+    uint8_t msg[65536];
     size_t msg_len;
-    err = nipc_shm_receive(&shm, &msg, &msg_len, 5000);
+    err = nipc_shm_receive(&shm, msg, sizeof(msg), &msg_len, 5000);
     if (err != NIPC_SHM_OK) {
         fprintf(stderr, "shm server receive failed: %d\n", err);
         nipc_shm_destroy(&shm);
@@ -124,7 +124,7 @@ static void *shm_echo_server_thread(void *arg)
             nipc_header_encode(&hdr, resp_buf, NIPC_HEADER_LEN);
             if (payload_len > 0)
                 memcpy(resp_buf + NIPC_HEADER_LEN,
-                       (const uint8_t *)msg + NIPC_HEADER_LEN,
+                       msg + NIPC_HEADER_LEN,
                        payload_len);
 
             err = nipc_shm_send(&shm, resp_buf, resp_len);
@@ -188,9 +188,9 @@ static void test_direct_roundtrip(void)
         check("client send request", err == NIPC_SHM_OK);
 
         /* Receive response. */
-        const void *resp;
+        uint8_t resp[65536];
         size_t resp_len;
-        err = nipc_shm_receive(&client, &resp, &resp_len, 5000);
+        err = nipc_shm_receive(&client, resp, sizeof(resp), &resp_len, 5000);
         check("client receive response", err == NIPC_SHM_OK);
 
         if (err == NIPC_SHM_OK) {
@@ -203,7 +203,7 @@ static void test_direct_roundtrip(void)
             check("response message_id", rhdr.message_id == 42);
             check("response payload matches",
                   resp_len >= NIPC_HEADER_LEN + sizeof(payload) &&
-                  memcmp((const uint8_t *)resp + NIPC_HEADER_LEN,
+                  memcmp(resp + NIPC_HEADER_LEN,
                          payload, sizeof(payload)) == 0);
         }
 
@@ -280,9 +280,10 @@ static void *hybrid_server_thread(void *arg)
 
     if (use_shm) {
         /* Echo via SHM. */
-        const void *msg;
+        uint8_t msg[65536];
         size_t msg_len;
-        nipc_shm_error_t serr = nipc_shm_receive(&shm, &msg, &msg_len, 5000);
+        nipc_shm_error_t serr = nipc_shm_receive(&shm, msg, sizeof(msg),
+                                                    &msg_len, 5000);
         if (serr == NIPC_SHM_OK && msg_len >= NIPC_HEADER_LEN) {
             nipc_header_t hdr;
             nipc_header_decode(msg, msg_len, &hdr);
@@ -295,7 +296,7 @@ static void *hybrid_server_thread(void *arg)
                 nipc_header_encode(&hdr, resp_buf, NIPC_HEADER_LEN);
                 if (payload_len > 0)
                     memcpy(resp_buf + NIPC_HEADER_LEN,
-                           (const uint8_t *)msg + NIPC_HEADER_LEN,
+                           msg + NIPC_HEADER_LEN,
                            payload_len);
                 serr = nipc_shm_send(&shm, resp_buf, resp_len);
                 ctx->echo_ok = (serr == NIPC_SHM_OK) ? 1 : 0;
@@ -390,9 +391,10 @@ static void test_negotiated_shm(void)
             check("SHM send", serr == NIPC_SHM_OK);
 
             /* Receive response via SHM. */
-            const void *resp;
+            uint8_t resp[65536];
             size_t resp_len;
-            serr = nipc_shm_receive(&client_shm, &resp, &resp_len, 5000);
+            serr = nipc_shm_receive(&client_shm, resp, sizeof(resp),
+                                      &resp_len, 5000);
             check("SHM receive", serr == NIPC_SHM_OK);
 
             if (serr == NIPC_SHM_OK) {
@@ -598,9 +600,9 @@ static void *large_msg_server_thread(void *arg)
     }
     ctx->ready = 1;
 
-    const void *msg;
+    uint8_t *msg = malloc(65536);
     size_t msg_len;
-    err = nipc_shm_receive(&shm, &msg, &msg_len, 5000);
+    err = nipc_shm_receive(&shm, msg, 65536, &msg_len, 5000);
     if (err == NIPC_SHM_OK && msg_len >= NIPC_HEADER_LEN) {
         nipc_header_t hdr;
         nipc_header_decode(msg, msg_len, &hdr);
@@ -613,13 +615,14 @@ static void *large_msg_server_thread(void *arg)
             nipc_header_encode(&hdr, resp_buf, NIPC_HEADER_LEN);
             if (payload_len > 0)
                 memcpy(resp_buf + NIPC_HEADER_LEN,
-                       (const uint8_t *)msg + NIPC_HEADER_LEN,
+                       msg + NIPC_HEADER_LEN,
                        payload_len);
             err = nipc_shm_send(&shm, resp_buf, resp_len);
             ctx->echo_ok = (err == NIPC_SHM_OK) ? 1 : 0;
             free(resp_buf);
         }
     }
+    free(msg);
 
     nipc_shm_destroy(&shm);
     ctx->done = 1;
@@ -675,9 +678,9 @@ static void test_large_message(void)
             check("send large message", err == NIPC_SHM_OK);
 
             /* Receive response. */
-            const void *resp;
+            uint8_t *resp = malloc(65536);
             size_t resp_len;
-            err = nipc_shm_receive(&client, &resp, &resp_len, 5000);
+            err = nipc_shm_receive(&client, resp, 65536, &resp_len, 5000);
             check("receive large response", err == NIPC_SHM_OK);
 
             if (err == NIPC_SHM_OK) {
@@ -687,8 +690,7 @@ static void test_large_message(void)
                 /* Verify payload pattern. */
                 int payload_ok = 1;
                 if (resp_len >= NIPC_HEADER_LEN + payload_len) {
-                    const uint8_t *rp =
-                        (const uint8_t *)resp + NIPC_HEADER_LEN;
+                    const uint8_t *rp = resp + NIPC_HEADER_LEN;
                     for (size_t i = 0; i < payload_len; i++) {
                         if (rp[i] != (uint8_t)(i & 0xFF)) {
                             payload_ok = 0;
@@ -701,6 +703,7 @@ static void test_large_message(void)
                 check("response payload pattern matches", payload_ok);
             }
 
+            free(resp);
             free(msg);
         }
 
@@ -800,15 +803,16 @@ static void *multi_rt_server_thread(void *arg)
     ctx->ready = 1;
 
     int all_ok = 1;
+    uint8_t recv_msg[65536];
     for (int i = 0; i < 10; i++) {
-        const void *msg;
         size_t msg_len;
-        err = nipc_shm_receive(&shm, &msg, &msg_len, 5000);
+        err = nipc_shm_receive(&shm, recv_msg, sizeof(recv_msg),
+                                 &msg_len, 5000);
         if (err != NIPC_SHM_OK) { all_ok = 0; break; }
 
         if (msg_len >= NIPC_HEADER_LEN) {
             nipc_header_t hdr;
-            nipc_header_decode(msg, msg_len, &hdr);
+            nipc_header_decode(recv_msg, msg_len, &hdr);
             hdr.kind = NIPC_KIND_RESPONSE;
 
             size_t plen = msg_len - NIPC_HEADER_LEN;
@@ -818,7 +822,7 @@ static void *multi_rt_server_thread(void *arg)
                 nipc_header_encode(&hdr, rbuf, NIPC_HEADER_LEN);
                 if (plen > 0)
                     memcpy(rbuf + NIPC_HEADER_LEN,
-                           (const uint8_t *)msg + NIPC_HEADER_LEN, plen);
+                           recv_msg + NIPC_HEADER_LEN, plen);
                 err = nipc_shm_send(&shm, rbuf, rlen);
                 if (err != NIPC_SHM_OK) all_ok = 0;
                 free(rbuf);
@@ -860,6 +864,7 @@ static void test_multiple_roundtrips(void)
 
     if (err == NIPC_SHM_OK) {
         int all_ok = 1;
+        uint8_t resp[65536];
         for (int i = 0; i < 10; i++) {
             uint8_t payload = (uint8_t)i;
             nipc_header_t hdr = {
@@ -877,9 +882,9 @@ static void test_multiple_roundtrips(void)
             err = nipc_shm_send(&client, msg, sizeof(msg));
             if (err != NIPC_SHM_OK) { all_ok = 0; break; }
 
-            const void *resp;
             size_t resp_len;
-            err = nipc_shm_receive(&client, &resp, &resp_len, 5000);
+            err = nipc_shm_receive(&client, resp, sizeof(resp),
+                                     &resp_len, 5000);
             if (err != NIPC_SHM_OK) { all_ok = 0; break; }
 
             if (resp_len < NIPC_HEADER_LEN + 1) { all_ok = 0; break; }
@@ -890,7 +895,7 @@ static void test_multiple_roundtrips(void)
                 rhdr.message_id != (uint64_t)(i + 1))
                 all_ok = 0;
 
-            if (((const uint8_t *)resp)[NIPC_HEADER_LEN] != payload)
+            if (resp[NIPC_HEADER_LEN] != payload)
                 all_ok = 0;
         }
         check("all 10 round-trips correct", all_ok);

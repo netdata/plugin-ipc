@@ -346,20 +346,21 @@ impl CgroupsClient {
         #[cfg(target_os = "linux")]
         {
             if let Some(ref mut shm) = self.shm {
-                let msg = shm.receive(30000).map_err(|_| NipcError::Truncated)?;
+                let mut shm_buf = vec![0u8; response_buf.len() + HEADER_SIZE];
+                let mlen = shm.receive(&mut shm_buf, 30000).map_err(|_| NipcError::Truncated)?;
 
-                if msg.len() < HEADER_SIZE {
+                if mlen < HEADER_SIZE {
                     return Err(NipcError::Truncated);
                 }
 
-                let hdr = Header::decode(msg)?;
-                let payload_len = msg.len() - HEADER_SIZE;
+                let hdr = Header::decode(&shm_buf[..mlen])?;
+                let payload_len = mlen - HEADER_SIZE;
 
                 if payload_len > response_buf.len() {
                     return Err(NipcError::Overflow);
                 }
 
-                response_buf[..payload_len].copy_from_slice(&msg[HEADER_SIZE..]);
+                response_buf[..payload_len].copy_from_slice(&shm_buf[HEADER_SIZE..mlen]);
                 return Ok((hdr, payload_len));
             }
         }
@@ -528,16 +529,16 @@ impl CgroupsServer {
                 #[cfg(target_os = "linux")]
                 {
                     if let Some(ref mut shm_ctx) = shm {
-                        match shm_ctx.receive(500) {
-                            Ok(msg) => {
-                                if msg.len() < HEADER_SIZE {
+                        match shm_ctx.receive(&mut recv_buf, 500) {
+                            Ok(mlen) => {
+                                if mlen < HEADER_SIZE {
                                     break;
                                 }
-                                let hdr = match Header::decode(msg) {
+                                let hdr = match Header::decode(&recv_buf[..mlen]) {
                                     Ok(h) => h,
                                     Err(_) => break,
                                 };
-                                let payload = msg[HEADER_SIZE..].to_vec();
+                                let payload = recv_buf[HEADER_SIZE..mlen].to_vec();
                                 (hdr, payload)
                             }
                             Err(crate::transport::shm::ShmError::Timeout) => continue,

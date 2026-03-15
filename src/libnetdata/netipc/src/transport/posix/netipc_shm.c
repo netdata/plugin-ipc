@@ -488,11 +488,12 @@ nipc_shm_error_t nipc_shm_send(nipc_shm_ctx_t *ctx,
 /* ------------------------------------------------------------------ */
 
 nipc_shm_error_t nipc_shm_receive(nipc_shm_ctx_t *ctx,
-                                    const void **msg_out,
+                                    void *buf,
+                                    size_t buf_size,
                                     size_t *msg_len_out,
                                     uint32_t timeout_ms)
 {
-    if (!ctx || !ctx->base || !msg_out || !msg_len_out)
+    if (!ctx || !ctx->base || !buf || !msg_len_out || buf_size == 0)
         return NIPC_SHM_ERR_BAD_PARAM;
 
     /*
@@ -521,11 +522,22 @@ nipc_shm_error_t nipc_shm_receive(nipc_shm_ctx_t *ctx,
     uint32_t *len_ptr    = shm_u32_ptr(ctx->base, len_off);
     uint32_t *signal_ptr = shm_u32_ptr(ctx->base, sig_off);
 
-    /* Phase 1: spin. */
+    void *data_ptr = region_ptr(ctx, area_offset);
+
+    /*
+     * Phase 1: spin. On detecting the sequence advance, immediately
+     * copy the message into the caller's buffer while still in the
+     * same iteration. The shared area can be overwritten by the peer
+     * within nanoseconds of the sequence advancing.
+     */
     bool observed = false;
+    uint32_t mlen = 0;
     for (uint32_t i = 0; i < ctx->spin_tries; i++) {
         uint64_t cur = __atomic_load_n(seq_ptr, __ATOMIC_ACQUIRE);
         if (cur >= expected_seq) {
+            mlen = __atomic_load_n(len_ptr, __ATOMIC_ACQUIRE);
+            if (mlen > 0 && mlen <= buf_size)
+                memcpy(buf, data_ptr, mlen);
             observed = true;
             break;
         }
@@ -534,14 +546,8 @@ nipc_shm_error_t nipc_shm_receive(nipc_shm_ctx_t *ctx,
 
     /* Phase 2: futex wait (if spinning didn't observe the advance). */
     if (!observed) {
-        /*
-         * Read the current signal value before waiting. If the
-         * publisher already incremented it, the FUTEX_WAIT will
-         * return immediately (expected != actual).
-         */
         uint32_t sig_val = __atomic_load_n(signal_ptr, __ATOMIC_ACQUIRE);
 
-        /* Check one more time after reading the signal. */
         uint64_t cur = __atomic_load_n(seq_ptr, __ATOMIC_ACQUIRE);
         if (cur < expected_seq) {
             struct timespec ts;
@@ -556,18 +562,28 @@ nipc_shm_error_t nipc_shm_receive(nipc_shm_ctx_t *ctx,
             if (ret < 0 && errno == ETIMEDOUT)
                 return NIPC_SHM_ERR_TIMEOUT;
 
-            /* After waking, verify the sequence advanced. */
             cur = __atomic_load_n(seq_ptr, __ATOMIC_ACQUIRE);
             if (cur < expected_seq)
                 return NIPC_SHM_ERR_TIMEOUT;
         }
+
+        /* Copy immediately after waking. */
+        mlen = __atomic_load_n(len_ptr, __ATOMIC_ACQUIRE);
+        if (mlen > 0 && mlen <= buf_size)
+            memcpy(buf, data_ptr, mlen);
     }
 
-    /* Read the message length (acquire). */
-    uint32_t mlen = __atomic_load_n(len_ptr, __ATOMIC_ACQUIRE);
+    /* Message larger than caller buffer */
+    if (mlen > buf_size) {
+        *msg_len_out = mlen;
+        /* Still advance tracking -- message is consumed from SHM perspective */
+        if (ctx->role == NIPC_SHM_ROLE_SERVER)
+            ctx->local_req_seq = expected_seq;
+        else
+            ctx->local_resp_seq = expected_seq;
+        return NIPC_SHM_ERR_MSG_TOO_LARGE;
+    }
 
-    /* Point directly into the SHM region (zero-copy). */
-    *msg_out     = region_ptr(ctx, area_offset);
     *msg_len_out = mlen;
 
     /* Advance local tracking. */

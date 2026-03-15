@@ -474,12 +474,16 @@ impl ShmContext {
         Ok(())
     }
 
-    /// Receive a message. Returns a slice into the SHM region (zero-copy).
+    /// Receive a message into the caller-provided buffer.
     ///
-    /// The returned slice is valid until the next send or receive call.
-    pub fn receive(&mut self, timeout_ms: u32) -> Result<&[u8], ShmError> {
+    /// On success, returns the number of bytes written to `buf`.
+    /// Returns `MsgTooLarge` if the message exceeds `buf.len()`.
+    pub fn receive(&mut self, buf: &mut [u8], timeout_ms: u32) -> Result<usize, ShmError> {
         if self.base.is_null() {
             return Err(ShmError::BadParam("null context".into()));
+        }
+        if buf.is_empty() {
+            return Err(ShmError::BadParam("empty buffer".into()));
         }
 
         let (area_offset, seq_off, len_off, sig_off, expected_seq) = match self.role {
@@ -499,11 +503,22 @@ impl ShmContext {
             ),
         };
 
-        // Phase 1: spin
+        // Phase 1: spin. Copy immediately on observing the advance.
         let mut observed = false;
+        let mut mlen = 0usize;
         for _ in 0..self.spin_tries {
             let cur = atomic_load_u64(self.base, seq_off);
             if cur >= expected_seq {
+                mlen = atomic_load_u32(self.base, len_off) as usize;
+                if mlen > 0 && mlen <= buf.len() {
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            self.base.add(area_offset as usize),
+                            buf.as_mut_ptr(),
+                            mlen,
+                        );
+                    }
+                }
                 observed = true;
                 break;
             }
@@ -542,22 +557,32 @@ impl ShmContext {
                     return Err(ShmError::Timeout);
                 }
             }
+
+            // Copy immediately after waking
+            mlen = atomic_load_u32(self.base, len_off) as usize;
+            if mlen > 0 && mlen <= buf.len() {
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        self.base.add(area_offset as usize),
+                        buf.as_mut_ptr(),
+                        mlen,
+                    );
+                }
+            }
         }
 
-        // Read message length (acquire)
-        let mlen = atomic_load_u32(self.base, len_off) as usize;
-
-        // Advance local tracking
+        // Advance local tracking (message is consumed from SHM perspective)
         match self.role {
             ShmRole::Server => self.local_req_seq = expected_seq,
             ShmRole::Client => self.local_resp_seq = expected_seq,
         }
 
-        // Return zero-copy slice
-        let slice = unsafe {
-            std::slice::from_raw_parts(self.base.add(area_offset as usize), mlen)
-        };
-        Ok(slice)
+        // Message larger than caller buffer
+        if mlen > buf.len() {
+            return Err(ShmError::MsgTooLarge);
+        }
+
+        Ok(mlen)
     }
 
     /// Close client (munmap, close fd, no unlink).
@@ -836,17 +861,19 @@ mod tests {
                 .expect("server create");
 
             // Receive request
-            let msg = ctx.receive(5000).expect("server receive");
+            let mut buf = vec![0u8; 65536];
+            let mlen = ctx.receive(&mut buf, 5000).expect("server receive");
+            let msg = &buf[..mlen];
             assert!(msg.len() >= protocol::HEADER_SIZE);
 
             // Parse and echo as response
             let hdr = protocol::Header::decode(msg).expect("decode");
-            let payload = &msg[protocol::HEADER_SIZE..];
+            let payload = msg[protocol::HEADER_SIZE..].to_vec();
             let resp = build_message(
                 protocol::KIND_RESPONSE,
                 hdr.code,
                 hdr.message_id,
-                payload,
+                &payload,
             );
             ctx.send(&resp).expect("server send");
             ctx.destroy();
@@ -867,7 +894,9 @@ mod tests {
         );
         client.send(&msg).expect("client send");
 
-        let resp = client.receive(5000).expect("client receive");
+        let mut resp_buf = vec![0u8; 65536];
+        let rlen = client.receive(&mut resp_buf, 5000).expect("client receive");
+        let resp = &resp_buf[..rlen];
         assert_eq!(resp.len(), protocol::HEADER_SIZE + payload.len());
 
         let rhdr = protocol::Header::decode(resp).expect("decode response");
@@ -891,15 +920,17 @@ mod tests {
             let mut ctx = ShmContext::server_create(TEST_RUN_DIR, &svc_clone, 4096, 4096)
                 .expect("server create");
 
+            let mut buf = vec![0u8; 65536];
             for _ in 0..10 {
-                let msg = ctx.receive(5000).expect("server receive");
+                let mlen = ctx.receive(&mut buf, 5000).expect("server receive");
+                let msg = &buf[..mlen];
                 let hdr = protocol::Header::decode(msg).expect("decode");
-                let payload = &msg[protocol::HEADER_SIZE..];
+                let payload = msg[protocol::HEADER_SIZE..].to_vec();
                 let resp = build_message(
                     protocol::KIND_RESPONSE,
                     hdr.code,
                     hdr.message_id,
-                    payload,
+                    &payload,
                 );
                 ctx.send(&resp).expect("server send");
             }
@@ -910,6 +941,7 @@ mod tests {
         let mut client =
             ShmContext::client_attach(TEST_RUN_DIR, svc).expect("client attach");
 
+        let mut resp_buf = vec![0u8; 65536];
         for i in 0u64..10 {
             let payload = vec![i as u8];
             let msg = build_message(
@@ -919,7 +951,8 @@ mod tests {
                 &payload,
             );
             client.send(&msg).expect("client send");
-            let resp = client.receive(5000).expect("client receive");
+            let rlen = client.receive(&mut resp_buf, 5000).expect("client receive");
+            let resp = &resp_buf[..rlen];
             let rhdr = protocol::Header::decode(resp).expect("decode");
             assert_eq!(rhdr.kind, protocol::KIND_RESPONSE);
             assert_eq!(rhdr.message_id, i + 1);
@@ -962,14 +995,16 @@ mod tests {
         let server_thread = thread::spawn(move || {
             let mut ctx = ShmContext::server_create(TEST_RUN_DIR, &svc_clone, 65536, 65536)
                 .expect("server create");
-            let msg = ctx.receive(5000).expect("server receive");
+            let mut buf = vec![0u8; 65536];
+            let mlen = ctx.receive(&mut buf, 5000).expect("server receive");
+            let msg = &buf[..mlen];
             let hdr = protocol::Header::decode(msg).expect("decode");
-            let payload = &msg[protocol::HEADER_SIZE..];
+            let payload = msg[protocol::HEADER_SIZE..].to_vec();
             let resp = build_message(
                 protocol::KIND_RESPONSE,
                 hdr.code,
                 hdr.message_id,
-                payload,
+                &payload,
             );
             ctx.send(&resp).expect("server send");
             ctx.destroy();
@@ -984,7 +1019,9 @@ mod tests {
         let msg = build_message(protocol::KIND_REQUEST, 1, 999, &payload);
         client.send(&msg).expect("send large");
 
-        let resp = client.receive(5000).expect("receive large");
+        let mut resp_buf = vec![0u8; 65536];
+        let rlen = client.receive(&mut resp_buf, 5000).expect("receive large");
+        let resp = &resp_buf[..rlen];
         assert_eq!(resp.len(), protocol::HEADER_SIZE + payload.len());
         assert_eq!(&resp[protocol::HEADER_SIZE..], &payload[..]);
 

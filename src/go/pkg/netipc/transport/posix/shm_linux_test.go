@@ -65,24 +65,26 @@ func TestShmDirectRoundtrip(t *testing.T) {
 		}
 		defer ctx.ShmDestroy()
 
-		msg, err := ctx.ShmReceive(5000)
+		buf := make([]byte, 65536)
+		mlen, err := ctx.ShmReceive(buf, 5000)
 		if err != nil {
 			serverErr = fmt.Errorf("server receive: %w", err)
 			return
 		}
 
-		if len(msg) < protocol.HeaderSize {
-			serverErr = fmt.Errorf("message too short: %d", len(msg))
+		if mlen < protocol.HeaderSize {
+			serverErr = fmt.Errorf("message too short: %d", mlen)
 			return
 		}
 
 		// Parse header, echo as response
-		hdr, err := protocol.DecodeHeader(msg)
+		hdr, err := protocol.DecodeHeader(buf[:mlen])
 		if err != nil {
 			serverErr = fmt.Errorf("decode header: %w", err)
 			return
 		}
-		payload := msg[protocol.HeaderSize:]
+		payload := make([]byte, mlen-protocol.HeaderSize)
+		copy(payload, buf[protocol.HeaderSize:mlen])
 		resp := buildShmMessage(protocol.KindResponse, hdr.Code, hdr.MessageID, payload)
 		if err := ctx.ShmSend(resp); err != nil {
 			serverErr = fmt.Errorf("server send: %w", err)
@@ -104,16 +106,17 @@ func TestShmDirectRoundtrip(t *testing.T) {
 		t.Fatalf("client send: %v", err)
 	}
 
-	resp, err := client.ShmReceive(5000)
+	respBuf := make([]byte, 65536)
+	rlen, err := client.ShmReceive(respBuf, 5000)
 	if err != nil {
 		t.Fatalf("client receive: %v", err)
 	}
 
-	if len(resp) != protocol.HeaderSize+len(payload) {
-		t.Fatalf("response length: got %d, want %d", len(resp), protocol.HeaderSize+len(payload))
+	if rlen != protocol.HeaderSize+len(payload) {
+		t.Fatalf("response length: got %d, want %d", rlen, protocol.HeaderSize+len(payload))
 	}
 
-	rhdr, err := protocol.DecodeHeader(resp)
+	rhdr, err := protocol.DecodeHeader(respBuf[:rlen])
 	if err != nil {
 		t.Fatalf("decode response header: %v", err)
 	}
@@ -123,9 +126,7 @@ func TestShmDirectRoundtrip(t *testing.T) {
 	if rhdr.MessageID != 42 {
 		t.Errorf("response message_id: got %d, want 42", rhdr.MessageID)
 	}
-	// Must copy before comparing since resp is a slice into mmap
-	respPayload := make([]byte, len(payload))
-	copy(respPayload, resp[protocol.HeaderSize:])
+	respPayload := respBuf[protocol.HeaderSize:rlen]
 	if !bytes.Equal(respPayload, payload) {
 		t.Errorf("response payload mismatch")
 	}
@@ -155,19 +156,20 @@ func TestShmMultipleRoundtrips(t *testing.T) {
 		}
 		defer ctx.ShmDestroy()
 
+		buf := make([]byte, 65536)
 		for i := 0; i < 10; i++ {
-			msg, err := ctx.ShmReceive(5000)
+			mlen, err := ctx.ShmReceive(buf, 5000)
 			if err != nil {
 				serverErr = fmt.Errorf("server receive %d: %w", i, err)
 				return
 			}
-			hdr, err := protocol.DecodeHeader(msg)
+			hdr, err := protocol.DecodeHeader(buf[:mlen])
 			if err != nil {
 				serverErr = fmt.Errorf("decode header %d: %w", i, err)
 				return
 			}
-			payload := make([]byte, len(msg)-protocol.HeaderSize)
-			copy(payload, msg[protocol.HeaderSize:])
+			payload := make([]byte, mlen-protocol.HeaderSize)
+			copy(payload, buf[protocol.HeaderSize:mlen])
 			resp := buildShmMessage(protocol.KindResponse, hdr.Code, hdr.MessageID, payload)
 			if err := ctx.ShmSend(resp); err != nil {
 				serverErr = fmt.Errorf("server send %d: %w", i, err)
@@ -183,6 +185,7 @@ func TestShmMultipleRoundtrips(t *testing.T) {
 	}
 	defer client.ShmClose()
 
+	respBuf := make([]byte, 65536)
 	for i := uint64(0); i < 10; i++ {
 		payload := []byte{byte(i)}
 		msg := buildShmMessage(protocol.KindRequest, 1, i+1, payload)
@@ -190,12 +193,12 @@ func TestShmMultipleRoundtrips(t *testing.T) {
 			t.Fatalf("client send %d: %v", i, err)
 		}
 
-		resp, err := client.ShmReceive(5000)
+		rlen, err := client.ShmReceive(respBuf, 5000)
 		if err != nil {
 			t.Fatalf("client receive %d: %v", i, err)
 		}
 
-		rhdr, err := protocol.DecodeHeader(resp)
+		rhdr, err := protocol.DecodeHeader(respBuf[:rlen])
 		if err != nil {
 			t.Fatalf("decode response %d: %v", i, err)
 		}
@@ -205,8 +208,8 @@ func TestShmMultipleRoundtrips(t *testing.T) {
 		if rhdr.MessageID != i+1 {
 			t.Errorf("round %d: message_id=%d, want %d", i, rhdr.MessageID, i+1)
 		}
-		if resp[protocol.HeaderSize] != byte(i) {
-			t.Errorf("round %d: payload byte=%d, want %d", i, resp[protocol.HeaderSize], i)
+		if respBuf[protocol.HeaderSize] != byte(i) {
+			t.Errorf("round %d: payload byte=%d, want %d", i, respBuf[protocol.HeaderSize], i)
 		}
 	}
 
@@ -262,19 +265,20 @@ func TestShmLargeMessage(t *testing.T) {
 		}
 		defer ctx.ShmDestroy()
 
-		msg, err := ctx.ShmReceive(5000)
+		buf := make([]byte, 65536)
+		mlen, err := ctx.ShmReceive(buf, 5000)
 		if err != nil {
 			serverErr = fmt.Errorf("server receive: %w", err)
 			return
 		}
 
-		hdr, err := protocol.DecodeHeader(msg)
+		hdr, err := protocol.DecodeHeader(buf[:mlen])
 		if err != nil {
 			serverErr = fmt.Errorf("decode: %w", err)
 			return
 		}
-		payload := make([]byte, len(msg)-protocol.HeaderSize)
-		copy(payload, msg[protocol.HeaderSize:])
+		payload := make([]byte, mlen-protocol.HeaderSize)
+		copy(payload, buf[protocol.HeaderSize:mlen])
 		resp := buildShmMessage(protocol.KindResponse, hdr.Code, hdr.MessageID, payload)
 		if err := ctx.ShmSend(resp); err != nil {
 			serverErr = fmt.Errorf("server send: %w", err)
@@ -298,17 +302,17 @@ func TestShmLargeMessage(t *testing.T) {
 		t.Fatalf("client send: %v", err)
 	}
 
-	resp, err := client.ShmReceive(5000)
+	respBuf := make([]byte, 65536)
+	rlen, err := client.ShmReceive(respBuf, 5000)
 	if err != nil {
 		t.Fatalf("client receive: %v", err)
 	}
 
-	if len(resp) != protocol.HeaderSize+len(payload) {
-		t.Fatalf("response length: got %d, want %d", len(resp), protocol.HeaderSize+len(payload))
+	if rlen != protocol.HeaderSize+len(payload) {
+		t.Fatalf("response length: got %d, want %d", rlen, protocol.HeaderSize+len(payload))
 	}
 
-	respPayload := make([]byte, len(payload))
-	copy(respPayload, resp[protocol.HeaderSize:])
+	respPayload := respBuf[protocol.HeaderSize:rlen]
 	if !bytes.Equal(respPayload, payload) {
 		t.Errorf("response payload pattern mismatch")
 	}

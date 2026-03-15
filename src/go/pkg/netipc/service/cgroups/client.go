@@ -303,24 +303,25 @@ func (c *Client) transportSend(hdr *protocol.Header, payload []byte) error {
 
 func (c *Client) transportReceive(responseBuf []byte) (protocol.Header, int, error) {
 	if c.shm != nil {
-		msg, err := c.shm.ShmReceive(30000)
+		shmBuf := make([]byte, len(responseBuf)+protocol.HeaderSize)
+		mlen, err := c.shm.ShmReceive(shmBuf, 30000)
 		if err != nil {
 			return protocol.Header{}, 0, protocol.ErrTruncated
 		}
-		if len(msg) < protocol.HeaderSize {
+		if mlen < protocol.HeaderSize {
 			return protocol.Header{}, 0, protocol.ErrTruncated
 		}
 
-		hdr, err := protocol.DecodeHeader(msg)
+		hdr, err := protocol.DecodeHeader(shmBuf[:mlen])
 		if err != nil {
 			return protocol.Header{}, 0, err
 		}
 
-		payloadLen := len(msg) - protocol.HeaderSize
+		payloadLen := mlen - protocol.HeaderSize
 		if payloadLen > len(responseBuf) {
 			return protocol.Header{}, 0, protocol.ErrOverflow
 		}
-		copy(responseBuf[:payloadLen], msg[protocol.HeaderSize:])
+		copy(responseBuf[:payloadLen], shmBuf[protocol.HeaderSize:mlen])
 		return hdr, payloadLen, nil
 	}
 
@@ -456,24 +457,24 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 		var payload []byte
 
 		if shm != nil {
-			msg, err := shm.ShmReceive(500)
+			mlen, err := shm.ShmReceive(recvBuf, 500)
 			if err != nil {
 				if err == posix.ErrShmTimeout {
 					continue
 				}
 				return
 			}
-			if len(msg) < protocol.HeaderSize {
+			if mlen < protocol.HeaderSize {
 				return
 			}
-			h, err := protocol.DecodeHeader(msg)
+			h, err := protocol.DecodeHeader(recvBuf[:mlen])
 			if err != nil {
 				return
 			}
 			hdr = h
-			// Copy payload to avoid holding SHM reference
-			payload = make([]byte, len(msg)-protocol.HeaderSize)
-			copy(payload, msg[protocol.HeaderSize:])
+			// Copy payload from local buffer
+			payload = make([]byte, mlen-protocol.HeaderSize)
+			copy(payload, recvBuf[protocol.HeaderSize:mlen])
 		} else {
 			// Poll the session fd before blocking on receive
 			ready := pollFd(session.Fd(), 500)

@@ -120,6 +120,7 @@ typedef struct {
     uint32_t owner_generation;   /* cached for PID reuse detection */
 
     char     path[256];          /* stored for unlink on destroy */
+
 } nipc_shm_ctx_t;
 
 /* ------------------------------------------------------------------ */
@@ -189,12 +190,13 @@ nipc_shm_error_t nipc_shm_send(nipc_shm_ctx_t *ctx,
  * Spins for ctx->spin_tries iterations, then falls back to futex wait
  * with timeout_ms. Pass 0 for no timeout (infinite wait).
  *
- * On success, *msg_out points into the SHM region (zero-copy) and
- * *msg_len_out is the message length. The pointer is valid until the
- * next nipc_shm_send or nipc_shm_receive call on the same context.
+ * The message is copied into the caller-provided buffer (buf, buf_size).
+ * On success, *msg_len_out is the message length. Returns
+ * NIPC_SHM_ERR_MSG_TOO_LARGE if the message exceeds buf_size.
  */
 nipc_shm_error_t nipc_shm_receive(nipc_shm_ctx_t *ctx,
-                                    const void **msg_out,
+                                    void *buf,
+                                    size_t buf_size,
                                     size_t *msg_len_out,
                                     uint32_t timeout_ms);
 

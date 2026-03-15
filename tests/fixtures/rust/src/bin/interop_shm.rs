@@ -36,17 +36,16 @@ fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Er
     println!("READY");
 
     // Receive one message
-    let msg = ctx.receive(10000)?;
+    let mut buf = vec![0u8; 65536];
+    let mlen = ctx.receive(&mut buf, 10000)?;
 
-    if msg.len() < protocol::HEADER_SIZE {
+    if mlen < protocol::HEADER_SIZE {
         return Err("message too short".into());
     }
 
     // Parse and echo as response
-    let hdr = Header::decode(msg)?;
-    let payload = &msg[protocol::HEADER_SIZE..];
-    // Copy payload before sending (the send call will overwrite the region)
-    let payload_copy: Vec<u8> = payload.to_vec();
+    let hdr = Header::decode(&buf[..mlen])?;
+    let payload_copy: Vec<u8> = buf[protocol::HEADER_SIZE..mlen].to_vec();
     let resp = build_message(
         protocol::KIND_RESPONSE,
         hdr.code,
@@ -89,10 +88,9 @@ fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Er
     ctx.send(&msg)?;
 
     // Receive response
-    let resp = ctx.receive(10000)?;
-
-    // Verify (copy resp since it points into SHM)
-    let resp_copy: Vec<u8> = resp.to_vec();
+    let mut resp_buf = vec![0u8; 65536];
+    let rlen = ctx.receive(&mut resp_buf, 10000)?;
+    let resp_copy: Vec<u8> = resp_buf[..rlen].to_vec();
 
     let mut ok = true;
     if resp_copy.len() < protocol::HEADER_SIZE {

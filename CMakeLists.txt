@@ -435,4 +435,48 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
     )
 endif()
 
-# --- Benchmarks (added per phase) ----------------------------------------
+# --- Benchmarks (Phase 13) ------------------------------------------------
+
+if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+    # C benchmark binary
+    add_executable(bench_posix_c bench/drivers/c/bench_posix.c)
+    target_link_libraries(bench_posix_c PRIVATE
+        netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads m
+    )
+    target_compile_options(bench_posix_c PRIVATE -O2)
+endif()
+
+# Rust benchmark binary (release build for accurate performance)
+if(CARGO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+    add_custom_target(bench_posix_rs
+        COMMAND ${CARGO_EXECUTABLE} build --release --bin bench_posix
+        WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+        COMMENT "Building Rust benchmark binary (release)"
+    )
+endif()
+
+# Go benchmark binary
+if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
+    add_custom_target(bench_posix_go ALL
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} build -o "${CMAKE_BINARY_DIR}/bin/bench_posix_go" .
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/bench/drivers/go"
+        COMMENT "Building Go benchmark binary"
+    )
+endif()
+
+# Benchmark runner (not CTest — too slow for CI)
+if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+    add_custom_target(run-posix-bench
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/run-posix-bench.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Running full POSIX benchmark suite"
+        DEPENDS bench_posix_c
+    )
+
+    add_custom_target(generate-benchmarks-posix
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/generate-benchmarks-posix.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Generating benchmarks-posix.md from CSV data"
+    )
+endif()

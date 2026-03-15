@@ -162,20 +162,20 @@ static nipc_error_t transport_receive(nipc_client_ctx_t *ctx,
                                        size_t *payload_len_out)
 {
     if (ctx->shm) {
-        const void *msg;
         size_t msg_len;
-        nipc_shm_error_t serr = nipc_shm_receive(ctx->shm, &msg, &msg_len, 30000);
+        nipc_shm_error_t serr = nipc_shm_receive(ctx->shm, buf, buf_size,
+                                                    &msg_len, 30000);
         if (serr != NIPC_SHM_OK)
             return NIPC_ERR_TRUNCATED;
 
         if (msg_len < NIPC_HEADER_LEN)
             return NIPC_ERR_TRUNCATED;
 
-        nipc_error_t perr = nipc_header_decode(msg, msg_len, hdr_out);
+        nipc_error_t perr = nipc_header_decode(buf, msg_len, hdr_out);
         if (perr != NIPC_OK)
             return perr;
 
-        *payload_out = (const uint8_t *)msg + NIPC_HEADER_LEN;
+        *payload_out = (const uint8_t *)buf + NIPC_HEADER_LEN;
         *payload_len_out = msg_len - NIPC_HEADER_LEN;
         return NIPC_OK;
     }
@@ -438,9 +438,9 @@ static void server_handle_session(nipc_managed_server_t *server,
 
         /* Receive request via the active transport */
         if (shm) {
-            const void *msg;
             size_t msg_len;
-            nipc_shm_error_t serr = nipc_shm_receive(shm, &msg, &msg_len, 500);
+            nipc_shm_error_t serr = nipc_shm_receive(shm, recv_buf, sizeof(recv_buf),
+                                                       &msg_len, 500);
             if (serr == NIPC_SHM_ERR_TIMEOUT)
                 continue; /* check running flag */
             if (serr != NIPC_SHM_OK)
@@ -448,11 +448,11 @@ static void server_handle_session(nipc_managed_server_t *server,
             if (msg_len < NIPC_HEADER_LEN)
                 break;
 
-            nipc_error_t perr = nipc_header_decode(msg, msg_len, &hdr);
+            nipc_error_t perr = nipc_header_decode(recv_buf, msg_len, &hdr);
             if (perr != NIPC_OK)
                 break;
 
-            payload = (const uint8_t *)msg + NIPC_HEADER_LEN;
+            payload = recv_buf + NIPC_HEADER_LEN;
             payload_len = msg_len - NIPC_HEADER_LEN;
         } else {
             /* Poll the session fd before blocking on receive */
@@ -498,22 +498,28 @@ static void server_handle_session(nipc_managed_server_t *server,
 
         /* Send response via the active transport */
         if (shm) {
+            /* Build full message in recv_buf (it's large enough since
+             * we already received into it and resp_buf_size >= recv_buf size). */
             size_t msg_len = NIPC_HEADER_LEN + response_len;
-            uint8_t *msg = malloc(msg_len);
-            if (!msg)
-                break;
 
             resp_hdr.magic      = NIPC_MAGIC_MSG;
             resp_hdr.version    = NIPC_VERSION;
             resp_hdr.header_len = NIPC_HEADER_LEN;
             resp_hdr.payload_len = (uint32_t)response_len;
 
+            /* Use a stack buffer for small responses, heap for large ones */
+            uint8_t stack_msg[4096];
+            uint8_t *msg = (msg_len <= sizeof(stack_msg)) ? stack_msg : malloc(msg_len);
+            if (!msg)
+                break;
+
             nipc_header_encode(&resp_hdr, msg, NIPC_HEADER_LEN);
             if (response_len > 0)
                 memcpy(msg + NIPC_HEADER_LEN, resp_buf, response_len);
 
             nipc_shm_error_t serr = nipc_shm_send(shm, msg, msg_len);
-            free(msg);
+            if (msg != stack_msg)
+                free(msg);
             if (serr != NIPC_SHM_OK)
                 break;
         } else {

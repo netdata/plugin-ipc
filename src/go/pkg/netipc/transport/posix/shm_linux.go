@@ -444,11 +444,15 @@ func (c *ShmContext) ShmSend(msg []byte) error {
 	return nil
 }
 
-// ShmReceive receives a message. Returns a slice into the SHM region
-// (zero-copy). Valid until the next Send/Receive call.
-func (c *ShmContext) ShmReceive(timeoutMs uint32) ([]byte, error) {
+// ShmReceive receives a message into the caller-provided buffer.
+// On success, returns the number of bytes written to buf.
+// Returns ErrShmMsgTooLarge if the message exceeds len(buf).
+func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 	if c.data == nil {
-		return nil, fmt.Errorf("%w: null context", ErrShmBadParam)
+		return 0, fmt.Errorf("%w: null context", ErrShmBadParam)
+	}
+	if len(buf) == 0 {
+		return 0, fmt.Errorf("%w: empty buffer", ErrShmBadParam)
 	}
 
 	var areaOff uint32
@@ -469,14 +473,22 @@ func (c *ShmContext) ShmReceive(timeoutMs uint32) ([]byte, error) {
 		expectedSeq = c.localRespSeq + 1
 	}
 
-	// Phase 1: spin
+	// Phase 1: spin. Copy immediately on observing the advance.
 	observed := false
+	var mlen uint32
 	for i := uint32(0); i < c.SpinTries; i++ {
 		cur, err := atomicLoadU64(c.data, seqOff)
 		if err != nil {
-			return nil, fmt.Errorf("%w: load seq: %v", ErrShmBadParam, err)
+			return 0, fmt.Errorf("%w: load seq: %v", ErrShmBadParam, err)
 		}
 		if cur >= expectedSeq {
+			mlen, err = atomicLoadU32(c.data, lenOff)
+			if err != nil {
+				return 0, fmt.Errorf("%w: load msg_len: %v", ErrShmBadParam, err)
+			}
+			if mlen > 0 && int(mlen) <= len(buf) {
+				copy(buf[:mlen], c.data[areaOff:areaOff+mlen])
+			}
 			observed = true
 			break
 		}
@@ -487,13 +499,13 @@ func (c *ShmContext) ShmReceive(timeoutMs uint32) ([]byte, error) {
 	if !observed {
 		sigVal, err := atomicLoadU32(c.data, sigOff)
 		if err != nil {
-			return nil, fmt.Errorf("%w: load signal: %v", ErrShmBadParam, err)
+			return 0, fmt.Errorf("%w: load signal: %v", ErrShmBadParam, err)
 		}
 
 		// Check once more after reading signal
 		cur, err := atomicLoadU64(c.data, seqOff)
 		if err != nil {
-			return nil, fmt.Errorf("%w: load seq: %v", ErrShmBadParam, err)
+			return 0, fmt.Errorf("%w: load seq: %v", ErrShmBadParam, err)
 		}
 		if cur < expectedSeq {
 			var ts *syscall.Timespec
@@ -508,36 +520,43 @@ func (c *ShmContext) ShmReceive(timeoutMs uint32) ([]byte, error) {
 			if ret < 0 {
 				errno := syscall.Errno(-ret)
 				if errno == syscall.ETIMEDOUT {
-					return nil, ErrShmTimeout
+					return 0, ErrShmTimeout
 				}
 			}
 
 			// After waking, verify sequence advanced
 			cur, err = atomicLoadU64(c.data, seqOff)
 			if err != nil {
-				return nil, fmt.Errorf("%w: load seq: %v", ErrShmBadParam, err)
+				return 0, fmt.Errorf("%w: load seq: %v", ErrShmBadParam, err)
 			}
 			if cur < expectedSeq {
-				return nil, ErrShmTimeout
+				return 0, ErrShmTimeout
 			}
+		}
+
+		// Copy immediately after waking
+		mlen, err = atomicLoadU32(c.data, lenOff)
+		if err != nil {
+			return 0, fmt.Errorf("%w: load msg_len: %v", ErrShmBadParam, err)
+		}
+		if mlen > 0 && int(mlen) <= len(buf) {
+			copy(buf[:mlen], c.data[areaOff:areaOff+mlen])
 		}
 	}
 
-	// Read message length
-	mlen, err := atomicLoadU32(c.data, lenOff)
-	if err != nil {
-		return nil, fmt.Errorf("%w: load msg_len: %v", ErrShmBadParam, err)
-	}
-
-	// Advance local tracking
+	// Advance local tracking (message is consumed from SHM perspective)
 	if c.role == ShmRoleServer {
 		c.localReqSeq = expectedSeq
 	} else {
 		c.localRespSeq = expectedSeq
 	}
 
-	// Return zero-copy slice
-	return c.data[areaOff : areaOff+mlen], nil
+	// Message larger than caller buffer
+	if int(mlen) > len(buf) {
+		return int(mlen), ErrShmMsgTooLarge
+	}
+
+	return int(mlen), nil
 }
 
 // ---------------------------------------------------------------------------

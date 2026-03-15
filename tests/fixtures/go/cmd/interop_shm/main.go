@@ -52,27 +52,28 @@ func runServer(runDir, service string) int {
 	// Signal readiness
 	fmt.Println("READY")
 
-	msg, err := ctx.ShmReceive(10000)
+	buf := make([]byte, 65536)
+	mlen, err := ctx.ShmReceive(buf, 10000)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "server: receive failed: %v\n", err)
 		return 1
 	}
 
-	if len(msg) < protocol.HeaderSize {
-		fmt.Fprintf(os.Stderr, "server: message too short: %d\n", len(msg))
+	if mlen < protocol.HeaderSize {
+		fmt.Fprintf(os.Stderr, "server: message too short: %d\n", mlen)
 		return 1
 	}
 
 	// Parse and echo as response
-	hdr, err := protocol.DecodeHeader(msg)
+	hdr, err := protocol.DecodeHeader(buf[:mlen])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "server: decode header: %v\n", err)
 		return 1
 	}
 
 	// Copy payload before sending (send overwrites SHM region for response area)
-	payload := make([]byte, len(msg)-protocol.HeaderSize)
-	copy(payload, msg[protocol.HeaderSize:])
+	payload := make([]byte, mlen-protocol.HeaderSize)
+	copy(payload, buf[protocol.HeaderSize:mlen])
 
 	resp := buildMessage(protocol.KindResponse, hdr.Code, hdr.MessageID, payload)
 	if err := ctx.ShmSend(resp); err != nil {
@@ -119,15 +120,15 @@ func runClient(runDir, service string) int {
 	}
 
 	// Receive response
-	resp, err := ctx.ShmReceive(10000)
+	respBuf := make([]byte, 65536)
+	rlen, err := ctx.ShmReceive(respBuf, 10000)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "client: receive failed: %v\n", err)
 		return 1
 	}
 
-	// Copy response (it's a slice into mmap)
-	respCopy := make([]byte, len(resp))
-	copy(respCopy, resp)
+	respCopy := make([]byte, rlen)
+	copy(respCopy, respBuf[:rlen])
 
 	// Verify
 	ok := true
