@@ -94,6 +94,7 @@ var (
 	procCreateNamedPipeW        = modkernel32.NewProc("CreateNamedPipeW")
 	procConnectNamedPipe        = modkernel32.NewProc("ConnectNamedPipe")
 	procDisconnectNamedPipe     = modkernel32.NewProc("DisconnectNamedPipe")
+	procFlushFileBuffers        = modkernel32.NewProc("FlushFileBuffers")
 	procSetNamedPipeHandleState = modkernel32.NewProc("SetNamedPipeHandleState")
 )
 
@@ -125,6 +126,10 @@ func connectNamedPipe(handle syscall.Handle) error {
 
 func disconnectNamedPipe(handle syscall.Handle) {
 	procDisconnectNamedPipe.Call(uintptr(handle))
+}
+
+func flushFileBuffers(handle syscall.Handle) {
+	procFlushFileBuffers.Call(uintptr(handle))
 }
 
 func setNamedPipeHandleState(handle syscall.Handle, mode *uint32) error {
@@ -364,6 +369,8 @@ func (s *Session) GetRole() Role {
 // Close closes the session and releases resources.
 func (s *Session) Close() {
 	if s.handle != syscall.InvalidHandle {
+		// Flush pending writes so the peer reads all data
+		flushFileBuffers(s.handle)
 		if s.role == RoleServer {
 			disconnectNamedPipe(s.handle)
 		}

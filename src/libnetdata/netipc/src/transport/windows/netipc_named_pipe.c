@@ -650,6 +650,10 @@ void nipc_np_close_session(nipc_np_session_t *session)
         return;
 
     if (session->pipe != INVALID_HANDLE_VALUE && session->pipe != NULL) {
+        /* Flush pending writes so the peer reads all data before
+         * the pipe is destroyed. Without this, a slow peer may see
+         * ERROR_BROKEN_PIPE instead of the last message. */
+        FlushFileBuffers(session->pipe);
         /* Server side: disconnect before closing */
         if (session->role == NIPC_NP_ROLE_SERVER)
             DisconnectNamedPipe(session->pipe);

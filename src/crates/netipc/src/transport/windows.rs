@@ -63,6 +63,7 @@ mod ffi {
         ) -> BOOL;
 
         pub fn DisconnectNamedPipe(hNamedPipe: HANDLE) -> BOOL;
+        pub fn FlushFileBuffers(hFile: HANDLE) -> BOOL;
 
         pub fn CreateFileW(
             lpFileName: LPCWSTR,
@@ -725,6 +726,8 @@ impl NpSession {
     /// Close the session.
     pub fn close(&mut self) {
         if self.handle != ffi::INVALID_HANDLE_VALUE && self.handle != 0 {
+            // Flush pending writes so the peer reads all data
+            unsafe { ffi::FlushFileBuffers(self.handle); }
             if self.role == Role::Server {
                 unsafe { ffi::DisconnectNamedPipe(self.handle); }
             }
