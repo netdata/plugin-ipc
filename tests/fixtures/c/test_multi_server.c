@@ -183,8 +183,8 @@ typedef struct {
     nipc_managed_server_t server;
     nipc_server_handler_fn handler;
     int worker_count;
-    volatile int ready;
-    volatile int done;
+    int ready;  /* use __atomic builtins for cross-thread access */
+    int done;   /* use __atomic builtins for cross-thread access */
 } server_thread_ctx_t;
 
 static void *server_thread_fn(void *arg)
@@ -198,14 +198,14 @@ static void *server_thread_fn(void *arg)
 
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed: %d\n", err);
-        ctx->done = 1;
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
         return NULL;
     }
 
-    ctx->ready = 1;
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
     nipc_server_run(&ctx->server);
     nipc_server_destroy(&ctx->server);
-    ctx->done = 1;
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
     return NULL;
 }
 
@@ -217,13 +217,15 @@ static void start_server_ex(server_thread_ctx_t *sctx, const char *service,
     sctx->service = service;
     sctx->handler = handler;
     sctx->worker_count = worker_count;
-    sctx->ready = 0;
-    sctx->done = 0;
+    __atomic_store_n(&sctx->ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sctx->done, 0, __ATOMIC_RELAXED);
 
     pthread_create(tid, NULL, server_thread_fn, sctx);
 
     /* Wait for server to be ready */
-    for (int i = 0; i < 4000 && !sctx->ready && !sctx->done; i++)
+    for (int i = 0; i < 4000
+         && !__atomic_load_n(&sctx->ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx->done, __ATOMIC_ACQUIRE); i++)
         usleep(500);
 }
 
@@ -345,7 +347,7 @@ static void test_basic_multi_client(void)
     server_thread_ctx_t sctx;
     pthread_t stid;
     start_server(&sctx, svc, echo_handler, &stid);
-    check("server started", sctx.ready == 1);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Launch 5 client threads */
     const int num_clients = 5;
@@ -404,7 +406,7 @@ static void test_worker_limit(void)
     server_thread_ctx_t sctx;
     pthread_t stid;
     start_server_ex(&sctx, svc, slow_handler, 2, &stid);
-    check("server started", sctx.ready == 1);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Try to connect 5 clients. With worker_count=2, only 2 can be
      * served concurrently. The slow_handler sleeps 100ms per request,
@@ -439,7 +441,7 @@ static void test_worker_limit(void)
 
     check("at least 2 clients were served", served_clients >= 2);
     check("served clients got correct data", all_served_content_ok);
-    check("server did not crash", !sctx.done);
+    check("server did not crash", !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE));
 
     stop_server(&sctx, stid);
     cleanup_all(svc);
@@ -458,7 +460,7 @@ static void test_client_disconnect_recovery(void)
     server_thread_ctx_t sctx;
     pthread_t stid;
     start_server(&sctx, svc, echo_handler, &stid);
-    check("server started", sctx.ready == 1);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_uds_client_config_t ccfg = default_client_config();
 
@@ -507,7 +509,7 @@ static void test_client_disconnect_recovery(void)
         nipc_client_close(&c3);
     }
 
-    check("server still running", !sctx.done);
+    check("server still running", !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE));
 
     stop_server(&sctx, stid);
     cleanup_all(svc);
@@ -526,7 +528,7 @@ static void test_handler_failure_per_session(void)
     server_thread_ctx_t sctx;
     pthread_t stid;
     start_server(&sctx, svc, selective_handler, &stid);
-    check("server started", sctx.ready == 1);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_uds_client_config_t ccfg = default_client_config();
 
@@ -553,7 +555,7 @@ static void test_handler_failure_per_session(void)
 
     nipc_client_close(&c2);
 
-    check("server still running after mixed results", !sctx.done);
+    check("server still running after mixed results", !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE));
 
     stop_server(&sctx, stid);
     cleanup_all(svc);
@@ -572,7 +574,7 @@ static void test_rapid_connect_disconnect(void)
     server_thread_ctx_t sctx;
     pthread_t stid;
     start_server(&sctx, svc, echo_handler, &stid);
-    check("server started", sctx.ready == 1);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_uds_client_config_t ccfg = default_client_config();
     int success_count = 0;
@@ -602,7 +604,7 @@ static void test_rapid_connect_disconnect(void)
     snprintf(msg, sizeof(msg), "rapid cycles: %d/%d succeeded",
              success_count, cycles);
     check(msg, success_count == cycles);
-    check("server survived rapid connect/disconnect", !sctx.done);
+    check("server survived rapid connect/disconnect", !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE));
 
     stop_server(&sctx, stid);
     cleanup_all(svc);
@@ -621,7 +623,7 @@ static void test_long_running_concurrent(void)
     server_thread_ctx_t sctx;
     pthread_t stid;
     start_server_ex(&sctx, svc, echo_handler, 10, &stid);
-    check("server started", sctx.ready == 1);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     const int num_clients = 10;
     const int requests_per = 100;
@@ -677,15 +679,15 @@ static void test_long_running_concurrent(void)
 
 typedef struct {
     const char *service;
-    volatile int connected;
-    volatile int finished;
-    int calls_made;
+    int connected;   /* use __atomic builtins for cross-thread access */
+    int finished;    /* use __atomic builtins for cross-thread access */
+    int calls_made;  /* use __atomic builtins for cross-thread access */
 } shutdown_client_ctx_t;
 
 static void *shutdown_client_fn(void *arg)
 {
     shutdown_client_ctx_t *ctx = (shutdown_client_ctx_t *)arg;
-    ctx->calls_made = 0;
+    __atomic_store_n(&ctx->calls_made, 0, __ATOMIC_RELAXED);
 
     nipc_uds_client_config_t ccfg = default_client_config();
     nipc_client_ctx_t client;
@@ -699,12 +701,12 @@ static void *shutdown_client_fn(void *arg)
     }
 
     if (!nipc_client_ready(&client)) {
-        ctx->finished = 1;
+        __atomic_store_n(&ctx->finished, 1, __ATOMIC_RELEASE);
         nipc_client_close(&client);
         return NULL;
     }
 
-    ctx->connected = 1;
+    __atomic_store_n(&ctx->connected, 1, __ATOMIC_RELEASE);
 
     /* Keep making calls until failure (server shutdown) */
     uint8_t req_buf[64], resp_buf[RESPONSE_BUF_SIZE];
@@ -715,12 +717,12 @@ static void *shutdown_client_fn(void *arg)
             &client, req_buf, resp_buf, sizeof(resp_buf), &view);
         if (err != NIPC_OK)
             break;
-        ctx->calls_made++;
+        __atomic_fetch_add(&ctx->calls_made, 1, __ATOMIC_RELAXED);
         usleep(10000);
     }
 
     nipc_client_close(&client);
-    ctx->finished = 1;
+    __atomic_store_n(&ctx->finished, 1, __ATOMIC_RELEASE);
     return NULL;
 }
 
@@ -733,7 +735,7 @@ static void test_graceful_shutdown(void)
     server_thread_ctx_t sctx;
     pthread_t stid;
     start_server(&sctx, svc, echo_handler, &stid);
-    check("server started", sctx.ready == 1);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Start 3 clients that keep making calls */
     const int num_clients = 3;
@@ -742,9 +744,9 @@ static void test_graceful_shutdown(void)
 
     for (int i = 0; i < num_clients; i++) {
         cctxs[i].service = svc;
-        cctxs[i].connected = 0;
-        cctxs[i].finished = 0;
-        cctxs[i].calls_made = 0;
+        __atomic_store_n(&cctxs[i].connected, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&cctxs[i].finished, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&cctxs[i].calls_made, 0, __ATOMIC_RELAXED);
         pthread_create(&ctids[i], NULL, shutdown_client_fn, &cctxs[i]);
     }
 
@@ -752,7 +754,7 @@ static void test_graceful_shutdown(void)
     for (int w = 0; w < 2000; w++) {
         int connected = 0;
         for (int i = 0; i < num_clients; i++)
-            if (cctxs[i].connected)
+            if (__atomic_load_n(&cctxs[i].connected, __ATOMIC_ACQUIRE))
                 connected++;
         if (connected == num_clients)
             break;
@@ -761,7 +763,7 @@ static void test_graceful_shutdown(void)
 
     int connected_count = 0;
     for (int i = 0; i < num_clients; i++)
-        if (cctxs[i].connected)
+        if (__atomic_load_n(&cctxs[i].connected, __ATOMIC_ACQUIRE))
             connected_count++;
     check("all clients connected before shutdown",
           connected_count == num_clients);
@@ -774,20 +776,20 @@ static void test_graceful_shutdown(void)
 
     /* Wait for server thread to finish */
     pthread_join(stid, NULL);
-    check("server thread exited cleanly", sctx.done == 1);
+    check("server thread exited cleanly", __atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) == 1);
 
     /* Wait for client threads to detect disconnection */
     for (int i = 0; i < num_clients; i++)
         pthread_join(ctids[i], NULL);
 
-    /* Verify all clients finished */
+    /* Verify all clients finished (after join, no races possible) */
     int finished_count = 0;
     int min_calls = 999999;
     for (int i = 0; i < num_clients; i++) {
-        if (cctxs[i].finished)
+        if (__atomic_load_n(&cctxs[i].finished, __ATOMIC_ACQUIRE))
             finished_count++;
-        if (cctxs[i].calls_made < min_calls)
-            min_calls = cctxs[i].calls_made;
+        if (__atomic_load_n(&cctxs[i].calls_made, __ATOMIC_ACQUIRE) < min_calls)
+            min_calls = __atomic_load_n(&cctxs[i].calls_made, __ATOMIC_ACQUIRE);
     }
 
     check("all clients finished after shutdown",

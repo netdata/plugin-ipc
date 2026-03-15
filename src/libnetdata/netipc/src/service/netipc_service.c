@@ -395,9 +395,9 @@ nipc_error_t nipc_client_call_cgroups_snapshot(
  * Wait for data on a file descriptor with periodic shutdown checks.
  * Returns: 1 = data ready, 0 = server stopping, -1 = error/hangup.
  */
-static int poll_with_shutdown(int fd, volatile bool *running)
+static int poll_with_shutdown(int fd, bool *running)
 {
-    while (*running) {
+    while (__atomic_load_n(running, __ATOMIC_RELAXED)) {
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
         int ret = poll(&pfd, 1, SERVER_POLL_TIMEOUT_MS);
 
@@ -432,7 +432,7 @@ static void server_handle_session(nipc_managed_server_t *server,
 {
     uint8_t recv_buf[65536];
 
-    while (server->running) {
+    while (__atomic_load_n(&server->running, __ATOMIC_RELAXED)) {
         nipc_header_t hdr;
         const void *payload;
         size_t payload_len;
@@ -534,22 +534,6 @@ static void server_handle_session(nipc_managed_server_t *server,
 /*  Internal: per-session handler thread                                */
 /* ------------------------------------------------------------------ */
 
-/* Remove a session from the server's tracking array. */
-static void server_remove_session(nipc_managed_server_t *server,
-                                   nipc_session_ctx_t *sctx)
-{
-    pthread_mutex_lock(&server->sessions_lock);
-    for (int i = 0; i < server->session_count; i++) {
-        if (server->sessions[i] == sctx) {
-            /* Swap with last element for O(1) removal */
-            server->sessions[i] = server->sessions[server->session_count - 1];
-            server->session_count--;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&server->sessions_lock);
-}
-
 /* Thread function: handles one client session from accept to disconnect. */
 static void *session_handler_thread(void *arg)
 {
@@ -571,14 +555,10 @@ static void *session_handler_thread(void *arg)
     }
     nipc_uds_close_session(&sctx->session);
 
-    sctx->active = false;
-
-    /* Remove from server tracking */
-    server_remove_session(server, sctx);
-
-    /* The acceptor thread owns the sctx memory and will free it
-     * after joining this thread, or on server destroy. We leave
-     * sctx allocated here — the acceptor reaps it. */
+    /* Mark inactive so the acceptor's reap loop (or server destroy)
+     * can join this thread and free sctx.  Do NOT remove from the
+     * tracking array here — the reap/destroy path owns that. */
+    __atomic_store_n(&sctx->active, false, __ATOMIC_RELEASE);
     return NULL;
 }
 
@@ -592,7 +572,7 @@ static void server_reap_sessions_locked(nipc_managed_server_t *server)
     int i = 0;
     while (i < server->session_count) {
         nipc_session_ctx_t *s = server->sessions[i];
-        if (!s->active) {
+        if (!__atomic_load_n(&s->active, __ATOMIC_ACQUIRE)) {
             pthread_join(s->thread, NULL);
             /* Swap with last, free */
             server->sessions[i] = server->sessions[server->session_count - 1];
@@ -619,7 +599,7 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
 {
     memset(server, 0, sizeof(*server));
     server->listener.fd = -1;
-    server->running = false;
+    __atomic_store_n(&server->running, false, __ATOMIC_RELAXED);
     server->acceptor_started = false;
 
     if (!run_dir || !service_name || !handler || worker_count < 1)
@@ -673,9 +653,9 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
 
 void nipc_server_run(nipc_managed_server_t *server)
 {
-    server->running = true;
+    __atomic_store_n(&server->running, true, __ATOMIC_RELEASE);
 
-    while (server->running) {
+    while (__atomic_load_n(&server->running, __ATOMIC_RELAXED)) {
         /* Poll the listener fd before blocking on accept */
         int pr = poll_with_shutdown(server->listener.fd, &server->running);
         if (pr <= 0)
@@ -689,7 +669,7 @@ void nipc_server_run(nipc_managed_server_t *server)
         nipc_uds_error_t uerr = nipc_uds_accept(
             &server->listener, &session);
         if (uerr != NIPC_UDS_OK) {
-            if (!server->running)
+            if (!__atomic_load_n(&server->running, __ATOMIC_RELAXED))
                 break;
             usleep(10000);
             continue;
@@ -738,7 +718,7 @@ void nipc_server_run(nipc_managed_server_t *server)
         sctx->session = session;
         sctx->shm = shm;
         sctx->id = server->next_session_id++;
-        sctx->active = true;
+        __atomic_store_n(&sctx->active, true, __ATOMIC_RELAXED);
 
         /* Grow session array if needed */
         if (server->session_count >= server->session_capacity) {
@@ -785,12 +765,12 @@ void nipc_server_run(nipc_managed_server_t *server)
 
 void nipc_server_stop(nipc_managed_server_t *server)
 {
-    server->running = false;
+    __atomic_store_n(&server->running, false, __ATOMIC_RELEASE);
 }
 
 void nipc_server_destroy(nipc_managed_server_t *server)
 {
-    server->running = false;
+    __atomic_store_n(&server->running, false, __ATOMIC_RELEASE);
     nipc_uds_close_listener(&server->listener);
 
     /* Join all active session threads */

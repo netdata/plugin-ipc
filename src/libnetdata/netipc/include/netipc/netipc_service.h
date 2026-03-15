@@ -207,7 +207,7 @@ typedef struct nipc_session_ctx {
     pthread_t thread;
 #endif
     int id;
-    volatile bool active;
+    bool active;  /* use __atomic builtins for cross-thread access */
 } nipc_session_ctx_t;
 
 struct nipc_managed_server {
@@ -229,7 +229,7 @@ struct nipc_managed_server {
     size_t   response_buf_size;
 
     /* State */
-    volatile bool running;
+    bool running;  /* use __atomic builtins for cross-thread access */
 
     /* Session tracking */
 #ifndef _WIN32

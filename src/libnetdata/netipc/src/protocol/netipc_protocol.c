@@ -341,7 +341,15 @@ size_t nipc_batch_builder_finish(nipc_batch_builder_t *b,
      * and they were computed as offsets from 0, so they remain valid
      * regardless of where the packed area is in the buffer. */
 
-    return final_dir_aligned + nipc_align8(b->data_offset);
+    /* Zero trailing alignment padding so the output is fully
+     * deterministic and tools like valgrind won't flag it. */
+    size_t data_aligned = nipc_align8(b->data_offset);
+    if (data_aligned > b->data_offset) {
+        memset(b->buf + final_dir_aligned + b->data_offset,
+               0, data_aligned - b->data_offset);
+    }
+
+    return final_dir_aligned + data_aligned;
 }
 
 /* ------------------------------------------------------------------ */

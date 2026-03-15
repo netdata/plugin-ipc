@@ -177,8 +177,8 @@ typedef struct {
     const char *service;
     nipc_managed_server_t server;
     nipc_server_handler_fn handler;
-    volatile int ready;
-    volatile int done;
+    int ready;  /* use __atomic builtins for cross-thread access */
+    int done;   /* use __atomic builtins for cross-thread access */
 } server_thread_ctx_t;
 
 static void *server_thread_fn(void *arg)
@@ -193,17 +193,17 @@ static void *server_thread_fn(void *arg)
 
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed: %d\n", err);
-        ctx->done = 1;
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
         return NULL;
     }
 
-    ctx->ready = 1;
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
 
     /* Blocking acceptor loop */
     nipc_server_run(&ctx->server);
 
     nipc_server_destroy(&ctx->server);
-    ctx->done = 1;
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
     return NULL;
 }
 
@@ -214,13 +214,15 @@ static void start_server(server_thread_ctx_t *sctx, const char *service,
     memset(sctx, 0, sizeof(*sctx));
     sctx->service = service;
     sctx->handler = handler;
-    sctx->ready = 0;
-    sctx->done = 0;
+    __atomic_store_n(&sctx->ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sctx->done, 0, __ATOMIC_RELAXED);
 
     pthread_create(tid, NULL, server_thread_fn, sctx);
 
     /* Wait for server to be ready */
-    for (int i = 0; i < 2000 && !sctx->ready && !sctx->done; i++)
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx->ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx->done, __ATOMIC_ACQUIRE); i++)
         usleep(500);
 }
 
@@ -261,7 +263,7 @@ static void test_client_lifecycle(void)
     server_thread_ctx_t sctx;
     pthread_t tid;
     start_server(&sctx, svc, test_cgroups_handler, &tid);
-    check("server started", sctx.ready == 1);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Refresh -> READY */
     changed = nipc_client_refresh(&client);
@@ -302,7 +304,7 @@ static void test_cgroups_call(void)
     server_thread_ctx_t sctx;
     pthread_t tid;
     start_server(&sctx, svc, test_cgroups_handler, &tid);
-    check("server started", sctx.ready == 1);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Init + connect client */
     nipc_client_ctx_t client;
@@ -378,7 +380,7 @@ static void test_retry_on_failure(void)
     server_thread_ctx_t sctx;
     pthread_t tid;
     start_server(&sctx, svc, test_cgroups_handler, &tid);
-    check("server 1 started", sctx.ready == 1);
+    check("server 1 started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Init + connect client */
     nipc_client_ctx_t client;
@@ -405,7 +407,7 @@ static void test_retry_on_failure(void)
     server_thread_ctx_t sctx2;
     pthread_t tid2;
     start_server(&sctx2, svc, test_cgroups_handler, &tid2);
-    check("server 2 started", sctx2.ready == 1);
+    check("server 2 started", __atomic_load_n(&sctx2.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Next call should trigger reconnect + retry (at-least-once).
      * The first attempt will fail because the old session is dead.
@@ -442,7 +444,7 @@ static void test_multiple_clients(void)
     server_thread_ctx_t sctx;
     pthread_t tid;
     start_server(&sctx, svc, test_cgroups_handler, &tid);
-    check("server started", sctx.ready == 1);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Create and connect two clients */
     nipc_client_ctx_t client1, client2;
@@ -498,7 +500,7 @@ static void test_handler_failure(void)
     server_thread_ctx_t sctx;
     pthread_t tid;
     start_server(&sctx, svc, failing_handler, &tid);
-    check("server started", sctx.ready == 1);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Connect client */
     nipc_client_ctx_t client;
@@ -540,7 +542,7 @@ static void test_status_reporting(void)
     server_thread_ctx_t sctx;
     pthread_t tid;
     start_server(&sctx, svc, test_cgroups_handler, &tid);
-    check("server started", sctx.ready == 1);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Connect client */
     nipc_client_ctx_t client;

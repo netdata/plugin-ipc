@@ -95,8 +95,8 @@ typedef struct {
     nipc_uds_server_config_t config;
     int                      accept_count; /* how many clients to accept */
     int                      echo_count;   /* messages to echo per client */
-    volatile int             ready;        /* set to 1 when listening */
-    volatile int             done;         /* set to 1 when finished */
+    int                      ready;        /* set to 1 when listening */
+    int                      done;         /* set to 1 when finished */
 } server_ctx_t;
 
 /* Simple echo server: accepts clients, for each one reads echo_count
@@ -110,11 +110,11 @@ static void *echo_server_thread(void *arg)
                                             &ctx->config, &listener);
     if (err != NIPC_UDS_OK) {
         fprintf(stderr, "server listen failed: %d\n", err);
-        ctx->done = 1;
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
         return NULL;
     }
 
-    ctx->ready = 1;
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
 
     for (int c = 0; c < ctx->accept_count; c++) {
         nipc_uds_session_t session;
@@ -149,7 +149,7 @@ static void *echo_server_thread(void *arg)
     }
 
     nipc_uds_close_listener(&listener);
-    ctx->done = 1;
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
     return NULL;
 }
 
@@ -157,13 +157,13 @@ static void *echo_server_thread(void *arg)
 static pthread_t start_echo_server(server_ctx_t *ctx)
 {
     pthread_t tid;
-    ctx->ready = 0;
-    ctx->done = 0;
+    __atomic_store_n(&ctx->ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ctx->done, 0, __ATOMIC_RELAXED);
     pthread_create(&tid, NULL, echo_server_thread, ctx);
 
     /* Wait for the server to be ready */
     int retries = 0;
-    while (!ctx->ready && !ctx->done && retries < 1000) {
+    while (!__atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE) && retries < 1000) {
         usleep(1000);
         retries++;
     }
@@ -188,7 +188,7 @@ static void test_ping_pong(void)
     };
 
     pthread_t tid = start_echo_server(&sctx);
-    check("server ready", sctx.ready == 1);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_uds_client_config_t ccfg = default_client_config();
     nipc_uds_session_t session;
@@ -293,7 +293,7 @@ static void test_multi_client(void)
     };
 
     pthread_t stid = start_echo_server(&sctx);
-    check("server ready", sctx.ready == 1);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_uds_client_config_t ccfg = default_client_config();
 
@@ -336,7 +336,7 @@ static void test_pipelining(void)
     };
 
     pthread_t tid = start_echo_server(&sctx);
-    check("server ready", sctx.ready == 1);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_uds_client_config_t ccfg = default_client_config();
     nipc_uds_session_t session;
@@ -390,16 +390,16 @@ static void *chunked_server_thread(void *arg)
     nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
                                             &ctx->config, &listener);
     if (err != NIPC_UDS_OK) {
-        ctx->done = 1;
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
         return NULL;
     }
-    ctx->ready = 1;
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
 
     nipc_uds_session_t session;
     err = nipc_uds_accept(&listener, &session);
     if (err != NIPC_UDS_OK) {
         nipc_uds_close_listener(&listener);
-        ctx->done = 1;
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
         return NULL;
     }
 
@@ -420,7 +420,7 @@ static void *chunked_server_thread(void *arg)
 
     nipc_uds_close_session(&session);
     nipc_uds_close_listener(&listener);
-    ctx->done = 1;
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
     return NULL;
 }
 
@@ -444,16 +444,16 @@ static void test_chunking(void)
     };
 
     pthread_t tid;
-    sctx.ready = 0;
-    sctx.done = 0;
+    __atomic_store_n(&sctx.ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sctx.done, 0, __ATOMIC_RELAXED);
     pthread_create(&tid, NULL, chunked_server_thread, &sctx);
 
     int retries = 0;
-    while (!sctx.ready && !sctx.done && retries < 1000) {
+    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 1000) {
         usleep(1000);
         retries++;
     }
-    check("chunked server ready", sctx.ready == 1);
+    check("chunked server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_uds_client_config_t ccfg = default_client_config();
     ccfg.packet_size = 128;
@@ -523,7 +523,7 @@ static void test_bad_auth(void)
     };
 
     pthread_t tid = start_echo_server(&sctx);
-    check("server ready", sctx.ready == 1);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Client with wrong auth token */
     nipc_uds_client_config_t ccfg = default_client_config();
@@ -562,7 +562,7 @@ static void test_profile_mismatch(void)
     };
 
     pthread_t tid = start_echo_server(&sctx);
-    check("server ready", sctx.ready == 1);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Client only supports baseline (bit 0) */
     nipc_uds_client_config_t ccfg = default_client_config();
@@ -631,10 +631,10 @@ static void *disconnect_server_thread(void *arg)
     nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
                                             &ctx->config, &listener);
     if (err != NIPC_UDS_OK) {
-        ctx->done = 1;
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
         return NULL;
     }
-    ctx->ready = 1;
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
 
     nipc_uds_session_t session;
     err = nipc_uds_accept(&listener, &session);
@@ -649,7 +649,7 @@ static void *disconnect_server_thread(void *arg)
     }
 
     nipc_uds_close_listener(&listener);
-    ctx->done = 1;
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
     return NULL;
 }
 
@@ -667,16 +667,16 @@ static void test_disconnect_inflight(void)
     };
 
     pthread_t tid;
-    sctx.ready = 0;
-    sctx.done = 0;
+    __atomic_store_n(&sctx.ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sctx.done, 0, __ATOMIC_RELAXED);
     pthread_create(&tid, NULL, disconnect_server_thread, &sctx);
 
     int retries = 0;
-    while (!sctx.ready && !sctx.done && retries < 1000) {
+    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 1000) {
         usleep(1000);
         retries++;
     }
-    check("server ready", sctx.ready == 1);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_uds_client_config_t ccfg = default_client_config();
     nipc_uds_session_t session;
@@ -726,7 +726,7 @@ static void test_batch(void)
     };
 
     pthread_t tid = start_echo_server(&sctx);
-    check("server ready", sctx.ready == 1);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_uds_client_config_t ccfg = default_client_config();
     nipc_uds_session_t session;
