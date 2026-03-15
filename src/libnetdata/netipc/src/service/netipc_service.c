@@ -342,7 +342,7 @@ nipc_error_t nipc_client_call_cgroups_snapshot(
     /* Fail fast if not READY */
     if (ctx->state != NIPC_CLIENT_READY) {
         ctx->error_count++;
-        return NIPC_ERR_BAD_LAYOUT;
+        return NIPC_ERR_NOT_READY;
     }
 
     bool was_ready = true;
@@ -431,7 +431,11 @@ static void server_handle_session(nipc_managed_server_t *server,
                                    uint8_t *resp_buf,
                                    size_t resp_buf_size)
 {
-    uint8_t recv_buf[65536];
+    /* Allocate recv buffer based on negotiated max request size */
+    size_t recv_size = NIPC_HEADER_LEN + session->max_request_payload_bytes;
+    uint8_t *recv_buf = malloc(recv_size);
+    if (!recv_buf)
+        return;
 
     while (__atomic_load_n(&server->running, __ATOMIC_RELAXED)) {
         nipc_header_t hdr;
@@ -441,7 +445,7 @@ static void server_handle_session(nipc_managed_server_t *server,
         /* Receive request via the active transport */
         if (shm) {
             size_t msg_len;
-            nipc_shm_error_t serr = nipc_shm_receive(shm, recv_buf, sizeof(recv_buf),
+            nipc_shm_error_t serr = nipc_shm_receive(shm, recv_buf, recv_size,
                                                        &msg_len, 500);
             if (serr == NIPC_SHM_ERR_TIMEOUT)
                 continue; /* check running flag */
@@ -463,7 +467,7 @@ static void server_handle_session(nipc_managed_server_t *server,
                 break; /* shutdown or error */
 
             nipc_uds_error_t uerr = nipc_uds_receive(
-                session, recv_buf, sizeof(recv_buf),
+                session, recv_buf, recv_size,
                 &hdr, &payload, &payload_len);
             if (uerr != NIPC_UDS_OK)
                 break;
@@ -529,6 +533,8 @@ static void server_handle_session(nipc_managed_server_t *server,
                 break;
         }
     }
+
+    free(recv_buf);
 }
 
 /* ------------------------------------------------------------------ */
@@ -583,6 +589,16 @@ static void server_reap_sessions_locked(nipc_managed_server_t *server)
             i++;
         }
     }
+
+    /* If no active session has SHM, clear the flag so a new session can use it */
+    bool any_shm = false;
+    for (int j = 0; j < server->session_count; j++) {
+        if (server->sessions[j]->shm) {
+            any_shm = true;
+            break;
+        }
+    }
+    server->shm_in_use = any_shm;
 }
 
 /* ------------------------------------------------------------------ */
@@ -687,10 +703,13 @@ void nipc_server_run(nipc_managed_server_t *server)
             continue;
         }
 
-        /* SHM upgrade if negotiated */
+        /* SHM upgrade if negotiated, but only if no other session
+         * already has SHM (SHM region path is per-service, not
+         * per-session, so concurrent SHM sessions would contend). */
         nipc_shm_ctx_t *shm = NULL;
-        if (session.selected_profile == NIPC_PROFILE_SHM_HYBRID ||
-            session.selected_profile == NIPC_PROFILE_SHM_FUTEX) {
+        if ((session.selected_profile == NIPC_PROFILE_SHM_HYBRID ||
+             session.selected_profile == NIPC_PROFILE_SHM_FUTEX) &&
+            !server->shm_in_use) {
 
             nipc_shm_ctx_t *s = calloc(1, sizeof(nipc_shm_ctx_t));
             if (s) {
@@ -699,10 +718,12 @@ void nipc_server_run(nipc_managed_server_t *server)
                     session.max_request_payload_bytes + NIPC_HEADER_LEN,
                     session.max_response_payload_bytes + NIPC_HEADER_LEN,
                     s);
-                if (serr == NIPC_SHM_OK)
+                if (serr == NIPC_SHM_OK) {
                     shm = s;
-                else
+                    server->shm_in_use = true;
+                } else {
                     free(s);
+                }
             }
         }
 
@@ -806,6 +827,19 @@ bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms)
             if (now.tv_sec > deadline.tv_sec ||
                 (now.tv_sec == deadline.tv_sec &&
                  now.tv_nsec >= deadline.tv_nsec)) {
+                /* Timeout: force-close session fds to unblock recv.
+                 * Closing the fd causes poll/recv to return error,
+                 * which terminates the session handler loop. */
+                pthread_mutex_lock(&server->sessions_lock);
+                for (int i = 0; i < server->session_count; i++) {
+                    nipc_session_ctx_t *s = server->sessions[i];
+                    if (__atomic_load_n(&s->active, __ATOMIC_ACQUIRE)) {
+                        if (s->session.fd >= 0) {
+                            shutdown(s->session.fd, SHUT_RDWR);
+                        }
+                    }
+                }
+                pthread_mutex_unlock(&server->sessions_lock);
                 all_drained = false;
                 break;
             }
@@ -832,6 +866,7 @@ bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms)
     }
 
     server->worker_count = 0;
+    server->shm_in_use = false;
     return all_drained;
 }
 
@@ -860,6 +895,7 @@ void nipc_server_destroy(nipc_managed_server_t *server)
     }
 
     server->worker_count = 0;
+    server->shm_in_use = false;
 }
 
 /* ------------------------------------------------------------------ */

@@ -200,7 +200,8 @@ typedef struct nipc_session_ctx {
     nipc_managed_server_t *server;   /* back-pointer */
 #ifdef _WIN32
     nipc_np_session_t session;
-    /* TODO: win SHM */
+    nipc_win_shm_ctx_t *shm;        /* non-NULL if SHM negotiated */
+    HANDLE thread;
 #else
     nipc_uds_session_t session;
     nipc_shm_ctx_t *shm;            /* non-NULL if SHM negotiated */
@@ -232,15 +233,18 @@ struct nipc_managed_server {
     bool running;  /* use __atomic builtins for cross-thread access */
 
     /* Session tracking */
-#ifndef _WIN32
     nipc_session_ctx_t **sessions;   /* dynamic array of active sessions */
     int session_count;               /* current active session count */
     int session_capacity;            /* allocated slots */
     int next_session_id;             /* monotonic session ID counter */
+#ifdef _WIN32
+    CRITICAL_SECTION sessions_lock;  /* protects session array + count */
+#else
     pthread_mutex_t sessions_lock;   /* protects session array + count */
     pthread_t acceptor_thread;
     bool acceptor_started;
 #endif
+    bool shm_in_use;                 /* true if any session has SHM */
 
     /* Configuration */
     char run_dir[256];

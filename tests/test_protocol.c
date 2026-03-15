@@ -583,6 +583,16 @@ static void test_cgroups_req_decode_bad_layout(void) {
     CHECK(err == NIPC_ERR_BAD_LAYOUT, "cgroups req bad layout");
 }
 
+static void test_cgroups_req_decode_bad_flags(void) {
+    nipc_cgroups_req_t r = {.layout_version = 1, .flags = 1};
+    uint8_t buf[4];
+    nipc_cgroups_req_encode(&r, buf, sizeof(buf));
+
+    nipc_cgroups_req_t out;
+    nipc_error_t err = nipc_cgroups_req_decode(buf, sizeof(buf), &out);
+    CHECK(err == NIPC_ERR_BAD_LAYOUT, "cgroups req nonzero flags rejected");
+}
+
 static void test_cgroups_req_encode_too_small(void) {
     nipc_cgroups_req_t r = {0};
     uint8_t buf[2];
@@ -733,6 +743,34 @@ static void test_cgroups_resp_decode_bad_layout(void) {
     nipc_cgroups_resp_view_t view;
     nipc_error_t err = nipc_cgroups_resp_decode(buf, sizeof(buf), &view);
     CHECK(err == NIPC_ERR_BAD_LAYOUT, "cgroups resp bad layout");
+}
+
+static void test_cgroups_resp_decode_bad_flags(void) {
+    /* Build a minimal valid payload but with nonzero flags */
+    uint8_t buf[24];
+    memset(buf, 0, sizeof(buf));
+    uint16_t ver = 1;
+    memcpy(buf, &ver, 2);
+    uint16_t bad_flags = 1;
+    memcpy(buf + 2, &bad_flags, 2);
+
+    nipc_cgroups_resp_view_t view;
+    nipc_error_t err = nipc_cgroups_resp_decode(buf, sizeof(buf), &view);
+    CHECK(err == NIPC_ERR_BAD_LAYOUT, "cgroups resp nonzero flags rejected");
+}
+
+static void test_cgroups_resp_decode_bad_reserved(void) {
+    /* Build a minimal valid payload but with nonzero reserved */
+    uint8_t buf[24];
+    memset(buf, 0, sizeof(buf));
+    uint16_t ver = 1;
+    memcpy(buf, &ver, 2);
+    uint32_t bad_reserved = 42;
+    memcpy(buf + 12, &bad_reserved, 4);
+
+    nipc_cgroups_resp_view_t view;
+    nipc_error_t err = nipc_cgroups_resp_decode(buf, sizeof(buf), &view);
+    CHECK(err == NIPC_ERR_BAD_LAYOUT, "cgroups resp nonzero reserved rejected");
 }
 
 static void test_cgroups_resp_decode_truncated_dir(void) {
@@ -1411,6 +1449,7 @@ int main(void) {
     test_cgroups_req_roundtrip();
     test_cgroups_req_decode_truncated();
     test_cgroups_req_decode_bad_layout();
+    test_cgroups_req_decode_bad_flags();
     test_cgroups_req_encode_too_small();
 
     /* Cgroups response tests */
@@ -1419,6 +1458,8 @@ int main(void) {
     test_cgroups_resp_multiple_items();
     test_cgroups_resp_decode_truncated_header();
     test_cgroups_resp_decode_bad_layout();
+    test_cgroups_resp_decode_bad_flags();
+    test_cgroups_resp_decode_bad_reserved();
     test_cgroups_resp_decode_truncated_dir();
     test_cgroups_resp_decode_oob_dir();
     test_cgroups_resp_decode_item_too_small();

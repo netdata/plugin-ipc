@@ -484,6 +484,10 @@ nipc_error_t nipc_cgroups_req_decode(const void *buf, size_t buf_len,
     if (out->layout_version != 1)
         return NIPC_ERR_BAD_LAYOUT;
 
+    /* flags must be zero (reserved for future use) */
+    if (out->flags != 0)
+        return NIPC_ERR_BAD_LAYOUT;
+
     return NIPC_OK;
 }
 
@@ -505,6 +509,14 @@ nipc_error_t nipc_cgroups_resp_decode(const void *buf, size_t buf_len,
     out->generation      = get_u64(p + 16);
 
     if (out->layout_version != 1)
+        return NIPC_ERR_BAD_LAYOUT;
+
+    /* flags must be zero */
+    if (out->flags != 0)
+        return NIPC_ERR_BAD_LAYOUT;
+
+    /* reserved field (p+12..16) must be zero */
+    if (get_u32(p + 12) != 0)
         return NIPC_ERR_BAD_LAYOUT;
 
     /* Validate directory fits (with overflow check) */
@@ -569,6 +581,10 @@ nipc_error_t nipc_cgroups_resp_item(const nipc_cgroups_resp_view_t *view,
     uint32_t path_len = get_u32(item + 28);
 
     if (out->layout_version != 1)
+        return NIPC_ERR_BAD_LAYOUT;
+
+    /* item flags must be zero */
+    if (out->flags != 0)
         return NIPC_ERR_BAD_LAYOUT;
 
     /* String offsets are relative to item start.

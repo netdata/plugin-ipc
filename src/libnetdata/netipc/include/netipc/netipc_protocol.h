@@ -83,6 +83,7 @@ typedef enum {
     NIPC_ERR_BAD_ALIGNMENT,   /* item not 8-byte aligned */
     NIPC_ERR_BAD_ITEM_COUNT,  /* directory inconsistent with payload size */
     NIPC_ERR_OVERFLOW,        /* builder ran out of space */
+    NIPC_ERR_NOT_READY,       /* client not connected / service unavailable */
 } nipc_error_t;
 
 /* ------------------------------------------------------------------ */

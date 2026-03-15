@@ -608,6 +608,10 @@ impl CgroupsRequest {
         if r.layout_version != 1 {
             return Err(NipcError::BadLayout);
         }
+        // flags must be zero (reserved for future use)
+        if r.flags != 0 {
+            return Err(NipcError::BadLayout);
+        }
         Ok(r)
     }
 }
@@ -676,10 +680,21 @@ impl<'a> CgroupsResponseView<'a> {
         let flags = u16::from_le_bytes(buf[2..4].try_into().unwrap());
         let item_count = u32::from_le_bytes(buf[4..8].try_into().unwrap());
         let systemd_enabled = u32::from_le_bytes(buf[8..12].try_into().unwrap());
-        // buf[12..16] reserved, ignored
+        // buf[12..16] reserved, must be zero
+        let reserved = u32::from_le_bytes(buf[12..16].try_into().unwrap());
         let generation = u64::from_le_bytes(buf[16..24].try_into().unwrap());
 
         if layout_version != 1 {
+            return Err(NipcError::BadLayout);
+        }
+
+        // flags must be zero
+        if flags != 0 {
+            return Err(NipcError::BadLayout);
+        }
+
+        // reserved field must be zero
+        if reserved != 0 {
             return Err(NipcError::BadLayout);
         }
 
@@ -751,6 +766,11 @@ impl<'a> CgroupsResponseView<'a> {
         let path_len = u32::from_le_bytes(item[28..32].try_into().unwrap());
 
         if layout_version != 1 {
+            return Err(NipcError::BadLayout);
+        }
+
+        // item flags must be zero
+        if flags != 0 {
             return Err(NipcError::BadLayout);
         }
 

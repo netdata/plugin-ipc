@@ -18,6 +18,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <process.h>
 #include <windows.h>
 
 /* WaitForSingleObject timeout for server poll loops (ms) */
@@ -325,7 +326,7 @@ nipc_error_t nipc_client_call_cgroups_snapshot(
     /* Fail fast if not READY */
     if (ctx->state != NIPC_CLIENT_READY) {
         ctx->error_count++;
-        return NIPC_ERR_BAD_LAYOUT;
+        return NIPC_ERR_NOT_READY;
     }
 
     bool was_ready = true;
@@ -374,13 +375,22 @@ nipc_error_t nipc_client_call_cgroups_snapshot(
 /*  Internal: managed server session handler                           */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Handle one client session: read requests, dispatch to handler,
+ * send responses. Each session gets its own response buffer.
+ * Runs until the client disconnects or server stops.
+ */
 static void server_handle_session(nipc_managed_server_t *server,
                                    nipc_np_session_t *session,
-                                   nipc_win_shm_ctx_t *shm)
+                                   nipc_win_shm_ctx_t *shm,
+                                   uint8_t *resp_buf,
+                                   size_t resp_buf_size)
 {
-    uint8_t recv_buf[65536];
-    uint8_t *resp_buf = server->response_buf;
-    size_t resp_buf_size = server->response_buf_size;
+    /* Dynamically allocate recv buffer based on negotiated max */
+    size_t recv_size = NIPC_HEADER_LEN + session->max_request_payload_bytes;
+    uint8_t *recv_buf = malloc(recv_size);
+    if (!recv_buf)
+        return;
 
     while (server->running) {
         nipc_header_t hdr;
@@ -390,7 +400,7 @@ static void server_handle_session(nipc_managed_server_t *server,
         /* Receive request via the active transport */
         if (shm) {
             size_t msg_len;
-            nipc_win_shm_error_t serr = nipc_win_shm_receive(shm, recv_buf, sizeof(recv_buf),
+            nipc_win_shm_error_t serr = nipc_win_shm_receive(shm, recv_buf, recv_size,
                                                                &msg_len, SERVER_POLL_TIMEOUT_MS);
             if (serr == NIPC_WIN_SHM_ERR_TIMEOUT)
                 continue;
@@ -416,7 +426,7 @@ static void server_handle_session(nipc_managed_server_t *server,
             }
 
             nipc_np_error_t uerr = nipc_np_receive(
-                session, recv_buf, sizeof(recv_buf),
+                session, recv_buf, recv_size,
                 &hdr, &payload, &payload_len);
             if (uerr != NIPC_NP_OK)
                 break;
@@ -480,6 +490,61 @@ static void server_handle_session(nipc_managed_server_t *server,
                 break;
         }
     }
+
+    free(recv_buf);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Internal: per-session handler thread                                */
+/* ------------------------------------------------------------------ */
+
+/* Thread function: handles one client session from accept to disconnect. */
+static unsigned __stdcall session_handler_thread(void *arg)
+{
+    nipc_session_ctx_t *sctx = (nipc_session_ctx_t *)arg;
+    nipc_managed_server_t *server = sctx->server;
+
+    /* Allocate a per-session response buffer */
+    uint8_t *resp_buf = malloc(server->response_buf_size);
+    if (resp_buf) {
+        server_handle_session(server, &sctx->session, sctx->shm,
+                              resp_buf, server->response_buf_size);
+        free(resp_buf);
+    }
+
+    /* Cleanup SHM and session */
+    if (sctx->shm) {
+        nipc_win_shm_destroy(sctx->shm);
+        free(sctx->shm);
+    }
+    nipc_np_close_session(&sctx->session);
+
+    /* Mark inactive; the reap/destroy path owns removal from the array */
+    InterlockedExchange((volatile LONG *)&sctx->active, 0);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Internal: reap finished session threads                             */
+/* ------------------------------------------------------------------ */
+
+/* Reap all finished (inactive) session threads. Called with lock held. */
+static void server_reap_sessions_locked(nipc_managed_server_t *server)
+{
+    int i = 0;
+    while (i < server->session_count) {
+        nipc_session_ctx_t *s = server->sessions[i];
+        if (!InterlockedCompareExchange((volatile LONG *)&s->active, 0, 0)) {
+            WaitForSingleObject(s->thread, INFINITE);
+            CloseHandle(s->thread);
+            /* Swap with last, free */
+            server->sessions[i] = server->sessions[server->session_count - 1];
+            server->session_count--;
+            free(s);
+        } else {
+            i++;
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -521,20 +586,29 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
     server->handler = handler;
     server->handler_user = user;
     server->worker_count = worker_count;
-    server->auth_token = config->auth_token;
-
-    /* Allocate response buffer */
     server->response_buf_size = response_buf_size;
-    server->response_buf = malloc(response_buf_size);
-    if (!server->response_buf)
+    server->auth_token = config->auth_token;
+    server->shm_in_use = false;
+
+    /* Initialize session tracking */
+    server->session_capacity = worker_count * 2;
+    if (server->session_capacity < 16)
+        server->session_capacity = 16;
+    server->sessions = calloc((size_t)server->session_capacity,
+                              sizeof(nipc_session_ctx_t *));
+    if (!server->sessions)
         return NIPC_ERR_OVERFLOW;
+    server->session_count = 0;
+    server->next_session_id = 0;
+    InitializeCriticalSection(&server->sessions_lock);
 
     /* Start listening via L1 */
     nipc_np_error_t uerr = nipc_np_listen(
         run_dir, service_name, config, &server->listener);
     if (uerr != NIPC_NP_OK) {
-        free(server->response_buf);
-        server->response_buf = NULL;
+        free(server->sessions);
+        server->sessions = NULL;
+        DeleteCriticalSection(&server->sessions_lock);
         return NIPC_ERR_BAD_LAYOUT;
     }
 
@@ -559,10 +633,23 @@ void nipc_server_run(nipc_managed_server_t *server)
             continue;
         }
 
-        /* Win SHM upgrade if negotiated */
+        /* Enforce worker_count limit: reap finished sessions, check count */
+        EnterCriticalSection(&server->sessions_lock);
+        server_reap_sessions_locked(server);
+
+        if (server->session_count >= server->worker_count) {
+            /* At capacity: reject this client by closing the session */
+            LeaveCriticalSection(&server->sessions_lock);
+            nipc_np_close_session(&session);
+            continue;
+        }
+
+        /* Win SHM upgrade if negotiated, but only if no other session
+         * already has SHM (SHM is single-session per service). */
         nipc_win_shm_ctx_t *shm = NULL;
-        if (session.selected_profile == NIPC_WIN_SHM_PROFILE_HYBRID ||
-            session.selected_profile == NIPC_WIN_SHM_PROFILE_BUSYWAIT) {
+        if ((session.selected_profile == NIPC_WIN_SHM_PROFILE_HYBRID ||
+             session.selected_profile == NIPC_WIN_SHM_PROFILE_BUSYWAIT) &&
+            !server->shm_in_use) {
 
             nipc_win_shm_ctx_t *s = calloc(1, sizeof(nipc_win_shm_ctx_t));
             if (s) {
@@ -573,22 +660,70 @@ void nipc_server_run(nipc_managed_server_t *server)
                     session.max_request_payload_bytes + NIPC_HEADER_LEN,
                     session.max_response_payload_bytes + NIPC_HEADER_LEN,
                     s);
-                if (serr == NIPC_WIN_SHM_OK)
+                if (serr == NIPC_WIN_SHM_OK) {
                     shm = s;
-                else
+                    server->shm_in_use = true;
+                } else {
                     free(s);
+                }
             }
         }
 
-        /* Handle this session (blocking, single-threaded) */
-        server_handle_session(server, &session, shm);
-
-        /* Cleanup */
-        if (shm) {
-            nipc_win_shm_destroy(shm);
-            free(shm);
+        /* Create session context */
+        nipc_session_ctx_t *sctx = calloc(1, sizeof(nipc_session_ctx_t));
+        if (!sctx) {
+            LeaveCriticalSection(&server->sessions_lock);
+            if (shm) { nipc_win_shm_destroy(shm); free(shm); server->shm_in_use = false; }
+            nipc_np_close_session(&session);
+            continue;
         }
-        nipc_np_close_session(&session);
+
+        sctx->server = server;
+        sctx->session = session;
+        sctx->shm = shm;
+        sctx->id = server->next_session_id++;
+        InterlockedExchange((volatile LONG *)&sctx->active, 1);
+
+        /* Grow session array if needed */
+        if (server->session_count >= server->session_capacity) {
+            int new_cap = server->session_capacity * 2;
+            nipc_session_ctx_t **new_arr = realloc(
+                server->sessions,
+                (size_t)new_cap * sizeof(nipc_session_ctx_t *));
+            if (!new_arr) {
+                LeaveCriticalSection(&server->sessions_lock);
+                if (shm) { nipc_win_shm_destroy(shm); free(shm); server->shm_in_use = false; }
+                nipc_np_close_session(&session);
+                free(sctx);
+                continue;
+            }
+            server->sessions = new_arr;
+            server->session_capacity = new_cap;
+        }
+
+        server->sessions[server->session_count++] = sctx;
+        LeaveCriticalSection(&server->sessions_lock);
+
+        /* Spawn handler thread for this session */
+        unsigned tid_unused;
+        sctx->thread = (HANDLE)_beginthreadex(
+            NULL, 0, session_handler_thread, sctx, 0, &tid_unused);
+        if (sctx->thread == 0) {
+            /* Thread creation failed: clean up */
+            EnterCriticalSection(&server->sessions_lock);
+            for (int i = 0; i < server->session_count; i++) {
+                if (server->sessions[i] == sctx) {
+                    server->sessions[i] = server->sessions[server->session_count - 1];
+                    server->session_count--;
+                    break;
+                }
+            }
+            LeaveCriticalSection(&server->sessions_lock);
+
+            if (shm) { nipc_win_shm_destroy(shm); free(shm); server->shm_in_use = false; }
+            nipc_np_close_session(&session);
+            free(sctx);
+        }
     }
 }
 
@@ -599,22 +734,72 @@ void nipc_server_stop(nipc_managed_server_t *server)
 
 bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms)
 {
-    /* Windows single-threaded server: stop + destroy is sufficient.
-     * The session is handled synchronously in nipc_server_run(),
-     * so there are no in-flight sessions to wait for. */
+    /* 1. Stop accepting new clients */
     server->running = false;
     nipc_np_close_listener(&server->listener);
 
-    free(server->response_buf);
-    server->response_buf = NULL;
-    server->response_buf_size = 0;
+    /* 2. Wait for in-flight sessions to complete */
+    bool all_drained = true;
+    if (server->sessions) {
+        DWORD deadline = GetTickCount() + timeout_ms;
 
-    free(server->workers);
-    server->workers = NULL;
+        /* Poll until all sessions are inactive or timeout */
+        while (1) {
+            EnterCriticalSection(&server->sessions_lock);
+            int active_count = 0;
+            for (int i = 0; i < server->session_count; i++) {
+                if (InterlockedCompareExchange(
+                        (volatile LONG *)&server->sessions[i]->active, 0, 0))
+                    active_count++;
+            }
+            LeaveCriticalSection(&server->sessions_lock);
+
+            if (active_count == 0)
+                break;
+
+            if (GetTickCount() >= deadline) {
+                /* Timeout: force-close session pipes to unblock threads */
+                EnterCriticalSection(&server->sessions_lock);
+                for (int i = 0; i < server->session_count; i++) {
+                    nipc_session_ctx_t *s = server->sessions[i];
+                    if (InterlockedCompareExchange(
+                            (volatile LONG *)&s->active, 0, 0)) {
+                        /* Close the pipe to unblock the recv call */
+                        if (s->session.pipe != INVALID_HANDLE_VALUE) {
+                            CancelIoEx(s->session.pipe, NULL);
+                        }
+                    }
+                }
+                LeaveCriticalSection(&server->sessions_lock);
+                all_drained = false;
+                break;
+            }
+
+            Sleep(5); /* 5ms poll interval */
+        }
+
+        /* 3. Join all session threads */
+        EnterCriticalSection(&server->sessions_lock);
+        for (int i = 0; i < server->session_count; i++) {
+            nipc_session_ctx_t *s = server->sessions[i];
+            LeaveCriticalSection(&server->sessions_lock);
+            WaitForSingleObject(s->thread, INFINITE);
+            CloseHandle(s->thread);
+            free(s);
+            EnterCriticalSection(&server->sessions_lock);
+        }
+        server->session_count = 0;
+        LeaveCriticalSection(&server->sessions_lock);
+
+        free(server->sessions);
+        server->sessions = NULL;
+        server->session_capacity = 0;
+        DeleteCriticalSection(&server->sessions_lock);
+    }
+
     server->worker_count = 0;
-
-    (void)timeout_ms;
-    return true;
+    server->shm_in_use = false;
+    return all_drained;
 }
 
 void nipc_server_destroy(nipc_managed_server_t *server)
@@ -622,13 +807,28 @@ void nipc_server_destroy(nipc_managed_server_t *server)
     server->running = false;
     nipc_np_close_listener(&server->listener);
 
-    free(server->response_buf);
-    server->response_buf = NULL;
-    server->response_buf_size = 0;
+    /* Join all active session threads */
+    if (server->sessions) {
+        EnterCriticalSection(&server->sessions_lock);
+        for (int i = 0; i < server->session_count; i++) {
+            nipc_session_ctx_t *s = server->sessions[i];
+            LeaveCriticalSection(&server->sessions_lock);
+            WaitForSingleObject(s->thread, INFINITE);
+            CloseHandle(s->thread);
+            free(s);
+            EnterCriticalSection(&server->sessions_lock);
+        }
+        server->session_count = 0;
+        LeaveCriticalSection(&server->sessions_lock);
 
-    free(server->workers);
-    server->workers = NULL;
+        free(server->sessions);
+        server->sessions = NULL;
+        server->session_capacity = 0;
+        DeleteCriticalSection(&server->sessions_lock);
+    }
+
     server->worker_count = 0;
+    server->shm_in_use = false;
 }
 
 /* ------------------------------------------------------------------ */

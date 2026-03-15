@@ -552,6 +552,10 @@ func DecodeCgroupsRequest(buf []byte) (CgroupsRequest, error) {
 	if r.LayoutVersion != 1 {
 		return CgroupsRequest{}, ErrBadLayout
 	}
+	// flags must be zero (reserved for future use)
+	if r.Flags != 0 {
+		return CgroupsRequest{}, ErrBadLayout
+	}
 	return r, nil
 }
 
@@ -633,10 +637,20 @@ func DecodeCgroupsResponse(buf []byte) (CgroupsResponseView, error) {
 	flags := le.Uint16(buf[2:4])
 	itemCount := le.Uint32(buf[4:8])
 	systemdEnabled := le.Uint32(buf[8:12])
-	// buf[12:16] reserved, ignored.
+	reserved := le.Uint32(buf[12:16])
 	generation := le.Uint64(buf[16:24])
 
 	if layoutVersion != 1 {
+		return CgroupsResponseView{}, ErrBadLayout
+	}
+
+	// flags must be zero
+	if flags != 0 {
+		return CgroupsResponseView{}, ErrBadLayout
+	}
+
+	// reserved field must be zero
+	if reserved != 0 {
 		return CgroupsResponseView{}, ErrBadLayout
 	}
 
@@ -706,6 +720,11 @@ func (v *CgroupsResponseView) Item(index uint32) (CgroupsItemView, error) {
 	pathLen := le.Uint32(item[28:32])
 
 	if layoutVersion != 1 {
+		return CgroupsItemView{}, ErrBadLayout
+	}
+
+	// item flags must be zero
+	if flags != 0 {
 		return CgroupsItemView{}, ErrBadLayout
 	}
 
