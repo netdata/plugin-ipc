@@ -195,6 +195,8 @@ nipc_error_t nipc_chunk_header_decode(const void *buf, size_t buf_len,
         return NIPC_ERR_BAD_MAGIC;
     if (out->version != NIPC_VERSION)
         return NIPC_ERR_BAD_VERSION;
+    if (out->chunk_payload_len == 0)
+        return NIPC_ERR_BAD_LAYOUT;
 
     return NIPC_OK;
 }

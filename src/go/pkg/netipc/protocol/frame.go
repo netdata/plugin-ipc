@@ -223,6 +223,9 @@ func DecodeChunkHeader(buf []byte) (ChunkHeader, error) {
 	if c.Version != Version {
 		return ChunkHeader{}, ErrBadVersion
 	}
+	if c.ChunkPayloadLen == 0 {
+		return ChunkHeader{}, ErrBadLayout
+	}
 	return c, nil
 }
 

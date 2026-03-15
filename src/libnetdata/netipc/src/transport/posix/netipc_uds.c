@@ -790,6 +790,13 @@ nipc_uds_error_t nipc_uds_receive(nipc_uds_session_t *session,
     if (hdr_out->payload_len > max_payload)
         return NIPC_UDS_ERR_LIMIT_EXCEEDED;
 
+    /* Validate item_count against negotiated directional batch limit. */
+    uint32_t max_batch = (session->role == NIPC_UDS_ROLE_SERVER)
+        ? session->max_request_batch_items
+        : session->max_response_batch_items;
+    if (hdr_out->item_count > max_batch)
+        return NIPC_UDS_ERR_LIMIT_EXCEEDED;
+
     /* Client-side: validate response message_id is in-flight */
     if (session->role == NIPC_UDS_ROLE_CLIENT &&
         hdr_out->kind == NIPC_KIND_RESPONSE) {

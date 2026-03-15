@@ -332,8 +332,18 @@ func ShmClientAttach(runDir, serviceName string) (*ShmContext, error) {
 	}
 
 	// Read current sequence numbers
-	curReqSeq := atomicLoadU64(data, shmHeaderReqSeqOff)
-	curRespSeq := atomicLoadU64(data, shmHeaderRespSeqOff)
+	curReqSeq, err := atomicLoadU64(data, shmHeaderReqSeqOff)
+	if err != nil {
+		syscall.Munmap(data)
+		f.Close()
+		return nil, fmt.Errorf("%w: load req_seq: %v", ErrShmBadParam, err)
+	}
+	curRespSeq, err := atomicLoadU64(data, shmHeaderRespSeqOff)
+	if err != nil {
+		syscall.Munmap(data)
+		f.Close()
+		return nil, fmt.Errorf("%w: load resp_seq: %v", ErrShmBadParam, err)
+	}
 	ownerGen := binary.LittleEndian.Uint32(data[shmHeaderOwnerGenOff : shmHeaderOwnerGenOff+4])
 
 	// Dup fd and close file
@@ -409,13 +419,19 @@ func (c *ShmContext) ShmSend(msg []byte) error {
 	copy(c.data[areaOff:], msg)
 
 	// 2. Store message length (release)
-	atomicStoreU32(c.data, lenOff, uint32(len(msg)))
+	if err := atomicStoreU32(c.data, lenOff, uint32(len(msg))); err != nil {
+		return fmt.Errorf("%w: store msg_len: %v", ErrShmBadParam, err)
+	}
 
 	// 3. Increment sequence number (release)
-	atomicAddU64(c.data, seqOff, 1)
+	if err := atomicAddU64(c.data, seqOff, 1); err != nil {
+		return fmt.Errorf("%w: add seq: %v", ErrShmBadParam, err)
+	}
 
 	// 4. Wake peer via futex
-	atomicAddU32(c.data, sigOff, 1)
+	if err := atomicAddU32(c.data, sigOff, 1); err != nil {
+		return fmt.Errorf("%w: add signal: %v", ErrShmBadParam, err)
+	}
 	futexWakeCall(c.data, sigOff, 1)
 
 	// Track locally
@@ -456,7 +472,10 @@ func (c *ShmContext) ShmReceive(timeoutMs uint32) ([]byte, error) {
 	// Phase 1: spin
 	observed := false
 	for i := uint32(0); i < c.SpinTries; i++ {
-		cur := atomicLoadU64(c.data, seqOff)
+		cur, err := atomicLoadU64(c.data, seqOff)
+		if err != nil {
+			return nil, fmt.Errorf("%w: load seq: %v", ErrShmBadParam, err)
+		}
 		if cur >= expectedSeq {
 			observed = true
 			break
@@ -466,10 +485,16 @@ func (c *ShmContext) ShmReceive(timeoutMs uint32) ([]byte, error) {
 
 	// Phase 2: futex wait
 	if !observed {
-		sigVal := atomicLoadU32(c.data, sigOff)
+		sigVal, err := atomicLoadU32(c.data, sigOff)
+		if err != nil {
+			return nil, fmt.Errorf("%w: load signal: %v", ErrShmBadParam, err)
+		}
 
 		// Check once more after reading signal
-		cur := atomicLoadU64(c.data, seqOff)
+		cur, err := atomicLoadU64(c.data, seqOff)
+		if err != nil {
+			return nil, fmt.Errorf("%w: load seq: %v", ErrShmBadParam, err)
+		}
 		if cur < expectedSeq {
 			var ts *syscall.Timespec
 			if timeoutMs > 0 {
@@ -488,7 +513,10 @@ func (c *ShmContext) ShmReceive(timeoutMs uint32) ([]byte, error) {
 			}
 
 			// After waking, verify sequence advanced
-			cur = atomicLoadU64(c.data, seqOff)
+			cur, err = atomicLoadU64(c.data, seqOff)
+			if err != nil {
+				return nil, fmt.Errorf("%w: load seq: %v", ErrShmBadParam, err)
+			}
 			if cur < expectedSeq {
 				return nil, ErrShmTimeout
 			}
@@ -496,7 +524,10 @@ func (c *ShmContext) ShmReceive(timeoutMs uint32) ([]byte, error) {
 	}
 
 	// Read message length
-	mlen := atomicLoadU32(c.data, lenOff)
+	mlen, err := atomicLoadU32(c.data, lenOff)
+	if err != nil {
+		return nil, fmt.Errorf("%w: load msg_len: %v", ErrShmBadParam, err)
+	}
 
 	// Advance local tracking
 	if c.role == ShmRoleServer {
@@ -535,44 +566,49 @@ func pidAlive(pid int) bool {
 
 // Atomic operations on the mmap'd region with bounds checking.
 
-func atomicLoadU64(data []byte, off int) uint64 {
+var errShmOutOfBounds = errors.New("SHM atomic: offset out of bounds")
+
+func atomicLoadU64(data []byte, off int) (uint64, error) {
 	if off < 0 || off+8 > len(data) {
-		panic("atomicLoadU64: offset out of bounds")
+		return 0, errShmOutOfBounds
 	}
 	ptr := (*uint64)(unsafe.Pointer(&data[off]))
-	return atomic.LoadUint64(ptr)
+	return atomic.LoadUint64(ptr), nil
 }
 
-func atomicLoadU32(data []byte, off int) uint32 {
+func atomicLoadU32(data []byte, off int) (uint32, error) {
 	if off < 0 || off+4 > len(data) {
-		panic("atomicLoadU32: offset out of bounds")
+		return 0, errShmOutOfBounds
 	}
 	ptr := (*uint32)(unsafe.Pointer(&data[off]))
-	return atomic.LoadUint32(ptr)
+	return atomic.LoadUint32(ptr), nil
 }
 
-func atomicStoreU32(data []byte, off int, val uint32) {
+func atomicStoreU32(data []byte, off int, val uint32) error {
 	if off < 0 || off+4 > len(data) {
-		panic("atomicStoreU32: offset out of bounds")
+		return errShmOutOfBounds
 	}
 	ptr := (*uint32)(unsafe.Pointer(&data[off]))
 	atomic.StoreUint32(ptr, val)
+	return nil
 }
 
-func atomicAddU64(data []byte, off int, val uint64) {
+func atomicAddU64(data []byte, off int, val uint64) error {
 	if off < 0 || off+8 > len(data) {
-		panic("atomicAddU64: offset out of bounds")
+		return errShmOutOfBounds
 	}
 	ptr := (*uint64)(unsafe.Pointer(&data[off]))
 	atomic.AddUint64(ptr, val)
+	return nil
 }
 
-func atomicAddU32(data []byte, off int, val uint32) {
+func atomicAddU32(data []byte, off int, val uint32) error {
 	if off < 0 || off+4 > len(data) {
-		panic("atomicAddU32: offset out of bounds")
+		return errShmOutOfBounds
 	}
 	ptr := (*uint32)(unsafe.Pointer(&data[off]))
 	atomic.AddUint32(ptr, val)
+	return nil
 }
 
 func futexWakeCall(data []byte, off int, count int) int {

@@ -298,6 +298,18 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 			fmt.Sprintf("payload_len %d exceeds negotiated max %d", hdr.PayloadLen, maxPayload))
 	}
 
+	// Validate item_count against negotiated directional batch limit.
+	var maxBatch uint32
+	if s.role == RoleServer {
+		maxBatch = s.MaxRequestBatchItems
+	} else {
+		maxBatch = s.MaxResponseBatchItems
+	}
+	if hdr.ItemCount > maxBatch {
+		return protocol.Header{}, nil, wrapErr(ErrLimitExceeded,
+			fmt.Sprintf("item_count %d exceeds negotiated max %d", hdr.ItemCount, maxBatch))
+	}
+
 	// Client-side: validate response message_id is in-flight
 	if s.role == RoleClient && hdr.Kind == protocol.KindResponse {
 		if s.inflightIDs == nil {

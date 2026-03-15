@@ -336,6 +336,16 @@ impl UdsSession {
             return Err(UdsError::LimitExceeded);
         }
 
+        // Validate item_count against negotiated directional batch limit.
+        let max_batch = if self.role == Role::Server {
+            self.max_request_batch_items
+        } else {
+            self.max_response_batch_items
+        };
+        if hdr.item_count > max_batch {
+            return Err(UdsError::LimitExceeded);
+        }
+
         // Client-side: validate response message_id is in-flight
         if self.role == Role::Client && hdr.kind == KIND_RESPONSE {
             if !self.inflight_ids.remove(&hdr.message_id) {

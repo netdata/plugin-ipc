@@ -247,6 +247,9 @@ impl ChunkHeader {
         if chk.version != VERSION {
             return Err(NipcError::BadVersion);
         }
+        if chk.chunk_payload_len == 0 {
+            return Err(NipcError::BadLayout);
+        }
         Ok(chk)
     }
 }
