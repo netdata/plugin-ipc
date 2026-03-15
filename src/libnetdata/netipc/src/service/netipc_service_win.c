@@ -392,7 +392,7 @@ static void server_handle_session(nipc_managed_server_t *server,
     if (!recv_buf)
         return;
 
-    while (server->running) {
+    while (InterlockedCompareExchange(&server->running, 0, 0)) {
         nipc_header_t hdr;
         const void *payload;
         size_t payload_len;
@@ -545,6 +545,16 @@ static void server_reap_sessions_locked(nipc_managed_server_t *server)
             i++;
         }
     }
+
+    /* Recalculate shm_in_use based on remaining active sessions */
+    LONG any_shm = 0;
+    for (int j = 0; j < server->session_count; j++) {
+        if (server->sessions[j]->shm) {
+            any_shm = 1;
+            break;
+        }
+    }
+    InterlockedExchange(&server->shm_in_use, any_shm);
 }
 
 /* ------------------------------------------------------------------ */
@@ -562,7 +572,7 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
 {
     memset(server, 0, sizeof(*server));
     server->listener.pipe = INVALID_HANDLE_VALUE;
-    server->running = false;
+    InterlockedExchange(&server->running, 0);
 
     if (!run_dir || !service_name || !handler || worker_count < 1)
         return NIPC_ERR_BAD_LAYOUT;
@@ -588,7 +598,7 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
     server->worker_count = worker_count;
     server->response_buf_size = response_buf_size;
     server->auth_token = config->auth_token;
-    server->shm_in_use = false;
+    InterlockedExchange(&server->shm_in_use, 0);
 
     /* Initialize session tracking */
     server->session_capacity = worker_count * 2;
@@ -617,9 +627,9 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
 
 void nipc_server_run(nipc_managed_server_t *server)
 {
-    server->running = true;
+    InterlockedExchange(&server->running, 1);
 
-    while (server->running) {
+    while (InterlockedCompareExchange(&server->running, 0, 0)) {
         /* Accept one client via L1 (blocking with internal timeout) */
         nipc_np_session_t session;
         memset(&session, 0, sizeof(session));
@@ -627,7 +637,7 @@ void nipc_server_run(nipc_managed_server_t *server)
 
         nipc_np_error_t uerr = nipc_np_accept(&server->listener, &session);
         if (uerr != NIPC_NP_OK) {
-            if (!server->running)
+            if (!InterlockedCompareExchange(&server->running, 0, 0))
                 break;
             Sleep(10);
             continue;
@@ -649,7 +659,7 @@ void nipc_server_run(nipc_managed_server_t *server)
         nipc_win_shm_ctx_t *shm = NULL;
         if ((session.selected_profile == NIPC_WIN_SHM_PROFILE_HYBRID ||
              session.selected_profile == NIPC_WIN_SHM_PROFILE_BUSYWAIT) &&
-            !server->shm_in_use) {
+            !InterlockedCompareExchange(&server->shm_in_use, 0, 0)) {
 
             nipc_win_shm_ctx_t *s = calloc(1, sizeof(nipc_win_shm_ctx_t));
             if (s) {
@@ -662,7 +672,7 @@ void nipc_server_run(nipc_managed_server_t *server)
                     s);
                 if (serr == NIPC_WIN_SHM_OK) {
                     shm = s;
-                    server->shm_in_use = true;
+                    InterlockedExchange(&server->shm_in_use, 1);
                 } else {
                     free(s);
                 }
@@ -673,7 +683,7 @@ void nipc_server_run(nipc_managed_server_t *server)
         nipc_session_ctx_t *sctx = calloc(1, sizeof(nipc_session_ctx_t));
         if (!sctx) {
             LeaveCriticalSection(&server->sessions_lock);
-            if (shm) { nipc_win_shm_destroy(shm); free(shm); server->shm_in_use = false; }
+            if (shm) { nipc_win_shm_destroy(shm); free(shm); InterlockedExchange(&server->shm_in_use, 0); }
             nipc_np_close_session(&session);
             continue;
         }
@@ -692,7 +702,7 @@ void nipc_server_run(nipc_managed_server_t *server)
                 (size_t)new_cap * sizeof(nipc_session_ctx_t *));
             if (!new_arr) {
                 LeaveCriticalSection(&server->sessions_lock);
-                if (shm) { nipc_win_shm_destroy(shm); free(shm); server->shm_in_use = false; }
+                if (shm) { nipc_win_shm_destroy(shm); free(shm); InterlockedExchange(&server->shm_in_use, 0); }
                 nipc_np_close_session(&session);
                 free(sctx);
                 continue;
@@ -720,7 +730,7 @@ void nipc_server_run(nipc_managed_server_t *server)
             }
             LeaveCriticalSection(&server->sessions_lock);
 
-            if (shm) { nipc_win_shm_destroy(shm); free(shm); server->shm_in_use = false; }
+            if (shm) { nipc_win_shm_destroy(shm); free(shm); InterlockedExchange(&server->shm_in_use, 0); }
             nipc_np_close_session(&session);
             free(sctx);
         }
@@ -729,13 +739,13 @@ void nipc_server_run(nipc_managed_server_t *server)
 
 void nipc_server_stop(nipc_managed_server_t *server)
 {
-    server->running = false;
+    InterlockedExchange(&server->running, 0);
 }
 
 bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms)
 {
     /* 1. Stop accepting new clients */
-    server->running = false;
+    InterlockedExchange(&server->running, 0);
     nipc_np_close_listener(&server->listener);
 
     /* 2. Wait for in-flight sessions to complete */
@@ -798,13 +808,13 @@ bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms)
     }
 
     server->worker_count = 0;
-    server->shm_in_use = false;
+    InterlockedExchange(&server->shm_in_use, 0);
     return all_drained;
 }
 
 void nipc_server_destroy(nipc_managed_server_t *server)
 {
-    server->running = false;
+    InterlockedExchange(&server->running, 0);
     nipc_np_close_listener(&server->listener);
 
     /* Join all active session threads */
@@ -828,7 +838,7 @@ void nipc_server_destroy(nipc_managed_server_t *server)
     }
 
     server->worker_count = 0;
-    server->shm_in_use = false;
+    InterlockedExchange(&server->shm_in_use, 0);
 }
 
 /* ------------------------------------------------------------------ */

@@ -16,7 +16,6 @@
 
 #include <errno.h>
 #include <poll.h>
-#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -730,8 +729,8 @@ void nipc_server_run(nipc_managed_server_t *server)
         /* Create session context */
         nipc_session_ctx_t *sctx = calloc(1, sizeof(nipc_session_ctx_t));
         if (!sctx) {
+            if (shm) { nipc_shm_destroy(shm); free(shm); server->shm_in_use = false; }
             pthread_mutex_unlock(&server->sessions_lock);
-            if (shm) { nipc_shm_destroy(shm); free(shm); }
             nipc_uds_close_session(&session);
             continue;
         }
@@ -749,8 +748,8 @@ void nipc_server_run(nipc_managed_server_t *server)
                 server->sessions,
                 (size_t)new_cap * sizeof(nipc_session_ctx_t *));
             if (!new_arr) {
+                if (shm) { nipc_shm_destroy(shm); free(shm); server->shm_in_use = false; }
                 pthread_mutex_unlock(&server->sessions_lock);
-                if (shm) { nipc_shm_destroy(shm); free(shm); }
                 nipc_uds_close_session(&session);
                 free(sctx);
                 continue;
@@ -776,6 +775,7 @@ void nipc_server_run(nipc_managed_server_t *server)
                     break;
                 }
             }
+            if (shm) server->shm_in_use = false;
             pthread_mutex_unlock(&server->sessions_lock);
 
             if (shm) { nipc_shm_destroy(shm); free(shm); }
@@ -792,9 +792,12 @@ void nipc_server_stop(nipc_managed_server_t *server)
 
 bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms)
 {
-    /* 1. Stop accepting new clients */
+    /* 1. Stop accepting new clients.
+     * Do NOT close the listener here — the run loop may still be
+     * polling on listener.fd. Setting the flag is enough; the run
+     * loop will exit on its next poll timeout (500ms). The listener
+     * is closed later by nipc_server_destroy(). */
     __atomic_store_n(&server->running, false, __ATOMIC_RELEASE);
-    nipc_uds_close_listener(&server->listener);
 
     /* 2. Wait for in-flight sessions to complete */
     bool all_drained = true;
