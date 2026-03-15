@@ -143,6 +143,71 @@ run_test() {
     rm -f /tmp/nipc_server_out_$$
 }
 
+run_pipeline_test() {
+    local name="$1"
+    local server_bin="$2"
+    local client_bin="$3"
+    local service="$4"
+    local count="$5"
+
+    # Skip if either binary is missing
+    if [[ ! -x "$server_bin" || ! -x "$client_bin" ]]; then
+        echo -e "  $name ... ${YELLOW}SKIP${NC}"
+        SKIP=$((SKIP + 1))
+        return
+    fi
+
+    echo -n "  $name ... "
+
+    rm -f "${RUN_DIR}/${service}.sock"
+
+    # Start pipeline server
+    local server_pid
+    "$server_bin" pipeline-server "$RUN_DIR" "$service" "$count" > /tmp/nipc_server_out_$$ 2>&1 &
+    server_pid=$!
+
+    # Wait for READY
+    local waited=0
+    while [[ $waited -lt $TIMEOUT ]]; do
+        if ! kill -0 "$server_pid" 2>/dev/null; then
+            echo -e "${RED}FAIL${NC} (server exited early)"
+            FAIL=$((FAIL + 1))
+            return
+        fi
+        if grep -q "^READY$" /tmp/nipc_server_out_$$ 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+
+    if [[ $waited -ge $TIMEOUT ]]; then
+        echo -e "${RED}FAIL${NC} (server not ready after ${TIMEOUT}s)"
+        kill "$server_pid" 2>/dev/null || true
+        wait "$server_pid" 2>/dev/null || true
+        FAIL=$((FAIL + 1))
+        return
+    fi
+
+    # Run pipeline client
+    local client_out
+    if client_out=$("$client_bin" pipeline-client "$RUN_DIR" "$service" "$count" 2>&1); then
+        if echo "$client_out" | grep -q "^PASS$"; then
+            echo -e "${GREEN}PASS${NC}"
+            PASS=$((PASS + 1))
+        else
+            echo -e "${RED}FAIL${NC} (client output: $client_out)"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        echo -e "${RED}FAIL${NC} (client exit code $?, output: $client_out)"
+        FAIL=$((FAIL + 1))
+    fi
+
+    wait "$server_pid" 2>/dev/null || true
+    rm -f /tmp/nipc_server_out_$$
+}
+
 main() {
     echo "=== UDS Transport Cross-Language Interop Tests ==="
     echo ""
@@ -185,6 +250,39 @@ main() {
 
     run_test "Go server, Rust client" \
         "$INTEROP_UDS_GO" "$INTEROP_UDS_RS" "interop_go_rs"
+
+    echo ""
+    echo "--- Pipeline Interop Tests (20 requests) ---"
+    echo ""
+
+    # Same-language pipeline (3 tests)
+    run_pipeline_test "Pipeline: C server, C client (20)" \
+        "$INTEROP_UDS_C" "$INTEROP_UDS_C" "pipe_c_c" 20
+
+    run_pipeline_test "Pipeline: Rust server, Rust client (20)" \
+        "$INTEROP_UDS_RS" "$INTEROP_UDS_RS" "pipe_rs_rs" 20
+
+    run_pipeline_test "Pipeline: Go server, Go client (20)" \
+        "$INTEROP_UDS_GO" "$INTEROP_UDS_GO" "pipe_go_go" 20
+
+    # Cross-language pipeline (6 tests)
+    run_pipeline_test "Pipeline: C server, Rust client (20)" \
+        "$INTEROP_UDS_C" "$INTEROP_UDS_RS" "pipe_c_rs" 20
+
+    run_pipeline_test "Pipeline: Rust server, C client (20)" \
+        "$INTEROP_UDS_RS" "$INTEROP_UDS_C" "pipe_rs_c" 20
+
+    run_pipeline_test "Pipeline: C server, Go client (20)" \
+        "$INTEROP_UDS_C" "$INTEROP_UDS_GO" "pipe_c_go" 20
+
+    run_pipeline_test "Pipeline: Go server, C client (20)" \
+        "$INTEROP_UDS_GO" "$INTEROP_UDS_C" "pipe_go_c" 20
+
+    run_pipeline_test "Pipeline: Rust server, Go client (20)" \
+        "$INTEROP_UDS_RS" "$INTEROP_UDS_GO" "pipe_rs_go" 20
+
+    run_pipeline_test "Pipeline: Go server, Rust client (20)" \
+        "$INTEROP_UDS_GO" "$INTEROP_UDS_RS" "pipe_go_rs" 20
 
     echo ""
     echo -e "=== Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}, ${YELLOW}${SKIP} skipped${NC} ==="

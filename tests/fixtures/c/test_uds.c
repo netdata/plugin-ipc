@@ -976,6 +976,391 @@ static void test_connect_path_too_long(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: Pipeline 10 requests, verify all matched by message_id       */
+/* ------------------------------------------------------------------ */
+
+static void test_pipeline_10(void)
+{
+    printf("Test: Pipeline 10 requests, verify all matched by message_id\n");
+    const char *svc = "test_pipe10";
+    cleanup_socket(svc);
+
+    server_ctx_t sctx = {
+        .service      = svc,
+        .config       = default_server_config(),
+        .accept_count = 1,
+        .echo_count   = 10,
+    };
+
+    pthread_t tid = start_echo_server(&sctx);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        /* Send 10 requests before reading any response */
+        for (uint64_t i = 1; i <= 10; i++) {
+            uint8_t payload[8];
+            memcpy(payload, &i, sizeof(i));
+            nipc_header_t hdr = {
+                .kind = NIPC_KIND_REQUEST, .code = 1,
+                .item_count = 1, .message_id = i,
+            };
+            err = nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+            if (err != NIPC_UDS_OK) {
+                check("send all 10", 0);
+                break;
+            }
+        }
+
+        /* Receive 10 responses, verify message_id and payload */
+        int all_match = 1;
+        for (uint64_t i = 1; i <= 10; i++) {
+            uint8_t rbuf[4096];
+            nipc_header_t rhdr;
+            const void *rp;
+            size_t rlen;
+            err = nipc_uds_receive(&session, rbuf, sizeof(rbuf),
+                                    &rhdr, &rp, &rlen);
+            if (err != NIPC_UDS_OK) {
+                all_match = 0;
+                break;
+            }
+            uint64_t val;
+            if (rlen != 8 || rhdr.message_id != i) {
+                all_match = 0;
+                continue;
+            }
+            memcpy(&val, rp, 8);
+            if (val != i)
+                all_match = 0;
+        }
+        check("all 10 responses matched by message_id and payload", all_match);
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: Pipeline 100 requests (stress pipelining)                    */
+/* ------------------------------------------------------------------ */
+
+static void test_pipeline_100(void)
+{
+    printf("Test: Pipeline 100 requests (stress pipelining)\n");
+    const char *svc = "test_pipe100";
+    cleanup_socket(svc);
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    scfg.max_request_payload_bytes = 65536;
+    scfg.max_response_payload_bytes = 65536;
+
+    server_ctx_t sctx = {
+        .service      = svc,
+        .config       = scfg,
+        .accept_count = 1,
+        .echo_count   = 100,
+    };
+
+    pthread_t tid = start_echo_server(&sctx);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    ccfg.max_request_payload_bytes = 65536;
+    ccfg.max_response_payload_bytes = 65536;
+
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        /* Send 100 requests before reading any */
+        int send_ok = 1;
+        for (uint64_t i = 1; i <= 100; i++) {
+            uint8_t payload[8];
+            memcpy(payload, &i, sizeof(i));
+            nipc_header_t hdr = {
+                .kind = NIPC_KIND_REQUEST, .code = 1,
+                .item_count = 1, .message_id = i,
+            };
+            if (nipc_uds_send(&session, &hdr, payload, 8) != NIPC_UDS_OK) {
+                send_ok = 0;
+                break;
+            }
+        }
+        check("sent all 100 requests", send_ok);
+
+        /* Receive 100 responses */
+        int recv_ok = 1;
+        for (uint64_t i = 1; i <= 100; i++) {
+            uint8_t rbuf[4096];
+            nipc_header_t rhdr;
+            const void *rp;
+            size_t rlen;
+            if (nipc_uds_receive(&session, rbuf, sizeof(rbuf),
+                                  &rhdr, &rp, &rlen) != NIPC_UDS_OK) {
+                recv_ok = 0;
+                break;
+            }
+            uint64_t val;
+            if (rlen != 8 || rhdr.message_id != i) {
+                recv_ok = 0;
+                continue;
+            }
+            memcpy(&val, rp, 8);
+            if (val != i)
+                recv_ok = 0;
+        }
+        check("all 100 responses matched by message_id and payload", recv_ok);
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: Pipeline with mixed message sizes                            */
+/* ------------------------------------------------------------------ */
+
+static void test_pipeline_mixed_sizes(void)
+{
+    printf("Test: Pipeline with mixed message sizes (8, 256, 1024 bytes)\n");
+    const char *svc = "test_pipemix";
+    cleanup_socket(svc);
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    scfg.max_request_payload_bytes = 65536;
+    scfg.max_response_payload_bytes = 65536;
+
+    /* 9 messages: 3 sizes x 3 */
+    const int count = 9;
+    const size_t sizes[] = {8, 256, 1024, 8, 256, 1024, 8, 256, 1024};
+
+    server_ctx_t sctx = {
+        .service      = svc,
+        .config       = scfg,
+        .accept_count = 1,
+        .echo_count   = count,
+    };
+
+    pthread_t tid = start_echo_server(&sctx);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    ccfg.max_request_payload_bytes = 65536;
+    ccfg.max_response_payload_bytes = 65536;
+
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        /* Send all 9 messages with varying sizes */
+        for (int i = 0; i < count; i++) {
+            size_t sz = sizes[i];
+            uint8_t *payload = malloc(sz);
+            for (size_t j = 0; j < sz; j++)
+                payload[j] = (uint8_t)((i * 37 + j) & 0xFF);
+
+            nipc_header_t hdr = {
+                .kind = NIPC_KIND_REQUEST, .code = 1,
+                .item_count = 1, .message_id = (uint64_t)(i + 1),
+            };
+            nipc_uds_send(&session, &hdr, payload, sz);
+            free(payload);
+        }
+
+        /* Receive all 9 responses */
+        int all_ok = 1;
+        for (int i = 0; i < count; i++) {
+            size_t sz = sizes[i];
+            uint8_t rbuf[4096];
+            nipc_header_t rhdr;
+            const void *rp;
+            size_t rlen;
+            if (nipc_uds_receive(&session, rbuf, sizeof(rbuf),
+                                  &rhdr, &rp, &rlen) != NIPC_UDS_OK) {
+                all_ok = 0;
+                break;
+            }
+            if (rhdr.message_id != (uint64_t)(i + 1) || rlen != sz) {
+                all_ok = 0;
+                continue;
+            }
+            /* Verify payload content */
+            const uint8_t *rpp = (const uint8_t *)rp;
+            for (size_t j = 0; j < sz; j++) {
+                if (rpp[j] != (uint8_t)((i * 37 + j) & 0xFF)) {
+                    all_ok = 0;
+                    break;
+                }
+            }
+        }
+        check("all mixed-size responses correct", all_ok);
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: Pipeline with chunked messages (> packet_size)               */
+/* ------------------------------------------------------------------ */
+
+/* Chunked echo server for pipeline: reads N messages, echoes each. */
+static void *chunked_echo_server_thread(void *arg)
+{
+    server_ctx_t *ctx = (server_ctx_t *)arg;
+
+    nipc_uds_listener_t listener;
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
+                                            &ctx->config, &listener);
+    if (err != NIPC_UDS_OK) {
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+
+    nipc_uds_session_t session;
+    err = nipc_uds_accept(&listener, &session);
+    if (err != NIPC_UDS_OK) {
+        nipc_uds_close_listener(&listener);
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+
+    for (int m = 0; m < ctx->echo_count; m++) {
+        uint8_t buf[256]; /* small buf, forces recv_buf alloc */
+        nipc_header_t hdr;
+        const void *payload;
+        size_t payload_len;
+
+        err = nipc_uds_receive(&session, buf, sizeof(buf),
+                                &hdr, &payload, &payload_len);
+        if (err != NIPC_UDS_OK)
+            break;
+
+        nipc_header_t resp = hdr;
+        resp.kind = NIPC_KIND_RESPONSE;
+        resp.transport_status = NIPC_STATUS_OK;
+
+        err = nipc_uds_send(&session, &resp, payload, payload_len);
+        if (err != NIPC_UDS_OK)
+            break;
+    }
+
+    nipc_uds_close_session(&session);
+    nipc_uds_close_listener(&listener);
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void test_pipeline_chunked(void)
+{
+    printf("Test: Pipeline with chunked messages (> packet_size)\n");
+    const char *svc = "test_pipechk";
+    cleanup_socket(svc);
+
+    /* Small packet size to force chunking */
+    nipc_uds_server_config_t scfg = default_server_config();
+    scfg.packet_size = 128;
+    scfg.max_request_payload_bytes  = 65536;
+    scfg.max_response_payload_bytes = 65536;
+
+    const int count = 5;
+    const size_t sizes[] = {200, 500, 300, 800, 150};
+
+    server_ctx_t sctx = {
+        .service      = svc,
+        .config       = scfg,
+        .accept_count = 1,
+        .echo_count   = count,
+    };
+
+    pthread_t tid;
+    __atomic_store_n(&sctx.ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sctx.done, 0, __ATOMIC_RELAXED);
+    pthread_create(&tid, NULL, chunked_echo_server_thread, &sctx);
+
+    int retries = 0;
+    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) &&
+           !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 1000) {
+        usleep(1000);
+        retries++;
+    }
+    check("chunked pipeline server ready",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    ccfg.packet_size = 128;
+    ccfg.max_request_payload_bytes  = 65536;
+    ccfg.max_response_payload_bytes = 65536;
+
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        /* Send all messages (each chunked) */
+        for (int i = 0; i < count; i++) {
+            size_t sz = sizes[i];
+            uint8_t *payload = malloc(sz);
+            for (size_t j = 0; j < sz; j++)
+                payload[j] = (uint8_t)((i + j) & 0xFF);
+
+            nipc_header_t hdr = {
+                .kind = NIPC_KIND_REQUEST, .code = 1,
+                .item_count = 1, .message_id = (uint64_t)(i + 1),
+            };
+            nipc_uds_send(&session, &hdr, payload, sz);
+            free(payload);
+        }
+
+        /* Receive all responses */
+        int all_ok = 1;
+        for (int i = 0; i < count; i++) {
+            size_t sz = sizes[i];
+            uint8_t rbuf[256];
+            nipc_header_t rhdr;
+            const void *rp;
+            size_t rlen;
+            if (nipc_uds_receive(&session, rbuf, sizeof(rbuf),
+                                  &rhdr, &rp, &rlen) != NIPC_UDS_OK) {
+                all_ok = 0;
+                break;
+            }
+            if (rhdr.message_id != (uint64_t)(i + 1) || rlen != sz) {
+                all_ok = 0;
+                continue;
+            }
+            const uint8_t *rpp = (const uint8_t *)rp;
+            for (size_t j = 0; j < sz; j++) {
+                if (rpp[j] != (uint8_t)((i + j) & 0xFF)) {
+                    all_ok = 0;
+                    break;
+                }
+            }
+        }
+        check("all chunked pipeline responses correct", all_ok);
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -1006,6 +1391,10 @@ int main(void)
     test_close_session_edge();     printf("\n");
     test_listen_path_too_long();   printf("\n");
     test_connect_path_too_long();  printf("\n");
+    test_pipeline_10();            printf("\n");
+    test_pipeline_100();           printf("\n");
+    test_pipeline_mixed_sizes();   printf("\n");
+    test_pipeline_chunked();       printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

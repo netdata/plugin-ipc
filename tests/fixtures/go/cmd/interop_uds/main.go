@@ -13,9 +13,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
@@ -152,12 +154,124 @@ func runClient(runDir, service string) int {
 	return 1
 }
 
+func runPipelineServer(runDir, service string, count int) int {
+	cfg := serverConfig()
+	listener, err := posix.Listen(runDir, service, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "server: listen failed: %v\n", err)
+		return 1
+	}
+	defer listener.Close()
+
+	fmt.Println("READY")
+
+	session, err := listener.Accept()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "server: accept failed: %v\n", err)
+		return 1
+	}
+	defer session.Close()
+
+	buf := make([]byte, 65600)
+	for i := 0; i < count; i++ {
+		hdr, payload, err := session.Receive(buf)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "server: receive[%d] failed: %v\n", i, err)
+			return 1
+		}
+
+		resp := hdr
+		resp.Kind = protocol.KindResponse
+		resp.TransportStatus = protocol.StatusOK
+		if err := session.Send(&resp, payload); err != nil {
+			fmt.Fprintf(os.Stderr, "server: send[%d] failed: %v\n", i, err)
+			return 1
+		}
+	}
+
+	return 0
+}
+
+func runPipelineClient(runDir, service string, count int) int {
+	cfg := clientConfig()
+	session, err := posix.Connect(runDir, service, &cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "client: connect failed: %v\n", err)
+		return 1
+	}
+	defer session.Close()
+
+	// Send all requests before reading any response
+	for i := 0; i < count; i++ {
+		val := uint64(i + 1)
+		payload := make([]byte, 8)
+		binary.LittleEndian.PutUint64(payload, val)
+
+		hdr := protocol.Header{
+			Kind:      protocol.KindRequest,
+			Code:      protocol.MethodIncrement,
+			ItemCount: 1,
+			MessageID: val,
+		}
+
+		if err := session.Send(&hdr, payload); err != nil {
+			fmt.Fprintf(os.Stderr, "client: send[%d] failed: %v\n", i, err)
+			return 1
+		}
+	}
+
+	// Read all responses and verify
+	ok := true
+	rbuf := make([]byte, 65600)
+	for i := 0; i < count; i++ {
+		rhdr, rpayload, err := session.Receive(rbuf)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "client: receive[%d] failed: %v\n", i, err)
+			ok = false
+			break
+		}
+
+		expected := uint64(i + 1)
+		if rhdr.Kind != protocol.KindResponse {
+			fmt.Fprintf(os.Stderr, "client: [%d] expected RESPONSE, got %d\n", i, rhdr.Kind)
+			ok = false
+		}
+		if rhdr.MessageID != expected {
+			fmt.Fprintf(os.Stderr, "client: [%d] message_id %d, want %d\n", i, rhdr.MessageID, expected)
+			ok = false
+		}
+		if len(rpayload) != 8 {
+			fmt.Fprintf(os.Stderr, "client: [%d] payload len %d, want 8\n", i, len(rpayload))
+			ok = false
+		} else {
+			val := binary.LittleEndian.Uint64(rpayload)
+			if val != expected {
+				fmt.Fprintf(os.Stderr, "client: [%d] payload %d, want %d\n", i, val, expected)
+				ok = false
+			}
+		}
+	}
+
+	if ok {
+		fmt.Println("PASS")
+	} else {
+		fmt.Println("FAIL")
+	}
+
+	if ok {
+		return 0
+	}
+	return 1
+}
+
 func main() {
 	// Ignore SIGPIPE
 	signal.Ignore(syscall.SIGPIPE)
 
-	if len(os.Args) != 4 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <server|client> <run_dir> <service_name>\n", os.Args[0])
+	if len(os.Args) < 4 {
+		fmt.Fprintf(os.Stderr,
+			"Usage:\n  %s server <run_dir> <service>\n  %s client <run_dir> <service>\n  %s pipeline-server <run_dir> <service> <count>\n  %s pipeline-client <run_dir> <service> <count>\n",
+			os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 		os.Exit(1)
 	}
 
@@ -174,6 +288,21 @@ func main() {
 		rc = runServer(runDir, service)
 	case "client":
 		rc = runClient(runDir, service)
+	case "pipeline-server", "pipeline-client":
+		if len(os.Args) < 5 {
+			fmt.Fprintf(os.Stderr, "%s requires <count> argument\n", mode)
+			os.Exit(1)
+		}
+		count, err := strconv.Atoi(os.Args[4])
+		if err != nil || count <= 0 {
+			fmt.Fprintf(os.Stderr, "invalid count: %s\n", os.Args[4])
+			os.Exit(1)
+		}
+		if mode == "pipeline-server" {
+			rc = runPipelineServer(runDir, service, count)
+		} else {
+			rc = runPipelineClient(runDir, service, count)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown mode: %s\n", mode)
 		rc = 1

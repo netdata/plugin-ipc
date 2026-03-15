@@ -87,7 +87,7 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 /* In-flight message_id tracking (L1 spec requirement) */
-#define NIPC_UDS_MAX_INFLIGHT 64
+#define NIPC_UDS_MAX_INFLIGHT 128
 
 typedef struct {
     int             fd;             /* connected socket (native wait object) */

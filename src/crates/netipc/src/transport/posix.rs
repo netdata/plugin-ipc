@@ -1709,6 +1709,305 @@ mod tests {
         cleanup_socket(&svc);
     }
 
+    // -----------------------------------------------------------------------
+    //  Test: Pipeline 10 requests, verify all matched by message_id
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pipeline_10() {
+        ensure_run_dir();
+        let svc = unique_service("rs_pipe10");
+        cleanup_socket(&svc);
+
+        let svc_clone = svc.clone();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready.clone();
+
+        let server_thread = thread::spawn(move || {
+            let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config())
+                .expect("listen");
+            ready_clone.store(true, Ordering::Release);
+
+            let mut session = listener.accept().expect("accept");
+
+            for _ in 0..10 {
+                let mut buf = [0u8; 8192];
+                let (hdr, payload) = session.receive(&mut buf).expect("recv");
+                let mut resp = hdr;
+                resp.kind = protocol::KIND_RESPONSE;
+                resp.transport_status = protocol::STATUS_OK;
+                session.send(&mut resp, &payload).expect("send");
+            }
+        });
+
+        while !ready.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config())
+            .expect("connect");
+
+        // Send 10 requests before reading any response
+        for i in 1u64..=10 {
+            let payload = i.to_le_bytes();
+            let mut hdr = Header {
+                kind: protocol::KIND_REQUEST,
+                code: 1,
+                item_count: 1,
+                message_id: i,
+                ..Header::default()
+            };
+            session.send(&mut hdr, &payload).expect("send");
+        }
+
+        // Receive 10 responses, verify message_id and payload
+        for i in 1u64..=10 {
+            let mut rbuf = [0u8; 4096];
+            let (rhdr, rpayload) = session.receive(&mut rbuf).expect("recv");
+            assert_eq!(rhdr.message_id, i, "message_id mismatch at {i}");
+            assert_eq!(rpayload.len(), 8, "payload len at {i}");
+            let val = u64::from_le_bytes(rpayload.try_into().unwrap());
+            assert_eq!(val, i, "payload value at {i}");
+        }
+
+        drop(session);
+        server_thread.join().expect("server join");
+        cleanup_socket(&svc);
+    }
+
+    // -----------------------------------------------------------------------
+    //  Test: Pipeline 100 requests (stress pipelining)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pipeline_100() {
+        ensure_run_dir();
+        let svc = unique_service("rs_pipe100");
+        cleanup_socket(&svc);
+
+        let svc_clone = svc.clone();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready.clone();
+
+        let server_thread = thread::spawn(move || {
+            let scfg = ServerConfig {
+                max_request_payload_bytes: 65536,
+                max_response_payload_bytes: 65536,
+                ..default_server_config()
+            };
+            let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg)
+                .expect("listen");
+            ready_clone.store(true, Ordering::Release);
+
+            let mut session = listener.accept().expect("accept");
+
+            for _ in 0..100 {
+                let mut buf = [0u8; 8192];
+                let (hdr, payload) = session.receive(&mut buf).expect("recv");
+                let mut resp = hdr;
+                resp.kind = protocol::KIND_RESPONSE;
+                resp.transport_status = protocol::STATUS_OK;
+                session.send(&mut resp, &payload).expect("send");
+            }
+        });
+
+        while !ready.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let ccfg = ClientConfig {
+            max_request_payload_bytes: 65536,
+            max_response_payload_bytes: 65536,
+            ..default_client_config()
+        };
+        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg)
+            .expect("connect");
+
+        // Send 100 requests
+        for i in 1u64..=100 {
+            let payload = i.to_le_bytes();
+            let mut hdr = Header {
+                kind: protocol::KIND_REQUEST,
+                code: 1,
+                item_count: 1,
+                message_id: i,
+                ..Header::default()
+            };
+            session.send(&mut hdr, &payload).expect("send");
+        }
+
+        // Receive 100 responses
+        for i in 1u64..=100 {
+            let mut rbuf = [0u8; 4096];
+            let (rhdr, rpayload) = session.receive(&mut rbuf).expect("recv");
+            assert_eq!(rhdr.message_id, i);
+            let val = u64::from_le_bytes(rpayload.try_into().unwrap());
+            assert_eq!(val, i);
+        }
+
+        drop(session);
+        server_thread.join().expect("server join");
+        cleanup_socket(&svc);
+    }
+
+    // -----------------------------------------------------------------------
+    //  Test: Pipeline with mixed message sizes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pipeline_mixed_sizes() {
+        ensure_run_dir();
+        let svc = unique_service("rs_pipemix");
+        cleanup_socket(&svc);
+
+        let svc_clone = svc.clone();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready.clone();
+
+        let sizes = [8usize, 256, 1024, 8, 256, 1024, 8, 256, 1024];
+        let count = sizes.len();
+
+        let server_thread = thread::spawn(move || {
+            let scfg = ServerConfig {
+                max_request_payload_bytes: 65536,
+                max_response_payload_bytes: 65536,
+                ..default_server_config()
+            };
+            let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg)
+                .expect("listen");
+            ready_clone.store(true, Ordering::Release);
+
+            let mut session = listener.accept().expect("accept");
+
+            for _ in 0..count {
+                let mut buf = [0u8; 8192];
+                let (hdr, payload) = session.receive(&mut buf).expect("recv");
+                let mut resp = hdr;
+                resp.kind = protocol::KIND_RESPONSE;
+                resp.transport_status = protocol::STATUS_OK;
+                session.send(&mut resp, &payload).expect("send");
+            }
+        });
+
+        while !ready.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let ccfg = ClientConfig {
+            max_request_payload_bytes: 65536,
+            max_response_payload_bytes: 65536,
+            ..default_client_config()
+        };
+        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg)
+            .expect("connect");
+
+        // Send all messages with varying sizes
+        for (i, &sz) in sizes.iter().enumerate() {
+            let payload: Vec<u8> = (0..sz).map(|j| ((i * 37 + j) & 0xFF) as u8).collect();
+            let mut hdr = Header {
+                kind: protocol::KIND_REQUEST,
+                code: 1,
+                item_count: 1,
+                message_id: (i + 1) as u64,
+                ..Header::default()
+            };
+            session.send(&mut hdr, &payload).expect("send");
+        }
+
+        // Receive all responses
+        for (i, &sz) in sizes.iter().enumerate() {
+            let mut rbuf = [0u8; 4096];
+            let (rhdr, rpayload) = session.receive(&mut rbuf).expect("recv");
+            assert_eq!(rhdr.message_id, (i + 1) as u64, "message_id at {i}");
+            assert_eq!(rpayload.len(), sz, "payload len at {i}");
+            let expected: Vec<u8> = (0..sz).map(|j| ((i * 37 + j) & 0xFF) as u8).collect();
+            assert_eq!(rpayload, expected, "payload data at {i}");
+        }
+
+        drop(session);
+        server_thread.join().expect("server join");
+        cleanup_socket(&svc);
+    }
+
+    // -----------------------------------------------------------------------
+    //  Test: Pipeline with chunked messages (> packet_size)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pipeline_chunked_multi() {
+        ensure_run_dir();
+        let svc = unique_service("rs_pipechk2");
+        cleanup_socket(&svc);
+
+        let svc_clone = svc.clone();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready.clone();
+
+        let sizes = [200usize, 500, 300, 800, 150];
+        let count = sizes.len();
+
+        let server_thread = thread::spawn(move || {
+            let scfg = ServerConfig {
+                packet_size: 128,
+                max_request_payload_bytes: 65536,
+                max_response_payload_bytes: 65536,
+                ..default_server_config()
+            };
+            let listener =
+                UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
+            ready_clone.store(true, Ordering::Release);
+
+            let mut session = listener.accept().expect("accept");
+
+            for _ in 0..count {
+                let mut buf = [0u8; 256];
+                let (hdr, payload) = session.receive(&mut buf).expect("recv");
+                let mut resp = hdr;
+                resp.kind = protocol::KIND_RESPONSE;
+                session.send(&mut resp, &payload).expect("send");
+            }
+        });
+
+        while !ready.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let ccfg = ClientConfig {
+            packet_size: 128,
+            max_request_payload_bytes: 65536,
+            max_response_payload_bytes: 65536,
+            ..default_client_config()
+        };
+        let mut session =
+            UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
+
+        // Send all chunked messages
+        for (i, &sz) in sizes.iter().enumerate() {
+            let payload: Vec<u8> = (0..sz).map(|j| ((i + j) & 0xFF) as u8).collect();
+            let mut hdr = Header {
+                kind: protocol::KIND_REQUEST,
+                code: 1,
+                item_count: 1,
+                message_id: (i + 1) as u64,
+                ..Header::default()
+            };
+            session.send(&mut hdr, &payload).expect("send");
+        }
+
+        // Receive all responses
+        for (i, &sz) in sizes.iter().enumerate() {
+            let mut rbuf = [0u8; 256];
+            let (rhdr, rpayload) = session.receive(&mut rbuf).expect("recv");
+            assert_eq!(rhdr.message_id, (i + 1) as u64);
+            let expected: Vec<u8> = (0..sz).map(|j| ((i + j) & 0xFF) as u8).collect();
+            assert_eq!(rpayload, expected);
+        }
+
+        drop(session);
+        server_thread.join().expect("server join");
+        cleanup_socket(&svc);
+    }
+
     #[test]
     fn test_invalid_service_name() {
         let bad_names = &["", ".", "..", "foo/bar", "../etc", "name space", "a@b"];

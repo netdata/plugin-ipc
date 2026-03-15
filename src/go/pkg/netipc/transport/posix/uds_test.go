@@ -4,6 +4,7 @@ package posix
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -1263,6 +1264,406 @@ func TestInvalidServiceName(t *testing.T) {
 			t.Errorf("validateServiceName(%q) = %v, want nil", name, err)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+//  Test: Pipeline 10 requests, verify all matched by message_id
+// ---------------------------------------------------------------------------
+
+func TestPipeline10(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	defer os.Remove(filepath.Join(runDir, service+".sock"))
+
+	sCfg := defaultServerConfig()
+	listener := startListener(t, runDir, service, sCfg)
+	defer listener.Close()
+
+	acceptCh := acceptAsync(listener)
+
+	cCfg := defaultClientConfig()
+	client, err := Connect(runDir, service, &cCfg)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer client.Close()
+
+	sr := <-acceptCh
+	if sr.err != nil {
+		t.Fatalf("Accept failed: %v", sr.err)
+	}
+	server := sr.session
+	defer server.Close()
+
+	const count = 10
+
+	// Server goroutine: receive and echo
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 4096)
+		for i := 0; i < count; i++ {
+			rHdr, rPayload, err := server.Receive(buf)
+			if err != nil {
+				t.Errorf("server Receive[%d]: %v", i, err)
+				return
+			}
+			resp := protocol.Header{
+				Kind:      protocol.KindResponse,
+				Code:      rHdr.Code,
+				ItemCount: 1,
+				MessageID: rHdr.MessageID,
+			}
+			if err := server.Send(&resp, rPayload); err != nil {
+				t.Errorf("server Send[%d]: %v", i, err)
+				return
+			}
+		}
+	}()
+
+	// Client sends 10 requests before reading any
+	for i := uint64(1); i <= count; i++ {
+		payload := make([]byte, 8)
+		binary.LittleEndian.PutUint64(payload, i)
+		hdr := protocol.Header{
+			Kind:      protocol.KindRequest,
+			Code:      protocol.MethodIncrement,
+			ItemCount: 1,
+			MessageID: i,
+		}
+		if err := client.Send(&hdr, payload); err != nil {
+			t.Fatalf("client Send(%d): %v", i, err)
+		}
+	}
+
+	// Receive 10 responses
+	buf := make([]byte, 4096)
+	for i := uint64(1); i <= count; i++ {
+		rHdr, rPayload, err := client.Receive(buf)
+		if err != nil {
+			t.Fatalf("client Receive(%d): %v", i, err)
+		}
+		if rHdr.MessageID != i {
+			t.Errorf("message_id = %d, want %d", rHdr.MessageID, i)
+		}
+		if len(rPayload) != 8 {
+			t.Errorf("payload len = %d, want 8", len(rPayload))
+			continue
+		}
+		val := binary.LittleEndian.Uint64(rPayload)
+		if val != i {
+			t.Errorf("payload value = %d, want %d", val, i)
+		}
+	}
+
+	wg.Wait()
+}
+
+// ---------------------------------------------------------------------------
+//  Test: Pipeline 100 requests (stress pipelining)
+// ---------------------------------------------------------------------------
+
+func TestPipeline100(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	defer os.Remove(filepath.Join(runDir, service+".sock"))
+
+	sCfg := defaultServerConfig()
+	sCfg.MaxRequestPayloadBytes = 65536
+	sCfg.MaxResponsePayloadBytes = 65536
+	listener := startListener(t, runDir, service, sCfg)
+	defer listener.Close()
+
+	acceptCh := acceptAsync(listener)
+
+	cCfg := defaultClientConfig()
+	cCfg.MaxRequestPayloadBytes = 65536
+	cCfg.MaxResponsePayloadBytes = 65536
+	client, err := Connect(runDir, service, &cCfg)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer client.Close()
+
+	sr := <-acceptCh
+	if sr.err != nil {
+		t.Fatalf("Accept failed: %v", sr.err)
+	}
+	server := sr.session
+	defer server.Close()
+
+	const count = 100
+
+	// Server goroutine
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 4096)
+		for i := 0; i < count; i++ {
+			rHdr, rPayload, err := server.Receive(buf)
+			if err != nil {
+				t.Errorf("server Receive[%d]: %v", i, err)
+				return
+			}
+			resp := protocol.Header{
+				Kind:      protocol.KindResponse,
+				Code:      rHdr.Code,
+				ItemCount: 1,
+				MessageID: rHdr.MessageID,
+			}
+			if err := server.Send(&resp, rPayload); err != nil {
+				t.Errorf("server Send[%d]: %v", i, err)
+				return
+			}
+		}
+	}()
+
+	// Client sends 100 requests
+	for i := uint64(1); i <= count; i++ {
+		payload := make([]byte, 8)
+		binary.LittleEndian.PutUint64(payload, i)
+		hdr := protocol.Header{
+			Kind:      protocol.KindRequest,
+			Code:      protocol.MethodIncrement,
+			ItemCount: 1,
+			MessageID: i,
+		}
+		if err := client.Send(&hdr, payload); err != nil {
+			t.Fatalf("client Send(%d): %v", i, err)
+		}
+	}
+
+	// Receive 100 responses
+	buf := make([]byte, 4096)
+	for i := uint64(1); i <= count; i++ {
+		rHdr, rPayload, err := client.Receive(buf)
+		if err != nil {
+			t.Fatalf("client Receive(%d): %v", i, err)
+		}
+		if rHdr.MessageID != i {
+			t.Errorf("message_id = %d, want %d", rHdr.MessageID, i)
+		}
+		val := binary.LittleEndian.Uint64(rPayload)
+		if val != i {
+			t.Errorf("payload value = %d, want %d", val, i)
+		}
+	}
+
+	wg.Wait()
+}
+
+// ---------------------------------------------------------------------------
+//  Test: Pipeline with mixed message sizes
+// ---------------------------------------------------------------------------
+
+func TestPipelineMixedSizes(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	defer os.Remove(filepath.Join(runDir, service+".sock"))
+
+	sCfg := defaultServerConfig()
+	sCfg.MaxRequestPayloadBytes = 65536
+	sCfg.MaxResponsePayloadBytes = 65536
+	listener := startListener(t, runDir, service, sCfg)
+	defer listener.Close()
+
+	acceptCh := acceptAsync(listener)
+
+	cCfg := defaultClientConfig()
+	cCfg.MaxRequestPayloadBytes = 65536
+	cCfg.MaxResponsePayloadBytes = 65536
+	client, err := Connect(runDir, service, &cCfg)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer client.Close()
+
+	sr := <-acceptCh
+	if sr.err != nil {
+		t.Fatalf("Accept failed: %v", sr.err)
+	}
+	server := sr.session
+	defer server.Close()
+
+	sizes := []int{8, 256, 1024, 8, 256, 1024, 8, 256, 1024}
+	count := len(sizes)
+
+	// Server goroutine
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 8192)
+		for i := 0; i < count; i++ {
+			rHdr, rPayload, err := server.Receive(buf)
+			if err != nil {
+				t.Errorf("server Receive[%d]: %v", i, err)
+				return
+			}
+			resp := protocol.Header{
+				Kind:      protocol.KindResponse,
+				Code:      rHdr.Code,
+				ItemCount: 1,
+				MessageID: rHdr.MessageID,
+			}
+			if err := server.Send(&resp, rPayload); err != nil {
+				t.Errorf("server Send[%d]: %v", i, err)
+				return
+			}
+		}
+	}()
+
+	// Client sends all messages
+	for i, sz := range sizes {
+		payload := make([]byte, sz)
+		for j := range payload {
+			payload[j] = byte((i*37 + j) & 0xFF)
+		}
+		hdr := protocol.Header{
+			Kind:      protocol.KindRequest,
+			Code:      protocol.MethodIncrement,
+			ItemCount: 1,
+			MessageID: uint64(i + 1),
+		}
+		if err := client.Send(&hdr, payload); err != nil {
+			t.Fatalf("client Send[%d]: %v", i, err)
+		}
+	}
+
+	// Receive all responses
+	buf := make([]byte, 8192)
+	for i, sz := range sizes {
+		rHdr, rPayload, err := client.Receive(buf)
+		if err != nil {
+			t.Fatalf("client Receive[%d]: %v", i, err)
+		}
+		if rHdr.MessageID != uint64(i+1) {
+			t.Errorf("[%d] message_id = %d, want %d", i, rHdr.MessageID, i+1)
+		}
+		if len(rPayload) != sz {
+			t.Errorf("[%d] payload len = %d, want %d", i, len(rPayload), sz)
+			continue
+		}
+		expected := make([]byte, sz)
+		for j := range expected {
+			expected[j] = byte((i*37 + j) & 0xFF)
+		}
+		if !bytes.Equal(rPayload, expected) {
+			t.Errorf("[%d] payload data mismatch", i)
+		}
+	}
+
+	wg.Wait()
+}
+
+// ---------------------------------------------------------------------------
+//  Test: Pipeline with chunked messages (> packet_size)
+// ---------------------------------------------------------------------------
+
+func TestPipelineChunked(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	defer os.Remove(filepath.Join(runDir, service+".sock"))
+
+	const forcedPacketSize = 128
+
+	sCfg := defaultServerConfig()
+	sCfg.PacketSize = forcedPacketSize
+	sCfg.MaxRequestPayloadBytes = 65536
+	sCfg.MaxResponsePayloadBytes = 65536
+	listener := startListener(t, runDir, service, sCfg)
+	defer listener.Close()
+
+	acceptCh := acceptAsync(listener)
+
+	cCfg := defaultClientConfig()
+	cCfg.PacketSize = forcedPacketSize
+	cCfg.MaxRequestPayloadBytes = 65536
+	cCfg.MaxResponsePayloadBytes = 65536
+	client, err := Connect(runDir, service, &cCfg)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer client.Close()
+
+	sr := <-acceptCh
+	if sr.err != nil {
+		t.Fatalf("Accept failed: %v", sr.err)
+	}
+	server := sr.session
+	defer server.Close()
+
+	sizes := []int{200, 500, 300, 800, 150}
+	count := len(sizes)
+
+	// Server goroutine
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, forcedPacketSize)
+		for i := 0; i < count; i++ {
+			rHdr, rPayload, err := server.Receive(buf)
+			if err != nil {
+				t.Errorf("server Receive[%d]: %v", i, err)
+				return
+			}
+			resp := protocol.Header{
+				Kind:      protocol.KindResponse,
+				Code:      rHdr.Code,
+				ItemCount: 1,
+				MessageID: rHdr.MessageID,
+			}
+			if err := server.Send(&resp, rPayload); err != nil {
+				t.Errorf("server Send[%d]: %v", i, err)
+				return
+			}
+		}
+	}()
+
+	// Client sends all chunked messages
+	for i, sz := range sizes {
+		payload := make([]byte, sz)
+		for j := range payload {
+			payload[j] = byte((i + j) & 0xFF)
+		}
+		hdr := protocol.Header{
+			Kind:      protocol.KindRequest,
+			Code:      protocol.MethodIncrement,
+			ItemCount: 1,
+			MessageID: uint64(i + 1),
+		}
+		if err := client.Send(&hdr, payload); err != nil {
+			t.Fatalf("client Send[%d]: %v", i, err)
+		}
+	}
+
+	// Receive all responses
+	buf := make([]byte, forcedPacketSize)
+	for i, sz := range sizes {
+		rHdr, rPayload, err := client.Receive(buf)
+		if err != nil {
+			t.Fatalf("client Receive[%d]: %v", i, err)
+		}
+		if rHdr.MessageID != uint64(i+1) {
+			t.Errorf("[%d] message_id = %d, want %d", i, rHdr.MessageID, i+1)
+		}
+		if len(rPayload) != sz {
+			t.Errorf("[%d] payload len = %d, want %d", i, len(rPayload), sz)
+			continue
+		}
+		expected := make([]byte, sz)
+		for j := range expected {
+			expected[j] = byte((i + j) & 0xFF)
+		}
+		if !bytes.Equal(rPayload, expected) {
+			t.Errorf("[%d] chunked payload data mismatch", i)
+		}
+	}
+
+	wg.Wait()
 }
 
 // ---------------------------------------------------------------------------
