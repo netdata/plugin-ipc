@@ -993,6 +993,371 @@ static void test_align8(void) {
 }
 
 /* ================================================================== */
+/*  Coverage gap tests: chunk header edge cases                       */
+/* ================================================================== */
+
+static void test_chunk_decode_bad_flags(void) {
+    nipc_chunk_header_t c = {
+        .magic = NIPC_MAGIC_CHUNK,
+        .version = NIPC_VERSION,
+        .flags = 0x1234, /* non-zero flags */
+        .message_id = 1,
+        .total_message_len = 100,
+        .chunk_index = 0,
+        .chunk_count = 1,
+        .chunk_payload_len = 100,
+    };
+    uint8_t buf[32];
+    nipc_chunk_header_encode(&c, buf, sizeof(buf));
+
+    nipc_chunk_header_t out;
+    nipc_error_t err = nipc_chunk_header_decode(buf, sizeof(buf), &out);
+    CHECK(err == NIPC_ERR_BAD_LAYOUT, "chunk decode bad flags");
+}
+
+static void test_chunk_decode_zero_payload(void) {
+    nipc_chunk_header_t c = {
+        .magic = NIPC_MAGIC_CHUNK,
+        .version = NIPC_VERSION,
+        .flags = 0,
+        .message_id = 1,
+        .total_message_len = 100,
+        .chunk_index = 0,
+        .chunk_count = 1,
+        .chunk_payload_len = 0, /* zero payload */
+    };
+    uint8_t buf[32];
+    nipc_chunk_header_encode(&c, buf, sizeof(buf));
+
+    nipc_chunk_header_t out;
+    nipc_error_t err = nipc_chunk_header_decode(buf, sizeof(buf), &out);
+    CHECK(err == NIPC_ERR_BAD_LAYOUT, "chunk decode zero payload_len");
+}
+
+/* ================================================================== */
+/*  Coverage gap tests: batch dir encode edge case                    */
+/* ================================================================== */
+
+static void test_batch_dir_encode_too_small(void) {
+    nipc_batch_entry_t entries[2] = {
+        {.offset = 0, .length = 10},
+        {.offset = 16, .length = 20},
+    };
+    uint8_t buf[8]; /* needs 16 bytes for 2 entries */
+    size_t n = nipc_batch_dir_encode(entries, 2, buf, sizeof(buf));
+    CHECK(n == 0, "batch dir encode returns 0 if buf too small");
+}
+
+/* ================================================================== */
+/*  Coverage gap tests: batch dir decode overflow                     */
+/* ================================================================== */
+
+static void test_batch_dir_decode_overflow_count(void) {
+    /* item_count so large that item_count*8 overflows size_t.
+     * On 64-bit, we need item_count >= 2^61 to overflow.
+     * The mul_would_overflow guard should catch this. */
+    uint8_t buf[8] = {0};
+    nipc_batch_entry_t out;
+    /* Use a value that triggers the overflow check */
+    nipc_error_t err = nipc_batch_dir_decode(buf, 8, 0xFFFFFFFFu, 1000, &out);
+    CHECK(err == NIPC_ERR_BAD_ITEM_COUNT || err == NIPC_ERR_TRUNCATED,
+          "batch dir decode overflow count");
+}
+
+/* ================================================================== */
+/*  Coverage gap tests: batch_item_get edge cases                     */
+/* ================================================================== */
+
+static void test_batch_item_get_overflow_count(void) {
+    uint8_t buf[16] = {0};
+    const void *ptr;
+    uint32_t len;
+    /* Overflow-inducing item_count */
+    nipc_error_t err = nipc_batch_item_get(buf, 16, 0xFFFFFFFFu, 0, &ptr, &len);
+    CHECK(err == NIPC_ERR_BAD_ITEM_COUNT || err == NIPC_ERR_TRUNCATED,
+          "batch_item_get overflow count");
+}
+
+static void test_batch_item_get_truncated_dir(void) {
+    uint8_t buf[8] = {0};
+    const void *ptr;
+    uint32_t len;
+    /* 2 items need 16 bytes of dir, but payload is only 8 bytes */
+    nipc_error_t err = nipc_batch_item_get(buf, 8, 2, 0, &ptr, &len);
+    CHECK(err == NIPC_ERR_TRUNCATED, "batch_item_get truncated dir");
+}
+
+static void test_batch_item_get_bad_alignment(void) {
+    /* Craft a directory entry with unaligned offset */
+    uint8_t buf[32];
+    memset(buf, 0, sizeof(buf));
+    uint32_t off = 3; /* unaligned */
+    uint32_t length = 5;
+    memcpy(buf, &off, 4);
+    memcpy(buf + 4, &length, 4);
+
+    const void *ptr;
+    uint32_t len;
+    nipc_error_t err = nipc_batch_item_get(buf, sizeof(buf), 1, 0, &ptr, &len);
+    CHECK(err == NIPC_ERR_BAD_ALIGNMENT, "batch_item_get bad alignment");
+}
+
+static void test_batch_item_get_oob_data(void) {
+    /* Craft a directory entry pointing beyond packed area */
+    uint8_t buf[16];
+    memset(buf, 0, sizeof(buf));
+    uint32_t off = 0;
+    uint32_t length = 100; /* way beyond buffer */
+    memcpy(buf, &off, 4);
+    memcpy(buf + 4, &length, 4);
+
+    const void *ptr;
+    uint32_t len;
+    /* 1 entry: dir=8 bytes, aligned to 8, packed area = 16-8 = 8 bytes,
+     * but entry claims 100 bytes */
+    nipc_error_t err = nipc_batch_item_get(buf, sizeof(buf), 1, 0, &ptr, &len);
+    CHECK(err == NIPC_ERR_OUT_OF_BOUNDS, "batch_item_get oob data");
+}
+
+/* ================================================================== */
+/*  Coverage gap tests: hello-ack flags != 0                          */
+/* ================================================================== */
+
+static void test_hello_ack_decode_bad_flags(void) {
+    nipc_hello_ack_t ack = {
+        .layout_version = 1,
+        .flags = 0x1234, /* non-zero flags */
+        .server_supported_profiles = NIPC_PROFILE_BASELINE,
+        .intersection_profiles = NIPC_PROFILE_BASELINE,
+        .selected_profile = NIPC_PROFILE_BASELINE,
+        .agreed_max_request_payload_bytes = 1024,
+        .agreed_max_request_batch_items = 1,
+        .agreed_max_response_payload_bytes = 1024,
+        .agreed_max_response_batch_items = 1,
+        .agreed_packet_size = 65536,
+    };
+    uint8_t buf[64];
+    size_t n = nipc_hello_ack_encode(&ack, buf, sizeof(buf));
+    CHECK(n > 0, "hello-ack encode with bad flags succeeds");
+
+    nipc_hello_ack_t out;
+    nipc_error_t err = nipc_hello_ack_decode(buf, n, &out);
+    CHECK(err == NIPC_ERR_BAD_LAYOUT, "hello-ack decode bad flags");
+}
+
+/* ================================================================== */
+/*  Coverage gap tests: cgroups resp decode overflow                   */
+/* ================================================================== */
+
+static void test_cgroups_resp_decode_overflow_count(void) {
+    /* Craft a cgroups response header with huge item_count */
+    uint8_t buf[32];
+    memset(buf, 0, sizeof(buf));
+    /* layout_version=1, flags=0, item_count=0xFFFFFFFF */
+    uint16_t lv = 1;
+    memcpy(buf + 0, &lv, 2);
+    uint32_t huge_count = 0xFFFFFFFFu;
+    memcpy(buf + 4, &huge_count, 4);
+
+    nipc_cgroups_resp_view_t view;
+    nipc_error_t err = nipc_cgroups_resp_decode(buf, sizeof(buf), &view);
+    CHECK(err == NIPC_ERR_BAD_ITEM_COUNT || err == NIPC_ERR_TRUNCATED,
+          "cgroups resp decode overflow item_count");
+}
+
+static void test_cgroups_resp_decode_bad_alignment(void) {
+    /* Craft a response with unaligned directory entry offset */
+    /* Need: header(24) + dir(8 per entry) + packed area */
+    uint8_t buf[128];
+    memset(buf, 0, sizeof(buf));
+    uint16_t lv = 1;
+    memcpy(buf + 0, &lv, 2); /* layout_version */
+    uint32_t count = 1;
+    memcpy(buf + 4, &count, 4); /* item_count */
+    /* Dir entry at offset 24: offset=3 (unaligned), length=32 */
+    uint32_t off = 3; /* unaligned */
+    uint32_t len = 32;
+    memcpy(buf + 24, &off, 4);
+    memcpy(buf + 28, &len, 4);
+
+    nipc_cgroups_resp_view_t view;
+    nipc_error_t err = nipc_cgroups_resp_decode(buf, sizeof(buf), &view);
+    CHECK(err == NIPC_ERR_BAD_ALIGNMENT, "cgroups resp decode bad alignment");
+}
+
+/* ================================================================== */
+/*  Coverage gap tests: cgroups resp_item overflow + edge cases        */
+/* ================================================================== */
+
+static void test_cgroups_resp_item_oob_index(void) {
+    /* Request item beyond item_count */
+    uint8_t buf[256];
+    nipc_cgroups_builder_t b;
+    nipc_cgroups_builder_init(&b, buf, sizeof(buf), 1, 0, 100);
+    nipc_cgroups_builder_add(&b, 0, 0, 1, "n", 1, "p", 1);
+    size_t resp_len = nipc_cgroups_builder_finish(&b);
+
+    nipc_cgroups_resp_view_t view;
+    nipc_cgroups_resp_decode(buf, resp_len, &view);
+
+    nipc_cgroups_item_view_t item;
+    nipc_error_t err = nipc_cgroups_resp_item(&view, 99, &item);
+    CHECK(err == NIPC_ERR_OUT_OF_BOUNDS, "cgroups resp_item oob index");
+}
+
+static void test_cgroups_resp_item_bad_layout(void) {
+    /* Build a valid cgroups response, then corrupt the item layout_version */
+    uint8_t buf[256];
+    nipc_cgroups_builder_t b;
+    nipc_cgroups_builder_init(&b, buf, sizeof(buf), 1, 0, 100);
+    nipc_cgroups_builder_add(&b, 0xAABBCCDD, 0, 1, "test", 4, "path", 4);
+    size_t resp_len = nipc_cgroups_builder_finish(&b);
+    CHECK(resp_len > 0, "build valid response for layout test");
+
+    /* Corrupt the item's layout_version at the item start */
+    /* Header=24 bytes, dir=8 bytes, packed area starts at 32 */
+    uint16_t bad_lv = 99;
+    memcpy(buf + 32, &bad_lv, 2);
+
+    nipc_cgroups_resp_view_t view;
+    nipc_error_t err = nipc_cgroups_resp_decode(buf, resp_len, &view);
+    CHECK(err == NIPC_OK, "decode succeeds (dir doesn't check item layout)");
+
+    nipc_cgroups_item_view_t item;
+    err = nipc_cgroups_resp_item(&view, 0, &item);
+    CHECK(err == NIPC_ERR_BAD_LAYOUT, "resp_item bad layout_version");
+}
+
+static void test_cgroups_resp_item_string_name_oob(void) {
+    /* Build a valid response, then corrupt name offset to be < 32 */
+    uint8_t buf[256];
+    nipc_cgroups_builder_t b;
+    nipc_cgroups_builder_init(&b, buf, sizeof(buf), 1, 0, 100);
+    nipc_cgroups_builder_add(&b, 0, 0, 1, "n", 1, "p", 1);
+    size_t resp_len = nipc_cgroups_builder_finish(&b);
+    CHECK(resp_len > 0, "build response for name_oob test");
+
+    nipc_cgroups_resp_view_t view;
+    nipc_error_t err = nipc_cgroups_resp_decode(buf, resp_len, &view);
+    CHECK(err == NIPC_OK, "decode ok for name_oob test");
+
+    /* Corrupt name_off to be < NIPC_CGROUPS_ITEM_HDR_SIZE (32) */
+    /* Item starts at offset 32 (header=24 + dir=8) */
+    uint32_t bad_name_off = 0; /* < 32 */
+    memcpy(buf + 32 + 16, &bad_name_off, 4);
+
+    nipc_cgroups_item_view_t item;
+    err = nipc_cgroups_resp_item(&view, 0, &item);
+    CHECK(err == NIPC_ERR_OUT_OF_BOUNDS, "resp_item name offset < hdr size");
+}
+
+static void test_cgroups_resp_item_name_len_oob(void) {
+    /* Build a valid response, then corrupt name length to exceed item */
+    uint8_t buf[256];
+    nipc_cgroups_builder_t b;
+    nipc_cgroups_builder_init(&b, buf, sizeof(buf), 1, 0, 100);
+    nipc_cgroups_builder_add(&b, 0, 0, 1, "n", 1, "p", 1);
+    size_t resp_len = nipc_cgroups_builder_finish(&b);
+
+    nipc_cgroups_resp_view_t view;
+    nipc_cgroups_resp_decode(buf, resp_len, &view);
+
+    /* Corrupt name_len to be huge */
+    uint32_t bad_name_len = 9999;
+    memcpy(buf + 32 + 20, &bad_name_len, 4);
+
+    nipc_cgroups_item_view_t item;
+    nipc_error_t err = nipc_cgroups_resp_item(&view, 0, &item);
+    CHECK(err == NIPC_ERR_OUT_OF_BOUNDS, "resp_item name length oob");
+}
+
+static void test_cgroups_resp_item_name_missing_nul(void) {
+    /* Build a valid response, then remove the NUL terminator after name */
+    uint8_t buf[256];
+    nipc_cgroups_builder_t b;
+    nipc_cgroups_builder_init(&b, buf, sizeof(buf), 1, 0, 100);
+    nipc_cgroups_builder_add(&b, 0, 0, 1, "n", 1, "p", 1);
+    size_t resp_len = nipc_cgroups_builder_finish(&b);
+
+    nipc_cgroups_resp_view_t view;
+    nipc_cgroups_resp_decode(buf, resp_len, &view);
+
+    /* Find the name in the item and overwrite NUL with non-NUL */
+    /* Item at offset 32, name_off is at +16, name_len at +20 */
+    uint32_t name_off, name_len;
+    memcpy(&name_off, buf + 32 + 16, 4);
+    memcpy(&name_len, buf + 32 + 20, 4);
+    /* The NUL is at buf[32 + name_off + name_len] */
+    buf[32 + name_off + name_len] = 'X';
+
+    nipc_cgroups_item_view_t item;
+    nipc_error_t err = nipc_cgroups_resp_item(&view, 0, &item);
+    CHECK(err == NIPC_ERR_MISSING_NUL, "resp_item name missing NUL");
+}
+
+static void test_cgroups_resp_item_path_off_oob(void) {
+    /* Build a valid response, then corrupt path_off to be < 32 */
+    uint8_t buf[256];
+    nipc_cgroups_builder_t b;
+    nipc_cgroups_builder_init(&b, buf, sizeof(buf), 1, 0, 100);
+    nipc_cgroups_builder_add(&b, 0, 0, 1, "n", 1, "p", 1);
+    size_t resp_len = nipc_cgroups_builder_finish(&b);
+
+    nipc_cgroups_resp_view_t view;
+    nipc_cgroups_resp_decode(buf, resp_len, &view);
+
+    /* Corrupt path_off (at item+24) to be < 32 */
+    uint32_t bad_path_off = 0;
+    memcpy(buf + 32 + 24, &bad_path_off, 4);
+
+    nipc_cgroups_item_view_t item;
+    nipc_error_t err = nipc_cgroups_resp_item(&view, 0, &item);
+    CHECK(err == NIPC_ERR_OUT_OF_BOUNDS, "resp_item path offset < hdr size");
+}
+
+static void test_cgroups_resp_item_path_len_oob(void) {
+    /* Build a valid response, then corrupt path_len to exceed item */
+    uint8_t buf[256];
+    nipc_cgroups_builder_t b;
+    nipc_cgroups_builder_init(&b, buf, sizeof(buf), 1, 0, 100);
+    nipc_cgroups_builder_add(&b, 0, 0, 1, "n", 1, "p", 1);
+    size_t resp_len = nipc_cgroups_builder_finish(&b);
+
+    nipc_cgroups_resp_view_t view;
+    nipc_cgroups_resp_decode(buf, resp_len, &view);
+
+    /* Corrupt path_len (at item+28) to be huge */
+    uint32_t bad_path_len = 9999;
+    memcpy(buf + 32 + 28, &bad_path_len, 4);
+
+    nipc_cgroups_item_view_t item;
+    nipc_error_t err = nipc_cgroups_resp_item(&view, 0, &item);
+    CHECK(err == NIPC_ERR_OUT_OF_BOUNDS, "resp_item path length oob");
+}
+
+static void test_cgroups_resp_item_path_missing_nul(void) {
+    /* Build a valid response, then remove path NUL */
+    uint8_t buf[256];
+    nipc_cgroups_builder_t b;
+    nipc_cgroups_builder_init(&b, buf, sizeof(buf), 1, 0, 100);
+    nipc_cgroups_builder_add(&b, 0, 0, 1, "n", 1, "p", 1);
+    size_t resp_len = nipc_cgroups_builder_finish(&b);
+
+    nipc_cgroups_resp_view_t view;
+    nipc_cgroups_resp_decode(buf, resp_len, &view);
+
+    /* Find path and corrupt its NUL */
+    uint32_t path_off, path_len;
+    memcpy(&path_off, buf + 32 + 24, 4);
+    memcpy(&path_len, buf + 32 + 28, 4);
+    buf[32 + path_off + path_len] = 'Y';
+
+    nipc_cgroups_item_view_t item;
+    nipc_error_t err = nipc_cgroups_resp_item(&view, 0, &item);
+    CHECK(err == NIPC_ERR_MISSING_NUL, "resp_item path missing NUL");
+}
+
+/* ================================================================== */
 /*  Main                                                              */
 /* ================================================================== */
 
@@ -1065,6 +1430,27 @@ int main(void) {
 
     /* Alignment utility */
     test_align8();
+
+    /* Coverage gap tests */
+    test_chunk_decode_bad_flags();
+    test_chunk_decode_zero_payload();
+    test_batch_dir_encode_too_small();
+    test_batch_dir_decode_overflow_count();
+    test_batch_item_get_overflow_count();
+    test_batch_item_get_truncated_dir();
+    test_batch_item_get_bad_alignment();
+    test_batch_item_get_oob_data();
+    test_hello_ack_decode_bad_flags();
+    test_cgroups_resp_decode_overflow_count();
+    test_cgroups_resp_decode_bad_alignment();
+    test_cgroups_resp_item_oob_index();
+    test_cgroups_resp_item_bad_layout();
+    test_cgroups_resp_item_string_name_oob();
+    test_cgroups_resp_item_name_len_oob();
+    test_cgroups_resp_item_name_missing_nul();
+    test_cgroups_resp_item_path_off_oob();
+    test_cgroups_resp_item_path_len_oob();
+    test_cgroups_resp_item_path_missing_nul();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

@@ -12,6 +12,7 @@
 #include "netipc/netipc_protocol.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -909,6 +910,208 @@ static void test_multiple_roundtrips(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: SHM validation error paths                                   */
+/* ------------------------------------------------------------------ */
+
+static void test_server_create_validation(void)
+{
+    printf("Test: Server create validation errors\n");
+
+    nipc_shm_ctx_t ctx;
+
+    /* NULL run_dir */
+    check("null run_dir",
+          nipc_shm_server_create(NULL, "svc", 4096, 4096, &ctx)
+              == NIPC_SHM_ERR_BAD_PARAM);
+
+    /* NULL service_name */
+    check("null service_name",
+          nipc_shm_server_create(TEST_RUN_DIR, NULL, 4096, 4096, &ctx)
+              == NIPC_SHM_ERR_BAD_PARAM);
+
+    /* Invalid service name (bad chars) */
+    check("bad service name",
+          nipc_shm_server_create(TEST_RUN_DIR, "bad/name", 4096, 4096, &ctx)
+              == NIPC_SHM_ERR_BAD_PARAM);
+
+    /* Empty service name */
+    check("empty service name",
+          nipc_shm_server_create(TEST_RUN_DIR, "", 4096, 4096, &ctx)
+              == NIPC_SHM_ERR_BAD_PARAM);
+
+    /* Dot service name */
+    check("dot service name",
+          nipc_shm_server_create(TEST_RUN_DIR, ".", 4096, 4096, &ctx)
+              == NIPC_SHM_ERR_BAD_PARAM);
+
+    /* Dotdot service name */
+    check("dotdot service name",
+          nipc_shm_server_create(TEST_RUN_DIR, "..", 4096, 4096, &ctx)
+              == NIPC_SHM_ERR_BAD_PARAM);
+
+    /* Path too long */
+    char long_dir[4096];
+    memset(long_dir, 'a', sizeof(long_dir) - 1);
+    long_dir[sizeof(long_dir) - 1] = '\0';
+    check("path too long",
+          nipc_shm_server_create(long_dir, "svc", 4096, 4096, &ctx)
+              == NIPC_SHM_ERR_PATH_TOO_LONG);
+}
+
+static void test_client_attach_validation(void)
+{
+    printf("Test: Client attach validation errors\n");
+
+    nipc_shm_ctx_t ctx;
+
+    /* NULL run_dir */
+    check("null run_dir",
+          nipc_shm_client_attach(NULL, "svc", &ctx)
+              == NIPC_SHM_ERR_BAD_PARAM);
+
+    /* NULL service_name */
+    check("null service_name",
+          nipc_shm_client_attach(TEST_RUN_DIR, NULL, &ctx)
+              == NIPC_SHM_ERR_BAD_PARAM);
+
+    /* Bad service name */
+    check("bad service name",
+          nipc_shm_client_attach(TEST_RUN_DIR, "bad/name", &ctx)
+              == NIPC_SHM_ERR_BAD_PARAM);
+
+    /* Path too long */
+    char long_dir[4096];
+    memset(long_dir, 'a', sizeof(long_dir) - 1);
+    long_dir[sizeof(long_dir) - 1] = '\0';
+    check("path too long",
+          nipc_shm_client_attach(long_dir, "svc", &ctx)
+              == NIPC_SHM_ERR_PATH_TOO_LONG);
+
+    /* Non-existent file */
+    check("non-existent file",
+          nipc_shm_client_attach(TEST_RUN_DIR, "does_not_exist_12345", &ctx)
+              == NIPC_SHM_ERR_OPEN);
+}
+
+static void test_shm_close_null(void)
+{
+    printf("Test: SHM close with NULL/invalid\n");
+
+    /* Close with fd=-1 should not crash */
+    nipc_shm_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.fd = -1;
+    ctx.base = NULL;
+    ctx.region_size = 0;
+    nipc_shm_close(&ctx);
+    check("close null/empty does not crash", 1);
+}
+
+static void test_shm_send_bad_param(void)
+{
+    printf("Test: SHM send with bad params\n");
+
+    nipc_shm_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.fd = -1;
+
+    uint8_t msg[32];
+    /* Sending on a non-initialized context */
+    nipc_shm_error_t err = nipc_shm_send(&ctx, msg, sizeof(msg));
+    /* Should fail -- map is NULL so any access would segfault,
+     * but the function should handle it. Let's see if it validates. */
+    check("send on null ctx returns error or does not crash",
+          err != NIPC_SHM_OK);
+}
+
+static void test_shm_bad_magic_file(void)
+{
+    printf("Test: Client attach to file with bad magic\n");
+    const char *svc = "shm_bad_magic";
+    cleanup_shm(svc);
+
+    /* Create a file with wrong magic */
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s.ipcshm", TEST_RUN_DIR, svc);
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) {
+        /* Write enough for stat check but with bad magic */
+        uint8_t zeros[4096];
+        memset(zeros, 0, sizeof(zeros));
+        /* Write a bad magic at the start */
+        uint32_t bad_magic = 0xDEADBEEF;
+        memcpy(zeros, &bad_magic, 4);
+        write(fd, zeros, sizeof(zeros));
+        close(fd);
+
+        nipc_shm_ctx_t ctx;
+        nipc_shm_error_t err = nipc_shm_client_attach(TEST_RUN_DIR, svc, &ctx);
+        check("bad magic rejected",
+              err == NIPC_SHM_ERR_BAD_MAGIC || err == NIPC_SHM_ERR_NOT_READY);
+
+        unlink(path);
+    } else {
+        check("could not create bad magic test file", 0);
+    }
+}
+
+static void test_shm_bad_version_file(void)
+{
+    printf("Test: Client attach to file with bad version\n");
+    const char *svc = "shm_bad_ver";
+    cleanup_shm(svc);
+
+    /* Create a valid SHM region, then corrupt the version */
+    nipc_shm_ctx_t server;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 4096, 4096, &server);
+    if (err == NIPC_SHM_OK) {
+        /* Corrupt version field: offset 4 in the header */
+        nipc_shm_region_header_t *hdr =
+            (nipc_shm_region_header_t *)server.base;
+        hdr->version = 999;
+
+        nipc_shm_ctx_t client;
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, &client);
+        check("bad version rejected", err == NIPC_SHM_ERR_BAD_VERSION);
+
+        /* Restore version before destroy */
+        hdr->version = NIPC_SHM_REGION_VERSION;
+        nipc_shm_destroy(&server);
+    } else {
+        check("could not create server for bad version test", 0);
+    }
+    cleanup_shm(svc);
+}
+
+static void test_shm_truncated_file(void)
+{
+    printf("Test: Client attach to truncated file\n");
+    const char *svc = "shm_truncated";
+    cleanup_shm(svc);
+
+    /* Create a file that's too small to be a valid SHM region */
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s.ipcshm", TEST_RUN_DIR, svc);
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) {
+        /* Write only 10 bytes -- way too small for header check */
+        uint8_t data[10] = {0};
+        write(fd, data, sizeof(data));
+        close(fd);
+
+        nipc_shm_ctx_t ctx;
+        nipc_shm_error_t err = nipc_shm_client_attach(TEST_RUN_DIR, svc, &ctx);
+        check("truncated file rejected",
+              err != NIPC_SHM_OK);
+
+        unlink(path);
+    } else {
+        check("could not create truncated test file", 0);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -920,15 +1123,22 @@ int main(void)
 
     printf("=== L1 POSIX SHM Transport Tests ===\n\n");
 
-    test_direct_roundtrip();      printf("\n");
-    test_negotiated_shm();        printf("\n");
-    test_profile_fallback();      printf("\n");
-    test_disconnect_detection();  printf("\n");
-    test_stale_shm_recovery();    printf("\n");
-    test_large_message();         printf("\n");
-    test_msg_too_large();         printf("\n");
-    test_addr_in_use();           printf("\n");
-    test_multiple_roundtrips();   printf("\n");
+    test_direct_roundtrip();           printf("\n");
+    test_negotiated_shm();             printf("\n");
+    test_profile_fallback();           printf("\n");
+    test_disconnect_detection();       printf("\n");
+    test_stale_shm_recovery();         printf("\n");
+    test_large_message();              printf("\n");
+    test_msg_too_large();              printf("\n");
+    test_addr_in_use();                printf("\n");
+    test_multiple_roundtrips();        printf("\n");
+    test_server_create_validation();   printf("\n");
+    test_client_attach_validation();   printf("\n");
+    test_shm_close_null();             printf("\n");
+    test_shm_send_bad_param();         printf("\n");
+    test_shm_bad_magic_file();         printf("\n");
+    test_shm_bad_version_file();       printf("\n");
+    test_shm_truncated_file();         printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

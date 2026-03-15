@@ -77,9 +77,64 @@ pool, no batch dispatch.
 
 ---
 
-## Phase H2: Coverage Measurement and Gaps
+## Phase H2: Coverage Measurement and Gaps [IN PROGRESS]
 
 **We have ~600 test assertions but zero proof of coverage percentage.**
+**STATUS: Infrastructure built. Coverage measured. Gap-closing tests written.**
+
+### Coverage Infrastructure (DONE)
+- CMakeLists.txt: `NETIPC_COVERAGE` option adds `-fprofile-arcs -ftest-coverage -O0 -g`
+- `tests/run-coverage-c.sh`: Builds+runs all C tests, reports per-file gcov coverage
+- `tests/run-coverage-rust.sh`: Runs cargo-tarpaulin on library code
+- `tests/run-coverage-go.sh`: Runs go test with -coverprofile, reports per-file/function
+
+### Coverage Results
+
+#### C Library Coverage (84.2% total, 1400/1662 lines)
+| File | Coverage | Lines |
+|------|----------|-------|
+| netipc_protocol.c | 98.7% | 394/399 |
+| netipc_uds.c | 85.9% | 377/439 |
+| netipc_shm.c | 86.9% | 265/305 |
+| netipc_service.c | 70.1% | 364/519 |
+
+#### Rust Library Coverage (80.0% total, 1159/1448 lines)
+| File | Coverage | Lines |
+|------|----------|-------|
+| protocol.rs | 90.1% | 353/392 |
+| transport/posix.rs | 83.1% | 310/373 |
+| transport/shm.rs | 69.0% | 216/313 |
+| service/cgroups.rs | 76.9% | 280/364 |
+
+#### Go Library Coverage (80.3% total, 981/1221 stmts)
+| File | Coverage | Stmts |
+|------|----------|-------|
+| protocol/frame.go | 98.0% | 291/297 |
+| transport/posix/uds.go | 86.3% | 297/344 |
+| transport/posix/shm_linux.go | 70.8% | 226/319 |
+| service/cgroups/client.go | 60.2% | 139/231 |
+| service/cgroups/cache.go | 93.3% | 28/30 |
+
+### Gap Analysis
+
+**Protocol (all languages ~98%)**: Only 64-bit-unreachable overflow guards uncovered. Effectively complete.
+
+**UDS transport (~85%)**: Uncovered: chunked receive path (multi-packet reassembly), some handshake error paths, socket failure paths. Chunked receive is the biggest gap -- needs a test that sends messages larger than packet_size.
+
+**SHM transport (~70-87%)**: Uncovered: error paths for invalid params, open/truncate/mmap failures, stale detection edge cases. Many are OS-level failure paths hard to trigger in tests.
+
+**Service/client (~60-70%)**: Largest gap across all languages. The SHM transport path through the managed client/server API is completely untested. This is the #1 gap to close.
+
+### Tests Added (Phase H2)
+- `test_protocol.c`: +19 tests covering chunk header flags/zero-payload, batch dir encode overflow, batch_item_get edge cases, hello-ack bad flags, cgroups resp item corruption
+- `test_shm.c`: +17 tests covering server create validation (null params, bad names, path too long), client attach validation, close edge cases, bad magic/version/truncated files
+- `test_uds.c`: +9 tests covering send/receive parameter validation, close listener/session edge cases, path too long
+
+### Remaining Gaps (to close in subsequent iterations)
+1. SHM-mode L2 service test (client+server with SHM profile negotiation)
+2. Chunked receive path in UDS
+3. Server session capacity and growth paths
+4. Cache build failure paths (malloc failure injection)
 
 ### Implementation plan
 1. C: Add CMake option for coverage build (`-fprofile-arcs -ftest-coverage`)

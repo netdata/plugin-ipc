@@ -19,6 +19,13 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 find_package(Threads REQUIRED)
 
+# Coverage build option: adds -fprofile-arcs -ftest-coverage to all C targets
+option(NETIPC_COVERAGE "Enable code coverage instrumentation (gcov)" OFF)
+if(NETIPC_COVERAGE)
+    add_compile_options(-fprofile-arcs -ftest-coverage -O0 -g)
+    add_link_options(-fprofile-arcs -ftest-coverage)
+endif()
+
 # Detect Windows runtime (native or MSYS/Cygwin)
 set(NETIPC_WINDOWS_RUNTIME OFF)
 if(WIN32 OR CYGWIN OR CMAKE_SYSTEM_NAME STREQUAL "MSYS")

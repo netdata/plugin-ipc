@@ -860,6 +860,122 @@ static void test_invalid_service_name(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: Send/receive validation                                      */
+/* ------------------------------------------------------------------ */
+
+static void test_send_recv_validation(void)
+{
+    printf("Test: Send/receive parameter validation\n");
+
+    /* Send with NULL session */
+    nipc_header_t hdr = {0};
+    uint8_t data[4] = {0};
+    check("send null session",
+          nipc_uds_send(NULL, &hdr, data, sizeof(data))
+              == NIPC_UDS_ERR_BAD_PARAM);
+
+    /* Send with invalid fd */
+    nipc_uds_session_t bad_session;
+    memset(&bad_session, 0, sizeof(bad_session));
+    bad_session.fd = -1;
+    check("send bad fd",
+          nipc_uds_send(&bad_session, &hdr, data, sizeof(data))
+              == NIPC_UDS_ERR_BAD_PARAM);
+
+    /* Receive with NULL session */
+    uint8_t buf[256];
+    nipc_header_t hdr_out;
+    const void *payload;
+    size_t payload_len;
+    check("recv null session",
+          nipc_uds_receive(NULL, buf, sizeof(buf),
+                           &hdr_out, &payload, &payload_len)
+              == NIPC_UDS_ERR_BAD_PARAM);
+
+    /* Receive with invalid fd */
+    check("recv bad fd",
+          nipc_uds_receive(&bad_session, buf, sizeof(buf),
+                           &hdr_out, &payload, &payload_len)
+              == NIPC_UDS_ERR_BAD_PARAM);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: Close listener edge cases                                    */
+/* ------------------------------------------------------------------ */
+
+static void test_close_listener_edge(void)
+{
+    printf("Test: Close listener edge cases\n");
+
+    /* Close NULL listener should not crash */
+    nipc_uds_close_listener(NULL);
+    check("close null listener does not crash", 1);
+
+    /* Close listener with fd=-1 */
+    nipc_uds_listener_t listener;
+    memset(&listener, 0, sizeof(listener));
+    listener.fd = -1;
+    listener.path[0] = '\0';
+    nipc_uds_close_listener(&listener);
+    check("close invalid listener does not crash", 1);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: Close session edge cases                                     */
+/* ------------------------------------------------------------------ */
+
+static void test_close_session_edge(void)
+{
+    printf("Test: Close session edge cases\n");
+
+    /* Close session with fd=-1 should not crash */
+    nipc_uds_session_t session;
+    memset(&session, 0, sizeof(session));
+    session.fd = -1;
+    session.recv_buf = NULL;
+    nipc_uds_close_session(&session);
+    check("close session fd=-1 does not crash", 1);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: Listen path too long                                         */
+/* ------------------------------------------------------------------ */
+
+static void test_listen_path_too_long(void)
+{
+    printf("Test: Listen with path too long\n");
+
+    char long_dir[4096];
+    memset(long_dir, 'x', sizeof(long_dir) - 1);
+    long_dir[sizeof(long_dir) - 1] = '\0';
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_uds_listener_t listener;
+    check("listen path too long",
+          nipc_uds_listen(long_dir, "svc", &scfg, &listener)
+              == NIPC_UDS_ERR_PATH_TOO_LONG);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: Connect path too long                                        */
+/* ------------------------------------------------------------------ */
+
+static void test_connect_path_too_long(void)
+{
+    printf("Test: Connect with path too long\n");
+
+    char long_dir[4096];
+    memset(long_dir, 'x', sizeof(long_dir) - 1);
+    long_dir[sizeof(long_dir) - 1] = '\0';
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    check("connect path too long",
+          nipc_uds_connect(long_dir, "svc", &ccfg, &session)
+              == NIPC_UDS_ERR_PATH_TOO_LONG);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -875,16 +991,21 @@ int main(void)
 
     printf("=== L1 POSIX UDS SEQPACKET Transport Tests ===\n\n");
 
-    test_ping_pong();           printf("\n");
-    test_multi_client();        printf("\n");
-    test_pipelining();          printf("\n");
-    test_chunking();            printf("\n");
-    test_bad_auth();            printf("\n");
-    test_profile_mismatch();    printf("\n");
-    test_stale_recovery();      printf("\n");
-    test_disconnect_inflight(); printf("\n");
-    test_batch();               printf("\n");
-    test_invalid_service_name(); printf("\n");
+    test_ping_pong();              printf("\n");
+    test_multi_client();           printf("\n");
+    test_pipelining();             printf("\n");
+    test_chunking();               printf("\n");
+    test_bad_auth();               printf("\n");
+    test_profile_mismatch();       printf("\n");
+    test_stale_recovery();         printf("\n");
+    test_disconnect_inflight();    printf("\n");
+    test_batch();                  printf("\n");
+    test_invalid_service_name();   printf("\n");
+    test_send_recv_validation();   printf("\n");
+    test_close_listener_edge();    printf("\n");
+    test_close_session_edge();     printf("\n");
+    test_listen_path_too_long();   printf("\n");
+    test_connect_path_too_long();  printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
