@@ -267,6 +267,14 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_link_libraries(interop_service_c PRIVATE
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
     )
+
+    # Stress tests (Phase H4: large-scale and stress testing)
+    add_executable(test_stress tests/fixtures/c/test_stress.c)
+    target_link_libraries(test_stress PRIVATE
+        netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
+    )
+    add_test(NAME test_stress COMMAND test_stress)
+    set_tests_properties(test_stress PROPERTIES TIMEOUT 180)
 endif()
 
 # --- Rust UDS transport tests ---------------------------------------------
@@ -466,6 +474,28 @@ if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tests/fixtures/go"
         COMMENT "Building Go L3 cache interop binary"
     )
+endif()
+
+# --- Go stress tests (Phase H4) ---------------------------------------------
+
+if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
+    add_test(NAME test_stress_go
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} test -count=1 -timeout=180s
+            -run TestStress ./pkg/netipc/service/cgroups/
+        WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
+    )
+    set_tests_properties(test_stress_go PROPERTIES TIMEOUT 240)
+endif()
+
+# --- Rust stress tests (Phase H4) -------------------------------------------
+
+if(CARGO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+    add_test(NAME test_stress_rust
+        COMMAND ${CARGO_EXECUTABLE} test test_stress -- --test-threads=1
+        WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+    )
+    set_tests_properties(test_stress_rust PROPERTIES TIMEOUT 240)
 endif()
 
 # --- Cross-language L3 cache interop tests (Linux only) ---------------------

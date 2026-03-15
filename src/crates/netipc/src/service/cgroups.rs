@@ -1304,6 +1304,14 @@ mod tests {
             service: &str,
             handler: fn(u16, &[u8]) -> Option<Vec<u8>>,
         ) -> Self {
+            Self::start_with_workers(service, handler, 8)
+        }
+
+        fn start_with_workers(
+            service: &str,
+            handler: fn(u16, &[u8]) -> Option<Vec<u8>>,
+            worker_count: usize,
+        ) -> Self {
             ensure_run_dir();
             cleanup_all(service);
 
@@ -1311,12 +1319,13 @@ mod tests {
             let ready_flag = Arc::new(AtomicBool::new(false));
             let ready_clone = ready_flag.clone();
 
-            let mut server = CgroupsServer::new(
+            let mut server = CgroupsServer::with_workers(
                 TEST_RUN_DIR,
                 &svc,
                 server_config(),
                 RESPONSE_BUF_SIZE,
                 Arc::new(move |code, payload| handler(code, payload)),
+                worker_count,
             );
             let stop_flag = server.running_flag();
 
@@ -1911,6 +1920,457 @@ mod tests {
         }
 
         cache.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    // ---------------------------------------------------------------
+    //  Stress tests (Phase H4)
+    // ---------------------------------------------------------------
+
+    /// djb2 hash matching the C implementation
+    fn simple_hash(s: &str) -> u32 {
+        let mut hash: u32 = 5381;
+        for c in s.bytes() {
+            hash = hash.wrapping_shl(5).wrapping_add(hash).wrapping_add(c as u32);
+        }
+        hash
+    }
+
+    struct StressTestServer {
+        stop_flag: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl StressTestServer {
+        fn start(service: &str, n: u32, resp_buf_size: usize) -> Self {
+            ensure_run_dir();
+            cleanup_all(service);
+
+            let svc = service.to_string();
+            let ready_flag = Arc::new(AtomicBool::new(false));
+            let ready_clone = ready_flag.clone();
+
+            let mut scfg = server_config();
+            scfg.max_response_payload_bytes = resp_buf_size as u32;
+            scfg.packet_size = 65536; // force smaller packets for chunked transport
+
+            let handler: Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync> =
+                Arc::new(move |method_code, request_payload| {
+                    if method_code != METHOD_CGROUPS_SNAPSHOT {
+                        return None;
+                    }
+                    if CgroupsRequest::decode(request_payload).is_err() {
+                        return None;
+                    }
+
+                    let mut buf = vec![0u8; resp_buf_size];
+                    let mut builder = CgroupsBuilder::new(&mut buf, n, 1, 42);
+
+                    for i in 0..n {
+                        let name = format!("container-{i:04}");
+                        let path = format!("/sys/fs/cgroup/docker/{i:04}");
+                        let hash = simple_hash(&name);
+                        let enabled = if i % 5 == 0 { 0 } else { 1 };
+                        if builder.add(hash, 0x10, enabled,
+                                       name.as_bytes(), path.as_bytes()).is_err() {
+                            return None;
+                        }
+                    }
+
+                    let total = builder.finish();
+                    buf.truncate(total);
+                    Some(buf)
+                });
+
+            let mut server = CgroupsServer::new(
+                TEST_RUN_DIR,
+                &svc,
+                scfg,
+                resp_buf_size,
+                handler,
+            );
+            let stop_flag = server.running_flag();
+
+            let thread = thread::spawn(move || {
+                ready_clone.store(true, Ordering::Release);
+                let _ = server.run();
+            });
+
+            for _ in 0..2000 {
+                if ready_flag.load(Ordering::Acquire) {
+                    break;
+                }
+                thread::sleep(Duration::from_micros(500));
+            }
+            thread::sleep(Duration::from_millis(50));
+
+            StressTestServer {
+                stop_flag,
+                thread: Some(thread),
+            }
+        }
+
+        fn stop(&mut self) {
+            self.stop_flag.store(false, Ordering::Release);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    impl Drop for StressTestServer {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    #[test]
+    fn test_stress_1000_items() {
+        let svc = "rs_stress_1k";
+
+        const N: u32 = 1000;
+        const BUF_SIZE: usize = 300 * N as usize;
+
+        let mut server = StressTestServer::start(svc, N, BUF_SIZE);
+
+        let mut cfg = client_config();
+        cfg.max_response_payload_bytes = BUF_SIZE as u32;
+        cfg.packet_size = 65536;
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, cfg);
+        client.refresh();
+        assert!(client.ready(), "client not ready");
+
+        let start = std::time::Instant::now();
+        let mut resp_buf = vec![0u8; BUF_SIZE];
+        let view = client.call_snapshot(&mut resp_buf).expect("call should succeed");
+        let elapsed = start.elapsed();
+
+        eprintln!("  1000 items: {:?}", elapsed);
+
+        assert_eq!(view.item_count, N);
+        assert_eq!(view.systemd_enabled, 1);
+        assert_eq!(view.generation, 42);
+
+        // Verify ALL items
+        for i in 0..N {
+            let item = view.item(i).unwrap_or_else(|_| panic!("item {i} decode failed"));
+            let expected_name = format!("container-{i:04}");
+            let expected_path = format!("/sys/fs/cgroup/docker/{i:04}");
+            let expected_hash = simple_hash(&expected_name);
+            let expected_enabled = if i % 5 == 0 { 0 } else { 1 };
+
+            assert_eq!(item.hash, expected_hash, "item {i} hash mismatch");
+            assert_eq!(
+                std::str::from_utf8(item.name.as_bytes()).unwrap(),
+                expected_name,
+                "item {i} name mismatch"
+            );
+            assert_eq!(
+                std::str::from_utf8(item.path.as_bytes()).unwrap(),
+                expected_path,
+                "item {i} path mismatch"
+            );
+            assert_eq!(item.enabled, expected_enabled, "item {i} enabled mismatch");
+            assert_eq!(item.options, 0x10, "item {i} options mismatch");
+        }
+
+        client.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_stress_5000_items() {
+        let svc = "rs_stress_5k";
+
+        const N: u32 = 5000;
+        const BUF_SIZE: usize = 300 * N as usize;
+
+        let mut server = StressTestServer::start(svc, N, BUF_SIZE);
+
+        let mut cfg = client_config();
+        cfg.max_response_payload_bytes = BUF_SIZE as u32;
+        cfg.packet_size = 65536;
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, cfg);
+        client.refresh();
+        assert!(client.ready(), "client not ready");
+
+        let start = std::time::Instant::now();
+        let mut resp_buf = vec![0u8; BUF_SIZE];
+        let view = client.call_snapshot(&mut resp_buf).expect("call should succeed");
+        let elapsed = start.elapsed();
+
+        eprintln!("  5000 items: {:?}", elapsed);
+
+        assert_eq!(view.item_count, N);
+
+        // Spot-check first, middle, last
+        for idx in [0, N / 2, N - 1] {
+            let item = view.item(idx).unwrap();
+            let expected_name = format!("container-{idx:04}");
+            let expected_hash = simple_hash(&expected_name);
+            assert_eq!(item.hash, expected_hash);
+            assert_eq!(
+                std::str::from_utf8(item.name.as_bytes()).unwrap(),
+                expected_name
+            );
+        }
+
+        client.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_stress_concurrent_clients() {
+        let svc = "rs_stress_concurrent";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start_with_workers(svc, test_cgroups_handler, 64);
+
+        const NUM_CLIENTS: usize = 50;
+        const REQUESTS_PER: usize = 10;
+
+        let start = std::time::Instant::now();
+
+        let mut handles = Vec::new();
+        for client_id in 0..NUM_CLIENTS {
+            let svc_name = svc.to_string();
+            let handle = thread::spawn(move || {
+                let mut client = CgroupsClient::new(TEST_RUN_DIR, &svc_name, client_config());
+
+                for _ in 0..200 {
+                    client.refresh();
+                    if client.ready() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+
+                assert!(client.ready(), "client {client_id} not ready");
+
+                let mut successes = 0usize;
+                for _ in 0..REQUESTS_PER {
+                    let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
+                    match client.call_snapshot(&mut resp_buf) {
+                        Ok(view) => {
+                            assert_eq!(view.item_count, 3);
+                            assert_eq!(view.generation, 42);
+                            let item0 = view.item(0).expect("item 0");
+                            assert_eq!(item0.hash, 1001);
+                            assert_eq!(
+                                std::str::from_utf8(item0.name.as_bytes()).unwrap(),
+                                "docker-abc123"
+                            );
+                            let item2 = view.item(2).expect("item 2");
+                            assert_eq!(item2.hash, 3003);
+                            successes += 1;
+                        }
+                        Err(e) => panic!("client {client_id} call failed: {:?}", e),
+                    }
+                }
+                client.close();
+                successes
+            });
+            handles.push(handle);
+        }
+
+        let mut total = 0usize;
+        for h in handles {
+            total += h.join().expect("client thread panicked");
+        }
+
+        let elapsed = start.elapsed();
+        eprintln!(
+            "  {NUM_CLIENTS} clients x {REQUESTS_PER} req: {total}/{} in {:?}",
+            NUM_CLIENTS * REQUESTS_PER,
+            elapsed
+        );
+
+        assert_eq!(total, NUM_CLIENTS * REQUESTS_PER);
+
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_stress_rapid_connect_disconnect() {
+        let svc = "rs_stress_rapid";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, test_cgroups_handler);
+
+        const CYCLES: usize = 1000;
+        let mut successes = 0usize;
+        let mut failures = 0usize;
+
+        let start = std::time::Instant::now();
+
+        for _ in 0..CYCLES {
+            let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
+
+            let mut connected = false;
+            for _ in 0..50 {
+                client.refresh();
+                if client.ready() {
+                    connected = true;
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+
+            if !connected {
+                failures += 1;
+                client.close();
+                continue;
+            }
+
+            let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
+            match client.call_snapshot(&mut resp_buf) {
+                Ok(view) => {
+                    if view.item_count == 3 && view.generation == 42 {
+                        successes += 1;
+                    } else {
+                        failures += 1;
+                    }
+                }
+                Err(_) => failures += 1,
+            }
+
+            client.close();
+        }
+
+        let elapsed = start.elapsed();
+        eprintln!("  {CYCLES} rapid cycles: {successes} ok, {failures} fail, {:?}", elapsed);
+
+        assert_eq!(successes, CYCLES, "all cycles should succeed");
+        assert_eq!(failures, 0, "no failures expected");
+
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_stress_cache_concurrent() {
+        let svc = "rs_stress_cache";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start_with_workers(svc, test_cgroups_handler, 16);
+
+        const NUM_CLIENTS: usize = 10;
+        const REQUESTS_PER: usize = 100;
+
+        let start = std::time::Instant::now();
+
+        let mut handles = Vec::new();
+        for _ in 0..NUM_CLIENTS {
+            let svc_name = svc.to_string();
+            let handle = thread::spawn(move || {
+                let mut cache = CgroupsCache::new(TEST_RUN_DIR, &svc_name, client_config());
+                let mut successes = 0usize;
+
+                for _ in 0..REQUESTS_PER {
+                    let updated = cache.refresh();
+                    if updated || cache.ready() {
+                        let status = cache.status();
+                        if status.item_count != 3 {
+                            continue;
+                        }
+                        let item = cache.lookup(1001, "docker-abc123");
+                        if item.is_some() && item.unwrap().hash == 1001 {
+                            successes += 1;
+                        }
+                    }
+                }
+                cache.close();
+                successes
+            });
+            handles.push(handle);
+        }
+
+        let mut total = 0usize;
+        for h in handles {
+            total += h.join().expect("cache thread panicked");
+        }
+
+        let elapsed = start.elapsed();
+        eprintln!(
+            "  {NUM_CLIENTS} cache clients x {REQUESTS_PER} req: {total}/{} in {:?}",
+            NUM_CLIENTS * REQUESTS_PER,
+            elapsed
+        );
+
+        assert_eq!(total, NUM_CLIENTS * REQUESTS_PER);
+
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_stress_long_running() {
+        let svc = "rs_stress_long";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, test_cgroups_handler);
+
+        const NUM_CLIENTS: usize = 5;
+        let run_duration = Duration::from_secs(60);
+
+        let running = Arc::new(AtomicBool::new(true));
+        let mut handles = Vec::new();
+
+        for _ in 0..NUM_CLIENTS {
+            let svc_name = svc.to_string();
+            let r = running.clone();
+            let handle = thread::spawn(move || {
+                let mut cache = CgroupsCache::new(TEST_RUN_DIR, &svc_name, client_config());
+                let mut refreshes = 0u64;
+                let mut errors = 0u64;
+
+                while r.load(Ordering::Acquire) {
+                    let updated = cache.refresh();
+                    if updated || cache.ready() {
+                        let status = cache.status();
+                        if status.item_count == 3 {
+                            refreshes += 1;
+                        } else {
+                            errors += 1;
+                        }
+                    } else {
+                        errors += 1;
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+
+                cache.close();
+                (refreshes, errors)
+            });
+            handles.push(handle);
+        }
+
+        thread::sleep(run_duration);
+        running.store(false, Ordering::Release);
+
+        let mut total_refreshes = 0u64;
+        let mut total_errors = 0u64;
+        for h in handles {
+            let (r, e) = h.join().expect("client thread panicked");
+            total_refreshes += r;
+            total_errors += e;
+        }
+
+        eprintln!("  60s run: {total_refreshes} refreshes, {total_errors} errors");
+
+        assert!(total_refreshes > 0, "expected some refreshes");
+        assert_eq!(total_errors, 0, "expected zero errors in 60s run");
+
         server.stop();
         cleanup_all(svc);
     }
