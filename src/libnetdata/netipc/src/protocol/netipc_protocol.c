@@ -603,6 +603,17 @@ nipc_error_t nipc_cgroups_resp_item(const nipc_cgroups_resp_view_t *view,
     if (item[path_off + path_len] != '\0')
         return NIPC_ERR_MISSING_NUL;
 
+    /* Reject overlapping name and path regions.
+     * Each region is [off, off+len+1) to include the NUL terminator. */
+    {
+        uint64_t name_start = name_off;
+        uint64_t name_end   = (uint64_t)name_off + name_len + 1;
+        uint64_t path_start = path_off;
+        uint64_t path_end   = (uint64_t)path_off + path_len + 1;
+        if (name_start < path_end && path_start < name_end)
+            return NIPC_ERR_BAD_LAYOUT;
+    }
+
     out->name.ptr = (const char *)(item + name_off);
     out->name.len = name_len;
     out->path.ptr = (const char *)(item + path_off);

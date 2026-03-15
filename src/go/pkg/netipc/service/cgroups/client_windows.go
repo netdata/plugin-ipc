@@ -220,6 +220,17 @@ func (c *Client) doCgroupsCallRaw(responseBuf []byte) (int, error) {
 		return 0, err
 	}
 
+	// Verify response envelope fields before decode
+	if respHdr.Kind != protocol.KindResponse {
+		return 0, protocol.ErrBadKind
+	}
+	if respHdr.Code != protocol.MethodCgroupsSnapshot {
+		return 0, protocol.ErrBadLayout
+	}
+	if respHdr.MessageID != hdr.MessageID {
+		return 0, protocol.ErrBadLayout
+	}
+
 	if respHdr.TransportStatus != protocol.StatusOK {
 		return 0, protocol.ErrBadLayout
 	}
@@ -419,8 +430,9 @@ func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmCont
 			copy(payload, p)
 		}
 
+		// Protocol violation: unexpected message kind terminates session
 		if hdr.Kind != protocol.KindRequest {
-			continue
+			return
 		}
 
 		respPayload, ok := s.handler(hdr.Code, payload)

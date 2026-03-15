@@ -11,7 +11,6 @@
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_uds.h"
 
-#include <errno.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -688,6 +687,86 @@ static void test_graceful_drain(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: non-request message terminates session                        */
+/* ------------------------------------------------------------------ */
+
+static void test_non_request_terminates_session(void)
+{
+    const char *svc = "svc_nonreq";
+    cleanup_all(svc);
+    printf("--- test_non_request_terminates_session ---\n");
+
+    /* Start server */
+    nipc_managed_server_t server;
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_error_t err = nipc_server_init(&server, TEST_RUN_DIR, svc,
+                                         &scfg, 2, RESPONSE_BUF_SIZE,
+                                         test_cgroups_handler, NULL);
+    check("server init", err == NIPC_OK);
+
+    pthread_t server_tid;
+    pthread_create(&server_tid, NULL,
+                   (void *(*)(void *))nipc_server_run, &server);
+    usleep(50000);
+
+    /* Connect via raw UDS session */
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    memset(&session, 0, sizeof(session));
+    session.fd = -1;
+    nipc_uds_error_t uerr = nipc_uds_connect(TEST_RUN_DIR, svc,
+                                               &ccfg, &session);
+    check("raw connect", uerr == NIPC_UDS_OK);
+
+    /* Send a RESPONSE message (not REQUEST) - protocol violation */
+    nipc_header_t hdr = {0};
+    hdr.kind             = NIPC_KIND_RESPONSE;
+    hdr.code             = NIPC_METHOD_CGROUPS_SNAPSHOT;
+    hdr.flags            = 0;
+    hdr.item_count       = 0;
+    hdr.message_id       = 1;
+    hdr.transport_status = NIPC_STATUS_OK;
+
+    uerr = nipc_uds_send(&session, &hdr, NULL, 0);
+    check("send non-request", uerr == NIPC_UDS_OK);
+
+    /* Wait for server to process and terminate the session */
+    usleep(200000);
+
+    /* Try to send a valid request - should fail because server closed */
+    nipc_header_t hdr2 = {0};
+    hdr2.kind             = NIPC_KIND_REQUEST;
+    hdr2.code             = NIPC_METHOD_CGROUPS_SNAPSHOT;
+    hdr2.flags            = 0;
+    hdr2.item_count       = 1;
+    hdr2.message_id       = 2;
+    hdr2.transport_status = NIPC_STATUS_OK;
+
+    uint8_t req_buf[4];
+    nipc_cgroups_req_t req = { .layout_version = 1, .flags = 0 };
+    nipc_cgroups_req_encode(&req, req_buf, sizeof(req_buf));
+
+    /* Send may succeed (buffered), but receive should fail */
+    nipc_uds_send(&session, &hdr2, req_buf, 4);
+    uint8_t recv_buf[4096];
+    nipc_header_t resp_hdr;
+    const void *payload;
+    size_t payload_len;
+    nipc_uds_error_t recv_err = nipc_uds_receive(&session, recv_buf,
+                                                   sizeof(recv_buf),
+                                                   &resp_hdr, &payload,
+                                                   &payload_len);
+    check("recv after non-request fails", recv_err != NIPC_UDS_OK);
+
+    nipc_uds_close_session(&session);
+
+    nipc_server_stop(&server);
+    pthread_join(server_tid, NULL);
+    nipc_server_destroy(&server);
+    cleanup_all(svc);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -706,6 +785,7 @@ int main(void)
     test_handler_failure();        printf("\n");
     test_status_reporting();       printf("\n");
     test_graceful_drain();         printf("\n");
+    test_non_request_terminates_session(); printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

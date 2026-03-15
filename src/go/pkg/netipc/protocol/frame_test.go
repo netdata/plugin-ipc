@@ -1653,3 +1653,33 @@ func TestCgroupsResponseItemPathOffsetBelowHeader(t *testing.T) {
 		t.Fatalf("got %v, want ErrOutOfBounds", err)
 	}
 }
+
+func TestCgroupsResponseItemOverlapRejected(t *testing.T) {
+	buf := make([]byte, 8192)
+	b := NewCgroupsBuilder(buf, 1, 0, 1)
+	if err := b.Add(1, 0, 1, []byte("hello"), []byte("/path")); err != nil {
+		t.Fatal(err)
+	}
+	total := b.Finish()
+
+	dirBase := cgroupsRespHdr
+	itemOff := int(le.Uint32(buf[dirBase : dirBase+4]))
+	packedStart := cgroupsRespHdr + 1*cgroupsDirEntry
+	itemStart := packedStart + itemOff
+
+	// name region is [32..38) (name_off=32, name_len=5, +1 for NUL)
+	// Set path_off=34 (inside name), path_len=1
+	le.PutUint32(buf[itemStart+24:itemStart+28], 34)
+	le.PutUint32(buf[itemStart+28:itemStart+32], 1)
+	// Ensure NUL at item[35]
+	buf[itemStart+35] = 0
+
+	view, err := DecodeCgroupsResponse(buf[:total])
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = view.Item(0)
+	if err != ErrBadLayout {
+		t.Fatalf("got %v, want ErrBadLayout (overlapping fields)", err)
+	}
+}

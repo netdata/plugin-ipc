@@ -750,6 +750,17 @@ func (v *CgroupsResponseView) Item(index uint32) (CgroupsItemView, error) {
 		return CgroupsItemView{}, ErrMissingNul
 	}
 
+	// Reject overlapping name and path regions (including NUL)
+	{
+		nameStart := uint64(nameOff)
+		nameEnd := nameStart + uint64(nameLen) + 1
+		pathStart := uint64(pathOff)
+		pathEnd := pathStart + uint64(pathLen) + 1
+		if nameStart < pathEnd && pathStart < nameEnd {
+			return CgroupsItemView{}, ErrBadLayout
+		}
+	}
+
 	name := NewCStringView(item[nameOff:nameOff+int(nameLen)+1], nameLen)
 	path := NewCStringView(item[pathOff:pathOff+int(pathLen)+1], pathLen)
 

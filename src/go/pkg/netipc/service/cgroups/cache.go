@@ -8,10 +8,18 @@ import (
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
 )
 
+// cacheKey is the composite key for O(1) hash+name lookup.
+type cacheKey struct {
+	hash uint32
+	name string
+}
+
 // Cache is an L3 client-side cgroups snapshot cache.
 type Cache struct {
 	client *Client
 	items  []CacheItem
+	// O(1) lookup index: (hash, name) -> index into items slice
+	lookupIndex map[cacheKey]int
 
 	systemdEnabled      uint32
 	generation          uint64
@@ -62,7 +70,14 @@ func (c *Cache) Refresh() bool {
 		})
 	}
 
+	// Rebuild lookup index
+	idx := make(map[cacheKey]int, len(newItems))
+	for i := range newItems {
+		idx[cacheKey{hash: newItems[i].Hash, name: newItems[i].Name}] = i
+	}
+
 	c.items = newItems
+	c.lookupIndex = idx
 	c.systemdEnabled = view.SystemdEnabled
 	c.generation = view.Generation
 	c.populated = true
@@ -76,15 +91,13 @@ func (c *Cache) Ready() bool {
 	return c.populated
 }
 
-// Lookup finds a cached item by hash + name. Pure in-memory, no I/O.
+// Lookup finds a cached item by hash + name. O(1) via map. No I/O.
 func (c *Cache) Lookup(hash uint32, name string) (CacheItem, bool) {
 	if !c.populated {
 		return CacheItem{}, false
 	}
-	for i := range c.items {
-		if c.items[i].Hash == hash && c.items[i].Name == name {
-			return c.items[i], true
-		}
+	if i, ok := c.lookupIndex[cacheKey{hash: hash, name: name}]; ok {
+		return c.items[i], true
 	}
 	return CacheItem{}, false
 }
@@ -104,6 +117,7 @@ func (c *Cache) Status() CacheStatus {
 // Close frees all cached items and closes the L2 client.
 func (c *Cache) Close() {
 	c.items = nil
+	c.lookupIndex = nil
 	c.populated = false
 	c.client.Close()
 }

@@ -215,7 +215,15 @@ static nipc_error_t do_cgroups_call(nipc_client_ctx_t *ctx,
     if (err != NIPC_OK)
         return err;
 
-    /* 5. Check transport_status BEFORE any decode (spec requirement) */
+    /* 5. Verify response envelope fields before decode */
+    if (resp_hdr.kind != NIPC_KIND_RESPONSE)
+        return NIPC_ERR_BAD_KIND;
+    if (resp_hdr.code != NIPC_METHOD_CGROUPS_SNAPSHOT)
+        return NIPC_ERR_BAD_LAYOUT;
+    if (resp_hdr.message_id != hdr.message_id)
+        return NIPC_ERR_BAD_LAYOUT;
+
+    /* 6. Check transport_status BEFORE any decode (spec requirement) */
     if (resp_hdr.transport_status != NIPC_STATUS_OK) {
         switch (resp_hdr.transport_status) {
         case NIPC_STATUS_INTERNAL_ERROR:
@@ -225,7 +233,7 @@ static nipc_error_t do_cgroups_call(nipc_client_ctx_t *ctx,
         }
     }
 
-    /* 6. Decode response using Codec */
+    /* 7. Decode response using Codec */
     err = nipc_cgroups_resp_decode(payload, payload_len, view_out);
     return err;
 }
@@ -432,9 +440,9 @@ static void server_handle_session(nipc_managed_server_t *server,
                 break;
         }
 
-        /* Skip non-request messages */
+        /* Protocol violation: unexpected message kind terminates session */
         if (hdr.kind != NIPC_KIND_REQUEST)
-            continue;
+            break;
 
         /* Dispatch to handler */
         size_t response_len = 0;

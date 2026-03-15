@@ -380,7 +380,18 @@ impl CgroupsClient {
         // 4. Receive via L1 (payload written into response_buf)
         let (resp_hdr, payload_len) = self.transport_receive(response_buf)?;
 
-        // 5. Check transport_status BEFORE decode (spec requirement)
+        // 5. Verify response envelope fields before decode
+        if resp_hdr.kind != KIND_RESPONSE {
+            return Err(NipcError::BadKind);
+        }
+        if resp_hdr.code != METHOD_CGROUPS_SNAPSHOT {
+            return Err(NipcError::BadLayout);
+        }
+        if resp_hdr.message_id != hdr.message_id {
+            return Err(NipcError::BadLayout);
+        }
+
+        // 6. Check transport_status BEFORE decode (spec requirement)
         if resp_hdr.transport_status != STATUS_OK {
             return Err(NipcError::BadLayout);
         }
@@ -806,8 +817,9 @@ fn handle_session_win_threaded(
             }
         };
 
+        // Protocol violation: unexpected message kind terminates session
         if hdr.kind != KIND_REQUEST {
-            continue;
+            break;
         }
 
         let handler_result = handler(hdr.code, &payload);
@@ -929,9 +941,9 @@ fn handle_session_threaded(
             }
         };
 
-        // Skip non-request messages
+        // Protocol violation: unexpected message kind terminates session
         if hdr.kind != KIND_REQUEST {
-            continue;
+            break;
         }
 
         // Dispatch to handler
@@ -1070,14 +1082,15 @@ const CACHE_RESPONSE_BUF_SIZE: usize = 65536;
 /// L3 client-side cgroups snapshot cache.
 ///
 /// Wraps an L2 client and maintains a local owned copy of the most
-/// recent successful snapshot. Lookup by hash+name is pure in-memory
-/// with no I/O.
+/// recent successful snapshot. Lookup by hash+name is O(1) via HashMap.
 ///
 /// On refresh failure, the previous cache is preserved. The cache
 /// is empty only if no successful refresh has ever occurred.
 pub struct CgroupsCache {
     client: CgroupsClient,
     items: Vec<CgroupsCacheItem>,
+    /// Hash table: (hash, name) -> index into items vec
+    lookup_index: std::collections::HashMap<(u32, String), usize>,
     systemd_enabled: u32,
     generation: u64,
     populated: bool,
@@ -1094,6 +1107,7 @@ impl CgroupsCache {
         CgroupsCache {
             client: CgroupsClient::new(run_dir, service_name, config),
             items: Vec::new(),
+            lookup_index: std::collections::HashMap::new(),
             systemd_enabled: 0,
             generation: 0,
             populated: false,
@@ -1149,8 +1163,15 @@ impl CgroupsCache {
                     }
                 }
 
+                // Rebuild lookup index
+                let mut idx = std::collections::HashMap::with_capacity(new_items.len());
+                for (i, item) in new_items.iter().enumerate() {
+                    idx.insert((item.hash, item.name.clone()), i);
+                }
+
                 // Replace old cache
                 self.items = new_items;
+                self.lookup_index = idx;
                 self.systemd_enabled = view.systemd_enabled;
                 self.generation = view.generation;
                 self.populated = true;
@@ -1174,13 +1195,14 @@ impl CgroupsCache {
         self.populated
     }
 
-    /// Look up a cached item by hash + name. Pure in-memory, no I/O.
-    /// Returns a reference to the cached item, or None if not found.
+    /// Look up a cached item by hash + name. O(1) via HashMap. No I/O.
     pub fn lookup(&self, hash: u32, name: &str) -> Option<&CgroupsCacheItem> {
         if !self.populated {
             return None;
         }
-        self.items.iter().find(|item| item.hash == hash && item.name == name)
+        self.lookup_index
+            .get(&(hash, name.to_string()))
+            .map(|&idx| &self.items[idx])
     }
 
     /// Fill a status snapshot for diagnostics.
@@ -1198,6 +1220,7 @@ impl CgroupsCache {
     /// Close the cache: free all cached items, close the L2 client.
     pub fn close(&mut self) {
         self.items.clear();
+        self.lookup_index.clear();
         self.populated = false;
         self.client.close();
     }
@@ -1691,6 +1714,61 @@ mod tests {
         let s2 = client.status();
         assert_eq!(s2.error_count, 1);
 
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_non_request_terminates_session() {
+        // Send a RESPONSE message to a server; the server must terminate
+        // the session (protocol violation), so subsequent requests fail.
+        let svc = "rs_svc_nonreq";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, test_cgroups_handler);
+
+        // Connect via raw UDS session
+        let mut session = UdsSession::connect(
+            TEST_RUN_DIR, svc, &client_config(),
+        ).expect("connect");
+
+        // Send a RESPONSE (not REQUEST) - protocol violation
+        let mut hdr = Header {
+            kind: KIND_RESPONSE,
+            code: METHOD_CGROUPS_SNAPSHOT,
+            flags: 0,
+            item_count: 0,
+            message_id: 1,
+            transport_status: STATUS_OK,
+            ..Header::default()
+        };
+        let send_result = session.send(&mut hdr, &[]);
+        // Send may succeed (the bytes go out)
+        if send_result.is_ok() {
+            // But subsequent communication should fail because the
+            // server terminated the session
+            thread::sleep(Duration::from_millis(100));
+            let mut recv_buf = vec![0u8; 4096];
+            // Try to send a valid request and receive - should fail
+            let mut hdr2 = Header {
+                kind: KIND_REQUEST,
+                code: METHOD_CGROUPS_SNAPSHOT,
+                flags: 0,
+                item_count: 1,
+                message_id: 2,
+                transport_status: STATUS_OK,
+                ..Header::default()
+            };
+            let req = CgroupsRequest { layout_version: 1, flags: 0 };
+            let mut req_buf = [0u8; 4];
+            req.encode(&mut req_buf);
+            let _ = session.send(&mut hdr2, &req_buf);
+            let recv = session.receive(&mut recv_buf);
+            assert!(recv.is_err(), "server should have terminated session after non-request message");
+        }
+
+        drop(session);
         server.stop();
         cleanup_all(svc);
     }

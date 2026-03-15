@@ -1395,6 +1395,59 @@ static void test_cgroups_resp_item_path_missing_nul(void) {
     CHECK(err == NIPC_ERR_MISSING_NUL, "resp_item path missing NUL");
 }
 
+static void test_cgroups_resp_item_overlap(void) {
+    /* Craft an item where name and path regions overlap.
+     * Item layout: 32-byte header + "hello\0" at offset 32.
+     * Set both name and path to point at the same region. */
+    uint8_t buf[256];
+    memset(buf, 0, sizeof(buf));
+
+    /* Snapshot response header: layout_version=1, flags=0, item_count=1,
+     * systemd_enabled=0, reserved=0, generation=1 */
+    buf[0] = 1; buf[1] = 0;  /* layout_version */
+    buf[2] = 0; buf[3] = 0;  /* flags */
+    buf[4] = 1; buf[5] = 0; buf[6] = 0; buf[7] = 0;  /* item_count */
+    /* systemd_enabled, reserved, generation = 0 */
+    memset(buf + 8, 0, 16);
+
+    /* Directory entry at offset 24: offset=0, length=39
+     * (32 header + "hello\0" = 6 + NUL for path overlapping) */
+    size_t dir_off = 24;
+    uint32_t item_offset = 0;
+    uint32_t item_length = 39;  /* 32 + 6 (hello\0) + 1 (a\0 would need 2, but overlaps) */
+    memcpy(buf + dir_off, &item_offset, 4);
+    memcpy(buf + dir_off + 4, &item_length, 4);
+
+    /* Item starts at packed area (24 + 8 = 32) */
+    uint8_t *item = buf + 32;
+    /* layout_version=1, flags=0 */
+    item[0] = 1; item[1] = 0;
+    item[2] = 0; item[3] = 0;
+    /* hash, options, enabled = 0 */
+    memset(item + 4, 0, 12);
+    /* name_off=32, name_len=5 ("hello") */
+    uint32_t name_off = 32, name_len = 5;
+    memcpy(item + 16, &name_off, 4);
+    memcpy(item + 20, &name_len, 4);
+    /* path_off=34, path_len=1 -- overlaps with name region [32..38) */
+    uint32_t path_off = 34, path_len = 1;
+    memcpy(item + 24, &path_off, 4);
+    memcpy(item + 28, &path_len, 4);
+    /* Write name: "hello\0" at item+32 */
+    memcpy(item + 32, "hello", 5);
+    item[37] = '\0';
+    /* Write path byte at item+34 and NUL at item+35 (within name region) */
+    item[35] = '\0';
+
+    nipc_cgroups_resp_view_t view;
+    nipc_error_t err = nipc_cgroups_resp_decode(buf, 32 + item_length, &view);
+    CHECK(err == NIPC_OK, "overlap: decode succeeds");
+
+    nipc_cgroups_item_view_t iv;
+    err = nipc_cgroups_resp_item(&view, 0, &iv);
+    CHECK(err == NIPC_ERR_BAD_LAYOUT, "resp_item rejects overlapping fields");
+}
+
 /* ================================================================== */
 /*  Main                                                              */
 /* ================================================================== */
@@ -1492,6 +1545,7 @@ int main(void) {
     test_cgroups_resp_item_path_off_oob();
     test_cgroups_resp_item_path_len_oob();
     test_cgroups_resp_item_path_missing_nul();
+    test_cgroups_resp_item_overlap();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

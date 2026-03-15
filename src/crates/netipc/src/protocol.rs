@@ -796,6 +796,17 @@ impl<'a> CgroupsResponseView<'a> {
             return Err(NipcError::MissingNul);
         }
 
+        // Reject overlapping name and path regions (including NUL)
+        {
+            let name_start = name_off as u64;
+            let name_end = name_start + name_len as u64 + 1;
+            let path_start = path_off as u64;
+            let path_end = path_start + path_len as u64 + 1;
+            if name_start < path_end && path_start < name_end {
+                return Err(NipcError::BadLayout);
+            }
+        }
+
         let name = StrView {
             bytes: &item[name_off..name_off + name_len as usize + 1],
             len: name_len,
@@ -2048,6 +2059,33 @@ mod tests {
         // Re-decode after corruption
         let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
         assert_eq!(view.item(0).unwrap_err(), NipcError::MissingNul);
+    }
+
+    #[test]
+    fn cgroups_resp_item_overlap_rejected() {
+        // Build a valid item, then manually set path_offset to overlap with name
+        let mut buf = [0u8; 4096];
+        let mut b = CgroupsBuilder::new(&mut buf, 1, 0, 1);
+        b.add(1, 0, 1, b"hello", b"/path").unwrap();
+        let total = b.finish();
+
+        let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
+        let item_off = u32::from_le_bytes(
+            buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let item_start = dir_end + item_off;
+
+        // name_off=32, name_len=5, so name region is [32..38)
+        // Set path_off=34 (inside name region), path_len=1
+        buf[item_start + 24..item_start + 28].copy_from_slice(&34u32.to_le_bytes());
+        buf[item_start + 28..item_start + 32].copy_from_slice(&1u32.to_le_bytes());
+        // Ensure NUL at item[34+1]=item[35]
+        buf[item_start + 35] = 0;
+
+        let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
+        assert_eq!(view.item(0).unwrap_err(), NipcError::BadLayout);
     }
 
     // -------------------------------------------------------------------

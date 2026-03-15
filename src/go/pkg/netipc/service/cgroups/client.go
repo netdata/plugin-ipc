@@ -236,7 +236,18 @@ func (c *Client) doCgroupsCallRaw(responseBuf []byte) (int, error) {
 		return 0, err
 	}
 
-	// 5. Check transport_status BEFORE decode (spec requirement)
+	// 5. Verify response envelope fields before decode
+	if respHdr.Kind != protocol.KindResponse {
+		return 0, protocol.ErrBadKind
+	}
+	if respHdr.Code != protocol.MethodCgroupsSnapshot {
+		return 0, protocol.ErrBadLayout
+	}
+	if respHdr.MessageID != hdr.MessageID {
+		return 0, protocol.ErrBadLayout
+	}
+
+	// 6. Check transport_status BEFORE decode (spec requirement)
 	if respHdr.TransportStatus != protocol.StatusOK {
 		return 0, protocol.ErrBadLayout
 	}
@@ -494,9 +505,9 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 			copy(payload, p)
 		}
 
-		// Skip non-request messages
+		// Protocol violation: unexpected message kind terminates session
 		if hdr.Kind != protocol.KindRequest {
-			continue
+			return
 		}
 
 		// Dispatch to handler
