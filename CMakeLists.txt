@@ -212,6 +212,12 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     )
     add_test(NAME test_service COMMAND test_service)
     set_tests_properties(test_service PROPERTIES TIMEOUT 60)
+
+    # C L2 interop binary
+    add_executable(interop_service_c tests/fixtures/c/interop_service.c)
+    target_link_libraries(interop_service_c PRIVATE
+        netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
+    )
 endif()
 
 # --- Rust UDS transport tests ---------------------------------------------
@@ -243,6 +249,20 @@ if(CARGO_EXECUTABLE)
             COMMAND ${CARGO_EXECUTABLE} build --bin interop_shm
             WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
             COMMENT "Building Rust SHM interop binary"
+        )
+
+        # Rust L2 service tests
+        add_test(NAME test_service_rust
+            COMMAND ${CARGO_EXECUTABLE} test service -- --test-threads=1
+            WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+        )
+        set_tests_properties(test_service_rust PROPERTIES TIMEOUT 60)
+
+        # Build the Rust L2 interop binary
+        add_custom_target(interop_service_rs ALL
+            COMMAND ${CARGO_EXECUTABLE} build --bin interop_service
+            WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+            COMMENT "Building Rust L2 service interop binary"
         )
     endif()
 endif()
@@ -283,6 +303,23 @@ if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
             COMMENT "Building Go SHM interop binary"
         )
     endif()
+
+    # Go L2 service tests
+    add_test(NAME test_service_go
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} test -count=1 -timeout=120s
+            ./pkg/netipc/service/cgroups/
+        WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
+    )
+    set_tests_properties(test_service_go PROPERTIES TIMEOUT 180)
+
+    # Build Go L2 interop binary
+    add_custom_target(interop_service_go ALL
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} build -o "${CMAKE_BINARY_DIR}/bin/interop_service_go" ./cmd/interop_service
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tests/fixtures/go"
+        COMMENT "Building Go L2 service interop binary"
+    )
 endif()
 
 # --- Cross-language UDS interop tests -------------------------------------
@@ -314,6 +351,22 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
     set_tests_properties(test_shm_interop PROPERTIES
         TIMEOUT 60
         ENVIRONMENT "INTEROP_SHM_C=$<TARGET_FILE:interop_shm_c>;INTEROP_SHM_RS=${INTEROP_SHM_RS};INTEROP_SHM_GO=${INTEROP_SHM_GO}"
+    )
+endif()
+
+# --- Cross-language L2 service interop tests (Linux only) ------------------
+
+if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
+    set(INTEROP_SVC_RS "${NETIPC_RUST_CRATE_DIR}/target/debug/interop_service")
+    set(INTEROP_SVC_GO "${CMAKE_BINARY_DIR}/bin/interop_service_go")
+
+    add_test(NAME test_service_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_service_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_service_interop PROPERTIES
+        TIMEOUT 120
+        ENVIRONMENT "INTEROP_SVC_C=$<TARGET_FILE:interop_service_c>;INTEROP_SVC_RS=${INTEROP_SVC_RS};INTEROP_SVC_GO=${INTEROP_SVC_GO}"
     )
 endif()
 
