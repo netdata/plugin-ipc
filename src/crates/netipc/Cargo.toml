@@ -37,5 +37,9 @@ name = "interop_named_pipe"
 path = "../../../tests/fixtures/rust/src/bin/interop_named_pipe.rs"
 
 [[bin]]
+name = "interop_win_shm"
+path = "../../../tests/fixtures/rust/src/bin/interop_win_shm.rs"
+
+[[bin]]
 name = "bench_posix"
 path = "../../../bench/drivers/rust/src/main.rs"

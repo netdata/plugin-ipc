@@ -11,3 +11,6 @@ pub mod shm;
 
 #[cfg(windows)]
 pub mod windows;
+
+#[cfg(windows)]
+pub mod win_shm;

@@ -80,6 +80,16 @@ if(NETIPC_WINDOWS_RUNTIME)
         src/libnetdata/netipc/include
     )
     target_link_libraries(netipc_named_pipe PUBLIC netipc_protocol)
+
+    # --- C library: L1 Windows SHM transport --------------------------------
+
+    add_library(netipc_win_shm STATIC
+        src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c
+    )
+    target_include_directories(netipc_win_shm PUBLIC
+        src/libnetdata/netipc/include
+    )
+    target_link_libraries(netipc_win_shm PUBLIC netipc_protocol netipc_named_pipe)
 endif()
 
 # --- Rust crate -----------------------------------------------------------
@@ -504,6 +514,58 @@ if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
     set_tests_properties(test_named_pipe_interop PROPERTIES
         TIMEOUT 60
         ENVIRONMENT "INTEROP_NP_C=$<TARGET_FILE:interop_named_pipe_c>;INTEROP_NP_RS=${INTEROP_NP_RS};INTEROP_NP_GO=${INTEROP_NP_GO}"
+    )
+endif()
+
+# --- L1 Windows SHM transport tests ----------------------------------------
+
+if(NETIPC_WINDOWS_RUNTIME)
+    add_executable(test_win_shm tests/fixtures/c/test_win_shm.c)
+    target_link_libraries(test_win_shm PRIVATE netipc_win_shm netipc_named_pipe netipc_protocol)
+    add_test(NAME test_win_shm COMMAND test_win_shm)
+    set_tests_properties(test_win_shm PROPERTIES TIMEOUT 30)
+
+    # C Windows SHM interop binary
+    add_executable(interop_win_shm_c tests/fixtures/c/interop_win_shm.c)
+    target_link_libraries(interop_win_shm_c PRIVATE netipc_win_shm netipc_named_pipe netipc_protocol)
+endif()
+
+# --- Rust Windows SHM transport (Windows) -----------------------------------
+
+if(CARGO_EXECUTABLE AND NETIPC_WINDOWS_RUNTIME)
+    add_custom_target(interop_win_shm_rs ALL
+        COMMAND ${CARGO_EXECUTABLE} build --bin interop_win_shm
+        WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+        COMMENT "Building Rust Windows SHM interop binary"
+    )
+endif()
+
+# --- Go Windows SHM transport (Windows) ------------------------------------
+
+if(GO_EXECUTABLE AND NETIPC_WINDOWS_RUNTIME)
+    # Build Go Windows SHM interop binary
+    add_custom_target(interop_win_shm_go ALL
+        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
+            ${GO_EXECUTABLE} build -o "${CMAKE_BINARY_DIR}/bin/interop_win_shm_go.exe"
+            ./cmd/interop_win_shm
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tests/fixtures/go"
+        COMMENT "Building Go Windows SHM interop binary"
+    )
+endif()
+
+# --- Cross-language Windows SHM interop tests (Windows) ---------------------
+
+if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
+    set(INTEROP_WIN_SHM_RS "${NETIPC_RUST_CRATE_DIR}/target/debug/interop_win_shm.exe")
+    set(INTEROP_WIN_SHM_GO "${CMAKE_BINARY_DIR}/bin/interop_win_shm_go.exe")
+
+    add_test(NAME test_win_shm_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_win_shm_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_win_shm_interop PROPERTIES
+        TIMEOUT 60
+        ENVIRONMENT "INTEROP_WIN_SHM_C=$<TARGET_FILE:interop_win_shm_c>;INTEROP_WIN_SHM_RS=${INTEROP_WIN_SHM_RS};INTEROP_WIN_SHM_GO=${INTEROP_WIN_SHM_GO}"
     )
 endif()
 
