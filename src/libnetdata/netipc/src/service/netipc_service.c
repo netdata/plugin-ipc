@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Poll timeout for server loops: 500ms between shutdown checks */
@@ -768,6 +769,72 @@ void nipc_server_stop(nipc_managed_server_t *server)
     __atomic_store_n(&server->running, false, __ATOMIC_RELEASE);
 }
 
+bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms)
+{
+    /* 1. Stop accepting new clients */
+    __atomic_store_n(&server->running, false, __ATOMIC_RELEASE);
+    nipc_uds_close_listener(&server->listener);
+
+    /* 2. Wait for in-flight sessions to complete */
+    bool all_drained = true;
+    if (server->sessions) {
+        struct timespec deadline;
+        clock_gettime(CLOCK_MONOTONIC, &deadline);
+        deadline.tv_sec  += timeout_ms / 1000;
+        deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000L;
+        }
+
+        /* Poll until all sessions are inactive or timeout */
+        while (1) {
+            pthread_mutex_lock(&server->sessions_lock);
+            int active_count = 0;
+            for (int i = 0; i < server->session_count; i++) {
+                if (__atomic_load_n(&server->sessions[i]->active,
+                                    __ATOMIC_ACQUIRE))
+                    active_count++;
+            }
+            pthread_mutex_unlock(&server->sessions_lock);
+
+            if (active_count == 0)
+                break;
+
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (now.tv_sec > deadline.tv_sec ||
+                (now.tv_sec == deadline.tv_sec &&
+                 now.tv_nsec >= deadline.tv_nsec)) {
+                all_drained = false;
+                break;
+            }
+
+            usleep(5000); /* 5ms poll interval */
+        }
+
+        /* 3. Join all session threads (finished or not) */
+        pthread_mutex_lock(&server->sessions_lock);
+        for (int i = 0; i < server->session_count; i++) {
+            nipc_session_ctx_t *s = server->sessions[i];
+            pthread_mutex_unlock(&server->sessions_lock);
+            pthread_join(s->thread, NULL);
+            free(s);
+            pthread_mutex_lock(&server->sessions_lock);
+        }
+        server->session_count = 0;
+        pthread_mutex_unlock(&server->sessions_lock);
+
+        free(server->sessions);
+        server->sessions = NULL;
+        server->session_capacity = 0;
+        pthread_mutex_destroy(&server->sessions_lock);
+    }
+
+    server->worker_count = 0;
+    return all_drained;
+}
+
 void nipc_server_destroy(nipc_managed_server_t *server)
 {
     __atomic_store_n(&server->running, false, __ATOMIC_RELEASE);
@@ -810,6 +877,67 @@ static void cache_free_items(nipc_cgroups_cache_item_t *items, uint32_t count)
         free(items[i].path);
     }
     free(items);
+}
+
+/* Round up to the next power of 2. Minimum 16. */
+static uint32_t next_power_of_2(uint32_t n)
+{
+    if (n < 16)
+        return 16;
+    n--;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    return n + 1;
+}
+
+/* Hash a name string (djb2). Combined with item hash for bucket index. */
+static uint32_t cache_hash_name(const char *name)
+{
+    uint32_t h = 5381;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++)
+        h = ((h << 5) + h) + *p;
+    return h;
+}
+
+/*
+ * Build the open-addressing hash table from the items array.
+ * Uses (item.hash ^ name_hash) as the probe key.
+ * Load factor <= 0.5 (bucket_count >= 2 * item_count).
+ */
+static bool cache_build_hashtable(nipc_cgroups_cache_t *cache)
+{
+    free(cache->buckets);
+    cache->buckets = NULL;
+    cache->bucket_count = 0;
+
+    if (cache->item_count == 0)
+        return true;
+
+    uint32_t bcount = next_power_of_2(cache->item_count * 2);
+    nipc_cgroups_hash_bucket_t *buckets = calloc(bcount,
+        sizeof(nipc_cgroups_hash_bucket_t));
+    if (!buckets)
+        return false;
+
+    uint32_t mask = bcount - 1;
+    for (uint32_t i = 0; i < cache->item_count; i++) {
+        uint32_t key = cache->items[i].hash ^ cache_hash_name(cache->items[i].name);
+        uint32_t slot = key & mask;
+
+        /* Linear probe for an empty bucket */
+        while (buckets[slot].used)
+            slot = (slot + 1) & mask;
+
+        buckets[slot].index = i;
+        buckets[slot].used = true;
+    }
+
+    cache->buckets = buckets;
+    cache->bucket_count = bcount;
+    return true;
 }
 
 /*
@@ -886,6 +1014,8 @@ void nipc_cgroups_cache_init(nipc_cgroups_cache_t *cache,
     cache->systemd_enabled = 0;
     cache->generation = 0;
     cache->populated = false;
+    cache->buckets = NULL;
+    cache->bucket_count = 0;
     cache->refresh_success_count = 0;
     cache->refresh_failure_count = 0;
 
@@ -940,6 +1070,9 @@ bool nipc_cgroups_cache_refresh(nipc_cgroups_cache_t *cache)
     cache->populated = true;
     cache->refresh_success_count++;
 
+    /* Rebuild hash table for O(1) lookup */
+    cache_build_hashtable(cache);
+
     return true;
 }
 
@@ -951,6 +1084,24 @@ const nipc_cgroups_cache_item_t *nipc_cgroups_cache_lookup(
     if (!cache->populated || !cache->items || !name)
         return NULL;
 
+    /* Use hash table if available, fall back to linear scan */
+    if (cache->buckets && cache->bucket_count > 0) {
+        uint32_t key = hash ^ cache_hash_name(name);
+        uint32_t mask = cache->bucket_count - 1;
+        uint32_t slot = key & mask;
+
+        while (cache->buckets[slot].used) {
+            uint32_t idx = cache->buckets[slot].index;
+            if (cache->items[idx].hash == hash &&
+                strcmp(cache->items[idx].name, name) == 0) {
+                return &cache->items[idx];
+            }
+            slot = (slot + 1) & mask;
+        }
+        return NULL;
+    }
+
+    /* Fallback linear scan (hash table allocation failed) */
     for (uint32_t i = 0; i < cache->item_count; i++) {
         if (cache->items[i].hash == hash &&
             strcmp(cache->items[i].name, name) == 0) {
@@ -978,6 +1129,10 @@ void nipc_cgroups_cache_close(nipc_cgroups_cache_t *cache)
     cache->items = NULL;
     cache->item_count = 0;
     cache->populated = false;
+
+    free(cache->buckets);
+    cache->buckets = NULL;
+    cache->bucket_count = 0;
 
     free(cache->response_buf);
     cache->response_buf = NULL;

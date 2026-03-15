@@ -590,6 +590,104 @@ static void test_status_reporting(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test 7: Graceful server drain                                      */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    const char *service;
+    int done;  /* __atomic */
+    int call_ok;  /* __atomic */
+} drain_client_ctx_t;
+
+static void *drain_client_fn(void *arg)
+{
+    drain_client_ctx_t *ctx = (drain_client_ctx_t *)arg;
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, ctx->service, &ccfg);
+
+    /* Connect with retry */
+    for (int r = 0; r < 200; r++) {
+        nipc_client_refresh(&client);
+        if (nipc_client_ready(&client))
+            break;
+        usleep(5000);
+    }
+
+    if (nipc_client_ready(&client)) {
+        /* Make a slow series of calls to be "in-flight" during drain */
+        for (int i = 0; i < 5; i++) {
+            uint8_t req_buf[64], resp_buf[RESPONSE_BUF_SIZE];
+            nipc_cgroups_resp_view_t view;
+            nipc_error_t err = nipc_client_call_cgroups_snapshot(
+                &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+            if (err == NIPC_OK)
+                __atomic_fetch_add(&ctx->call_ok, 1, __ATOMIC_RELAXED);
+            usleep(10000); /* 10ms between calls */
+        }
+    }
+
+    nipc_client_close(&client);
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void test_graceful_drain(void)
+{
+    printf("Test 7: Graceful server drain with active clients\n");
+    const char *svc = "svc_drain";
+    cleanup_all(svc);
+
+    /* Start server with multi-worker support */
+    nipc_managed_server_t server;
+    nipc_uds_server_config_t scfg = default_server_config();
+
+    nipc_error_t err = nipc_server_init(&server,
+        TEST_RUN_DIR, svc, &scfg,
+        4, RESPONSE_BUF_SIZE, test_cgroups_handler, NULL);
+    check("server init ok", err == NIPC_OK);
+
+    /* Start server in background thread */
+    pthread_t server_tid;
+    pthread_create(&server_tid, NULL, (void *(*)(void *))nipc_server_run, &server);
+    usleep(50000); /* let it start */
+
+    /* Start 3 client threads that will be making calls */
+    drain_client_ctx_t cctxs[3];
+    pthread_t ctids[3];
+    for (int i = 0; i < 3; i++) {
+        cctxs[i].service = svc;
+        __atomic_store_n(&cctxs[i].done, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&cctxs[i].call_ok, 0, __ATOMIC_RELAXED);
+        pthread_create(&ctids[i], NULL, drain_client_fn, &cctxs[i]);
+    }
+
+    /* Let clients establish connections and start making calls */
+    usleep(50000);
+
+    /* Drain with 5-second timeout */
+    bool drained = nipc_server_drain(&server, 5000);
+    check("drain completed", drained);
+
+    /* Wait for client threads to finish */
+    for (int i = 0; i < 3; i++)
+        pthread_join(ctids[i], NULL);
+
+    /* Join server thread */
+    pthread_join(server_tid, NULL);
+
+    /* Check that clients got at least some successful calls */
+    int total_ok = 0;
+    for (int i = 0; i < 3; i++)
+        total_ok += __atomic_load_n(&cctxs[i].call_ok, __ATOMIC_RELAXED);
+    printf("    total successful calls during drain: %d\n", total_ok);
+    check("clients got successful calls before drain", total_ok > 0);
+
+    cleanup_all(svc);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -607,6 +705,7 @@ int main(void)
     test_multiple_clients();       printf("\n");
     test_handler_failure();        printf("\n");
     test_status_reporting();       printf("\n");
+    test_graceful_drain();         printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

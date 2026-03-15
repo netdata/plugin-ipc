@@ -283,6 +283,18 @@ void nipc_server_run(nipc_managed_server_t *server);
 void nipc_server_stop(nipc_managed_server_t *server);
 
 /*
+ * Graceful drain: stop accepting new clients, wait for in-flight
+ * sessions to complete (up to timeout_ms), then close everything.
+ *
+ * Combines stop + wait + destroy in one call. If sessions don't
+ * finish within timeout_ms, they are forcibly closed.
+ *
+ * Returns true if all sessions completed within the timeout,
+ * false if the timeout expired and sessions were forcibly closed.
+ */
+bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms);
+
+/*
  * Cleanup: close listener, free workers. Safe after stop.
  */
 void nipc_server_destroy(nipc_managed_server_t *server);
@@ -322,12 +334,19 @@ typedef struct {
  * L3 client-side cgroups snapshot cache.
  *
  * Wraps an L2 client context and maintains a local owned copy of the
- * most recent successful snapshot. Lookup by hash+name is pure
- * in-memory with no I/O.
+ * most recent successful snapshot. Lookup by hash+name is O(1) via
+ * an open-addressing hash table, with no I/O.
  *
  * On refresh failure, the previous cache is preserved. The cache
  * becomes empty only if no successful refresh has ever occurred.
  */
+
+/* Hash table bucket for O(1) cache lookup */
+typedef struct {
+    uint32_t index;  /* index into items[] array */
+    bool     used;   /* true if this bucket is occupied */
+} nipc_cgroups_hash_bucket_t;
+
 typedef struct {
     nipc_client_ctx_t client;
 
@@ -337,6 +356,10 @@ typedef struct {
     uint32_t systemd_enabled;
     uint64_t generation;
     bool     populated;
+
+    /* Hash table for O(1) lookup (open addressing, rebuilt on refresh) */
+    nipc_cgroups_hash_bucket_t *buckets;
+    uint32_t bucket_count;  /* always a power of 2 */
 
     /* Counters */
     uint32_t refresh_success_count;
