@@ -55,6 +55,18 @@ if(NOT NETIPC_WINDOWS_RUNTIME)
             src/libnetdata/netipc/include
         )
         target_link_libraries(netipc_shm PUBLIC netipc_protocol)
+
+        # --- C library: L2 service orchestration (Linux only, needs SHM+UDS) ----
+
+        add_library(netipc_service STATIC
+            src/libnetdata/netipc/src/service/netipc_service.c
+        )
+        target_include_directories(netipc_service PUBLIC
+            src/libnetdata/netipc/include
+        )
+        target_link_libraries(netipc_service PUBLIC
+            netipc_protocol netipc_uds netipc_shm Threads::Threads
+        )
     endif()
 endif()
 
@@ -189,6 +201,17 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     # C SHM interop binary
     add_executable(interop_shm_c tests/fixtures/c/interop_shm.c)
     target_link_libraries(interop_shm_c PRIVATE netipc_shm netipc_protocol)
+endif()
+
+# --- L2 service orchestration tests (Linux only) ---------------------------
+
+if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+    add_executable(test_service tests/fixtures/c/test_service.c)
+    target_link_libraries(test_service PRIVATE
+        netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
+    )
+    add_test(NAME test_service COMMAND test_service)
+    set_tests_properties(test_service PROPERTIES TIMEOUT 60)
 endif()
 
 # --- Rust UDS transport tests ---------------------------------------------
