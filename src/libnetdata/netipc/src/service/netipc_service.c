@@ -474,6 +474,99 @@ nipc_error_t nipc_client_call_increment(
 }
 
 /* ------------------------------------------------------------------ */
+/*  Public API: batch INCREMENT call                                   */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    const uint64_t *request_values;
+    uint32_t        count;
+    uint64_t       *response_values;
+    uint8_t        *response_buf;
+    size_t          response_buf_size;
+} increment_batch_state_t;
+
+static nipc_error_t do_increment_batch_attempt(nipc_client_ctx_t *ctx,
+                                                 void *state)
+{
+    increment_batch_state_t *s = (increment_batch_state_t *)state;
+
+    /* Build batch request payload using batch builder */
+    size_t req_buf_size = s->count * (8 + NIPC_INCREMENT_PAYLOAD_SIZE) + 64;
+    uint8_t *req_buf = malloc(req_buf_size);
+    if (!req_buf) return NIPC_ERR_OVERFLOW;
+
+    nipc_batch_builder_t bb;
+    nipc_batch_builder_init(&bb, req_buf, req_buf_size, s->count);
+
+    for (uint32_t i = 0; i < s->count; i++) {
+        uint8_t item[NIPC_INCREMENT_PAYLOAD_SIZE];
+        nipc_increment_encode(s->request_values[i], item, sizeof(item));
+        nipc_error_t err = nipc_batch_builder_add(&bb, item, sizeof(item));
+        if (err != NIPC_OK) { free(req_buf); return err; }
+    }
+
+    uint32_t out_count;
+    size_t req_len = nipc_batch_builder_finish(&bb, &out_count);
+
+    /* Send as batch */
+    nipc_header_t hdr = {0};
+    hdr.kind       = NIPC_KIND_REQUEST;
+    hdr.code       = NIPC_METHOD_INCREMENT;
+    hdr.flags      = NIPC_FLAG_BATCH;
+    hdr.item_count = s->count;
+    hdr.message_id = (uint64_t)(ctx->call_count + 1);
+    hdr.transport_status = NIPC_STATUS_OK;
+
+    nipc_error_t err = transport_send(ctx, &hdr, req_buf, req_len);
+    free(req_buf);
+    if (err != NIPC_OK) return err;
+
+    /* Receive batch response */
+    nipc_header_t resp_hdr;
+    const void *payload;
+    size_t payload_len;
+    err = transport_receive(ctx, s->response_buf, s->response_buf_size,
+                            &resp_hdr, &payload, &payload_len);
+    if (err != NIPC_OK) return err;
+
+    if (resp_hdr.kind != NIPC_KIND_RESPONSE) return NIPC_ERR_BAD_KIND;
+    if (resp_hdr.code != NIPC_METHOD_INCREMENT) return NIPC_ERR_BAD_LAYOUT;
+    if (resp_hdr.transport_status != NIPC_STATUS_OK) return NIPC_ERR_BAD_LAYOUT;
+    if (resp_hdr.item_count != s->count) return NIPC_ERR_BAD_ITEM_COUNT;
+
+    /* Extract and decode each response item */
+    for (uint32_t i = 0; i < s->count; i++) {
+        const void *item_ptr;
+        uint32_t item_len;
+        err = nipc_batch_item_get(payload, payload_len, s->count, i,
+                                   &item_ptr, &item_len);
+        if (err != NIPC_OK) return err;
+
+        err = nipc_increment_decode(item_ptr, item_len,
+                                     &s->response_values[i]);
+        if (err != NIPC_OK) return err;
+    }
+
+    return NIPC_OK;
+}
+
+nipc_error_t nipc_client_call_increment_batch(
+    nipc_client_ctx_t *ctx,
+    const uint64_t *request_values, uint32_t count,
+    uint64_t *response_values,
+    uint8_t *response_buf, size_t response_buf_size)
+{
+    increment_batch_state_t state = {
+        .request_values    = request_values,
+        .count             = count,
+        .response_values   = response_values,
+        .response_buf      = response_buf,
+        .response_buf_size = response_buf_size,
+    };
+    return call_with_retry(ctx, do_increment_batch_attempt, &state);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Public API: typed STRING_REVERSE call                              */
 /* ------------------------------------------------------------------ */
 
@@ -626,28 +719,79 @@ static void server_handle_session(nipc_managed_server_t *server,
         if (hdr.kind != NIPC_KIND_REQUEST)
             break;
 
-        /* Dispatch to handler */
+        /* Dispatch: single-item or batch */
         size_t response_len = 0;
-        bool ok = server->handler(
-            server->handler_user,
-            hdr.code,
-            (const uint8_t *)payload, payload_len,
-            resp_buf, resp_buf_size,
-            &response_len);
+        bool ok = true;
+        bool is_batch = (hdr.flags & NIPC_FLAG_BATCH) && hdr.item_count > 1;
+
+        if (!is_batch) {
+            /* Single-item dispatch */
+            ok = server->handler(
+                server->handler_user,
+                hdr.code,
+                (const uint8_t *)payload, payload_len,
+                resp_buf, resp_buf_size,
+                &response_len);
+        } else {
+            /* Batch dispatch: extract each item, call handler per item,
+             * reassemble responses using batch builder. */
+            nipc_batch_builder_t bb;
+            nipc_batch_builder_init(&bb, resp_buf, resp_buf_size,
+                                     hdr.item_count);
+
+            /* Per-item response scratch buffer (second half of resp_buf
+             * is used for individual item responses). */
+            size_t item_resp_size = resp_buf_size / 2;
+            uint8_t *item_resp = resp_buf + resp_buf_size - item_resp_size;
+
+            for (uint32_t i = 0; i < hdr.item_count && ok; i++) {
+                const void *item_ptr;
+                uint32_t item_len;
+                nipc_error_t gerr = nipc_batch_item_get(
+                    payload, payload_len, hdr.item_count, i,
+                    &item_ptr, &item_len);
+                if (gerr != NIPC_OK) { ok = false; break; }
+
+                size_t item_resp_len = 0;
+                ok = server->handler(
+                    server->handler_user,
+                    hdr.code,
+                    (const uint8_t *)item_ptr, item_len,
+                    item_resp, item_resp_size,
+                    &item_resp_len);
+                if (!ok) break;
+
+                nipc_error_t aerr = nipc_batch_builder_add(
+                    &bb, item_resp, item_resp_len);
+                if (aerr != NIPC_OK) { ok = false; break; }
+            }
+
+            if (ok) {
+                uint32_t out_count;
+                response_len = nipc_batch_builder_finish(&bb, &out_count);
+            }
+        }
 
         /* Build response header */
         nipc_header_t resp_hdr = {0};
         resp_hdr.kind       = NIPC_KIND_RESPONSE;
         resp_hdr.code       = hdr.code;
         resp_hdr.message_id = hdr.message_id;
-        resp_hdr.item_count = 1;
-        resp_hdr.flags      = 0;
 
         if (ok) {
             resp_hdr.transport_status = NIPC_STATUS_OK;
+            if (is_batch) {
+                resp_hdr.flags      = NIPC_FLAG_BATCH;
+                resp_hdr.item_count = hdr.item_count;
+            } else {
+                resp_hdr.item_count = 1;
+                resp_hdr.flags      = 0;
+            }
         } else {
-            /* Handler failure: INTERNAL_ERROR + empty payload (spec) */
+            /* Handler/batch failure: INTERNAL_ERROR + empty payload */
             resp_hdr.transport_status = NIPC_STATUS_INTERNAL_ERROR;
+            resp_hdr.item_count = 1;
+            resp_hdr.flags      = 0;
             response_len = 0;
         }
 
@@ -1259,6 +1403,11 @@ bool nipc_cgroups_cache_refresh(nipc_cgroups_cache_t *cache)
     cache->populated = true;
     cache->refresh_success_count++;
 
+    /* Record monotonic timestamp */
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    cache->last_refresh_ts = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+
     /* Rebuild hash table for O(1) lookup */
     cache_build_hashtable(cache);
 
@@ -1310,6 +1459,8 @@ void nipc_cgroups_cache_status(const nipc_cgroups_cache_t *cache,
     out->generation            = cache->generation;
     out->refresh_success_count = cache->refresh_success_count;
     out->refresh_failure_count = cache->refresh_failure_count;
+    out->connection_state      = cache->client.state;
+    out->last_refresh_ts       = cache->last_refresh_ts;
 }
 
 void nipc_cgroups_cache_close(nipc_cgroups_cache_t *cache)

@@ -4,6 +4,7 @@ package cgroups
 
 import (
 	"testing"
+	"time"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 )
@@ -145,6 +146,74 @@ func TestStringReversePingPong(t *testing.T) {
 	status := client.Status()
 	if status.CallCount != 6 {
 		t.Fatalf("expected call_count=6, got %d", status.CallCount)
+	}
+	if status.ErrorCount != 0 {
+		t.Fatalf("expected error_count=0, got %d", status.ErrorCount)
+	}
+
+	client.Close()
+	cleanupAll(svc)
+}
+
+func TestIncrementBatch(t *testing.T) {
+	svc := "go_pp_batch"
+	ensureRunDir()
+	cleanupAll(svc)
+
+	// Server config with batch support
+	sCfg := testServerConfig()
+	sCfg.MaxRequestBatchItems = 16
+	sCfg.MaxResponseBatchItems = 16
+	sCfg.MaxRequestPayloadBytes = 65536
+
+	s := NewServer(testRunDir, svc, sCfg, pingPongHandler)
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		s.Run()
+	}()
+	defer func() {
+		s.Stop()
+		<-doneCh
+	}()
+
+	// Wait for server
+	time.Sleep(100 * time.Millisecond)
+
+	// Client config with batch support
+	cCfg := testClientConfig()
+	cCfg.MaxRequestBatchItems = 16
+	cCfg.MaxResponseBatchItems = 16
+	cCfg.MaxRequestPayloadBytes = 65536
+
+	client := NewClient(testRunDir, svc, cCfg)
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatal("client not ready")
+	}
+
+	respBuf := make([]byte, responseBufSize)
+	input := []uint64{10, 20, 30, 40, 50}
+
+	results, err := client.CallIncrementBatch(input, respBuf)
+	if err != nil {
+		t.Fatalf("CallIncrementBatch failed: %v", err)
+	}
+
+	if len(results) != len(input) {
+		t.Fatalf("expected %d results, got %d", len(input), len(results))
+	}
+
+	for i, v := range input {
+		expected := v + 1
+		if results[i] != expected {
+			t.Fatalf("item %d: expected %d, got %d", i, expected, results[i])
+		}
+	}
+
+	status := client.Status()
+	if status.CallCount != 1 {
+		t.Fatalf("expected call_count=1, got %d", status.CallCount)
 	}
 	if status.ErrorCount != 0 {
 		t.Fatalf("expected error_count=0, got %d", status.ErrorCount)

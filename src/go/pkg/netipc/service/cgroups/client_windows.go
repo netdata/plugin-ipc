@@ -445,19 +445,75 @@ func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmCont
 			return
 		}
 
-		respPayload, ok := s.handler(hdr.Code, payload)
+		// Dispatch: single-item or batch
+		var respPayload []byte
+		ok := true
+		isBatch := (hdr.Flags&protocol.FlagBatch != 0) && hdr.ItemCount > 1
 
+		if !isBatch {
+			// Single-item dispatch
+			respPayload, ok = s.handler(hdr.Code, payload)
+		} else {
+			// Batch dispatch: extract each item, call handler per item,
+			// reassemble responses using batch builder.
+			batchBufSize := int(session.MaxResponsePayloadBytes)
+			batchBuf := make([]byte, batchBufSize)
+			bb := protocol.NewBatchBuilder(batchBuf, hdr.ItemCount)
+
+			// Per-item response scratch buffer
+			itemRespSize := batchBufSize / 2
+			itemResp := make([]byte, itemRespSize)
+
+			for i := uint32(0); i < hdr.ItemCount && ok; i++ {
+				itemData, gerr := protocol.BatchItemGet(payload, hdr.ItemCount, i)
+				if gerr != nil {
+					ok = false
+					break
+				}
+
+				itemResult, handlerOk := s.handler(hdr.Code, itemData)
+				if !handlerOk {
+					ok = false
+					break
+				}
+
+				if len(itemResult) > itemRespSize {
+					ok = false
+					break
+				}
+				copy(itemResp, itemResult)
+
+				if aerr := bb.Add(itemResp[:len(itemResult)]); aerr != nil {
+					ok = false
+					break
+				}
+			}
+
+			if ok {
+				totalLen, _ := bb.Finish()
+				respPayload = batchBuf[:totalLen]
+			}
+		}
+
+		// Build response header
 		respHdr := protocol.Header{
 			Kind:      protocol.KindResponse,
 			Code:      hdr.Code,
 			MessageID: hdr.MessageID,
-			ItemCount: 1,
 		}
 
 		if ok {
 			respHdr.TransportStatus = protocol.StatusOK
+			if isBatch {
+				respHdr.Flags = protocol.FlagBatch
+				respHdr.ItemCount = hdr.ItemCount
+			} else {
+				respHdr.ItemCount = 1
+			}
 		} else {
+			// Handler/batch failure: INTERNAL_ERROR + empty payload
 			respHdr.TransportStatus = protocol.StatusInternalError
+			respHdr.ItemCount = 1
 			respPayload = nil
 		}
 

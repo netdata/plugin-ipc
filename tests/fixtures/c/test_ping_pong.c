@@ -126,9 +126,9 @@ static bool start_server(server_ctx_t *sctx)
     nipc_uds_server_config_t scfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
         .max_request_payload_bytes = RESPONSE_BUF,
-        .max_request_batch_items   = 1,
+        .max_request_batch_items   = 16,
         .max_response_payload_bytes = RESPONSE_BUF,
-        .max_response_batch_items  = 1,
+        .max_response_batch_items  = 16,
         .auth_token                = AUTH_TOKEN,
     };
 
@@ -307,6 +307,56 @@ static void test_string_reverse_ping_pong(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: INCREMENT batch                                              */
+/* ------------------------------------------------------------------ */
+
+static void test_increment_batch(void)
+{
+    printf("\nTest: INCREMENT batch (5 items)\n");
+
+    server_ctx_t sctx = {0};
+    check("server started", start_server(&sctx));
+
+    nipc_uds_client_config_t ccfg = {
+        .supported_profiles        = NIPC_PROFILE_BASELINE,
+        .max_request_payload_bytes = RESPONSE_BUF,
+        .max_request_batch_items   = 16,
+        .max_response_payload_bytes = RESPONSE_BUF,
+        .max_response_batch_items  = 16,
+        .auth_token                = AUTH_TOKEN,
+    };
+
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, SERVICE_NAME, &ccfg);
+    nipc_client_refresh(&client);
+    check("client ready", nipc_client_ready(&client));
+
+    uint64_t requests[5]  = {10, 20, 30, 40, 50};
+    uint64_t responses[5] = {0};
+    uint8_t resp_buf[RESPONSE_BUF];
+
+    nipc_error_t err = nipc_client_call_increment_batch(
+        &client, requests, 5, responses, resp_buf, sizeof(resp_buf));
+
+    check("batch call ok", err == NIPC_OK);
+
+    bool all_ok = true;
+    for (int i = 0; i < 5; i++) {
+        if (responses[i] != requests[i] + 1) {
+            printf("  FAIL: item %d: sent %lu, expected %lu, got %lu\n",
+                   i, (unsigned long)requests[i],
+                   (unsigned long)(requests[i] + 1),
+                   (unsigned long)responses[i]);
+            all_ok = false;
+        }
+    }
+    check("each response == request + 1", all_ok);
+
+    nipc_client_close(&client);
+    stop_server(&sctx);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Test: mixed methods on same connection                             */
 /* ------------------------------------------------------------------ */
 
@@ -410,6 +460,7 @@ int main(void)
 
     test_increment_ping_pong();
     test_string_reverse_ping_pong();
+    test_increment_batch();
     test_mixed_methods();
     test_empty_string();
 

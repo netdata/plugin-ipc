@@ -8,9 +8,10 @@
 use crate::protocol::{
     self, CgroupsRequest, CgroupsResponseView, Header, NipcError, HEADER_SIZE,
     KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT,
-    METHOD_STRING_REVERSE, STATUS_INTERNAL_ERROR, STATUS_OK, VERSION,
+    METHOD_STRING_REVERSE, STATUS_INTERNAL_ERROR, STATUS_OK, VERSION, FLAG_BATCH,
     increment_decode, increment_encode, INCREMENT_PAYLOAD_SIZE,
     string_reverse_decode, string_reverse_encode, STRING_REVERSE_HDR_SIZE,
+    BatchBuilder, batch_item_get,
 };
 
 #[cfg(unix)]
@@ -243,6 +244,72 @@ impl CgroupsClient {
         Ok(view.as_str().to_string())
     }
 
+    /// Blocking typed batch call: INCREMENT method.
+    /// Sends multiple u64 values, receives the incremented u64s back.
+    pub fn call_increment_batch(&mut self, values: &[u64]) -> Result<Vec<u64>, NipcError> {
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Single value: use the non-batch path
+        if values.len() == 1 {
+            let r = self.call_increment(values[0])?;
+            return Ok(vec![r]);
+        }
+
+        let count = values.len() as u32;
+
+        // Pre-encode all items
+        let mut encoded_items: Vec<[u8; INCREMENT_PAYLOAD_SIZE]> = Vec::with_capacity(values.len());
+        for &v in values {
+            let mut item_buf = [0u8; INCREMENT_PAYLOAD_SIZE];
+            let n = increment_encode(v, &mut item_buf);
+            if n == 0 {
+                return Err(NipcError::Truncated);
+            }
+            encoded_items.push(item_buf);
+        }
+
+        // Response buffer large enough for batch directory + packed items
+        let resp_buf_size = protocol::align8(count as usize * 8)
+            + count as usize * protocol::align8(INCREMENT_PAYLOAD_SIZE)
+            + 64;
+        let mut response_buf = vec![0u8; resp_buf_size];
+
+        let payload_len = self.call_with_retry(|client| {
+            // Build batch request payload
+            let req_buf_size = protocol::align8(count as usize * 8)
+                + count as usize * protocol::align8(INCREMENT_PAYLOAD_SIZE)
+                + 64;
+            let mut req_buf = vec![0u8; req_buf_size];
+            let mut bb = BatchBuilder::new(&mut req_buf, count);
+
+            for item in &encoded_items {
+                bb.add(item).map_err(|_| NipcError::Overflow)?;
+            }
+
+            let (req_len, _out_count) = bb.finish();
+
+            client.do_raw_batch_call(
+                METHOD_INCREMENT,
+                &req_buf[..req_len],
+                count,
+                &mut response_buf,
+            )
+        })?;
+
+        // Extract and decode each response item
+        let resp_payload = &response_buf[..payload_len];
+        let mut results = Vec::with_capacity(values.len());
+        for i in 0..count {
+            let (item_data, _item_len) = batch_item_get(resp_payload, count, i)?;
+            let val = increment_decode(item_data)?;
+            results.push(val);
+        }
+
+        Ok(results)
+    }
+
     // ------------------------------------------------------------------
     //  Generic retry wrapper
     // ------------------------------------------------------------------
@@ -467,6 +534,48 @@ impl CgroupsClient {
         // 5. Check transport_status BEFORE decode (spec requirement)
         if resp_hdr.transport_status != STATUS_OK {
             return Err(NipcError::BadLayout);
+        }
+
+        Ok(payload_len)
+    }
+
+    /// Single attempt at a raw batch call. Like `do_raw_call` but sets
+    /// FLAG_BATCH and item_count, and validates the response matches.
+    fn do_raw_batch_call(
+        &mut self,
+        method_code: u16,
+        request_payload: &[u8],
+        item_count: u32,
+        response_buf: &mut [u8],
+    ) -> Result<usize, NipcError> {
+        let mut hdr = Header {
+            kind: KIND_REQUEST,
+            code: method_code,
+            flags: FLAG_BATCH,
+            item_count,
+            message_id: (self.call_count as u64) + 1,
+            transport_status: STATUS_OK,
+            ..Header::default()
+        };
+
+        self.transport_send(&mut hdr, request_payload)?;
+
+        let (resp_hdr, payload_len) = self.transport_receive(response_buf)?;
+
+        if resp_hdr.kind != KIND_RESPONSE {
+            return Err(NipcError::BadKind);
+        }
+        if resp_hdr.code != method_code {
+            return Err(NipcError::BadLayout);
+        }
+        if resp_hdr.message_id != hdr.message_id {
+            return Err(NipcError::BadLayout);
+        }
+        if resp_hdr.transport_status != STATUS_OK {
+            return Err(NipcError::BadLayout);
+        }
+        if resp_hdr.item_count != item_count {
+            return Err(NipcError::BadItemCount);
         }
 
         Ok(payload_len)
@@ -923,27 +1032,73 @@ fn handle_session_win_threaded(
             break;
         }
 
-        let handler_result = handler(hdr.code, &payload);
+        // Dispatch: single-item or batch
+        let is_batch = (hdr.flags & FLAG_BATCH) != 0 && hdr.item_count > 1;
+
+        let (response_payload, resp_ok, resp_flags, resp_item_count) = if !is_batch {
+            match handler(hdr.code, &payload) {
+                Some(data) => (data, true, 0u16, 1u32),
+                None => (Vec::new(), false, 0u16, 1u32),
+            }
+        } else {
+            let batch_count = hdr.item_count;
+            let mut ok = true;
+            let mut item_responses: Vec<Vec<u8>> = Vec::with_capacity(batch_count as usize);
+
+            for i in 0..batch_count {
+                match batch_item_get(&payload, batch_count, i) {
+                    Ok((item_data, _item_len)) => {
+                        match handler(hdr.code, item_data) {
+                            Some(resp_data) => item_responses.push(resp_data),
+                            None => { ok = false; break; }
+                        }
+                    }
+                    Err(_) => { ok = false; break; }
+                }
+            }
+
+            if ok {
+                let total_data: usize = item_responses.iter()
+                    .map(|r| protocol::align8(r.len()))
+                    .sum();
+                let buf_size = protocol::align8(batch_count as usize * 8) + total_data + 64;
+                let mut batch_buf = vec![0u8; buf_size];
+                let mut bb = BatchBuilder::new(&mut batch_buf, batch_count);
+
+                for resp in &item_responses {
+                    if bb.add(resp).is_err() {
+                        ok = false;
+                        break;
+                    }
+                }
+
+                if ok {
+                    let (total_len, _out_count) = bb.finish();
+                    (batch_buf[..total_len].to_vec(), true, FLAG_BATCH, batch_count)
+                } else {
+                    (Vec::new(), false, 0u16, 1u32)
+                }
+            } else {
+                (Vec::new(), false, 0u16, 1u32)
+            }
+        };
 
         let mut resp_hdr = Header {
             kind: KIND_RESPONSE,
             code: hdr.code,
             message_id: hdr.message_id,
-            item_count: 1,
-            flags: 0,
             ..Header::default()
         };
 
-        let response_payload = match handler_result {
-            Some(data) => {
-                resp_hdr.transport_status = STATUS_OK;
-                data
-            }
-            None => {
-                resp_hdr.transport_status = STATUS_INTERNAL_ERROR;
-                Vec::new()
-            }
-        };
+        if resp_ok {
+            resp_hdr.transport_status = STATUS_OK;
+            resp_hdr.flags = resp_flags;
+            resp_hdr.item_count = resp_item_count;
+        } else {
+            resp_hdr.transport_status = STATUS_INTERNAL_ERROR;
+            resp_hdr.item_count = 1;
+            resp_hdr.flags = 0;
+        }
 
         if let Some(ref mut shm_ctx) = shm {
             let msg_len = HEADER_SIZE + response_payload.len();
@@ -1047,30 +1202,78 @@ fn handle_session_threaded(
             break;
         }
 
-        // Dispatch to handler
-        let handler_result = handler(hdr.code, &payload);
+        // Dispatch: single-item or batch
+        let is_batch = (hdr.flags & FLAG_BATCH) != 0 && hdr.item_count > 1;
+
+        let (response_payload, resp_ok, resp_flags, resp_item_count) = if !is_batch {
+            // Single-item dispatch
+            match handler(hdr.code, &payload) {
+                Some(data) => (data, true, 0u16, 1u32),
+                None => (Vec::new(), false, 0u16, 1u32),
+            }
+        } else {
+            // Batch dispatch: extract each item, call handler per item,
+            // reassemble responses using BatchBuilder.
+            let batch_count = hdr.item_count;
+            let mut ok = true;
+            let mut item_responses: Vec<Vec<u8>> = Vec::with_capacity(batch_count as usize);
+
+            for i in 0..batch_count {
+                match batch_item_get(&payload, batch_count, i) {
+                    Ok((item_data, _item_len)) => {
+                        match handler(hdr.code, item_data) {
+                            Some(resp_data) => item_responses.push(resp_data),
+                            None => { ok = false; break; }
+                        }
+                    }
+                    Err(_) => { ok = false; break; }
+                }
+            }
+
+            if ok {
+                // Assemble batch response
+                let total_data: usize = item_responses.iter()
+                    .map(|r| protocol::align8(r.len()))
+                    .sum();
+                let buf_size = protocol::align8(batch_count as usize * 8) + total_data + 64;
+                let mut batch_buf = vec![0u8; buf_size];
+                let mut bb = BatchBuilder::new(&mut batch_buf, batch_count);
+
+                for resp in &item_responses {
+                    if bb.add(resp).is_err() {
+                        ok = false;
+                        break;
+                    }
+                }
+
+                if ok {
+                    let (total_len, _out_count) = bb.finish();
+                    (batch_buf[..total_len].to_vec(), true, FLAG_BATCH, batch_count)
+                } else {
+                    (Vec::new(), false, 0u16, 1u32)
+                }
+            } else {
+                (Vec::new(), false, 0u16, 1u32)
+            }
+        };
 
         // Build response header
         let mut resp_hdr = Header {
             kind: KIND_RESPONSE,
             code: hdr.code,
             message_id: hdr.message_id,
-            item_count: 1,
-            flags: 0,
             ..Header::default()
         };
 
-        let response_payload = match handler_result {
-            Some(data) => {
-                resp_hdr.transport_status = STATUS_OK;
-                data
-            }
-            None => {
-                // Handler failure: INTERNAL_ERROR + empty payload
-                resp_hdr.transport_status = STATUS_INTERNAL_ERROR;
-                Vec::new()
-            }
-        };
+        if resp_ok {
+            resp_hdr.transport_status = STATUS_OK;
+            resp_hdr.flags = resp_flags;
+            resp_hdr.item_count = resp_item_count;
+        } else {
+            resp_hdr.transport_status = STATUS_INTERNAL_ERROR;
+            resp_hdr.item_count = 1;
+            resp_hdr.flags = 0;
+        }
 
         // Send response via the active transport
         #[cfg(target_os = "linux")]
@@ -1175,6 +1378,9 @@ pub struct CgroupsCacheStatus {
     pub generation: u64,
     pub refresh_success_count: u32,
     pub refresh_failure_count: u32,
+    pub connection_state: ClientState,
+    /// Monotonic milliseconds of last successful refresh (0 if never).
+    pub last_refresh_ts: u64,
 }
 
 /// Default response buffer size for L3 cache refresh.
@@ -1198,6 +1404,10 @@ pub struct CgroupsCache {
     refresh_success_count: u32,
     refresh_failure_count: u32,
     response_buf: Vec<u8>,
+    /// Monotonic reference point for timestamp calculation
+    epoch: std::time::Instant,
+    /// Monotonic ms of last successful refresh (0 if never)
+    pub last_refresh_ts: u64,
 }
 
 impl CgroupsCache {
@@ -1220,6 +1430,8 @@ impl CgroupsCache {
             refresh_success_count: 0,
             refresh_failure_count: 0,
             response_buf: vec![0u8; buf_size],
+            epoch: std::time::Instant::now(),
+            last_refresh_ts: 0,
         }
     }
 
@@ -1282,6 +1494,7 @@ impl CgroupsCache {
                 self.generation = view.generation;
                 self.populated = true;
                 self.refresh_success_count += 1;
+                self.last_refresh_ts = self.epoch.elapsed().as_millis() as u64;
                 true
             }
             Err(_) => {
@@ -1320,6 +1533,8 @@ impl CgroupsCache {
             generation: self.generation,
             refresh_success_count: self.refresh_success_count,
             refresh_failure_count: self.refresh_failure_count,
+            connection_state: self.client.state,
+            last_refresh_ts: self.last_refresh_ts,
         }
     }
 
@@ -2684,6 +2899,93 @@ mod tests {
 
         client.close();
         server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_increment_batch() {
+        let svc = "rs_pp_batch";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        // Need batch items > 1 for both client and server configs
+        fn batch_server_config() -> ServerConfig {
+            ServerConfig {
+                supported_profiles: PROFILE_BASELINE,
+                max_request_payload_bytes: 4096,
+                max_request_batch_items: 16,
+                max_response_payload_bytes: 4096,
+                max_response_batch_items: 16,
+                auth_token: AUTH_TOKEN,
+                backlog: 4,
+                ..ServerConfig::default()
+            }
+        }
+
+        fn batch_client_config() -> ClientConfig {
+            ClientConfig {
+                supported_profiles: PROFILE_BASELINE,
+                max_request_payload_bytes: 4096,
+                max_request_batch_items: 16,
+                max_response_payload_bytes: 4096,
+                max_response_batch_items: 16,
+                auth_token: AUTH_TOKEN,
+                ..ClientConfig::default()
+            }
+        }
+
+        // Start server with batch-capable config
+        let svc_name = svc.to_string();
+        let ready_flag = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready_flag.clone();
+
+        let mut server_obj = CgroupsServer::with_workers(
+            TEST_RUN_DIR,
+            &svc_name,
+            batch_server_config(),
+            RESPONSE_BUF_SIZE,
+            Arc::new(move |code, payload| pingpong_handler(code, payload)),
+            8,
+        );
+        let stop_flag = server_obj.running_flag();
+
+        let thread_handle = thread::spawn(move || {
+            ready_clone.store(true, Ordering::Release);
+            let _ = server_obj.run();
+        });
+
+        for _ in 0..2000 {
+            if ready_flag.load(Ordering::Acquire) {
+                break;
+            }
+            thread::sleep(Duration::from_micros(500));
+        }
+        thread::sleep(Duration::from_millis(50));
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, batch_client_config());
+        client.refresh();
+        assert!(client.ready(), "client not ready");
+
+        // Send batch of [10, 20, 30, 40, 50]
+        let values = vec![10u64, 20, 30, 40, 50];
+        let results = client.call_increment_batch(&values).expect("batch call");
+
+        assert_eq!(results.len(), 5);
+        for (i, (&input, &output)) in values.iter().zip(results.iter()).enumerate() {
+            assert_eq!(output, input + 1, "batch item {i}: expected {}, got {output}", input + 1);
+        }
+
+        // Single item batch
+        let single = client.call_increment_batch(&[99]).expect("single-item batch");
+        assert_eq!(single, vec![100]);
+
+        // Empty batch
+        let empty = client.call_increment_batch(&[]).expect("empty batch");
+        assert!(empty.is_empty());
+
+        client.close();
+        stop_flag.store(false, Ordering::Release);
+        let _ = thread_handle.join();
         cleanup_all(svc);
     }
 }

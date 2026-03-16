@@ -188,6 +188,21 @@ nipc_error_t nipc_client_call_increment(
     size_t response_buf_size,
     uint64_t *value_out);
 
+/*
+ * Batch typed call: send N values, receive N incremented values.
+ *
+ * request_values/count: array of values to send.
+ * response_values: caller-owned array (>= count elements) for results.
+ * response_buf/size: scratch buffer for the batch message.
+ *
+ * Returns NIPC_OK on success (all count responses decoded).
+ */
+nipc_error_t nipc_client_call_increment_batch(
+    nipc_client_ctx_t *ctx,
+    const uint64_t *request_values, uint32_t count,
+    uint64_t *response_values,
+    uint8_t *response_buf, size_t response_buf_size);
+
 /* ------------------------------------------------------------------ */
 /*  Typed STRING_REVERSE call                                          */
 /* ------------------------------------------------------------------ */
@@ -376,6 +391,8 @@ typedef struct {
     uint64_t generation;
     uint32_t refresh_success_count;
     uint32_t refresh_failure_count;
+    nipc_client_state_t connection_state;  /* current L2 connection state */
+    uint64_t last_refresh_ts;  /* monotonic timestamp of last successful refresh (ms), 0 if never */
 } nipc_cgroups_cache_status_t;
 
 /*
@@ -412,6 +429,7 @@ typedef struct {
     /* Counters */
     uint32_t refresh_success_count;
     uint32_t refresh_failure_count;
+    uint64_t last_refresh_ts;  /* monotonic ms of last successful refresh */
 
     /* Internal: response buffer for L2 calls */
     uint8_t *response_buf;

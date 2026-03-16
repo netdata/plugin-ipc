@@ -71,4 +71,6 @@ type CacheStatus struct {
 	Generation          uint64
 	RefreshSuccessCount uint32
 	RefreshFailureCount uint32
+	ConnectionState     ClientState // underlying L2 client state
+	LastRefreshTs       int64       // monotonic timestamp (ms) of last successful refresh, 0 if never
 }

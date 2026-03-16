@@ -263,6 +263,91 @@ func (c *Client) CallStringReverse(requestStr string, responseBuf []byte) (*prot
 	return result, nil
 }
 
+// CallIncrementBatch performs a blocking batch INCREMENT call.
+// Sends multiple values, returns the server's response values.
+func (c *Client) CallIncrementBatch(values []uint64, responseBuf []byte) ([]uint64, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+
+	var results []uint64
+	itemCount := uint32(len(values))
+
+	err := c.callWithRetry(func() error {
+		// Build batch request payload
+		batchBufSize := protocol.Align8(int(itemCount)*8) + int(itemCount)*protocol.IncrementPayloadSize + int(itemCount)*protocol.Alignment
+		batchBuf := make([]byte, batchBufSize)
+		bb := protocol.NewBatchBuilder(batchBuf, itemCount)
+
+		for _, v := range values {
+			var item [protocol.IncrementPayloadSize]byte
+			if protocol.IncrementEncode(v, item[:]) == 0 {
+				return protocol.ErrTruncated
+			}
+			if err := bb.Add(item[:]); err != nil {
+				return err
+			}
+		}
+
+		totalPayloadLen, _ := bb.Finish()
+		reqPayload := batchBuf[:totalPayloadLen]
+
+		// Build and send header with batch flags
+		hdr := protocol.Header{
+			Kind:            protocol.KindRequest,
+			Code:            protocol.MethodIncrement,
+			Flags:           protocol.FlagBatch,
+			ItemCount:       itemCount,
+			MessageID:       uint64(c.callCount) + 1,
+			TransportStatus: protocol.StatusOK,
+		}
+
+		if err := c.transportSend(&hdr, reqPayload); err != nil {
+			return err
+		}
+
+		// Receive response
+		respHdr, payloadLen, err := c.transportReceive(responseBuf)
+		if err != nil {
+			return err
+		}
+
+		if respHdr.Kind != protocol.KindResponse {
+			return protocol.ErrBadKind
+		}
+		if respHdr.Code != protocol.MethodIncrement {
+			return protocol.ErrBadLayout
+		}
+		if respHdr.MessageID != hdr.MessageID {
+			return protocol.ErrBadLayout
+		}
+		if respHdr.TransportStatus != protocol.StatusOK {
+			return protocol.ErrBadLayout
+		}
+		if respHdr.Flags&protocol.FlagBatch == 0 || respHdr.ItemCount != itemCount {
+			return protocol.ErrBadItemCount
+		}
+
+		// Extract each response item
+		respPayload := responseBuf[:payloadLen]
+		out := make([]uint64, itemCount)
+		for i := uint32(0); i < itemCount; i++ {
+			itemData, gerr := protocol.BatchItemGet(respPayload, itemCount, i)
+			if gerr != nil {
+				return gerr
+			}
+			val, derr := protocol.IncrementDecode(itemData)
+			if derr != nil {
+				return derr
+			}
+			out[i] = val
+		}
+		results = out
+		return nil
+	})
+	return results, err
+}
+
 // Close tears down the connection and releases resources.
 func (c *Client) Close() {
 	c.disconnect()
@@ -584,22 +669,76 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 			return
 		}
 
-		// Dispatch to handler
-		respPayload, ok := s.handler(hdr.Code, payload)
+		// Dispatch: single-item or batch
+		var respPayload []byte
+		ok := true
+		isBatch := (hdr.Flags&protocol.FlagBatch != 0) && hdr.ItemCount > 1
+
+		if !isBatch {
+			// Single-item dispatch
+			respPayload, ok = s.handler(hdr.Code, payload)
+		} else {
+			// Batch dispatch: extract each item, call handler per item,
+			// reassemble responses using batch builder.
+			batchBufSize := int(session.MaxResponsePayloadBytes)
+			batchBuf := make([]byte, batchBufSize)
+			bb := protocol.NewBatchBuilder(batchBuf, hdr.ItemCount)
+
+			// Per-item response scratch buffer
+			itemRespSize := batchBufSize / 2
+			itemResp := make([]byte, itemRespSize)
+
+			for i := uint32(0); i < hdr.ItemCount && ok; i++ {
+				itemData, gerr := protocol.BatchItemGet(payload, hdr.ItemCount, i)
+				if gerr != nil {
+					ok = false
+					break
+				}
+
+				itemResult, handlerOk := s.handler(hdr.Code, itemData)
+				if !handlerOk {
+					ok = false
+					break
+				}
+
+				// Copy handler result into scratch (for safety), then add to builder
+				if len(itemResult) > itemRespSize {
+					ok = false
+					break
+				}
+				copy(itemResp, itemResult)
+
+				if aerr := bb.Add(itemResp[:len(itemResult)]); aerr != nil {
+					ok = false
+					break
+				}
+			}
+
+			if ok {
+				totalLen, _ := bb.Finish()
+				respPayload = batchBuf[:totalLen]
+			}
+		}
 
 		// Build response header
 		respHdr := protocol.Header{
 			Kind:      protocol.KindResponse,
 			Code:      hdr.Code,
 			MessageID: hdr.MessageID,
-			ItemCount: 1,
 		}
 
 		if ok {
 			respHdr.TransportStatus = protocol.StatusOK
+			if isBatch {
+				respHdr.Flags = protocol.FlagBatch
+				respHdr.ItemCount = hdr.ItemCount
+			} else {
+				respHdr.ItemCount = 1
+			}
 		} else {
-			// Handler failure: INTERNAL_ERROR + empty payload
+			// Handler/batch failure: INTERNAL_ERROR + empty payload
 			respHdr.TransportStatus = protocol.StatusInternalError
+			respHdr.ItemCount = 1
 			respPayload = nil
 		}
 

@@ -5,6 +5,8 @@
 package cgroups
 
 import (
+	"time"
+
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
 )
@@ -27,6 +29,7 @@ type Cache struct {
 	populated           bool
 	refreshSuccessCount uint32
 	refreshFailureCount uint32
+	lastRefreshTs       int64
 
 	responseBuf []byte
 }
@@ -87,6 +90,7 @@ func (c *Cache) Refresh() bool {
 	c.generation = view.Generation
 	c.populated = true
 	c.refreshSuccessCount++
+	c.lastRefreshTs = time.Now().UnixMilli()
 
 	return true
 }
@@ -116,6 +120,8 @@ func (c *Cache) Status() CacheStatus {
 		Generation:          c.generation,
 		RefreshSuccessCount: c.refreshSuccessCount,
 		RefreshFailureCount: c.refreshFailureCount,
+		ConnectionState:     c.client.state,
+		LastRefreshTs:       c.lastRefreshTs,
 	}
 }
 

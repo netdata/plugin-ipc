@@ -139,41 +139,42 @@ The client context tracks its connection state with the following states:
 reconnect counts, and operational counters. This is for diagnostics
 and logging, not for hot-path decisions.
 
-### Typed calls
+### Typed single-item calls
 
-Level 2 exposes per-method-type call functions. Each call function:
+Level 2 exposes per-method-type blocking call functions. Each call:
 
 1. Encodes the typed request using the Codec
-2. Sends it via Level 1
+2. Sends it via Level 1 as a single-item message
 3. Receives the response via Level 1
-4. Checks outer `transport_status` — if not OK, reports failure to the
-   caller without attempting to decode the payload
-5. Decodes the response payload using the Codec into an ephemeral view
-6. Delivers the view to the caller via callback (zero-copy path) or
-   returns a success/failure result (convenience path)
+4. Checks outer `transport_status` — if not OK, reports failure
+   without attempting to decode
+5. Decodes the response payload using the Codec
+6. Returns the decoded result directly to the caller
 
-**Zero-copy path** (primary): the caller provides a callback. The library
-invokes the callback with the decoded response view. The view is valid
-only inside the callback. This is the recommended path for performance.
+For simple types (INCREMENT), the call returns a scalar value. For
+complex types (CGROUPS_SNAPSHOT), the call returns an ephemeral view
+that borrows the response buffer and is valid until the next call.
 
-**Convenience path**: returns a simple success/failure. When the service
-is unavailable, returns a "no response" result instead of forcing a
-separate readiness branch at every call site.
+If the client is not READY, the call fails immediately without I/O.
 
-### Typed batch calls (planned)
+### Typed batch calls
 
-Typed batch call wrappers — encoding multiple items into one Level 1
-batch message and decoding the batch response — are planned but not
-yet implemented. Current method types use single-item messages only.
+Level 2 also provides per-method-type batch call functions. Each batch
+call:
 
-When implemented, batch calls will:
+1. Encodes each typed request item using the Codec
+2. Assembles them into one Level 1 batch message using the batch builder
+3. Sends the batch via Level 1 (one message, one message_id)
+4. Receives the batch response via Level 1
+5. Checks outer `transport_status` — if not OK, reports failure for
+   the entire batch without attempting to decode
+6. Extracts each response item using Level 1 batch extraction
+7. Decodes each response item using the Codec
+8. Returns decoded results to the caller
 
-1. Encode each typed request item using the Codec
-2. Assemble them into one Level 1 batch message
-3. Send the batch via Level 1
-4. Receive the batch response via Level 1
-5. Extract and decode each response item
-6. Correlate by position: response item 0 corresponds to request item 0
+Items are correlated by position: response item 0 corresponds to
+request item 0. The batch travels as one logical message — no
+pipelining overhead, one round-trip for N items.
 
 ## Managed server
 
@@ -256,18 +257,18 @@ Handler failure semantics:
 
 ### Batch splitting (planned)
 
-Batch orchestration — splitting a batch request into per-item handler
-calls and reassembling the responses — is planned but not yet
-implemented. Current method types use single-item messages only.
+When a batch request arrives (BATCH flag set, item_count > 1), the
+managed server:
 
-When implemented, the managed server will:
+1. Extracts each item payload using Level 1 batch extraction
+2. Calls the handler once per item, collecting each response
+3. Assembles individual responses into one Level 1 batch response
+   using the batch builder, preserving request order
+4. Sends the batch response as one logical message
 
-- Detect batch messages (BATCH flag, item_count > 1)
-- Extract each item using Level 1 batch extraction
-- Decode each item using the Codec
-- Call the typed handler once per item
-- Reassemble responses in request order
-- Send one batch response
+Items are correlated by position: response item 0 corresponds to
+request item 0. If the handler fails on any item, the entire batch
+gets `transport_status = INTERNAL_ERROR` with empty payload.
 
 ### Shutdown
 
