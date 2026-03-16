@@ -32,10 +32,6 @@ if(WIN32 OR CYGWIN OR CMAKE_SYSTEM_NAME STREQUAL "MSYS")
     set(NETIPC_WINDOWS_RUNTIME ON)
 endif()
 
-# Cygwin GCC does not define _WIN32 — add it so #ifdef _WIN32 guards work
-if(NETIPC_WINDOWS_RUNTIME AND CYGWIN)
-    add_compile_definitions(_WIN32)
-endif()
 
 # --- C library: protocol (Codec + L1 wire envelope) ----------------------
 
