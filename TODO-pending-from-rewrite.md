@@ -595,10 +595,12 @@ Small, independent, low-risk items.
 9. C/Rust Windows SHM spurious wake bug (same as POSIX H6) — partial fix, 27k→72k but still 45x slower than Go 3.3M
 
 ### Known performance gaps (need profiling on Windows)
-- [ ] **Windows SHM C/Rust client: 72k vs Go 3.7M — TO BE FIXED**
-  - C server is fine (Go→C = 3.7M). C client is the bottleneck.
-  - Tried: volatile loads, compiler barrier, BUSYWAIT, stack buffers — no improvement.
-  - Assembly looks correct. Needs profiling (VTune / WPA) on win11.
+- [x] **Windows SHM C client: 72k → 2.3M — FIXED**
+  - Root cause: QueryPerformanceCounter called 3x per iteration in bench hot loop.
+  - QPC is expensive on Windows (~1-5µs), dominated the benchmark.
+  - Fix: GetTickCount64 for loop condition, QPC latency sampled every 64th request.
+  - Identified by Codex. Historical: 2.8M. Now: 2.3M. Close to target.
+  - [ ] **Rust Windows bench needs same fix** (Instant::now in hot loop).
 - Windows C/Rust cache lookup: 3.7M vs Go 114M — likely MinGW codegen gap.
 - Go snapshot baseline: 50k vs C 121k — Go bench driver per-request allocation.
 
