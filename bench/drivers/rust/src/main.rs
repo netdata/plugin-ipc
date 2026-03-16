@@ -387,6 +387,29 @@ fn run_batch_ping_pong_client(
     let mut recv_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
     let mut expected = vec![0u64; BENCH_MAX_BATCH_ITEMS as usize];
 
+    // SHM upgrade if negotiated
+    #[cfg(target_os = "linux")]
+    let mut shm: Option<ShmContext> = {
+        let sp = session.selected_profile;
+        if sp == PROFILE_SHM_HYBRID || sp == protocol::PROFILE_SHM_FUTEX {
+            let mut shm_ctx = None;
+            for _ in 0..200 {
+                match ShmContext::client_attach(run_dir, service, session.session_id) {
+                    Ok(ctx) => {
+                        shm_ctx = Some(ctx);
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            shm_ctx
+        } else {
+            None
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let shm: Option<()> = None;
+
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
     let deadline = Duration::from_secs(duration_sec as u64);
@@ -431,18 +454,58 @@ fn run_batch_ping_pong_client(
 
         let t0 = Instant::now();
 
-        // Send
-        if session.send(&mut hdr, &req_buf[..req_len]).is_err() {
-            errors += 1;
-            continue;
-        }
+        // Send + receive via SHM or UDS
+        #[cfg(target_os = "linux")]
+        let io_result: Result<(Header, Vec<u8>), ()> = if let Some(ref mut shm_ctx) = shm {
+            // SHM path: assemble header + payload into one message
+            let msg_len = HEADER_SIZE + req_len;
+            let mut msg = vec![0u8; msg_len];
+            hdr.magic = MAGIC_MSG;
+            hdr.version = VERSION;
+            hdr.header_len = protocol::HEADER_LEN;
+            hdr.payload_len = req_len as u32;
+            hdr.encode(&mut msg[..HEADER_SIZE]);
+            msg[HEADER_SIZE..].copy_from_slice(&req_buf[..req_len]);
 
-        // Receive
-        let (resp_hdr, resp_payload) = match session.receive(&mut recv_buf) {
+            if shm_ctx.send(&msg).is_err() {
+                Err(())
+            } else {
+                match shm_ctx.receive(&mut recv_buf, 30000) {
+                    Ok(resp_len) => {
+                        if resp_len < HEADER_SIZE {
+                            Err(())
+                        } else {
+                            match Header::decode(&recv_buf[..resp_len]) {
+                                Ok(resp_hdr) => {
+                                    let payload = recv_buf[HEADER_SIZE..resp_len].to_vec();
+                                    Ok((resp_hdr, payload))
+                                }
+                                Err(_) => Err(()),
+                            }
+                        }
+                    }
+                    Err(_) => Err(()),
+                }
+            }
+        } else {
+            // UDS path
+            match session.send(&mut hdr, &req_buf[..req_len]) {
+                Ok(_) => session.receive(&mut recv_buf).map_err(|_| ()),
+                Err(_) => Err(()),
+            }
+        };
+
+        #[cfg(not(target_os = "linux"))]
+        let io_result: Result<(Header, Vec<u8>), ()> = match session.send(&mut hdr, &req_buf[..req_len]) {
+            Ok(_) => session.receive(&mut recv_buf).map_err(|_| ()),
+            Err(_) => Err(()),
+        };
+
+        let (resp_hdr, resp_payload) = match io_result {
             Ok(r) => r,
             Err(_) => {
                 errors += 1;
-                continue;
+                break; // desync — stop
             }
         };
 
@@ -510,6 +573,10 @@ fn run_batch_ping_pong_client(
         scenario, server_lang, throughput, p50, p95, p99, cpu_pct, cpu_pct
     );
 
+    #[cfg(target_os = "linux")]
+    if let Some(mut shm_ctx) = shm {
+        shm_ctx.close();
+    }
     drop(session);
 
     if errors > 0 {
