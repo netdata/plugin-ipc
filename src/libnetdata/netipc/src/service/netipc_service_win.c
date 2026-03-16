@@ -986,6 +986,8 @@ void nipc_server_run(nipc_managed_server_t *server)
 void nipc_server_stop(nipc_managed_server_t *server)
 {
     InterlockedExchange(&server->running, 0);
+    /* Close the listener pipe to unblock ConnectNamedPipe in the accept loop */
+    nipc_np_close_listener(&server->listener);
 }
 
 bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms)

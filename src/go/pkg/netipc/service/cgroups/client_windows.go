@@ -491,6 +491,7 @@ type Server struct {
 	config      windows.ServerConfig
 	handler     HandlerFunc
 	running     atomic.Bool
+	listener    *windows.Listener // stored so Stop() can close it
 }
 
 // NewServer creates a new managed server.
@@ -509,7 +510,11 @@ func (s *Server) Run() error {
 	if err != nil {
 		return err
 	}
-	defer listener.Close()
+	s.listener = listener
+	defer func() {
+		listener.Close()
+		s.listener = nil
+	}()
 
 	s.running.Store(true)
 
@@ -549,9 +554,12 @@ func (s *Server) Run() error {
 	return nil
 }
 
-// Stop signals the server to stop.
+// Stop signals the server to stop and unblocks Accept by closing the listener.
 func (s *Server) Stop() {
 	s.running.Store(false)
+	if s.listener != nil {
+		s.listener.Close()
+	}
 }
 
 func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmContext) {

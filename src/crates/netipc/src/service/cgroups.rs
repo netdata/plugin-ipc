@@ -743,6 +743,9 @@ pub struct CgroupsServer {
     handler: HandlerFn,
     running: Arc<AtomicBool>,
     worker_count: usize,
+    /// Windows: stored listener handle so stop() can close it to unblock Accept.
+    #[cfg(windows)]
+    listener_handle: Arc<std::sync::Mutex<Option<usize>>>,
 }
 
 impl CgroupsServer {
@@ -773,6 +776,8 @@ impl CgroupsServer {
             handler,
             running: Arc::new(AtomicBool::new(false)),
             worker_count: if worker_count < 1 { 1 } else { worker_count },
+            #[cfg(windows)]
+            listener_handle: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -882,6 +887,9 @@ impl CgroupsServer {
         )
         .map_err(|_| NipcError::BadLayout)?;
 
+        // Store listener handle so stop() can close it to unblock Accept
+        *self.listener_handle.lock().unwrap() = Some(listener.handle() as usize);
+
         self.running.store(true, Ordering::Release);
 
         let mut session_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
@@ -932,9 +940,20 @@ impl CgroupsServer {
         Ok(())
     }
 
-    /// Signal shutdown.
+    /// Signal shutdown. On Windows, also closes the listener pipe to
+    /// unblock ConnectNamedPipe in the accept loop.
     pub fn stop(&self) {
         self.running.store(false, Ordering::Release);
+
+        #[cfg(windows)]
+        {
+            let mut guard = self.listener_handle.lock().unwrap();
+            if let Some(h) = guard.take() {
+                // Close the listener pipe to unblock ConnectNamedPipe
+                extern "system" { fn CloseHandle(h: usize) -> i32; }
+                unsafe { CloseHandle(h); }
+            }
+        }
     }
 
     /// Returns an Arc to the running flag for external stop signaling.
