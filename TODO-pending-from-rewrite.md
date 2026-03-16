@@ -595,14 +595,10 @@ Small, independent, low-risk items.
 9. C/Rust Windows SHM spurious wake bug (same as POSIX H6) — partial fix, 27k→72k but still 45x slower than Go 3.3M
 
 ### Known performance gaps (need profiling on Windows)
-- **Windows SHM C client: 72k vs Go 3.7M (cross-lang test confirms C server is fine at 3.7M with Go client)**
-  - CAS reads → volatile loads: no improvement
-  - MemoryBarrier → GCC compiler barrier: no improvement
-  - HYBRID vs BUSYWAIT profile: no difference
-  - malloc-in-loop → stack buffer: no improvement
-  - The spin loop assembly looks correct (pause instruction present)
-  - Root cause unknown. Needs Windows profiling (VTune / WPA).
-  - The Go SHM client code does the same operations but is 50x faster.
+- [ ] **Windows SHM C/Rust client: 72k vs Go 3.7M — TO BE FIXED**
+  - C server is fine (Go→C = 3.7M). C client is the bottleneck.
+  - Tried: volatile loads, compiler barrier, BUSYWAIT, stack buffers — no improvement.
+  - Assembly looks correct. Needs profiling (VTune / WPA) on win11.
 - Windows C/Rust cache lookup: 3.7M vs Go 114M — likely MinGW codegen gap.
 - Go snapshot baseline: 50k vs C 121k — Go bench driver per-request allocation.
 
