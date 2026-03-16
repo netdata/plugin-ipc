@@ -112,8 +112,6 @@ typedef struct {
 /*  Session                                                            */
 /* ------------------------------------------------------------------ */
 
-#define NIPC_NP_MAX_INFLIGHT 64
-
 typedef struct {
     HANDLE          pipe;    /* connected pipe handle (native wait object) */
     nipc_np_role_t  role;
@@ -131,9 +129,10 @@ typedef struct {
     uint8_t *recv_buf;
     size_t   recv_buf_size;
 
-    /* In-flight message_id set (client-side only) */
-    uint64_t inflight_ids[NIPC_NP_MAX_INFLIGHT];
-    uint32_t inflight_count;
+    /* In-flight message_id set (client-side only, dynamically grown) */
+    uint64_t *inflight_ids;
+    uint32_t  inflight_count;
+    uint32_t  inflight_capacity;
 } nipc_np_session_t;
 
 /* ------------------------------------------------------------------ */

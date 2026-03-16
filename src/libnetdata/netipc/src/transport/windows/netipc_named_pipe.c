@@ -248,8 +248,14 @@ static int inflight_add(nipc_np_session_t *s, uint64_t id)
         if (s->inflight_ids[i] == id)
             return -1; /* duplicate */
     }
-    if (s->inflight_count >= NIPC_NP_MAX_INFLIGHT)
-        return -2; /* full */
+    if (s->inflight_count >= s->inflight_capacity) {
+        uint32_t new_cap = s->inflight_capacity ? s->inflight_capacity * 2 : 16;
+        uint64_t *new_ids = realloc(s->inflight_ids, (size_t)new_cap * sizeof(uint64_t));
+        if (!new_ids)
+            return -2; /* allocation failure */
+        s->inflight_ids = new_ids;
+        s->inflight_capacity = new_cap;
+    }
     s->inflight_ids[s->inflight_count++] = id;
     return 0;
 }
@@ -670,6 +676,11 @@ void nipc_np_close_session(nipc_np_session_t *session)
     free(session->recv_buf);
     session->recv_buf = NULL;
     session->recv_buf_size = 0;
+
+    free(session->inflight_ids);
+    session->inflight_ids = NULL;
+    session->inflight_count = 0;
+    session->inflight_capacity = 0;
 }
 
 void nipc_np_close_listener(nipc_np_listener_t *listener)

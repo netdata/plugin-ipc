@@ -86,9 +86,6 @@ typedef struct {
 /*  Session                                                            */
 /* ------------------------------------------------------------------ */
 
-/* In-flight message_id tracking (L1 spec requirement) */
-#define NIPC_UDS_MAX_INFLIGHT 128
-
 typedef struct {
     int             fd;             /* connected socket (native wait object) */
     nipc_uds_role_t role;
@@ -108,9 +105,10 @@ typedef struct {
     uint8_t *recv_buf;
     size_t   recv_buf_size;
 
-    /* In-flight message_id set (client-side only) */
-    uint64_t inflight_ids[NIPC_UDS_MAX_INFLIGHT];
-    uint32_t inflight_count;
+    /* In-flight message_id set (client-side only, dynamically grown) */
+    uint64_t *inflight_ids;
+    uint32_t  inflight_count;
+    uint32_t  inflight_capacity;
 } nipc_uds_session_t;
 
 /* ------------------------------------------------------------------ */

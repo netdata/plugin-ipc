@@ -518,6 +518,7 @@ static nipc_error_t do_increment_batch_attempt(nipc_client_ctx_t *ctx,
 
     if (resp_hdr.kind != NIPC_KIND_RESPONSE) return NIPC_ERR_BAD_KIND;
     if (resp_hdr.code != NIPC_METHOD_INCREMENT) return NIPC_ERR_BAD_LAYOUT;
+    if (resp_hdr.message_id != hdr.message_id) return NIPC_ERR_BAD_LAYOUT;
     if (resp_hdr.transport_status != NIPC_STATUS_OK) return NIPC_ERR_BAD_LAYOUT;
     if (resp_hdr.item_count != s->count) return NIPC_ERR_BAD_ITEM_COUNT;
 
@@ -811,8 +812,11 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
     server->listener.pipe = INVALID_HANDLE_VALUE;
     InterlockedExchange(&server->running, 0);
 
-    if (!run_dir || !service_name || !handler || worker_count < 1)
+    if (!run_dir || !service_name || !handler)
         return NIPC_ERR_BAD_LAYOUT;
+
+    if (worker_count < 1)
+        worker_count = 1;
 
     /* Store config */
     {
