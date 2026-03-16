@@ -13,7 +13,7 @@ use netipc::protocol::{
     METHOD_INCREMENT, METHOD_CGROUPS_SNAPSHOT, METHOD_STRING_REVERSE,
     dispatch_increment, dispatch_string_reverse,
 };
-use netipc::service::cgroups::{CgroupsClient, CgroupsServer};
+use netipc::service::cgroups::{CgroupsClient, ManagedServer};
 use netipc::transport::posix::{ClientConfig, ServerConfig};
 
 const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;
@@ -107,7 +107,7 @@ fn client_config() -> ClientConfig {
 }
 
 fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut server = CgroupsServer::new(
+    let mut server = ManagedServer::new(
         run_dir,
         service,
         server_config(),

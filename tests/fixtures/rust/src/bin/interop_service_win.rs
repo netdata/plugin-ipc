@@ -11,7 +11,7 @@ use netipc::protocol::{
     dispatch_increment, dispatch_string_reverse,
 };
 #[cfg(windows)]
-use netipc::service::cgroups::{CgroupsClient, CgroupsServer};
+use netipc::service::cgroups::{CgroupsClient, ManagedServer};
 #[cfg(windows)]
 use netipc::transport::windows::{ClientConfig, ServerConfig};
 
@@ -92,7 +92,7 @@ fn run_server(run_dir: &str, service: &str) -> i32 {
         ..ServerConfig::default()
     };
 
-    let mut server = CgroupsServer::new(
+    let mut server = ManagedServer::new(
         run_dir,
         service,
         config,

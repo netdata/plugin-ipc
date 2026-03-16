@@ -191,6 +191,9 @@ The decoder must reject:
 - Any string field whose offset + length exceeds the item's variable
   data area
 - Any string field missing the trailing NUL at the expected position
+- Any item whose name and path byte regions (including trailing NUL)
+  overlap — that is, where `name_offset < path_offset + path_length + 1`
+  AND `path_offset < name_offset + name_length + 1`
 
 ## Batch semantics
 

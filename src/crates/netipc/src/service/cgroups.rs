@@ -1,4 +1,4 @@
-//! L2 cgroups snapshot service: client context and managed server.
+//! L2 cgroups service: client context, managed server, and L3 cache.
 //!
 //! Pure composition of L1 (UDS/SHM on POSIX, Named Pipe/Win SHM on Windows)
 //! + Codec. No direct socket/mmap calls.
@@ -732,11 +732,11 @@ impl Drop for CgroupsClient {
 /// Must be Fn (not FnMut) + Send + Sync for multi-client concurrency.
 pub type HandlerFn = Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync>;
 
-/// L2 managed server for the cgroups snapshot service.
+/// L2 managed server. Generic request/response dispatcher.
 ///
 /// Handles accept, spawns a thread per session (up to worker_count),
 /// reads requests, dispatches to handler, sends responses.
-pub struct CgroupsServer {
+pub struct ManagedServer {
     run_dir: String,
     service_name: String,
     server_config: ServerConfig,
@@ -748,7 +748,7 @@ pub struct CgroupsServer {
     listener_handle: Arc<std::sync::Mutex<Option<usize>>>,
 }
 
-impl CgroupsServer {
+impl ManagedServer {
     /// Create a new managed server. Does NOT start listening yet.
     pub fn new(
         run_dir: &str,
@@ -769,7 +769,7 @@ impl CgroupsServer {
         handler: HandlerFn,
         worker_count: usize,
     ) -> Self {
-        CgroupsServer {
+        ManagedServer {
             run_dir: run_dir.to_string(),
             service_name: service_name.to_string(),
             server_config: config,
@@ -1682,7 +1682,7 @@ mod tests {
             let ready_flag = Arc::new(AtomicBool::new(false));
             let ready_clone = ready_flag.clone();
 
-            let mut server = CgroupsServer::with_workers(
+            let mut server = ManagedServer::with_workers(
                 TEST_RUN_DIR,
                 &svc,
                 server_config(),
@@ -1731,7 +1731,7 @@ mod tests {
             let mut scfg = server_config();
             scfg.max_response_payload_bytes = resp_buf_size as u32;
 
-            let mut server = CgroupsServer::new(
+            let mut server = ManagedServer::new(
                 TEST_RUN_DIR,
                 &svc,
                 scfg,
@@ -2109,6 +2109,18 @@ mod tests {
         }
 
         drop(session);
+
+        // Verify server is still alive: connect a new client and do a normal call
+        let mut verify_client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
+        verify_client.refresh();
+        assert!(verify_client.ready(), "server should still be alive after bad client");
+
+        let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
+        let view = verify_client.call_snapshot(&mut resp_buf)
+            .expect("normal call should succeed after bad client");
+        assert_eq!(view.item_count, 3, "response should be correct after bad client");
+
+        verify_client.close();
         server.stop();
         cleanup_all(svc);
     }
@@ -2406,7 +2418,7 @@ mod tests {
                     Some(buf)
                 });
 
-            let mut server = CgroupsServer::new(
+            let mut server = ManagedServer::new(
                 TEST_RUN_DIR,
                 &svc,
                 scfg,
@@ -2963,7 +2975,7 @@ mod tests {
         let ready_flag = Arc::new(AtomicBool::new(false));
         let ready_clone = ready_flag.clone();
 
-        let mut server_obj = CgroupsServer::with_workers(
+        let mut server_obj = ManagedServer::with_workers(
             TEST_RUN_DIR,
             &svc_name,
             batch_server_config(),

@@ -511,3 +511,84 @@ func TestStatusReporting(t *testing.T) {
 
 	cleanupAll(svc)
 }
+
+func TestNonRequestTerminatesSession(t *testing.T) {
+	svc := "go_svc_nonreq"
+	ensureRunDir()
+	cleanupAll(svc)
+
+	ts := startTestServer(svc, testCgroupsHandler)
+	defer ts.stop()
+
+	// Connect via raw UDS session (transport level)
+	session, err := posix.Connect(testRunDir, svc, &posix.ClientConfig{
+		SupportedProfiles:       protocol.ProfileBaseline,
+		MaxRequestPayloadBytes:  4096,
+		MaxRequestBatchItems:    1,
+		MaxResponsePayloadBytes: responseBufSize,
+		MaxResponseBatchItems:   1,
+		AuthToken:               authToken,
+	})
+	if err != nil {
+		t.Fatalf("raw connect failed: %v", err)
+	}
+
+	// Send a RESPONSE message (not REQUEST) - protocol violation
+	badHdr := &protocol.Header{
+		Kind:            protocol.KindResponse, // wrong kind!
+		Code:            protocol.MethodCgroupsSnapshot,
+		Flags:           0,
+		ItemCount:       0,
+		MessageID:       1,
+		TransportStatus: protocol.StatusOK,
+	}
+	sendErr := session.Send(badHdr, nil)
+	if sendErr != nil {
+		// Send might fail immediately; that's acceptable
+		t.Logf("send non-request failed immediately: %v", sendErr)
+	} else {
+		// Wait for server to process and terminate the session
+		time.Sleep(200 * time.Millisecond)
+
+		// Try to send a valid request and receive - should fail
+		reqHdr := &protocol.Header{
+			Kind:            protocol.KindRequest,
+			Code:            protocol.MethodCgroupsSnapshot,
+			Flags:           0,
+			ItemCount:       1,
+			MessageID:       2,
+			TransportStatus: protocol.StatusOK,
+		}
+		var reqBuf [4]byte
+		req := protocol.CgroupsRequest{LayoutVersion: 1, Flags: 0}
+		req.Encode(reqBuf[:])
+
+		_ = session.Send(reqHdr, reqBuf[:])
+
+		recvBuf := make([]byte, 4096)
+		_, _, recvErr := session.Receive(recvBuf)
+		if recvErr == nil {
+			t.Fatal("recv after non-request should fail (server terminated session)")
+		}
+	}
+	session.Close()
+
+	// Verify server is still alive: connect a new client and do a normal call
+	verifyClient := NewClient(testRunDir, svc, testClientConfig())
+	verifyClient.Refresh()
+	if !verifyClient.Ready() {
+		t.Fatal("server should still be alive after bad client")
+	}
+
+	verifyBuf := make([]byte, responseBufSize)
+	view, err := verifyClient.CallSnapshot(verifyBuf)
+	if err != nil {
+		t.Fatalf("normal call should succeed after bad client: %v", err)
+	}
+	if view.ItemCount != 3 {
+		t.Fatalf("expected 3 items, got %d", view.ItemCount)
+	}
+
+	verifyClient.Close()
+	cleanupAll(svc)
+}

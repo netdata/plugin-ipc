@@ -151,9 +151,22 @@ Level 2 exposes per-method-type blocking call functions. Each call:
 5. Decodes the response payload using the Codec
 6. Returns the decoded result directly to the caller
 
-For simple types (INCREMENT), the call returns a scalar value. For
-complex types (CGROUPS_SNAPSHOT), the call returns an ephemeral view
-that borrows the response buffer and is valid until the next call.
+For simple types (INCREMENT), the call returns a scalar value (or via
+out-parameter in C). For complex types (CGROUPS_SNAPSHOT), the call
+returns an ephemeral view that borrows the response buffer and is valid
+until the next call.
+
+There are no callbacks on the client side. Every typed call is a
+synchronous function that returns the decoded result:
+
+- **C**: `nipc_client_call_increment(&client, value, &result)` returns an
+  error code, result via out-parameter.
+  `nipc_client_call_cgroups_snapshot(&client, req_buf, resp_buf, resp_size, &view)`
+  returns an error code, view via out-parameter.
+- **Rust**: `client.call_increment(value)` returns `Result<u64>`.
+  `client.call_snapshot(&mut resp_buf)` returns `Result<SnapshotView>`.
+- **Go**: `client.CallIncrement(value)` returns `(uint64, error)`.
+  `client.CallSnapshot(respBuf)` returns `(*SnapshotView, error)`.
 
 If the client is not READY, the call fails immediately without I/O.
 

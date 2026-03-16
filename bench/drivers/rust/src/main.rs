@@ -11,7 +11,7 @@ use netipc::protocol::{
     METHOD_INCREMENT, PROFILE_BASELINE, PROFILE_SHM_HYBRID, STATUS_OK, VERSION,
 };
 use netipc::service::cgroups::{
-    CgroupsCacheItem, CgroupsClient, CgroupsServer,
+    CgroupsCacheItem, CgroupsClient, ManagedServer,
 };
 use netipc::transport::posix::{ClientConfig, ServerConfig, UdsSession};
 
@@ -219,7 +219,7 @@ fn run_server(
         }
     };
 
-    let mut server = CgroupsServer::new(
+    let mut server = ManagedServer::new(
         run_dir,
         service,
         server_config(profiles),

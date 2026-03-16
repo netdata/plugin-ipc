@@ -10,7 +10,7 @@ use netipc::protocol::{
     METHOD_CGROUPS_SNAPSHOT, PROFILE_SHM_HYBRID,
 };
 #[cfg(windows)]
-use netipc::service::cgroups::{CgroupsCache, CgroupsServer};
+use netipc::service::cgroups::{CgroupsCache, ManagedServer};
 #[cfg(windows)]
 use netipc::transport::windows::{ClientConfig, ServerConfig};
 
@@ -70,7 +70,7 @@ fn run_server(run_dir: &str, service: &str) -> i32 {
         ..ServerConfig::default()
     };
 
-    let mut server = CgroupsServer::new(
+    let mut server = ManagedServer::new(
         run_dir,
         service,
         config,

@@ -3,12 +3,12 @@
 # run-posix-bench.sh - Run the full POSIX benchmark matrix.
 #
 # Runs all C/Rust/Go client-server pairs for:
-#   1. UDS ping-pong (9 pairs x 3 rates)
-#   2. SHM ping-pong (9 pairs x 3 rates)
+#   1. UDS ping-pong (9 pairs x 4 rates)
+#   2. SHM ping-pong (9 pairs x 4 rates)
 #   3. Snapshot baseline refresh (9 pairs x 2 rates)
 #   4. Snapshot SHM refresh (9 pairs x 2 rates)
 #   5. Local cache lookup (3 languages x 1 rate)
-#   6. Negotiated profile comparison (Rust->Rust x 3 rates)
+#   6. Negotiated profile comparison (Rust->Rust x 4 rates)
 #
 # Output: CSV file + human-readable summary.
 #
@@ -303,10 +303,10 @@ main() {
     echo "scenario,client,server,throughput,p50_us,p95_us,p99_us,client_cpu_pct,server_cpu_pct,total_cpu_pct" > "$OUTPUT_CSV"
 
     local LANGS=(c rust go)
-    local RATES_PING_PONG=(0 100000 10000)
+    local RATES_PING_PONG=(0 100000 10000 1000)
     local RATES_SNAPSHOT=(0 1000)
 
-    # 1. UDS ping-pong: 9 pairs x 3 rates
+    # 1. UDS ping-pong: 9 pairs x 4 rates
     log "=== UDS Ping-Pong ==="
     for rate in "${RATES_PING_PONG[@]}"; do
         for server_lang in "${LANGS[@]}"; do
@@ -317,7 +317,7 @@ main() {
         done
     done
 
-    # 2. SHM ping-pong: 9 pairs x 3 rates
+    # 2. SHM ping-pong: 9 pairs x 4 rates
     log "=== SHM Ping-Pong ==="
     for rate in "${RATES_PING_PONG[@]}"; do
         for server_lang in "${LANGS[@]}"; do

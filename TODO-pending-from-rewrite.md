@@ -482,38 +482,94 @@ Rust and Go have deterministic helper-level negative tests. C does not.
 
 ## 4. Implementation Plan
 
-### Phase 1: Coverage to 100%
+### Phase A: Quick Fixes
+Small, independent, low-risk items.
 
-1. Run all 3 coverage scripts, collect current numbers
-2. Identify every uncovered line
-3. Write tests for coverable lines
-4. Document exclusions for uncoverable lines in `COVERAGE-EXCLUSIONS.md`
-5. Raise thresholds to 100% (with exclusion list)
-6. Add Rust Windows service tests (`#[cfg(all(test, windows))]`)
-7. Create Windows coverage scripts for C and Go
-8. Investigate Rust Windows coverage tooling
+1. Rename `CgroupsServer` → `ManagedServer` in Rust; restructure Go server naming
+2. Add overlap rejection rule to `docs/codec-cgroups-snapshot.md`
+3. Update `docs/level2-typed-api.md` to match returned-view API
+4. Add 1k/s rate tier to both run scripts (one-line each)
+5. Add test: unexpected message kind terminates session (C, Rust, Go)
+6. Add test: SEQPACKET first-packet truncation edge case
+7. Add C helper deterministic negative tests (matching Rust/Go pattern)
+8. Add SHM-mode L2 service test (client+server with SHM profile negotiation)
+9. Commit, push, verify on win11
 
-### Phase 2: Benchmark Matrix Completion
+### Phase B: POSIX Coverage to 100%
+1. Run all 3 coverage scripts, record baseline numbers
+2. Analyze every uncovered line — categorize: testable vs exclusion
+3. Write targeted tests for all testable uncovered lines
+4. Create `COVERAGE-EXCLUSIONS.md` for genuinely untestable paths
+5. Raise thresholds to 100%
+6. Verify all 3 scripts pass at 100% (with exclusion list)
+7. Commit, push
 
-1. Add 1k/s rate tier to existing POSIX and Windows run scripts
-2. Add batching subcmds to all 6 bench drivers (C/Rust/Go × POSIX/Windows)
-   - Random 1–1000 batch size per request
-   - Server dispatches per-item, reassembles batch response
-   - Negotiate batch limit = 1000 at handshake
-3. Add pipelining subcmds to Rust and Go bench drivers (POSIX)
-4. Create Rust Windows bench driver (`bench_windows.rs` + CMake target)
-5. Implement Windows pipelining in all 3 bench drivers
-6. Add pipelining+batching subcmds to all bench drivers
-7. Update `run-posix-bench.sh` for full 162-run matrix
-8. Update `run-windows-bench.sh` for full 162-run matrix (3×3 pairs, all scenarios)
-9. Update report generators for new scenarios and rate tiers
+### Phase C: Windows Coverage
+1. Create `run-coverage-c-windows.sh` (gcov with MinGW)
+2. Create `run-coverage-go-windows.sh` (`go test -coverprofile` for Windows packages)
+3. Document Rust Windows coverage exclusion
+4. Add Rust L2 service tests for Windows
+5. ssh win11, run coverage, identify gaps, write tests
+6. Commit, push
 
-### Phase 3: Stress Test Parity
+### Phase D: Benchmark Drivers — Batching + Pipelining
 
-1. Port C stress tests to Windows (Win32 threads + Named Pipes)
-2. Make Rust stress tests cross-platform (remove `#[cfg(all(test, unix))]` or add Windows module)
-3. Make Go stress tests cross-platform (remove `//go:build unix` or add Windows file)
-4. Add batch stress tests (random 1–1000 batch sizes under load)
+**D1: POSIX batching** (C, Rust, Go):
+- Add batch ping-pong subcmds (baseline + SHM)
+- Random 1–1000 batch size, negotiate batch_items=1000
+- Server per-item dispatch + reassemble
+
+**D2: POSIX pipelining for Rust + Go**:
+- Add `uds-pipeline-client` to Rust and Go bench drivers
+
+**D3: POSIX pipelining + batching** (C, Rust, Go):
+- Add `uds-pipeline-batch-client` combining D1 + D2
+
+**D4: Rust Windows bench driver**:
+- Create `bench_windows.rs` + CMake target
+- Mirror C/Go Windows driver subcmds
+
+**D5: Windows batching + pipelining** (C, Rust, Go):
+- Port D1/D2/D3 to Windows bench drivers
+- Test on win11
+
+### Phase E: Benchmark Run Scripts + Reports
+1. Update `run-posix-bench.sh` for full 162-run matrix
+2. Update `run-windows-bench.sh` for full 162-run matrix
+3. Update both report generators for new scenarios + rate tiers
+4. Run full POSIX matrix, generate `benchmarks-posix.md`
+5. ssh win11, run Windows matrix, generate `benchmarks-windows.md`
+6. Verify all performance floors
+7. Commit, push
+
+### Phase F: Stress Test Parity
+1. Port C stress tests to Windows (`test_stress_win.c`)
+2. Add Windows stress tests to Rust and Go
+3. Add batch stress tests (random 1–1000 under concurrent load)
+4. Test on win11
+5. Commit, push
+
+### Phase G: Windows SHM Verification
+1. ssh win11, run full SHM interop matrix
+2. Verify the 4 previously-failing pairs
+3. Fix if still broken
+4. Commit, push
+
+### Phase H: Final Validation + Multi-Agent Review
+1. Run all tests on Linux and Windows
+2. Run full benchmark matrices on both platforms
+3. Run 4 external reviewers
+4. Fix findings, re-review until clean
+5. Costa final review
+
+### Decisions
+- File splitting: **DEFERRED** to post-integration (Costa decision 2026-03-16)
+
+### Dependencies
+- A, B, D, F, G: independent — can run in parallel
+- C depends on B (methodology)
+- E depends on D (bench drivers must exist)
+- H depends on all others
 
 ---
 

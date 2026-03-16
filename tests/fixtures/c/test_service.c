@@ -760,9 +760,337 @@ static void test_non_request_terminates_session(void)
 
     nipc_uds_close_session(&session);
 
+    /* Verify server is still alive: connect a new client and do a normal call */
+    nipc_client_ctx_t verify_client;
+    nipc_client_init(&verify_client, TEST_RUN_DIR, svc, &ccfg);
+    nipc_client_refresh(&verify_client);
+    check("server still alive after bad client",
+          nipc_client_ready(&verify_client));
+
+    if (nipc_client_ready(&verify_client)) {
+        uint8_t vreq[64], vresp[RESPONSE_BUF_SIZE];
+        nipc_cgroups_resp_view_t vview;
+        nipc_error_t verr = nipc_client_call_cgroups_snapshot(
+            &verify_client, vreq, vresp, sizeof(vresp), &vview);
+        check("normal call succeeds after bad client", verr == NIPC_OK);
+        if (verr == NIPC_OK)
+            check("response correct after bad client", vview.item_count == 3);
+    }
+    nipc_client_close(&verify_client);
+
     nipc_server_stop(&server);
     pthread_join(server_tid, NULL);
     nipc_server_destroy(&server);
+    cleanup_all(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Multi-method handler (INCREMENT + STRING_REVERSE + CGROUPS)         */
+/* ------------------------------------------------------------------ */
+
+static bool on_increment(void *user, uint64_t request, uint64_t *response)
+{
+    (void)user;
+    *response = request + 1;
+    return true;
+}
+
+static bool on_string_reverse(void *user,
+                                const char *request_str, uint32_t request_str_len,
+                                char *response_str, uint32_t response_capacity,
+                                uint32_t *response_str_len)
+{
+    (void)user;
+    if (request_str_len > response_capacity)
+        return false;
+
+    for (uint32_t i = 0; i < request_str_len; i++)
+        response_str[i] = request_str[request_str_len - 1 - i];
+
+    *response_str_len = request_str_len;
+    return true;
+}
+
+static bool multi_method_handler(
+    void *user,
+    uint16_t method_code,
+    const uint8_t *request_payload, size_t request_len,
+    uint8_t *response_buf, size_t response_buf_size,
+    size_t *response_len_out)
+{
+    switch (method_code) {
+    case NIPC_METHOD_INCREMENT:
+        return nipc_dispatch_increment(request_payload, request_len,
+                                        response_buf, response_buf_size,
+                                        response_len_out, on_increment, user);
+    case NIPC_METHOD_STRING_REVERSE:
+        return nipc_dispatch_string_reverse(request_payload, request_len,
+                                             response_buf, response_buf_size,
+                                             response_len_out, on_string_reverse, user);
+    case NIPC_METHOD_CGROUPS_SNAPSHOT:
+        return test_cgroups_handler(user, method_code, request_payload, request_len,
+                                     response_buf, response_buf_size, response_len_out);
+    default:
+        return false;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: SHM-mode L2 service (increment + string_reverse over SHM)     */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    const char *service;
+    nipc_managed_server_t server;
+    int ready;
+    int done;
+} shm_server_ctx_t;
+
+static void *shm_server_thread_fn(void *arg)
+{
+    shm_server_ctx_t *ctx = (shm_server_ctx_t *)arg;
+
+    nipc_uds_server_config_t scfg = {
+        .supported_profiles        = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
+        .preferred_profiles        = NIPC_PROFILE_SHM_HYBRID,
+        .max_request_payload_bytes = 4096,
+        .max_request_batch_items   = 1,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .max_response_batch_items  = 1,
+        .auth_token                = AUTH_TOKEN,
+        .backlog                   = 4,
+    };
+
+    nipc_error_t err = nipc_server_init(&ctx->server,
+        TEST_RUN_DIR, ctx->service, &scfg,
+        2, RESPONSE_BUF_SIZE, multi_method_handler, NULL);
+
+    if (err != NIPC_OK) {
+        fprintf(stderr, "SHM server init failed: %d\n", err);
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    nipc_server_run(&ctx->server);
+    nipc_server_destroy(&ctx->server);
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void test_shm_l2_service(void)
+{
+    printf("Test: SHM-mode L2 service (increment + string_reverse + cgroups)\n");
+    const char *svc = "svc_shm_l2";
+    cleanup_all(svc);
+
+    /* Start SHM-capable server */
+    shm_server_ctx_t sctx;
+    memset(&sctx, 0, sizeof(sctx));
+    sctx.service = svc;
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, shm_server_thread_fn, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("SHM server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    /* Connect client with SHM profile */
+    nipc_uds_client_config_t ccfg = {
+        .supported_profiles        = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
+        .preferred_profiles        = NIPC_PROFILE_SHM_HYBRID,
+        .max_request_payload_bytes = 4096,
+        .max_request_batch_items   = 1,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .max_response_batch_items  = 1,
+        .auth_token                = AUTH_TOKEN,
+    };
+
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+    nipc_client_refresh(&client);
+    check("SHM client ready", nipc_client_ready(&client));
+
+    /* INCREMENT calls */
+    uint8_t resp_buf[RESPONSE_BUF_SIZE];
+    uint64_t inc_val;
+
+    nipc_error_t err = nipc_client_call_increment(
+        &client, 41, resp_buf, sizeof(resp_buf), &inc_val);
+    check("increment(41) ok", err == NIPC_OK);
+    if (err == NIPC_OK)
+        check("increment(41) == 42", inc_val == 42);
+
+    err = nipc_client_call_increment(
+        &client, 99, resp_buf, sizeof(resp_buf), &inc_val);
+    check("increment(99) ok", err == NIPC_OK);
+    if (err == NIPC_OK)
+        check("increment(99) == 100", inc_val == 100);
+
+    /* STRING_REVERSE call */
+    nipc_string_reverse_view_t str_view;
+    err = nipc_client_call_string_reverse(
+        &client, "hello", 5, resp_buf, sizeof(resp_buf), &str_view);
+    check("string_reverse(hello) ok", err == NIPC_OK);
+    if (err == NIPC_OK)
+        check("string_reverse(hello) == olleh",
+              str_view.str_len == 5 &&
+              memcmp(str_view.str, "olleh", 5) == 0);
+
+    /* CGROUPS_SNAPSHOT call */
+    uint8_t cg_req[64];
+    nipc_cgroups_resp_view_t cg_view;
+    err = nipc_client_call_cgroups_snapshot(
+        &client, cg_req, resp_buf, sizeof(resp_buf), &cg_view);
+    check("cgroups_snapshot ok", err == NIPC_OK);
+    if (err == NIPC_OK) {
+        check("cgroups item_count == 3", cg_view.item_count == 3);
+        check("cgroups generation == 42", cg_view.generation == 42);
+    }
+
+    nipc_client_close(&client);
+    nipc_server_stop(&sctx.server);
+    pthread_join(tid, NULL);
+    cleanup_all(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: Refresh failure preserves cache                               */
+/* ------------------------------------------------------------------ */
+
+static void test_cache_refresh_failure_preserves(void)
+{
+    printf("Test: Refresh failure preserves cache\n");
+    const char *svc = "svc_cache_pres";
+    cleanup_all(svc);
+
+    /* Start server */
+    server_thread_ctx_t sctx;
+    pthread_t tid;
+    start_server(&sctx, svc, test_cgroups_handler, &tid);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    /* Init cache and do first refresh */
+    nipc_cgroups_cache_t cache;
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, svc, &ccfg);
+
+    bool updated = nipc_cgroups_cache_refresh(&cache);
+    check("first refresh ok", updated);
+    check("ready after refresh", nipc_cgroups_cache_ready(&cache));
+    check("lookup ok after refresh",
+          nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+
+    /* Get baseline status */
+    nipc_cgroups_cache_status_t s0;
+    nipc_cgroups_cache_status(&cache, &s0);
+    check("success_count == 1", s0.refresh_success_count == 1);
+    check("failure_count == 0", s0.refresh_failure_count == 0);
+
+    /* Stop server */
+    stop_server(&sctx, tid);
+    cleanup_all(svc);
+    usleep(50000);
+
+    /* Refresh fails, but old cache must be preserved */
+    updated = nipc_cgroups_cache_refresh(&cache);
+    check("refresh fails without server", !updated);
+    check("still ready (old cache preserved)", nipc_cgroups_cache_ready(&cache));
+    check("old data still present",
+          nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+    check("item 2 still present",
+          nipc_cgroups_cache_lookup(&cache, 3003, "systemd-user") != NULL);
+
+    nipc_cgroups_cache_status_t s1;
+    nipc_cgroups_cache_status(&cache, &s1);
+    check("success_count still 1", s1.refresh_success_count == 1);
+    check("failure_count >= 1", s1.refresh_failure_count >= 1);
+
+    nipc_cgroups_cache_close(&cache);
+    cleanup_all(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: Malformed response handling (handler returns garbage)         */
+/* ------------------------------------------------------------------ */
+
+/* Handler that returns garbage bytes that don't decode as valid cgroups */
+static bool garbage_handler(void *user,
+                              uint16_t method_code,
+                              const uint8_t *request_payload,
+                              size_t request_len,
+                              uint8_t *response_buf,
+                              size_t response_buf_size,
+                              size_t *response_len_out)
+{
+    (void)user;
+    (void)request_payload;
+    (void)request_len;
+
+    if (method_code != NIPC_METHOD_CGROUPS_SNAPSHOT)
+        return false;
+
+    /* Write garbage that won't decode as a valid cgroups response */
+    if (response_buf_size < 16)
+        return false;
+
+    memset(response_buf, 0xFF, 16);
+    *response_len_out = 16;
+    return true;
+}
+
+static void test_malformed_response_handling(void)
+{
+    printf("Test: Malformed response handling\n");
+    const char *svc = "svc_garbage";
+    cleanup_all(svc);
+
+    /* Phase 1: populate cache with good server */
+    server_thread_ctx_t sctx_good;
+    pthread_t tid_good;
+    start_server(&sctx_good, svc, test_cgroups_handler, &tid_good);
+    check("good server started",
+          __atomic_load_n(&sctx_good.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_cgroups_cache_t cache;
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, svc, &ccfg);
+
+    bool updated = nipc_cgroups_cache_refresh(&cache);
+    check("first refresh ok", updated);
+    check("cache ready", nipc_cgroups_cache_ready(&cache));
+    check("data present",
+          nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+
+    /* Stop good server, start garbage server */
+    stop_server(&sctx_good, tid_good);
+    cleanup_all(svc);
+    usleep(50000);
+
+    server_thread_ctx_t sctx_bad;
+    pthread_t tid_bad;
+    start_server(&sctx_bad, svc, garbage_handler, &tid_bad);
+    check("garbage server started",
+          __atomic_load_n(&sctx_bad.ready, __ATOMIC_ACQUIRE) == 1);
+
+    /* Phase 2: refresh against garbage server should fail gracefully,
+     * but old cache data must be preserved */
+    updated = nipc_cgroups_cache_refresh(&cache);
+    check("refresh with garbage fails", !updated);
+    check("still ready (old cache preserved)", nipc_cgroups_cache_ready(&cache));
+    check("old data still present",
+          nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+
+    nipc_cgroups_cache_status_t status;
+    nipc_cgroups_cache_status(&cache, &status);
+    check("success_count still 1", status.refresh_success_count == 1);
+    check("failure_count >= 1", status.refresh_failure_count >= 1);
+
+    nipc_cgroups_cache_close(&cache);
+    stop_server(&sctx_bad, tid_bad);
     cleanup_all(svc);
 }
 
@@ -786,6 +1114,9 @@ int main(void)
     test_status_reporting();       printf("\n");
     test_graceful_drain();         printf("\n");
     test_non_request_terminates_session(); printf("\n");
+    test_shm_l2_service();         printf("\n");
+    test_cache_refresh_failure_preserves(); printf("\n");
+    test_malformed_response_handling(); printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
