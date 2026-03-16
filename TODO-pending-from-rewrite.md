@@ -1,11 +1,122 @@
 # TODO: Pending Items from Rewrite
 
+## Purpose
+
+Produce benchmark and coverage artifacts that are fit for Netdata integration:
+
+- full cross-language evidence, not partial spot checks
+- fail-closed validation when benchmark runs are incomplete or stale
+- generated reports that reflect the actual matrix being executed today
+
 ## TL;DR
 
 Two categories of incomplete work remaining from the plugin-ipc rewrite:
 
 1. **Test coverage**: Target is 100% line coverage across all 3 languages on both POSIX and Windows. Exceptions allowed only if justified and documented.
 2. **Benchmark/stress-test matrix**: Must cover all scenarios × all language pairs × both transports × both platforms, including batching and pipelining.
+
+## Review Update (2026-03-16)
+
+Verified facts from the current codebase:
+
+- `tests/run-posix-bench.sh` already runs:
+  - C/Rust/Go (full 3×3 pairs)
+  - baseline + SHM ping-pong
+  - baseline + SHM batch ping-pong
+  - snapshot baseline + snapshot SHM
+  - local lookup
+  - pipeline + pipeline+batch
+  - `target_rps` tiers `0`, `100000`, `10000`, `1000` for ping-pong and batch
+- `tests/run-windows-bench.sh` already runs the same scenario families and rate tiers, and includes Rust when `bench_windows.exe` exists.
+- `CMakeLists.txt` already defines `bench_windows_rs`, so the TODO note saying Windows Rust benchmarking does not exist is stale.
+- `tests/run-posix-bench.sh` previously duplicated Rust→Rust baseline/SHM rows under the normal scenario names for a negotiated-profile appendix; this polluted CSV counts and has now been removed.
+- Benchmark CSV output now includes explicit `target_rps` metadata:
+  - `scenario,client,server,target_rps,throughput,p50_us,p95_us,p99_us,client_cpu_pct,server_cpu_pct,total_cpu_pct`
+- `tests/generate-benchmarks-posix.sh` and `tests/generate-benchmarks-windows.sh` now:
+  - validate exact scenario/rate counts
+  - reject stale/incomplete CSV inputs
+  - generate batch and pipeline+batch sections
+  - accept LF and CRLF CSV inputs
+- The committed CSV artifacts in the repo are not reliable proof of completeness:
+  - they still use the old header without `target_rps`
+  - they were generated before the duplicate-row cleanup / stricter validation
+  - implication: they must be regenerated from fresh benchmark runs before they can be used again
+
+## Decisions
+
+### Made
+
+- Benchmark report generation will be treated as an enforcement layer, not a best-effort pretty-printer.
+- Internal benchmark CSVs may evolve when required for correctness of validation/reporting.
+- Windows execution environment for this repo is:
+  - `ssh win11`
+  - `cd ~/src/plugin-ipc.git/`
+  - work under `MSYSTEM=MSYS`
+  - local workflow is: develop locally, commit, push, then pull/build/test on `win11`
+- User-approved exception:
+  - the `win11` clone of this repo is disposable for this task
+  - it may be cleaned/reset there before pull/build/test if needed
+  - this approval does **not** apply to the local Linux worktree
+
+### Current Implementation Chunk
+
+- [x] Add explicit run metadata to benchmark CSV output, starting with `target_rps`.
+- [x] Update both benchmark generators to validate the full matrix from explicit CSV data and fail on incomplete inputs.
+
+## Plan
+
+1. [x] Update this TODO with verified current-state facts and stale assumptions.
+2. [x] Add explicit rate-tier metadata to benchmark CSV rows emitted by the runner scripts.
+3. [x] Rewrite the POSIX and Windows markdown generators to:
+   - validate expected scenario counts
+   - validate expected rate tiers
+   - fail on partial/stale CSVs
+   - generate sections for batch and pipeline+batch scenarios
+4. [x] Verify the scripts using the repo CSVs plus synthetic complete fixtures.
+5. [ ] Re-run real POSIX and Windows benchmark suites to regenerate CSV + markdown artifacts with the new schema.
+   - POSIX rerun completed on 2026-03-16: `benchmarks-posix.csv` now has 201 rows and `benchmarks-posix.md` was regenerated from it.
+   - POSIX generator exited non-zero because the measured floors currently fail on real data:
+     - `snapshot-baseline`: `c->go 71009`, `rust->go 71400`, `go->go 65838` vs required `>= 100000`
+     - `snapshot-shm` C/Rust pairs: `471413` to `624506` vs required `>= 1000000`
+     - `snapshot-shm` Go pairs: `106397` to `175814` vs required `>= 800000`
+   - Windows rerun still pending.
+6. [ ] Reassess remaining rewrite gaps after the report path is trustworthy.
+
+## Fresh Benchmark Evidence (2026-03-16)
+
+- Real POSIX benchmark suite completed successfully with the new runner schema:
+  - output file: `benchmarks-posix.csv`
+  - generated report: `benchmarks-posix.md`
+  - measurement count: `201`
+- Real POSIX run confirms that the report path is now trustworthy enough to surface real floor failures instead of silently accepting stale/partial data.
+- Concrete floor violations observed in the generated report:
+  - `snapshot-baseline` below floor for all `* -> go` pairs:
+    - `c -> go`: `71009`
+    - `rust -> go`: `71400`
+    - `go -> go`: `65838`
+  - `snapshot-shm` below floor for all pairs:
+    - C/Rust-server pairs ranged from `471413` to `624506` against a `>= 1000000` requirement
+    - Go-involved pairs ranged from `106397` to `175814` against a `>= 800000` requirement
+- Working conclusion:
+  - benchmark reporting/validation bug: **fixed**
+  - benchmark floor compliance: **still failing on current code**
+
+## Implied Decisions
+
+- A Windows benchmark run without Rust is still useful for local debugging, but it is not sufficient for the final generated report required by this TODO.
+- Completeness validation must rely on explicit CSV metadata, not row ordering.
+- Generated markdown should cover the matrix already produced by the runners before adding new benchmark features.
+
+## Testing Requirements
+
+- Script-level verification that incomplete CSV inputs fail with a clear error.
+- Script-level verification that complete CSV inputs generate markdown successfully.
+- Validation that new CSV headers remain accepted by both generator scripts.
+
+## Documentation Updates Required
+
+- Update benchmark generator output format expectations in this TODO.
+- Regenerate `benchmarks-posix.md` and `benchmarks-windows.md` only from complete CSV runs after the generators are fixed.
 
 ---
 
@@ -76,19 +187,39 @@ Windows: **no instrumented coverage**. Only pass/fail unit tests and interop scr
 
 **POSIX** (`tests/run-posix-bench.sh`):
 - 3 languages: C, Rust, Go
-- 4 scenarios: UDS ping-pong, SHM ping-pong, snapshot-baseline, snapshot-SHM
-- Full 9-pair cross-language matrix (3×3) at 3 rate tiers (max, 100k/s, 10k/s)
-- UDS pipelining: **C-only**, depths 1/4/8/16/32 (C client, C server)
-- Local cache lookup: 3 languages
-- Negotiated profile comparison: Rust→Rust only
+- Full 9-pair cross-language matrix (3×3)
+- Scenarios implemented:
+  - UDS ping-pong
+  - SHM ping-pong
+  - snapshot-baseline
+  - snapshot-SHM
+  - UDS batch ping-pong
+  - SHM batch ping-pong
+  - local cache lookup
+  - UDS pipeline (depth 16)
+  - UDS pipeline+batch (depth 16)
+- Rate tiers implemented:
+  - ping-pong + batch: `0`, `100000`, `10000`, `1000`
+  - snapshot: `0`, `1000`
+- Current gap is no longer scenario implementation here; it is trustworthy reporting/validation of these runs.
 
 **Windows** (`tests/run-windows-bench.sh`):
-- 2 languages: **C and Go only** (Rust missing)
-- 4 scenarios: NP ping-pong, Win SHM ping-pong, snapshot-baseline, snapshot-SHM
-- 4-pair matrix (2×2) at 3 rate tiers
-- Local cache lookup: C, Go
-- **No pipelining**
-- **No batching**
+- Runner supports C, Rust, Go when the Rust benchmark binary exists
+- `CMakeLists.txt` defines `bench_windows_rs`; Cargo also defines the `bench_windows` binary
+- Scenarios implemented:
+  - NP ping-pong
+  - Win SHM ping-pong
+  - snapshot-baseline
+  - snapshot-SHM
+  - NP batch ping-pong
+  - Win SHM batch ping-pong
+  - local cache lookup
+  - NP pipeline (depth 16)
+  - NP pipeline+batch (depth 16)
+- Rate tiers implemented:
+  - ping-pong + batch: `0`, `100000`, `10000`, `1000`
+  - snapshot: `0`, `1000`
+- Remaining issue: the runner still allows partial 2-language local runs when the Rust binary is absent, but the final report path must reject those as incomplete.
 
 **Stress tests** (separate from benchmarks):
 - C: `test_stress.c` — POSIX only (1000/5000 items, 10/50 concurrent clients, rapid connect/disconnect, 60s stability, SHM lifecycle, mixed transport)
@@ -99,7 +230,8 @@ Windows: **no instrumented coverage**. Only pass/fail unit tests and interop scr
 **Report generation**:
 - `tests/generate-benchmarks-posix.sh` → `benchmarks-posix.md`
 - `tests/generate-benchmarks-windows.sh` → `benchmarks-windows.md`
-- Performance floor checks: SHM ≥1M req/s, UDS ≥150k req/s, lookup ≥10M/s
+- Generators now validate the full matrix from explicit `target_rps` metadata and reject stale/incomplete CSVs.
+- The checked-in CSV/markdown artifacts still need regeneration with the new runner output.
 
 ### 2.2 Required Full Matrix
 
@@ -153,54 +285,45 @@ Ping-pong scenarios (1–4) must additionally be tested at:
 
 #### A. Missing Scenarios
 
-- [ ] **Ping-pong + batching (baseline + SHM)** — not implemented in any benchmark driver
-  - All bench drivers hardcode `max_request_batch_items = 1` / `max_response_batch_items = 1`
-  - Needs: batch builder in bench client (random 1–1000 items per request), batch dispatch in bench server
-  - All 3 languages, both POSIX and Windows
-- [ ] **Pipelining + batching** — not implemented
-  - Currently pipelining exists only for C-on-POSIX, without batching
-  - Needs: pipelined requests where each message contains a random 1–1000 batch
-- [ ] **Pipelining on Rust and Go** — only C implements `uds-pipeline-client`
-  - Rust and Go bench drivers have no pipelining subcmd
-  - Full matrix requires all 9 pairs for pipelining (any client → any server)
+- [x] Ping-pong + batching (baseline + SHM) exists in the benchmark drivers and runner scripts on both platforms.
+- [x] Pipelining + batching exists in the runner scripts and benchmark drivers.
+- [x] Rust and Go pipelining clients exist.
+- [ ] What remains is regenerating real benchmark artifacts with the new runner/generator path.
 
 #### B. Missing Language Coverage
 
-- [ ] **Rust bench driver on Windows** — does not exist
-  - `run-windows-bench.sh` only references `bench_windows_c.exe` and `bench_windows_go.exe`
-  - CMakeLists.txt has no `bench_windows_rs` target
-  - **Action**: Create `bench_windows.rs` (or `--features windows` in existing crate) + CMake target
-- [ ] **Windows bench matrix is 2×2 instead of 3×3**
-  - Missing: all Rust pairs (Rust→C, C→Rust, Rust→Go, Go→Rust, Rust→Rust)
-  - 5 additional pairs per scenario per rate tier
+- [x] Rust bench driver on Windows exists.
+- [x] Final report generation now enforces the full 3×3 Windows matrix and rejects 2×2 local-debug runs.
 
 #### C. Missing Platform Coverage
 
-- [ ] **Windows pipelining** — not implemented at all
-  - Named Pipe message mode should support multiple in-flight — implement and test
+- [x] Windows pipelining exists in the benchmark runner path.
 - [ ] **Windows stress tests** — none exist
   - C stress tests use pthreads/UDS (POSIX-only)
   - Need Windows equivalents using Win32 threads + Named Pipes
 
 #### D. Missing Rate Tiers
 
-- [ ] **1k/s rate tier** — not in current scripts
-  - `run-posix-bench.sh` uses rates (0, 100000, 10000) — missing 1000
-  - `run-windows-bench.sh` uses rates (0, 100000, 10000) — missing 1000
-  - **Action**: Add 1000 to `RATES_PING_PONG` arrays in both scripts
+- [x] `1k/s` is already present in both benchmark runner scripts.
+- [x] Explicit `target_rps` metadata is now part of benchmark CSV output.
 
 #### E. Benchmark Infrastructure
 
-- [ ] **Batch mode in bench drivers** — all bench drivers need batching subcmds
-  - Random 1–1000 batch size per request (not a fixed size)
-  - Negotiated batch limits must be set to 1000 during handshake
-  - Server must handle per-item dispatch and reassemble batch responses
-- [ ] **Run scripts need updating** for all new scenarios and rate tiers
-  - `run-posix-bench.sh`: add batch ping-pong (baseline+SHM), pipelining+batch, Rust/Go pipelining, 1k/s rate tier
-  - `run-windows-bench.sh`: add Rust language, all new scenarios, pipelining, 1k/s rate tier
-- [ ] **Report generators need updating**
-  - `generate-benchmarks-posix.sh`: add batch and pipeline+batch tables, 1k/s tier
-  - `generate-benchmarks-windows.sh`: same + add Rust column
+- [x] Batch mode exists in the bench drivers and runner scripts.
+- [x] Run scripts already include batch, pipeline+batch, Rust/Go pipelining, and `1k/s`.
+- [x] **CSV schema now includes explicit tier metadata**
+  - `target_rps` added to benchmark CSV output
+  - lookup rows emitted as `target_rps=0`
+  - generators now use explicit rate metadata instead of positional slicing
+- [x] **Report generators rewritten**
+  - validate exact expected counts for complete runs
+  - validate the presence of all expected tiers
+  - reject incomplete/stale CSVs
+  - generate sections for batch and pipeline+batch scenarios
+  - stop assuming Windows is always 2×2 or pipeline is C-only
+- [ ] **Real artifacts must be regenerated**
+  - `benchmarks-posix.csv` / `benchmarks-posix.md`
+  - `benchmarks-windows.csv` / `benchmarks-windows.md`
 
 #### F. Benchmark Reporting Requirements (from TODO-rewrite.md, TODO-hardening.md)
 

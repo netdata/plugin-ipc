@@ -12,9 +12,11 @@
 #   7. Local cache lookup (3 languages x 1 rate)
 #   8. UDS pipeline (9 pairs x 1 rate, depth=16)
 #   9. UDS pipeline+batch (9 pairs x 1 rate, depth=16)
-#  10. Negotiated profile comparison (Rust->Rust x 4 rates)
 #
 # Output: CSV file + human-readable summary.
+# CSV columns:
+#   scenario,client,server,target_rps,throughput,p50_us,p95_us,p99_us,
+#   client_cpu_pct,server_cpu_pct,total_cpu_pct
 #
 # Usage:
 #   ./tests/run-posix-bench.sh [output_csv] [duration_sec]
@@ -143,6 +145,24 @@ stop_server() {
     echo "$server_cpu"
 }
 
+write_csv_row() {
+    local scenario="$1"
+    local client="$2"
+    local server="$3"
+    local target_rps="$4"
+    local throughput="$5"
+    local p50="$6"
+    local p95="$7"
+    local p99="$8"
+    local client_cpu="$9"
+    local server_cpu_pct="${10}"
+    local total_cpu_pct="${11}"
+
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$scenario" "$client" "$server" "$target_rps" "$throughput" "$p50" "$p95" "$p99" \
+        "$client_cpu" "$server_cpu_pct" "$total_cpu_pct" >> "$OUTPUT_CSV"
+}
+
 # Run a single benchmark pair
 run_pair() {
     local scenario="$1"       # e.g., uds-ping-pong, shm-ping-pong, snapshot-baseline, snapshot-shm
@@ -228,19 +248,21 @@ run_pair() {
 
     if [ -z "$client_output" ]; then
         warn "  No output from ${client_lang} client for ${scenario}"
-        echo "${scenario},${client_lang},${server_lang},0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
+        write_csv_row "$scenario" "$client_lang" "$server_lang" "$target_rps" \
+            "0" "0" "0" "0" "0.0" "0.0" "0.0"
         return 0
     fi
 
     # Parse client output and patch in server CPU
     # Client outputs: scenario,client,server,throughput,p50,p95,p99,client_cpu,0.0,total_cpu
-    # We replace server=lang with actual server_lang, and fill in server_cpu
+    # We replace server=lang with actual server_lang, add target_rps, and fill in server_cpu
     local line
     line=$(echo "$client_output" | grep "^${scenario}," | head -1)
 
     if [ -z "$line" ]; then
         warn "  Could not parse output from ${client_lang} client"
-        echo "${scenario},${client_lang},${server_lang},0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
+        write_csv_row "$scenario" "$client_lang" "$server_lang" "$target_rps" \
+            "0" "0" "0" "0" "0.0" "0.0" "0.0"
         return 0
     fi
 
@@ -262,7 +284,8 @@ run_pair() {
         total_cpu_pct="$client_cpu"
     fi
 
-    echo "${scenario},${client_lang},${server_lang},${throughput},${p50},${p95},${p99},${client_cpu},${server_cpu_pct},${total_cpu_pct}" >> "$OUTPUT_CSV"
+    write_csv_row "$scenario" "$client_lang" "$server_lang" "$target_rps" \
+        "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
 
     log "    throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us"
 }
@@ -312,7 +335,7 @@ main() {
     mkdir -p "$RUN_DIR"
 
     # CSV header
-    echo "scenario,client,server,throughput,p50_us,p95_us,p99_us,client_cpu_pct,server_cpu_pct,total_cpu_pct" > "$OUTPUT_CSV"
+    echo "scenario,client,server,target_rps,throughput,p50_us,p95_us,p99_us,client_cpu_pct,server_cpu_pct,total_cpu_pct" > "$OUTPUT_CSV"
 
     local LANGS=(c rust go)
     local RATES_PING_PONG=(0 100000 10000 1000)
@@ -390,7 +413,24 @@ main() {
         local bin
         bin="$(bench_bin "$lang")"
         log "  lookup: ${lang}"
-        "$bin" lookup-bench "$DURATION" >> "$OUTPUT_CSV" 2>/dev/null || true
+        local line
+        line=$("$bin" lookup-bench "$DURATION" 2>/dev/null | grep "^lookup," | head -1 || true)
+        if [ -n "$line" ]; then
+            local throughput p50 p95 p99 client_cpu server_cpu_pct total_cpu_pct
+            throughput=$(echo "$line" | cut -d',' -f4)
+            p50=$(echo "$line" | cut -d',' -f5)
+            p95=$(echo "$line" | cut -d',' -f6)
+            p99=$(echo "$line" | cut -d',' -f7)
+            client_cpu=$(echo "$line" | cut -d',' -f8)
+            server_cpu_pct=$(echo "$line" | cut -d',' -f9)
+            total_cpu_pct=$(echo "$line" | cut -d',' -f10)
+            write_csv_row "lookup" "$lang" "$lang" "0" \
+                "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
+        else
+            warn "  No output from ${lang} lookup benchmark"
+            write_csv_row "lookup" "$lang" "$lang" "0" \
+                "0" "0" "0" "0" "0.0" "0.0" "0.0"
+        fi
     done
 
     # 8. UDS pipeline benchmarks (all 9 pairs, max rate, depth=16)
@@ -446,13 +486,16 @@ main() {
                         total_cpu_pct="$client_cpu"
                     fi
 
-                    echo "uds-pipeline-d${PIPELINE_DEPTH},${client_lang},${server_lang},${throughput},${p50},${p95},${p99},${client_cpu},${server_cpu_pct},${total_cpu_pct}" >> "$OUTPUT_CSV"
+                    write_csv_row "uds-pipeline-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
+                        "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
                     log "    throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us"
                 else
-                    echo "uds-pipeline-d${PIPELINE_DEPTH},${client_lang},${server_lang},0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
+                    write_csv_row "uds-pipeline-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
+                        "0" "0" "0" "0" "0.0" "0.0" "0.0"
                 fi
             else
-                echo "uds-pipeline-d${PIPELINE_DEPTH},${client_lang},${server_lang},0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
+                write_csv_row "uds-pipeline-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
+                    "0" "0" "0" "0" "0.0" "0.0" "0.0"
             fi
 
             sleep 0.5
@@ -512,27 +555,20 @@ main() {
                         total_cpu_pct="$client_cpu"
                     fi
 
-                    echo "uds-pipeline-batch-d${PIPELINE_DEPTH},${client_lang},${server_lang},${throughput},${p50},${p95},${p99},${client_cpu},${server_cpu_pct},${total_cpu_pct}" >> "$OUTPUT_CSV"
+                    write_csv_row "uds-pipeline-batch-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
+                        "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
                     log "    throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us"
                 else
-                    echo "uds-pipeline-batch-d${PIPELINE_DEPTH},${client_lang},${server_lang},0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
+                    write_csv_row "uds-pipeline-batch-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
+                        "0" "0" "0" "0" "0.0" "0.0" "0.0"
                 fi
             else
-                echo "uds-pipeline-batch-d${PIPELINE_DEPTH},${client_lang},${server_lang},0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
+                write_csv_row "uds-pipeline-batch-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
+                    "0" "0" "0" "0" "0.0" "0.0" "0.0"
             fi
 
             sleep 0.5
         done
-    done
-
-    # 10. Negotiated profile comparison (Rust->Rust)
-    log "=== Negotiated Profile (Rust->Rust: UDS vs SHM) ==="
-    # UDS already measured above; add labeled entries for clarity
-    for rate in "${RATES_PING_PONG[@]}"; do
-        run_pair "uds-ping-pong" "rust" "rust" "$rate" "$DURATION" || true
-        sleep 0.5
-        run_pair "shm-ping-pong" "rust" "rust" "$rate" "$DURATION" || true
-        sleep 0.5
     done
 
     # Summary
@@ -546,14 +582,13 @@ main() {
 
     # Print summary table
     printf "\n"
-    printf "${CYAN}%-25s %-8s %-8s %12s %8s %8s %8s${NC}\n" \
-        "Scenario" "Client" "Server" "Throughput" "p50(us)" "p95(us)" "p99(us)"
-    printf -- "-------- -------- -------- ------------ -------- -------- --------\n"
+    printf "${CYAN}%-25s %-8s %-8s %-10s %12s %8s %8s %8s${NC}\n" \
+        "Scenario" "Client" "Server" "Target RPS" "Throughput" "p50(us)" "p95(us)" "p99(us)"
+    printf -- "-------- -------- -------- ---------- ------------ -------- -------- --------\n"
 
-    tail -n +2 "$OUTPUT_CSV" | while IFS=',' read -r scenario client server throughput p50 p95 p99 ccpu scpu tcpu; do
-        # Only show max throughput (rate=0) results in summary
-        printf "%-25s %-8s %-8s %12s %8s %8s %8s\n" \
-            "$scenario" "$client" "$server" "$throughput" "$p50" "$p95" "$p99"
+    tail -n +2 "$OUTPUT_CSV" | while IFS=',' read -r scenario client server target_rps throughput p50 p95 p99 ccpu scpu tcpu; do
+        printf "%-25s %-8s %-8s %-10s %12s %8s %8s %8s\n" \
+            "$scenario" "$client" "$server" "$target_rps" "$throughput" "$p50" "$p95" "$p99"
     done
 
     printf "\n"
