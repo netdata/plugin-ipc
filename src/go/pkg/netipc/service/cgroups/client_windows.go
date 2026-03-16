@@ -613,7 +613,7 @@ func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmCont
 		// Dispatch: single-item or batch
 		var respPayload []byte
 		ok := true
-		isBatch := (hdr.Flags&protocol.FlagBatch != 0) && hdr.ItemCount > 1
+		isBatch := (hdr.Flags&protocol.FlagBatch != 0) && hdr.ItemCount >= 1
 
 		if !isBatch {
 			// Single-item dispatch

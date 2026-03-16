@@ -480,7 +480,7 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
             nipc_error_t berr = nipc_batch_builder_add(&bb, item, sizeof(item));
             if (berr != NIPC_OK) {
                 errors++;
-                goto next_batch;
+                break;
             }
         }
 
@@ -497,17 +497,20 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
 
         uint64_t t0 = now_ns();
 
-        /* Send + receive via L2 transport */
+        /* Send + receive via L1 transport.
+         * Any error after send desynchronizes the stream — break out
+         * of the benchmark loop (reconnection is not worth it for a bench). */
         nipc_uds_error_t uerr;
         nipc_header_t resp_hdr;
         const void *resp_payload;
         size_t resp_len;
+        int fatal = 0;
 
         if (client.shm) {
             /* SHM path: manual header+payload assembly */
             size_t msg_len = NIPC_HEADER_LEN + req_len;
             uint8_t *msg = malloc(msg_len);
-            if (!msg) { errors++; goto next_batch; }
+            if (!msg) { errors++; break; }
 
             hdr.magic = NIPC_MAGIC_MSG;
             hdr.version = NIPC_VERSION;
@@ -518,76 +521,82 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
 
             nipc_shm_error_t serr = nipc_shm_send(client.shm, msg, msg_len);
             free(msg);
-            if (serr != NIPC_SHM_OK) { errors++; goto next_batch; }
+            if (serr != NIPC_SHM_OK) { errors++; break; }
 
             size_t shm_resp_len;
             serr = nipc_shm_receive(client.shm, resp_buf,
                                     BENCH_BATCH_BUF_SIZE + NIPC_HEADER_LEN,
                                     &shm_resp_len, 30000);
-            if (serr != NIPC_SHM_OK) { errors++; goto next_batch; }
+            if (serr != NIPC_SHM_OK) { errors++; fatal = 1; break; }
 
-            if (shm_resp_len < NIPC_HEADER_LEN) { errors++; goto next_batch; }
+            if (shm_resp_len < NIPC_HEADER_LEN) { errors++; fatal = 1; break; }
             nipc_header_decode(resp_buf, NIPC_HEADER_LEN, &resp_hdr);
             resp_payload = resp_buf + NIPC_HEADER_LEN;
             resp_len = shm_resp_len - NIPC_HEADER_LEN;
         } else {
             /* UDS path */
             uerr = nipc_uds_send(&client.session, &hdr, req_buf, req_len);
-            if (uerr != NIPC_UDS_OK) { errors++; goto next_batch; }
+            if (uerr != NIPC_UDS_OK) { errors++; break; }
 
             uerr = nipc_uds_receive(&client.session, resp_buf,
                                     BENCH_BATCH_BUF_SIZE + NIPC_HEADER_LEN,
                                     &resp_hdr, &resp_payload, &resp_len);
-            if (uerr != NIPC_UDS_OK) { errors++; goto next_batch; }
+            if (uerr != NIPC_UDS_OK) { errors++; fatal = 1; break; }
         }
 
-        /* Validate response */
+        /* Validate response — any mismatch is a protocol desync, stop */
         if (resp_hdr.kind != NIPC_KIND_RESPONSE ||
             resp_hdr.code != NIPC_METHOD_INCREMENT ||
+            resp_hdr.transport_status != NIPC_STATUS_OK ||
             resp_hdr.item_count != batch_size) {
+            fprintf(stderr, "batch: response mismatch kind=%u code=%u status=%u items=%u (expected %u)\n",
+                    resp_hdr.kind, resp_hdr.code, resp_hdr.transport_status,
+                    resp_hdr.item_count, batch_size);
             errors++;
-            goto next_batch;
+            fatal = 1;
+            break;
         }
 
         /* Verify each item */
-        {
-            int batch_ok = 1;
-            for (uint32_t i = 0; i < batch_size; i++) {
-                const void *item_ptr;
-                uint32_t item_len;
-                nipc_error_t gerr = nipc_batch_item_get(resp_payload, resp_len,
-                                                          batch_size, i,
-                                                          &item_ptr, &item_len);
-                if (gerr != NIPC_OK) { errors++; batch_ok = 0; break; }
-
-                uint64_t resp_val;
-                if (nipc_increment_decode(item_ptr, item_len, &resp_val) != NIPC_OK) {
-                    errors++;
-                    batch_ok = 0;
-                    break;
-                }
-                if (resp_val != expected[i]) {
-                    errors++;
-                    batch_ok = 0;
-                    break;
-                }
+        for (uint32_t i = 0; i < batch_size; i++) {
+            const void *item_ptr;
+            uint32_t item_len;
+            nipc_error_t gerr = nipc_batch_item_get(resp_payload, resp_len,
+                                                      batch_size, i,
+                                                      &item_ptr, &item_len);
+            if (gerr != NIPC_OK) {
+                fprintf(stderr, "batch: item_get failed at %u/%u\n", i, batch_size);
+                errors++;
+                fatal = 1;
+                break;
             }
 
-            uint64_t t1 = now_ns();
-            latency_record(&lr, t1 - t0);
-
-            if (batch_ok) {
-                total_items += batch_size;
-            } else {
-                /* Still count items for throughput, but note errors */
-                total_items += batch_size;
+            uint64_t resp_val;
+            if (nipc_increment_decode(item_ptr, item_len, &resp_val) != NIPC_OK) {
+                fprintf(stderr, "batch: decode failed at %u/%u\n", i, batch_size);
+                errors++;
+                fatal = 1;
+                break;
+            }
+            if (resp_val != expected[i]) {
+                fprintf(stderr, "batch: value mismatch at %u/%u: expected %lu got %lu\n",
+                        i, batch_size, (unsigned long)expected[i], (unsigned long)resp_val);
+                errors++;
+                fatal = 1;
+                break;
             }
         }
 
-        counter += batch_size;
+        if (fatal)
+            break;
 
-next_batch:
-        ;
+        {
+            uint64_t t1 = now_ns();
+            latency_record(&lr, t1 - t0);
+        }
+
+        counter += batch_size;
+        total_items += batch_size;
     }
 
     uint64_t cpu_end = cpu_ns();

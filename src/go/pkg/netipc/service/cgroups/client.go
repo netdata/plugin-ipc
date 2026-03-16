@@ -672,7 +672,7 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 		// Dispatch: single-item or batch
 		var respPayload []byte
 		ok := true
-		isBatch := (hdr.Flags&protocol.FlagBatch != 0) && hdr.ItemCount > 1
+		isBatch := (hdr.Flags&protocol.FlagBatch != 0) && hdr.ItemCount >= 1
 
 		if !isBatch {
 			// Single-item dispatch

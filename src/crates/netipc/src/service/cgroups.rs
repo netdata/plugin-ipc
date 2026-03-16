@@ -1052,7 +1052,7 @@ fn handle_session_win_threaded(
         }
 
         // Dispatch: single-item or batch
-        let is_batch = (hdr.flags & FLAG_BATCH) != 0 && hdr.item_count > 1;
+        let is_batch = (hdr.flags & FLAG_BATCH) != 0 && hdr.item_count >= 1;
 
         let (response_payload, resp_ok, resp_flags, resp_item_count) = if !is_batch {
             match handler(hdr.code, &payload) {
@@ -1222,7 +1222,7 @@ fn handle_session_threaded(
         }
 
         // Dispatch: single-item or batch
-        let is_batch = (hdr.flags & FLAG_BATCH) != 0 && hdr.item_count > 1;
+        let is_batch = (hdr.flags & FLAG_BATCH) != 0 && hdr.item_count >= 1;
 
         let (response_payload, resp_ok, resp_flags, resp_item_count) = if !is_batch {
             // Single-item dispatch

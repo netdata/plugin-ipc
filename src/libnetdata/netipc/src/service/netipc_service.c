@@ -723,7 +723,7 @@ static void server_handle_session(nipc_managed_server_t *server,
         /* Dispatch: single-item or batch */
         size_t response_len = 0;
         bool ok = true;
-        bool is_batch = (hdr.flags & NIPC_FLAG_BATCH) && hdr.item_count > 1;
+        bool is_batch = (hdr.flags & NIPC_FLAG_BATCH) && hdr.item_count >= 1;
 
         if (!is_batch) {
             /* Single-item dispatch */
