@@ -84,6 +84,26 @@ mod ffi {
             lpUserTime: *mut u64,
         ) -> i32;
         pub fn GetCurrentProcess() -> HANDLE;
+        pub fn GetTickCount64() -> u64;
+    }
+}
+
+/// Cheap deadline check using GetTickCount64 (~1ms resolution).
+/// Avoids QPC overhead in hot loops.
+#[cfg(windows)]
+struct TickDeadline {
+    deadline: u64,
+}
+
+#[cfg(windows)]
+impl TickDeadline {
+    fn new(duration_sec: u32) -> Self {
+        let now = unsafe { ffi::GetTickCount64() };
+        Self { deadline: now + duration_sec as u64 * 1000 }
+    }
+    #[inline]
+    fn expired(&self) -> bool {
+        unsafe { ffi::GetTickCount64() >= self.deadline }
     }
 }
 
@@ -486,9 +506,9 @@ fn run_ping_pong_client(
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
-    let deadline = Duration::from_secs(duration_sec as u64);
+    let tick_deadline = TickDeadline::new(duration_sec);
 
-    while wall_start.elapsed() < deadline {
+    while !tick_deadline.expired() {
         rl.wait();
 
         let req_payload = counter.to_ne_bytes();
@@ -503,7 +523,7 @@ fn run_ping_pong_client(
             ..Header::default()
         };
 
-        let t0 = Instant::now();
+        let t0 = if requests & 63 == 0 { Some(Instant::now()) } else { None };
 
         let send_ok = if let Some(ref mut shm_ctx) = shm {
             // Win SHM path
@@ -573,9 +593,10 @@ fn run_ping_pong_client(
             }
         };
 
-        let t1 = Instant::now();
-        if send_ok {
-            lr.record((t1 - t0).as_nanos() as u64);
+        if let Some(t0v) = t0 {
+            if send_ok {
+                lr.record(t0v.elapsed().as_nanos() as u64);
+            }
         }
 
         counter += 1;
@@ -651,14 +672,14 @@ fn run_snapshot_client(
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
-    let deadline = Duration::from_secs(duration_sec as u64);
+    let tick_deadline = TickDeadline::new(duration_sec);
 
     let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
 
-    while wall_start.elapsed() < deadline {
+    while !tick_deadline.expired() {
         rl.wait();
 
-        let t0 = Instant::now();
+        let t0 = if requests & 63 == 0 { Some(Instant::now()) } else { None };
 
         match client.call_snapshot(&mut resp_buf) {
             Ok(view) => {
@@ -666,8 +687,9 @@ fn run_snapshot_client(
                     eprintln!("snapshot: expected 16 items, got {}", view.item_count);
                     errors += 1;
                 }
-                let t1 = Instant::now();
-                lr.record((t1 - t0).as_nanos() as u64);
+                if let Some(t0v) = t0 {
+                    lr.record(t0v.elapsed().as_nanos() as u64);
+                }
                 requests += 1;
             }
             Err(_) => {
@@ -755,9 +777,9 @@ fn run_batch_ping_pong_client(
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
-    let deadline = Duration::from_secs(duration_sec as u64);
+    let tick_deadline = TickDeadline::new(duration_sec);
 
-    while wall_start.elapsed() < deadline {
+    while !tick_deadline.expired() {
         rl.wait();
 
         let batch_size = (rng.next() % BENCH_MAX_BATCH_ITEMS) + 1;
@@ -793,7 +815,7 @@ fn run_batch_ping_pong_client(
             ..Header::default()
         };
 
-        let t0 = Instant::now();
+        let t0 = if total_items & 63 == 0 { Some(Instant::now()) } else { None };
 
         // Send + receive via SHM or Named Pipe
         let io_result: Result<(Header, Vec<u8>), ()> = if let Some(ref mut shm_ctx) = shm {
@@ -876,8 +898,9 @@ fn run_batch_ping_pong_client(
             }
         }
 
-        let t1 = Instant::now();
-        lr.record((t1 - t0).as_nanos() as u64);
+        if let Some(t0v) = t0 {
+            lr.record(t0v.elapsed().as_nanos() as u64);
+        }
 
         total_items += batch_size as u64;
         let _ = batch_ok;
@@ -956,12 +979,12 @@ fn run_pipeline_client(
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
-    let deadline = Duration::from_secs(duration_sec as u64);
+    let tick_deadline = TickDeadline::new(duration_sec);
 
-    while wall_start.elapsed() < deadline {
+    while !tick_deadline.expired() {
         rl.wait();
 
-        let t0 = Instant::now();
+        let t0 = if requests & 63 == 0 { Some(Instant::now()) } else { None };
 
         // Send `depth` requests
         let mut send_ok = true;
@@ -1014,8 +1037,9 @@ fn run_pipeline_client(
             }
         }
 
-        let t1 = Instant::now();
-        lr.record((t1 - t0).as_nanos() as u64);
+        if let Some(t0v) = t0 {
+            lr.record(t0v.elapsed().as_nanos() as u64);
+        }
 
         counter += depth as u64;
         requests += depth as u64;
@@ -1092,12 +1116,12 @@ fn run_pipeline_batch_client(
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
-    let deadline = Duration::from_secs(duration_sec as u64);
+    let tick_deadline = TickDeadline::new(duration_sec);
 
-    while wall_start.elapsed() < deadline {
+    while !tick_deadline.expired() {
         rl.wait();
 
-        let t0 = Instant::now();
+        let t0 = if total_items & 63 == 0 { Some(Instant::now()) } else { None };
 
         let mut send_ok = true;
         for d in 0..depth {
@@ -1159,8 +1183,9 @@ fn run_pipeline_batch_client(
             }
         }
 
-        let t1 = Instant::now();
-        lr.record((t1 - t0).as_nanos() as u64);
+        if let Some(t0v) = t0 {
+            lr.record(t0v.elapsed().as_nanos() as u64);
+        }
     }
 
     let wall_sec = wall_start.elapsed().as_secs_f64();
@@ -1209,9 +1234,9 @@ fn run_lookup_bench(duration_sec: u32) -> i32 {
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
-    let deadline = Duration::from_secs(duration_sec as u64);
+    let tick_deadline = TickDeadline::new(duration_sec);
 
-    while wall_start.elapsed() < deadline {
+    while !tick_deadline.expired() {
         for item in &items {
             let found = items
                 .iter()
