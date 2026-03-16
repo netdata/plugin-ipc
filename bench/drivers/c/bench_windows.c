@@ -1413,7 +1413,7 @@ int main(int argc, char **argv)
 
         while (GetTickCount64() < tick_deadline) {
             rate_limiter_wait(&rl);
-            uint64_t t0 = (requests & 63) == 0 ? now_ns() : 0;
+            uint64_t t0 = (total_items & 63) == 0 ? now_ns() : 0;
 
             /* Build and send `depth` batch requests */
             int send_ok = 1;
