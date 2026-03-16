@@ -125,6 +125,21 @@ Verified facts from the current codebase:
     - `np-pipeline-batch-d16` emitted 9 zero-throughput rows for all pairs
     - the current generator accepts these rows because it validates row presence and selected floors, not semantic non-zero throughput for scenarios that should never report zero on a healthy run
 
+- Follow-up debug/update after `bench: fail closed on invalid benchmark runs` (`b6aa295`):
+  - both benchmark generators now reject any row with `throughput <= 0`
+  - both runner scripts now treat client non-zero exit / missing output / unparsable output / zero throughput as benchmark failure instead of fabricating zero rows
+  - Windows C `shm-batch-ping-pong-client` had a real buffer overflow in `bench/drivers/c/bench_windows.c`
+    - bug: it assembled `NIPC_HEADER_LEN + req_len` bytes into a fixed `NIPC_HEADER_LEN + 8` stack buffer on the Win SHM batch path
+    - fix: reuse the preallocated heap response buffer as the contiguous SHM send buffer
+    - verification on `win11`: manual C `shm-batch-ping-pong-client` probe now succeeds (`throughput=25741586`, exit `0`) instead of segfaulting
+  - after fail-closed validation was enabled, additional hidden Windows benchmark correctness failures surfaced during a `duration=1` smoke run:
+    - `shm-ping-pong` max-rate Go clients failed against C/Rust/Go servers with counter-chain mismatches
+    - `shm-ping-pong` also showed non-zero correctness failures for some `c -> go` and `rust -> go` runs
+    - implication: the old benchmark path was masking real Windows SHM correctness bugs by accepting client failures as usable measurements
+  - `np-pipeline-batch-d16` still has a real runtime bug on Windows:
+    - manual probes on `win11` show Rust and Go clients can print a throughput line but still exit non-zero with `pipeline-batch client: 1 errors`
+    - the updated runner now rejects these runs instead of recording them as valid rows
+
 ## Implied Decisions
 
 - A Windows benchmark run without Rust is still useful for local debugging, but it is not sufficient for the final generated report required by this TODO.
