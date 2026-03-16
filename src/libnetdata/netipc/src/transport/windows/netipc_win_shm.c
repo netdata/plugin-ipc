@@ -27,6 +27,25 @@ static inline uint32_t align_cacheline(uint32_t v)
     return (v + (NIPC_WIN_SHM_CACHELINE - 1)) & ~(uint32_t)(NIPC_WIN_SHM_CACHELINE - 1);
 }
 
+/* Atomic reads without write contention.
+ * InterlockedCompareExchange64(ptr, 0, 0) emits LOCK CMPXCHG8B which writes
+ * the cache line on every call — catastrophic in spin loops.
+ * On x86-64, aligned 64-bit reads are naturally atomic; a volatile read
+ * with a compiler barrier suffices. */
+static inline LONG64 atomic_load_64(volatile LONG64 *ptr)
+{
+    LONG64 val = *ptr;
+    MemoryBarrier();
+    return val;
+}
+
+static inline LONG atomic_load_32(volatile LONG *ptr)
+{
+    LONG val = *ptr;
+    MemoryBarrier();
+    return val;
+}
+
 /* Validate service_name: only [a-zA-Z0-9._-], non-empty, not "." or "..". */
 static int validate_service_name(const char *name)
 {
@@ -396,10 +415,10 @@ nipc_win_shm_error_t nipc_win_shm_client_attach(
     uint32_t spin     = hdr->spin_tries;
 
     /* Read current sequence numbers */
-    LONG64 cur_req_seq  = InterlockedCompareExchange64(
-        (volatile LONG64 *)&((nipc_win_shm_region_header_t *)base)->req_seq, 0, 0);
-    LONG64 cur_resp_seq = InterlockedCompareExchange64(
-        (volatile LONG64 *)&((nipc_win_shm_region_header_t *)base)->resp_seq, 0, 0);
+    LONG64 cur_req_seq  = atomic_load_64(
+        (volatile LONG64 *)&((nipc_win_shm_region_header_t *)base)->req_seq);
+    LONG64 cur_resp_seq = atomic_load_64(
+        (volatile LONG64 *)&((nipc_win_shm_region_header_t *)base)->resp_seq);
 
     size_t region_size = (size_t)resp_off + resp_cap;
 
@@ -551,7 +570,7 @@ nipc_win_shm_error_t nipc_win_shm_send(
 
     /* 4. If HYBRID and peer is waiting, signal the event */
     if (ctx->profile == NIPC_WIN_SHM_PROFILE_HYBRID) {
-        if (InterlockedCompareExchange(peer_waiting_ptr, 0, 0) != 0)
+        if (atomic_load_32(peer_waiting_ptr) != 0)
             SetEvent(peer_event);
     }
 
@@ -622,9 +641,9 @@ nipc_win_shm_error_t nipc_win_shm_receive(
     bool observed = false;
     LONG mlen = 0;
     for (uint32_t i = 0; i < ctx->spin_tries; i++) {
-        LONG64 cur = InterlockedCompareExchange64(seq_ptr, 0, 0);
+        LONG64 cur = atomic_load_64(seq_ptr);
         if (cur >= expected_seq) {
-            mlen = InterlockedCompareExchange(len_ptr, 0, 0);
+            mlen = atomic_load_32(len_ptr);
             if (mlen > 0 && (size_t)mlen <= max_copy)
                 memcpy(buf, data_ptr, (size_t)mlen);
             observed = true;
@@ -645,7 +664,7 @@ nipc_win_shm_error_t nipc_win_shm_receive(
                 MemoryBarrier();
 
                 /* Recheck after setting flag to avoid race */
-                LONG64 cur = InterlockedCompareExchange64(seq_ptr, 0, 0);
+                LONG64 cur = atomic_load_64(seq_ptr);
                 if (cur >= expected_seq) {
                     InterlockedExchange(self_waiting_ptr, 0);
                     break; /* data available */
@@ -668,12 +687,12 @@ nipc_win_shm_error_t nipc_win_shm_receive(
                 InterlockedExchange(self_waiting_ptr, 0);
 
                 /* Check sequence — data may have arrived */
-                cur = InterlockedCompareExchange64(seq_ptr, 0, 0);
+                cur = atomic_load_64(seq_ptr);
                 if (cur >= expected_seq)
                     break; /* data available */
 
                 /* No data — check peer close */
-                if (InterlockedCompareExchange(peer_closed_ptr, 0, 0) != 0) {
+                if (atomic_load_32(peer_closed_ptr) != 0) {
                     if (ctx->role == NIPC_WIN_SHM_ROLE_SERVER)
                         ctx->local_req_seq = expected_seq;
                     else
@@ -689,7 +708,7 @@ nipc_win_shm_error_t nipc_win_shm_receive(
             }
 
             /* Copy immediately after waking */
-            mlen = InterlockedCompareExchange(len_ptr, 0, 0);
+            mlen = atomic_load_32(len_ptr);
             if (mlen > 0 && (size_t)mlen <= max_copy)
                 memcpy(buf, data_ptr, (size_t)mlen);
 
@@ -697,9 +716,9 @@ nipc_win_shm_error_t nipc_win_shm_receive(
             /* SHM_BUSYWAIT: spin indefinitely with periodic deadline checks */
             DWORD start = GetTickCount();
             for (;;) {
-                LONG64 cur = InterlockedCompareExchange64(seq_ptr, 0, 0);
+                LONG64 cur = atomic_load_64(seq_ptr);
                 if (cur >= expected_seq) {
-                    mlen = InterlockedCompareExchange(len_ptr, 0, 0);
+                    mlen = atomic_load_32(len_ptr);
                     if (mlen > 0 && (size_t)mlen <= max_copy)
                         memcpy(buf, data_ptr, (size_t)mlen);
                     break;
@@ -716,7 +735,7 @@ nipc_win_shm_error_t nipc_win_shm_receive(
                 }
 
                 /* Check peer close */
-                if (InterlockedCompareExchange(peer_closed_ptr, 0, 0) != 0) {
+                if (atomic_load_32(peer_closed_ptr) != 0) {
                     if (ctx->role == NIPC_WIN_SHM_ROLE_SERVER)
                         ctx->local_req_seq = expected_seq;
                     else
