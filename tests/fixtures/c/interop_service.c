@@ -3,11 +3,11 @@
  *
  * Usage:
  *   interop_service server <run_dir> <service_name>
- *     Starts a managed server with a cgroups handler (3 items),
- *     prints READY, handles 1 client session, then exits.
+ *     Starts a managed server handling INCREMENT, CGROUPS_SNAPSHOT,
+ *     and STRING_REVERSE methods. Prints READY, then serves clients.
  *
  *   interop_service client <run_dir> <service_name>
- *     Connects, calls snapshot, verifies 3 items, prints PASS/FAIL.
+ *     Connects, calls all three methods, verifies results, prints PASS/FAIL.
  */
 
 #include "netipc/netipc_service.h"
@@ -25,22 +25,36 @@
 #define RESPONSE_BUF_SIZE 65536
 
 /* ------------------------------------------------------------------ */
-/*  Cgroups handler: 3 test items                                      */
+/*  Typed business-logic handlers                                      */
 /* ------------------------------------------------------------------ */
 
-static bool test_handler(void *user,
-                          uint16_t method_code,
-                          const uint8_t *request_payload,
-                          size_t request_len,
-                          uint8_t *response_buf,
-                          size_t response_buf_size,
-                          size_t *response_len_out)
+static bool on_increment(void *user, uint64_t request, uint64_t *response)
 {
     (void)user;
+    *response = request + 1;
+    return true;
+}
 
-    if (method_code != NIPC_METHOD_CGROUPS_SNAPSHOT)
+static bool on_string_reverse(void *user,
+                                const char *request_str, uint32_t request_str_len,
+                                char *response_str, uint32_t response_capacity,
+                                uint32_t *response_str_len)
+{
+    (void)user;
+    if (request_str_len > response_capacity)
         return false;
 
+    for (uint32_t i = 0; i < request_str_len; i++)
+        response_str[i] = request_str[request_str_len - 1 - i];
+
+    *response_str_len = request_str_len;
+    return true;
+}
+
+static bool handle_cgroups(const uint8_t *request_payload, size_t request_len,
+                            uint8_t *response_buf, size_t response_buf_size,
+                            size_t *response_len_out)
+{
     nipc_cgroups_req_t req;
     nipc_error_t err = nipc_cgroups_req_decode(request_payload, request_len, &req);
     if (err != NIPC_OK)
@@ -70,6 +84,36 @@ static bool test_handler(void *user,
 
     *response_len_out = nipc_cgroups_builder_finish(&builder);
     return true;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Multi-method dispatcher                                            */
+/* ------------------------------------------------------------------ */
+
+static bool test_handler(void *user,
+                          uint16_t method_code,
+                          const uint8_t *request_payload,
+                          size_t request_len,
+                          uint8_t *response_buf,
+                          size_t response_buf_size,
+                          size_t *response_len_out)
+{
+    switch (method_code) {
+    case NIPC_METHOD_INCREMENT:
+        return nipc_dispatch_increment(request_payload, request_len,
+                                        response_buf, response_buf_size,
+                                        response_len_out, on_increment, user);
+    case NIPC_METHOD_CGROUPS_SNAPSHOT:
+        return handle_cgroups(request_payload, request_len,
+                               response_buf, response_buf_size,
+                               response_len_out);
+    case NIPC_METHOD_STRING_REVERSE:
+        return nipc_dispatch_string_reverse(request_payload, request_len,
+                                             response_buf, response_buf_size,
+                                             response_len_out, on_string_reverse, user);
+    default:
+        return false;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -167,47 +211,80 @@ static int run_client(const char *run_dir, const char *service)
 
     uint8_t req_buf[64];
     uint8_t resp_buf[RESPONSE_BUF_SIZE];
-    nipc_cgroups_resp_view_t view;
-
-    nipc_error_t err = nipc_client_call_cgroups_snapshot(
-        &client, req_buf, resp_buf, sizeof(resp_buf), &view);
-
     int ok = 1;
-    if (err != NIPC_OK) {
-        fprintf(stderr, "client: call failed: %d\n", err);
-        ok = 0;
-    } else {
-        if (view.item_count != 3) {
-            fprintf(stderr, "client: expected 3 items, got %u\n", view.item_count);
-            ok = 0;
-        }
-        if (view.systemd_enabled != 1) {
-            fprintf(stderr, "client: expected systemd_enabled=1, got %u\n",
-                    view.systemd_enabled);
-            ok = 0;
-        }
-        if (view.generation != 42) {
-            fprintf(stderr, "client: expected generation=42, got %lu\n",
-                    (unsigned long)view.generation);
-            ok = 0;
-        }
 
-        /* Verify first item */
-        nipc_cgroups_item_view_t item;
-        nipc_error_t ierr = nipc_cgroups_resp_item(&view, 0, &item);
-        if (ierr != NIPC_OK) {
-            fprintf(stderr, "client: item 0 decode failed\n");
+    /* --- Test INCREMENT: 42 -> 43 --- */
+    {
+        uint64_t inc_result = 0;
+        nipc_error_t err = nipc_client_call_increment(
+            &client, 42, resp_buf, sizeof(resp_buf), &inc_result);
+        if (err != NIPC_OK) {
+            fprintf(stderr, "client: increment call failed: %d\n", err);
+            ok = 0;
+        } else if (inc_result != 43) {
+            fprintf(stderr, "client: increment expected 43, got %lu\n",
+                    (unsigned long)inc_result);
+            ok = 0;
+        }
+    }
+
+    /* --- Test CGROUPS_SNAPSHOT: 3 items --- */
+    {
+        nipc_cgroups_resp_view_t view;
+        nipc_error_t err = nipc_client_call_cgroups_snapshot(
+            &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+
+        if (err != NIPC_OK) {
+            fprintf(stderr, "client: cgroups call failed: %d\n", err);
             ok = 0;
         } else {
-            if (item.hash != 1001) {
-                fprintf(stderr, "client: item 0 hash: got %u\n", item.hash);
+            if (view.item_count != 3) {
+                fprintf(stderr, "client: expected 3 items, got %u\n", view.item_count);
                 ok = 0;
             }
-            if (item.name.len != strlen("docker-abc123") ||
-                memcmp(item.name.ptr, "docker-abc123", item.name.len) != 0) {
-                fprintf(stderr, "client: item 0 name mismatch\n");
+            if (view.systemd_enabled != 1) {
+                fprintf(stderr, "client: expected systemd_enabled=1, got %u\n",
+                        view.systemd_enabled);
                 ok = 0;
             }
+            if (view.generation != 42) {
+                fprintf(stderr, "client: expected generation=42, got %lu\n",
+                        (unsigned long)view.generation);
+                ok = 0;
+            }
+
+            /* Verify first item */
+            nipc_cgroups_item_view_t item;
+            nipc_error_t ierr = nipc_cgroups_resp_item(&view, 0, &item);
+            if (ierr != NIPC_OK) {
+                fprintf(stderr, "client: item 0 decode failed\n");
+                ok = 0;
+            } else {
+                if (item.hash != 1001) {
+                    fprintf(stderr, "client: item 0 hash: got %u\n", item.hash);
+                    ok = 0;
+                }
+                if (item.name.len != strlen("docker-abc123") ||
+                    memcmp(item.name.ptr, "docker-abc123", item.name.len) != 0) {
+                    fprintf(stderr, "client: item 0 name mismatch\n");
+                    ok = 0;
+                }
+            }
+        }
+    }
+
+    /* --- Test STRING_REVERSE: "hello" -> "olleh" --- */
+    {
+        nipc_string_reverse_view_t sr_view;
+        nipc_error_t err = nipc_client_call_string_reverse(
+            &client, "hello", 5, resp_buf, sizeof(resp_buf), &sr_view);
+        if (err != NIPC_OK) {
+            fprintf(stderr, "client: string_reverse call failed: %d\n", err);
+            ok = 0;
+        } else if (sr_view.str_len != 5 || memcmp(sr_view.str, "olleh", 5) != 0) {
+            fprintf(stderr, "client: string_reverse expected \"olleh\", got \"%.*s\"\n",
+                    (int)sr_view.str_len, sr_view.str);
+            ok = 0;
         }
     }
 

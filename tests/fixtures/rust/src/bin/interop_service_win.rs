@@ -6,8 +6,9 @@
 
 #[cfg(windows)]
 use netipc::protocol::{
-    CgroupsBuilder, CgroupsRequest, PROFILE_BASELINE,
-    METHOD_CGROUPS_SNAPSHOT, PROFILE_SHM_HYBRID,
+    CgroupsBuilder, CgroupsRequest, PROFILE_BASELINE, PROFILE_SHM_HYBRID,
+    METHOD_INCREMENT, METHOD_CGROUPS_SNAPSHOT, METHOD_STRING_REVERSE,
+    dispatch_increment, dispatch_string_reverse,
 };
 #[cfg(windows)]
 use netipc::service::cgroups::{CgroupsClient, CgroupsServer};
@@ -29,10 +30,7 @@ fn detect_profiles() -> u32 {
 }
 
 #[cfg(windows)]
-fn test_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
-    if method_code != METHOD_CGROUPS_SNAPSHOT {
-        return None;
-    }
+fn handle_cgroups(request_payload: &[u8]) -> Option<Vec<u8>> {
     if CgroupsRequest::decode(request_payload).is_err() {
         return None;
     }
@@ -55,6 +53,30 @@ fn test_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
     let total = builder.finish();
     buf.truncate(total);
     Some(buf)
+}
+
+#[cfg(windows)]
+fn test_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
+    match method_code {
+        METHOD_INCREMENT => {
+            let mut resp = vec![0u8; 8];
+            let n = dispatch_increment(request_payload, &mut resp, |v| Some(v + 1))?;
+            resp.truncate(n);
+            Some(resp)
+        }
+        METHOD_CGROUPS_SNAPSHOT => handle_cgroups(request_payload),
+        METHOD_STRING_REVERSE => {
+            let mut resp = vec![0u8; RESPONSE_BUF_SIZE];
+            let n = dispatch_string_reverse(request_payload, &mut resp, |s| {
+                let mut reversed = s.to_vec();
+                reversed.reverse();
+                Some(reversed)
+            })?;
+            resp.truncate(n);
+            Some(resp)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(windows)]
@@ -114,53 +136,81 @@ fn run_client(run_dir: &str, service: &str) -> i32 {
         return 1;
     }
 
-    let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-    match client.call_snapshot(&mut resp_buf) {
-        Ok(view) => {
-            let mut ok = true;
-            if view.item_count != 3 {
-                eprintln!("client: expected 3 items, got {}", view.item_count);
-                ok = false;
-            }
-            if view.systemd_enabled != 1 {
-                eprintln!("client: expected systemd_enabled=1, got {}", view.systemd_enabled);
-                ok = false;
-            }
-            if view.generation != 42 {
-                eprintln!("client: expected generation=42, got {}", view.generation);
-                ok = false;
-            }
+    let mut ok = true;
 
-            if let Ok(item0) = view.item(0) {
-                if item0.hash != 1001 {
-                    eprintln!("client: item 0 hash: got {}", item0.hash);
-                    ok = false;
-                }
-                if item0.name.as_bytes() != b"docker-abc123" {
-                    eprintln!("client: item 0 name mismatch");
-                    ok = false;
-                }
-            } else {
-                eprintln!("client: item 0 decode failed");
-                ok = false;
-            }
-
-            client.close();
-
-            if ok {
-                println!("PASS");
-                0
-            } else {
-                println!("FAIL");
-                1
-            }
+    // --- Test INCREMENT: 42 -> 43 ---
+    match client.call_increment(42) {
+        Ok(v) if v == 43 => {}
+        Ok(v) => {
+            eprintln!("client: increment expected 43, got {v}");
+            ok = false;
         }
         Err(e) => {
-            eprintln!("client: call failed: {:?}", e);
-            client.close();
-            println!("FAIL");
-            1
+            eprintln!("client: increment call failed: {e:?}");
+            ok = false;
         }
+    }
+
+    // --- Test CGROUPS_SNAPSHOT: 3 items ---
+    {
+        let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
+        match client.call_snapshot(&mut resp_buf) {
+            Ok(view) => {
+                if view.item_count != 3 {
+                    eprintln!("client: expected 3 items, got {}", view.item_count);
+                    ok = false;
+                }
+                if view.systemd_enabled != 1 {
+                    eprintln!("client: expected systemd_enabled=1, got {}", view.systemd_enabled);
+                    ok = false;
+                }
+                if view.generation != 42 {
+                    eprintln!("client: expected generation=42, got {}", view.generation);
+                    ok = false;
+                }
+
+                if let Ok(item0) = view.item(0) {
+                    if item0.hash != 1001 {
+                        eprintln!("client: item 0 hash: got {}", item0.hash);
+                        ok = false;
+                    }
+                    if item0.name.as_bytes() != b"docker-abc123" {
+                        eprintln!("client: item 0 name mismatch");
+                        ok = false;
+                    }
+                } else {
+                    eprintln!("client: item 0 decode failed");
+                    ok = false;
+                }
+            }
+            Err(e) => {
+                eprintln!("client: cgroups call failed: {e:?}");
+                ok = false;
+            }
+        }
+    }
+
+    // --- Test STRING_REVERSE: "hello" -> "olleh" ---
+    match client.call_string_reverse("hello") {
+        Ok(ref s) if s == "olleh" => {}
+        Ok(ref s) => {
+            eprintln!("client: string_reverse expected \"olleh\", got \"{s}\"");
+            ok = false;
+        }
+        Err(e) => {
+            eprintln!("client: string_reverse call failed: {e:?}");
+            ok = false;
+        }
+    }
+
+    client.close();
+
+    if ok {
+        println!("PASS");
+        0
+    } else {
+        println!("FAIL");
+        1
     }
 }
 

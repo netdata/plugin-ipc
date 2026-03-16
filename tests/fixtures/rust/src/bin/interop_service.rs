@@ -10,7 +10,8 @@
 
 use netipc::protocol::{
     CgroupsBuilder, CgroupsRequest, PROFILE_BASELINE, PROFILE_SHM_HYBRID,
-    METHOD_CGROUPS_SNAPSHOT,
+    METHOD_INCREMENT, METHOD_CGROUPS_SNAPSHOT, METHOD_STRING_REVERSE,
+    dispatch_increment, dispatch_string_reverse,
 };
 use netipc::service::cgroups::{CgroupsClient, CgroupsServer};
 use netipc::transport::posix::{ClientConfig, ServerConfig};
@@ -26,12 +27,8 @@ fn detect_profiles() -> u32 {
     }
 }
 
-/// Build a snapshot with 3 test items.
-fn cgroups_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
-    if method_code != METHOD_CGROUPS_SNAPSHOT {
-        return None;
-    }
-
+/// Build a cgroups snapshot with 3 test items.
+fn handle_cgroups(request_payload: &[u8]) -> Option<Vec<u8>> {
     if CgroupsRequest::decode(request_payload).is_err() {
         return None;
     }
@@ -54,6 +51,30 @@ fn cgroups_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> 
     let total = builder.finish();
     buf.truncate(total);
     Some(buf)
+}
+
+/// Multi-method dispatcher: INCREMENT, CGROUPS_SNAPSHOT, STRING_REVERSE.
+fn multi_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
+    match method_code {
+        METHOD_INCREMENT => {
+            let mut resp = vec![0u8; 8];
+            let n = dispatch_increment(request_payload, &mut resp, |v| Some(v + 1))?;
+            resp.truncate(n);
+            Some(resp)
+        }
+        METHOD_CGROUPS_SNAPSHOT => handle_cgroups(request_payload),
+        METHOD_STRING_REVERSE => {
+            let mut resp = vec![0u8; RESPONSE_BUF_SIZE];
+            let n = dispatch_string_reverse(request_payload, &mut resp, |s| {
+                let mut reversed = s.to_vec();
+                reversed.reverse();
+                Some(reversed)
+            })?;
+            resp.truncate(n);
+            Some(resp)
+        }
+        _ => None,
+    }
 }
 
 fn server_config() -> ServerConfig {
@@ -91,7 +112,7 @@ fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Er
         service,
         server_config(),
         RESPONSE_BUF_SIZE,
-        std::sync::Arc::new(|code, payload| cgroups_handler(code, payload)),
+        std::sync::Arc::new(|code, payload| multi_handler(code, payload)),
     );
 
     // Signal readiness
@@ -116,40 +137,81 @@ fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Er
         return Err("client not ready".into());
     }
 
-    let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-    let view = client.call_snapshot(&mut resp_buf)?;
-
     let mut ok = true;
 
-    if view.item_count != 3 {
-        eprintln!("client: expected 3 items, got {}", view.item_count);
-        ok = false;
-    }
-    if view.systemd_enabled != 1 {
-        eprintln!(
-            "client: expected systemd_enabled=1, got {}",
-            view.systemd_enabled
-        );
-        ok = false;
-    }
-    if view.generation != 42 {
-        eprintln!("client: expected generation=42, got {}", view.generation);
-        ok = false;
+    // --- Test INCREMENT: 42 -> 43 ---
+    match client.call_increment(42) {
+        Ok(v) if v == 43 => {}
+        Ok(v) => {
+            eprintln!("client: increment expected 43, got {v}");
+            ok = false;
+        }
+        Err(e) => {
+            eprintln!("client: increment call failed: {e:?}");
+            ok = false;
+        }
     }
 
-    // Verify first item
-    let item0 = view.item(0)?;
-    if item0.hash != 1001 {
-        eprintln!("client: item 0 hash: got {}", item0.hash);
-        ok = false;
+    // --- Test CGROUPS_SNAPSHOT: 3 items ---
+    {
+        let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
+        match client.call_snapshot(&mut resp_buf) {
+            Ok(view) => {
+                if view.item_count != 3 {
+                    eprintln!("client: expected 3 items, got {}", view.item_count);
+                    ok = false;
+                }
+                if view.systemd_enabled != 1 {
+                    eprintln!(
+                        "client: expected systemd_enabled=1, got {}",
+                        view.systemd_enabled
+                    );
+                    ok = false;
+                }
+                if view.generation != 42 {
+                    eprintln!("client: expected generation=42, got {}", view.generation);
+                    ok = false;
+                }
+
+                match view.item(0) {
+                    Ok(item0) => {
+                        if item0.hash != 1001 {
+                            eprintln!("client: item 0 hash: got {}", item0.hash);
+                            ok = false;
+                        }
+                        if item0.name.as_bytes() != b"docker-abc123" {
+                            eprintln!("client: item 0 name mismatch");
+                            ok = false;
+                        }
+                        if item0.path.as_bytes() != b"/sys/fs/cgroup/docker/abc123" {
+                            eprintln!("client: item 0 path mismatch");
+                            ok = false;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("client: item 0 decode failed: {e:?}");
+                        ok = false;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("client: cgroups call failed: {e:?}");
+                ok = false;
+            }
+        }
     }
-    if item0.name.as_bytes() != b"docker-abc123" {
-        eprintln!("client: item 0 name mismatch");
-        ok = false;
-    }
-    if item0.path.as_bytes() != b"/sys/fs/cgroup/docker/abc123" {
-        eprintln!("client: item 0 path mismatch");
-        ok = false;
+
+    // --- Test STRING_REVERSE: "hello" -> "olleh" ---
+    match client.call_string_reverse("hello") {
+        Ok(ref s) if s == "olleh" => {}
+        Ok(ref s) => {
+            eprintln!("client: string_reverse expected \"olleh\", got \"{s}\"");
+            ok = false;
+        }
+        Err(e) => {
+            eprintln!("client: string_reverse call failed: {e:?}");
+            ok = false;
+        }
     }
 
     client.close();

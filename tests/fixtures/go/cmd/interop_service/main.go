@@ -65,12 +65,8 @@ func clientConfig() posix.ClientConfig {
 	}
 }
 
-// testHandler builds a snapshot with 3 test items.
-func testHandler(methodCode uint16, request []byte) ([]byte, bool) {
-	if methodCode != protocol.MethodCgroupsSnapshot {
-		return nil, false
-	}
-
+// handleCgroups builds a snapshot with 3 test items.
+func handleCgroups(request []byte) ([]byte, bool) {
 	if _, err := protocol.DecodeCgroupsRequest(request); err != nil {
 		return nil, false
 	}
@@ -95,6 +91,41 @@ func testHandler(methodCode uint16, request []byte) ([]byte, bool) {
 
 	total := builder.Finish()
 	return buf[:total], true
+}
+
+// testHandler dispatches INCREMENT, CGROUPS_SNAPSHOT, and STRING_REVERSE.
+func testHandler(methodCode uint16, request []byte) ([]byte, bool) {
+	switch methodCode {
+	case protocol.MethodIncrement:
+		resp := make([]byte, protocol.IncrementPayloadSize)
+		n, ok := protocol.DispatchIncrement(request, resp, func(v uint64) (uint64, bool) {
+			return v + 1, true
+		})
+		if !ok {
+			return nil, false
+		}
+		return resp[:n], true
+
+	case protocol.MethodCgroupsSnapshot:
+		return handleCgroups(request)
+
+	case protocol.MethodStringReverse:
+		resp := make([]byte, responseBufSize)
+		n, ok := protocol.DispatchStringReverse(request, resp, func(s string) (string, bool) {
+			runes := []rune(s)
+			for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+				runes[i], runes[j] = runes[j], runes[i]
+			}
+			return string(runes), true
+		})
+		if !ok {
+			return nil, false
+		}
+		return resp[:n], true
+
+	default:
+		return nil, false
+	}
 }
 
 func runServer(runDir, service string) int {
@@ -125,45 +156,66 @@ func runClient(runDir, service string) int {
 	}
 
 	respBuf := make([]byte, responseBufSize)
+	ok := true
+
+	// --- Test INCREMENT: 42 -> 43 ---
+	incResult, err := client.CallIncrement(42, respBuf)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "client: increment call failed: %v\n", err)
+		ok = false
+	} else if incResult != 43 {
+		fmt.Fprintf(os.Stderr, "client: increment expected 43, got %d\n", incResult)
+		ok = false
+	}
+
+	// --- Test CGROUPS_SNAPSHOT: 3 items ---
 	view, err := client.CallSnapshot(respBuf)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "client: call failed: %v\n", err)
-		fmt.Println("FAIL")
-		return 1
-	}
-
-	ok := true
-	if view.ItemCount != 3 {
-		fmt.Fprintf(os.Stderr, "client: expected 3 items, got %d\n", view.ItemCount)
-		ok = false
-	}
-	if view.SystemdEnabled != 1 {
-		fmt.Fprintf(os.Stderr, "client: expected systemd_enabled=1, got %d\n", view.SystemdEnabled)
-		ok = false
-	}
-	if view.Generation != 42 {
-		fmt.Fprintf(os.Stderr, "client: expected generation=42, got %d\n", view.Generation)
-		ok = false
-	}
-
-	// Verify first item
-	item0, ierr := view.Item(0)
-	if ierr != nil {
-		fmt.Fprintf(os.Stderr, "client: item 0 error: %v\n", ierr)
+		fmt.Fprintf(os.Stderr, "client: cgroups call failed: %v\n", err)
 		ok = false
 	} else {
-		if item0.Hash != 1001 {
-			fmt.Fprintf(os.Stderr, "client: item 0 hash: got %d\n", item0.Hash)
+		if view.ItemCount != 3 {
+			fmt.Fprintf(os.Stderr, "client: expected 3 items, got %d\n", view.ItemCount)
 			ok = false
 		}
-		if item0.Name.String() != "docker-abc123" {
-			fmt.Fprintf(os.Stderr, "client: item 0 name: got %q\n", item0.Name.String())
+		if view.SystemdEnabled != 1 {
+			fmt.Fprintf(os.Stderr, "client: expected systemd_enabled=1, got %d\n", view.SystemdEnabled)
 			ok = false
 		}
-		if item0.Path.String() != "/sys/fs/cgroup/docker/abc123" {
-			fmt.Fprintf(os.Stderr, "client: item 0 path: got %q\n", item0.Path.String())
+		if view.Generation != 42 {
+			fmt.Fprintf(os.Stderr, "client: expected generation=42, got %d\n", view.Generation)
 			ok = false
 		}
+
+		// Verify first item
+		item0, ierr := view.Item(0)
+		if ierr != nil {
+			fmt.Fprintf(os.Stderr, "client: item 0 error: %v\n", ierr)
+			ok = false
+		} else {
+			if item0.Hash != 1001 {
+				fmt.Fprintf(os.Stderr, "client: item 0 hash: got %d\n", item0.Hash)
+				ok = false
+			}
+			if item0.Name.String() != "docker-abc123" {
+				fmt.Fprintf(os.Stderr, "client: item 0 name: got %q\n", item0.Name.String())
+				ok = false
+			}
+			if item0.Path.String() != "/sys/fs/cgroup/docker/abc123" {
+				fmt.Fprintf(os.Stderr, "client: item 0 path: got %q\n", item0.Path.String())
+				ok = false
+			}
+		}
+	}
+
+	// --- Test STRING_REVERSE: "hello" -> "olleh" ---
+	srView, err := client.CallStringReverse("hello", respBuf)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "client: string_reverse call failed: %v\n", err)
+		ok = false
+	} else if srView.Str != "olleh" {
+		fmt.Fprintf(os.Stderr, "client: string_reverse expected \"olleh\", got %q\n", srView.Str)
+		ok = false
 	}
 
 	client.Close()

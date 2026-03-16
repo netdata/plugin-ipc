@@ -89,8 +89,9 @@ specifications are the authority for interop correctness.
 Every spec document includes its own testing requirements section. The
 universal rules are:
 
-- High test coverage with enforced minimums (90%+ line coverage,
-  measured per-platform via `run-coverage-{c,rust,go}.sh`)
+- High test coverage with enforced minimums (90%+ line coverage
+  on POSIX via `run-coverage-{c,rust,go}.sh`; Windows coverage is
+  verified via unit tests and cross-language interop, not lcov/llvm-cov)
 - Fuzz testing for all parsing/decoding paths
 - Cross-language interop tests for all wire contracts, over both
   baseline and SHM transports

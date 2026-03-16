@@ -997,7 +997,7 @@ bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms)
     /* 2. Wait for in-flight sessions to complete */
     bool all_drained = true;
     if (server->sessions) {
-        DWORD deadline = GetTickCount() + timeout_ms;
+        ULONGLONG deadline = GetTickCount64() + timeout_ms;
 
         /* Poll until all sessions are inactive or timeout */
         while (1) {
@@ -1013,7 +1013,7 @@ bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms)
             if (active_count == 0)
                 break;
 
-            if (GetTickCount() >= deadline) {
+            if (GetTickCount64() >= deadline) {
                 /* Timeout: force-close session pipes to unblock threads */
                 EnterCriticalSection(&server->sessions_lock);
                 for (int i = 0; i < server->session_count; i++) {

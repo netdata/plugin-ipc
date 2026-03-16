@@ -731,6 +731,16 @@ if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
         TIMEOUT 120
         ENVIRONMENT "INTEROP_SVC_C=$<TARGET_FILE:interop_service_win_c>;INTEROP_SVC_RS=${INTEROP_SVC_WIN_RS};INTEROP_SVC_GO=${INTEROP_SVC_WIN_GO}"
     )
+
+    # SHM variant
+    add_test(NAME test_service_win_shm_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_service_win_shm_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_service_win_shm_interop PROPERTIES
+        TIMEOUT 120
+        ENVIRONMENT "INTEROP_SVC_C=$<TARGET_FILE:interop_service_win_c>;INTEROP_SVC_RS=${INTEROP_SVC_WIN_RS};INTEROP_SVC_GO=${INTEROP_SVC_WIN_GO}"
+    )
 endif()
 
 # --- Cross-language Windows L3 cache interop tests --------------------------
@@ -744,6 +754,16 @@ if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     )
     set_tests_properties(test_cache_win_interop PROPERTIES
+        TIMEOUT 120
+        ENVIRONMENT "INTEROP_CACHE_C=$<TARGET_FILE:interop_cache_win_c>;INTEROP_CACHE_RS=${INTEROP_CACHE_WIN_RS};INTEROP_CACHE_GO=${INTEROP_CACHE_WIN_GO}"
+    )
+
+    # SHM variant
+    add_test(NAME test_cache_win_shm_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_cache_win_shm_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_cache_win_shm_interop PROPERTIES
         TIMEOUT 120
         ENVIRONMENT "INTEROP_CACHE_C=$<TARGET_FILE:interop_cache_win_c>;INTEROP_CACHE_RS=${INTEROP_CACHE_WIN_RS};INTEROP_CACHE_GO=${INTEROP_CACHE_WIN_GO}"
     )
