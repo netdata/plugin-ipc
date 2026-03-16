@@ -29,20 +29,24 @@ static inline uint32_t align_cacheline(uint32_t v)
 
 /* Atomic reads without write contention.
  * InterlockedCompareExchange64(ptr, 0, 0) emits LOCK CMPXCHG8B which writes
- * the cache line on every call — catastrophic in spin loops.
- * On x86-64, aligned 64-bit reads are naturally atomic; a volatile read
- * with a compiler barrier suffices. */
+ * the cache line on every call — catastrophic in spin loops. MemoryBarrier()
+ * emits MFENCE which flushes the store buffer — also expensive.
+ *
+ * On x86-64, aligned 64-bit reads are naturally atomic and have acquire
+ * semantics (loads are never reordered with loads). A volatile read with
+ * a compiler barrier (no hardware barrier) is sufficient and matches what
+ * Go's atomic.LoadInt64 compiles to (plain MOV). */
 static inline LONG64 atomic_load_64(volatile LONG64 *ptr)
 {
     LONG64 val = *ptr;
-    MemoryBarrier();
+    __asm__ volatile("" ::: "memory"); /* compiler barrier only */
     return val;
 }
 
 static inline LONG atomic_load_32(volatile LONG *ptr)
 {
     LONG val = *ptr;
-    MemoryBarrier();
+    __asm__ volatile("" ::: "memory"); /* compiler barrier only */
     return val;
 }
 
