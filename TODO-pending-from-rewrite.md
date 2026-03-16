@@ -594,9 +594,16 @@ Small, independent, low-risk items.
 8. C Windows server missing batch dispatch entirely
 9. C/Rust Windows SHM spurious wake bug (same as POSIX H6) — partial fix, 27k→72k but still 45x slower than Go 3.3M
 
-### Known performance gaps (not bugs, need investigation)
-- Windows SHM C/Rust: 65-72k vs Go 3.3M — likely InterlockedCompareExchange64 spin overhead vs Go atomic.LoadInt64, or Win32 event signaling overhead. Needs profiling.
-- Windows C/Rust cache lookup: 3.7M vs Go 114M — likely MinGW compiler optimization gap.
+### Known performance gaps (need profiling on Windows)
+- **Windows SHM C client: 72k vs Go 3.7M (cross-lang test confirms C server is fine at 3.7M with Go client)**
+  - CAS reads → volatile loads: no improvement
+  - MemoryBarrier → GCC compiler barrier: no improvement
+  - HYBRID vs BUSYWAIT profile: no difference
+  - malloc-in-loop → stack buffer: no improvement
+  - The spin loop assembly looks correct (pause instruction present)
+  - Root cause unknown. Needs Windows profiling (VTune / WPA).
+  - The Go SHM client code does the same operations but is 50x faster.
+- Windows C/Rust cache lookup: 3.7M vs Go 114M — likely MinGW codegen gap.
 - Go snapshot baseline: 50k vs C 121k — Go bench driver per-request allocation.
 
 ### Dependencies
