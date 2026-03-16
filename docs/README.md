@@ -89,8 +89,10 @@ specifications are the authority for interop correctness.
 Every spec document includes its own testing requirements section. The
 universal rules are:
 
-- 100% test coverage (line + branch) for all library code
+- High test coverage with enforced minimums (90%+ line coverage,
+  measured per-platform via `run-coverage-{c,rust,go}.sh`)
 - Fuzz testing for all parsing/decoding paths
-- Cross-language interop tests for all wire contracts
+- Cross-language interop tests for all wire contracts, over both
+  baseline and SHM transports
 - Abnormal path coverage for all failure modes
 - No exceptions — nothing integrates into Netdata without this coverage

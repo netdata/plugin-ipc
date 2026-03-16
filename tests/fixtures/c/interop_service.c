@@ -94,11 +94,22 @@ static bool counting_handler(void *user,
     return ok;
 }
 
+/* Profile selection: NIPC_PROFILE env var ("shm" → SHM_HYBRID|BASELINE,
+ * default → BASELINE only). */
+static uint32_t detect_profiles(void)
+{
+    const char *env = getenv("NIPC_PROFILE");
+    if (env && strcmp(env, "shm") == 0)
+        return NIPC_PROFILE_SHM_HYBRID | NIPC_PROFILE_BASELINE;
+    return NIPC_PROFILE_BASELINE;
+}
+
 static int run_server(const char *run_dir, const char *service)
 {
+    uint32_t profiles = detect_profiles();
     nipc_uds_server_config_t scfg = {
-        .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .preferred_profiles        = 0,
+        .supported_profiles        = profiles,
+        .preferred_profiles        = profiles,
         .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
@@ -133,9 +144,10 @@ static int run_server(const char *run_dir, const char *service)
 
 static int run_client(const char *run_dir, const char *service)
 {
+    uint32_t profiles = detect_profiles();
     nipc_uds_client_config_t ccfg = {
-        .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .preferred_profiles        = 0,
+        .supported_profiles        = profiles,
+        .preferred_profiles        = profiles,
         .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,

@@ -514,6 +514,19 @@ if(CARGO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     set_tests_properties(test_stress_rust PROPERTIES TIMEOUT 240)
 endif()
 
+# --- Cross-language L2 service SHM interop tests (Linux only) ---------------
+
+if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
+    add_test(NAME test_service_shm_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_service_shm_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_service_shm_interop PROPERTIES
+        TIMEOUT 120
+        ENVIRONMENT "INTEROP_SVC_C=$<TARGET_FILE:interop_service_c>;INTEROP_SVC_RS=${INTEROP_SVC_RS};INTEROP_SVC_GO=${INTEROP_SVC_GO}"
+    )
+endif()
+
 # --- Cross-language L3 cache interop tests (Linux only) ---------------------
 
 if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
@@ -525,6 +538,16 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     )
     set_tests_properties(test_cache_interop PROPERTIES
+        TIMEOUT 120
+        ENVIRONMENT "INTEROP_CACHE_C=$<TARGET_FILE:interop_cache_c>;INTEROP_CACHE_RS=${INTEROP_CACHE_RS};INTEROP_CACHE_GO=${INTEROP_CACHE_GO}"
+    )
+
+    # SHM variant
+    add_test(NAME test_cache_shm_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_cache_shm_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_cache_shm_interop PROPERTIES
         TIMEOUT 120
         ENVIRONMENT "INTEROP_CACHE_C=$<TARGET_FILE:interop_cache_c>;INTEROP_CACHE_RS=${INTEROP_CACHE_RS};INTEROP_CACHE_GO=${INTEROP_CACHE_GO}"
     )

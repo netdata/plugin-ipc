@@ -101,7 +101,7 @@ run_test() {
 
     # Start server in background, wait for READY
     local server_pid
-    "$server_bin" server "$RUN_DIR" "$service" > /tmp/nipc_cache_server_out_$$ 2>&1 &
+    env NIPC_PROFILE="${NIPC_PROFILE:-}" "$server_bin" server "$RUN_DIR" "$service" > /tmp/nipc_cache_server_out_$$ 2>&1 &
     server_pid=$!
 
     local waited=0
@@ -131,7 +131,7 @@ run_test() {
 
     # Run client
     local client_out
-    if client_out=$("$client_bin" client "$RUN_DIR" "$service" 2>&1); then
+    if client_out=$(env NIPC_PROFILE="${NIPC_PROFILE:-}" "$client_bin" client "$RUN_DIR" "$service" 2>&1); then
         if echo "$client_out" | grep -q "^PASS$"; then
             echo -e "${GREEN}PASS${NC}"
             PASS=$((PASS + 1))

@@ -29,9 +29,20 @@ const (
 	responseBufSize = 65536
 )
 
+// detectProfiles reads NIPC_PROFILE env var: "shm" enables SHM_HYBRID|BASELINE,
+// default BASELINE only.
+func detectProfiles() uint32 {
+	if os.Getenv("NIPC_PROFILE") == "shm" {
+		return protocol.ProfileSHMHybrid | protocol.ProfileBaseline
+	}
+	return protocol.ProfileBaseline
+}
+
 func serverConfig() posix.ServerConfig {
+	profiles := detectProfiles()
 	return posix.ServerConfig{
-		SupportedProfiles:       protocol.ProfileBaseline,
+		SupportedProfiles:       profiles,
+		PreferredProfiles:       profiles,
 		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: responseBufSize,
@@ -42,8 +53,10 @@ func serverConfig() posix.ServerConfig {
 }
 
 func clientConfig() posix.ClientConfig {
+	profiles := detectProfiles()
 	return posix.ClientConfig{
-		SupportedProfiles:       protocol.ProfileBaseline,
+		SupportedProfiles:       profiles,
+		PreferredProfiles:       profiles,
 		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: responseBufSize,

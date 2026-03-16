@@ -92,50 +92,165 @@ func (c *Client) Status() ClientStatus {
 	}
 }
 
-// CallSnapshot performs a blocking typed cgroups snapshot call.
-func (c *Client) CallSnapshot(responseBuf []byte) (*protocol.CgroupsResponseView, error) {
+// callWithRetry runs attempt once; on failure disconnects, reconnects,
+// retries once. Manages state transitions and counters.
+func (c *Client) callWithRetry(attempt func() error) error {
 	if c.state != StateReady {
 		c.errorCount++
-		return nil, protocol.ErrBadLayout
+		return protocol.ErrBadLayout
 	}
 
 	// First attempt
-	payloadLen, firstErr := c.doCgroupsCallRaw(responseBuf)
+	firstErr := attempt()
 	if firstErr == nil {
-		view, err := protocol.DecodeCgroupsResponse(responseBuf[:payloadLen])
-		if err == nil {
-			c.callCount++
-			return &view, nil
-		}
-		firstErr = err
+		c.callCount++
+		return nil
 	}
 
-	// Call failed. Was previously READY: disconnect, reconnect, retry ONCE.
+	// Call failed. Disconnect, reconnect, retry ONCE.
 	c.disconnect()
 	c.state = StateBroken
 
 	c.state = c.tryConnect()
 	if c.state != StateReady {
 		c.errorCount++
-		return nil, firstErr
+		return firstErr
 	}
 	c.reconnectCount++
 
 	// Retry once
-	payloadLen, retryErr := c.doCgroupsCallRaw(responseBuf)
+	retryErr := attempt()
 	if retryErr == nil {
-		view, err := protocol.DecodeCgroupsResponse(responseBuf[:payloadLen])
-		if err == nil {
-			c.callCount++
-			return &view, nil
-		}
-		retryErr = err
+		c.callCount++
+		return nil
 	}
 
+	// Retry also failed
 	c.disconnect()
 	c.state = StateBroken
 	c.errorCount++
-	return nil, retryErr
+	return retryErr
+}
+
+// doRawCall sends a request and receives/validates the response envelope.
+// Returns the validated response header and payload length in responseBuf.
+func (c *Client) doRawCall(methodCode uint16, reqPayload, responseBuf []byte) (protocol.Header, int, error) {
+	hdr := protocol.Header{
+		Kind:            protocol.KindRequest,
+		Code:            methodCode,
+		Flags:           0,
+		ItemCount:       1,
+		MessageID:       uint64(c.callCount) + 1,
+		TransportStatus: protocol.StatusOK,
+	}
+
+	if err := c.transportSend(&hdr, reqPayload); err != nil {
+		return protocol.Header{}, 0, err
+	}
+
+	respHdr, payloadLen, err := c.transportReceive(responseBuf)
+	if err != nil {
+		return protocol.Header{}, 0, err
+	}
+
+	if respHdr.Kind != protocol.KindResponse {
+		return protocol.Header{}, 0, protocol.ErrBadKind
+	}
+	if respHdr.Code != methodCode {
+		return protocol.Header{}, 0, protocol.ErrBadLayout
+	}
+	if respHdr.MessageID != hdr.MessageID {
+		return protocol.Header{}, 0, protocol.ErrBadLayout
+	}
+	if respHdr.TransportStatus != protocol.StatusOK {
+		return protocol.Header{}, 0, protocol.ErrBadLayout
+	}
+
+	return respHdr, payloadLen, nil
+}
+
+// CallSnapshot performs a blocking typed cgroups snapshot call.
+func (c *Client) CallSnapshot(responseBuf []byte) (*protocol.CgroupsResponseView, error) {
+	var result *protocol.CgroupsResponseView
+
+	err := c.callWithRetry(func() error {
+		req := protocol.CgroupsRequest{LayoutVersion: 1, Flags: 0}
+		var reqBuf [4]byte
+		if req.Encode(reqBuf[:]) == 0 {
+			return protocol.ErrTruncated
+		}
+
+		_, payloadLen, rerr := c.doRawCall(protocol.MethodCgroupsSnapshot, reqBuf[:], responseBuf)
+		if rerr != nil {
+			return rerr
+		}
+
+		view, derr := protocol.DecodeCgroupsResponse(responseBuf[:payloadLen])
+		if derr != nil {
+			return derr
+		}
+		result = &view
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// CallIncrement performs a blocking INCREMENT call.
+// Sends requestValue, returns the server's response value.
+func (c *Client) CallIncrement(requestValue uint64, responseBuf []byte) (uint64, error) {
+	var result uint64
+
+	err := c.callWithRetry(func() error {
+		var reqBuf [protocol.IncrementPayloadSize]byte
+		if protocol.IncrementEncode(requestValue, reqBuf[:]) == 0 {
+			return protocol.ErrTruncated
+		}
+
+		_, payloadLen, rerr := c.doRawCall(protocol.MethodIncrement, reqBuf[:], responseBuf)
+		if rerr != nil {
+			return rerr
+		}
+
+		val, derr := protocol.IncrementDecode(responseBuf[:payloadLen])
+		if derr != nil {
+			return derr
+		}
+		result = val
+		return nil
+	})
+	return result, err
+}
+
+// CallStringReverse performs a blocking STRING_REVERSE call.
+// Sends requestStr, returns the server's reversed string view.
+func (c *Client) CallStringReverse(requestStr string, responseBuf []byte) (*protocol.StringReverseView, error) {
+	var result *protocol.StringReverseView
+
+	err := c.callWithRetry(func() error {
+		reqBuf := make([]byte, protocol.StringReverseHdrSize+len(requestStr)+1)
+		if protocol.StringReverseEncode(requestStr, reqBuf) == 0 {
+			return protocol.ErrTruncated
+		}
+
+		_, payloadLen, rerr := c.doRawCall(protocol.MethodStringReverse, reqBuf, responseBuf)
+		if rerr != nil {
+			return rerr
+		}
+
+		view, derr := protocol.StringReverseDecode(responseBuf[:payloadLen])
+		if derr != nil {
+			return derr
+		}
+		result = &view
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // Close tears down the connection and releases resources.
@@ -199,49 +314,6 @@ func (c *Client) tryConnect() ClientState {
 
 	c.session = session
 	return StateReady
-}
-
-func (c *Client) doCgroupsCallRaw(responseBuf []byte) (int, error) {
-	req := protocol.CgroupsRequest{LayoutVersion: 1, Flags: 0}
-	var reqBuf [4]byte
-	if req.Encode(reqBuf[:]) == 0 {
-		return 0, protocol.ErrTruncated
-	}
-
-	hdr := protocol.Header{
-		Kind:            protocol.KindRequest,
-		Code:            protocol.MethodCgroupsSnapshot,
-		Flags:           0,
-		ItemCount:       1,
-		MessageID:       uint64(c.callCount) + 1,
-		TransportStatus: protocol.StatusOK,
-	}
-
-	if err := c.transportSend(&hdr, reqBuf[:]); err != nil {
-		return 0, err
-	}
-
-	respHdr, payloadLen, err := c.transportReceive(responseBuf)
-	if err != nil {
-		return 0, err
-	}
-
-	// Verify response envelope fields before decode
-	if respHdr.Kind != protocol.KindResponse {
-		return 0, protocol.ErrBadKind
-	}
-	if respHdr.Code != protocol.MethodCgroupsSnapshot {
-		return 0, protocol.ErrBadLayout
-	}
-	if respHdr.MessageID != hdr.MessageID {
-		return 0, protocol.ErrBadLayout
-	}
-
-	if respHdr.TransportStatus != protocol.StatusOK {
-		return 0, protocol.ErrBadLayout
-	}
-
-	return payloadLen, nil
 }
 
 func (c *Client) transportSend(hdr *protocol.Header, payload []byte) error {

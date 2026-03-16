@@ -9,7 +9,7 @@
 //!     Connects, calls snapshot, verifies 3 items, prints PASS/FAIL.
 
 use netipc::protocol::{
-    CgroupsBuilder, CgroupsRequest, PROFILE_BASELINE,
+    CgroupsBuilder, CgroupsRequest, PROFILE_BASELINE, PROFILE_SHM_HYBRID,
     METHOD_CGROUPS_SNAPSHOT,
 };
 use netipc::service::cgroups::{CgroupsClient, CgroupsServer};
@@ -17,6 +17,14 @@ use netipc::transport::posix::{ClientConfig, ServerConfig};
 
 const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;
 const RESPONSE_BUF_SIZE: usize = 65536;
+
+/// NIPC_PROFILE env var: "shm" enables SHM_HYBRID|BASELINE, default BASELINE only.
+fn detect_profiles() -> u32 {
+    match std::env::var("NIPC_PROFILE").as_deref() {
+        Ok("shm") => PROFILE_SHM_HYBRID | PROFILE_BASELINE,
+        _ => PROFILE_BASELINE,
+    }
+}
 
 /// Build a snapshot with 3 test items.
 fn cgroups_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
@@ -49,8 +57,10 @@ fn cgroups_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> 
 }
 
 fn server_config() -> ServerConfig {
+    let profiles = detect_profiles();
     ServerConfig {
-        supported_profiles: PROFILE_BASELINE,
+        supported_profiles: profiles,
+        preferred_profiles: profiles,
         max_request_payload_bytes: 4096,
         max_request_batch_items: 1,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
@@ -62,8 +72,10 @@ fn server_config() -> ServerConfig {
 }
 
 fn client_config() -> ClientConfig {
+    let profiles = detect_profiles();
     ClientConfig {
-        supported_profiles: PROFILE_BASELINE,
+        supported_profiles: profiles,
+        preferred_profiles: profiles,
         max_request_payload_bytes: 4096,
         max_request_batch_items: 1,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
