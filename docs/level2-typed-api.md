@@ -7,8 +7,8 @@ functionality. Everything Level 2 does, a caller can do manually with
 Level 1 primitives and Codec functions.
 
 Level 2 exists so that the common patterns — blocking request/response,
-client lifecycle management, managed multi-client servers with worker pools —
-do not have to be reimplemented by every integration.
+client lifecycle management, managed multi-client servers — do not have
+to be reimplemented by every integration.
 
 ## Scope
 
@@ -17,9 +17,9 @@ Level 2 owns:
 - Blocking typed request/response call wrappers
 - Client context lifecycle (initialize, refresh, ready, status, close)
 - Connection state machine with automatic reconnect policy
-- Managed server mode (acceptor, worker pool, per-connection write
-  serialization, batch-to-individual-item dispatch)
-- Strongly typed per-method-type callback dispatch
+- Managed server mode (acceptor, per-session request/response loops,
+  concurrent session limit)
+- Per-method typed dispatch helpers in the Codec layer
 
 Level 2 does NOT own:
 
@@ -67,15 +67,10 @@ with typed request/response structures and service identities.
 Server callbacks receive one decoded typed request view and one response
 builder. They produce one typed response. Period.
 
-The callback does not know and does not care whether the request arrived
-as:
-
-- A single request message
-- One item in a 50-item batch
-- One of 5 pipelined messages
-
-The library handles all dispatch, batch splitting, and response
-reassembly. The callback sees one item in, one item out.
+The typed handler does not know and does not care about transport
+details, wire format, or session state. It receives decoded data and
+returns a result. The Codec dispatch helper handles encoding and
+decoding.
 
 ### 4. At-least-once call semantics
 

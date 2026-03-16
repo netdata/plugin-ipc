@@ -228,16 +228,17 @@ nipc_shm_error_t nipc_shm_server_create(const char *run_dir,
     uint32_t resp_off = align64(req_off + req_capacity);
     size_t region_size = (size_t)resp_off + resp_capacity;
 
-    /* Stale recovery: if the file exists, check whether the owner is alive.
-     * If the owner is dead (stale), check_shm_stale unlinks the file so
-     * our O_EXCL create below can succeed. If the owner is alive, we
-     * return ADDR_IN_USE to prevent collision. */
-    int stale = check_shm_stale(path);
-    if (stale == 1)
-        return NIPC_SHM_ERR_ADDR_IN_USE;
-
-    /* Create the file. O_EXCL prevents collision with existing regions. */
+    /* Try O_EXCL create first (fast path, no stale check needed). */
     int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
+
+    /* If O_EXCL failed because file exists, do stale recovery and retry. */
+    if (fd < 0 && errno == EEXIST) {
+        int stale = check_shm_stale(path);
+        if (stale == 1)
+            return NIPC_SHM_ERR_ADDR_IN_USE;
+        /* Stale file was unlinked, retry create */
+        fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
+    }
     if (fd < 0)
         return NIPC_SHM_ERR_OPEN;
 

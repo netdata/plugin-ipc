@@ -228,29 +228,40 @@ When a session closes (graceful or broken):
 1. `munmap` the region.
 2. Close the file descriptor.
 
+### Stale region detection
+
+Both `server_create` (per-session) and `cleanup_stale` (startup scan)
+use the same stale detection logic:
+
+1. Open the file and mmap the header.
+2. Validate magic. If invalid or file is undersized: stale — unlink.
+3. Check `owner_pid` and `owner_generation`:
+   - If `owner_pid` is alive AND `owner_generation` is non-zero:
+     the region is live — leave it.
+   - Otherwise (PID dead, or generation is zero indicating an
+     uninitialized/legacy region): stale — unlink.
+
+The `owner_generation` check catches PID reuse: a new process that
+reuses an old PID will not have the same generation value. A zero
+generation indicates an uninitialized or legacy region that should
+be reclaimed regardless of PID liveness.
+
 ### Stale region cleanup on server startup
 
-When a server starts, it must scan for stale per-session SHM files
-left behind by a previous server instance that crashed or was killed:
+When a server starts, it scans for stale per-session SHM files left
+behind by a previous server instance that crashed or was killed:
 
 1. Scan `{run_dir}` for files matching `{service_name}-*.ipcshm`.
-2. For each file: open, mmap, read the header.
-3. Check `owner_pid`:
-   - If `owner_pid` refers to a dead process: the region is stale —
-     unlink it.
-   - If `owner_pid` refers to a live process: the region belongs to
-     another running server instance — leave it (fail with
-     address-in-use if this server wants the same service).
-   - If the header is invalid (bad magic, undersized file): treat as
-     stale — unlink it.
-
-`owner_generation` is used by the per-session `server_create` path
-(not the startup cleanup) to detect PID reuse: when a server creates a
-new region and finds an existing file with a live `owner_pid`, it
-compares `owner_generation` to distinguish a genuinely live owner from
-a reused PID. The startup cleanup path cannot perform this comparison
-because it has no reference generation — it relies on PID liveness only.
+2. For each file: apply the stale detection logic above.
+3. Stale files are unlinked. Live files are left in place.
 
 This cleanup runs once at server startup, before the listener begins
 accepting connections. It is the safety net for crashes and hard
 reboots.
+
+### Stale recovery on per-session create
+
+When `server_create` is called for a new session, it applies the same
+stale detection logic to the target path before attempting `O_EXCL`
+create. If a stale file exists, it is unlinked first. If a live file
+exists, the create fails with address-in-use.

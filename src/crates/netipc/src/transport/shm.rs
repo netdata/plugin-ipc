@@ -204,13 +204,6 @@ impl ShmContext {
     ) -> Result<Self, ShmError> {
         let path = build_shm_path(run_dir, service_name, session_id)?;
 
-        // Stale recovery: if the file exists, check whether the owner is alive.
-        // If stale, unlink so O_EXCL below can succeed.
-        let stale = check_shm_stale(&path);
-        if stale == StaleResult::LiveServer {
-            return Err(ShmError::AddrInUse);
-        }
-
         // Round capacities to alignment
         let req_cap = align64(req_capacity);
         let resp_cap = align64(resp_capacity);
@@ -219,15 +212,31 @@ impl ShmContext {
         let resp_off = align64(req_off + req_cap);
         let region_size = (resp_off + resp_cap) as usize;
 
-        // Create the file
+        // Try O_EXCL create first (fast path, no stale check needed).
         let c_path = path_to_cstring(&path)?;
-        let fd = unsafe {
+        let mut fd = unsafe {
             libc::open(
                 c_path.as_ptr(),
                 libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
                 0o600,
             )
         };
+
+        // If O_EXCL failed (file exists), do stale recovery and retry.
+        if fd < 0 && unsafe { *libc::__errno_location() } == libc::EEXIST {
+            let stale = check_shm_stale(&path);
+            if stale == StaleResult::LiveServer {
+                return Err(ShmError::AddrInUse);
+            }
+            // Stale file was unlinked, retry create
+            fd = unsafe {
+                libc::open(
+                    c_path.as_ptr(),
+                    libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                    0o600,
+                )
+            };
+        }
         if fd < 0 {
             return Err(ShmError::Open(errno()));
         }

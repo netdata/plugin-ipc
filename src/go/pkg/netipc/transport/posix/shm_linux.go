@@ -147,13 +147,6 @@ func ShmServerCreate(runDir, serviceName string, sessionID uint64, reqCapacity, 
 		return nil, err
 	}
 
-	// Stale recovery: if the file exists, check whether the owner is alive.
-	// If stale, unlink so O_EXCL below can succeed.
-	stale := checkShmStale(path)
-	if stale == shmStaleLive {
-		return nil, fmt.Errorf("%w: live server owns SHM region", ErrShmOpen)
-	}
-
 	// Round capacities
 	reqCap := shmAlign64(reqCapacity)
 	respCap := shmAlign64(respCapacity)
@@ -162,8 +155,17 @@ func ShmServerCreate(runDir, serviceName string, sessionID uint64, reqCapacity, 
 	respOff := shmAlign64(reqOff + reqCap)
 	regionSize := int(respOff + respCap)
 
-	// Create file (O_EXCL: fail if it already exists)
+	// Try O_EXCL create first (fast path, no stale check needed).
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil && os.IsExist(err) {
+		// File exists — do stale recovery and retry.
+		stale := checkShmStale(path)
+		if stale == shmStaleLive {
+			return nil, fmt.Errorf("%w: live server owns SHM region", ErrShmOpen)
+		}
+		// Stale file was unlinked, retry create
+		f, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrShmOpen, err)
 	}
