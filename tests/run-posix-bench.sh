@@ -7,8 +7,12 @@
 #   2. SHM ping-pong (9 pairs x 4 rates)
 #   3. Snapshot baseline refresh (9 pairs x 2 rates)
 #   4. Snapshot SHM refresh (9 pairs x 2 rates)
-#   5. Local cache lookup (3 languages x 1 rate)
-#   6. Negotiated profile comparison (Rust->Rust x 4 rates)
+#   5. UDS batch ping-pong (9 pairs x 4 rates, random 1-1000 items)
+#   6. SHM batch ping-pong (9 pairs x 4 rates, random 1-1000 items)
+#   7. Local cache lookup (3 languages x 1 rate)
+#   8. UDS pipeline (9 pairs x 1 rate, depth=16)
+#   9. UDS pipeline+batch (9 pairs x 1 rate, depth=16)
+#  10. Negotiated profile comparison (Rust->Rust x 4 rates)
 #
 # Output: CSV file + human-readable summary.
 #
@@ -157,6 +161,14 @@ run_pair() {
         shm-ping-pong)
             server_subcmd="shm-ping-pong-server"
             client_subcmd="shm-ping-pong-client"
+            ;;
+        uds-batch-ping-pong)
+            server_subcmd="uds-batch-ping-pong-server"
+            client_subcmd="uds-batch-ping-pong-client"
+            ;;
+        shm-batch-ping-pong)
+            server_subcmd="shm-batch-ping-pong-server"
+            client_subcmd="shm-batch-ping-pong-client"
             ;;
         snapshot-baseline)
             server_subcmd="snapshot-server"
@@ -350,7 +362,29 @@ main() {
         done
     done
 
-    # 5. Local cache lookup: 3 languages
+    # 5. UDS batch ping-pong: 9 pairs x 4 rates
+    log "=== UDS Batch Ping-Pong ==="
+    for rate in "${RATES_PING_PONG[@]}"; do
+        for server_lang in "${LANGS[@]}"; do
+            for client_lang in "${LANGS[@]}"; do
+                run_pair "uds-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION" || true
+                sleep 0.5
+            done
+        done
+    done
+
+    # 6. SHM batch ping-pong: 9 pairs x 4 rates
+    log "=== SHM Batch Ping-Pong ==="
+    for rate in "${RATES_PING_PONG[@]}"; do
+        for server_lang in "${LANGS[@]}"; do
+            for client_lang in "${LANGS[@]}"; do
+                run_pair "shm-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION" || true
+                sleep 0.5
+            done
+        done
+    done
+
+    # 7. Local cache lookup: 3 languages
     log "=== Local Cache Lookup ==="
     for lang in "${LANGS[@]}"; do
         local bin
@@ -359,72 +393,139 @@ main() {
         "$bin" lookup-bench "$DURATION" >> "$OUTPUT_CSV" 2>/dev/null || true
     done
 
-    # 6. UDS pipeline benchmarks (C only, various depths)
-    log "=== UDS Pipeline (C client, C server, max rate) ==="
-    local PIPELINE_DEPTHS=(1 4 8 16 32)
-    for depth in "${PIPELINE_DEPTHS[@]}"; do
-        local pipe_svc="pipeline-d${depth}"
+    # 8. UDS pipeline benchmarks (all 9 pairs, max rate, depth=16)
+    log "=== UDS Pipeline (9 pairs, max rate, depth=16) ==="
+    local PIPELINE_DEPTH=16
+    for server_lang in "${LANGS[@]}"; do
+        for client_lang in "${LANGS[@]}"; do
+            local pipe_svc="pipeline-${server_lang}-${client_lang}"
 
-        log "  uds-pipeline: depth=${depth}"
+            log "  uds-pipeline: ${client_lang}->${server_lang} depth=${PIPELINE_DEPTH}"
 
-        # Use the same ping-pong server (it already echoes)
-        local server_duration=$((DURATION + 5))
-        local server_pid
-        server_pid=$(start_server "c" "uds-ping-pong-server" "$pipe_svc" "$server_duration") || {
-            warn "  Failed to start server for pipeline depth=$depth"
-            continue
-        }
+            local server_duration=$((DURATION + 5))
+            local server_pid
+            server_pid=$(start_server "$server_lang" "uds-ping-pong-server" "$pipe_svc" "$server_duration") || {
+                warn "  Failed to start pipeline server"
+                continue
+            }
 
-        sleep 0.5
+            sleep 0.5
 
-        local client_timeout=$((DURATION + 15))
-        local client_output
-        client_output=$(timeout "$client_timeout" "$BENCH_C" "uds-pipeline-client" "$RUN_DIR" "$pipe_svc" "$DURATION" "0" "$depth" 2>/dev/null) || true
+            local client_bin
+            client_bin="$(bench_bin "$client_lang")"
+            local client_timeout=$((DURATION + 15))
+            local client_output
+            client_output=$(timeout "$client_timeout" "$client_bin" "uds-pipeline-client" "$RUN_DIR" "$pipe_svc" "$DURATION" "0" "$PIPELINE_DEPTH" 2>/dev/null) || true
 
-        local server_cpu_sec
-        server_cpu_sec=$(stop_server "$server_pid" "c" "$pipe_svc")
+            local server_cpu_sec
+            server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pipe_svc")
 
-        # Remove PID from tracking
-        local new_pids=()
-        for p in "${SERVER_PIDS[@]:-}"; do
-            [ "$p" != "$server_pid" ] && new_pids+=("$p")
-        done
-        SERVER_PIDS=("${new_pids[@]:-}")
+            local new_pids=()
+            for p in "${SERVER_PIDS[@]:-}"; do
+                [ "$p" != "$server_pid" ] && new_pids+=("$p")
+            done
+            SERVER_PIDS=("${new_pids[@]:-}")
 
-        if [ -n "$client_output" ]; then
-            local line
-            line=$(echo "$client_output" | grep "^uds-pipeline" | head -1)
-            if [ -n "$line" ]; then
-                # Extract and patch server CPU
-                local throughput p50 p95 p99 client_cpu
-                throughput=$(echo "$line" | cut -d',' -f4)
-                p50=$(echo "$line" | cut -d',' -f5)
-                p95=$(echo "$line" | cut -d',' -f6)
-                p99=$(echo "$line" | cut -d',' -f7)
-                client_cpu=$(echo "$line" | cut -d',' -f8)
+            if [ -n "$client_output" ]; then
+                local line
+                line=$(echo "$client_output" | grep "^uds-pipeline" | head -1)
+                if [ -n "$line" ]; then
+                    local throughput p50 p95 p99 client_cpu
+                    throughput=$(echo "$line" | cut -d',' -f4)
+                    p50=$(echo "$line" | cut -d',' -f5)
+                    p95=$(echo "$line" | cut -d',' -f6)
+                    p99=$(echo "$line" | cut -d',' -f7)
+                    client_cpu=$(echo "$line" | cut -d',' -f8)
 
-                local server_cpu_pct total_cpu_pct
-                if command -v bc >/dev/null 2>&1; then
-                    server_cpu_pct=$(echo "scale=1; ${server_cpu_sec} / ${DURATION} * 100" | bc 2>/dev/null || echo "0.0")
-                    total_cpu_pct=$(echo "scale=1; ${client_cpu} + ${server_cpu_pct}" | bc 2>/dev/null || echo "0.0")
+                    local server_cpu_pct total_cpu_pct
+                    if command -v bc >/dev/null 2>&1; then
+                        server_cpu_pct=$(echo "scale=1; ${server_cpu_sec} / ${DURATION} * 100" | bc 2>/dev/null || echo "0.0")
+                        total_cpu_pct=$(echo "scale=1; ${client_cpu} + ${server_cpu_pct}" | bc 2>/dev/null || echo "0.0")
+                    else
+                        server_cpu_pct="0.0"
+                        total_cpu_pct="$client_cpu"
+                    fi
+
+                    echo "uds-pipeline-d${PIPELINE_DEPTH},${client_lang},${server_lang},${throughput},${p50},${p95},${p99},${client_cpu},${server_cpu_pct},${total_cpu_pct}" >> "$OUTPUT_CSV"
+                    log "    throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us"
                 else
-                    server_cpu_pct="0.0"
-                    total_cpu_pct="$client_cpu"
+                    echo "uds-pipeline-d${PIPELINE_DEPTH},${client_lang},${server_lang},0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
                 fi
-
-                echo "uds-pipeline-d${depth},c,c,${throughput},${p50},${p95},${p99},${client_cpu},${server_cpu_pct},${total_cpu_pct}" >> "$OUTPUT_CSV"
-                log "    depth=${depth} throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us"
             else
-                echo "uds-pipeline-d${depth},c,c,0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
+                echo "uds-pipeline-d${PIPELINE_DEPTH},${client_lang},${server_lang},0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
             fi
-        else
-            echo "uds-pipeline-d${depth},c,c,0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
-        fi
 
-        sleep 0.5
+            sleep 0.5
+        done
     done
 
-    # 7. Negotiated profile comparison (Rust->Rust)
+    # 9. UDS pipeline+batch benchmarks (9 pairs, max rate, depth=16)
+    log "=== UDS Pipeline+Batch (9 pairs, max rate, depth=16) ==="
+    for server_lang in "${LANGS[@]}"; do
+        for client_lang in "${LANGS[@]}"; do
+            local pipe_batch_svc="pipe-batch-${server_lang}-${client_lang}"
+
+            log "  uds-pipeline-batch: ${client_lang}->${server_lang} depth=${PIPELINE_DEPTH}"
+
+            local server_duration=$((DURATION + 5))
+            local server_pid
+            # Pipeline+batch needs the batch server (higher limits)
+            server_pid=$(start_server "$server_lang" "uds-batch-ping-pong-server" "$pipe_batch_svc" "$server_duration") || {
+                warn "  Failed to start pipeline-batch server"
+                continue
+            }
+
+            sleep 0.5
+
+            local client_bin
+            client_bin="$(bench_bin "$client_lang")"
+            local client_timeout=$((DURATION + 15))
+            local client_output
+            client_output=$(timeout "$client_timeout" "$client_bin" "uds-pipeline-batch-client" "$RUN_DIR" "$pipe_batch_svc" "$DURATION" "0" "$PIPELINE_DEPTH" 2>/dev/null) || true
+
+            local server_cpu_sec
+            server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pipe_batch_svc")
+
+            local new_pids=()
+            for p in "${SERVER_PIDS[@]:-}"; do
+                [ "$p" != "$server_pid" ] && new_pids+=("$p")
+            done
+            SERVER_PIDS=("${new_pids[@]:-}")
+
+            if [ -n "$client_output" ]; then
+                local line
+                line=$(echo "$client_output" | grep "^uds-pipeline-batch" | head -1)
+                if [ -n "$line" ]; then
+                    local throughput p50 p95 p99 client_cpu
+                    throughput=$(echo "$line" | cut -d',' -f4)
+                    p50=$(echo "$line" | cut -d',' -f5)
+                    p95=$(echo "$line" | cut -d',' -f6)
+                    p99=$(echo "$line" | cut -d',' -f7)
+                    client_cpu=$(echo "$line" | cut -d',' -f8)
+
+                    local server_cpu_pct total_cpu_pct
+                    if command -v bc >/dev/null 2>&1; then
+                        server_cpu_pct=$(echo "scale=1; ${server_cpu_sec} / ${DURATION} * 100" | bc 2>/dev/null || echo "0.0")
+                        total_cpu_pct=$(echo "scale=1; ${client_cpu} + ${server_cpu_pct}" | bc 2>/dev/null || echo "0.0")
+                    else
+                        server_cpu_pct="0.0"
+                        total_cpu_pct="$client_cpu"
+                    fi
+
+                    echo "uds-pipeline-batch-d${PIPELINE_DEPTH},${client_lang},${server_lang},${throughput},${p50},${p95},${p99},${client_cpu},${server_cpu_pct},${total_cpu_pct}" >> "$OUTPUT_CSV"
+                    log "    throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us"
+                else
+                    echo "uds-pipeline-batch-d${PIPELINE_DEPTH},${client_lang},${server_lang},0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
+                fi
+            else
+                echo "uds-pipeline-batch-d${PIPELINE_DEPTH},${client_lang},${server_lang},0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
+            fi
+
+            sleep 0.5
+        done
+    done
+
+    # 10. Negotiated profile comparison (Rust->Rust)
     log "=== Negotiated Profile (Rust->Rust: UDS vs SHM) ==="
     # UDS already measured above; add labeled entries for clarity
     for rate in "${RATES_PING_PONG[@]}"; do

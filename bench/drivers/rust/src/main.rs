@@ -6,9 +6,11 @@
 //! Same subcommands and output format as the C driver.
 
 use netipc::protocol::{
-    self, CgroupsBuilder, CgroupsRequest, Header,
-    HEADER_SIZE, KIND_REQUEST, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT,
-    METHOD_INCREMENT, PROFILE_BASELINE, PROFILE_SHM_HYBRID, STATUS_OK, VERSION,
+    self, BatchBuilder, CgroupsBuilder, CgroupsRequest, Header,
+    HEADER_SIZE, KIND_REQUEST, KIND_RESPONSE, FLAG_BATCH, MAGIC_MSG,
+    METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE, PROFILE_SHM_HYBRID,
+    STATUS_OK, VERSION, INCREMENT_PAYLOAD_SIZE,
+    batch_item_get, increment_decode, increment_encode,
 };
 use netipc::service::cgroups::{
     CgroupsCacheItem, CgroupsClient, ManagedServer,
@@ -31,6 +33,10 @@ const MAX_LATENCY_SAMPLES: usize = 10_000_000;
 
 const PROFILE_UDS: u32 = PROFILE_BASELINE;
 const PROFILE_SHM: u32 = PROFILE_BASELINE | PROFILE_SHM_HYBRID;
+
+// Batch benchmark constants (mirror C driver)
+const BENCH_MAX_BATCH_ITEMS: u32 = 1000;
+const BENCH_BATCH_BUF_SIZE: usize = BENCH_MAX_BATCH_ITEMS as usize * 48 + 4096;
 
 // ---------------------------------------------------------------------------
 //  Timing helpers
@@ -143,6 +149,33 @@ fn client_config(profiles: u32) -> ClientConfig {
     }
 }
 
+fn batch_server_config(profiles: u32) -> ServerConfig {
+    ServerConfig {
+        supported_profiles: profiles,
+        preferred_profiles: profiles,
+        max_request_payload_bytes: BENCH_BATCH_BUF_SIZE as u32,
+        max_request_batch_items: BENCH_MAX_BATCH_ITEMS,
+        max_response_payload_bytes: BENCH_BATCH_BUF_SIZE as u32,
+        max_response_batch_items: BENCH_MAX_BATCH_ITEMS,
+        auth_token: AUTH_TOKEN,
+        backlog: 4,
+        ..ServerConfig::default()
+    }
+}
+
+fn batch_client_config(profiles: u32) -> ClientConfig {
+    ClientConfig {
+        supported_profiles: profiles,
+        preferred_profiles: profiles,
+        max_request_payload_bytes: BENCH_BATCH_BUF_SIZE as u32,
+        max_request_batch_items: BENCH_MAX_BATCH_ITEMS,
+        max_response_payload_bytes: BENCH_BATCH_BUF_SIZE as u32,
+        max_response_batch_items: BENCH_MAX_BATCH_ITEMS,
+        auth_token: AUTH_TOKEN,
+        ..ClientConfig::default()
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  Ping-pong handler (INCREMENT method)
 // ---------------------------------------------------------------------------
@@ -246,6 +279,516 @@ fn run_server(
     println!("SERVER_CPU_SEC={:.6}", cpu_sec);
 
     0
+}
+
+// ---------------------------------------------------------------------------
+//  Batch server (same handler, higher batch/payload limits)
+// ---------------------------------------------------------------------------
+
+fn run_batch_server(
+    run_dir: &str,
+    service: &str,
+    profiles: u32,
+    duration_sec: u32,
+) -> i32 {
+    let handler: std::sync::Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync> =
+        std::sync::Arc::new(|code, payload| ping_pong_handler(code, payload));
+
+    // Response buffer 2x payload to avoid batch builder/scratch overlap
+    let resp_buf_size = BENCH_BATCH_BUF_SIZE * 2;
+
+    let mut server = ManagedServer::new(
+        run_dir,
+        service,
+        batch_server_config(profiles),
+        resp_buf_size,
+        handler,
+    );
+
+    println!("READY");
+
+    let cpu_start = cpu_ns();
+
+    let stop_flag = server.running_flag();
+    let dur = duration_sec;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(dur as u64 + 3));
+        stop_flag.store(false, Ordering::Release);
+    });
+
+    let _ = server.run();
+
+    let cpu_end = cpu_ns();
+    let cpu_sec = (cpu_end - cpu_start) as f64 / 1e9;
+
+    println!("SERVER_CPU_SEC={:.6}", cpu_sec);
+
+    0
+}
+
+// ---------------------------------------------------------------------------
+//  Batch ping-pong client (random 1-1000 items per batch)
+// ---------------------------------------------------------------------------
+
+/// Simple xorshift32 PRNG (mirrors C bench_rand)
+struct XorShift32 {
+    state: u32,
+}
+
+impl XorShift32 {
+    fn new() -> Self {
+        XorShift32 { state: 12345 }
+    }
+    fn next(&mut self) -> u32 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 17;
+        self.state ^= self.state << 5;
+        self.state
+    }
+}
+
+fn run_batch_ping_pong_client(
+    run_dir: &str,
+    service: &str,
+    profiles: u32,
+    duration_sec: u32,
+    target_rps: u64,
+    scenario: &str,
+    server_lang: &str,
+) -> i32 {
+    let mut session = None;
+    for _ in 0..200 {
+        match UdsSession::connect(run_dir, service, &batch_client_config(profiles)) {
+            Ok(s) => {
+                session = Some(s);
+                break;
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    let mut session = match session {
+        Some(s) => s,
+        None => {
+            eprintln!("batch client: connect failed after retries");
+            return 1;
+        }
+    };
+
+    let est_samples = if target_rps == 0 { 2_000_000 } else { (target_rps * duration_sec as u64) as usize };
+    let mut lr = LatencyRecorder::new(est_samples);
+    let mut rl = RateLimiter::new(target_rps);
+    let mut rng = XorShift32::new();
+
+    let mut counter: u64 = 0;
+    let mut total_items: u64 = 0;
+    let mut errors: u64 = 0;
+
+    let mut req_buf = vec![0u8; BENCH_BATCH_BUF_SIZE];
+    let mut recv_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
+    let mut expected = vec![0u64; BENCH_MAX_BATCH_ITEMS as usize];
+
+    let cpu_start = cpu_ns();
+    let wall_start = Instant::now();
+    let deadline = Duration::from_secs(duration_sec as u64);
+
+    while wall_start.elapsed() < deadline {
+        rl.wait();
+
+        // Random batch size 1-1000
+        let batch_size = (rng.next() % BENCH_MAX_BATCH_ITEMS) + 1;
+
+        // Build batch request
+        let mut bb = BatchBuilder::new(&mut req_buf, batch_size);
+
+        let mut build_ok = true;
+        for i in 0..batch_size {
+            let mut item = [0u8; INCREMENT_PAYLOAD_SIZE];
+            let val = counter + i as u64;
+            increment_encode(val, &mut item);
+            expected[i as usize] = val + 1;
+
+            if bb.add(&item).is_err() {
+                errors += 1;
+                build_ok = false;
+                break;
+            }
+        }
+        if !build_ok {
+            continue;
+        }
+
+        let (req_len, _out_count) = bb.finish();
+
+        let mut hdr = Header {
+            kind: KIND_REQUEST,
+            code: METHOD_INCREMENT,
+            flags: FLAG_BATCH,
+            item_count: batch_size,
+            message_id: counter + 1,
+            transport_status: STATUS_OK,
+            ..Header::default()
+        };
+
+        let t0 = Instant::now();
+
+        // Send
+        if session.send(&mut hdr, &req_buf[..req_len]).is_err() {
+            errors += 1;
+            continue;
+        }
+
+        // Receive
+        let (resp_hdr, resp_payload) = match session.receive(&mut recv_buf) {
+            Ok(r) => r,
+            Err(_) => {
+                errors += 1;
+                continue;
+            }
+        };
+
+        // Validate response header
+        if resp_hdr.kind != KIND_RESPONSE
+            || resp_hdr.code != METHOD_INCREMENT
+            || resp_hdr.item_count != batch_size
+        {
+            errors += 1;
+            counter += batch_size as u64;
+            total_items += batch_size as u64;
+            continue;
+        }
+
+        // Verify each item
+        let mut batch_ok = true;
+        for i in 0..batch_size {
+            match batch_item_get(&resp_payload, batch_size, i) {
+                Ok((item_data, _item_len)) => {
+                    match increment_decode(item_data) {
+                        Ok(resp_val) => {
+                            if resp_val != expected[i as usize] {
+                                errors += 1;
+                                batch_ok = false;
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            errors += 1;
+                            batch_ok = false;
+                            break;
+                        }
+                    }
+                }
+                Err(_) => {
+                    errors += 1;
+                    batch_ok = false;
+                    break;
+                }
+            }
+        }
+
+        let t1 = Instant::now();
+        lr.record((t1 - t0).as_nanos() as u64);
+
+        // Count items regardless of verification errors
+        total_items += batch_size as u64;
+        let _ = batch_ok;
+
+        counter += batch_size as u64;
+    }
+
+    let wall_sec = wall_start.elapsed().as_secs_f64();
+    let cpu_end = cpu_ns();
+    let cpu_sec = (cpu_end - cpu_start) as f64 / 1e9;
+    let throughput = total_items as f64 / wall_sec;
+    let cpu_pct = (cpu_sec / wall_sec) * 100.0;
+
+    let p50 = lr.percentile(50.0) / 1000;
+    let p95 = lr.percentile(95.0) / 1000;
+    let p99 = lr.percentile(99.0) / 1000;
+
+    println!(
+        "{},rust,{},{:.0},{},{},{},{:.1},0.0,{:.1}",
+        scenario, server_lang, throughput, p50, p95, p99, cpu_pct, cpu_pct
+    );
+
+    drop(session);
+
+    if errors > 0 {
+        eprintln!("batch client: {} errors out of {} items", errors, total_items);
+    }
+
+    if errors > 0 { 1 } else { 0 }
+}
+
+// ---------------------------------------------------------------------------
+//  Pipeline client (sends depth requests, then reads depth responses)
+// ---------------------------------------------------------------------------
+
+fn run_pipeline_client(
+    run_dir: &str,
+    service: &str,
+    duration_sec: u32,
+    target_rps: u64,
+    depth: u32,
+    server_lang: &str,
+) -> i32 {
+    let mut session = None;
+    for _ in 0..200 {
+        match UdsSession::connect(run_dir, service, &client_config(PROFILE_UDS)) {
+            Ok(s) => {
+                session = Some(s);
+                break;
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    let mut session = match session {
+        Some(s) => s,
+        None => {
+            eprintln!("pipeline client: connect failed after retries");
+            return 1;
+        }
+    };
+
+    let est_samples = if target_rps == 0 { 5_000_000 } else { (target_rps * duration_sec as u64) as usize };
+    let mut lr = LatencyRecorder::new(est_samples);
+    let mut rl = RateLimiter::new(target_rps);
+
+    let mut counter: u64 = 0;
+    let mut requests: u64 = 0;
+    let mut errors: u64 = 0;
+
+    let cpu_start = cpu_ns();
+    let wall_start = Instant::now();
+    let deadline = Duration::from_secs(duration_sec as u64);
+
+    while wall_start.elapsed() < deadline {
+        rl.wait();
+
+        let t0 = Instant::now();
+
+        // Send `depth` requests
+        let mut send_ok = true;
+        for d in 0..depth {
+            let val = counter + d as u64;
+            let req_payload = val.to_ne_bytes();
+
+            let mut hdr = Header {
+                kind: KIND_REQUEST,
+                code: METHOD_INCREMENT,
+                flags: 0,
+                item_count: 1,
+                message_id: val + 1,
+                transport_status: STATUS_OK,
+                ..Header::default()
+            };
+
+            if session.send(&mut hdr, &req_payload).is_err() {
+                send_ok = false;
+                errors += 1;
+                break;
+            }
+        }
+
+        if !send_ok {
+            continue;
+        }
+
+        // Receive `depth` responses
+        let mut recv_buf = vec![0u8; 256];
+        for d in 0..depth {
+            match session.receive(&mut recv_buf) {
+                Ok((_resp_hdr, payload)) => {
+                    if payload.len() >= 8 {
+                        let resp_val = u64::from_ne_bytes(payload[..8].try_into().unwrap());
+                        let expected = counter + d as u64 + 1;
+                        if resp_val != expected {
+                            eprintln!(
+                                "pipeline chain broken at depth {}: expected {}, got {}",
+                                d, expected, resp_val
+                            );
+                            errors += 1;
+                        }
+                    }
+                }
+                Err(_) => {
+                    errors += 1;
+                    break;
+                }
+            }
+        }
+
+        let t1 = Instant::now();
+        lr.record((t1 - t0).as_nanos() as u64);
+
+        counter += depth as u64;
+        requests += depth as u64;
+    }
+
+    let wall_sec = wall_start.elapsed().as_secs_f64();
+    let cpu_end = cpu_ns();
+    let cpu_sec = (cpu_end - cpu_start) as f64 / 1e9;
+    let throughput = requests as f64 / wall_sec;
+    let cpu_pct = (cpu_sec / wall_sec) * 100.0;
+
+    let p50 = lr.percentile(50.0) / 1000;
+    let p95 = lr.percentile(95.0) / 1000;
+    let p99 = lr.percentile(99.0) / 1000;
+
+    let scenario = format!("uds-pipeline-d{}", depth);
+    println!(
+        "{},rust,{},{:.0},{},{},{},{:.1},0.0,{:.1}",
+        scenario, server_lang, throughput, p50, p95, p99, cpu_pct, cpu_pct
+    );
+
+    drop(session);
+
+    if errors > 0 {
+        eprintln!("pipeline client: {} errors", errors);
+    }
+
+    if errors > 0 { 1 } else { 0 }
+}
+
+// ---------------------------------------------------------------------------
+//  Pipeline+batch client (sends depth batch messages, reads depth responses)
+// ---------------------------------------------------------------------------
+
+fn run_pipeline_batch_client(
+    run_dir: &str,
+    service: &str,
+    duration_sec: u32,
+    target_rps: u64,
+    depth: u32,
+    server_lang: &str,
+) -> i32 {
+    let mut session = None;
+    for _ in 0..200 {
+        match UdsSession::connect(run_dir, service, &batch_client_config(PROFILE_UDS)) {
+            Ok(s) => {
+                session = Some(s);
+                break;
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    let mut session = match session {
+        Some(s) => s,
+        None => {
+            eprintln!("pipeline-batch client: connect failed after retries");
+            return 1;
+        }
+    };
+
+    let mut lr = LatencyRecorder::new(2_000_000);
+    let mut rl = RateLimiter::new(target_rps);
+    let mut rng = XorShift32::new();
+
+    let mut counter: u64 = 0;
+    let mut total_items: u64 = 0;
+    let mut errors: u64 = 0;
+
+    let depth = depth.min(128) as usize;
+    let mut req_bufs: Vec<Vec<u8>> = (0..depth).map(|_| vec![0u8; BENCH_BATCH_BUF_SIZE]).collect();
+    let mut req_lens = vec![0usize; depth];
+    let mut batch_sizes = vec![0u32; depth];
+
+    let cpu_start = cpu_ns();
+    let wall_start = Instant::now();
+    let deadline = Duration::from_secs(duration_sec as u64);
+
+    while wall_start.elapsed() < deadline {
+        rl.wait();
+
+        let t0 = Instant::now();
+
+        // Build and send `depth` batch requests
+        let mut send_ok = true;
+        for d in 0..depth {
+            let bs = (rng.next() % BENCH_MAX_BATCH_ITEMS) + 1;
+            batch_sizes[d] = bs;
+
+            let mut bb = BatchBuilder::new(&mut req_bufs[d], bs);
+
+            for i in 0..bs {
+                let mut item = [0u8; INCREMENT_PAYLOAD_SIZE];
+                increment_encode(counter + i as u64, &mut item);
+                if bb.add(&item).is_err() {
+                    send_ok = false;
+                    errors += 1;
+                    break;
+                }
+            }
+            if !send_ok {
+                break;
+            }
+
+            let (len, _out_count) = bb.finish();
+            req_lens[d] = len;
+
+            let mut hdr = Header {
+                kind: KIND_REQUEST,
+                code: METHOD_INCREMENT,
+                flags: FLAG_BATCH,
+                item_count: bs,
+                message_id: counter + 1 + d as u64,
+                transport_status: STATUS_OK,
+                ..Header::default()
+            };
+
+            if session.send(&mut hdr, &req_bufs[d][..len]).is_err() {
+                send_ok = false;
+                errors += 1;
+                break;
+            }
+
+            counter += bs as u64;
+        }
+
+        if !send_ok {
+            continue;
+        }
+
+        // Receive `depth` batch responses
+        let mut recv_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
+        for d in 0..depth {
+            match session.receive(&mut recv_buf) {
+                Ok((_resp_hdr, _payload)) => {
+                    total_items += batch_sizes[d] as u64;
+                }
+                Err(_) => {
+                    errors += 1;
+                    break;
+                }
+            }
+        }
+
+        let t1 = Instant::now();
+        lr.record((t1 - t0).as_nanos() as u64);
+    }
+
+    let wall_sec = wall_start.elapsed().as_secs_f64();
+    let cpu_end = cpu_ns();
+    let cpu_sec = (cpu_end - cpu_start) as f64 / 1e9;
+    let throughput = total_items as f64 / wall_sec;
+    let cpu_pct = (cpu_sec / wall_sec) * 100.0;
+
+    let p50 = lr.percentile(50.0) / 1000;
+    let p95 = lr.percentile(95.0) / 1000;
+    let p99 = lr.percentile(99.0) / 1000;
+
+    let scenario = format!("uds-pipeline-batch-d{}", depth);
+    println!(
+        "{},rust,{},{:.0},{},{},{},{:.1},0.0,{:.1}",
+        scenario, server_lang, throughput, p50, p95, p99, cpu_pct, cpu_pct
+    );
+
+    drop(session);
+
+    if errors > 0 {
+        eprintln!("pipeline-batch client: {} errors", errors);
+    }
+
+    if errors > 0 { 1 } else { 0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -630,8 +1173,12 @@ fn main() {
     if args.len() < 2 {
         eprintln!(
             "Usage: {} <subcommand> [args...]\n\
-             Subcommands: uds-ping-pong-{{server,client}}, shm-ping-pong-{{server,client}},\n\
-             snapshot-{{server,client}}, snapshot-shm-{{server,client}}, lookup-bench",
+             Subcommands:\n  \
+               uds-ping-pong-{{server,client}}, shm-ping-pong-{{server,client}}\n  \
+               uds-batch-ping-pong-{{server,client}}, shm-batch-ping-pong-{{server,client}}\n  \
+               snapshot-{{server,client}}, snapshot-shm-{{server,client}}\n  \
+               uds-pipeline-client, uds-pipeline-batch-client\n  \
+               lookup-bench",
             args[0]
         );
         std::process::exit(1);
@@ -709,6 +1256,90 @@ fn main() {
             };
 
             run_snapshot_client(run_dir, service, profiles, duration, target_rps, scenario, "rust")
+        }
+
+        // Batch server subcommands
+        "uds-batch-ping-pong-server" | "shm-batch-ping-pong-server" => {
+            if args.len() < 4 {
+                eprintln!("Usage: {} {} <run_dir> <service> [duration_sec]", args[0], cmd);
+                std::process::exit(1);
+            }
+            let run_dir = &args[2];
+            let service = &args[3];
+            let duration: u32 = if args.len() >= 5 {
+                args[4].parse().unwrap_or(30)
+            } else {
+                30
+            };
+
+            let _ = std::fs::create_dir_all(run_dir);
+
+            let profiles = if cmd == "uds-batch-ping-pong-server" {
+                PROFILE_UDS
+            } else {
+                PROFILE_SHM
+            };
+
+            run_batch_server(run_dir, service, profiles, duration)
+        }
+
+        // Batch client subcommands
+        "uds-batch-ping-pong-client" | "shm-batch-ping-pong-client" => {
+            if args.len() < 6 {
+                eprintln!(
+                    "Usage: {} {} <run_dir> <service> <duration_sec> <target_rps>",
+                    args[0], cmd
+                );
+                std::process::exit(1);
+            }
+            let run_dir = &args[2];
+            let service = &args[3];
+            let duration: u32 = args[4].parse().unwrap_or(5);
+            let target_rps: u64 = args[5].parse().unwrap_or(0);
+
+            let (profiles, scenario) = if cmd == "uds-batch-ping-pong-client" {
+                (PROFILE_UDS, "uds-batch-ping-pong")
+            } else {
+                (PROFILE_SHM, "shm-batch-ping-pong")
+            };
+
+            run_batch_ping_pong_client(run_dir, service, profiles, duration, target_rps, scenario, "rust")
+        }
+
+        // Pipeline client
+        "uds-pipeline-client" => {
+            if args.len() < 7 {
+                eprintln!(
+                    "Usage: {} {} <run_dir> <service> <duration_sec> <target_rps> <depth>",
+                    args[0], cmd
+                );
+                std::process::exit(1);
+            }
+            let run_dir = &args[2];
+            let service = &args[3];
+            let duration: u32 = args[4].parse().unwrap_or(5);
+            let target_rps: u64 = args[5].parse().unwrap_or(0);
+            let depth: u32 = args[6].parse().unwrap_or(1).max(1);
+
+            run_pipeline_client(run_dir, service, duration, target_rps, depth, "rust")
+        }
+
+        // Pipeline+batch client
+        "uds-pipeline-batch-client" => {
+            if args.len() < 7 {
+                eprintln!(
+                    "Usage: {} {} <run_dir> <service> <duration_sec> <target_rps> <depth>",
+                    args[0], cmd
+                );
+                std::process::exit(1);
+            }
+            let run_dir = &args[2];
+            let service = &args[3];
+            let duration: u32 = args[4].parse().unwrap_or(5);
+            let target_rps: u64 = args[5].parse().unwrap_or(0);
+            let depth: u32 = args[6].parse().unwrap_or(1).max(1);
+
+            run_pipeline_batch_client(run_dir, service, duration, target_rps, depth, "rust")
         }
 
         "lookup-bench" => {

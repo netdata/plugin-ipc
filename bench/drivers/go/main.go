@@ -12,6 +12,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/signal"
 	"runtime"
@@ -38,6 +39,10 @@ const (
 	defaultDuration    = 30
 	profileUDS         = protocol.ProfileBaseline
 	profileSHM         = protocol.ProfileBaseline | protocol.ProfileSHMHybrid
+
+	// Batch scenario limits (mirrors C driver).
+	maxBatchItems   = 1000
+	batchBufSize    = maxBatchItems*48 + 4096 // 52096
 )
 
 // ---------------------------------------------------------------------------
@@ -150,6 +155,31 @@ func clientConfig(profiles uint32) posix.ClientConfig {
 	}
 }
 
+func batchServerConfig(profiles uint32) posix.ServerConfig {
+	return posix.ServerConfig{
+		SupportedProfiles:       profiles,
+		PreferredProfiles:       profiles,
+		MaxRequestPayloadBytes:  batchBufSize,
+		MaxRequestBatchItems:    maxBatchItems,
+		MaxResponsePayloadBytes: batchBufSize,
+		MaxResponseBatchItems:   maxBatchItems,
+		AuthToken:               authToken,
+		Backlog:                 4,
+	}
+}
+
+func batchClientConfig(profiles uint32) posix.ClientConfig {
+	return posix.ClientConfig{
+		SupportedProfiles:       profiles,
+		PreferredProfiles:       profiles,
+		MaxRequestPayloadBytes:  batchBufSize,
+		MaxRequestBatchItems:    maxBatchItems,
+		MaxResponsePayloadBytes: batchBufSize,
+		MaxResponseBatchItems:   maxBatchItems,
+		AuthToken:               authToken,
+	}
+}
+
 // ---------------------------------------------------------------------------
 //  Ping-pong handler (INCREMENT method)
 // ---------------------------------------------------------------------------
@@ -236,6 +266,531 @@ func runServer(runDir, service string, profiles uint32, durationSec int, handler
 	cpuSec := float64(cpuEnd-cpuStart) / 1e9
 
 	fmt.Printf("SERVER_CPU_SEC=%.6f\n", cpuSec)
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+//  Batch server (same handler, higher batch/payload limits)
+// ---------------------------------------------------------------------------
+
+func runBatchServer(runDir, service string, profiles uint32, durationSec int) int {
+	cfg := batchServerConfig(profiles)
+	cfg.MaxResponsePayloadBytes = batchBufSize * 2 // extra room for builder overhead
+
+	server := cgroups.NewServerWithWorkers(runDir, service, cfg, pingPongHandler, 4)
+
+	fmt.Println("READY")
+
+	cpuStart := cpuNS()
+
+	go func() {
+		time.Sleep(time.Duration(durationSec+3) * time.Second)
+		server.Stop()
+	}()
+
+	if err := server.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "batch server: %v\n", err)
+	}
+
+	cpuEnd := cpuNS()
+	cpuSec := float64(cpuEnd-cpuStart) / 1e9
+
+	fmt.Printf("SERVER_CPU_SEC=%.6f\n", cpuSec)
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+//  Batch ping-pong client (random 1-1000 items per batch)
+// ---------------------------------------------------------------------------
+
+func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec int, targetRPS uint64, scenario, serverLang string) int {
+	cfg := batchClientConfig(profiles)
+	session, err := posix.Connect(runDir, service, &cfg)
+	if err != nil {
+		for i := 0; i < 200; i++ {
+			time.Sleep(10 * time.Millisecond)
+			session, err = posix.Connect(runDir, service, &cfg)
+			if err == nil {
+				break
+			}
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "batch client: connect failed: %v\n", err)
+			return 1
+		}
+	}
+	defer session.Close()
+
+	// SHM upgrade if negotiated
+	var shm *posix.ShmContext
+	if session.SelectedProfile == protocol.ProfileSHMHybrid ||
+		session.SelectedProfile == protocol.ProfileSHMFutex {
+		for i := 0; i < 200; i++ {
+			shmCtx, serr := posix.ShmClientAttach(runDir, service, session.SessionID)
+			if serr == nil {
+				shm = shmCtx
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if shm != nil {
+		defer shm.ShmClose()
+	}
+
+	estSamples := 2_000_000
+	if targetRPS > 0 {
+		estSamples = int(targetRPS) * durationSec
+	}
+	lr := newLatencyRecorder(estSamples)
+	rl := newRateLimiter(targetRPS)
+
+	reqBuf := make([]byte, batchBufSize)
+	respBuf := make([]byte, batchBufSize+protocol.HeaderSize)
+	expected := make([]uint64, maxBatchItems)
+
+	var counter, totalItems, errors, msgSeq uint64
+
+	cpuStart := cpuNS()
+	wallStart := time.Now()
+	deadline := time.Duration(durationSec) * time.Second
+
+	for time.Since(wallStart) < deadline {
+		rl.wait()
+
+		// Random batch size 2-1000 (server treats itemCount==1 as non-batch)
+		batchSize := uint32(rand.Intn(maxBatchItems-1) + 2)
+
+		// Build batch request
+		bb := protocol.NewBatchBuilder(reqBuf, batchSize)
+		itemBuf := make([]byte, protocol.IncrementPayloadSize)
+
+		buildOK := true
+		for i := uint32(0); i < batchSize; i++ {
+			val := counter + uint64(i)
+			protocol.IncrementEncode(val, itemBuf)
+			expected[i] = val + 1
+
+			if berr := bb.Add(itemBuf); berr != nil {
+				errors++
+				buildOK = false
+				break
+			}
+		}
+		if !buildOK {
+			continue
+		}
+
+		reqLen, _ := bb.Finish()
+
+		msgSeq++
+		hdr := protocol.Header{
+			Kind:            protocol.KindRequest,
+			Code:            protocol.MethodIncrement,
+			Flags:           protocol.FlagBatch,
+			ItemCount:       batchSize,
+			MessageID:       msgSeq,
+			TransportStatus: protocol.StatusOK,
+		}
+
+		t0 := time.Now()
+
+		if shm != nil {
+			// SHM path
+			msgLen := protocol.HeaderSize + reqLen
+			msg := make([]byte, msgLen)
+			hdr.Magic = protocol.MagicMsg
+			hdr.Version = protocol.Version
+			hdr.HeaderLen = protocol.HeaderLen
+			hdr.PayloadLen = uint32(reqLen)
+			hdr.Encode(msg[:protocol.HeaderSize])
+			copy(msg[protocol.HeaderSize:], reqBuf[:reqLen])
+
+			if serr := shm.ShmSend(msg); serr != nil {
+				errors++
+				continue
+			}
+
+			shmRespLen, serr := shm.ShmReceive(respBuf, 30000)
+			if serr != nil {
+				errors++
+				continue
+			}
+
+			if shmRespLen < protocol.HeaderSize {
+				errors++
+				continue
+			}
+
+			respHdr, herr := protocol.DecodeHeader(respBuf[:protocol.HeaderSize])
+			if herr != nil {
+				errors++
+				continue
+			}
+
+			if respHdr.Kind != protocol.KindResponse ||
+				respHdr.Code != protocol.MethodIncrement ||
+				respHdr.ItemCount != batchSize {
+				errors++
+				continue
+			}
+
+			respPayload := respBuf[protocol.HeaderSize : protocol.HeaderSize+int(respHdr.PayloadLen)]
+
+			batchOK := true
+			if batchSize == 1 {
+				// Server returns single-item response (no batch encoding)
+				respVal, derr := protocol.IncrementDecode(respPayload)
+				if derr != nil {
+					errors++
+					batchOK = false
+				} else if respVal != expected[0] {
+					errors++
+					batchOK = false
+				}
+			} else {
+				for i := uint32(0); i < batchSize; i++ {
+					item, gerr := protocol.BatchItemGet(respPayload, batchSize, i)
+					if gerr != nil {
+						errors++
+						batchOK = false
+						break
+					}
+					respVal, derr := protocol.IncrementDecode(item)
+					if derr != nil {
+						errors++
+						batchOK = false
+						break
+					}
+					if respVal != expected[i] {
+						errors++
+						batchOK = false
+						break
+					}
+				}
+			}
+
+			t1 := time.Now()
+			lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+			_ = batchOK
+			totalItems += uint64(batchSize)
+		} else {
+			// UDS path
+			if serr := session.Send(&hdr, reqBuf[:reqLen]); serr != nil {
+				errors++
+				continue
+			}
+
+			respHdr, payload, rerr := session.Receive(respBuf)
+			if rerr != nil {
+				errors++
+				continue
+			}
+
+			if respHdr.Kind != protocol.KindResponse ||
+				respHdr.Code != protocol.MethodIncrement ||
+				respHdr.ItemCount != batchSize {
+				errors++
+				continue
+			}
+
+			batchOK := true
+			if batchSize == 1 {
+				// Server returns single-item response (no batch encoding)
+				respVal, derr := protocol.IncrementDecode(payload)
+				if derr != nil {
+					errors++
+					batchOK = false
+				} else if respVal != expected[0] {
+					errors++
+					batchOK = false
+				}
+			} else {
+				for i := uint32(0); i < batchSize; i++ {
+					item, gerr := protocol.BatchItemGet(payload, batchSize, i)
+					if gerr != nil {
+						errors++
+						batchOK = false
+						break
+					}
+					respVal, derr := protocol.IncrementDecode(item)
+					if derr != nil {
+						errors++
+						batchOK = false
+						break
+					}
+					if respVal != expected[i] {
+						errors++
+						batchOK = false
+						break
+					}
+				}
+			}
+
+			t1 := time.Now()
+			lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+			_ = batchOK
+			totalItems += uint64(batchSize)
+		}
+
+		counter += uint64(batchSize)
+	}
+
+	wallSec := time.Since(wallStart).Seconds()
+	cpuEnd := cpuNS()
+	cpuSec := float64(cpuEnd-cpuStart) / 1e9
+	throughput := float64(totalItems) / wallSec
+	cpuPct := (cpuSec / wallSec) * 100.0
+
+	p50 := lr.percentile(50.0) / 1000
+	p95 := lr.percentile(95.0) / 1000
+	p99 := lr.percentile(99.0) / 1000
+
+	fmt.Printf("%s,go,%s,%.0f,%d,%d,%d,%.1f,0.0,%.1f\n",
+		scenario, serverLang, throughput, p50, p95, p99, cpuPct, cpuPct)
+
+	if errors > 0 {
+		fmt.Fprintf(os.Stderr, "batch client: %d errors\n", errors)
+		return 1
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+//  Pipeline client (sends depth requests, then reads depth responses)
+// ---------------------------------------------------------------------------
+
+func runPipelineClient(runDir, service string, durationSec int, targetRPS uint64, depth int, serverLang string) int {
+	cfg := clientConfig(profileUDS)
+	session, err := posix.Connect(runDir, service, &cfg)
+	if err != nil {
+		for i := 0; i < 200; i++ {
+			time.Sleep(10 * time.Millisecond)
+			session, err = posix.Connect(runDir, service, &cfg)
+			if err == nil {
+				break
+			}
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pipeline client: connect failed: %v\n", err)
+			return 1
+		}
+	}
+	defer session.Close()
+
+	estSamples := maxLatencySamples
+	if targetRPS > 0 {
+		estSamples = int(targetRPS) * durationSec
+	}
+	if estSamples > maxLatencySamples {
+		estSamples = maxLatencySamples
+	}
+	lr := newLatencyRecorder(estSamples)
+	rl := newRateLimiter(targetRPS)
+
+	var counter, requests, errors, msgSeq uint64
+
+	cpuStart := cpuNS()
+	wallStart := time.Now()
+	deadline := time.Duration(durationSec) * time.Second
+
+	recvBuf := make([]byte, 256)
+
+	for time.Since(wallStart) < deadline {
+		rl.wait()
+
+		t0 := time.Now()
+
+		// Send `depth` requests with unique message IDs
+		sendOK := true
+		for d := 0; d < depth; d++ {
+			val := counter + uint64(d)
+			reqPayload := make([]byte, 8)
+			binary.NativeEndian.PutUint64(reqPayload, val)
+
+			msgSeq++
+			hdr := protocol.Header{
+				Kind:            protocol.KindRequest,
+				Code:            protocol.MethodIncrement,
+				ItemCount:       1,
+				MessageID:       msgSeq,
+				TransportStatus: protocol.StatusOK,
+				PayloadLen:      8,
+			}
+
+			if serr := session.Send(&hdr, reqPayload); serr != nil {
+				sendOK = false
+				errors++
+				break
+			}
+		}
+
+		if !sendOK {
+			continue
+		}
+
+		// Receive `depth` responses
+		for d := 0; d < depth; d++ {
+			_, payload, rerr := session.Receive(recvBuf)
+			if rerr != nil {
+				errors++
+				break
+			}
+
+			if len(payload) >= 8 {
+				respVal := binary.NativeEndian.Uint64(payload[:8])
+				expected := counter + uint64(d) + 1
+				if respVal != expected {
+					fmt.Fprintf(os.Stderr, "pipeline chain broken at depth %d: expected %d, got %d\n",
+						d, expected, respVal)
+					errors++
+				}
+			}
+		}
+
+		t1 := time.Now()
+		lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+
+		counter += uint64(depth)
+		requests += uint64(depth)
+	}
+
+	wallSec := time.Since(wallStart).Seconds()
+	cpuEnd := cpuNS()
+	cpuSec := float64(cpuEnd-cpuStart) / 1e9
+	throughput := float64(requests) / wallSec
+	cpuPct := (cpuSec / wallSec) * 100.0
+
+	p50 := lr.percentile(50.0) / 1000
+	p95 := lr.percentile(95.0) / 1000
+	p99 := lr.percentile(99.0) / 1000
+
+	scenario := fmt.Sprintf("uds-pipeline-d%d", depth)
+	fmt.Printf("%s,go,%s,%.0f,%d,%d,%d,%.1f,0.0,%.1f\n",
+		scenario, serverLang, throughput, p50, p95, p99, cpuPct, cpuPct)
+
+	if errors > 0 {
+		fmt.Fprintf(os.Stderr, "pipeline client: %d errors\n", errors)
+		return 1
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+//  Pipeline+batch client (sends depth batch msgs, reads depth responses)
+// ---------------------------------------------------------------------------
+
+func runPipelineBatchClient(runDir, service string, durationSec int, targetRPS uint64, depth int, serverLang string) int {
+	cfg := batchClientConfig(profileUDS)
+	session, err := posix.Connect(runDir, service, &cfg)
+	if err != nil {
+		for i := 0; i < 200; i++ {
+			time.Sleep(10 * time.Millisecond)
+			session, err = posix.Connect(runDir, service, &cfg)
+			if err == nil {
+				break
+			}
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pipeline-batch client: connect failed: %v\n", err)
+			return 1
+		}
+	}
+	defer session.Close()
+
+	lr := newLatencyRecorder(2_000_000)
+	rl := newRateLimiter(targetRPS)
+
+	// Pre-allocate per-depth buffers
+	reqBufs := make([][]byte, depth)
+	batchSizes := make([]uint32, depth)
+	for i := range reqBufs {
+		reqBufs[i] = make([]byte, batchBufSize)
+	}
+	recvBuf := make([]byte, batchBufSize+protocol.HeaderSize)
+
+	var counter, totalItems, errors, msgSeq uint64
+
+	cpuStart := cpuNS()
+	wallStart := time.Now()
+	deadline := time.Duration(durationSec) * time.Second
+
+	for time.Since(wallStart) < deadline {
+		rl.wait()
+
+		t0 := time.Now()
+
+		// Build and send `depth` batch requests
+		sendOK := true
+		for d := 0; d < depth; d++ {
+			bs := uint32(rand.Intn(maxBatchItems-1) + 2)
+			batchSizes[d] = bs
+
+			bb := protocol.NewBatchBuilder(reqBufs[d], bs)
+			itemBuf := make([]byte, protocol.IncrementPayloadSize)
+
+			for i := uint32(0); i < bs; i++ {
+				protocol.IncrementEncode(counter+uint64(i), itemBuf)
+				bb.Add(itemBuf)
+			}
+
+			reqLen, _ := bb.Finish()
+
+			msgSeq++
+			hdr := protocol.Header{
+				Kind:            protocol.KindRequest,
+				Code:            protocol.MethodIncrement,
+				Flags:           protocol.FlagBatch,
+				ItemCount:       bs,
+				MessageID:       msgSeq,
+				TransportStatus: protocol.StatusOK,
+			}
+
+			if serr := session.Send(&hdr, reqBufs[d][:reqLen]); serr != nil {
+				sendOK = false
+				errors++
+				break
+			}
+
+			counter += uint64(bs)
+		}
+
+		if !sendOK {
+			continue
+		}
+
+		// Receive `depth` batch responses
+		for d := 0; d < depth; d++ {
+			_, _, rerr := session.Receive(recvBuf)
+			if rerr != nil {
+				errors++
+				break
+			}
+			totalItems += uint64(batchSizes[d])
+		}
+
+		t1 := time.Now()
+		lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+	}
+
+	wallSec := time.Since(wallStart).Seconds()
+	cpuEnd := cpuNS()
+	cpuSec := float64(cpuEnd-cpuStart) / 1e9
+	throughput := float64(totalItems) / wallSec
+	cpuPct := (cpuSec / wallSec) * 100.0
+
+	p50 := lr.percentile(50.0) / 1000
+	p95 := lr.percentile(95.0) / 1000
+	p99 := lr.percentile(99.0) / 1000
+
+	scenario := fmt.Sprintf("uds-pipeline-batch-d%d", depth)
+	fmt.Printf("%s,go,%s,%.0f,%d,%d,%d,%.1f,0.0,%.1f\n",
+		scenario, serverLang, throughput, p50, p95, p99, cpuPct, cpuPct)
+
+	if errors > 0 {
+		fmt.Fprintf(os.Stderr, "pipeline-batch client: %d errors\n", errors)
+		return 1
+	}
 	return 0
 }
 
@@ -562,7 +1117,9 @@ func main() {
 		fmt.Fprintf(os.Stderr,
 			"Usage: %s <subcommand> [args...]\n"+
 				"Subcommands: uds-ping-pong-{server,client}, shm-ping-pong-{server,client},\n"+
-				"snapshot-{server,client}, snapshot-shm-{server,client}, lookup-bench\n",
+				"  uds-batch-ping-pong-{server,client}, shm-batch-ping-pong-{server,client},\n"+
+				"  snapshot-{server,client}, snapshot-shm-{server,client},\n"+
+				"  uds-pipeline-client, uds-pipeline-batch-client, lookup-bench\n",
 			os.Args[0])
 		os.Exit(1)
 	}
@@ -607,6 +1164,32 @@ func main() {
 
 		rc = runServer(runDir, service, profiles, duration, handlerType)
 
+	case "uds-batch-ping-pong-server", "shm-batch-ping-pong-server":
+		if len(os.Args) < 4 {
+			fmt.Fprintf(os.Stderr, "Usage: %s %s <run_dir> <service> [duration_sec]\n", os.Args[0], cmd)
+			os.Exit(1)
+		}
+		runDir := os.Args[2]
+		service := os.Args[3]
+		duration := defaultDuration
+		if len(os.Args) >= 5 {
+			if d, err := strconv.Atoi(os.Args[4]); err == nil {
+				duration = d
+			}
+		}
+
+		os.MkdirAll(runDir, 0700)
+
+		var profiles uint32
+		switch cmd {
+		case "uds-batch-ping-pong-server":
+			profiles = profileUDS
+		case "shm-batch-ping-pong-server":
+			profiles = profileSHM
+		}
+
+		rc = runBatchServer(runDir, service, profiles, duration)
+
 	case "uds-ping-pong-client", "shm-ping-pong-client":
 		if len(os.Args) < 6 {
 			fmt.Fprintf(os.Stderr, "Usage: %s %s <run_dir> <service> <duration_sec> <target_rps>\n", os.Args[0], cmd)
@@ -630,6 +1213,29 @@ func main() {
 
 		rc = runPingPongClient(runDir, service, profiles, duration, targetRPS, scenario, "go")
 
+	case "uds-batch-ping-pong-client", "shm-batch-ping-pong-client":
+		if len(os.Args) < 6 {
+			fmt.Fprintf(os.Stderr, "Usage: %s %s <run_dir> <service> <duration_sec> <target_rps>\n", os.Args[0], cmd)
+			os.Exit(1)
+		}
+		runDir := os.Args[2]
+		service := os.Args[3]
+		duration, _ := strconv.Atoi(os.Args[4])
+		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
+
+		var profiles uint32
+		var scenario string
+		switch cmd {
+		case "uds-batch-ping-pong-client":
+			profiles = profileUDS
+			scenario = "uds-batch-ping-pong"
+		case "shm-batch-ping-pong-client":
+			profiles = profileSHM
+			scenario = "shm-batch-ping-pong"
+		}
+
+		rc = runBatchPingPongClient(runDir, service, profiles, duration, targetRPS, scenario, "go")
+
 	case "snapshot-client", "snapshot-shm-client":
 		if len(os.Args) < 6 {
 			fmt.Fprintf(os.Stderr, "Usage: %s %s <run_dir> <service> <duration_sec> <target_rps>\n", os.Args[0], cmd)
@@ -652,6 +1258,38 @@ func main() {
 		}
 
 		rc = runSnapshotClient(runDir, service, profiles, duration, targetRPS, scenario, "go")
+
+	case "uds-pipeline-client":
+		if len(os.Args) < 7 {
+			fmt.Fprintf(os.Stderr, "Usage: %s %s <run_dir> <service> <duration_sec> <target_rps> <depth>\n", os.Args[0], cmd)
+			os.Exit(1)
+		}
+		runDir := os.Args[2]
+		service := os.Args[3]
+		duration, _ := strconv.Atoi(os.Args[4])
+		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
+		depth, _ := strconv.Atoi(os.Args[6])
+		if depth < 1 {
+			depth = 1
+		}
+
+		rc = runPipelineClient(runDir, service, duration, targetRPS, depth, "go")
+
+	case "uds-pipeline-batch-client":
+		if len(os.Args) < 7 {
+			fmt.Fprintf(os.Stderr, "Usage: %s %s <run_dir> <service> <duration_sec> <target_rps> <depth>\n", os.Args[0], cmd)
+			os.Exit(1)
+		}
+		runDir := os.Args[2]
+		service := os.Args[3]
+		duration, _ := strconv.Atoi(os.Args[4])
+		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
+		depth, _ := strconv.Atoi(os.Args[6])
+		if depth < 1 {
+			depth = 1
+		}
+
+		rc = runPipelineBatchClient(runDir, service, duration, targetRPS, depth, "go")
 
 	case "lookup-bench":
 		if len(os.Args) < 3 {
