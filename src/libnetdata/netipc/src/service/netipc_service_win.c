@@ -683,27 +683,79 @@ static void server_handle_session(nipc_managed_server_t *server,
         if (hdr.kind != NIPC_KIND_REQUEST)
             break;
 
-        /* Dispatch to handler */
+        /* Dispatch: single-item or batch */
         size_t response_len = 0;
-        bool ok = server->handler(
-            server->handler_user,
-            hdr.code,
-            (const uint8_t *)payload, payload_len,
-            resp_buf, resp_buf_size,
-            &response_len);
+        bool ok = true;
+        bool is_batch = (hdr.flags & NIPC_FLAG_BATCH) && hdr.item_count >= 1;
+
+        if (!is_batch) {
+            /* Single-item dispatch */
+            ok = server->handler(
+                server->handler_user,
+                hdr.code,
+                (const uint8_t *)payload, payload_len,
+                resp_buf, resp_buf_size,
+                &response_len);
+        } else {
+            /* Batch dispatch: extract each item, call handler per item,
+             * reassemble responses using batch builder. */
+            nipc_batch_builder_t bb;
+            nipc_batch_builder_init(&bb, resp_buf, resp_buf_size,
+                                     hdr.item_count);
+
+            /* Separate scratch buffer for per-item handler responses. */
+            size_t item_resp_size = 4096;
+            uint8_t *item_resp = malloc(item_resp_size);
+            if (!item_resp) { ok = false; }
+
+            for (uint32_t i = 0; i < hdr.item_count && ok; i++) {
+                const void *item_ptr;
+                uint32_t item_len;
+                nipc_error_t gerr = nipc_batch_item_get(
+                    payload, payload_len, hdr.item_count, i,
+                    &item_ptr, &item_len);
+                if (gerr != NIPC_OK) { ok = false; break; }
+
+                size_t item_resp_len = 0;
+                ok = server->handler(
+                    server->handler_user,
+                    hdr.code,
+                    (const uint8_t *)item_ptr, item_len,
+                    item_resp, item_resp_size,
+                    &item_resp_len);
+                if (!ok) break;
+
+                nipc_error_t aerr = nipc_batch_builder_add(
+                    &bb, item_resp, item_resp_len);
+                if (aerr != NIPC_OK) { ok = false; break; }
+            }
+
+            if (ok) {
+                uint32_t out_count;
+                response_len = nipc_batch_builder_finish(&bb, &out_count);
+            }
+            free(item_resp);
+        }
 
         /* Build response header */
         nipc_header_t resp_hdr = {0};
         resp_hdr.kind       = NIPC_KIND_RESPONSE;
         resp_hdr.code       = hdr.code;
         resp_hdr.message_id = hdr.message_id;
-        resp_hdr.item_count = 1;
-        resp_hdr.flags      = 0;
 
         if (ok) {
             resp_hdr.transport_status = NIPC_STATUS_OK;
+            if (is_batch) {
+                resp_hdr.flags      = NIPC_FLAG_BATCH;
+                resp_hdr.item_count = hdr.item_count;
+            } else {
+                resp_hdr.item_count = 1;
+                resp_hdr.flags      = 0;
+            }
         } else {
             resp_hdr.transport_status = NIPC_STATUS_INTERNAL_ERROR;
+            resp_hdr.item_count = 1;
+            resp_hdr.flags      = 0;
             response_len = 0;
         }
 
