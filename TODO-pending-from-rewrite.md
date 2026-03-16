@@ -565,6 +565,33 @@ Small, independent, low-risk items.
 ### Decisions
 - File splitting: **DEFERRED** to post-integration (Costa decision 2026-03-16)
 
+### Progress (2026-03-16)
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| A: Quick fixes | **DONE** | Rename, tests, spec docs, rate tier |
+| B: POSIX coverage | **IN PROGRESS** | C: 83.5%→90.5% (116 new tests). Rust/Go pending |
+| C: Windows coverage | Not started | |
+| D1: C batch bench | **DONE** | 18.4M items/s UDS batch |
+| D2: Rust+Go pipelining | **DONE** | All 3 languages have all 6 subcmds |
+| D3: Pipeline+batch | **DONE** | 42.8M items/s (Rust→C) |
+| D4: Rust Windows bench | **DONE** | 1456 lines, all 9 scenarios, tested on win11 |
+| D5: Windows batch+pipeline | **IN PROGRESS** | Run script updated, running on win11 |
+| E: POSIX benchmarks | **DONE** | 325 measurements |
+| E: Windows benchmarks | **IN PROGRESS** | 3×3 matrix running on win11 |
+| F: Stress parity | Not started | |
+| G: Windows SHM verify | Not started | |
+| H: Final validation | Not started | |
+
+### Bugs found and fixed during implementation
+1. Server batch dispatch: `item_count > 1` → `>= 1` (all 5 implementations)
+2. C batch bench: goto-based error handling caused protocol desync
+3. Server batch builder buffer overlap with per-item scratch
+4. Rust SHM batch client missing SHM attach
+5. C inflight caps (128/64) replaced with unbounded dynamic arrays
+6. C batch response missing message_id validation
+7. C worker_count=0 rejected instead of clamped
+
 ### Dependencies
 - A, B, D, F, G: independent — can run in parallel
 - C depends on B (methodology)
