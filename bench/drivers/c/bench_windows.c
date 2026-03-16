@@ -493,10 +493,9 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
         int fatal = 0;
 
         if (client.shm) {
-            /* Win SHM path */
+            /* Win SHM path — stack buffer, no malloc in hot loop */
+            uint8_t msg[NIPC_HEADER_LEN + 8];
             size_t msg_len = NIPC_HEADER_LEN + req_len;
-            uint8_t *msg = malloc(msg_len);
-            if (!msg) { errors++; break; }
 
             hdr.magic = NIPC_MAGIC_MSG;
             hdr.version = NIPC_VERSION;
@@ -506,7 +505,6 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
             memcpy(msg + NIPC_HEADER_LEN, req_buf, req_len);
 
             nipc_win_shm_error_t serr = nipc_win_shm_send(client.shm, msg, msg_len);
-            free(msg);
             if (serr != NIPC_WIN_SHM_OK) { errors++; break; }
 
             size_t shm_resp_len;
