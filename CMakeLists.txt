@@ -823,7 +823,7 @@ if(NETIPC_WINDOWS_RUNTIME)
     target_link_libraries(bench_windows_c PRIVATE
         netipc_service netipc_named_pipe netipc_win_shm netipc_protocol
     )
-    target_compile_options(bench_windows_c PRIVATE /O2)
+    target_compile_options(bench_windows_c PRIVATE -O2)
 
     # Go Windows benchmark binary
     if(GO_EXECUTABLE)
