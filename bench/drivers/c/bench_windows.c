@@ -449,9 +449,10 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
 
     uint64_t cpu_start = cpu_ns();
     uint64_t wall_start = now_ns();
-    uint64_t wall_end = wall_start + (uint64_t)duration_sec * 1000000000ull;
+    ULONGLONG btick_start = GetTickCount64();
+    ULONGLONG btick_deadline = btick_start + (ULONGLONG)duration_sec * 1000;
 
-    while (now_ns() < wall_end) {
+    while (GetTickCount64() < btick_deadline) {
         rate_limiter_wait(&rl);
 
         /* Random batch size 1-1000 */
@@ -485,7 +486,7 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
         hdr.message_id = counter + 1;
         hdr.transport_status = NIPC_STATUS_OK;
 
-        uint64_t t0 = now_ns();
+        uint64_t t0 = (total_items & 63) == 0 ? now_ns() : 0;
 
         nipc_header_t resp_hdr;
         const void *resp_payload;
@@ -577,7 +578,7 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
         if (fatal)
             break;
 
-        {
+        if (t0 != 0) {
             uint64_t t1 = now_ns();
             latency_record(&lr, t1 - t0);
         }
@@ -693,9 +694,13 @@ static int run_ping_pong_client(const char *run_dir, const char *service,
 
     uint64_t cpu_start = cpu_ns();
     uint64_t wall_start = now_ns();
-    uint64_t wall_end = wall_start + (uint64_t)duration_sec * 1000000000ull;
+    /* Use GetTickCount64 for loop condition — cheap (~1ms resolution).
+     * QPC is expensive on Windows (esp. under Hyper-V) and was capping
+     * throughput at ~70k req/s when called 3x per iteration. */
+    ULONGLONG tick_start = GetTickCount64();
+    ULONGLONG tick_deadline = tick_start + (ULONGLONG)duration_sec * 1000;
 
-    while (now_ns() < wall_end) {
+    while (GetTickCount64() < tick_deadline) {
         rate_limiter_wait(&rl);
 
         uint8_t req_payload[8];
@@ -709,7 +714,9 @@ static int run_ping_pong_client(const char *run_dir, const char *service,
         hdr.transport_status = NIPC_STATUS_OK;
         hdr.payload_len = 8;
 
-        uint64_t t0 = now_ns();
+        /* Sample latency with QPC only every 64th request to avoid
+         * QPC overhead dominating the benchmark. */
+        uint64_t t0 = (requests & 63) == 0 ? now_ns() : 0;
 
         if (shm) {
             /* Win SHM path */
@@ -777,8 +784,10 @@ static int run_ping_pong_client(const char *run_dir, const char *service,
             }
         }
 
-        uint64_t t1 = now_ns();
-        latency_record(&lr, t1 - t0);
+        if (t0 != 0) {
+            uint64_t t1 = now_ns();
+            latency_record(&lr, t1 - t0);
+        }
 
         counter++;
         requests++;
@@ -867,18 +876,16 @@ static int run_snapshot_client(const char *run_dir, const char *service,
 
     uint64_t cpu_start = cpu_ns();
     uint64_t wall_start = now_ns();
-    uint64_t wall_end = wall_start + (uint64_t)duration_sec * 1000000000ull;
+    ULONGLONG tick_deadline = GetTickCount64() + (ULONGLONG)duration_sec * 1000;
 
-    while (now_ns() < wall_end) {
+    while (GetTickCount64() < tick_deadline) {
         rate_limiter_wait(&rl);
 
-        uint64_t t0 = now_ns();
+        uint64_t t0 = (requests_cnt & 63) == 0 ? now_ns() : 0;
 
         nipc_cgroups_resp_view_t view;
         nipc_error_t err = nipc_client_call_cgroups_snapshot(
             &client, req_buf, resp_buf, sizeof(resp_buf), &view);
-
-        uint64_t t1 = now_ns();
 
         if (err != NIPC_OK) {
             errors_cnt++;
@@ -892,7 +899,10 @@ static int run_snapshot_client(const char *run_dir, const char *service,
             errors_cnt++;
         }
 
-        latency_record(&lr, t1 - t0);
+        if (t0 != 0) {
+            uint64_t t1 = now_ns();
+            latency_record(&lr, t1 - t0);
+        }
         requests_cnt++;
     }
 
@@ -954,9 +964,9 @@ static int run_lookup_bench(int duration_sec)
 
     uint64_t cpu_start = cpu_ns();
     uint64_t wall_start = now_ns();
-    uint64_t wall_end = wall_start + (uint64_t)duration_sec * 1000000000ull;
+    ULONGLONG tick_deadline = GetTickCount64() + (ULONGLONG)duration_sec * 1000;
 
-    while (now_ns() < wall_end) {
+    while (GetTickCount64() < tick_deadline) {
         for (int i = 0; i < 16; i++) {
             const nipc_cgroups_cache_item_t *found =
                 nipc_cgroups_cache_lookup(&cache, items[i].hash, items[i].name);
@@ -1238,11 +1248,11 @@ int main(int argc, char **argv)
 
         uint64_t cpu_start = cpu_ns();
         uint64_t wall_start = now_ns();
-        uint64_t wall_end = wall_start + (uint64_t)duration * 1000000000ull;
+        ULONGLONG tick_deadline = GetTickCount64() + (ULONGLONG)duration * 1000;
 
-        while (now_ns() < wall_end) {
+        while (GetTickCount64() < tick_deadline) {
             rate_limiter_wait(&rl);
-            uint64_t t0 = now_ns();
+            uint64_t t0 = (requests & 63) == 0 ? now_ns() : 0;
 
             /* Send `depth` requests */
             int send_ok = 1;
@@ -1298,8 +1308,10 @@ int main(int argc, char **argv)
                 }
             }
 
-            uint64_t t1 = now_ns();
-            latency_record(&lr, t1 - t0);
+            if (t0 != 0) {
+                uint64_t t1 = now_ns();
+                latency_record(&lr, t1 - t0);
+            }
 
             counter += (uint64_t)depth;
             requests += (uint64_t)depth;
@@ -1397,11 +1409,11 @@ int main(int argc, char **argv)
 
         uint64_t cpu_start = cpu_ns();
         uint64_t wall_start = now_ns();
-        uint64_t wall_end = wall_start + (uint64_t)duration * 1000000000ull;
+        ULONGLONG tick_deadline = GetTickCount64() + (ULONGLONG)duration * 1000;
 
-        while (now_ns() < wall_end) {
+        while (GetTickCount64() < tick_deadline) {
             rate_limiter_wait(&rl);
-            uint64_t t0 = now_ns();
+            uint64_t t0 = (requests & 63) == 0 ? now_ns() : 0;
 
             /* Build and send `depth` batch requests */
             int send_ok = 1;
@@ -1453,8 +1465,10 @@ int main(int argc, char **argv)
                 total_items += batch_sizes[d];
             }
 
-            uint64_t t1 = now_ns();
-            latency_record(&lr, t1 - t0);
+            if (t0 != 0) {
+                uint64_t t1 = now_ns();
+                latency_record(&lr, t1 - t0);
+            }
         }
 
         uint64_t cpu_end = cpu_ns();
