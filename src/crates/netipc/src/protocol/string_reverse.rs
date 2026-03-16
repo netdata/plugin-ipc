@@ -59,3 +59,122 @@ where
     }
     Some(n)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_decode_roundtrip() {
+        let s = b"hello world";
+        let mut buf = [0u8; 64];
+        let n = string_reverse_encode(s, &mut buf);
+        assert_eq!(n, STRING_REVERSE_HDR_SIZE + s.len() + 1);
+
+        let view = string_reverse_decode(&buf[..n]).unwrap();
+        assert_eq!(view.str_data, s);
+        assert_eq!(view.str_len, s.len() as u32);
+        assert_eq!(view.as_str(), "hello world");
+    }
+
+    #[test]
+    fn encode_empty() {
+        let mut buf = [0u8; 64];
+        let n = string_reverse_encode(b"", &mut buf);
+        assert_eq!(n, STRING_REVERSE_HDR_SIZE + 1); // header + NUL
+        let view = string_reverse_decode(&buf[..n]).unwrap();
+        assert_eq!(view.str_data, b"");
+        assert_eq!(view.str_len, 0);
+    }
+
+    #[test]
+    fn encode_too_small() {
+        let mut buf = [0u8; 4]; // too small
+        assert_eq!(string_reverse_encode(b"hello", &mut buf), 0);
+    }
+
+    #[test]
+    fn decode_truncated() {
+        assert!(matches!(
+            string_reverse_decode(&[0u8; 4]),
+            Err(NipcError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn decode_oob() {
+        // str_offset + str_length + 1 > buf.len()
+        let mut buf = [0u8; 16];
+        buf[0..4].copy_from_slice(&8u32.to_ne_bytes()); // offset = 8
+        buf[4..8].copy_from_slice(&99u32.to_ne_bytes()); // length = 99 (way too big)
+        assert!(matches!(
+            string_reverse_decode(&buf),
+            Err(NipcError::OutOfBounds)
+        ));
+    }
+
+    #[test]
+    fn decode_missing_nul() {
+        let mut buf = [0u8; 16];
+        buf[0..4].copy_from_slice(&8u32.to_ne_bytes()); // offset = 8
+        buf[4..8].copy_from_slice(&3u32.to_ne_bytes()); // length = 3
+        buf[8] = b'a';
+        buf[9] = b'b';
+        buf[10] = b'c';
+        buf[11] = b'X'; // should be 0
+        assert!(matches!(
+            string_reverse_decode(&buf),
+            Err(NipcError::MissingNul)
+        ));
+    }
+
+    #[test]
+    fn dispatch_resp_too_small() {
+        // Line 58: response buffer too small -> encode returns 0 -> None
+        let s = b"hello";
+        let mut req_buf = [0u8; 64];
+        string_reverse_encode(s, &mut req_buf);
+        let mut resp = [0u8; 4]; // too small
+        let result = dispatch_string_reverse(
+            &req_buf, &mut resp, |data| Some(data.iter().rev().copied().collect()),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn dispatch_handler_returns_none() {
+        let mut req_buf = [0u8; 64];
+        string_reverse_encode(b"test", &mut req_buf);
+        let mut resp = [0u8; 64];
+        assert!(dispatch_string_reverse(&req_buf, &mut resp, |_| None).is_none());
+    }
+
+    #[test]
+    fn dispatch_bad_request() {
+        let mut resp = [0u8; 64];
+        assert!(dispatch_string_reverse(&[0u8; 4], &mut resp, |_| None).is_none());
+    }
+
+    #[test]
+    fn dispatch_success() {
+        let mut req_buf = [0u8; 64];
+        let n = string_reverse_encode(b"abc", &mut req_buf);
+        let mut resp = [0u8; 64];
+        let rn = dispatch_string_reverse(
+            &req_buf[..n], &mut resp,
+            |data| Some(data.iter().rev().copied().collect()),
+        ).unwrap();
+        let view = string_reverse_decode(&resp[..rn]).unwrap();
+        assert_eq!(view.str_data, b"cba");
+    }
+
+    #[test]
+    fn as_str_non_utf8() {
+        // StringReverseView::as_str returns "" for non-UTF8 data
+        let view = StringReverseView {
+            str_data: &[0xFF, 0xFE],
+            str_len: 2,
+        };
+        assert_eq!(view.as_str(), "");
+    }
+}

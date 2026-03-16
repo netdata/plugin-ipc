@@ -1844,4 +1844,542 @@ mod tests {
             }
         }
     }
+
+    // -----------------------------------------------------------------------
+    //  NipcError Display coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nipc_error_display_all_variants() {
+        // Exercise the Display impl for every NipcError variant (lines 101-113)
+        let cases: Vec<(NipcError, &str)> = vec![
+            (NipcError::Truncated, "buffer too short"),
+            (NipcError::BadMagic, "magic value mismatch"),
+            (NipcError::BadVersion, "unsupported version"),
+            (NipcError::BadHeaderLen, "header_len != 32"),
+            (NipcError::BadKind, "unknown message kind"),
+            (NipcError::BadLayout, "unknown layout_version"),
+            (NipcError::OutOfBounds, "offset+length exceeds data"),
+            (NipcError::MissingNul, "string not NUL-terminated"),
+            (NipcError::BadAlignment, "item not 8-byte aligned"),
+            (NipcError::BadItemCount, "item count inconsistent"),
+            (NipcError::Overflow, "builder out of space"),
+        ];
+        for (err, expected) in cases {
+            let msg = format!("{}", err);
+            assert_eq!(msg, expected, "Display for {:?}", err);
+        }
+        // Also verify std::error::Error is implemented
+        let err: &dyn std::error::Error = &NipcError::Truncated;
+        let _ = format!("{err}");
+    }
+
+    // -----------------------------------------------------------------------
+    //  ChunkHeader decode: flags != 0 and chunk_payload_len == 0
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn chunk_decode_bad_flags() {
+        // Line 257: flags != 0 -> BadLayout
+        let c = ChunkHeader {
+            magic: MAGIC_CHUNK,
+            version: VERSION,
+            flags: 0x01, // non-zero flags
+            message_id: 1,
+            total_message_len: 100,
+            chunk_index: 0,
+            chunk_count: 1,
+            chunk_payload_len: 50,
+        };
+        let mut buf = [0u8; 32];
+        c.encode(&mut buf);
+        assert_eq!(ChunkHeader::decode(&buf), Err(NipcError::BadLayout));
+    }
+
+    #[test]
+    fn chunk_decode_zero_payload_len() {
+        // Line 260: chunk_payload_len == 0 -> BadLayout
+        let c = ChunkHeader {
+            magic: MAGIC_CHUNK,
+            version: VERSION,
+            flags: 0,
+            message_id: 1,
+            total_message_len: 100,
+            chunk_index: 0,
+            chunk_count: 1,
+            chunk_payload_len: 0,
+        };
+        let mut buf = [0u8; 32];
+        c.encode(&mut buf);
+        assert_eq!(ChunkHeader::decode(&buf), Err(NipcError::BadLayout));
+    }
+
+    // -----------------------------------------------------------------------
+    //  batch_dir_encode: buffer too small (line 282)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn batch_dir_encode_too_small() {
+        let entries = [
+            BatchEntry { offset: 0, length: 8 },
+            BatchEntry { offset: 8, length: 8 },
+        ];
+        let mut buf = [0u8; 12]; // needs 16, only 12
+        assert_eq!(batch_dir_encode(&entries, &mut buf), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    //  batch_dir_validate error paths (lines 329, 336, 339)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn batch_dir_validate_truncated() {
+        let buf = [0u8; 4]; // too short for 1 entry (needs 8)
+        assert_eq!(
+            batch_dir_validate(&buf, 1, 100),
+            Err(NipcError::Truncated)
+        );
+    }
+
+    #[test]
+    fn batch_dir_validate_bad_alignment() {
+        let mut buf = [0u8; 8];
+        buf[0..4].copy_from_slice(&3u32.to_ne_bytes()); // unaligned offset
+        buf[4..8].copy_from_slice(&8u32.to_ne_bytes());
+        assert_eq!(
+            batch_dir_validate(&buf, 1, 100),
+            Err(NipcError::BadAlignment)
+        );
+    }
+
+    #[test]
+    fn batch_dir_validate_out_of_bounds() {
+        let mut buf = [0u8; 8];
+        buf[0..4].copy_from_slice(&0u32.to_ne_bytes());
+        buf[4..8].copy_from_slice(&200u32.to_ne_bytes()); // exceeds packed_area_len
+        assert_eq!(
+            batch_dir_validate(&buf, 1, 100),
+            Err(NipcError::OutOfBounds)
+        );
+    }
+
+    #[test]
+    fn batch_dir_validate_ok() {
+        let mut buf = [0u8; 16];
+        buf[0..4].copy_from_slice(&0u32.to_ne_bytes());
+        buf[4..8].copy_from_slice(&8u32.to_ne_bytes());
+        buf[8..12].copy_from_slice(&8u32.to_ne_bytes());
+        buf[12..16].copy_from_slice(&8u32.to_ne_bytes());
+        assert!(batch_dir_validate(&buf, 2, 100).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    //  batch_item_get: alignment check (line 375)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn batch_item_get_bad_alignment() {
+        // Manually craft a batch payload with unaligned offset
+        let mut buf = [0u8; 64];
+        // Directory: 1 entry at offset 0 of buf
+        buf[0..4].copy_from_slice(&3u32.to_ne_bytes()); // unaligned offset
+        buf[4..8].copy_from_slice(&4u32.to_ne_bytes());
+        assert_eq!(
+            batch_item_get(&buf, 1, 0),
+            Err(NipcError::BadAlignment)
+        );
+    }
+
+    #[test]
+    fn batch_item_get_truncated_dir() {
+        // Payload too small to hold the directory
+        let buf = [0u8; 4]; // needs at least 8 for 1 item directory
+        assert_eq!(
+            batch_item_get(&buf, 1, 0),
+            Err(NipcError::Truncated)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    //  BatchBuilder::finish compaction (lines 451-456)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn batch_builder_compaction() {
+        // Reserve space for 8 items but add only 2 -- triggers compaction
+        let mut buf = [0u8; 1024];
+        let mut b = BatchBuilder::new(&mut buf, 8);
+
+        let item1 = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let item2 = [10u8, 20, 30, 40];
+
+        b.add(&item1).unwrap();
+        b.add(&item2).unwrap();
+
+        // dir_end for 8 items = align8(8*8) = 64
+        // final_dir_aligned for 2 items = align8(2*8) = 16
+        // This triggers the copy_within compaction branch (line 453-456)
+        let (total, count) = b.finish();
+        assert_eq!(count, 2);
+        assert!(total > 0);
+
+        // Verify the items can still be extracted correctly
+        let (data, len) = batch_item_get(&buf[..total], 2, 0).unwrap();
+        assert_eq!(len as usize, item1.len());
+        assert_eq!(data, &item1);
+
+        let (data, len) = batch_item_get(&buf[..total], 2, 1).unwrap();
+        assert_eq!(len as usize, item2.len());
+        assert_eq!(data, &item2);
+    }
+
+    // -----------------------------------------------------------------------
+    //  HelloAck decode: flags != 0 (line 606)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hello_ack_decode_bad_flags() {
+        let h = HelloAck {
+            layout_version: 1,
+            flags: 1, // non-zero flags
+            ..Default::default()
+        };
+        let mut buf = [0u8; 48];
+        h.encode(&mut buf);
+        assert_eq!(HelloAck::decode(&buf), Err(NipcError::BadLayout));
+    }
+
+    // -----------------------------------------------------------------------
+    //  Hello decode: non-zero padding (line 527)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hello_decode_bad_padding() {
+        let h = Hello {
+            layout_version: 1,
+            flags: 0,
+            ..Default::default()
+        };
+        let mut buf = [0u8; 44];
+        h.encode(&mut buf);
+        // Corrupt the padding bytes at 28..32
+        buf[28..32].copy_from_slice(&1u32.to_ne_bytes());
+        assert_eq!(Hello::decode(&buf), Err(NipcError::BadLayout));
+    }
+
+    // -----------------------------------------------------------------------
+    //  Cgroups request: non-zero flags (line 45)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cgroups_req_decode_bad_flags() {
+        let r = CgroupsRequest {
+            layout_version: 1,
+            flags: 1, // non-zero flags -> BadLayout
+        };
+        let mut buf = [0u8; 4];
+        r.encode(&mut buf);
+        assert_eq!(CgroupsRequest::decode(&buf), Err(NipcError::BadLayout));
+    }
+
+    // -----------------------------------------------------------------------
+    //  CgroupsResponseView: non-zero flags and reserved (lines 125, 130)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cgroups_resp_decode_bad_flags() {
+        // Line 125: flags != 0 -> BadLayout
+        let mut buf = [0u8; 24];
+        buf[0..2].copy_from_slice(&1u16.to_ne_bytes()); // layout_version = 1
+        buf[2..4].copy_from_slice(&1u16.to_ne_bytes()); // flags = 1 (non-zero)
+        assert_eq!(
+            CgroupsResponseView::decode(&buf).unwrap_err(),
+            NipcError::BadLayout
+        );
+    }
+
+    #[test]
+    fn cgroups_resp_decode_bad_reserved() {
+        // Line 130: reserved != 0 -> BadLayout
+        let mut buf = [0u8; 24];
+        buf[0..2].copy_from_slice(&1u16.to_ne_bytes()); // layout_version = 1
+        buf[2..4].copy_from_slice(&0u16.to_ne_bytes()); // flags = 0
+        buf[12..16].copy_from_slice(&1u32.to_ne_bytes()); // reserved = 1
+        assert_eq!(
+            CgroupsResponseView::decode(&buf).unwrap_err(),
+            NipcError::BadLayout
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    //  CgroupsResponseView: bad alignment in directory (line 149)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cgroups_resp_decode_bad_dir_alignment() {
+        // dir entry with offset not aligned to 8
+        let mut buf = [0u8; 128];
+        buf[0..2].copy_from_slice(&1u16.to_ne_bytes()); // layout_version
+        buf[4..8].copy_from_slice(&1u32.to_ne_bytes()); // item_count = 1
+        // Dir entry at offset 24: offset=3 (unaligned), length=32
+        buf[24..28].copy_from_slice(&3u32.to_ne_bytes());
+        buf[28..32].copy_from_slice(&32u32.to_ne_bytes());
+        assert_eq!(
+            CgroupsResponseView::decode(&buf).unwrap_err(),
+            NipcError::BadAlignment
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    //  CgroupsItemView: bad layout_version, bad flags (lines 200-206)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cgroups_item_bad_layout_version() {
+        // Build valid snapshot then corrupt item layout_version
+        let mut buf = [0u8; 4096];
+        let mut b = CgroupsBuilder::new(&mut buf, 1, 0, 1);
+        b.add(1, 0, 1, b"test", b"/test").unwrap();
+        let total = b.finish();
+
+        // Find item start
+        let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
+        let item_off = u32::from_ne_bytes(
+            buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
+                .try_into().unwrap(),
+        ) as usize;
+        let item_start = dir_end + item_off;
+
+        // Corrupt layout_version to 99
+        buf[item_start..item_start + 2].copy_from_slice(&99u16.to_ne_bytes());
+
+        let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
+        assert_eq!(view.item(0).unwrap_err(), NipcError::BadLayout);
+    }
+
+    #[test]
+    fn cgroups_item_bad_flags() {
+        // Build valid snapshot then corrupt item flags
+        let mut buf = [0u8; 4096];
+        let mut b = CgroupsBuilder::new(&mut buf, 1, 0, 1);
+        b.add(1, 0, 1, b"test", b"/test").unwrap();
+        let total = b.finish();
+
+        let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
+        let item_off = u32::from_ne_bytes(
+            buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
+                .try_into().unwrap(),
+        ) as usize;
+        let item_start = dir_end + item_off;
+
+        // Corrupt flags to non-zero
+        buf[item_start + 2..item_start + 4].copy_from_slice(&1u16.to_ne_bytes());
+
+        let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
+        assert_eq!(view.item(0).unwrap_err(), NipcError::BadLayout);
+    }
+
+    // -----------------------------------------------------------------------
+    //  CgroupsItemView: name_off < ITEM_HDR_SIZE (line 211)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cgroups_item_name_off_too_small() {
+        let mut buf = [0u8; 4096];
+        let mut b = CgroupsBuilder::new(&mut buf, 1, 0, 1);
+        b.add(1, 0, 1, b"test", b"/test").unwrap();
+        let total = b.finish();
+
+        let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
+        let item_off = u32::from_ne_bytes(
+            buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
+                .try_into().unwrap(),
+        ) as usize;
+        let item_start = dir_end + item_off;
+
+        // Set name_offset to 0 (< 32 = CGROUPS_ITEM_HDR_SIZE)
+        buf[item_start + 16..item_start + 20].copy_from_slice(&0u32.to_ne_bytes());
+
+        let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
+        assert_eq!(view.item(0).unwrap_err(), NipcError::OutOfBounds);
+    }
+
+    // -----------------------------------------------------------------------
+    //  CgroupsItemView: path NUL missing (line 228)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cgroups_item_path_missing_nul() {
+        let mut buf = [0u8; 4096];
+        let mut b = CgroupsBuilder::new(&mut buf, 1, 0, 1);
+        b.add(1, 0, 1, b"test", b"/test").unwrap();
+        let total = b.finish();
+
+        let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
+        let item_off = u32::from_ne_bytes(
+            buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
+                .try_into().unwrap(),
+        ) as usize;
+        let item_start = dir_end + item_off;
+
+        // Find the path NUL terminator and corrupt it
+        let path_off = u32::from_ne_bytes(
+            buf[item_start + 24..item_start + 28].try_into().unwrap(),
+        ) as usize;
+        let path_len = u32::from_ne_bytes(
+            buf[item_start + 28..item_start + 32].try_into().unwrap(),
+        ) as usize;
+        buf[item_start + path_off + path_len] = b'X'; // corrupt path NUL
+
+        let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
+        assert_eq!(view.item(0).unwrap_err(), NipcError::MissingNul);
+    }
+
+    // -----------------------------------------------------------------------
+    //  CgroupsItemView: path_off < ITEM_HDR_SIZE (line 222)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cgroups_item_path_off_too_small() {
+        let mut buf = [0u8; 4096];
+        let mut b = CgroupsBuilder::new(&mut buf, 1, 0, 1);
+        b.add(1, 0, 1, b"test", b"/test").unwrap();
+        let total = b.finish();
+
+        let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
+        let item_off = u32::from_ne_bytes(
+            buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
+                .try_into().unwrap(),
+        ) as usize;
+        let item_start = dir_end + item_off;
+
+        // Set path_offset to 0 (< 32 = CGROUPS_ITEM_HDR_SIZE)
+        buf[item_start + 24..item_start + 28].copy_from_slice(&0u32.to_ne_bytes());
+
+        let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
+        assert_eq!(view.item(0).unwrap_err(), NipcError::OutOfBounds);
+    }
+
+    // -----------------------------------------------------------------------
+    //  CgroupsItemView: path string OOB (line 225)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cgroups_item_path_string_oob() {
+        let mut buf = [0u8; 4096];
+        let mut b = CgroupsBuilder::new(&mut buf, 1, 0, 1);
+        b.add(1, 0, 1, b"test", b"/test").unwrap();
+        let total = b.finish();
+
+        let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
+        let item_off = u32::from_ne_bytes(
+            buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
+                .try_into().unwrap(),
+        ) as usize;
+        let item_start = dir_end + item_off;
+
+        // Corrupt path_length to huge value
+        buf[item_start + 28..item_start + 32]
+            .copy_from_slice(&99999u32.to_ne_bytes());
+
+        let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
+        assert_eq!(view.item(0).unwrap_err(), NipcError::OutOfBounds);
+    }
+
+    // -----------------------------------------------------------------------
+    //  Cgroups dispatch (lines 438-447)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dispatch_cgroups_snapshot_bad_request() {
+        // Bad request (too short) -> dispatch returns None (line 438)
+        let mut resp = [0u8; 4096];
+        let result = crate::protocol::dispatch_cgroups_snapshot(
+            &[], &mut resp, 1, |_req, _builder| true,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn dispatch_cgroups_snapshot_handler_returns_false() {
+        // Handler returns false -> dispatch returns None (lines 440-441)
+        let req = CgroupsRequest { layout_version: 1, flags: 0 };
+        let mut req_buf = [0u8; 4];
+        req.encode(&mut req_buf);
+        let mut resp = [0u8; 4096];
+        let result = crate::protocol::dispatch_cgroups_snapshot(
+            &req_buf, &mut resp, 1, |_req, _builder| false,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn dispatch_cgroups_snapshot_success() {
+        let req = CgroupsRequest { layout_version: 1, flags: 0 };
+        let mut req_buf = [0u8; 4];
+        req.encode(&mut req_buf);
+        let mut resp = [0u8; 4096];
+        let result = crate::protocol::dispatch_cgroups_snapshot(
+            &req_buf, &mut resp, 2, |_req, builder| {
+                builder.add(1, 0, 1, b"cg1", b"/test").unwrap();
+                true
+            },
+        );
+        assert!(result.is_some());
+        let n = result.unwrap();
+        let view = CgroupsResponseView::decode(&resp[..n]).unwrap();
+        assert_eq!(view.item_count, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    //  Dispatch increment / string_reverse buf overflow (lines 27, 58)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dispatch_increment_resp_too_small() {
+        // Response buffer too small -> encode returns 0 -> dispatch returns None
+        let req_val = 42u64;
+        let mut req_buf = [0u8; 8];
+        crate::protocol::increment_encode(req_val, &mut req_buf);
+        let mut resp = [0u8; 4]; // too small for 8-byte response
+        let result = crate::protocol::dispatch_increment(
+            &req_buf, &mut resp, |v| Some(v + 1),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn dispatch_increment_handler_none() {
+        let mut req_buf = [0u8; 8];
+        crate::protocol::increment_encode(42, &mut req_buf);
+        let mut resp = [0u8; 8];
+        let result = crate::protocol::dispatch_increment(
+            &req_buf, &mut resp, |_| None,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn dispatch_string_reverse_resp_too_small() {
+        let s = b"hello";
+        let mut req_buf = [0u8; 64];
+        crate::protocol::string_reverse_encode(s, &mut req_buf);
+        let mut resp = [0u8; 4]; // too small
+        let result = crate::protocol::dispatch_string_reverse(
+            &req_buf, &mut resp, |data| Some(data.iter().rev().copied().collect()),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn dispatch_string_reverse_handler_none() {
+        let s = b"hello";
+        let mut req_buf = [0u8; 64];
+        crate::protocol::string_reverse_encode(s, &mut req_buf);
+        let mut resp = [0u8; 64];
+        let result = crate::protocol::dispatch_string_reverse(
+            &req_buf, &mut resp, |_| None,
+        );
+        assert!(result.is_none());
+    }
 }

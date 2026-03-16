@@ -3024,4 +3024,381 @@ mod tests {
         let _ = thread_handle.join();
         cleanup_all(svc);
     }
+
+    // ---------------------------------------------------------------
+    //  Client state machine: auth failure (lines 438-440)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_client_auth_failure() {
+        let svc = "rs_svc_authfail";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, test_cgroups_handler);
+
+        // Client with wrong auth token
+        let mut bad_cfg = client_config();
+        bad_cfg.auth_token = 0xBAD_BAD_BAD;
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, bad_cfg);
+        client.refresh();
+        assert_eq!(client.state, ClientState::AuthFailed);
+        assert!(!client.ready());
+
+        // Subsequent refresh stays stuck in AuthFailed
+        client.refresh();
+        assert_eq!(client.state, ClientState::AuthFailed);
+
+        client.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    // ---------------------------------------------------------------
+    //  Client state machine: incompatible (lines 439-440)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_client_incompatible() {
+        let svc = "rs_svc_incompat";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        // Server supports only PROFILE_BASELINE, but start it first
+        let mut server = TestServer::start(svc, test_cgroups_handler);
+
+        // Client requires SHM_FUTEX only (no baseline)
+        let mut bad_cfg = client_config();
+        #[cfg(target_os = "linux")]
+        {
+            bad_cfg.supported_profiles = crate::protocol::PROFILE_SHM_FUTEX;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // On non-Linux, use a profile bit that won't match
+            bad_cfg.supported_profiles = 0x80000000;
+        }
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, bad_cfg);
+        client.refresh();
+        assert_eq!(client.state, ClientState::Incompatible);
+        assert!(!client.ready());
+
+        // Stays stuck
+        client.refresh();
+        assert_eq!(client.state, ClientState::Incompatible);
+
+        client.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    // ---------------------------------------------------------------
+    //  Client: call_snapshot when not ready (line 324-326)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_call_when_not_ready() {
+        let svc = "rs_svc_noready";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
+        assert_eq!(client.state, ClientState::Disconnected);
+
+        let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
+        let result = client.call_snapshot(&mut resp_buf);
+        assert!(result.is_err());
+        assert_eq!(client.status().error_count, 1);
+
+        // Increment when not ready
+        let result = client.call_increment(42);
+        assert!(result.is_err());
+
+        // String reverse when not ready
+        let result = client.call_string_reverse("test");
+        assert!(result.is_err());
+
+        client.close();
+        cleanup_all(svc);
+    }
+
+    // ---------------------------------------------------------------
+    //  Client: broken -> reconnect cycle (lines 136-141)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_broken_reconnect() {
+        let svc = "rs_svc_broken";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, test_cgroups_handler);
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
+        client.refresh();
+        assert_eq!(client.state, ClientState::Ready);
+
+        // Force broken state
+        client.state = ClientState::Broken;
+
+        // refresh from Broken should disconnect, reconnect
+        let changed = client.refresh();
+        assert!(changed);
+        assert_eq!(client.state, ClientState::Ready);
+        assert!(client.status().reconnect_count >= 1);
+
+        client.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    // ---------------------------------------------------------------
+    //  Cache: close resets everything (line 1561-1566)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_cache_close_resets() {
+        let svc = "rs_cache_close";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, test_cgroups_handler);
+
+        let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, client_config());
+        assert!(cache.refresh());
+        assert!(cache.ready());
+        assert_eq!(cache.status().item_count, 3);
+
+        cache.close();
+        assert!(!cache.ready());
+        assert!(cache.lookup(1001, "docker-abc123").is_none());
+        assert_eq!(cache.status().item_count, 0);
+
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    // ---------------------------------------------------------------
+    //  Cache: with max_response_payload_bytes = 0 (line 1437-1440)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_cache_default_buf_size() {
+        let svc = "rs_cache_defbuf";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        // Config with max_response_payload_bytes = 0 triggers default buf
+        let mut cfg = client_config();
+        cfg.max_response_payload_bytes = 0;
+
+        let cache = CgroupsCache::new(TEST_RUN_DIR, svc, cfg);
+        // Should use CACHE_RESPONSE_BUF_SIZE (65536)
+        assert_eq!(cache.response_buf.len(), 65536);
+
+        cleanup_all(svc);
+    }
+
+    // ---------------------------------------------------------------
+    //  ManagedServer: worker_count = 0 -> clamped to 1 (line 778)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_server_worker_count_clamped() {
+        let svc = "rs_svc_w0";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let handler: HandlerFn = Arc::new(|_, _| None);
+        let server = ManagedServer::with_workers(
+            TEST_RUN_DIR, svc, server_config(), RESPONSE_BUF_SIZE, handler, 0,
+        );
+        assert_eq!(server.worker_count, 1);
+
+        cleanup_all(svc);
+    }
+
+    // ---------------------------------------------------------------
+    //  ManagedServer: stop flag (line 946)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_server_stop_flag() {
+        let svc = "rs_svc_stopflag";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let handler: HandlerFn = Arc::new(|_, _| None);
+        let server = ManagedServer::new(
+            TEST_RUN_DIR, svc, server_config(), RESPONSE_BUF_SIZE, handler,
+        );
+        let flag = server.running_flag();
+        assert!(!flag.load(Ordering::Acquire));
+
+        // stop sets running to false
+        server.stop();
+        assert!(!flag.load(Ordering::Acquire));
+
+        cleanup_all(svc);
+    }
+
+    // ---------------------------------------------------------------
+    //  ClientStatus / CgroupsCacheStatus fields
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_client_status_fields() {
+        let svc = "rs_svc_csf";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
+        let status = client.status();
+        assert_eq!(status.state, ClientState::Disconnected);
+        assert_eq!(status.connect_count, 0);
+        assert_eq!(status.reconnect_count, 0);
+        assert_eq!(status.call_count, 0);
+        assert_eq!(status.error_count, 0);
+        cleanup_all(svc);
+    }
+
+    // ---------------------------------------------------------------
+    //  call_increment and call_string_reverse success paths
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_client_call_increment_success() {
+        let svc = "rs_svc_incr_ok";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, pingpong_handler);
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
+        client.refresh();
+        assert!(client.ready());
+
+        let result = client.call_increment(99).expect("increment");
+        assert_eq!(result, 100);
+
+        client.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_client_call_string_reverse_success() {
+        let svc = "rs_svc_strrev_ok";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, pingpong_handler);
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
+        client.refresh();
+        assert!(client.ready());
+
+        let result = client.call_string_reverse("hello").expect("reverse");
+        assert_eq!(result, "olleh");
+
+        client.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    // ---------------------------------------------------------------
+    //  Batch dispatch: handler failure returns INTERNAL_ERROR (lines 1244-1248)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_batch_dispatch_handler_failure() {
+        let svc = "rs_svc_batchfail";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        // Handler that fails on the 2nd item
+        fn fail_second_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
+            static CALL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if method_code == METHOD_INCREMENT {
+                if n % 3 == 1 {
+                    // Fail on the second call of every batch
+                    return None;
+                }
+                let val = increment_decode(request_payload).ok()?;
+                let mut buf = [0u8; INCREMENT_PAYLOAD_SIZE];
+                increment_encode(val + 1, &mut buf);
+                Some(buf.to_vec())
+            } else {
+                None
+            }
+        }
+
+        fn batch_server_config() -> ServerConfig {
+            ServerConfig {
+                supported_profiles: PROFILE_BASELINE,
+                max_request_payload_bytes: 4096,
+                max_request_batch_items: 16,
+                max_response_payload_bytes: 4096,
+                max_response_batch_items: 16,
+                auth_token: AUTH_TOKEN,
+                backlog: 4,
+                ..ServerConfig::default()
+            }
+        }
+
+        fn batch_client_config() -> ClientConfig {
+            ClientConfig {
+                supported_profiles: PROFILE_BASELINE,
+                max_request_payload_bytes: 4096,
+                max_request_batch_items: 16,
+                max_response_payload_bytes: 4096,
+                max_response_batch_items: 16,
+                auth_token: AUTH_TOKEN,
+                ..ClientConfig::default()
+            }
+        }
+
+        let svc_name = svc.to_string();
+        let ready_flag = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready_flag.clone();
+
+        let mut server_obj = ManagedServer::with_workers(
+            TEST_RUN_DIR,
+            &svc_name,
+            batch_server_config(),
+            RESPONSE_BUF_SIZE,
+            Arc::new(move |code, payload| fail_second_handler(code, payload)),
+            8,
+        );
+        let stop_flag = server_obj.running_flag();
+
+        let thread_handle = thread::spawn(move || {
+            ready_clone.store(true, Ordering::Release);
+            let _ = server_obj.run();
+        });
+
+        for _ in 0..2000 {
+            if ready_flag.load(Ordering::Acquire) { break; }
+            thread::sleep(Duration::from_micros(500));
+        }
+        thread::sleep(Duration::from_millis(50));
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, batch_client_config());
+        client.refresh();
+        assert!(client.ready());
+
+        // Batch of 3: handler fails on the 2nd -> server returns INTERNAL_ERROR
+        let values = vec![10u64, 20, 30];
+        let result = client.call_increment_batch(&values);
+        // The batch should fail because the handler returned None for item 2
+        assert!(result.is_err());
+
+        client.close();
+        stop_flag.store(false, Ordering::Release);
+        let _ = thread_handle.join();
+        cleanup_all(svc);
+    }
 }

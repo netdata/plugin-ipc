@@ -1428,4 +1428,400 @@ mod tests {
             cleanup_shm(svc, sid);
         }
     }
+
+    // -----------------------------------------------------------------------
+    //  ShmError Display coverage (lines 73-88)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn shm_error_display_all_variants() {
+        let cases: Vec<(ShmError, &str)> = vec![
+            (ShmError::PathTooLong, "SHM path exceeds limit"),
+            (ShmError::Open(2), "open failed: errno 2"),
+            (ShmError::Truncate(28), "ftruncate failed: errno 28"),
+            (ShmError::Mmap(12), "mmap failed: errno 12"),
+            (ShmError::BadMagic, "SHM header magic mismatch"),
+            (ShmError::BadVersion, "SHM header version mismatch"),
+            (ShmError::BadHeader, "SHM header_len mismatch"),
+            (ShmError::BadSize, "SHM file too small for declared areas"),
+            (ShmError::AddrInUse, "SHM region owned by live server"),
+            (ShmError::NotReady, "SHM server not ready"),
+            (ShmError::MsgTooLarge, "message exceeds SHM area capacity"),
+            (ShmError::Timeout, "SHM futex wait timed out"),
+            (ShmError::BadParam("test".into()), "bad parameter: test"),
+            (ShmError::PeerDead, "SHM owner process has exited"),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(format!("{}", err), expected);
+        }
+        let e: &dyn std::error::Error = &ShmError::PathTooLong;
+        let _ = format!("{e}");
+    }
+
+    // -----------------------------------------------------------------------
+    //  ShmContext accessors: role(), fd() (lines 164-165, 169-170)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_shm_role_and_fd() {
+        ensure_run_dir();
+        let svc = "rs_shm_role";
+        let sid: u64 = 50;
+        cleanup_shm(svc, sid);
+
+        let server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
+            .expect("server create");
+        assert_eq!(server.role(), ShmRole::Server);
+        assert!(server.fd() >= 0);
+
+        let client = ShmContext::client_attach(TEST_RUN_DIR, svc, sid)
+            .expect("client attach");
+        assert_eq!(client.role(), ShmRole::Client);
+        assert!(client.fd() >= 0);
+
+        // Cleanup
+        let mut c = client;
+        let mut s = server;
+        c.close();
+        s.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    // -----------------------------------------------------------------------
+    //  ShmContext::owner_alive() (lines 174-191)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_owner_alive() {
+        ensure_run_dir();
+        let svc = "rs_shm_alive";
+        let sid: u64 = 51;
+        cleanup_shm(svc, sid);
+
+        let server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
+            .expect("server create");
+
+        // Owner is the current process, so should be alive
+        assert!(server.owner_alive());
+
+        // Client should also report alive (same process owns it)
+        let client = ShmContext::client_attach(TEST_RUN_DIR, svc, sid)
+            .expect("client attach");
+        assert!(client.owner_alive());
+
+        let mut c = client;
+        let mut s = server;
+        c.close();
+        s.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    #[test]
+    fn test_owner_alive_dead_pid() {
+        ensure_run_dir();
+        let svc = "rs_shm_dead";
+        let sid: u64 = 52;
+        cleanup_shm(svc, sid);
+
+        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
+            .expect("server create");
+
+        // Forge a dead PID
+        let hdr = server.base as *mut RegionHeader;
+        unsafe { (*hdr).owner_pid = 99999 };
+
+        assert!(!server.owner_alive());
+
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    #[test]
+    fn test_owner_alive_null_base() {
+        ensure_run_dir();
+        let svc = "rs_shm_null";
+        let sid: u64 = 53;
+        cleanup_shm(svc, sid);
+
+        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
+            .expect("server create");
+
+        // Null base -> not alive
+        let saved_base = server.base;
+        server.base = std::ptr::null_mut();
+        assert!(!server.owner_alive());
+
+        // Restore for cleanup
+        server.base = saved_base;
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    #[test]
+    fn test_owner_alive_generation_mismatch() {
+        ensure_run_dir();
+        let svc = "rs_shm_gen";
+        let sid: u64 = 54;
+        cleanup_shm(svc, sid);
+
+        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
+            .expect("server create");
+
+        // Forge a different generation in the header
+        let hdr = server.base as *mut RegionHeader;
+        unsafe { (*hdr).owner_generation = server.owner_generation + 1 };
+
+        // Generation mismatch -> not alive
+        assert!(!server.owner_alive());
+
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    // -----------------------------------------------------------------------
+    //  ShmContext::send() error paths (lines 436-437, 458)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_send_null_context() {
+        ensure_run_dir();
+        let svc = "rs_shm_sendnull";
+        let sid: u64 = 55;
+        cleanup_shm(svc, sid);
+
+        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
+            .expect("server create");
+
+        // Empty message -> error
+        assert!(matches!(server.send(&[]), Err(ShmError::BadParam(_))));
+
+        // Null base -> error
+        let saved_base = server.base;
+        server.base = std::ptr::null_mut();
+        assert!(matches!(server.send(&[1, 2, 3]), Err(ShmError::BadParam(_))));
+        server.base = saved_base;
+
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    #[test]
+    fn test_send_msg_too_large() {
+        ensure_run_dir();
+        let svc = "rs_shm_sendlrg";
+        let sid: u64 = 56;
+        cleanup_shm(svc, sid);
+
+        // Small capacity
+        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 64, 64)
+            .expect("server create");
+
+        // Create a message bigger than response capacity
+        let big = vec![0u8; 1024];
+        assert_eq!(server.send(&big).unwrap_err(), ShmError::MsgTooLarge);
+
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    // -----------------------------------------------------------------------
+    //  ShmContext::receive() error paths (lines 494-498)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_receive_null_context() {
+        ensure_run_dir();
+        let svc = "rs_shm_recvnull";
+        let sid: u64 = 57;
+        cleanup_shm(svc, sid);
+
+        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
+            .expect("server create");
+
+        // Empty buffer -> error
+        assert!(matches!(server.receive(&mut [], 100), Err(ShmError::BadParam(_))));
+
+        // Null base -> error
+        let saved_base = server.base;
+        server.base = std::ptr::null_mut();
+        let mut buf = [0u8; 64];
+        assert!(matches!(server.receive(&mut buf, 100), Err(ShmError::BadParam(_))));
+        server.base = saved_base;
+
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    // -----------------------------------------------------------------------
+    //  Timeout (line 575, 593)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_receive_timeout() {
+        ensure_run_dir();
+        let svc = "rs_shm_timeout";
+        let sid: u64 = 58;
+        cleanup_shm(svc, sid);
+
+        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
+            .expect("server create");
+
+        // No client sends anything, so receive must timeout
+        let mut buf = [0u8; 1024];
+        let result = server.receive(&mut buf, 50); // 50ms timeout
+        assert_eq!(result.unwrap_err(), ShmError::Timeout);
+
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    // -----------------------------------------------------------------------
+    //  Client attach: bad magic, bad version, bad header_len (lines 366-385)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_client_attach_bad_magic() {
+        ensure_run_dir();
+        let svc = "rs_shm_badmag";
+        let sid: u64 = 59;
+        cleanup_shm(svc, sid);
+
+        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
+            .expect("server create");
+
+        // Corrupt magic
+        let hdr = server.base as *mut RegionHeader;
+        unsafe { (*hdr).magic = 0xDEADBEEF };
+
+        let result = ShmContext::client_attach(TEST_RUN_DIR, svc, sid);
+        assert!(matches!(result, Err(ShmError::BadMagic)));
+
+        // Restore for cleanup
+        unsafe { (*hdr).magic = REGION_MAGIC };
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    #[test]
+    fn test_client_attach_bad_version() {
+        ensure_run_dir();
+        let svc = "rs_shm_badver";
+        let sid: u64 = 60;
+        cleanup_shm(svc, sid);
+
+        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
+            .expect("server create");
+
+        let hdr = server.base as *mut RegionHeader;
+        unsafe { (*hdr).version = 99 };
+
+        let result = ShmContext::client_attach(TEST_RUN_DIR, svc, sid);
+        assert!(matches!(result, Err(ShmError::BadVersion)));
+
+        unsafe { (*hdr).version = REGION_VERSION };
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    #[test]
+    fn test_client_attach_bad_header_len() {
+        ensure_run_dir();
+        let svc = "rs_shm_badhdr";
+        let sid: u64 = 61;
+        cleanup_shm(svc, sid);
+
+        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
+            .expect("server create");
+
+        let hdr = server.base as *mut RegionHeader;
+        unsafe { (*hdr).header_len = 128 };
+
+        let result = ShmContext::client_attach(TEST_RUN_DIR, svc, sid);
+        assert!(matches!(result, Err(ShmError::BadHeader)));
+
+        unsafe { (*hdr).header_len = HEADER_LEN };
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    #[test]
+    fn test_client_attach_bad_size() {
+        ensure_run_dir();
+        let svc = "rs_shm_badsz";
+        let sid: u64 = 62;
+        cleanup_shm(svc, sid);
+
+        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
+            .expect("server create");
+
+        // Corrupt response capacity to be huge, so region_size < needed
+        let hdr = server.base as *mut RegionHeader;
+        let saved_cap = unsafe { (*hdr).response_capacity };
+        unsafe { (*hdr).response_capacity = 0xFFFF_FFFF };
+
+        let result = ShmContext::client_attach(TEST_RUN_DIR, svc, sid);
+        assert!(matches!(result, Err(ShmError::BadSize)));
+
+        unsafe { (*hdr).response_capacity = saved_cap };
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    // -----------------------------------------------------------------------
+    //  validate_service_name (lines 764-778)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_service_name() {
+        assert!(validate_service_name("").is_err());
+        assert!(validate_service_name(".").is_err());
+        assert!(validate_service_name("..").is_err());
+        assert!(validate_service_name("a/b").is_err());
+        assert!(validate_service_name("a b").is_err());
+        assert!(validate_service_name("a@b").is_err());
+
+        assert!(validate_service_name("valid").is_ok());
+        assert!(validate_service_name("valid-name").is_ok());
+        assert!(validate_service_name("valid_name").is_ok());
+        assert!(validate_service_name("valid.name.123").is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    //  build_shm_path: path too long (line 785)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_shm_path_too_long() {
+        // Path = "{run_dir}/{name}-{session_id:016x}.ipcshm" must be >= 256
+        // /tmp/aaa...aaa-0000000000000001.ipcshm
+        // 5 + name_len + 1 + 16 + 7 = 29 + name_len >= 256 -> name_len >= 227
+        let long_name = "a".repeat(230);
+        let result = build_shm_path("/tmp", &long_name, 1);
+        assert!(matches!(result, Err(ShmError::PathTooLong)));
+    }
+
+    // -----------------------------------------------------------------------
+    //  pid_alive edge cases (lines 800-804)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pid_alive() {
+        assert!(!pid_alive(0));
+        assert!(!pid_alive(-1));
+        // Current process should be alive
+        assert!(pid_alive(unsafe { libc::getpid() }));
+        // Very unlikely PID
+        assert!(!pid_alive(99999));
+    }
+
+    // -----------------------------------------------------------------------
+    //  Client attach: nonexistent file (line 325)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_client_attach_nonexistent() {
+        ensure_run_dir();
+        let result = ShmContext::client_attach(TEST_RUN_DIR, "rs_shm_nofile", 99999);
+        assert!(matches!(result, Err(ShmError::Open(_))));
+    }
 }
