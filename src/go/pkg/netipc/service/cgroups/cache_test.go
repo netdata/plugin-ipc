@@ -25,6 +25,9 @@ func TestCacheFullRoundTrip(t *testing.T) {
 		t.Fatal("should not be ready before refresh")
 	}
 
+	// Ensure monotonic epoch advances past 0ms before refresh
+	time.Sleep(2 * time.Millisecond)
+
 	// Refresh populates the cache
 	updated := cache.Refresh()
 	if !updated {
@@ -82,6 +85,12 @@ func TestCacheFullRoundTrip(t *testing.T) {
 	}
 	if status.RefreshFailureCount != 0 {
 		t.Fatalf("expected failure_count=0, got %d", status.RefreshFailureCount)
+	}
+	if status.ConnectionState != StateReady {
+		t.Fatalf("expected connection_state=StateReady, got %d", status.ConnectionState)
+	}
+	if status.LastRefreshTs <= 0 {
+		t.Fatalf("expected positive last_refresh_ts, got %d", status.LastRefreshTs)
 	}
 
 	cache.Close()

@@ -155,9 +155,9 @@ static int run_server(const char *run_dir, const char *service)
         .supported_profiles        = profiles,
         .preferred_profiles        = profiles,
         .max_request_payload_bytes = 4096,
-        .max_request_batch_items   = 1,
+        .max_request_batch_items   = 16,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-        .max_response_batch_items  = 1,
+        .max_response_batch_items  = 16,
         .auth_token                = AUTH_TOKEN,
         .packet_size               = 0,
         .backlog                   = 4,
@@ -193,9 +193,9 @@ static int run_client(const char *run_dir, const char *service)
         .supported_profiles        = profiles,
         .preferred_profiles        = profiles,
         .max_request_payload_bytes = 4096,
-        .max_request_batch_items   = 1,
+        .max_request_batch_items   = 16,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-        .max_response_batch_items  = 1,
+        .max_response_batch_items  = 16,
         .auth_token                = AUTH_TOKEN,
         .packet_size               = 0,
     };
@@ -267,6 +267,27 @@ static int run_client(const char *run_dir, const char *service)
                 if (item.name.len != strlen("docker-abc123") ||
                     memcmp(item.name.ptr, "docker-abc123", item.name.len) != 0) {
                     fprintf(stderr, "client: item 0 name mismatch\n");
+                    ok = 0;
+                }
+            }
+        }
+    }
+
+    /* --- Test INCREMENT batch: [10,20,30] -> [11,21,31] --- */
+    {
+        uint64_t batch_in[] = { 10, 20, 30 };
+        uint64_t batch_out[3] = { 0 };
+        nipc_error_t err = nipc_client_call_increment_batch(
+            &client, batch_in, 3, batch_out, resp_buf, sizeof(resp_buf));
+        if (err != NIPC_OK) {
+            fprintf(stderr, "client: increment batch call failed: %d\n", err);
+            ok = 0;
+        } else {
+            uint64_t expected[] = { 11, 21, 31 };
+            for (int i = 0; i < 3; i++) {
+                if (batch_out[i] != expected[i]) {
+                    fprintf(stderr, "client: batch[%d] expected %lu, got %lu\n",
+                            i, (unsigned long)expected[i], (unsigned long)batch_out[i]);
                     ok = 0;
                 }
             }

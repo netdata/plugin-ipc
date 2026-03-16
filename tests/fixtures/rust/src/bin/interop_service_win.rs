@@ -85,9 +85,9 @@ fn run_server(run_dir: &str, service: &str) -> i32 {
     let config = ServerConfig {
         supported_profiles: profiles,
         max_request_payload_bytes: 4096,
-        max_request_batch_items: 1,
+        max_request_batch_items: 16,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-        max_response_batch_items: 1,
+        max_response_batch_items: 16,
         auth_token: AUTH_TOKEN,
         ..ServerConfig::default()
     };
@@ -121,9 +121,9 @@ fn run_client(run_dir: &str, service: &str) -> i32 {
     let config = ClientConfig {
         supported_profiles: profiles,
         max_request_payload_bytes: 4096,
-        max_request_batch_items: 1,
+        max_request_batch_items: 16,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-        max_response_batch_items: 1,
+        max_response_batch_items: 16,
         auth_token: AUTH_TOKEN,
         ..ClientConfig::default()
     };
@@ -187,6 +187,19 @@ fn run_client(run_dir: &str, service: &str) -> i32 {
                 eprintln!("client: cgroups call failed: {e:?}");
                 ok = false;
             }
+        }
+    }
+
+    // --- Test INCREMENT batch: [10,20,30] -> [11,21,31] ---
+    match client.call_increment_batch(&[10, 20, 30]) {
+        Ok(ref results) if results == &[11, 21, 31] => {}
+        Ok(ref results) => {
+            eprintln!("client: increment batch expected [11,21,31], got {results:?}");
+            ok = false;
+        }
+        Err(e) => {
+            eprintln!("client: increment batch call failed: {e:?}");
+            ok = false;
         }
     }
 

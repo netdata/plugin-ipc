@@ -297,6 +297,8 @@ static void test_full_round_trip(void)
     check("status generation == 42", status.generation == 42);
     check("status success_count == 1", status.refresh_success_count == 1);
     check("status failure_count == 0", status.refresh_failure_count == 0);
+    check("status connection_state == READY", status.connection_state == NIPC_CLIENT_READY);
+    check("status last_refresh_ts > 0", status.last_refresh_ts > 0);
 
     nipc_cgroups_cache_close(&cache);
     stop_server(&sctx, tid);

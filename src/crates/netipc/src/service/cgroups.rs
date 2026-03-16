@@ -2128,6 +2128,9 @@ mod tests {
         let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, client_config());
         assert!(!cache.ready());
 
+        // Ensure monotonic epoch advances past 0ms before refresh
+        thread::sleep(Duration::from_millis(2));
+
         // Refresh populates the cache
         let updated = cache.refresh();
         assert!(updated);
@@ -2155,6 +2158,8 @@ mod tests {
         assert_eq!(status.generation, 42);
         assert_eq!(status.refresh_success_count, 1);
         assert_eq!(status.refresh_failure_count, 0);
+        assert_eq!(status.connection_state, ClientState::Ready);
+        assert!(status.last_refresh_ts > 0);
 
         cache.close();
         server.stop();

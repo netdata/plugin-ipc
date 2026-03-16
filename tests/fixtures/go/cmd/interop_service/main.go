@@ -44,9 +44,9 @@ func serverConfig() posix.ServerConfig {
 		SupportedProfiles:       profiles,
 		PreferredProfiles:       profiles,
 		MaxRequestPayloadBytes:  4096,
-		MaxRequestBatchItems:    1,
+		MaxRequestBatchItems:    16,
 		MaxResponsePayloadBytes: responseBufSize,
-		MaxResponseBatchItems:   1,
+		MaxResponseBatchItems:   16,
 		AuthToken:               authToken,
 		Backlog:                 4,
 	}
@@ -58,9 +58,9 @@ func clientConfig() posix.ClientConfig {
 		SupportedProfiles:       profiles,
 		PreferredProfiles:       profiles,
 		MaxRequestPayloadBytes:  4096,
-		MaxRequestBatchItems:    1,
+		MaxRequestBatchItems:    16,
 		MaxResponsePayloadBytes: responseBufSize,
-		MaxResponseBatchItems:   1,
+		MaxResponseBatchItems:   16,
 		AuthToken:               authToken,
 	}
 }
@@ -204,6 +204,28 @@ func runClient(runDir, service string) int {
 			if item0.Path.String() != "/sys/fs/cgroup/docker/abc123" {
 				fmt.Fprintf(os.Stderr, "client: item 0 path: got %q\n", item0.Path.String())
 				ok = false
+			}
+		}
+	}
+
+	// --- Test INCREMENT batch: [10,20,30] -> [11,21,31] ---
+	batchResults, err := client.CallIncrementBatch([]uint64{10, 20, 30}, respBuf)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "client: increment batch call failed: %v\n", err)
+		ok = false
+	} else {
+		expected := []uint64{11, 21, 31}
+		if len(batchResults) != len(expected) {
+			fmt.Fprintf(os.Stderr, "client: batch expected %d results, got %d\n",
+				len(expected), len(batchResults))
+			ok = false
+		} else {
+			for i, v := range batchResults {
+				if v != expected[i] {
+					fmt.Fprintf(os.Stderr, "client: batch[%d] expected %d, got %d\n",
+						i, expected[i], v)
+					ok = false
+				}
 			}
 		}
 	}

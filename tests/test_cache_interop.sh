@@ -105,7 +105,7 @@ run_test() {
     server_pid=$!
 
     local waited=0
-    while [[ $waited -lt $TIMEOUT ]]; do
+    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
         if ! kill -0 "$server_pid" 2>/dev/null; then
             echo -e "${RED}FAIL${NC} (server exited early)"
             cat /tmp/nipc_cache_server_out_$$ >&2 2>/dev/null || true
@@ -120,7 +120,7 @@ run_test() {
         waited=$((waited + 1))
     done
 
-    if [[ $waited -ge $TIMEOUT ]]; then
+    if [[ $waited -ge $((TIMEOUT * 10)) ]]; then
         echo -e "${RED}FAIL${NC} (server not ready after ${TIMEOUT}s)"
         kill "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
