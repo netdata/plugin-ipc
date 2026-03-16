@@ -2,14 +2,18 @@
 #
 # run-windows-bench.sh - Run the full Windows benchmark matrix.
 #
-# Runs C and Go client-server pairs for:
-#   1. Named Pipe ping-pong (4 pairs x 4 rates)
-#   2. Win SHM ping-pong (4 pairs x 4 rates)
-#   3. Snapshot Named Pipe refresh (4 pairs x 2 rates)
-#   4. Snapshot Win SHM refresh (4 pairs x 2 rates)
-#   5. Local cache lookup (C, Go)
+# Runs C/Rust/Go client-server pairs for (Rust optional):
+#   1. Named Pipe ping-pong (N pairs x 4 rates)
+#   2. Win SHM ping-pong (N pairs x 4 rates)
+#   3. Snapshot Named Pipe refresh (N pairs x 2 rates)
+#   4. Snapshot Win SHM refresh (N pairs x 2 rates)
+#   5. NP batch ping-pong (N pairs x 4 rates, random 1-1000 items)
+#   6. Win SHM batch ping-pong (N pairs x 4 rates, random 1-1000 items)
+#   7. Local cache lookup (C, Rust, Go)
+#   8. NP pipeline (N pairs x 1 rate, depth=16)
+#   9. NP pipeline+batch (N pairs x 1 rate, depth=16)
 #
-# Cross-language pairs: c-c, go-go, c-go, go-c
+# N = 9 pairs (3x3) if Rust bench binary available, else 4 pairs (2x2)
 #
 # Output: CSV file + human-readable summary.
 #
@@ -38,6 +42,7 @@ RUN_DIR="${TEMP:-/tmp}/netipc-bench-$$"
 
 # Binary locations
 BENCH_C="${BUILD_DIR}/bin/bench_windows_c.exe"
+BENCH_RS="${ROOT_DIR}/src/crates/netipc/target/release/bench_windows.exe"
 BENCH_GO="${BUILD_DIR}/bin/bench_windows_go.exe"
 
 # ---------------------------------------------------------------------------
@@ -70,9 +75,10 @@ err() {
 bench_bin() {
     local lang="$1"
     case "$lang" in
-        c)  echo "$BENCH_C" ;;
-        go) echo "$BENCH_GO" ;;
-        *)  err "unknown lang: $lang"; return 1 ;;
+        c)    echo "$BENCH_C" ;;
+        rust) echo "$BENCH_RS" ;;
+        go)   echo "$BENCH_GO" ;;
+        *)    err "unknown lang: $lang"; return 1 ;;
     esac
 }
 
@@ -152,6 +158,14 @@ run_pair() {
         shm-ping-pong)
             server_subcmd="shm-ping-pong-server"
             client_subcmd="shm-ping-pong-client"
+            ;;
+        np-batch-ping-pong)
+            server_subcmd="np-batch-ping-pong-server"
+            client_subcmd="np-batch-ping-pong-client"
+            ;;
+        shm-batch-ping-pong)
+            server_subcmd="shm-batch-ping-pong-server"
+            client_subcmd="shm-batch-ping-pong-client"
             ;;
         snapshot-baseline)
             server_subcmd="snapshot-server"
@@ -241,6 +255,11 @@ run_pair() {
 #  Check prerequisites
 # ---------------------------------------------------------------------------
 
+HAS_RUST=0
+if [ -x "$BENCH_RS" ]; then
+    HAS_RUST=1
+fi
+
 check_binaries() {
     local ok=0
 
@@ -254,6 +273,10 @@ check_binaries() {
         err "Go benchmark binary not found: $BENCH_GO"
         err "Build with: cmake --build build --target bench_windows_go"
         ok=1
+    fi
+
+    if [ $HAS_RUST -eq 0 ]; then
+        warn "Rust benchmark binary not found: $BENCH_RS (Rust tests will be skipped)"
     fi
 
     return $ok
@@ -279,10 +302,14 @@ main() {
     echo "scenario,client,server,throughput,p50_us,p95_us,p99_us,client_cpu_pct,server_cpu_pct,total_cpu_pct" > "$OUTPUT_CSV"
 
     local LANGS=(c go)
+    if [ $HAS_RUST -eq 1 ]; then
+        LANGS=(c rust go)
+    fi
     local RATES_PING_PONG=(0 100000 10000 1000)
     local RATES_SNAPSHOT=(0 1000)
+    local PIPELINE_DEPTH=16
 
-    # 1. Named Pipe ping-pong: 4 pairs x 4 rates
+    # 1. Named Pipe ping-pong: N pairs x 4 rates
     log "=== Named Pipe Ping-Pong ==="
     for rate in "${RATES_PING_PONG[@]}"; do
         for server_lang in "${LANGS[@]}"; do
@@ -326,13 +353,165 @@ main() {
         done
     done
 
-    # 5. Local cache lookup: C, Go
+    # 5. NP batch ping-pong: N pairs x 4 rates
+    log "=== NP Batch Ping-Pong ==="
+    for rate in "${RATES_PING_PONG[@]}"; do
+        for server_lang in "${LANGS[@]}"; do
+            for client_lang in "${LANGS[@]}"; do
+                run_pair "np-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION" || true
+                sleep 0.5
+            done
+        done
+    done
+
+    # 6. Win SHM batch ping-pong: N pairs x 4 rates
+    log "=== Win SHM Batch Ping-Pong ==="
+    for rate in "${RATES_PING_PONG[@]}"; do
+        for server_lang in "${LANGS[@]}"; do
+            for client_lang in "${LANGS[@]}"; do
+                run_pair "shm-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION" || true
+                sleep 0.5
+            done
+        done
+    done
+
+    # 7. Local cache lookup
     log "=== Local Cache Lookup ==="
     for lang in "${LANGS[@]}"; do
         local bin
         bin="$(bench_bin "$lang")"
         log "  lookup: ${lang}"
         "$bin" lookup-bench "$DURATION" >> "$OUTPUT_CSV" 2>/dev/null || true
+    done
+
+    # 8. NP pipeline: N pairs x 1 rate (max), depth=16
+    log "=== NP Pipeline (depth=${PIPELINE_DEPTH}) ==="
+    for server_lang in "${LANGS[@]}"; do
+        for client_lang in "${LANGS[@]}"; do
+            local pipe_svc="pipeline-${server_lang}-${client_lang}"
+
+            log "  np-pipeline: ${client_lang}->${server_lang} depth=${PIPELINE_DEPTH}"
+
+            local server_duration=$((DURATION + 5))
+            local server_pid
+            server_pid=$(start_server "$server_lang" "np-ping-pong-server" "$pipe_svc" "$server_duration") || {
+                warn "  Failed to start pipeline server"
+                continue
+            }
+
+            sleep 1
+
+            local client_bin
+            client_bin="$(bench_bin "$client_lang")"
+            local client_timeout=$((DURATION + 15))
+            local client_output
+            client_output=$(timeout "$client_timeout" "$client_bin" "np-pipeline-client" "$RUN_DIR" "$pipe_svc" "$DURATION" "0" "$PIPELINE_DEPTH" 2>/dev/null) || true
+
+            local server_cpu_sec
+            server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pipe_svc")
+
+            local new_pids=()
+            for p in "${SERVER_PIDS[@]:-}"; do
+                [ "$p" != "$server_pid" ] && new_pids+=("$p")
+            done
+            SERVER_PIDS=("${new_pids[@]:-}")
+
+            if [ -n "$client_output" ]; then
+                local line
+                line=$(echo "$client_output" | grep "^np-pipeline" | head -1)
+                if [ -n "$line" ]; then
+                    local throughput p50 p95 p99 client_cpu
+                    throughput=$(echo "$line" | cut -d',' -f4)
+                    p50=$(echo "$line" | cut -d',' -f5)
+                    p95=$(echo "$line" | cut -d',' -f6)
+                    p99=$(echo "$line" | cut -d',' -f7)
+                    client_cpu=$(echo "$line" | cut -d',' -f8)
+
+                    local server_cpu_pct total_cpu_pct
+                    if command -v bc >/dev/null 2>&1; then
+                        server_cpu_pct=$(echo "scale=1; ${server_cpu_sec} / ${DURATION} * 100" | bc 2>/dev/null || echo "0.0")
+                        total_cpu_pct=$(echo "scale=1; ${client_cpu} + ${server_cpu_pct}" | bc 2>/dev/null || echo "0.0")
+                    else
+                        server_cpu_pct="0.0"
+                        total_cpu_pct="$client_cpu"
+                    fi
+
+                    echo "np-pipeline-d${PIPELINE_DEPTH},${client_lang},${server_lang},${throughput},${p50},${p95},${p99},${client_cpu},${server_cpu_pct},${total_cpu_pct}" >> "$OUTPUT_CSV"
+                    log "    throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us"
+                else
+                    echo "np-pipeline-d${PIPELINE_DEPTH},${client_lang},${server_lang},0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
+                fi
+            else
+                echo "np-pipeline-d${PIPELINE_DEPTH},${client_lang},${server_lang},0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
+            fi
+
+            sleep 0.5
+        done
+    done
+
+    # 9. NP pipeline+batch: N pairs x 1 rate (max), depth=16
+    log "=== NP Pipeline+Batch (depth=${PIPELINE_DEPTH}) ==="
+    for server_lang in "${LANGS[@]}"; do
+        for client_lang in "${LANGS[@]}"; do
+            local pb_svc="pipe-batch-${server_lang}-${client_lang}"
+
+            log "  np-pipeline-batch: ${client_lang}->${server_lang} depth=${PIPELINE_DEPTH}"
+
+            local server_duration=$((DURATION + 5))
+            local server_pid
+            server_pid=$(start_server "$server_lang" "np-batch-ping-pong-server" "$pb_svc" "$server_duration") || {
+                warn "  Failed to start pipeline-batch server"
+                continue
+            }
+
+            sleep 1
+
+            local client_bin
+            client_bin="$(bench_bin "$client_lang")"
+            local client_timeout=$((DURATION + 15))
+            local client_output
+            client_output=$(timeout "$client_timeout" "$client_bin" "np-pipeline-batch-client" "$RUN_DIR" "$pb_svc" "$DURATION" "0" "$PIPELINE_DEPTH" 2>/dev/null) || true
+
+            local server_cpu_sec
+            server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pb_svc")
+
+            local new_pids=()
+            for p in "${SERVER_PIDS[@]:-}"; do
+                [ "$p" != "$server_pid" ] && new_pids+=("$p")
+            done
+            SERVER_PIDS=("${new_pids[@]:-}")
+
+            if [ -n "$client_output" ]; then
+                local line
+                line=$(echo "$client_output" | grep "^np-pipeline-batch" | head -1)
+                if [ -n "$line" ]; then
+                    local throughput p50 p95 p99 client_cpu
+                    throughput=$(echo "$line" | cut -d',' -f4)
+                    p50=$(echo "$line" | cut -d',' -f5)
+                    p95=$(echo "$line" | cut -d',' -f6)
+                    p99=$(echo "$line" | cut -d',' -f7)
+                    client_cpu=$(echo "$line" | cut -d',' -f8)
+
+                    local server_cpu_pct total_cpu_pct
+                    if command -v bc >/dev/null 2>&1; then
+                        server_cpu_pct=$(echo "scale=1; ${server_cpu_sec} / ${DURATION} * 100" | bc 2>/dev/null || echo "0.0")
+                        total_cpu_pct=$(echo "scale=1; ${client_cpu} + ${server_cpu_pct}" | bc 2>/dev/null || echo "0.0")
+                    else
+                        server_cpu_pct="0.0"
+                        total_cpu_pct="$client_cpu"
+                    fi
+
+                    echo "np-pipeline-batch-d${PIPELINE_DEPTH},${client_lang},${server_lang},${throughput},${p50},${p95},${p99},${client_cpu},${server_cpu_pct},${total_cpu_pct}" >> "$OUTPUT_CSV"
+                    log "    throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us"
+                else
+                    echo "np-pipeline-batch-d${PIPELINE_DEPTH},${client_lang},${server_lang},0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
+                fi
+            else
+                echo "np-pipeline-batch-d${PIPELINE_DEPTH},${client_lang},${server_lang},0,0,0,0,0.0,0.0,0.0" >> "$OUTPUT_CSV"
+            fi
+
+            sleep 0.5
+        done
     done
 
     # Summary
