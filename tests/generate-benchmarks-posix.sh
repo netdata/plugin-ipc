@@ -111,6 +111,22 @@ require_rows() {
     fi
 }
 
+require_positive_throughput() {
+    awk -F',' '
+        NR > 1 && ($5 + 0) <= 0 {
+            printf "INVALID throughput<=0 for %s %s->%s @ %s\n", $1, $2, $3, $4
+            bad = 1
+        }
+        END { exit bad }
+    ' "$CSV_FILE" | while IFS= read -r line; do
+        err "$line"
+    done
+
+    if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+        VALIDATION_FAILED=1
+    fi
+}
+
 validate_csv() {
     if [ ! -f "$INPUT_CSV" ]; then
         err "Input CSV not found: $INPUT_CSV"
@@ -145,6 +161,7 @@ validate_csv() {
     require_rows "lookup" "0" 3
     require_rows "uds-pipeline-d16" "0" 9
     require_rows "uds-pipeline-batch-d16" "0" 9
+    require_positive_throughput
 
     if [ "$VALIDATION_FAILED" -ne 0 ]; then
         exit 1

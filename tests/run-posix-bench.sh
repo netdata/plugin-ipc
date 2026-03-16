@@ -59,6 +59,7 @@ cleanup() {
 trap cleanup EXIT
 
 SERVER_PIDS=()
+RUN_FAILED=0
 
 log() {
     printf "${CYAN}[bench]${NC} %s\n" "$*" >&2
@@ -163,6 +164,17 @@ write_csv_row() {
         "$client_cpu" "$server_cpu_pct" "$total_cpu_pct" >> "$OUTPUT_CSV"
 }
 
+throughput_is_positive() {
+    awk -v value="$1" 'BEGIN { exit ((value + 0) > 0 ? 0 : 1) }'
+}
+
+dump_client_error() {
+    local err_file="$1"
+    if [ -s "$err_file" ]; then
+        cat "$err_file" >&2
+    fi
+}
+
 # Run a single benchmark pair
 run_pair() {
     local scenario="$1"       # e.g., uds-ping-pong, shm-ping-pong, snapshot-baseline, snapshot-shm
@@ -233,7 +245,12 @@ run_pair() {
 
     local client_timeout=$((duration + 15))
     local client_output
-    client_output=$(timeout "$client_timeout" "$client_bin" "$client_subcmd" "$RUN_DIR" "$svc_name" "$duration" "$target_rps" 2>/dev/null) || true
+    local client_status
+    local client_err="${RUN_DIR}/client-${scenario}-${server_lang}-${client_lang}-${target_rps}.err"
+    set +e
+    client_output=$(timeout "$client_timeout" "$client_bin" "$client_subcmd" "$RUN_DIR" "$svc_name" "$duration" "$target_rps" 2>"$client_err")
+    client_status=$?
+    set -e
 
     # Stop server and get CPU
     local server_cpu_sec
@@ -246,11 +263,16 @@ run_pair() {
     done
     SERVER_PIDS=("${new_pids[@]:-}")
 
+    if [ "$client_status" -ne 0 ]; then
+        warn "  ${client_lang} client failed for ${scenario} (exit ${client_status})"
+        dump_client_error "$client_err"
+        return 1
+    fi
+
     if [ -z "$client_output" ]; then
         warn "  No output from ${client_lang} client for ${scenario}"
-        write_csv_row "$scenario" "$client_lang" "$server_lang" "$target_rps" \
-            "0" "0" "0" "0" "0.0" "0.0" "0.0"
-        return 0
+        dump_client_error "$client_err"
+        return 1
     fi
 
     # Parse client output and patch in server CPU
@@ -261,9 +283,8 @@ run_pair() {
 
     if [ -z "$line" ]; then
         warn "  Could not parse output from ${client_lang} client"
-        write_csv_row "$scenario" "$client_lang" "$server_lang" "$target_rps" \
-            "0" "0" "0" "0" "0.0" "0.0" "0.0"
-        return 0
+        dump_client_error "$client_err"
+        return 1
     fi
 
     # Reconstruct with correct server_lang and server CPU
@@ -273,6 +294,12 @@ run_pair() {
     p95=$(echo "$line" | cut -d',' -f6)
     p99=$(echo "$line" | cut -d',' -f7)
     client_cpu=$(echo "$line" | cut -d',' -f8)
+
+    if ! throughput_is_positive "$throughput"; then
+        warn "  Invalid zero throughput from ${client_lang} client for ${scenario}"
+        dump_client_error "$client_err"
+        return 1
+    fi
 
     # Compute server CPU % and total CPU %
     local server_cpu_pct total_cpu_pct
@@ -346,7 +373,9 @@ main() {
     for rate in "${RATES_PING_PONG[@]}"; do
         for server_lang in "${LANGS[@]}"; do
             for client_lang in "${LANGS[@]}"; do
-                run_pair "uds-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION" || true
+                if ! run_pair "uds-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
+                    RUN_FAILED=1
+                fi
                 sleep 0.5
             done
         done
@@ -357,7 +386,9 @@ main() {
     for rate in "${RATES_PING_PONG[@]}"; do
         for server_lang in "${LANGS[@]}"; do
             for client_lang in "${LANGS[@]}"; do
-                run_pair "shm-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION" || true
+                if ! run_pair "shm-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
+                    RUN_FAILED=1
+                fi
                 sleep 0.5
             done
         done
@@ -368,7 +399,9 @@ main() {
     for rate in "${RATES_SNAPSHOT[@]}"; do
         for server_lang in "${LANGS[@]}"; do
             for client_lang in "${LANGS[@]}"; do
-                run_pair "snapshot-baseline" "$server_lang" "$client_lang" "$rate" "$DURATION" || true
+                if ! run_pair "snapshot-baseline" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
+                    RUN_FAILED=1
+                fi
                 sleep 0.5
             done
         done
@@ -379,7 +412,9 @@ main() {
     for rate in "${RATES_SNAPSHOT[@]}"; do
         for server_lang in "${LANGS[@]}"; do
             for client_lang in "${LANGS[@]}"; do
-                run_pair "snapshot-shm" "$server_lang" "$client_lang" "$rate" "$DURATION" || true
+                if ! run_pair "snapshot-shm" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
+                    RUN_FAILED=1
+                fi
                 sleep 0.5
             done
         done
@@ -390,7 +425,9 @@ main() {
     for rate in "${RATES_PING_PONG[@]}"; do
         for server_lang in "${LANGS[@]}"; do
             for client_lang in "${LANGS[@]}"; do
-                run_pair "uds-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION" || true
+                if ! run_pair "uds-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
+                    RUN_FAILED=1
+                fi
                 sleep 0.5
             done
         done
@@ -401,7 +438,9 @@ main() {
     for rate in "${RATES_PING_PONG[@]}"; do
         for server_lang in "${LANGS[@]}"; do
             for client_lang in "${LANGS[@]}"; do
-                run_pair "shm-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION" || true
+                if ! run_pair "shm-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
+                    RUN_FAILED=1
+                fi
                 sleep 0.5
             done
         done
@@ -414,7 +453,18 @@ main() {
         bin="$(bench_bin "$lang")"
         log "  lookup: ${lang}"
         local line
-        line=$("$bin" lookup-bench "$DURATION" 2>/dev/null | grep "^lookup," | head -1 || true)
+        local lookup_status
+        local lookup_err="${RUN_DIR}/lookup-${lang}.err"
+        set +e
+        line=$("$bin" lookup-bench "$DURATION" 2>"$lookup_err" | grep "^lookup," | head -1)
+        lookup_status=$?
+        set -e
+        if [ "$lookup_status" -ne 0 ]; then
+            warn "  ${lang} lookup benchmark failed"
+            dump_client_error "$lookup_err"
+            RUN_FAILED=1
+            continue
+        fi
         if [ -n "$line" ]; then
             local throughput p50 p95 p99 client_cpu server_cpu_pct total_cpu_pct
             throughput=$(echo "$line" | cut -d',' -f4)
@@ -424,12 +474,18 @@ main() {
             client_cpu=$(echo "$line" | cut -d',' -f8)
             server_cpu_pct=$(echo "$line" | cut -d',' -f9)
             total_cpu_pct=$(echo "$line" | cut -d',' -f10)
+            if ! throughput_is_positive "$throughput"; then
+                warn "  Invalid zero throughput from ${lang} lookup benchmark"
+                dump_client_error "$lookup_err"
+                RUN_FAILED=1
+                continue
+            fi
             write_csv_row "lookup" "$lang" "$lang" "0" \
                 "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
         else
             warn "  No output from ${lang} lookup benchmark"
-            write_csv_row "lookup" "$lang" "$lang" "0" \
-                "0" "0" "0" "0" "0.0" "0.0" "0.0"
+            dump_client_error "$lookup_err"
+            RUN_FAILED=1
         fi
     done
 
@@ -455,7 +511,12 @@ main() {
             client_bin="$(bench_bin "$client_lang")"
             local client_timeout=$((DURATION + 15))
             local client_output
-            client_output=$(timeout "$client_timeout" "$client_bin" "uds-pipeline-client" "$RUN_DIR" "$pipe_svc" "$DURATION" "0" "$PIPELINE_DEPTH" 2>/dev/null) || true
+            local client_status
+            local client_err="${RUN_DIR}/client-uds-pipeline-${server_lang}-${client_lang}.err"
+            set +e
+            client_output=$(timeout "$client_timeout" "$client_bin" "uds-pipeline-client" "$RUN_DIR" "$pipe_svc" "$DURATION" "0" "$PIPELINE_DEPTH" 2>"$client_err")
+            client_status=$?
+            set -e
 
             local server_cpu_sec
             server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pipe_svc")
@@ -466,7 +527,11 @@ main() {
             done
             SERVER_PIDS=("${new_pids[@]:-}")
 
-            if [ -n "$client_output" ]; then
+            if [ "$client_status" -ne 0 ]; then
+                warn "  ${client_lang} pipeline client failed for ${server_lang} server (exit ${client_status})"
+                dump_client_error "$client_err"
+                RUN_FAILED=1
+            elif [ -n "$client_output" ]; then
                 local line
                 line=$(echo "$client_output" | grep "^uds-pipeline" | head -1)
                 if [ -n "$line" ]; then
@@ -476,6 +541,14 @@ main() {
                     p95=$(echo "$line" | cut -d',' -f6)
                     p99=$(echo "$line" | cut -d',' -f7)
                     client_cpu=$(echo "$line" | cut -d',' -f8)
+
+                    if ! throughput_is_positive "$throughput"; then
+                        warn "  Invalid zero throughput from ${client_lang} pipeline client for ${server_lang} server"
+                        dump_client_error "$client_err"
+                        RUN_FAILED=1
+                        sleep 0.5
+                        continue
+                    fi
 
                     local server_cpu_pct total_cpu_pct
                     if command -v bc >/dev/null 2>&1; then
@@ -490,12 +563,14 @@ main() {
                         "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
                     log "    throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us"
                 else
-                    write_csv_row "uds-pipeline-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
-                        "0" "0" "0" "0" "0.0" "0.0" "0.0"
+                    warn "  Could not parse pipeline output from ${client_lang} client for ${server_lang} server"
+                    dump_client_error "$client_err"
+                    RUN_FAILED=1
                 fi
             else
-                write_csv_row "uds-pipeline-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
-                    "0" "0" "0" "0" "0.0" "0.0" "0.0"
+                warn "  No output from ${client_lang} pipeline client for ${server_lang} server"
+                dump_client_error "$client_err"
+                RUN_FAILED=1
             fi
 
             sleep 0.5
@@ -524,7 +599,12 @@ main() {
             client_bin="$(bench_bin "$client_lang")"
             local client_timeout=$((DURATION + 15))
             local client_output
-            client_output=$(timeout "$client_timeout" "$client_bin" "uds-pipeline-batch-client" "$RUN_DIR" "$pipe_batch_svc" "$DURATION" "0" "$PIPELINE_DEPTH" 2>/dev/null) || true
+            local client_status
+            local client_err="${RUN_DIR}/client-uds-pipeline-batch-${server_lang}-${client_lang}.err"
+            set +e
+            client_output=$(timeout "$client_timeout" "$client_bin" "uds-pipeline-batch-client" "$RUN_DIR" "$pipe_batch_svc" "$DURATION" "0" "$PIPELINE_DEPTH" 2>"$client_err")
+            client_status=$?
+            set -e
 
             local server_cpu_sec
             server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pipe_batch_svc")
@@ -535,7 +615,11 @@ main() {
             done
             SERVER_PIDS=("${new_pids[@]:-}")
 
-            if [ -n "$client_output" ]; then
+            if [ "$client_status" -ne 0 ]; then
+                warn "  ${client_lang} pipeline-batch client failed for ${server_lang} server (exit ${client_status})"
+                dump_client_error "$client_err"
+                RUN_FAILED=1
+            elif [ -n "$client_output" ]; then
                 local line
                 line=$(echo "$client_output" | grep "^uds-pipeline-batch" | head -1)
                 if [ -n "$line" ]; then
@@ -545,6 +629,14 @@ main() {
                     p95=$(echo "$line" | cut -d',' -f6)
                     p99=$(echo "$line" | cut -d',' -f7)
                     client_cpu=$(echo "$line" | cut -d',' -f8)
+
+                    if ! throughput_is_positive "$throughput"; then
+                        warn "  Invalid zero throughput from ${client_lang} pipeline-batch client for ${server_lang} server"
+                        dump_client_error "$client_err"
+                        RUN_FAILED=1
+                        sleep 0.5
+                        continue
+                    fi
 
                     local server_cpu_pct total_cpu_pct
                     if command -v bc >/dev/null 2>&1; then
@@ -559,17 +651,24 @@ main() {
                         "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
                     log "    throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us"
                 else
-                    write_csv_row "uds-pipeline-batch-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
-                        "0" "0" "0" "0" "0.0" "0.0" "0.0"
+                    warn "  Could not parse pipeline-batch output from ${client_lang} client for ${server_lang} server"
+                    dump_client_error "$client_err"
+                    RUN_FAILED=1
                 fi
             else
-                write_csv_row "uds-pipeline-batch-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
-                    "0" "0" "0" "0" "0.0" "0.0" "0.0"
+                warn "  No output from ${client_lang} pipeline-batch client for ${server_lang} server"
+                dump_client_error "$client_err"
+                RUN_FAILED=1
             fi
 
             sleep 0.5
         done
     done
+
+    if [ "$RUN_FAILED" -ne 0 ]; then
+        err "One or more POSIX benchmark scenarios failed; CSV is incomplete or invalid"
+        return 1
+    fi
 
     # Summary
     log ""

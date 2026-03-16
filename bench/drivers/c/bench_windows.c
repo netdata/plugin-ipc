@@ -494,8 +494,10 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
         int fatal = 0;
 
         if (client.shm) {
-            /* Win SHM path — stack buffer, no malloc in hot loop */
-            uint8_t msg[NIPC_HEADER_LEN + 8];
+            /* Win SHM path. Reuse resp_buf as a temporary contiguous
+             * header+payload buffer so large batch payloads do not overflow
+             * a fixed-size stack allocation. */
+            uint8_t *msg = resp_buf;
             size_t msg_len = NIPC_HEADER_LEN + req_len;
 
             hdr.magic = NIPC_MAGIC_MSG;

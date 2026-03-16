@@ -79,7 +79,12 @@ Verified facts from the current codebase:
      - `snapshot-baseline`: `c->go 71009`, `rust->go 71400`, `go->go 65838` vs required `>= 100000`
      - `snapshot-shm` C/Rust pairs: `471413` to `624506` vs required `>= 1000000`
      - `snapshot-shm` Go pairs: `106397` to `175814` vs required `>= 800000`
-   - Windows rerun still pending.
+   - Windows rerun completed on 2026-03-16: `benchmarks-windows.csv` and `benchmarks-windows.md` were regenerated on `win11` under a MinGW64 toolchain from the MSYS login shell.
+   - Windows generator exited zero and reported all configured floors met.
+   - Fresh Windows data still reveals broken benchmark rows that are currently not rejected:
+     - `shm-batch-ping-pong`: all 12 rows with `client=c` were emitted with `throughput=0`
+     - `np-pipeline-batch-d16`: all 9 language pairs were emitted with `throughput=0`
+     - implication: row-count validation is now correct, but runtime benchmark failure can still pass through as zero-valued data
 6. [ ] Reassess remaining rewrite gaps after the report path is trustworthy.
 
 ## Fresh Benchmark Evidence (2026-03-16)
@@ -100,6 +105,25 @@ Verified facts from the current codebase:
 - Working conclusion:
   - benchmark reporting/validation bug: **fixed**
   - benchmark floor compliance: **still failing on current code**
+
+- Real Windows benchmark suite completed successfully enough to generate artifacts:
+  - output file: `benchmarks-windows.csv`
+  - generated report: `benchmarks-windows.md`
+  - measurement count: `201`
+- Real Windows run confirms:
+  - Win SHM ping-pong floor currently passes on `win11`
+    - `c -> c`: `2433943`
+    - `rust -> c`: `2237817`
+    - `c -> rust`: `2299190`
+    - `rust -> rust`: `1922360`
+  - local lookup floor currently passes on `win11`
+    - `c`: `113500082`
+    - `rust`: `148968543`
+    - `go`: `111807264`
+  - the fail-closed story is still incomplete for Windows runtime benchmark errors:
+    - `shm-batch-ping-pong` emitted 12 zero-throughput rows for all `c -> *` pairs
+    - `np-pipeline-batch-d16` emitted 9 zero-throughput rows for all pairs
+    - the current generator accepts these rows because it validates row presence and selected floors, not semantic non-zero throughput for scenarios that should never report zero on a healthy run
 
 ## Implied Decisions
 
