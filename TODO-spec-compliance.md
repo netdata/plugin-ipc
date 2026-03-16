@@ -1,84 +1,50 @@
-# TODO: L2 Typed Methods + Spec Compliance Fixes
+# TODO: Spec Compliance — Final Pass
 
-## TL;DR
+## Remaining Work
 
-Add INCREMENT and STRING_REVERSE as proper L2 typed methods to prove the
-architecture pattern: L1 transport is generic, Codec is per-method, L2
-composes them. Then fix the verified spec violations.
+### 1. L2 spec: update typed call contract to match returned-view API
+- level2-typed-api.md describes callback-based delivery
+- Code returns decoded views/values directly
+- getting-started.md already documents the correct pattern
+- Fix: rewrite the typed call section in level2-typed-api.md
 
-## Purpose
+### 2. L3 status: add missing fields
+- Spec requires: connection state (from L2), last successful refresh timestamp
+- Code only has: populated, item_count, systemd, generation, success/failure counts
+- Fix: add connection_state and last_refresh_timestamp to C, Rust, Go
 
-Establish the repeatable pattern for adding new IPC methods (IP→ASN,
-IP→Country, CgroupID→Name, PID→Traffic, etc.) to Netdata's plugin IPC.
+### 3. L2 batch client calls
+- call_increment_batch, call_string_reverse_batch, call_cgroups_snapshot (already single)
+- Encode N items into one L1 batch message, send, receive batch response, decode each
+- L1 batch builder + extraction already work — L2 must compose them
 
----
+### 4. L2 server batch dispatch
+- When BATCH flag + item_count > 1: split into items, call handler per item, reassemble
+- Currently server always sends item_count=1
+- Fix: add batch dispatch in the managed server request loop
 
-## Part 1: Add INCREMENT and STRING_REVERSE methods
+### 5. L2/L3 interop tests over SHM
+- Current interop fixtures hardcode PROFILE_BASELINE
+- Fix: add SHM profile variants to interop tests
 
-### Wire layouts
+### 6. Windows service/cache test coverage
+- Rust/Go service tests are unix-only
+- Fix: add Windows service test variants
 
-**INCREMENT** (method code 1, request and response identical):
-```
-| Offset | Size | Type | Field |
-|--------|------|------|-------|
-| 0      | 8    | u64  | value |
-```
-Total: 8 bytes. Matches existing benchmark format.
+### 7. Coverage tooling
+- Spec claims 100% line + branch, tooling enforces 90% line-only
+- Fix: update tooling or update the claim
 
-**STRING_REVERSE** (method code 3, request and response identical):
-```
-| Offset | Size | Type  | Field                         |
-|--------|------|-------|-------------------------------|
-| 0      | 4    | u32   | str_offset (from payload start) |
-| 4      | 4    | u32   | str_length (excluding NUL)    |
-| 8      | N+1  | bytes | string data + NUL             |
-```
-Fixed header: 8 bytes. Variable data follows at str_offset = 8.
-
-### Codec additions (protocol layer, all 3 languages)
-
-Each method gets encode + decode functions:
-- `increment_encode(value) → bytes`
-- `increment_decode(bytes) → value`
-- `string_reverse_encode(str, len) → bytes`
-- `string_reverse_decode(bytes) → view (str_ptr, str_len)`
-
-### L2 refactoring
-
-Extract generic call infrastructure from the existing cgroups-specific code:
-- `do_raw_call(ctx, method_code, req_payload, resp_buf) → (resp_payload, resp_len)`
-- `call_with_retry(ctx, raw_call) → error` (at-least-once retry logic)
-- Each typed method just does: encode → call_with_retry → decode
-
-### Ping-pong test pattern
-
-Server handles both methods. Client does:
-1. INCREMENT: send 0 → get 1 → send 1 → get 2 → ... → verify N rounds
-2. STRING_REVERSE: send "abcdef" → get "fedcba" → send "fedcba" → get "abcdef" → verify
-
-### Files to modify
-
-| Layer | C | Rust | Go |
-|-------|---|------|----|
-| Codec | netipc_protocol.h, netipc_protocol.c | protocol.rs | frame.go |
-| L2 client | netipc_service.h, netipc_service.c | cgroups.rs | client.go, types.go |
-| Docs | level1-wire-envelope.md | — | — |
-
----
-
-## Part 2: Spec compliance fixes (after Part 1)
-
-1. **L1 batch directory validation** on receive
-2. **SHM fallback → fail session** (fixes transport desync deadlock)
-3. **Stale SHM cleanup** wired into server startup
-4. **Dynamic buffer sizing** from negotiated limits
-
----
+### 8. File size discipline
+- cgroups.rs 2689, protocol.rs 2372, posix.rs 2081 — all > 500 lines
+- Fix: split into per-concern files where appropriate
 
 ## Status
-
-- [x] Analysis complete
-- [ ] Part 1: Codec additions
-- [ ] Part 1: L2 refactoring
-- [ ] Part 1: Ping-pong tests
-- [ ] Part 2: Spec compliance fixes
+- [ ] 1. L2 typed call spec
+- [ ] 2. L3 status fields
+- [ ] 3. L2 batch client calls
+- [ ] 4. L2 server batch dispatch
+- [ ] 5. SHM interop tests
+- [ ] 6. Windows test coverage
+- [ ] 7. Coverage tooling
+- [ ] 8. File sizes
