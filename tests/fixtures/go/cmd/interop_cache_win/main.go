@@ -18,9 +18,19 @@ const (
 	responseBufSize = 65536
 )
 
+// detectProfiles reads NIPC_PROFILE env var: "shm" enables SHM_HYBRID|BASELINE,
+// default BASELINE only.
+func detectProfiles() uint32 {
+	if os.Getenv("NIPC_PROFILE") == "shm" {
+		return windows.WinShmProfileHybrid | protocol.ProfileBaseline
+	}
+	return protocol.ProfileBaseline
+}
+
 func serverConfig() windows.ServerConfig {
+	profiles := detectProfiles()
 	return windows.ServerConfig{
-		SupportedProfiles:       protocol.ProfileBaseline,
+		SupportedProfiles:       profiles,
 		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: responseBufSize,
@@ -30,8 +40,9 @@ func serverConfig() windows.ServerConfig {
 }
 
 func clientConfig() windows.ClientConfig {
+	profiles := detectProfiles()
 	return windows.ClientConfig{
-		SupportedProfiles:       protocol.ProfileBaseline,
+		SupportedProfiles:       profiles,
 		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: responseBufSize,

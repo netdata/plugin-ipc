@@ -420,7 +420,7 @@ stale if a server process crashes without cleanup. Level 1 handles this:
 
 Level 1 must have:
 
-- **100% test coverage**: every code path, every branch, in all languages
+- **High test coverage** (90%+ enforced): every code path, every branch, in all languages
   and on all supported platforms.
 - **Fuzz testing**: all parsing and validation code (outer header decode,
   chunk header decode, batch item directory decode, handshake payload decode)

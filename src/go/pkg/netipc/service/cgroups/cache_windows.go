@@ -33,6 +33,7 @@ type Cache struct {
 	populated           bool
 	refreshSuccessCount uint32
 	refreshFailureCount uint32
+	epoch               time.Time
 	lastRefreshTs       int64
 
 	responseBuf []byte
@@ -46,6 +47,7 @@ func NewCache(runDir, serviceName string, config windows.ClientConfig) *Cache {
 	}
 	return &Cache{
 		client:      NewClient(runDir, serviceName, config),
+		epoch:       time.Now(),
 		responseBuf: make([]byte, bufSize),
 	}
 }
@@ -88,7 +90,7 @@ func (c *Cache) Refresh() bool {
 	c.generation = view.Generation
 	c.populated = true
 	c.refreshSuccessCount++
-	c.lastRefreshTs = time.Now().UnixMilli()
+	c.lastRefreshTs = time.Since(c.epoch).Milliseconds()
 
 	return true
 }

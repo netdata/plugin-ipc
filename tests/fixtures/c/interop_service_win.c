@@ -15,6 +15,7 @@
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_named_pipe.h"
+#include "netipc/netipc_win_shm.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,10 +77,21 @@ static bool test_handler(void *user,
 /*  Server mode                                                        */
 /* ------------------------------------------------------------------ */
 
+/* Profile selection: NIPC_PROFILE env var ("shm" -> SHM_HYBRID|BASELINE,
+ * default -> BASELINE only). */
+static uint32_t detect_profiles(void)
+{
+    const char *env = getenv("NIPC_PROFILE");
+    if (env && strcmp(env, "shm") == 0)
+        return NIPC_WIN_SHM_PROFILE_HYBRID | NIPC_PROFILE_BASELINE;
+    return NIPC_PROFILE_BASELINE;
+}
+
 static int run_server(const char *run_dir, const char *service)
 {
+    uint32_t profiles = detect_profiles();
     nipc_np_server_config_t scfg = {0};
-    scfg.supported_profiles        = NIPC_PROFILE_BASELINE;
+    scfg.supported_profiles        = profiles;
     scfg.max_request_payload_bytes = 4096;
     scfg.max_request_batch_items   = 1;
     scfg.max_response_payload_bytes = RESPONSE_BUF_SIZE;
@@ -109,8 +121,9 @@ static int run_server(const char *run_dir, const char *service)
 
 static int run_client(const char *run_dir, const char *service)
 {
+    uint32_t profiles = detect_profiles();
     nipc_np_client_config_t ccfg = {0};
-    ccfg.supported_profiles        = NIPC_PROFILE_BASELINE;
+    ccfg.supported_profiles        = profiles;
     ccfg.max_request_payload_bytes = 4096;
     ccfg.max_request_batch_items   = 1;
     ccfg.max_response_payload_bytes = RESPONSE_BUF_SIZE;

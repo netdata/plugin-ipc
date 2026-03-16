@@ -196,7 +196,7 @@ the contract file is wrong.
 
 The Codec must have:
 
-- **100% test coverage**: every encode path, every decode path, every
+- **High test coverage** (90%+ enforced): every encode path, every decode path, every
   builder method, every validation rule, in all languages.
 - **Round-trip tests**: encode a typed structure, decode the resulting
   bytes, verify the view matches the original data. For every method

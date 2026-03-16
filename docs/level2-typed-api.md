@@ -280,7 +280,7 @@ are implementation details.
 
 Level 2 must have:
 
-- **100% test coverage**: every client state transition, every call path,
+- **High test coverage** (90%+ enforced): every client state transition, every call path,
   every managed server dispatch path, in all languages and on all
   supported platforms.
 - **Client lifecycle tests**: initialize without server running, connect

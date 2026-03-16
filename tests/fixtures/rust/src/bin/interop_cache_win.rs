@@ -7,7 +7,7 @@
 #[cfg(windows)]
 use netipc::protocol::{
     CgroupsBuilder, CgroupsRequest, PROFILE_BASELINE,
-    METHOD_CGROUPS_SNAPSHOT,
+    METHOD_CGROUPS_SNAPSHOT, PROFILE_SHM_HYBRID,
 };
 #[cfg(windows)]
 use netipc::service::cgroups::{CgroupsCache, CgroupsServer};
@@ -18,6 +18,15 @@ use netipc::transport::windows::{ClientConfig, ServerConfig};
 const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;
 #[cfg(windows)]
 const RESPONSE_BUF_SIZE: usize = 65536;
+
+/// NIPC_PROFILE env var: "shm" enables SHM_HYBRID|BASELINE, default BASELINE only.
+#[cfg(windows)]
+fn detect_profiles() -> u32 {
+    match std::env::var("NIPC_PROFILE").as_deref() {
+        Ok("shm") => PROFILE_SHM_HYBRID | PROFILE_BASELINE,
+        _ => PROFILE_BASELINE,
+    }
+}
 
 #[cfg(windows)]
 fn test_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
@@ -50,8 +59,9 @@ fn test_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(windows)]
 fn run_server(run_dir: &str, service: &str) -> i32 {
+    let profiles = detect_profiles();
     let config = ServerConfig {
-        supported_profiles: PROFILE_BASELINE,
+        supported_profiles: profiles,
         max_request_payload_bytes: 4096,
         max_request_batch_items: 1,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
@@ -84,8 +94,9 @@ fn run_server(run_dir: &str, service: &str) -> i32 {
 
 #[cfg(windows)]
 fn run_client(run_dir: &str, service: &str) -> i32 {
+    let profiles = detect_profiles();
     let config = ClientConfig {
-        supported_profiles: PROFILE_BASELINE,
+        supported_profiles: profiles,
         max_request_payload_bytes: 4096,
         max_request_batch_items: 1,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
