@@ -826,6 +826,15 @@ if(NETIPC_WINDOWS_RUNTIME)
     )
     target_compile_options(bench_windows_c PRIVATE -O2)
 
+    # Rust Windows benchmark binary (release build for accurate performance)
+    if(CARGO_EXECUTABLE)
+        add_custom_target(bench_windows_rs
+            COMMAND ${CARGO_EXECUTABLE} build --release --bin bench_windows
+            WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+            COMMENT "Building Rust Windows benchmark binary (release)"
+        )
+    endif()
+
     # Go Windows benchmark binary
     if(GO_EXECUTABLE)
         add_custom_target(bench_windows_go ALL

@@ -51,3 +51,7 @@ path = "../../../tests/fixtures/rust/src/bin/interop_cache_win.rs"
 [[bin]]
 name = "bench_posix"
 path = "../../../bench/drivers/rust/src/main.rs"
+
+[[bin]]
+name = "bench_windows"
+path = "../../../bench/drivers/rust/src/bench_windows.rs"
