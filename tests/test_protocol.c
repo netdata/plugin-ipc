@@ -1451,6 +1451,312 @@ static void test_cgroups_resp_item_overlap(void) {
 }
 
 /* ================================================================== */
+/*  Coverage: header decode with bad kind=99                          */
+/* ================================================================== */
+
+static void test_header_decode_kind_99(void) {
+    nipc_header_t h = {
+        .magic = NIPC_MAGIC_MSG,
+        .version = NIPC_VERSION,
+        .header_len = NIPC_HEADER_LEN,
+        .kind = 99, /* way out of range */
+    };
+    uint8_t buf[32];
+    nipc_header_encode(&h, buf, sizeof(buf));
+
+    nipc_header_t out;
+    nipc_error_t err = nipc_header_decode(buf, sizeof(buf), &out);
+    CHECK(err == NIPC_ERR_BAD_KIND, "header decode kind=99");
+}
+
+/* ================================================================== */
+/*  Coverage: batch_dir_validate error paths                          */
+/* ================================================================== */
+
+static void test_batch_dir_validate_overflow(void) {
+    uint8_t buf[8] = {0};
+    /* On 64-bit, 0xFFFFFFFF * 8 doesn't overflow size_t but buf_len is
+     * only 8, so we get TRUNCATED. Both are valid rejection paths. */
+    nipc_error_t err = nipc_batch_dir_validate(buf, 8, 0xFFFFFFFFu, 1000);
+    CHECK(err == NIPC_ERR_BAD_ITEM_COUNT || err == NIPC_ERR_TRUNCATED,
+          "batch_dir_validate overflow item_count");
+}
+
+static void test_batch_dir_validate_truncated(void) {
+    uint8_t buf[8] = {0};
+    /* 2 items need 16 bytes of dir, but only 8 provided */
+    nipc_error_t err = nipc_batch_dir_validate(buf, 8, 2, 1000);
+    CHECK(err == NIPC_ERR_TRUNCATED, "batch_dir_validate truncated");
+}
+
+static void test_batch_dir_validate_bad_alignment(void) {
+    /* Craft an entry with unaligned offset */
+    uint8_t buf[8];
+    uint32_t off = 3; /* not 8-byte aligned */
+    uint32_t len = 10;
+    memcpy(buf, &off, 4);
+    memcpy(buf + 4, &len, 4);
+
+    nipc_error_t err = nipc_batch_dir_validate(buf, 8, 1, 100);
+    CHECK(err == NIPC_ERR_BAD_ALIGNMENT, "batch_dir_validate bad alignment");
+}
+
+static void test_batch_dir_validate_oob(void) {
+    /* Entry offset+length exceeds packed area */
+    uint8_t buf[8];
+    uint32_t off = 0;
+    uint32_t len = 200;
+    memcpy(buf, &off, 4);
+    memcpy(buf + 4, &len, 4);
+
+    nipc_error_t err = nipc_batch_dir_validate(buf, 8, 1, 100);
+    CHECK(err == NIPC_ERR_OUT_OF_BOUNDS, "batch_dir_validate oob");
+}
+
+static void test_batch_dir_validate_happy(void) {
+    /* Valid entry */
+    uint8_t buf[8];
+    uint32_t off = 0;
+    uint32_t len = 50;
+    memcpy(buf, &off, 4);
+    memcpy(buf + 4, &len, 4);
+
+    nipc_error_t err = nipc_batch_dir_validate(buf, 8, 1, 100);
+    CHECK(err == NIPC_OK, "batch_dir_validate happy path");
+}
+
+/* ================================================================== */
+/*  Coverage: cgroups resp_item with non-zero flags                   */
+/* ================================================================== */
+
+static void test_cgroups_resp_item_nonzero_flags(void) {
+    /* Build a valid response, then set flags=1 on the item */
+    uint8_t buf[256];
+    nipc_cgroups_builder_t b;
+    nipc_cgroups_builder_init(&b, buf, sizeof(buf), 1, 0, 100);
+    nipc_cgroups_builder_add(&b, 0, 0, 1, "n", 1, "p", 1);
+    size_t resp_len = nipc_cgroups_builder_finish(&b);
+
+    nipc_cgroups_resp_view_t view;
+    nipc_cgroups_resp_decode(buf, resp_len, &view);
+
+    /* Corrupt item flags at offset 32+2 (item starts at 32) */
+    uint16_t bad_flags = 1;
+    memcpy(buf + 32 + 2, &bad_flags, 2);
+
+    nipc_cgroups_item_view_t item;
+    nipc_error_t err = nipc_cgroups_resp_item(&view, 0, &item);
+    CHECK(err == NIPC_ERR_BAD_LAYOUT, "resp_item nonzero flags rejected");
+}
+
+/* ================================================================== */
+/*  Coverage: increment encode/decode with too-small buffer           */
+/* ================================================================== */
+
+static void test_increment_encode_too_small(void) {
+    uint8_t buf[4]; /* needs 8 */
+    size_t n = nipc_increment_encode(42, buf, sizeof(buf));
+    CHECK(n == 0, "increment encode too small");
+}
+
+static void test_increment_decode_too_small(void) {
+    uint8_t buf[4] = {0}; /* needs 8 */
+    uint64_t val;
+    nipc_error_t err = nipc_increment_decode(buf, sizeof(buf), &val);
+    CHECK(err == NIPC_ERR_TRUNCATED, "increment decode too small");
+}
+
+/* ================================================================== */
+/*  Coverage: string_reverse encode/decode error paths                */
+/* ================================================================== */
+
+static void test_string_reverse_encode_too_small(void) {
+    uint8_t buf[4]; /* needs at least 8 + 1 + 5 = 14 for "hello" */
+    size_t n = nipc_string_reverse_encode("hello", 5, buf, sizeof(buf));
+    CHECK(n == 0, "string_reverse encode too small");
+}
+
+static void test_string_reverse_decode_truncated(void) {
+    uint8_t buf[4] = {0}; /* needs at least 8 */
+    nipc_string_reverse_view_t view;
+    nipc_error_t err = nipc_string_reverse_decode(buf, sizeof(buf), &view);
+    CHECK(err == NIPC_ERR_TRUNCATED, "string_reverse decode truncated");
+}
+
+static void test_string_reverse_decode_oob(void) {
+    /* Encode a valid string then corrupt the length to exceed buffer */
+    uint8_t buf[16];
+    size_t n = nipc_string_reverse_encode("hi", 2, buf, sizeof(buf));
+    CHECK(n > 0, "string_reverse encode ok for oob test");
+
+    /* Corrupt str_length at offset 4 to be huge */
+    uint32_t huge = 9999;
+    memcpy(buf + 4, &huge, 4);
+
+    nipc_string_reverse_view_t view;
+    nipc_error_t err = nipc_string_reverse_decode(buf, n, &view);
+    CHECK(err == NIPC_ERR_OUT_OF_BOUNDS, "string_reverse decode oob");
+}
+
+static void test_string_reverse_decode_no_nul(void) {
+    /* Encode a valid string then corrupt the NUL terminator */
+    uint8_t buf[16];
+    size_t n = nipc_string_reverse_encode("hi", 2, buf, sizeof(buf));
+    CHECK(n > 0, "string_reverse encode ok for no_nul test");
+
+    /* NUL is at offset 8 + 2 = 10 */
+    buf[10] = 'X';
+
+    nipc_string_reverse_view_t view;
+    nipc_error_t err = nipc_string_reverse_decode(buf, n, &view);
+    CHECK(err == NIPC_ERR_MISSING_NUL, "string_reverse decode missing NUL");
+}
+
+/* ================================================================== */
+/*  Coverage: dispatch_increment with bad input and failing handler   */
+/* ================================================================== */
+
+static bool always_fail_inc(void *user, uint64_t request, uint64_t *response) {
+    (void)user; (void)request; (void)response;
+    return false;
+}
+
+static void test_dispatch_increment_bad_input(void) {
+    uint8_t req[4] = {0}; /* too small, needs 8 */
+    uint8_t resp[16];
+    size_t resp_len;
+    bool ok = nipc_dispatch_increment(req, sizeof(req),
+                                       resp, sizeof(resp), &resp_len,
+                                       always_fail_inc, NULL);
+    CHECK(!ok, "dispatch_increment bad input (too short)");
+}
+
+static void test_dispatch_increment_handler_fails(void) {
+    uint8_t req[8];
+    nipc_increment_encode(42, req, sizeof(req));
+    uint8_t resp[16];
+    size_t resp_len;
+    bool ok = nipc_dispatch_increment(req, sizeof(req),
+                                       resp, sizeof(resp), &resp_len,
+                                       always_fail_inc, NULL);
+    CHECK(!ok, "dispatch_increment handler fails");
+}
+
+static bool ok_inc(void *user, uint64_t request, uint64_t *response) {
+    (void)user;
+    *response = request + 1;
+    return true;
+}
+
+static void test_dispatch_increment_resp_too_small(void) {
+    uint8_t req[8];
+    nipc_increment_encode(42, req, sizeof(req));
+    uint8_t resp[4]; /* too small for 8-byte response */
+    size_t resp_len;
+    bool ok = nipc_dispatch_increment(req, sizeof(req),
+                                       resp, sizeof(resp), &resp_len,
+                                       ok_inc, NULL);
+    CHECK(!ok, "dispatch_increment resp buffer too small");
+}
+
+/* ================================================================== */
+/*  Coverage: dispatch_string_reverse with bad input and failing handler */
+/* ================================================================== */
+
+static bool always_fail_str(void *user,
+                              const char *request_str, uint32_t request_str_len,
+                              char *response_str, uint32_t response_capacity,
+                              uint32_t *response_str_len) {
+    (void)user; (void)request_str; (void)request_str_len;
+    (void)response_str; (void)response_capacity; (void)response_str_len;
+    return false;
+}
+
+static void test_dispatch_string_reverse_bad_input(void) {
+    uint8_t req[4] = {0}; /* too small */
+    uint8_t resp[64];
+    size_t resp_len;
+    bool ok = nipc_dispatch_string_reverse(req, sizeof(req),
+                                            resp, sizeof(resp), &resp_len,
+                                            always_fail_str, NULL);
+    CHECK(!ok, "dispatch_string_reverse bad input");
+}
+
+static void test_dispatch_string_reverse_handler_fails(void) {
+    uint8_t req[32];
+    nipc_string_reverse_encode("hello", 5, req, sizeof(req));
+    uint8_t resp[64];
+    size_t resp_len;
+    bool ok = nipc_dispatch_string_reverse(req, 14,
+                                            resp, sizeof(resp), &resp_len,
+                                            always_fail_str, NULL);
+    CHECK(!ok, "dispatch_string_reverse handler fails");
+}
+
+/* ================================================================== */
+/*  Coverage: dispatch_cgroups_snapshot full coverage                  */
+/* ================================================================== */
+
+static bool test_cg_handler(void *user,
+                              const nipc_cgroups_req_t *request,
+                              nipc_cgroups_builder_t *builder) {
+    (void)user; (void)request;
+    /* Add one item */
+    return nipc_cgroups_builder_add(builder, 123, 0, 1,
+                                     "test", 4, "/test", 5) == NIPC_OK;
+}
+
+static bool fail_cg_handler(void *user,
+                              const nipc_cgroups_req_t *request,
+                              nipc_cgroups_builder_t *builder) {
+    (void)user; (void)request; (void)builder;
+    return false;
+}
+
+static void test_dispatch_cgroups_snapshot_happy(void) {
+    nipc_cgroups_req_t req = { .layout_version = 1, .flags = 0 };
+    uint8_t req_buf[4];
+    nipc_cgroups_req_encode(&req, req_buf, sizeof(req_buf));
+
+    uint8_t resp[4096];
+    size_t resp_len;
+    bool ok = nipc_dispatch_cgroups_snapshot(req_buf, 4,
+                                              resp, sizeof(resp), &resp_len,
+                                              10, test_cg_handler, NULL);
+    CHECK(ok, "dispatch_cgroups_snapshot happy path");
+    CHECK(resp_len > 0, "dispatch_cgroups_snapshot produced output");
+
+    /* Verify the response decodes correctly */
+    nipc_cgroups_resp_view_t view;
+    nipc_error_t err = nipc_cgroups_resp_decode(resp, resp_len, &view);
+    CHECK(err == NIPC_OK, "dispatch_cgroups_snapshot response decodes");
+    CHECK(view.item_count == 1, "dispatch_cgroups_snapshot 1 item");
+}
+
+static void test_dispatch_cgroups_snapshot_bad_req(void) {
+    uint8_t req[2] = {0}; /* too small */
+    uint8_t resp[4096];
+    size_t resp_len;
+    bool ok = nipc_dispatch_cgroups_snapshot(req, sizeof(req),
+                                              resp, sizeof(resp), &resp_len,
+                                              10, test_cg_handler, NULL);
+    CHECK(!ok, "dispatch_cgroups_snapshot bad request");
+}
+
+static void test_dispatch_cgroups_snapshot_handler_fails(void) {
+    nipc_cgroups_req_t req = { .layout_version = 1, .flags = 0 };
+    uint8_t req_buf[4];
+    nipc_cgroups_req_encode(&req, req_buf, sizeof(req_buf));
+
+    uint8_t resp[4096];
+    size_t resp_len;
+    bool ok = nipc_dispatch_cgroups_snapshot(req_buf, 4,
+                                              resp, sizeof(resp), &resp_len,
+                                              10, fail_cg_handler, NULL);
+    CHECK(!ok, "dispatch_cgroups_snapshot handler fails");
+}
+
+/* ================================================================== */
 /*  Main                                                              */
 /* ================================================================== */
 
@@ -1548,6 +1854,29 @@ int main(void) {
     test_cgroups_resp_item_path_len_oob();
     test_cgroups_resp_item_path_missing_nul();
     test_cgroups_resp_item_overlap();
+
+    /* Coverage gap tests: new batch */
+    test_header_decode_kind_99();
+    test_batch_dir_validate_overflow();
+    test_batch_dir_validate_truncated();
+    test_batch_dir_validate_bad_alignment();
+    test_batch_dir_validate_oob();
+    test_batch_dir_validate_happy();
+    test_cgroups_resp_item_nonzero_flags();
+    test_increment_encode_too_small();
+    test_increment_decode_too_small();
+    test_string_reverse_encode_too_small();
+    test_string_reverse_decode_truncated();
+    test_string_reverse_decode_oob();
+    test_string_reverse_decode_no_nul();
+    test_dispatch_increment_bad_input();
+    test_dispatch_increment_handler_fails();
+    test_dispatch_increment_resp_too_small();
+    test_dispatch_string_reverse_bad_input();
+    test_dispatch_string_reverse_handler_fails();
+    test_dispatch_cgroups_snapshot_happy();
+    test_dispatch_cgroups_snapshot_bad_req();
+    test_dispatch_cgroups_snapshot_handler_fails();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

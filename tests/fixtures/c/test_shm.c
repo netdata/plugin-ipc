@@ -1120,6 +1120,344 @@ static void test_shm_truncated_file(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Coverage: nipc_shm_destroy(NULL), nipc_shm_close(NULL),             */
+/*  nipc_shm_receive(NULL, ...)                                         */
+/* ------------------------------------------------------------------ */
+
+static void test_null_params(void)
+{
+    printf("Test: NULL parameter handling\n");
+
+    nipc_shm_destroy(NULL);
+    check("destroy(NULL) does not crash", 1);
+
+    nipc_shm_close(NULL);
+    check("close(NULL) does not crash", 1);
+
+    uint8_t buf[64];
+    size_t msg_len;
+    nipc_shm_error_t err = nipc_shm_receive(NULL, buf, sizeof(buf),
+                                              &msg_len, 1000);
+    check("receive(NULL) returns error", err == NIPC_SHM_ERR_BAD_PARAM);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: pid_alive with pid=0                                      */
+/* ------------------------------------------------------------------ */
+
+static void test_pid_zero(void)
+{
+    printf("Test: owner_alive with dead PID via pid=0 in header\n");
+    const char *svc = "shm_pid0";
+    cleanup_shm(svc);
+
+    nipc_shm_ctx_t server;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
+    check("server create", err == NIPC_SHM_OK);
+
+    if (err == NIPC_SHM_OK) {
+        nipc_shm_ctx_t client;
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
+        check("client attach", err == NIPC_SHM_OK);
+
+        if (err == NIPC_SHM_OK) {
+            /* Corrupt owner_pid to 0 */
+            nipc_shm_region_header_t *hdr =
+                (nipc_shm_region_header_t *)client.base;
+            int32_t saved_pid = hdr->owner_pid;
+            hdr->owner_pid = 0;
+
+            check("owner_alive with pid=0 returns false",
+                  !nipc_shm_owner_alive(&client));
+
+            /* Restore */
+            hdr->owner_pid = saved_pid;
+            nipc_shm_close(&client);
+        }
+        nipc_shm_destroy(&server);
+    }
+    cleanup_shm(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: owner_alive with dead PID, generation mismatch            */
+/* ------------------------------------------------------------------ */
+
+static void test_owner_dead_pid(void)
+{
+    printf("Test: owner_alive with dead PID\n");
+    const char *svc = "shm_deadpid";
+    cleanup_shm(svc);
+
+    nipc_shm_ctx_t server;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
+    check("server create", err == NIPC_SHM_OK);
+
+    if (err == NIPC_SHM_OK) {
+        nipc_shm_ctx_t client;
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
+        check("client attach", err == NIPC_SHM_OK);
+
+        if (err == NIPC_SHM_OK) {
+            /* Set owner_pid to a definitely-dead PID */
+            nipc_shm_region_header_t *hdr =
+                (nipc_shm_region_header_t *)client.base;
+            hdr->owner_pid = 99999;
+
+            check("owner_alive with dead pid returns false",
+                  !nipc_shm_owner_alive(&client));
+
+            /* Restore for cleanup */
+            hdr->owner_pid = (int32_t)getpid();
+            nipc_shm_close(&client);
+        }
+        nipc_shm_destroy(&server);
+    }
+    cleanup_shm(svc);
+}
+
+static void test_owner_generation_mismatch(void)
+{
+    printf("Test: owner_alive with generation mismatch\n");
+    const char *svc = "shm_gen_mm";
+    cleanup_shm(svc);
+
+    nipc_shm_ctx_t server;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
+    check("server create", err == NIPC_SHM_OK);
+
+    if (err == NIPC_SHM_OK) {
+        nipc_shm_ctx_t client;
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
+        check("client attach", err == NIPC_SHM_OK);
+
+        if (err == NIPC_SHM_OK) {
+            /* Corrupt generation in header to mismatch client's cached value */
+            nipc_shm_region_header_t *hdr =
+                (nipc_shm_region_header_t *)client.base;
+            uint32_t saved_gen = hdr->owner_generation;
+            hdr->owner_generation = saved_gen + 1; /* mismatch */
+
+            check("owner_alive with gen mismatch returns false",
+                  !nipc_shm_owner_alive(&client));
+
+            /* Restore */
+            hdr->owner_generation = saved_gen;
+            nipc_shm_close(&client);
+        }
+        nipc_shm_destroy(&server);
+    }
+    cleanup_shm(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: cleanup_stale with NULL params, invalid service, no dir   */
+/* ------------------------------------------------------------------ */
+
+static void test_cleanup_stale_params(void)
+{
+    printf("Test: cleanup_stale parameter validation\n");
+
+    /* NULL params - should not crash */
+    nipc_shm_cleanup_stale(NULL, "svc");
+    check("cleanup_stale(NULL, svc) ok", 1);
+
+    nipc_shm_cleanup_stale(TEST_RUN_DIR, NULL);
+    check("cleanup_stale(dir, NULL) ok", 1);
+
+    nipc_shm_cleanup_stale(TEST_RUN_DIR, "bad/name");
+    check("cleanup_stale invalid service ok", 1);
+
+    nipc_shm_cleanup_stale("/tmp/nonexistent_shm_dir_99999", "svc");
+    check("cleanup_stale nonexistent dir ok", 1);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: cleanup_stale with actual stale files                     */
+/* ------------------------------------------------------------------ */
+
+static void test_cleanup_stale_with_files(void)
+{
+    printf("Test: cleanup_stale with actual stale files\n");
+    const char *svc = "shm_stale_cleanup";
+    cleanup_shm(svc);
+
+    /* Create a region, corrupt the PID to simulate dead owner, close but
+     * leave the file. Then run cleanup_stale. */
+    nipc_shm_ctx_t server;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
+    check("create for cleanup test", err == NIPC_SHM_OK);
+
+    if (err == NIPC_SHM_OK) {
+        /* Set owner to dead PID */
+        nipc_shm_region_header_t *hdr =
+            (nipc_shm_region_header_t *)server.base;
+        hdr->owner_pid = 99999;
+
+        /* Close without unlink (just close fd + munmap) */
+        nipc_shm_close(&server);
+
+        /* Now run cleanup_stale - should find and unlink the stale file */
+        nipc_shm_cleanup_stale(TEST_RUN_DIR, svc);
+
+        /* Try to attach - should fail because file was cleaned up */
+        nipc_shm_ctx_t client;
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
+        check("stale file cleaned up", err != NIPC_SHM_OK);
+    }
+    cleanup_shm(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: SHM msg_too_large on receive (caller buf too small)       */
+/* ------------------------------------------------------------------ */
+
+static void *small_recv_server_thread(void *arg)
+{
+    shm_server_ctx_t *ctx = (shm_server_ctx_t *)arg;
+    ctx->echo_ok = 0;
+
+    nipc_shm_ctx_t shm;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, ctx->service, 1, 4096, 4096, &shm);
+    if (err != NIPC_SHM_OK) {
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+
+    /* Receive into a small buffer to trigger MSG_TOO_LARGE */
+    uint8_t msg[32]; /* very small */
+    size_t msg_len;
+    err = nipc_shm_receive(&shm, msg, sizeof(msg), &msg_len, 5000);
+    /* The message is larger than our buffer */
+    ctx->echo_ok = (err == NIPC_SHM_ERR_MSG_TOO_LARGE) ? 1 : 0;
+
+    nipc_shm_destroy(&shm);
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void test_shm_receive_msg_too_large(void)
+{
+    printf("Test: SHM receive msg_too_large (caller buffer too small)\n");
+    const char *svc = "shm_recv_large";
+    cleanup_shm(svc);
+
+    shm_server_ctx_t sctx = { .service = svc };
+    __atomic_store_n(&sctx.ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sctx.done, 0, __ATOMIC_RELAXED);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, small_recv_server_thread, &sctx);
+
+    int retries = 0;
+    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) &&
+           !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 2000) {
+        usleep(500);
+        retries++;
+    }
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_shm_ctx_t client;
+    nipc_shm_error_t err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
+    check("client attach", err == NIPC_SHM_OK);
+
+    if (err == NIPC_SHM_OK) {
+        /* Send a message larger than server's recv buffer (32 bytes) */
+        uint8_t big_msg[256];
+        memset(big_msg, 0xAA, sizeof(big_msg));
+        /* Still need a valid header for semantics */
+        nipc_header_t hdr = {
+            .magic = NIPC_MAGIC_MSG, .version = NIPC_VERSION,
+            .header_len = NIPC_HEADER_LEN,
+            .kind = NIPC_KIND_REQUEST, .code = 1,
+            .item_count = 1, .message_id = 1,
+            .payload_len = sizeof(big_msg) - NIPC_HEADER_LEN,
+        };
+        nipc_header_encode(&hdr, big_msg, NIPC_HEADER_LEN);
+
+        err = nipc_shm_send(&client, big_msg, sizeof(big_msg));
+        check("client send large msg", err == NIPC_SHM_OK);
+
+        nipc_shm_close(&client);
+    }
+
+    pthread_join(tid, NULL);
+    check("server got MSG_TOO_LARGE", sctx.echo_ok);
+    cleanup_shm(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: stale file scenarios: undersized file, bad magic          */
+/* ------------------------------------------------------------------ */
+
+static void test_stale_undersized_file(void)
+{
+    printf("Test: Stale SHM undersized file\n");
+    const char *svc = "shm_stale_small";
+    cleanup_shm(svc);
+
+    /* Create an undersized SHM file (< 64 bytes) */
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s-%016" PRIx64 ".ipcshm",
+             TEST_RUN_DIR, svc, (uint64_t)1);
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) {
+        uint8_t small[10] = {0};
+        write(fd, small, sizeof(small));
+        close(fd);
+
+        /* Server create should succeed by removing the stale undersized file */
+        nipc_shm_ctx_t server;
+        nipc_shm_error_t err = nipc_shm_server_create(
+            TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
+        check("create after undersized stale", err == NIPC_SHM_OK);
+        if (err == NIPC_SHM_OK)
+            nipc_shm_destroy(&server);
+    } else {
+        check("could not create undersized test file", 0);
+    }
+    cleanup_shm(svc);
+}
+
+static void test_stale_bad_magic_file(void)
+{
+    printf("Test: Stale SHM bad magic file\n");
+    const char *svc = "shm_stale_bm";
+    cleanup_shm(svc);
+
+    /* Create an SHM file with bad magic but correct size */
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s-%016" PRIx64 ".ipcshm",
+             TEST_RUN_DIR, svc, (uint64_t)1);
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) {
+        uint8_t data[256];
+        memset(data, 0, sizeof(data));
+        uint32_t bad_magic = 0xDEADBEEF;
+        memcpy(data, &bad_magic, 4);
+        write(fd, data, sizeof(data));
+        close(fd);
+
+        /* Server create should succeed by removing the stale bad-magic file */
+        nipc_shm_ctx_t server;
+        nipc_shm_error_t err = nipc_shm_server_create(
+            TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
+        check("create after bad magic stale", err == NIPC_SHM_OK);
+        if (err == NIPC_SHM_OK)
+            nipc_shm_destroy(&server);
+    } else {
+        check("could not create bad magic test file", 0);
+    }
+    cleanup_shm(svc);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -1147,6 +1485,17 @@ int main(void)
     test_shm_bad_magic_file();         printf("\n");
     test_shm_bad_version_file();       printf("\n");
     test_shm_truncated_file();         printf("\n");
+
+    /* Coverage gap tests */
+    test_null_params();                printf("\n");
+    test_pid_zero();                   printf("\n");
+    test_owner_dead_pid();             printf("\n");
+    test_owner_generation_mismatch();  printf("\n");
+    test_cleanup_stale_params();       printf("\n");
+    test_cleanup_stale_with_files();   printf("\n");
+    test_shm_receive_msg_too_large();  printf("\n");
+    test_stale_undersized_file();      printf("\n");
+    test_stale_bad_magic_file();       printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

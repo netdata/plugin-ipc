@@ -1361,6 +1361,486 @@ static void test_pipeline_chunked(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Coverage: handshake with wrong message kind from mock client        */
+/* ------------------------------------------------------------------ */
+
+static void *wrong_kind_server(void *arg)
+{
+    server_ctx_t *ctx = (server_ctx_t *)arg;
+    nipc_uds_server_config_t scfg = ctx->config;
+
+    nipc_uds_listener_t listener;
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
+                                             &scfg, &listener);
+    if (err != NIPC_UDS_OK) {
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+
+    nipc_uds_session_t session;
+    err = nipc_uds_accept(&listener, 1, &session);
+    /* We expect this to fail because the client sends wrong kind */
+    if (err == NIPC_UDS_OK)
+        nipc_uds_close_session(&session);
+
+    nipc_uds_close_listener(&listener);
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void test_handshake_wrong_kind(void)
+{
+    printf("Test: Handshake with wrong message kind\n");
+    const char *svc = "test_wrong_kind";
+    cleanup_socket(svc);
+
+    server_ctx_t sctx = {
+        .service = svc,
+        .config  = default_server_config(),
+    };
+    __atomic_store_n(&sctx.ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sctx.done, 0, __ATOMIC_RELAXED);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, wrong_kind_server, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    /* Connect raw socket and send a RESPONSE instead of HELLO */
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, svc);
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+
+    int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    check("raw connect", rc == 0);
+
+    if (rc == 0) {
+        /* Send a RESPONSE header where server expects HELLO */
+        nipc_header_t bad_hdr = {
+            .magic = NIPC_MAGIC_MSG, .version = NIPC_VERSION,
+            .header_len = NIPC_HEADER_LEN,
+            .kind = NIPC_KIND_RESPONSE, /* wrong kind */
+            .code = 99,
+        };
+        uint8_t buf[32];
+        nipc_header_encode(&bad_hdr, buf, sizeof(buf));
+        send(fd, buf, 32, MSG_NOSIGNAL);
+        /* Server should reject this handshake */
+    }
+    close(fd);
+
+    pthread_join(tid, NULL);
+    check("server finished", __atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) == 1);
+    cleanup_socket(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: inflight_add duplicate, inflight_remove not-found         */
+/* ------------------------------------------------------------------ */
+
+static void test_inflight_duplicate(void)
+{
+    printf("Test: inflight duplicate message_id\n");
+    const char *svc = "test_infldup";
+    cleanup_socket(svc);
+
+    /* Start a server to accept one client */
+    server_ctx_t sctx = {
+        .service = svc,
+        .config  = default_server_config(),
+        .accept_count = 1,
+        .echo_count = 2,
+    };
+    __atomic_store_n(&sctx.ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sctx.done, 0, __ATOMIC_RELAXED);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, echo_server_thread, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    /* Connect client */
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        /* Send a request with message_id=100 */
+        nipc_header_t hdr = {0};
+        hdr.kind = NIPC_KIND_REQUEST;
+        hdr.code = 1;
+        hdr.message_id = 100;
+        hdr.item_count = 1;
+        uint8_t payload[] = {0xAA};
+        err = nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+        check("first send ok", err == NIPC_UDS_OK);
+
+        /* Send another request with same message_id=100 (duplicate) */
+        err = nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+        check("duplicate message_id rejected",
+              err == NIPC_UDS_ERR_DUPLICATE_MSG_ID);
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: receive with payload exceeding negotiated limit           */
+/* ------------------------------------------------------------------ */
+
+static void *oversized_server(void *arg)
+{
+    server_ctx_t *ctx = (server_ctx_t *)arg;
+
+    /* Server with small max response but will send large payload */
+    nipc_uds_server_config_t scfg = ctx->config;
+    scfg.max_response_payload_bytes = 65536;
+    scfg.max_request_payload_bytes = 65536;
+
+    nipc_uds_listener_t listener;
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
+                                             &scfg, &listener);
+    if (err != NIPC_UDS_OK) {
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+
+    nipc_uds_session_t session;
+    err = nipc_uds_accept(&listener, 1, &session);
+    if (err == NIPC_UDS_OK) {
+        /* Read one request, then send response with payload_len > client's limit */
+        uint8_t buf[4096];
+        nipc_header_t hdr;
+        const void *payload;
+        size_t payload_len;
+        nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                    &hdr, &payload, &payload_len);
+        if (rerr == NIPC_UDS_OK) {
+            /* Build oversized response: use server's direct send */
+            nipc_header_t resp = {0};
+            resp.kind = NIPC_KIND_RESPONSE;
+            resp.code = hdr.code;
+            resp.message_id = hdr.message_id;
+            resp.item_count = 1;
+            resp.transport_status = NIPC_STATUS_OK;
+            /* Send a payload larger than client's max_response_payload_bytes */
+            uint8_t big[2048];
+            memset(big, 0xBB, sizeof(big));
+            nipc_uds_send(&session, &resp, big, sizeof(big));
+        }
+        nipc_uds_close_session(&session);
+    }
+    nipc_uds_close_listener(&listener);
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void test_receive_exceeds_limit(void)
+{
+    printf("Test: Receive with payload exceeding negotiated limit\n");
+    const char *svc = "test_exceed_limit";
+    cleanup_socket(svc);
+
+    server_ctx_t sctx = {
+        .service = svc,
+        .config  = default_server_config(),
+    };
+    sctx.config.max_response_payload_bytes = 65536;
+    sctx.config.max_request_payload_bytes = 65536;
+    __atomic_store_n(&sctx.ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sctx.done, 0, __ATOMIC_RELAXED);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, oversized_server, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    /* Client with small max_response */
+    nipc_uds_client_config_t ccfg = default_client_config();
+    ccfg.max_response_payload_bytes = 128; /* small limit */
+    ccfg.max_request_payload_bytes = 65536;
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        /* Send a request */
+        nipc_header_t hdr = {0};
+        hdr.kind = NIPC_KIND_REQUEST;
+        hdr.code = 1;
+        hdr.message_id = 1;
+        hdr.item_count = 1;
+        uint8_t payload[] = {0xAA};
+        nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+
+        /* Receive - should fail because server sends > negotiated limit */
+        uint8_t buf[4096];
+        nipc_header_t resp_hdr;
+        const void *rpay;
+        size_t rpay_len;
+        nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                    &resp_hdr, &rpay, &rpay_len);
+        check("oversized response rejected",
+              rerr == NIPC_UDS_ERR_LIMIT_EXCEEDED);
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: receive with unknown response message_id                  */
+/* ------------------------------------------------------------------ */
+
+static void *wrong_msgid_server(void *arg)
+{
+    server_ctx_t *ctx = (server_ctx_t *)arg;
+    nipc_uds_server_config_t scfg = ctx->config;
+
+    nipc_uds_listener_t listener;
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
+                                             &scfg, &listener);
+    if (err != NIPC_UDS_OK) {
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+
+    nipc_uds_session_t session;
+    err = nipc_uds_accept(&listener, 1, &session);
+    if (err == NIPC_UDS_OK) {
+        uint8_t buf[4096];
+        nipc_header_t hdr;
+        const void *payload;
+        size_t payload_len;
+        nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                    &hdr, &payload, &payload_len);
+        if (rerr == NIPC_UDS_OK) {
+            /* Send response with WRONG message_id */
+            nipc_header_t resp = {0};
+            resp.kind = NIPC_KIND_RESPONSE;
+            resp.code = hdr.code;
+            resp.message_id = hdr.message_id + 999; /* wrong! */
+            resp.item_count = 1;
+            resp.transport_status = NIPC_STATUS_OK;
+            uint8_t rpay[] = {0xBB};
+            nipc_uds_send(&session, &resp, rpay, sizeof(rpay));
+        }
+        nipc_uds_close_session(&session);
+    }
+    nipc_uds_close_listener(&listener);
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void test_receive_unknown_message_id(void)
+{
+    printf("Test: Receive with unknown response message_id\n");
+    const char *svc = "test_unknown_mid";
+    cleanup_socket(svc);
+
+    server_ctx_t sctx = {
+        .service = svc,
+        .config  = default_server_config(),
+    };
+    __atomic_store_n(&sctx.ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sctx.done, 0, __ATOMIC_RELAXED);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, wrong_msgid_server, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        nipc_header_t hdr = {0};
+        hdr.kind = NIPC_KIND_REQUEST;
+        hdr.code = 1;
+        hdr.message_id = 42;
+        hdr.item_count = 1;
+        uint8_t payload[] = {0xAA};
+        nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+
+        uint8_t buf[4096];
+        nipc_header_t resp_hdr;
+        const void *rpay;
+        size_t rpay_len;
+        nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                    &resp_hdr, &rpay, &rpay_len);
+        check("unknown message_id rejected",
+              rerr == NIPC_UDS_ERR_UNKNOWN_MSG_ID);
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: stale detection of live server (ADDR_IN_USE)              */
+/* ------------------------------------------------------------------ */
+
+static void test_stale_live_server(void)
+{
+    printf("Test: Stale detection of live server (ADDR_IN_USE)\n");
+    const char *svc = "test_stale_live";
+    cleanup_socket(svc);
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_uds_listener_t listener1;
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &listener1);
+    check("first listen ok", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        /* Try to listen again on same path - should detect live server */
+        nipc_uds_listener_t listener2;
+        err = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &listener2);
+        check("second listen ADDR_IN_USE", err == NIPC_UDS_ERR_ADDR_IN_USE);
+
+        nipc_uds_close_listener(&listener1);
+    }
+    cleanup_socket(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: listen on invalid path (bind failure)                     */
+/* ------------------------------------------------------------------ */
+
+static void test_listen_bind_failure(void)
+{
+    printf("Test: Listen on invalid path (bind failure)\n");
+
+    /* Use a non-existent parent directory */
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_uds_listener_t listener;
+    nipc_uds_error_t err = nipc_uds_listen("/tmp/nonexistent_dir_99999",
+                                             "svc", &scfg, &listener);
+    check("bind failure", err == NIPC_UDS_ERR_SOCKET);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: batch validation with corrupt directory (via echo server) */
+/* ------------------------------------------------------------------ */
+
+static void test_batch_corrupt_dir(void)
+{
+    printf("Test: Batch validation with corrupt directory\n");
+    const char *svc = "test_batch_corrupt";
+    cleanup_socket(svc);
+
+    /* Use echo server that echoes any message back */
+    server_ctx_t sctx = {
+        .service = svc,
+        .config  = default_server_config(),
+        .accept_count = 1,
+        .echo_count = 1,
+    };
+    __atomic_store_n(&sctx.ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sctx.done, 0, __ATOMIC_RELAXED);
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, echo_server_thread, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        /* Send a batch REQUEST with corrupt directory. The echo server
+         * will send it back as a RESPONSE. The client's receive path
+         * should reject the corrupt batch directory. */
+        nipc_header_t hdr = {0};
+        hdr.kind = NIPC_KIND_REQUEST;
+        hdr.code = 1;
+        hdr.message_id = 1;
+        hdr.flags = NIPC_FLAG_BATCH;
+        hdr.item_count = 2;
+
+        /* Build corrupt batch payload: 2 dir entries with unaligned offset */
+        uint8_t payload[32];
+        memset(payload, 0, sizeof(payload));
+        uint32_t off = 3, len = 4; /* unaligned offset */
+        memcpy(payload, &off, 4);
+        memcpy(payload + 4, &len, 4);
+        off = 0; len = 4;
+        memcpy(payload + 8, &off, 4);
+        memcpy(payload + 12, &len, 4);
+
+        nipc_uds_error_t serr = nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+        check("send batch request ok", serr == NIPC_UDS_OK);
+
+        if (serr == NIPC_UDS_OK) {
+            /* The echo server sends it back as RESPONSE with same flags.
+             * The client receive should validate the batch and reject. */
+            uint8_t buf[4096];
+            nipc_header_t resp_hdr;
+            const void *rpay;
+            size_t rpay_len;
+            nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                        &resp_hdr, &rpay, &rpay_len);
+            check("corrupt batch dir rejected",
+                  rerr == NIPC_UDS_ERR_PROTOCOL || rerr == NIPC_UDS_ERR_RECV);
+        }
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: close_session(NULL)                                       */
+/* ------------------------------------------------------------------ */
+
+static void test_close_session_null(void)
+{
+    printf("Test: close_session(NULL)\n");
+    nipc_uds_close_session(NULL);
+    check("close_session(NULL) does not crash", 1);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -1395,6 +1875,16 @@ int main(void)
     test_pipeline_100();           printf("\n");
     test_pipeline_mixed_sizes();   printf("\n");
     test_pipeline_chunked();       printf("\n");
+
+    /* Coverage gap tests */
+    test_handshake_wrong_kind();   printf("\n");
+    test_inflight_duplicate();     printf("\n");
+    test_receive_exceeds_limit();  printf("\n");
+    test_receive_unknown_message_id(); printf("\n");
+    test_stale_live_server();      printf("\n");
+    test_listen_bind_failure();    printf("\n");
+    test_batch_corrupt_dir();      printf("\n");
+    test_close_session_null();     printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
