@@ -591,6 +591,13 @@ Small, independent, low-risk items.
 5. C inflight caps (128/64) replaced with unbounded dynamic arrays
 6. C batch response missing message_id validation
 7. C worker_count=0 rejected instead of clamped
+8. C Windows server missing batch dispatch entirely
+9. C/Rust Windows SHM spurious wake bug (same as POSIX H6) — partial fix, 27k→72k but still 45x slower than Go 3.3M
+
+### Known performance gaps (not bugs, need investigation)
+- Windows SHM C/Rust: 65-72k vs Go 3.3M — likely InterlockedCompareExchange64 spin overhead vs Go atomic.LoadInt64, or Win32 event signaling overhead. Needs profiling.
+- Windows C/Rust cache lookup: 3.7M vs Go 114M — likely MinGW compiler optimization gap.
+- Go snapshot baseline: 50k vs C 121k — Go bench driver per-request allocation.
 
 ### Dependencies
 - A, B, D, F, G: independent — can run in parallel
