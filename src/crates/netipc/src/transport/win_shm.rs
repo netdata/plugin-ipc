@@ -74,6 +74,7 @@ mod ffi {
         pub fn GetLastError() -> DWORD;
 
         pub fn GetTickCount() -> DWORD;
+        pub fn GetTickCount64() -> u64;
 
         // Note: InterlockedXxx are MSVC compiler intrinsics, not linkable
         // symbols. We use Rust's std::sync::atomic instead (see helpers below).
@@ -598,42 +599,56 @@ impl WinShmContext {
             cpu_relax();
         }
 
-        // Phase 2: kernel wait or busy-wait
+        // Phase 2: kernel wait or busy-wait (deadline-based retry for
+        // spurious wakes — same pattern as POSIX SHM Phase H6 fix).
         if !observed {
             if self.profile == PROFILE_HYBRID {
-                interlocked_exchange_i32(self.base, self_waiting_off, 1);
-                std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+                let deadline_ms = if timeout_ms == 0 { ffi::INFINITE } else { timeout_ms };
+                let start_tick = unsafe { ffi::GetTickCount64() };
 
-                let cur = interlocked_read_i64(self.base, seq_off);
-                if cur < expected_seq {
-                    let wait_ms = if timeout_ms == 0 {
+                loop {
+                    interlocked_exchange_i32(self.base, self_waiting_off, 1);
+                    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+
+                    let cur = interlocked_read_i64(self.base, seq_off);
+                    if cur >= expected_seq {
+                        interlocked_exchange_i32(self.base, self_waiting_off, 0);
+                        break; // data available
+                    }
+
+                    // Compute remaining wait time
+                    let wait_ms = if deadline_ms == ffi::INFINITE {
                         ffi::INFINITE
                     } else {
-                        timeout_ms
-                    };
-                    let ret = unsafe { ffi::WaitForSingleObject(wait_event, wait_ms) };
-
-                    interlocked_exchange_i32(self.base, self_waiting_off, 0);
-
-                    // Check sequence FIRST — data may be available even
-                    // if the peer has also set its close flag.
-                    let cur = interlocked_read_i64(self.base, seq_off);
-                    if cur < expected_seq {
-                        // No data available — now check peer close.
-                        if interlocked_read_i32(self.base, peer_closed_off) != 0 {
-                            self.advance_seq(expected_seq);
-                            return Err(WinShmError::Disconnected);
-                        }
-
-                        if ret == ffi::WAIT_TIMEOUT {
+                        let elapsed = (unsafe { ffi::GetTickCount64() } - start_tick) as u32;
+                        if elapsed >= deadline_ms {
+                            interlocked_exchange_i32(self.base, self_waiting_off, 0);
                             return Err(WinShmError::Timeout);
                         }
+                        deadline_ms - elapsed
+                    };
 
-                        // Spurious wake — still no data.
+                    let ret = unsafe { ffi::WaitForSingleObject(wait_event, wait_ms) };
+                    interlocked_exchange_i32(self.base, self_waiting_off, 0);
+
+                    // Check sequence — data may have arrived
+                    let cur = interlocked_read_i64(self.base, seq_off);
+                    if cur >= expected_seq {
+                        break; // data available
+                    }
+
+                    // No data — check peer close
+                    if interlocked_read_i32(self.base, peer_closed_off) != 0 {
+                        self.advance_seq(expected_seq);
+                        return Err(WinShmError::Disconnected);
+                    }
+
+                    // Actual timeout (not spurious)
+                    if ret == ffi::WAIT_TIMEOUT {
                         return Err(WinShmError::Timeout);
                     }
-                } else {
-                    interlocked_exchange_i32(self.base, self_waiting_off, 0);
+
+                    // Spurious wake — retry with remaining deadline
                 }
 
                 // Copy after waking

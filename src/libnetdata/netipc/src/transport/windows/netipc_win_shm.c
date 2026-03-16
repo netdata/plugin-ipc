@@ -633,42 +633,59 @@ nipc_win_shm_error_t nipc_win_shm_receive(
         cpu_relax();
     }
 
-    /* Phase 2: kernel wait or busy-wait */
+    /* Phase 2: kernel wait or busy-wait (deadline-based retry for
+     * spurious wakes — same pattern as POSIX SHM Phase H6 fix). */
     if (!observed) {
         if (ctx->profile == NIPC_WIN_SHM_PROFILE_HYBRID) {
-            /* SHM_HYBRID: set waiting flag, recheck, then WaitForSingleObject */
-            InterlockedExchange(self_waiting_ptr, 1);
-            MemoryBarrier();
+            DWORD deadline_ms = (timeout_ms == 0) ? INFINITE : timeout_ms;
+            DWORD start_tick = GetTickCount64() & 0xFFFFFFFF;
 
-            /* Recheck after setting flag to avoid race */
-            LONG64 cur = InterlockedCompareExchange64(seq_ptr, 0, 0);
-            if (cur < expected_seq) {
-                DWORD wait_ms = (timeout_ms == 0) ? INFINITE : timeout_ms;
-                DWORD ret = WaitForSingleObject(wait_event, wait_ms);
+            for (;;) {
+                InterlockedExchange(self_waiting_ptr, 1);
+                MemoryBarrier();
 
-                InterlockedExchange(self_waiting_ptr, 0);
-
-                /* Check sequence FIRST — data may be available even
-                 * if the peer has also set its close flag. */
-                cur = InterlockedCompareExchange64(seq_ptr, 0, 0);
-                if (cur < expected_seq) {
-                    /* No data — now check peer close. */
-                    if (InterlockedCompareExchange(peer_closed_ptr, 0, 0) != 0) {
-                        if (ctx->role == NIPC_WIN_SHM_ROLE_SERVER)
-                            ctx->local_req_seq = expected_seq;
-                        else
-                            ctx->local_resp_seq = expected_seq;
-                        return NIPC_WIN_SHM_ERR_DISCONNECTED;
-                    }
-
-                    if (ret == WAIT_TIMEOUT)
-                        return NIPC_WIN_SHM_ERR_TIMEOUT;
-
-                    /* Spurious wake — still no data. */
-                    return NIPC_WIN_SHM_ERR_TIMEOUT;
+                /* Recheck after setting flag to avoid race */
+                LONG64 cur = InterlockedCompareExchange64(seq_ptr, 0, 0);
+                if (cur >= expected_seq) {
+                    InterlockedExchange(self_waiting_ptr, 0);
+                    break; /* data available */
                 }
-            } else {
+
+                /* Compute remaining wait time */
+                DWORD wait_ms;
+                if (deadline_ms == INFINITE) {
+                    wait_ms = INFINITE;
+                } else {
+                    DWORD elapsed = (GetTickCount64() & 0xFFFFFFFF) - start_tick;
+                    if (elapsed >= deadline_ms) {
+                        InterlockedExchange(self_waiting_ptr, 0);
+                        return NIPC_WIN_SHM_ERR_TIMEOUT;
+                    }
+                    wait_ms = deadline_ms - elapsed;
+                }
+
+                DWORD ret = WaitForSingleObject(wait_event, wait_ms);
                 InterlockedExchange(self_waiting_ptr, 0);
+
+                /* Check sequence — data may have arrived */
+                cur = InterlockedCompareExchange64(seq_ptr, 0, 0);
+                if (cur >= expected_seq)
+                    break; /* data available */
+
+                /* No data — check peer close */
+                if (InterlockedCompareExchange(peer_closed_ptr, 0, 0) != 0) {
+                    if (ctx->role == NIPC_WIN_SHM_ROLE_SERVER)
+                        ctx->local_req_seq = expected_seq;
+                    else
+                        ctx->local_resp_seq = expected_seq;
+                    return NIPC_WIN_SHM_ERR_DISCONNECTED;
+                }
+
+                /* Actual timeout (not spurious) */
+                if (ret == WAIT_TIMEOUT)
+                    return NIPC_WIN_SHM_ERR_TIMEOUT;
+
+                /* Spurious wake — retry with remaining deadline */
             }
 
             /* Copy immediately after waking */
