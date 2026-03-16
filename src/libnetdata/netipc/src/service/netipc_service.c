@@ -740,10 +740,11 @@ static void server_handle_session(nipc_managed_server_t *server,
             nipc_batch_builder_init(&bb, resp_buf, resp_buf_size,
                                      hdr.item_count);
 
-            /* Per-item response scratch buffer (second half of resp_buf
-             * is used for individual item responses). */
-            size_t item_resp_size = resp_buf_size / 2;
-            uint8_t *item_resp = resp_buf + resp_buf_size - item_resp_size;
+            /* Separate scratch buffer for per-item handler responses.
+             * Must not overlap with resp_buf (used by batch builder). */
+            size_t item_resp_size = 4096;
+            uint8_t *item_resp = malloc(item_resp_size);
+            if (!item_resp) { ok = false; }
 
             for (uint32_t i = 0; i < hdr.item_count && ok; i++) {
                 const void *item_ptr;
@@ -771,6 +772,7 @@ static void server_handle_session(nipc_managed_server_t *server,
                 uint32_t out_count;
                 response_len = nipc_batch_builder_finish(&bb, &out_count);
             }
+            free(item_resp);
         }
 
         /* Build response header */
