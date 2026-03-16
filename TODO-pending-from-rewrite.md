@@ -570,20 +570,16 @@ Small, independent, low-risk items.
 | Phase | Status | Notes |
 |-------|--------|-------|
 | A: Quick fixes | **DONE** | Rename, tests, spec docs, rate tier |
-| B: POSIX coverage | **IN PROGRESS** | C: 83.5%→90.5% (116 new tests). Rust/Go pending |
-| C: Windows coverage | Not started | |
-| D1: C batch bench | **DONE** | 18.4M items/s UDS batch |
-| D2: Rust+Go pipelining | **DONE** | All 3 languages have all 6 subcmds |
-| D3: Pipeline+batch | **DONE** | 42.8M items/s (Rust→C) |
-| D4: Rust Windows bench | **DONE** | 1456 lines, all 9 scenarios, tested on win11 |
-| D5: Windows batch+pipeline | **IN PROGRESS** | Run script updated, running on win11 |
-| E: POSIX benchmarks | **DONE** | 325 measurements |
-| E: Windows benchmarks | **IN PROGRESS** | 3×3 matrix running on win11 |
-| F: Stress parity | Not started | |
-| G: Windows SHM verify | Not started | |
-| H: Final validation | Not started | |
+| B: POSIX coverage | **DONE** | C: 90.5%, Rust: 87.0%, Go: 86.2% (298 new tests total) |
+| C: Windows coverage | Not started | Scripts + gap tests for C and Go on Windows |
+| D: All bench drivers | **DONE** | C/Rust/Go × POSIX/Windows, all 6 scenarios |
+| E: POSIX benchmarks | **DONE** | 325 measurements, full matrix |
+| E: Windows benchmarks | **NEEDS RE-RUN** | Previous run used pre-QPC-fix binaries |
+| F: Stress parity | Not started | Windows stress tests (C/Rust/Go) |
+| G: Windows SHM verify | Not started | Verify 4 previously-failing interop pairs |
+| H: Final validation | Not started | Multi-agent review |
 
-### Bugs found and fixed during implementation
+### Bugs found and fixed during implementation (10 total)
 1. Server batch dispatch: `item_count > 1` → `>= 1` (all 5 implementations)
 2. C batch bench: goto-based error handling caused protocol desync
 3. Server batch builder buffer overlap with per-item scratch
@@ -592,17 +588,30 @@ Small, independent, low-risk items.
 6. C batch response missing message_id validation
 7. C worker_count=0 rejected instead of clamped
 8. C Windows server missing batch dispatch entirely
-9. C/Rust Windows SHM spurious wake bug (same as POSIX H6) — partial fix, 27k→72k but still 45x slower than Go 3.3M
+9. C/Rust Windows SHM spurious wake bug (deadline-based retry)
+10. C/Rust Windows bench QPC overhead: 72k→2.5M (C), 53k→1.6M (Rust), lookup 3.7M→125-150M
 
-### Known performance gaps (need profiling on Windows)
-- [x] **Windows SHM C client: 72k → 2.3M — FIXED**
-  - Root cause: QueryPerformanceCounter called 3x per iteration in bench hot loop.
-  - QPC is expensive on Windows (~1-5µs), dominated the benchmark.
-  - Fix: GetTickCount64 for loop condition, QPC latency sampled every 64th request.
-  - Identified by Codex. Historical: 2.8M. Now: 2.3M. Close to target.
-  - [ ] **Rust Windows bench needs same fix** (Instant::now in hot loop).
-- Windows C/Rust cache lookup: 3.7M vs Go 114M — likely MinGW codegen gap.
-- Go snapshot baseline: 50k vs C 121k — Go bench driver per-request allocation.
+### Current Windows benchmark results (after QPC fix)
+
+| Scenario | C | Rust | Go | Historical |
+|----------|---|------|----|------------|
+| SHM ping-pong | **2.5M** | **1.6M** | **2.7M** | C 3.2M, Rust 4.5M |
+| NP ping-pong | 17k | 20k | 18k | — |
+| Cache lookup | **125M** | **150M** | **114M** | — |
+
+### Remaining work
+
+1. [ ] **Re-run full Windows benchmark matrix** with QPC-fixed binaries (all 3 languages)
+2. [ ] **Windows stress tests** (Phase F) — none exist in any language
+   - Port C test_stress.c to Windows (Win32 threads + Named Pipes)
+   - Add Rust/Go Windows stress tests
+   - Add batch stress tests
+3. [ ] **Windows SHM interop verification** (Phase G) — verify 4 previously-failing pairs
+4. [ ] **Windows coverage scripts** (Phase C) — run-coverage-c-windows.sh, run-coverage-go-windows.sh
+5. [ ] **Rust SHM performance** — 1.6M vs 4.5M historical (investigate)
+6. [ ] **Go snapshot baseline** — 50k vs C 121k (bench driver per-request allocation)
+7. [ ] **Regenerate benchmark reports** (benchmarks-posix.md, benchmarks-windows.md)
+8. [ ] **Final multi-agent review** (Phase H) — 4 external reviewers, fix findings, re-review
 
 ### Dependencies
 - A, B, D, F, G: independent — can run in parallel
