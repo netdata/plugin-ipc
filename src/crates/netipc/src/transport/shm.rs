@@ -194,6 +194,7 @@ impl ShmContext {
     /// Create a SHM region (server side).
     ///
     /// Creates `{run_dir}/{service_name}-{session_id:016x}.ipcshm` with O_EXCL.
+    /// Pre-checks for stale files and unlinks them before creating.
     pub fn server_create(
         run_dir: &str,
         service_name: &str,
@@ -202,6 +203,13 @@ impl ShmContext {
         resp_capacity: u32,
     ) -> Result<Self, ShmError> {
         let path = build_shm_path(run_dir, service_name, session_id)?;
+
+        // Stale recovery: if the file exists, check whether the owner is alive.
+        // If stale, unlink so O_EXCL below can succeed.
+        let stale = check_shm_stale(&path);
+        if stale == StaleResult::LiveServer {
+            return Err(ShmError::AddrInUse);
+        }
 
         // Round capacities to alignment
         let req_cap = align64(req_capacity);
@@ -867,6 +875,7 @@ fn futex_wait(addr: *mut u32, expected: u32, timeout: Option<&libc::timespec>) -
 //  Stale region recovery
 // ---------------------------------------------------------------------------
 
+#[derive(PartialEq, Eq)]
 #[allow(dead_code)]
 enum StaleResult {
     NotExist,

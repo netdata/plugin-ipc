@@ -183,7 +183,7 @@ When implemented, batch calls will:
 ## Managed server
 
 Level 2 provides a managed server mode for callers who want the library
-to handle connection acceptance, worker dispatch, and response delivery.
+to handle connection acceptance and per-session request/response loops.
 
 ### Configuration
 
@@ -192,8 +192,8 @@ The caller provides at initialization:
 - Service endpoint identity (namespace + name)
 - Auth token for handshake verification
 - Supported/preferred profiles and directional limits
-- Fixed worker count (set at initialization, no runtime scaling)
-- Per-method-type handler callbacks
+- Maximum concurrent sessions (worker count limit)
+- A handler callback that dispatches by method code to typed helpers
 
 The service set is fixed after startup. Adding or removing services
 requires process restart.
@@ -203,20 +203,16 @@ requires process restart.
 The managed server internally:
 
 1. Creates a Level 1 listener for the service endpoint
-2. Runs an acceptor that accepts incoming Level 1 sessions
-3. Reads Level 1 messages from sessions
-4. For single-item messages: decodes the request payload using the Codec,
-   dispatches to a worker, the worker calls the typed handler callback,
-   the handler fills a response builder, the library encodes the response
-   and sends it back via Level 1
-5. For batch messages: extracts each item using Level 1 batch extraction,
-   decodes each item payload using the Codec, may split contiguous groups
-   of items across workers, each worker calls the typed handler callback
-   once per item, the library collects all individual responses,
-   reassembles them in request order, assembles them into one Level 1
-   batch response, and sends it back
-6. Per-connection write serialization ensures complete logical response
-   messages on the wire (no partial interleaving from concurrent workers)
+2. Runs an acceptor loop that accepts incoming Level 1 sessions
+3. Spawns a thread (C, Rust) or goroutine (Go) per accepted session,
+   up to the configured maximum concurrent sessions
+4. Each session thread reads one Level 1 message at a time, calls the
+   handler callback with the raw request payload, and sends the handler's
+   response back via Level 1
+5. The handler dispatches by `method_code` and delegates to per-method
+   typed dispatch helpers (see Handler contract below)
+6. Per-session isolation: each session has its own recv buffer and
+   response buffer, no cross-session coordination
 
 ### Handler contract
 

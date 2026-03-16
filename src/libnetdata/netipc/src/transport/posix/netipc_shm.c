@@ -182,14 +182,14 @@ static int check_shm_stale(const char *path)
     }
 
     int32_t owner = hdr->owner_pid;
+    uint32_t gen   = hdr->owner_generation;
     munmap(map, NIPC_SHM_HEADER_LEN);
 
-    if (pid_alive((pid_t)owner)) {
-        return 1; /* live: PID is alive, region is active */
+    if (pid_alive((pid_t)owner) && gen != 0) {
+        return 1; /* live: PID is alive and generation is valid */
     }
 
-    /* Dead owner -- stale. PID reuse across reboots is handled by
-     * the client-side owner_alive() which compares generation. */
+    /* Dead owner or zero generation (uninitialized/legacy) — stale */
     unlink(path);
     return 0;
 }
