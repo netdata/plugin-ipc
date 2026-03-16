@@ -821,7 +821,7 @@ if(NETIPC_WINDOWS_RUNTIME)
     # C Windows benchmark binary
     add_executable(bench_windows_c bench/drivers/c/bench_windows.c)
     target_link_libraries(bench_windows_c PRIVATE
-        netipc_service netipc_named_pipe netipc_win_shm netipc_protocol
+        netipc_service_win netipc_named_pipe netipc_win_shm netipc_protocol
     )
     target_compile_options(bench_windows_c PRIVATE -O2)
 
