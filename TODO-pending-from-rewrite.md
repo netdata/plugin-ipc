@@ -58,6 +58,84 @@ Verified facts from the current codebase:
   - it may be cleaned/reset there before pull/build/test if needed
   - this approval does **not** apply to the local Linux worktree
 
+### Pending
+
+- Decision required: how to make Windows `np-pipeline-batch-d16` fit for purpose without hiding transport limits.
+  - evidence:
+    - the Windows pipeline+batch client sends all `depth` batch requests before reading any responses:
+      - C Windows: `bench/drivers/c/bench_windows.c:1420-1467`
+      - Go Windows: `bench/drivers/go/main_windows.go` pipeline+batch loop mirrors the same pattern
+    - the POSIX version uses the same send-all-then-receive-all pattern and works over UDS:
+      - `bench/drivers/c/bench_posix.c:1241-1289`
+    - Windows named pipes are created with a default 64 KiB pipe buffer:
+      - Go transport constants: `src/go/pkg/netipc/transport/windows/pipe.go`
+      - `defaultPacketSize = 65536`
+      - `defaultPipeBufSize = 65536`
+      - pipe creation uses that buffer size in `createPipeInstance()`
+    - batch payload sizing is large:
+      - `BENCH_BATCH_BUF_SIZE = BENCH_MAX_BATCH_ITEMS * 48 + 4096`
+      - with `BENCH_MAX_BATCH_ITEMS = 1000`, that is about 52 KiB per batch message
+    - verified depth sweep on `win11` for `c -> c`:
+      - depth `1`: success
+      - depth `2`: success
+      - depth `4`: success
+      - depth `8`: success
+      - depth `16`: timeout (`exit 124`)
+  - working theory:
+    - Windows named-pipe pipeline+batch deadlocks when both sides keep large batch messages in flight without draining responses soon enough
+    - this is consistent with the transport buffer sizes and with the fact that smaller pipeline depth still works
+  - options:
+    - `A.` Benchmark-only cap for Windows named pipes
+      - change Windows `np-pipeline-batch` to use a smaller fixed depth such as `8`
+      - benefits:
+        - minimal code churn
+        - matches what the current transport reliably supports on `win11`
+      - implications:
+        - Windows benchmark matrix diverges from POSIX (`d8` on Windows vs `d16` on POSIX)
+        - report scripts and docs must encode that platform-specific depth difference explicitly
+      - risks:
+        - this may be seen as lowering coverage instead of fixing the underlying transport limitation
+        - depth `8` works on `win11`, but that does not prove it is the safe limit on every Windows system
+    - `B.` Keep logical depth `16`, but make the Windows pipeline+batch clients use a bounded in-flight window
+      - instead of send-16-then-read-16, maintain up to `depth` requests in flight while draining responses as needed
+      - benefits:
+        - preserves the intent of a depth-16 pipeline benchmark
+        - avoids depending on a specific named-pipe buffer size
+        - likely portable across Windows systems
+      - implications:
+        - benchmark client logic changes in C, Rust, and Go
+        - latency accounting must be updated carefully so the benchmark remains comparable and honest
+      - risks:
+        - more implementation and review work
+        - if done carelessly, it can change what the benchmark actually measures
+    - `C.` Keep send-16-then-read-16 and increase Windows named-pipe packet/buffer size for this scenario
+      - raise `packet_size` / pipe buffer size enough to hold the larger in-flight window
+      - benefits:
+        - preserves the current benchmark algorithm
+        - probably smaller code change than option `B`
+      - implications:
+        - benchmark becomes dependent on an inflated Windows pipe buffer configuration
+        - transport settings for this one scenario diverge from the rest of the suite
+      - risks:
+        - may still deadlock if total in-flight request/response volume exceeds the larger buffer
+        - this treats the symptom, not the backpressure pattern
+  - recommendation:
+    - `B`
+    - reasoning:
+      - it keeps the benchmark purpose intact: a real depth-16 pipeline+batch stress case
+      - it addresses the actual backpressure problem instead of hiding it behind a smaller depth or a larger pipe buffer
+      - it should remain valid even if batch sizes or Windows buffer behavior change later
+
+### User Decisions
+
+- 2026-03-17:
+  - Windows `np-pipeline-batch-d16` will be fixed by changing the benchmark clients, not by imposing a lower global limit.
+  - Chosen direction: keep logical depth `16`, but add proper client-side flow control so the clients drain responses while maintaining a bounded in-flight window.
+  - Scope:
+    - Windows benchmark clients in C, Go, and Rust
+    - no transport-wide limit reduction
+    - no benchmark-only downgrade to depth `8`
+
 ### Current Implementation Chunk
 
 - [x] Add explicit run metadata to benchmark CSV output, starting with `target_rps`.
@@ -144,12 +222,35 @@ Verified facts from the current codebase:
       - Rust reference implementation in `src/crates/netipc/src/transport/win_shm.rs` already uses the same retry loop
       - Microsoft event-object documentation states that auto-reset events remain signaled until a waiter consumes them, so a wake is not equivalent to “new payload is present”
     - implication: a stale event wake could make Go read the previous payload and advance the local sequence, which matches the observed `counter chain broken: expected X, got X-1` failures
-    - current fix in progress:
-      - make Go `WinShmReceive()` mirror the C/Rust deadline-based retry loop
-      - add Windows-only regression tests that force a spurious wake and verify the second receive returns the new payload, not the stale one
+    - implemented fix:
+      - Go `WinShmReceive()` now mirrors the C/Rust deadline-based retry loop
+      - Windows-only regression tests were added to force a spurious wake and verify the second receive returns the new payload, not the stale one
+    - verification on `win11`:
+      - `go test ./pkg/netipc/transport/windows` passes
+      - previously failing SHM pairs now exit cleanly in direct probes:
+        - `go -> c`
+        - `go -> rust`
+        - `go -> go`
+        - `c -> go`
+        - `rust -> go`
+      - a fresh `duration=1` smoke rerun now clears all of:
+        - named pipe ping-pong
+        - Win SHM ping-pong
+        - snapshot baseline
+        - snapshot SHM
+        - named pipe batch ping-pong
+        - Win SHM batch ping-pong
+        - local lookup
+        - named pipe pipeline
   - `np-pipeline-batch-d16` still has a real runtime bug on Windows:
-    - manual probes on `win11` show Rust and Go clients can print a throughput line but still exit non-zero with `pipeline-batch client: 1 errors`
-    - the updated runner now rejects these runs instead of recording them as valid rows
+    - after the Go SHM fix, the remaining failure is now isolated to this scenario
+    - fresh `duration=1` smoke rerun on `win11` fails all 9 pairs with client timeout `exit 124`:
+      - `c -> c`, `rust -> c`, `go -> c`
+      - `c -> rust`, `rust -> rust`, `go -> rust`
+      - `c -> go`, `rust -> go`, `go -> go`
+    - implication:
+      - the old mixed `pipeline-batch client: 1 errors` symptom was at least partly contaminated by the Windows SHM receive bug
+      - the current remaining bug is specific to the Windows named-pipe pipeline+batch path itself
 
 ## Implied Decisions
 

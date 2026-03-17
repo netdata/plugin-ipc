@@ -57,10 +57,10 @@ func init() {
 }
 
 var (
-	kernel32                       = syscall.NewLazyDLL("kernel32.dll")
-	procQueryPerformanceFrequency  = kernel32.NewProc("QueryPerformanceFrequency")
-	procQueryPerformanceCounter    = kernel32.NewProc("QueryPerformanceCounter")
-	procGetProcessTimes            = kernel32.NewProc("GetProcessTimes")
+	kernel32                      = syscall.NewLazyDLL("kernel32.dll")
+	procQueryPerformanceFrequency = kernel32.NewProc("QueryPerformanceFrequency")
+	procQueryPerformanceCounter   = kernel32.NewProc("QueryPerformanceCounter")
+	procGetProcessTimes           = kernel32.NewProc("GetProcessTimes")
 )
 
 func nowNS() uint64 {
@@ -699,7 +699,21 @@ func runPipelineClientWin(runDir, service string, durationSec int, targetRPS uin
 //  Pipeline+batch client (sends depth batch msgs, reads depth responses)
 // ---------------------------------------------------------------------------
 
+type pipelineBatchSlotWin struct {
+	messageID     uint64
+	batchSize     uint32
+	inflightBytes uint64
+	active        bool
+}
+
 func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRPS uint64, depth int, serverLang string) int {
+	if depth < 1 {
+		depth = 1
+	}
+	if depth > 128 {
+		depth = 128
+	}
+
 	cfg := batchClientConfigWin(profileNP)
 	var session *windows.Session
 	var err error
@@ -722,13 +736,17 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 
 	// Pre-allocate per-depth buffers
 	reqBufs := make([][]byte, depth)
-	batchSizes := make([]uint32, depth)
+	slots := make([]pipelineBatchSlotWin, depth)
 	for i := range reqBufs {
 		reqBufs[i] = make([]byte, batchBufSizeWin)
 	}
 	recvBuf := make([]byte, batchBufSizeWin+protocol.HeaderSize)
 
 	var counter, totalItems, errors, msgSeq uint64
+	inflightBudget := uint64(depth) * uint64(session.PacketSize) / 2
+	if inflightBudget < uint64(session.PacketSize) {
+		inflightBudget = uint64(session.PacketSize)
+	}
 
 	cpuStart := cpuNSWin()
 	wallStart := time.Now()
@@ -738,54 +756,124 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 		rl.wait()
 
 		t0 := time.Now()
-
-		// Build and send `depth` batch requests
-		sendOK := true
-		for d := 0; d < depth; d++ {
-			bs := uint32(rand.Intn(maxBatchItemsWin-1) + 2)
-			batchSizes[d] = bs
-
-			bb := protocol.NewBatchBuilder(reqBufs[d], bs)
-			itemBuf := make([]byte, protocol.IncrementPayloadSize)
-
-			for i := uint32(0); i < bs; i++ {
-				protocol.IncrementEncode(counter+uint64(i), itemBuf)
-				bb.Add(itemBuf)
-			}
-
-			reqLen, _ := bb.Finish()
-
-			msgSeq++
-			hdr := protocol.Header{
-				Kind:            protocol.KindRequest,
-				Code:            protocol.MethodIncrement,
-				Flags:           protocol.FlagBatch,
-				ItemCount:       bs,
-				MessageID:       msgSeq,
-				TransportStatus: protocol.StatusOK,
-			}
-
-			if serr := session.Send(&hdr, reqBufs[d][:reqLen]); serr != nil {
-				sendOK = false
-				errors++
-				break
-			}
-
-			counter += uint64(bs)
+		for i := range slots {
+			slots[i] = pipelineBatchSlotWin{}
 		}
 
-		if !sendOK {
-			continue
-		}
+		sent := 0
+		received := 0
+		outstanding := 0
+		inflightBytes := uint64(0)
+		cycleOK := true
 
-		// Receive `depth` batch responses
-		for d := 0; d < depth; d++ {
-			_, _, rerr := session.Receive(recvBuf)
+		for received < depth {
+			if sent < depth {
+				slot := sent
+				bs := uint32(rand.Intn(maxBatchItemsWin-1) + 2)
+
+				bb := protocol.NewBatchBuilder(reqBufs[slot], bs)
+				itemBuf := make([]byte, protocol.IncrementPayloadSize)
+
+				for i := uint32(0); i < bs; i++ {
+					protocol.IncrementEncode(counter+uint64(i), itemBuf)
+					bb.Add(itemBuf)
+				}
+
+				reqLen, _ := bb.Finish()
+
+				msgSeq++
+				hdr := protocol.Header{
+					Kind:            protocol.KindRequest,
+					Code:            protocol.MethodIncrement,
+					Flags:           protocol.FlagBatch,
+					ItemCount:       bs,
+					MessageID:       msgSeq,
+					TransportStatus: protocol.StatusOK,
+				}
+
+				slotBytes := uint64((protocol.HeaderSize + reqLen) * 2)
+
+				for outstanding > 0 && inflightBytes+slotBytes > inflightBudget {
+					respHdr, _, rerr := session.Receive(recvBuf)
+					if rerr != nil {
+						errors++
+						cycleOK = false
+						break
+					}
+
+					matched := -1
+					for i := range slots {
+						if slots[i].active && slots[i].messageID == respHdr.MessageID {
+							matched = i
+							break
+						}
+					}
+					if matched < 0 {
+						fmt.Fprintf(os.Stderr, "pipeline-batch client: unknown response id %d\n", respHdr.MessageID)
+						errors++
+						cycleOK = false
+						break
+					}
+
+					inflightBytes -= slots[matched].inflightBytes
+					totalItems += uint64(slots[matched].batchSize)
+					slots[matched].active = false
+					outstanding--
+					received++
+				}
+				if !cycleOK {
+					break
+				}
+
+				if serr := session.Send(&hdr, reqBufs[slot][:reqLen]); serr != nil {
+					errors++
+					cycleOK = false
+					break
+				}
+
+				slots[slot] = pipelineBatchSlotWin{
+					messageID:     hdr.MessageID,
+					batchSize:     bs,
+					inflightBytes: slotBytes,
+					active:        true,
+				}
+				inflightBytes += slotBytes
+				outstanding++
+				counter += uint64(bs)
+				sent++
+				continue
+			}
+
+			respHdr, _, rerr := session.Receive(recvBuf)
 			if rerr != nil {
 				errors++
+				cycleOK = false
 				break
 			}
-			totalItems += uint64(batchSizes[d])
+
+			matched := -1
+			for i := range slots {
+				if slots[i].active && slots[i].messageID == respHdr.MessageID {
+					matched = i
+					break
+				}
+			}
+			if matched < 0 {
+				fmt.Fprintf(os.Stderr, "pipeline-batch client: unknown response id %d\n", respHdr.MessageID)
+				errors++
+				cycleOK = false
+				break
+			}
+
+			inflightBytes -= slots[matched].inflightBytes
+			totalItems += uint64(slots[matched].batchSize)
+			slots[matched].active = false
+			outstanding--
+			received++
+		}
+
+		if !cycleOK {
+			break
 		}
 
 		t1 := time.Now()

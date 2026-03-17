@@ -19,22 +19,17 @@ fn main() {
 
 #[cfg(windows)]
 use netipc::protocol::{
-    self, BatchBuilder, CgroupsBuilder, CgroupsRequest, Header,
-    HEADER_SIZE, KIND_REQUEST, KIND_RESPONSE, FLAG_BATCH, MAGIC_MSG,
-    METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE,
-    STATUS_OK, VERSION, INCREMENT_PAYLOAD_SIZE,
-    batch_item_get, increment_decode, increment_encode,
+    self, batch_item_get, increment_decode, increment_encode, BatchBuilder, CgroupsBuilder,
+    CgroupsRequest, Header, FLAG_BATCH, HEADER_SIZE, INCREMENT_PAYLOAD_SIZE, KIND_REQUEST,
+    KIND_RESPONSE, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE,
+    STATUS_OK, VERSION,
 };
 #[cfg(windows)]
-use netipc::service::cgroups::{
-    CgroupsCacheItem, CgroupsClient, ManagedServer,
-};
+use netipc::service::cgroups::{CgroupsCacheItem, CgroupsClient, ManagedServer};
 #[cfg(windows)]
-use netipc::transport::windows::{ClientConfig, ServerConfig, NpSession};
+use netipc::transport::win_shm::{WinShmContext, PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID};
 #[cfg(windows)]
-use netipc::transport::win_shm::{
-    WinShmContext, PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID,
-};
+use netipc::transport::windows::{ClientConfig, NpSession, ServerConfig};
 
 #[cfg(windows)]
 use std::sync::atomic::Ordering;
@@ -99,7 +94,9 @@ struct TickDeadline {
 impl TickDeadline {
     fn new(duration_sec: u32) -> Self {
         let now = unsafe { ffi::GetTickCount64() };
-        Self { deadline: now + duration_sec as u64 * 1000 }
+        Self {
+            deadline: now + duration_sec as u64 * 1000,
+        }
     }
     #[inline]
     fn expired(&self) -> bool {
@@ -390,12 +387,7 @@ fn run_server(
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-fn run_batch_server(
-    run_dir: &str,
-    service: &str,
-    profiles: u32,
-    duration_sec: u32,
-) -> i32 {
+fn run_batch_server(run_dir: &str, service: &str, profiles: u32, duration_sec: u32) -> i32 {
     let handler: std::sync::Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync> =
         std::sync::Arc::new(|code, payload| ping_pong_handler(code, payload));
 
@@ -435,11 +427,7 @@ fn run_batch_server(
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-fn try_shm_upgrade(
-    run_dir: &str,
-    service: &str,
-    session: &NpSession,
-) -> Option<WinShmContext> {
+fn try_shm_upgrade(run_dir: &str, service: &str, session: &NpSession) -> Option<WinShmContext> {
     if session.selected_profile & WIN_SHM_PROFILE_HYBRID == 0 {
         return None;
     }
@@ -523,7 +511,11 @@ fn run_ping_pong_client(
             ..Header::default()
         };
 
-        let t0 = if requests & 63 == 0 { Some(Instant::now()) } else { None };
+        let t0 = if requests & 63 == 0 {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         let send_ok = if let Some(ref mut shm_ctx) = shm {
             // Win SHM path
@@ -627,7 +619,11 @@ fn run_ping_pong_client(
         eprintln!("client: {} errors", errors);
     }
 
-    if errors > 0 { 1 } else { 0 }
+    if errors > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -679,7 +675,11 @@ fn run_snapshot_client(
     while !tick_deadline.expired() {
         rl.wait();
 
-        let t0 = if requests & 63 == 0 { Some(Instant::now()) } else { None };
+        let t0 = if requests & 63 == 0 {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         match client.call_snapshot(&mut resp_buf) {
             Ok(view) => {
@@ -720,7 +720,11 @@ fn run_snapshot_client(
         eprintln!("client: {} errors", errors);
     }
 
-    if errors > 0 { 1 } else { 0 }
+    if errors > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -815,7 +819,11 @@ fn run_batch_ping_pong_client(
             ..Header::default()
         };
 
-        let t0 = if total_items & 63 == 0 { Some(Instant::now()) } else { None };
+        let t0 = if total_items & 63 == 0 {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         // Send + receive via SHM or Named Pipe
         let io_result: Result<(Header, Vec<u8>), ()> = if let Some(ref mut shm_ctx) = shm {
@@ -928,10 +936,17 @@ fn run_batch_ping_pong_client(
     drop(session);
 
     if errors > 0 {
-        eprintln!("batch client: {} errors out of {} items", errors, total_items);
+        eprintln!(
+            "batch client: {} errors out of {} items",
+            errors, total_items
+        );
     }
 
-    if errors > 0 { 1 } else { 0 }
+    if errors > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -984,7 +999,11 @@ fn run_pipeline_client(
     while !tick_deadline.expired() {
         rl.wait();
 
-        let t0 = if requests & 63 == 0 { Some(Instant::now()) } else { None };
+        let t0 = if requests & 63 == 0 {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         // Send `depth` requests
         let mut send_ok = true;
@@ -1067,12 +1086,25 @@ fn run_pipeline_client(
         eprintln!("pipeline client: {} errors", errors);
     }
 
-    if errors > 0 { 1 } else { 0 }
+    if errors > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
 //  Pipeline+batch client (sends depth batch messages, reads depth responses)
 // ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Default)]
+struct PipelineBatchSlot {
+    message_id: u64,
+    batch_size: u32,
+    inflight_bytes: usize,
+    active: bool,
+}
 
 #[cfg(windows)]
 fn run_pipeline_batch_client(
@@ -1110,9 +1142,13 @@ fn run_pipeline_batch_client(
     let mut errors: u64 = 0;
 
     let depth = depth.min(128) as usize;
-    let mut req_bufs: Vec<Vec<u8>> = (0..depth).map(|_| vec![0u8; BENCH_BATCH_BUF_SIZE]).collect();
-    let mut req_lens = vec![0usize; depth];
-    let mut batch_sizes = vec![0u32; depth];
+    let mut req_bufs: Vec<Vec<u8>> = (0..depth)
+        .map(|_| vec![0u8; BENCH_BATCH_BUF_SIZE])
+        .collect();
+    let mut slots = vec![PipelineBatchSlot::default(); depth];
+    let mut recv_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
+    let inflight_budget =
+        ((depth * session.packet_size as usize) / 2).max(session.packet_size as usize);
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
@@ -1121,66 +1157,134 @@ fn run_pipeline_batch_client(
     while !tick_deadline.expired() {
         rl.wait();
 
-        let t0 = if total_items & 63 == 0 { Some(Instant::now()) } else { None };
+        let t0 = if total_items & 63 == 0 {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        for slot in &mut slots {
+            *slot = PipelineBatchSlot::default();
+        }
 
-        let mut send_ok = true;
-        for d in 0..depth {
-            let bs = (rng.next() % BENCH_MAX_BATCH_ITEMS) + 1;
-            batch_sizes[d] = bs;
+        let mut sent = 0usize;
+        let mut received = 0usize;
+        let mut outstanding = 0usize;
+        let mut inflight_bytes = 0usize;
+        let mut cycle_ok = true;
 
-            let mut bb = BatchBuilder::new(&mut req_bufs[d], bs);
+        while received < depth {
+            if sent < depth {
+                let slot = sent;
+                let bs = (rng.next() % BENCH_MAX_BATCH_ITEMS) + 1;
+                let mut bb = BatchBuilder::new(&mut req_bufs[slot], bs);
 
-            for i in 0..bs {
-                let mut item = [0u8; INCREMENT_PAYLOAD_SIZE];
-                increment_encode(counter + i as u64, &mut item);
-                if bb.add(&item).is_err() {
-                    send_ok = false;
+                for i in 0..bs {
+                    let mut item = [0u8; INCREMENT_PAYLOAD_SIZE];
+                    increment_encode(counter + i as u64, &mut item);
+                    if bb.add(&item).is_err() {
+                        cycle_ok = false;
+                        errors += 1;
+                        break;
+                    }
+                }
+                if !cycle_ok {
+                    break;
+                }
+
+                let (len, _out_count) = bb.finish();
+                let slot_bytes = (HEADER_SIZE + len) * 2;
+
+                let mut hdr = Header {
+                    kind: KIND_REQUEST,
+                    code: METHOD_INCREMENT,
+                    flags: FLAG_BATCH,
+                    item_count: bs,
+                    message_id: counter + 1 + slot as u64,
+                    transport_status: STATUS_OK,
+                    ..Header::default()
+                };
+
+                while outstanding > 0 && inflight_bytes + slot_bytes > inflight_budget {
+                    match session.receive(&mut recv_buf) {
+                        Ok((resp_hdr, _payload)) => {
+                            if let Some(matched) = slots.iter().position(|pending| {
+                                pending.active && pending.message_id == resp_hdr.message_id
+                            }) {
+                                inflight_bytes -= slots[matched].inflight_bytes;
+                                total_items += slots[matched].batch_size as u64;
+                                slots[matched].active = false;
+                                outstanding -= 1;
+                                received += 1;
+                            } else {
+                                eprintln!(
+                                    "pipeline-batch client: unknown response id {}",
+                                    resp_hdr.message_id
+                                );
+                                cycle_ok = false;
+                                errors += 1;
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            cycle_ok = false;
+                            errors += 1;
+                            break;
+                        }
+                    }
+                }
+                if !cycle_ok {
+                    break;
+                }
+
+                if session.send(&mut hdr, &req_bufs[slot][..len]).is_err() {
+                    cycle_ok = false;
                     errors += 1;
                     break;
                 }
-            }
-            if !send_ok {
-                break;
-            }
 
-            let (len, _out_count) = bb.finish();
-            req_lens[d] = len;
-
-            let mut hdr = Header {
-                kind: KIND_REQUEST,
-                code: METHOD_INCREMENT,
-                flags: FLAG_BATCH,
-                item_count: bs,
-                message_id: counter + 1 + d as u64,
-                transport_status: STATUS_OK,
-                ..Header::default()
-            };
-
-            if session.send(&mut hdr, &req_bufs[d][..len]).is_err() {
-                send_ok = false;
-                errors += 1;
-                break;
+                slots[slot] = PipelineBatchSlot {
+                    message_id: hdr.message_id,
+                    batch_size: bs,
+                    inflight_bytes: slot_bytes,
+                    active: true,
+                };
+                inflight_bytes += slot_bytes;
+                outstanding += 1;
+                counter += bs as u64;
+                sent += 1;
+                continue;
             }
 
-            counter += bs as u64;
-        }
-
-        if !send_ok {
-            continue;
-        }
-
-        // Receive `depth` batch responses
-        let mut recv_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
-        for d in 0..depth {
             match session.receive(&mut recv_buf) {
-                Ok((_resp_hdr, _payload)) => {
-                    total_items += batch_sizes[d] as u64;
+                Ok((resp_hdr, _payload)) => {
+                    if let Some(matched) = slots.iter().position(|pending| {
+                        pending.active && pending.message_id == resp_hdr.message_id
+                    }) {
+                        inflight_bytes -= slots[matched].inflight_bytes;
+                        total_items += slots[matched].batch_size as u64;
+                        slots[matched].active = false;
+                        outstanding -= 1;
+                        received += 1;
+                    } else {
+                        eprintln!(
+                            "pipeline-batch client: unknown response id {}",
+                            resp_hdr.message_id
+                        );
+                        cycle_ok = false;
+                        errors += 1;
+                        break;
+                    }
                 }
                 Err(_) => {
+                    cycle_ok = false;
                     errors += 1;
                     break;
                 }
             }
+        }
+
+        if !cycle_ok {
+            break;
         }
 
         if let Some(t0v) = t0 {
@@ -1210,7 +1314,11 @@ fn run_pipeline_batch_client(
         eprintln!("pipeline-batch client: {} errors", errors);
     }
 
-    if errors > 0 { 1 } else { 0 }
+    if errors > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1292,8 +1400,10 @@ fn main() {
 
     let rc = match cmd.as_str() {
         // --- Server subcommands ---
-        "np-ping-pong-server" | "shm-ping-pong-server"
-        | "snapshot-server" | "snapshot-shm-server" => {
+        "np-ping-pong-server"
+        | "shm-ping-pong-server"
+        | "snapshot-server"
+        | "snapshot-shm-server" => {
             if args.len() < 4 {
                 eprintln!(
                     "Usage: {} {} <run_dir> <service> [duration_sec]",

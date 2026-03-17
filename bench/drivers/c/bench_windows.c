@@ -1206,6 +1206,7 @@ int main(int argc, char **argv)
         uint64_t target_rps = (uint64_t)strtoull(argv[5], NULL, 10);
         int depth = atoi(argv[6]);
         if (depth < 1) depth = 1;
+        if (depth > 128) depth = 128;
 
         nipc_np_client_config_t ccfg = {
             .supported_profiles        = BENCH_PROFILE_NP,
@@ -1402,70 +1403,168 @@ int main(int argc, char **argv)
         uint64_t errors = 0;
 
         uint8_t *req_bufs[128];
+        uint8_t *recv_buf = NULL;
         size_t req_lens[128];
+        size_t slot_costs[128];
         uint32_t batch_sizes[128];
+        uint64_t slot_msg_ids[128];
+        bool slot_active[128];
         nipc_header_t hdrs[128];
 
+        memset(req_bufs, 0, sizeof(req_bufs));
+        memset(slot_active, 0, sizeof(slot_active));
         for (int i = 0; i < depth && i < 128; i++)
             req_bufs[i] = malloc(BENCH_BATCH_BUF_SIZE);
+        recv_buf = malloc(BENCH_BATCH_BUF_SIZE + NIPC_HEADER_LEN);
+
+        if (!recv_buf) {
+            fprintf(stderr, "pipeline-batch client: recv buffer alloc failed\n");
+            for (int i = 0; i < depth && i < 128; i++)
+                free(req_bufs[i]);
+            nipc_np_close_session(&session);
+            return 1;
+        }
 
         uint64_t cpu_start = cpu_ns();
         uint64_t wall_start = now_ns();
         ULONGLONG tick_deadline = GetTickCount64() + (ULONGLONG)duration * 1000;
+        size_t inflight_budget = ((size_t)depth * (size_t)session.packet_size) / 2;
+        if (inflight_budget < (size_t)session.packet_size)
+            inflight_budget = (size_t)session.packet_size;
 
         while (GetTickCount64() < tick_deadline) {
             rate_limiter_wait(&rl);
             uint64_t t0 = (total_items & 63) == 0 ? now_ns() : 0;
 
-            /* Build and send `depth` batch requests */
-            int send_ok = 1;
-            for (int d = 0; d < depth; d++) {
-                uint32_t bs = (bench_rand() % BENCH_MAX_BATCH_ITEMS) + 1;
-                batch_sizes[d] = bs;
+            /* Keep the logical pipeline depth, but drain responses once the
+             * estimated request+response bytes in flight get too large for a
+             * blocking named pipe session. */
+            memset(slot_active, 0, sizeof(slot_active));
+            int sent = 0;
+            int received = 0;
+            int outstanding = 0;
+            size_t inflight_bytes = 0;
+            int cycle_ok = 1;
 
-                nipc_batch_builder_t bb;
-                nipc_batch_builder_init(&bb, req_bufs[d], BENCH_BATCH_BUF_SIZE, bs);
+            while (received < depth) {
+                if (sent < depth) {
+                    int slot = sent;
+                    uint32_t bs = (bench_rand() % BENCH_MAX_BATCH_ITEMS) + 1;
+                    batch_sizes[slot] = bs;
 
-                for (uint32_t i = 0; i < bs; i++) {
-                    uint8_t item[NIPC_INCREMENT_PAYLOAD_SIZE];
-                    nipc_increment_encode(counter + i, item, sizeof(item));
-                    nipc_batch_builder_add(&bb, item, sizeof(item));
+                    nipc_batch_builder_t bb;
+                    nipc_batch_builder_init(&bb, req_bufs[slot], BENCH_BATCH_BUF_SIZE, bs);
+
+                    for (uint32_t i = 0; i < bs; i++) {
+                        uint8_t item[NIPC_INCREMENT_PAYLOAD_SIZE];
+                        nipc_increment_encode(counter + i, item, sizeof(item));
+                        nipc_batch_builder_add(&bb, item, sizeof(item));
+                    }
+
+                    uint32_t out_count;
+                    req_lens[slot] = nipc_batch_builder_finish(&bb, &out_count);
+
+                    hdrs[slot] = (nipc_header_t){0};
+                    hdrs[slot].kind = NIPC_KIND_REQUEST;
+                    hdrs[slot].code = NIPC_METHOD_INCREMENT;
+                    hdrs[slot].flags = NIPC_FLAG_BATCH;
+                    hdrs[slot].item_count = bs;
+                    hdrs[slot].message_id = counter + 1 + (uint64_t)slot;
+                    hdrs[slot].transport_status = NIPC_STATUS_OK;
+
+                    slot_msg_ids[slot] = hdrs[slot].message_id;
+                    slot_costs[slot] = (NIPC_HEADER_LEN + req_lens[slot]) * 2;
+
+                    while (outstanding > 0 &&
+                           inflight_bytes + slot_costs[slot] > inflight_budget) {
+                        nipc_header_t resp_hdr;
+                        const void *resp_payload;
+                        size_t resp_len;
+                        nipc_np_error_t uerr = nipc_np_receive(&session,
+                            recv_buf, BENCH_BATCH_BUF_SIZE + NIPC_HEADER_LEN,
+                            &resp_hdr, &resp_payload, &resp_len);
+                        if (uerr != NIPC_NP_OK) {
+                            errors++;
+                            cycle_ok = 0;
+                            break;
+                        }
+
+                        int matched = -1;
+                        for (int i = 0; i < depth; i++) {
+                            if (slot_active[i] && slot_msg_ids[i] == resp_hdr.message_id) {
+                                matched = i;
+                                break;
+                            }
+                        }
+                        if (matched < 0) {
+                            fprintf(stderr, "pipeline-batch client: unknown response id %llu\n",
+                                    (unsigned long long)resp_hdr.message_id);
+                            errors++;
+                            cycle_ok = 0;
+                            break;
+                        }
+
+                        inflight_bytes -= slot_costs[matched];
+                        total_items += batch_sizes[matched];
+                        slot_active[matched] = false;
+                        outstanding--;
+                        received++;
+                    }
+                    if (!cycle_ok)
+                        break;
+
+                    nipc_np_error_t uerr = nipc_np_send(&session,
+                        &hdrs[slot], req_bufs[slot], req_lens[slot]);
+                    if (uerr != NIPC_NP_OK) {
+                        errors++;
+                        cycle_ok = 0;
+                        break;
+                    }
+
+                    slot_active[slot] = true;
+                    inflight_bytes += slot_costs[slot];
+                    outstanding++;
+                    counter += bs;
+                    sent++;
+                    continue;
                 }
 
-                uint32_t out_count;
-                req_lens[d] = nipc_batch_builder_finish(&bb, &out_count);
-
-                hdrs[d] = (nipc_header_t){0};
-                hdrs[d].kind = NIPC_KIND_REQUEST;
-                hdrs[d].code = NIPC_METHOD_INCREMENT;
-                hdrs[d].flags = NIPC_FLAG_BATCH;
-                hdrs[d].item_count = bs;
-                hdrs[d].message_id = counter + 1 + (uint64_t)d;
-                hdrs[d].transport_status = NIPC_STATUS_OK;
-
-                nipc_np_error_t uerr = nipc_np_send(&session,
-                    &hdrs[d], req_bufs[d], req_lens[d]);
-                if (uerr != NIPC_NP_OK) { send_ok = 0; errors++; break; }
-
-                counter += bs;
-            }
-
-            if (!send_ok) continue;
-
-            /* Receive `depth` batch responses */
-            for (int d = 0; d < depth; d++) {
                 nipc_header_t resp_hdr;
                 const void *resp_payload;
                 size_t resp_len;
-                uint8_t *recv_buf = req_bufs[d]; /* reuse buffer */
-
                 nipc_np_error_t uerr = nipc_np_receive(&session,
-                    recv_buf, BENCH_BATCH_BUF_SIZE,
+                    recv_buf, BENCH_BATCH_BUF_SIZE + NIPC_HEADER_LEN,
                     &resp_hdr, &resp_payload, &resp_len);
-                if (uerr != NIPC_NP_OK) { errors++; break; }
+                if (uerr != NIPC_NP_OK) {
+                    errors++;
+                    cycle_ok = 0;
+                    break;
+                }
 
-                total_items += batch_sizes[d];
+                int matched = -1;
+                for (int i = 0; i < depth; i++) {
+                    if (slot_active[i] && slot_msg_ids[i] == resp_hdr.message_id) {
+                        matched = i;
+                        break;
+                    }
+                }
+                if (matched < 0) {
+                    fprintf(stderr, "pipeline-batch client: unknown response id %llu\n",
+                            (unsigned long long)resp_hdr.message_id);
+                    errors++;
+                    cycle_ok = 0;
+                    break;
+                }
+
+                inflight_bytes -= slot_costs[matched];
+                total_items += batch_sizes[matched];
+                slot_active[matched] = false;
+                outstanding--;
+                received++;
             }
+
+            if (!cycle_ok)
+                break;
 
             if (t0 != 0) {
                 uint64_t t1 = now_ns();
@@ -1492,6 +1591,7 @@ int main(int argc, char **argv)
                cpu_pct, cpu_pct);
         fflush(stdout);
 
+        free(recv_buf);
         for (int i = 0; i < depth && i < 128; i++)
             free(req_bufs[i]);
         latency_free(&lr);
