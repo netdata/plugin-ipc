@@ -327,6 +327,29 @@ nipc_error_t nipc_server_init_typed(nipc_managed_server_t *server,
                                int worker_count,
                                const nipc_cgroups_handlers_t *handlers);
 
+#ifdef NIPC_INTERNAL_TESTING
+/*
+ * Internal compatibility entrypoint for repo tests and benchmarks that
+ * intentionally exercise raw dispatch or malformed response paths. Not part
+ * of the public Level 2 contract.
+ */
+nipc_error_t nipc_server_init_raw_for_tests(
+    nipc_managed_server_t *server,
+    const char *run_dir,
+    const char *service_name,
+#ifdef _WIN32
+    const nipc_np_server_config_t *config,
+#else
+    const nipc_uds_server_config_t *config,
+#endif
+    int worker_count,
+    size_t response_buf_size,
+    nipc_server_handler_fn handler,
+    void *user);
+
+#define nipc_server_init nipc_server_init_raw_for_tests
+#endif
+
 /*
  * Run the acceptor loop. Blocking. Accepts clients, reads requests,
  * dispatches to the handler, sends responses.

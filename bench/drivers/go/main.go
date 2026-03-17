@@ -333,6 +333,11 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
+	if (session.SelectedProfile == protocol.ProfileSHMHybrid ||
+		session.SelectedProfile == protocol.ProfileSHMFutex) && shm == nil {
+		fmt.Fprintln(os.Stderr, "batch client: shm attach failed after retries")
+		return 1
+	}
 	if shm != nil {
 		defer shm.ShmClose()
 	}
@@ -829,6 +834,11 @@ func runPingPongClient(runDir, service string, profiles uint32, durationSec int,
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
+	}
+	if (session.SelectedProfile == protocol.ProfileSHMHybrid ||
+		session.SelectedProfile == protocol.ProfileSHMFutex) && shm == nil {
+		fmt.Fprintln(os.Stderr, "client: shm attach failed after retries")
+		return 1
 	}
 	if shm != nil {
 		defer shm.ShmClose()

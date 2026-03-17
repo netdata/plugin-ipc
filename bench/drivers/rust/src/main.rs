@@ -399,6 +399,12 @@ fn run_batch_ping_pong_client(
                     Err(_) => std::thread::sleep(Duration::from_millis(5)),
                 }
             }
+            if shm_ctx.is_none() {
+                eprintln!(
+                    "batch client: shm attach failed after retries (profile=0x{:x}, session={})",
+                    sp, session.session_id
+                );
+            }
             shm_ctx
         } else {
             None
@@ -406,6 +412,15 @@ fn run_batch_ping_pong_client(
     };
     #[cfg(not(target_os = "linux"))]
     let shm: Option<()> = None;
+
+    #[cfg(target_os = "linux")]
+    if (session.selected_profile == PROFILE_SHM_HYBRID
+        || session.selected_profile == protocol::PROFILE_SHM_FUTEX)
+        && shm.is_none()
+    {
+        drop(session);
+        return 1;
+    }
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
@@ -464,12 +479,14 @@ fn run_batch_ping_pong_client(
             hdr.encode(&mut msg[..HEADER_SIZE]);
             msg[HEADER_SIZE..].copy_from_slice(&req_buf[..req_len]);
 
-            if shm_ctx.send(&msg).is_err() {
+            if let Err(err) = shm_ctx.send(&msg) {
+                eprintln!("batch client: shm send failed: {err}");
                 Err(())
             } else {
                 match shm_ctx.receive(&mut recv_buf, 30000) {
                     Ok(resp_len) => {
                         if resp_len < HEADER_SIZE {
+                            eprintln!("batch client: shm response too short: {} bytes", resp_len);
                             Err(())
                         } else {
                             match Header::decode(&recv_buf[..resp_len]) {
@@ -477,11 +494,17 @@ fn run_batch_ping_pong_client(
                                     let payload = recv_buf[HEADER_SIZE..resp_len].to_vec();
                                     Ok((resp_hdr, payload))
                                 }
-                                Err(_) => Err(()),
+                                Err(err) => {
+                                    eprintln!("batch client: shm header decode failed: {err}");
+                                    Err(())
+                                }
                             }
                         }
                     }
-                    Err(_) => Err(()),
+                    Err(err) => {
+                        eprintln!("batch client: shm receive failed: {err}");
+                        Err(())
+                    }
                 }
             }
         } else {
@@ -946,6 +969,16 @@ fn run_ping_pong_client(
 
     #[cfg(not(target_os = "linux"))]
     let shm: Option<()> = None;
+
+    #[cfg(target_os = "linux")]
+    if (session.selected_profile == PROFILE_SHM_HYBRID
+        || session.selected_profile == protocol::PROFILE_SHM_FUTEX)
+        && shm.is_none()
+    {
+        eprintln!("client: shm attach failed after retries");
+        drop(session);
+        return 1;
+    }
 
     while wall_start.elapsed() < deadline {
         rl.wait();

@@ -241,7 +241,7 @@ func TestShmStaleRecovery(t *testing.T) {
 
 	// Write a dead PID into the header
 	binary.NativeEndian.PutUint32(first.data[8:12], 99999) // very unlikely alive
-	first.ShmClose() // close without unlink
+	first.ShmClose()                                       // close without unlink
 
 	// Clean up stale regions (as production server would)
 	ShmCleanupStale(testShmRunDir, svc)
@@ -255,6 +255,39 @@ func TestShmStaleRecovery(t *testing.T) {
 		t.Errorf("new region capacity: %d, want >= 2048", second.requestCapacity)
 	}
 	second.ShmDestroy()
+}
+
+func TestShmClientAttachPartialHeaderNotReady(t *testing.T) {
+	ensureShmRunDir(t)
+	svc := "go_shm_partial"
+	cleanupShmFiles(t, svc)
+	defer cleanupShmFiles(t, svc)
+
+	server, err := ShmServerCreate(testShmRunDir, svc, 5, 1024, 1024)
+	if err != nil {
+		t.Fatalf("server create: %v", err)
+	}
+	defer server.ShmDestroy()
+
+	reqOff := binary.NativeEndian.Uint32(server.data[shmHeaderReqOffOff : shmHeaderReqOffOff+4])
+	reqCap := binary.NativeEndian.Uint32(server.data[shmHeaderReqCapOff : shmHeaderReqCapOff+4])
+	respOff := binary.NativeEndian.Uint32(server.data[shmHeaderRespOffOff : shmHeaderRespOffOff+4])
+	respCap := binary.NativeEndian.Uint32(server.data[shmHeaderRespCapOff : shmHeaderRespCapOff+4])
+
+	binary.NativeEndian.PutUint32(server.data[shmHeaderReqOffOff:shmHeaderReqOffOff+4], 0)
+	binary.NativeEndian.PutUint32(server.data[shmHeaderReqCapOff:shmHeaderReqCapOff+4], 0)
+	binary.NativeEndian.PutUint32(server.data[shmHeaderRespOffOff:shmHeaderRespOffOff+4], 0)
+	binary.NativeEndian.PutUint32(server.data[shmHeaderRespCapOff:shmHeaderRespCapOff+4], 0)
+
+	_, err = ShmClientAttach(testShmRunDir, svc, 5)
+	if !errors.Is(err, ErrShmNotReady) {
+		t.Fatalf("client attach error = %v, want %v", err, ErrShmNotReady)
+	}
+
+	binary.NativeEndian.PutUint32(server.data[shmHeaderReqOffOff:shmHeaderReqOffOff+4], reqOff)
+	binary.NativeEndian.PutUint32(server.data[shmHeaderReqCapOff:shmHeaderReqCapOff+4], reqCap)
+	binary.NativeEndian.PutUint32(server.data[shmHeaderRespOffOff:shmHeaderRespOffOff+4], respOff)
+	binary.NativeEndian.PutUint32(server.data[shmHeaderRespCapOff:shmHeaderRespCapOff+4], respCap)
 }
 
 func TestShmLargeMessage(t *testing.T) {

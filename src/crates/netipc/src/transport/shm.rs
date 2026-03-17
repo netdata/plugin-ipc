@@ -397,6 +397,28 @@ impl ShmContext {
             )
         };
 
+        let header_end = align64(HEADER_LEN as u32);
+        if req_off < header_end || req_cap == 0 || resp_off < header_end || resp_cap == 0 {
+            unsafe {
+                libc::munmap(base as *mut libc::c_void, file_size);
+                libc::close(fd);
+            }
+            return Err(ShmError::NotReady);
+        }
+
+        if req_off % REGION_ALIGNMENT != 0
+            || req_cap % REGION_ALIGNMENT != 0
+            || resp_off % REGION_ALIGNMENT != 0
+            || resp_cap % REGION_ALIGNMENT != 0
+            || resp_off < align64(req_off + req_cap)
+        {
+            unsafe {
+                libc::munmap(base as *mut libc::c_void, file_size);
+                libc::close(fd);
+            }
+            return Err(ShmError::BadSize);
+        }
+
         // Validate region size
         let req_end = req_off as usize + req_cap as usize;
         let resp_end = resp_off as usize + resp_cap as usize;
@@ -1737,10 +1759,50 @@ mod tests {
     }
 
     #[test]
+    fn test_client_attach_partial_header_not_ready() {
+        ensure_run_dir();
+        let svc = "rs_shm_partial";
+        let sid: u64 = 63;
+        cleanup_shm(svc, sid);
+
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
+
+        let hdr = server.base as *mut RegionHeader;
+        let saved = unsafe {
+            (
+                (*hdr).request_offset,
+                (*hdr).request_capacity,
+                (*hdr).response_offset,
+                (*hdr).response_capacity,
+            )
+        };
+
+        unsafe {
+            (*hdr).request_offset = 0;
+            (*hdr).request_capacity = 0;
+            (*hdr).response_offset = 0;
+            (*hdr).response_capacity = 0;
+        }
+
+        let result = ShmContext::client_attach(TEST_RUN_DIR, svc, sid);
+        assert!(matches!(result, Err(ShmError::NotReady)));
+
+        unsafe {
+            (*hdr).request_offset = saved.0;
+            (*hdr).request_capacity = saved.1;
+            (*hdr).response_offset = saved.2;
+            (*hdr).response_capacity = saved.3;
+        }
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    #[test]
     fn test_client_attach_bad_size() {
         ensure_run_dir();
         let svc = "rs_shm_badsz";
-        let sid: u64 = 62;
+        let sid: u64 = 64;
         cleanup_shm(svc, sid);
 
         let mut server =

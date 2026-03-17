@@ -400,6 +400,26 @@ nipc_shm_error_t nipc_shm_client_attach(const char *run_dir,
         return NIPC_SHM_ERR_BAD_HEADER;
     }
 
+    size_t header_end = align64((uint32_t)NIPC_SHM_HEADER_LEN);
+    if (hdr->request_offset < header_end ||
+        hdr->request_capacity == 0 ||
+        hdr->response_offset < header_end ||
+        hdr->response_capacity == 0) {
+        munmap(map, file_size);
+        close(fd);
+        return NIPC_SHM_ERR_NOT_READY;
+    }
+
+    if ((hdr->request_offset % NIPC_SHM_REGION_ALIGNMENT) != 0 ||
+        (hdr->request_capacity % NIPC_SHM_REGION_ALIGNMENT) != 0 ||
+        (hdr->response_offset % NIPC_SHM_REGION_ALIGNMENT) != 0 ||
+        (hdr->response_capacity % NIPC_SHM_REGION_ALIGNMENT) != 0 ||
+        hdr->response_offset < align64(hdr->request_offset + hdr->request_capacity)) {
+        munmap(map, file_size);
+        close(fd);
+        return NIPC_SHM_ERR_BAD_SIZE;
+    }
+
     /* Validate region is large enough for the declared areas. */
     size_t needed = 0;
     size_t req_end  = (size_t)hdr->request_offset + hdr->request_capacity;

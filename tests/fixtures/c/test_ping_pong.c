@@ -192,8 +192,7 @@ static void test_increment_ping_pong(void)
     for (int round = 0; round < 10; round++) {
         uint64_t sent = value;
         uint64_t result;
-        nipc_error_t err = nipc_client_call_increment(
-            &client, sent, resp_buf, sizeof(resp_buf), &result);
+        nipc_error_t err = nipc_client_call_increment(&client, sent, &result);
 
         if (err != NIPC_OK) {
             printf("  FAIL: round %d: call error %d\n", round, err);
@@ -258,8 +257,7 @@ static void test_string_reverse_ping_pong(void)
 
         nipc_string_reverse_view_t view;
         nipc_error_t err = nipc_client_call_string_reverse(
-            &client, current, sent_len,
-            resp_buf, sizeof(resp_buf), &view);
+            &client, current, sent_len, &view);
 
         if (err != NIPC_OK) {
             printf("  FAIL: round %d: call error %d\n", round, err);
@@ -336,7 +334,7 @@ static void test_increment_batch(void)
     uint8_t resp_buf[RESPONSE_BUF];
 
     nipc_error_t err = nipc_client_call_increment_batch(
-        &client, requests, 5, responses, resp_buf, sizeof(resp_buf));
+        &client, requests, 5, responses);
 
     check("batch call ok", err == NIPC_OK);
 
@@ -387,24 +385,22 @@ static void test_mixed_methods(void)
     uint64_t inc_val;
     nipc_error_t err;
 
-    err = nipc_client_call_increment(&client, 100, resp_buf, sizeof(resp_buf), &inc_val);
+    err = nipc_client_call_increment(&client, 100, &inc_val);
     check("increment 100 -> 101", err == NIPC_OK && inc_val == 101);
 
     nipc_string_reverse_view_t sv;
-    err = nipc_client_call_string_reverse(&client, "hello", 5,
-                                           resp_buf, sizeof(resp_buf), &sv);
+    err = nipc_client_call_string_reverse(&client, "hello", 5, &sv);
     check("reverse 'hello' -> 'olleh'",
           err == NIPC_OK && sv.str_len == 5 && memcmp(sv.str, "olleh", 5) == 0);
 
-    err = nipc_client_call_increment(&client, inc_val, resp_buf, sizeof(resp_buf), &inc_val);
+    err = nipc_client_call_increment(&client, inc_val, &inc_val);
     check("increment 101 -> 102", err == NIPC_OK && inc_val == 102);
 
-    err = nipc_client_call_string_reverse(&client, "world", 5,
-                                           resp_buf, sizeof(resp_buf), &sv);
+    err = nipc_client_call_string_reverse(&client, "world", 5, &sv);
     check("reverse 'world' -> 'dlrow'",
           err == NIPC_OK && sv.str_len == 5 && memcmp(sv.str, "dlrow", 5) == 0);
 
-    err = nipc_client_call_increment(&client, inc_val, resp_buf, sizeof(resp_buf), &inc_val);
+    err = nipc_client_call_increment(&client, inc_val, &inc_val);
     check("increment 102 -> 103", err == NIPC_OK && inc_val == 103);
 
     nipc_client_close(&client);
@@ -438,8 +434,7 @@ static void test_empty_string(void)
 
     uint8_t resp_buf[RESPONSE_BUF];
     nipc_string_reverse_view_t sv;
-    nipc_error_t err = nipc_client_call_string_reverse(
-        &client, "", 0, resp_buf, sizeof(resp_buf), &sv);
+    nipc_error_t err = nipc_client_call_string_reverse(&client, "", 0, &sv);
 
     check("empty string: call ok", err == NIPC_OK);
     check("empty string: result len == 0", err == NIPC_OK && sv.str_len == 0);

@@ -317,8 +317,7 @@ static void test_cgroups_call(void)
     uint8_t resp_buf[RESPONSE_BUF_SIZE];
     nipc_cgroups_resp_view_t view;
 
-    nipc_error_t err = nipc_client_call_cgroups_snapshot(
-        &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
     check("call succeeded", err == NIPC_OK);
 
     if (err == NIPC_OK) {
@@ -393,8 +392,7 @@ static void test_retry_on_failure(void)
     uint8_t resp_buf[RESPONSE_BUF_SIZE];
     nipc_cgroups_resp_view_t view;
 
-    nipc_error_t err = nipc_client_call_cgroups_snapshot(
-        &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
     check("first call succeeded", err == NIPC_OK);
 
     /* Kill server */
@@ -411,8 +409,7 @@ static void test_retry_on_failure(void)
     /* Next call should trigger reconnect + retry (at-least-once).
      * The first attempt will fail because the old session is dead.
      * L2 must detect this, reconnect, and retry once. */
-    err = nipc_client_call_cgroups_snapshot(
-        &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+    err = nipc_client_call_cgroups_snapshot(&client, &view);
     check("call after server restart succeeded", err == NIPC_OK);
 
     if (err == NIPC_OK) {
@@ -456,13 +453,17 @@ static void test_multiple_clients(void)
     /* Make a call from client 1 */
     uint8_t req_buf1[64], resp_buf1[RESPONSE_BUF_SIZE];
     nipc_cgroups_resp_view_t view1;
-    nipc_error_t err1 = nipc_client_call_cgroups_snapshot(
-        &client1, req_buf1, resp_buf1, sizeof(resp_buf1), &view1);
+    nipc_error_t err1 = nipc_client_call_cgroups_snapshot(&client1, &view1);
     check("client 1 call ok", err1 == NIPC_OK);
 
+    if (err1 == NIPC_OK)
+        check("client 1 got 3 items", view1.item_count == 3);
+
     /* Close client 1 so the server can accept client 2
-     * (single-threaded acceptor) */
+     * (single-threaded acceptor). Give the server a short window to
+     * observe the disconnect before opening the next session. */
     nipc_client_close(&client1);
+    usleep(50000);
 
     nipc_client_init(&client2, TEST_RUN_DIR, svc, &ccfg);
     nipc_client_refresh(&client2);
@@ -471,12 +472,9 @@ static void test_multiple_clients(void)
     /* Make a call from client 2 */
     uint8_t req_buf2[64], resp_buf2[RESPONSE_BUF_SIZE];
     nipc_cgroups_resp_view_t view2;
-    nipc_error_t err2 = nipc_client_call_cgroups_snapshot(
-        &client2, req_buf2, resp_buf2, sizeof(resp_buf2), &view2);
+    nipc_error_t err2 = nipc_client_call_cgroups_snapshot(&client2, &view2);
     check("client 2 call ok", err2 == NIPC_OK);
 
-    if (err1 == NIPC_OK)
-        check("client 1 got 3 items", view1.item_count == 3);
     if (err2 == NIPC_OK)
         check("client 2 got 3 items", view2.item_count == 3);
 
@@ -513,8 +511,7 @@ static void test_handler_failure(void)
      * it was previously READY, but the handler will fail again. */
     uint8_t req_buf[64], resp_buf[RESPONSE_BUF_SIZE];
     nipc_cgroups_resp_view_t view;
-    nipc_error_t err = nipc_client_call_cgroups_snapshot(
-        &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
     check("call fails when handler fails", err != NIPC_OK);
 
     /* Stats should reflect the error */
@@ -561,8 +558,7 @@ static void test_status_reporting(void)
     for (int i = 0; i < 3; i++) {
         uint8_t req_buf[64], resp_buf[RESPONSE_BUF_SIZE];
         nipc_cgroups_resp_view_t view;
-        nipc_error_t err = nipc_client_call_cgroups_snapshot(
-            &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+        nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
         check("call succeeded", err == NIPC_OK);
     }
 
@@ -576,8 +572,7 @@ static void test_status_reporting(void)
     nipc_client_close(&client);
     uint8_t req_buf[64], resp_buf[RESPONSE_BUF_SIZE];
     nipc_cgroups_resp_view_t view;
-    nipc_error_t err = nipc_client_call_cgroups_snapshot(
-        &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
     check("call on disconnected fails", err != NIPC_OK);
 
     nipc_client_status_t s2;
@@ -619,8 +614,7 @@ static void *drain_client_fn(void *arg)
         for (int i = 0; i < 5; i++) {
             uint8_t req_buf[64], resp_buf[RESPONSE_BUF_SIZE];
             nipc_cgroups_resp_view_t view;
-            nipc_error_t err = nipc_client_call_cgroups_snapshot(
-                &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+            nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
             if (err == NIPC_OK)
                 __atomic_fetch_add(&ctx->call_ok, 1, __ATOMIC_RELAXED);
             usleep(10000); /* 10ms between calls */
@@ -770,8 +764,7 @@ static void test_non_request_terminates_session(void)
     if (nipc_client_ready(&verify_client)) {
         uint8_t vreq[64], vresp[RESPONSE_BUF_SIZE];
         nipc_cgroups_resp_view_t vview;
-        nipc_error_t verr = nipc_client_call_cgroups_snapshot(
-            &verify_client, vreq, vresp, sizeof(vresp), &vview);
+        nipc_error_t verr = nipc_client_call_cgroups_snapshot(&verify_client, &vview);
         check("normal call succeeds after bad client", verr == NIPC_OK);
         if (verr == NIPC_OK)
             check("response correct after bad client", vview.item_count == 3);
@@ -918,22 +911,19 @@ static void test_shm_l2_service(void)
     uint8_t resp_buf[RESPONSE_BUF_SIZE];
     uint64_t inc_val;
 
-    nipc_error_t err = nipc_client_call_increment(
-        &client, 41, resp_buf, sizeof(resp_buf), &inc_val);
+    nipc_error_t err = nipc_client_call_increment(&client, 41, &inc_val);
     check("increment(41) ok", err == NIPC_OK);
     if (err == NIPC_OK)
         check("increment(41) == 42", inc_val == 42);
 
-    err = nipc_client_call_increment(
-        &client, 99, resp_buf, sizeof(resp_buf), &inc_val);
+    err = nipc_client_call_increment(&client, 99, &inc_val);
     check("increment(99) ok", err == NIPC_OK);
     if (err == NIPC_OK)
         check("increment(99) == 100", inc_val == 100);
 
     /* STRING_REVERSE call */
     nipc_string_reverse_view_t str_view;
-    err = nipc_client_call_string_reverse(
-        &client, "hello", 5, resp_buf, sizeof(resp_buf), &str_view);
+    err = nipc_client_call_string_reverse(&client, "hello", 5, &str_view);
     check("string_reverse(hello) ok", err == NIPC_OK);
     if (err == NIPC_OK)
         check("string_reverse(hello) == olleh",
@@ -943,8 +933,7 @@ static void test_shm_l2_service(void)
     /* CGROUPS_SNAPSHOT call */
     uint8_t cg_req[64];
     nipc_cgroups_resp_view_t cg_view;
-    err = nipc_client_call_cgroups_snapshot(
-        &client, cg_req, resp_buf, sizeof(resp_buf), &cg_view);
+    err = nipc_client_call_cgroups_snapshot(&client, &cg_view);
     check("cgroups_snapshot ok", err == NIPC_OK);
     if (err == NIPC_OK) {
         check("cgroups item_count == 3", cg_view.item_count == 3);
@@ -1186,8 +1175,7 @@ static void test_client_broken_refresh(void)
     /* Make a call - should fail and put client in BROKEN state */
     uint8_t req_buf[64], resp_buf[RESPONSE_BUF_SIZE];
     nipc_cgroups_resp_view_t view;
-    nipc_error_t err = nipc_client_call_cgroups_snapshot(
-        &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
     check("call fails (server gone)", err != NIPC_OK);
     /* After retry, the state is BROKEN (retry reconnect failed)
      * OR NOT_FOUND (reconnect attempt returned not found).
@@ -1264,8 +1252,7 @@ static void test_batch_increment(void)
     uint8_t resp_buf[RESPONSE_BUF_SIZE];
 
     nipc_error_t err = nipc_client_call_increment_batch(
-        &client, request_values, 5, response_values,
-        resp_buf, sizeof(resp_buf));
+        &client, request_values, 5, response_values);
     check("batch increment ok", err == NIPC_OK);
 
     if (err == NIPC_OK) {
@@ -1523,20 +1510,17 @@ static void test_client_call_disconnected(void)
     /* Client is DISCONNECTED, call should fail immediately */
     uint8_t req_buf[64], resp_buf[RESPONSE_BUF_SIZE];
     nipc_cgroups_resp_view_t view;
-    nipc_error_t err = nipc_client_call_cgroups_snapshot(
-        &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
     check("call on DISCONNECTED fails", err == NIPC_ERR_NOT_READY);
 
     /* Same for increment */
     uint64_t inc_val;
-    err = nipc_client_call_increment(&client, 42, resp_buf,
-                                       sizeof(resp_buf), &inc_val);
+    err = nipc_client_call_increment(&client, 42, &inc_val);
     check("increment on DISCONNECTED fails", err == NIPC_ERR_NOT_READY);
 
     /* Same for string_reverse */
     nipc_string_reverse_view_t sv;
-    err = nipc_client_call_string_reverse(&client, "hi", 2, resp_buf,
-                                            sizeof(resp_buf), &sv);
+    err = nipc_client_call_string_reverse(&client, "hi", 2, &sv);
     check("string_reverse on DISCONNECTED fails", err == NIPC_ERR_NOT_READY);
 
     nipc_client_close(&client);

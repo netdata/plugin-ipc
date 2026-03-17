@@ -252,6 +252,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_link_libraries(test_service PRIVATE
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
     )
+    target_compile_definitions(test_service PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_service COMMAND test_service)
     set_tests_properties(test_service PROPERTIES TIMEOUT 60)
 
@@ -260,6 +261,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_link_libraries(test_multi_server PRIVATE
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
     )
+    target_compile_definitions(test_multi_server PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_multi_server COMMAND test_multi_server)
     set_tests_properties(test_multi_server PROPERTIES TIMEOUT 120)
 
@@ -268,12 +270,14 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_link_libraries(interop_service_c PRIVATE
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
     )
+    target_compile_definitions(interop_service_c PRIVATE NIPC_INTERNAL_TESTING=1)
 
     # Stress tests (Phase H4: large-scale and stress testing)
     add_executable(test_stress tests/fixtures/c/test_stress.c)
     target_link_libraries(test_stress PRIVATE
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
     )
+    target_compile_definitions(test_stress PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_stress COMMAND test_stress)
     set_tests_properties(test_stress PROPERTIES TIMEOUT 180)
 
@@ -282,6 +286,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_link_libraries(test_ping_pong PRIVATE
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
     )
+    target_compile_definitions(test_ping_pong PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_ping_pong COMMAND test_ping_pong)
     set_tests_properties(test_ping_pong PROPERTIES TIMEOUT 30)
 
@@ -290,6 +295,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_link_libraries(test_chaos PRIVATE
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
     )
+    target_compile_definitions(test_chaos PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_chaos COMMAND test_chaos)
     set_tests_properties(test_chaos PROPERTIES TIMEOUT 120)
 endif()
@@ -349,7 +355,10 @@ if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
             ${GO_EXECUTABLE} test -count=1 -timeout=60s ./pkg/netipc/transport/posix/
         WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
     )
-    set_tests_properties(test_uds_go PROPERTIES TIMEOUT 60)
+    set_tests_properties(test_uds_go PROPERTIES
+        TIMEOUT 60
+        RESOURCE_LOCK go_posix_transport_tests
+    )
 
     # Build Go UDS interop binary
     add_custom_target(interop_uds_go ALL
@@ -367,7 +376,10 @@ if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
                 -run TestShm ./pkg/netipc/transport/posix/
             WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
         )
-        set_tests_properties(test_shm_go PROPERTIES TIMEOUT 60)
+        set_tests_properties(test_shm_go PROPERTIES
+            TIMEOUT 60
+            RESOURCE_LOCK go_posix_transport_tests
+        )
 
         # Build Go SHM interop binary
         add_custom_target(interop_shm_go ALL
@@ -451,6 +463,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_link_libraries(test_cache PRIVATE
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
     )
+    target_compile_definitions(test_cache PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_cache COMMAND test_cache)
     set_tests_properties(test_cache PROPERTIES TIMEOUT 120)
 
@@ -459,6 +472,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_link_libraries(interop_cache_c PRIVATE
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
     )
+    target_compile_definitions(interop_cache_c PRIVATE NIPC_INTERNAL_TESTING=1)
 endif()
 
 # --- Rust L3 cache tests ---------------------------------------------------
@@ -674,12 +688,14 @@ if(NETIPC_WINDOWS_RUNTIME)
     target_link_libraries(interop_service_win_c PRIVATE
         netipc_service_win netipc_win_shm netipc_named_pipe netipc_protocol
     )
+    target_compile_definitions(interop_service_win_c PRIVATE NIPC_INTERNAL_TESTING=1)
 
     # C Windows L3 cache interop binary
     add_executable(interop_cache_win_c tests/fixtures/c/interop_cache_win.c)
     target_link_libraries(interop_cache_win_c PRIVATE
         netipc_service_win netipc_win_shm netipc_named_pipe netipc_protocol
     )
+    target_compile_definitions(interop_cache_win_c PRIVATE NIPC_INTERNAL_TESTING=1)
 endif()
 
 # --- Rust Windows L2/L3 interop binaries ------------------------------------
@@ -778,6 +794,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_link_libraries(bench_posix_c PRIVATE
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads m
     )
+    target_compile_definitions(bench_posix_c PRIVATE NIPC_INTERNAL_TESTING=1)
     target_compile_options(bench_posix_c PRIVATE -O2)
 endif()
 
@@ -824,6 +841,7 @@ if(NETIPC_WINDOWS_RUNTIME)
     target_link_libraries(bench_windows_c PRIVATE
         netipc_service_win netipc_named_pipe netipc_win_shm netipc_protocol
     )
+    target_compile_definitions(bench_windows_c PRIVATE NIPC_INTERNAL_TESTING=1)
     target_compile_options(bench_windows_c PRIVATE -O2)
 
     # Rust Windows benchmark binary (release build for accurate performance)

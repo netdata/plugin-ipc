@@ -1119,6 +1119,45 @@ static void test_shm_truncated_file(void)
     }
 }
 
+static void test_shm_partial_header_not_ready(void)
+{
+    printf("Test: Client attach retries partial header instead of accepting it\n");
+    const char *svc = "shm_partial_header";
+    cleanup_shm(svc);
+
+    nipc_shm_ctx_t server;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 4096, 4096, &server);
+    check("server create", err == NIPC_SHM_OK);
+
+    if (err == NIPC_SHM_OK) {
+        nipc_shm_region_header_t *hdr =
+            (nipc_shm_region_header_t *)server.base;
+        uint32_t saved_req_off = hdr->request_offset;
+        uint32_t saved_req_cap = hdr->request_capacity;
+        uint32_t saved_resp_off = hdr->response_offset;
+        uint32_t saved_resp_cap = hdr->response_capacity;
+
+        hdr->request_offset = 0;
+        hdr->request_capacity = 0;
+        hdr->response_offset = 0;
+        hdr->response_capacity = 0;
+
+        nipc_shm_ctx_t client;
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
+        check("partial header treated as not ready",
+              err == NIPC_SHM_ERR_NOT_READY);
+
+        hdr->request_offset = saved_req_off;
+        hdr->request_capacity = saved_req_cap;
+        hdr->response_offset = saved_resp_off;
+        hdr->response_capacity = saved_resp_cap;
+        nipc_shm_destroy(&server);
+    }
+
+    cleanup_shm(svc);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Coverage: nipc_shm_destroy(NULL), nipc_shm_close(NULL),             */
 /*  nipc_shm_receive(NULL, ...)                                         */
@@ -1485,6 +1524,7 @@ int main(void)
     test_shm_bad_magic_file();         printf("\n");
     test_shm_bad_version_file();       printf("\n");
     test_shm_truncated_file();         printf("\n");
+    test_shm_partial_header_not_ready(); printf("\n");
 
     /* Coverage gap tests */
     test_null_params();                printf("\n");

@@ -82,6 +82,80 @@ Working conclusion from the docs:
     - L2 still exposes raw request bytes and caller-managed response buffers
 - Therefore the next code changes must be preceded by a doc correction/normalization pass for Level 2, so implementation is aligned with one explicit model instead of a mixed one.
 
+## Implementation / Validation Update (2026-03-17)
+
+Verified facts from the current code and reruns:
+
+- The public Level 2 spec/docs are now normalized around the typed-only model:
+  - `docs/level2-typed-api.md`
+  - `docs/getting-started.md`
+  - `docs/codec.md`
+- The C public header and implementation are now aligned with that typed L2 contract for clients.
+- Internal/raw managed-server entrypoints are still available only for internal tests/benchmarks under `NIPC_INTERNAL_TESTING`:
+  - public spec remains typed-only
+  - internal malformed-response tests and raw benchmark drivers still work
+- C call sites that used the old public L2 buffer-based API were updated:
+  - fixtures, stress/ping-pong/service tests, and C benchmark drivers now use typed client calls
+- Go L1 borrowed-payload test expectations were fixed:
+  - `src/go/pkg/netipc/transport/posix/uds_test.go`
+  - payloads that must outlive a receive are now copied in the test
+- CTest scheduling for Go POSIX transport tests is now serialized with a `RESOURCE_LOCK`:
+  - avoids `test_uds_go` vs `test_shm_go` racing on the same fixed SHM path / service names
+
+Linux rerun status:
+
+- `cmake --build build -j4`: passes
+- `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `36/36` passed
+- Focused SHM transport tests all pass after the latest fix:
+  - C: `build/bin/test_shm`
+  - Go: `go test ./pkg/netipc/transport/posix -run TestShm -count=1`
+  - Rust: `cargo test --manifest-path src/crates/netipc/Cargo.toml transport::shm -- --nocapture`
+
+New root cause found and fixed on 2026-03-17:
+
+- POSIX SHM `client_attach()` in all 3 languages could accept a partially initialized region header.
+- Concrete failure mode:
+  - `magic`, `version`, and `header_len` were already visible
+  - `request_offset`, `request_capacity`, `response_offset`, `response_capacity` could still be zero
+  - client attach succeeded with cached capacities `0/0`
+  - the first SHM send then failed with `message exceeds SHM area capacity`
+- Evidence:
+  - reproducible intermittent failure in `shm-batch-ping-pong rust->c @ 1000/s`
+  - Rust diagnostic run showed:
+    - `batch client: shm send failed: message exceeds SHM area capacity`
+    - with a normal request size and cached SHM capacities `0/0`
+- Fix implemented:
+  - C:
+    - `src/libnetdata/netipc/src/transport/posix/netipc_shm.c`
+  - Rust:
+    - `src/crates/netipc/src/transport/shm.rs`
+  - Go:
+    - `src/go/pkg/netipc/transport/posix/shm_linux.go`
+  - client attach now treats zero / not-yet-valid area geometry as `NotReady`, so the existing retry loops handle the race correctly
+- Regression tests added:
+  - C:
+    - `tests/fixtures/c/test_shm.c`
+  - Rust:
+    - `src/crates/netipc/src/transport/shm.rs`
+  - Go:
+    - `src/go/pkg/netipc/transport/posix/shm_linux_test.go`
+
+Current POSIX benchmark status after the SHM attach fix:
+
+- `tests/run-posix-bench.sh benchmarks-posix.csv 5`: passes, complete `201`-row matrix
+- `tests/generate-benchmarks-posix.sh benchmarks-posix.csv benchmarks-posix.md`: generates the report and fails only on configured floors
+- Verified remaining floor violations are limited to `snapshot-shm` max-rate rows:
+  - `c -> c`: `624516` vs min `1000000`
+  - `rust -> c`: `625029` vs min `1000000`
+  - `go -> c`: `595669` vs min `800000`
+  - `c -> rust`: `450596` vs min `1000000`
+  - `rust -> rust`: `445944` vs min `1000000`
+  - `go -> rust`: `462507` vs min `800000`
+  - `rust -> go`: `674303` vs min `800000`
+- Verified improvement:
+  - previous `snapshot-baseline` floor failures are gone in the current rerun
+  - the previous functional blocker in `shm-batch-ping-pong rust->c @ 1000/s` is gone
+
 ## Decisions
 
 ### Made
@@ -97,6 +171,11 @@ Working conclusion from the docs:
   - the `win11` clone of this repo is disposable for this task
   - it may be cleaned/reset there before pull/build/test if needed
   - this approval does **not** apply to the local Linux worktree
+- User direction on 2026-03-17 after the POSIX reruns:
+  - commit the validated functional fixes first
+  - do a proper root-cause review of the remaining `snapshot-shm` underperformance after that commit
+  - implication:
+    - the remaining performance-floor failures are not to be “blindly fixed” in this phase without evidence
 
 ### Pending
 
@@ -309,6 +388,11 @@ Working conclusion from the docs:
 
 - [x] Add explicit run metadata to benchmark CSV output, starting with `target_rps`.
 - [x] Update both benchmark generators to validate the full matrix from explicit CSV data and fail on incomplete inputs.
+- [ ] Bring the C Level 2 implementation back in sync with the normalized typed public API.
+  - Verified on 2026-03-17:
+    - `src/libnetdata/netipc/include/netipc/netipc_service.h` already exposes the new typed public L2 contract.
+    - `src/libnetdata/netipc/src/service/netipc_service.c` and `src/libnetdata/netipc/src/service/netipc_service_win.c` still implement the old caller-buffer API.
+    - the tree does not build until those sources and the C call sites are migrated.
 
 ## Plan
 

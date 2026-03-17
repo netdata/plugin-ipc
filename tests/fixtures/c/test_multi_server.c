@@ -249,12 +249,10 @@ static void stop_server(server_thread_ctx_t *sctx, pthread_t tid)
  * Returns true if all checks passed. */
 static bool do_call_and_verify(nipc_client_ctx_t *client, int client_id)
 {
-    uint8_t req_buf[64];
-    uint8_t resp_buf[RESPONSE_BUF_SIZE];
     nipc_cgroups_resp_view_t view;
+    (void)client_id;
 
-    nipc_error_t err = nipc_client_call_cgroups_snapshot(
-        client, req_buf, resp_buf, sizeof(resp_buf), &view);
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(client, &view);
 
     if (err != NIPC_OK)
         return false;
@@ -709,12 +707,10 @@ static void *shutdown_client_fn(void *arg)
     __atomic_store_n(&ctx->connected, 1, __ATOMIC_RELEASE);
 
     /* Keep making calls until failure (server shutdown) */
-    uint8_t req_buf[64], resp_buf[RESPONSE_BUF_SIZE];
     nipc_cgroups_resp_view_t view;
 
     while (1) {
-        nipc_error_t err = nipc_client_call_cgroups_snapshot(
-            &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+        nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
         if (err != NIPC_OK)
             break;
         __atomic_fetch_add(&ctx->calls_made, 1, __ATOMIC_RELAXED);

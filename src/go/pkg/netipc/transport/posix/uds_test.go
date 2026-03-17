@@ -337,7 +337,7 @@ func TestPipelining(t *testing.T) {
 		if err != nil {
 			t.Fatalf("server Receive[%d]: %v", i, err)
 		}
-		reqs = append(reqs, reqInfo{rHdr, rPayload})
+		reqs = append(reqs, reqInfo{rHdr, append([]byte(nil), rPayload...)})
 	}
 
 	// Respond in reverse order
@@ -364,7 +364,7 @@ func TestPipelining(t *testing.T) {
 		if rHdr.Kind != protocol.KindResponse {
 			t.Errorf("received kind=%d, want RESPONSE", rHdr.Kind)
 		}
-		received[rHdr.MessageID] = rPayload
+		received[rHdr.MessageID] = append([]byte(nil), rPayload...)
 	}
 
 	// Verify all messages received with correct data

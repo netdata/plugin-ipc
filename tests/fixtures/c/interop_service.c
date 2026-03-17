@@ -209,15 +209,12 @@ static int run_client(const char *run_dir, const char *service)
         return 1;
     }
 
-    uint8_t req_buf[64];
-    uint8_t resp_buf[RESPONSE_BUF_SIZE];
     int ok = 1;
 
     /* --- Test INCREMENT: 42 -> 43 --- */
     {
         uint64_t inc_result = 0;
-        nipc_error_t err = nipc_client_call_increment(
-            &client, 42, resp_buf, sizeof(resp_buf), &inc_result);
+        nipc_error_t err = nipc_client_call_increment(&client, 42, &inc_result);
         if (err != NIPC_OK) {
             fprintf(stderr, "client: increment call failed: %d\n", err);
             ok = 0;
@@ -231,8 +228,7 @@ static int run_client(const char *run_dir, const char *service)
     /* --- Test CGROUPS_SNAPSHOT: 3 items --- */
     {
         nipc_cgroups_resp_view_t view;
-        nipc_error_t err = nipc_client_call_cgroups_snapshot(
-            &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+        nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
 
         if (err != NIPC_OK) {
             fprintf(stderr, "client: cgroups call failed: %d\n", err);
@@ -277,8 +273,7 @@ static int run_client(const char *run_dir, const char *service)
     {
         uint64_t batch_in[] = { 10, 20, 30 };
         uint64_t batch_out[3] = { 0 };
-        nipc_error_t err = nipc_client_call_increment_batch(
-            &client, batch_in, 3, batch_out, resp_buf, sizeof(resp_buf));
+        nipc_error_t err = nipc_client_call_increment_batch(&client, batch_in, 3, batch_out);
         if (err != NIPC_OK) {
             fprintf(stderr, "client: increment batch call failed: %d\n", err);
             ok = 0;
@@ -297,8 +292,7 @@ static int run_client(const char *run_dir, const char *service)
     /* --- Test STRING_REVERSE: "hello" -> "olleh" --- */
     {
         nipc_string_reverse_view_t sr_view;
-        nipc_error_t err = nipc_client_call_string_reverse(
-            &client, "hello", 5, resp_buf, sizeof(resp_buf), &sr_view);
+        nipc_error_t err = nipc_client_call_string_reverse(&client, "hello", 5, &sr_view);
         if (err != NIPC_OK) {
             fprintf(stderr, "client: string_reverse call failed: %d\n", err);
             ok = 0;

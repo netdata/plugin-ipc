@@ -23,6 +23,23 @@
 
 /* WaitForSingleObject timeout for server poll loops (ms) */
 #define SERVER_POLL_TIMEOUT_MS 100
+#define NIPC_CLIENT_BUF_DEFAULT 65536u
+
+static size_t client_request_buf_size(const nipc_np_client_config_t *config)
+{
+    uint32_t max_req = config ? config->max_request_payload_bytes : 0;
+    if (max_req == 0)
+        max_req = NIPC_CLIENT_BUF_DEFAULT;
+    return (size_t)max_req;
+}
+
+static size_t client_response_buf_size(const nipc_np_client_config_t *config)
+{
+    uint32_t max_resp = config ? config->max_response_payload_bytes : 0;
+    if (max_resp == 0)
+        max_resp = NIPC_CLIENT_BUF_DEFAULT;
+    return (size_t)max_resp + NIPC_HEADER_LEN;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Internal: client connection helpers                                */
@@ -124,10 +141,9 @@ static nipc_error_t transport_send(nipc_client_ctx_t *ctx,
                                     size_t payload_len)
 {
     if (ctx->shm) {
-        /* SHM: build the full message (header + payload) */
         size_t msg_len = NIPC_HEADER_LEN + payload_len;
-        uint8_t *msg = malloc(msg_len);
-        if (!msg)
+        uint8_t *msg = ctx->send_buf;
+        if (!msg || msg_len > ctx->send_buf_size)
             return NIPC_ERR_OVERFLOW;
 
         hdr->magic      = NIPC_MAGIC_MSG;
@@ -140,7 +156,6 @@ static nipc_error_t transport_send(nipc_client_ctx_t *ctx,
             memcpy(msg + NIPC_HEADER_LEN, payload, payload_len);
 
         nipc_win_shm_error_t serr = nipc_win_shm_send(ctx->shm, msg, msg_len);
-        free(msg);
         return (serr == NIPC_WIN_SHM_OK) ? NIPC_OK : NIPC_ERR_OVERFLOW;
     }
 
@@ -190,15 +205,13 @@ static nipc_error_t transport_receive(nipc_client_ctx_t *ctx,
  * Single-attempt raw call: build envelope, send, receive, validate
  * envelope. The caller handles encode before and decode after.
  *
- * On success, response_payload_out and response_len_out point into
- * response_buf (valid until next call on this context).
+ * On success, response_payload_out and response_len_out point into the
+ * internal client response buffer (valid until next call on this context).
  */
 static nipc_error_t do_raw_call(nipc_client_ctx_t *ctx,
                                  uint16_t method_code,
                                  const void *request_payload,
                                  size_t request_len,
-                                 void *response_buf,
-                                 size_t response_buf_size,
                                  const void **response_payload_out,
                                  size_t *response_len_out)
 {
@@ -215,7 +228,7 @@ static nipc_error_t do_raw_call(nipc_client_ctx_t *ctx,
         return err;
 
     nipc_header_t resp_hdr;
-    err = transport_receive(ctx, response_buf, response_buf_size,
+    err = transport_receive(ctx, ctx->response_buf, ctx->response_buf_size,
                             &resp_hdr, response_payload_out, response_len_out);
     if (err != NIPC_OK)
         return err;
@@ -281,8 +294,6 @@ static nipc_error_t call_with_retry(nipc_client_ctx_t *ctx,
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    uint8_t *response_buf;
-    size_t   response_buf_size;
     nipc_cgroups_resp_view_t *view_out;
 } cgroups_call_state_t;
 
@@ -300,7 +311,6 @@ static nipc_error_t do_cgroups_attempt(nipc_client_ctx_t *ctx, void *state)
     size_t payload_len;
     nipc_error_t err = do_raw_call(ctx, NIPC_METHOD_CGROUPS_SNAPSHOT,
                                      req_buf, req_len,
-                                     s->response_buf, s->response_buf_size,
                                      &payload, &payload_len);
     if (err != NIPC_OK)
         return err;
@@ -341,6 +351,26 @@ void nipc_client_init(nipc_client_ctx_t *ctx,
 
     if (config)
         ctx->transport_config = *config;
+
+    ctx->request_buf_size = client_request_buf_size(config);
+    ctx->response_buf_size = client_response_buf_size(config);
+    ctx->send_buf_size = ctx->request_buf_size + NIPC_HEADER_LEN;
+
+    ctx->request_buf = malloc(ctx->request_buf_size);
+    ctx->response_buf = malloc(ctx->response_buf_size);
+    ctx->send_buf = malloc(ctx->send_buf_size);
+
+    if (!ctx->request_buf || !ctx->response_buf || !ctx->send_buf) {
+        free(ctx->request_buf);
+        free(ctx->response_buf);
+        free(ctx->send_buf);
+        ctx->request_buf = NULL;
+        ctx->response_buf = NULL;
+        ctx->send_buf = NULL;
+        ctx->request_buf_size = 0;
+        ctx->response_buf_size = 0;
+        ctx->send_buf_size = 0;
+    }
 }
 
 bool nipc_client_refresh(nipc_client_ctx_t *ctx)
@@ -387,6 +417,15 @@ void nipc_client_status(const nipc_client_ctx_t *ctx,
 void nipc_client_close(nipc_client_ctx_t *ctx)
 {
     client_disconnect(ctx);
+    free(ctx->request_buf);
+    free(ctx->response_buf);
+    free(ctx->send_buf);
+    ctx->request_buf = NULL;
+    ctx->response_buf = NULL;
+    ctx->send_buf = NULL;
+    ctx->request_buf_size = 0;
+    ctx->response_buf_size = 0;
+    ctx->send_buf_size = 0;
     ctx->state = NIPC_CLIENT_DISCONNECTED;
 }
 
@@ -396,16 +435,9 @@ void nipc_client_close(nipc_client_ctx_t *ctx)
 
 nipc_error_t nipc_client_call_cgroups_snapshot(
     nipc_client_ctx_t *ctx,
-    uint8_t *request_buf,
-    uint8_t *response_buf,
-    size_t response_buf_size,
     nipc_cgroups_resp_view_t *view_out)
 {
-    (void)request_buf; /* request is encoded internally */
-
     cgroups_call_state_t state = {
-        .response_buf      = response_buf,
-        .response_buf_size = response_buf_size,
         .view_out          = view_out,
     };
     return call_with_retry(ctx, do_cgroups_attempt, &state);
@@ -417,8 +449,6 @@ nipc_error_t nipc_client_call_cgroups_snapshot(
 
 typedef struct {
     uint64_t  request_value;
-    uint8_t  *response_buf;
-    size_t    response_buf_size;
     uint64_t *value_out;
 } increment_call_state_t;
 
@@ -436,7 +466,6 @@ static nipc_error_t do_increment_attempt(nipc_client_ctx_t *ctx, void *state)
     size_t payload_len;
     nipc_error_t err = do_raw_call(ctx, NIPC_METHOD_INCREMENT,
                                      req_buf, req_len,
-                                     s->response_buf, s->response_buf_size,
                                      &payload, &payload_len);
     if (err != NIPC_OK)
         return err;
@@ -447,14 +476,10 @@ static nipc_error_t do_increment_attempt(nipc_client_ctx_t *ctx, void *state)
 nipc_error_t nipc_client_call_increment(
     nipc_client_ctx_t *ctx,
     uint64_t request_value,
-    uint8_t *response_buf,
-    size_t response_buf_size,
     uint64_t *value_out)
 {
     increment_call_state_t state = {
         .request_value     = request_value,
-        .response_buf      = response_buf,
-        .response_buf_size = response_buf_size,
         .value_out         = value_out,
     };
     return call_with_retry(ctx, do_increment_attempt, &state);
@@ -468,28 +493,28 @@ typedef struct {
     const uint64_t *request_values;
     uint32_t        count;
     uint64_t       *response_values;
-    uint8_t        *response_buf;
-    size_t          response_buf_size;
 } increment_batch_state_t;
 
 static nipc_error_t do_increment_batch_attempt(nipc_client_ctx_t *ctx,
                                                  void *state)
 {
     increment_batch_state_t *s = (increment_batch_state_t *)state;
+    if (s->count == 0)
+        return NIPC_OK;
 
-    /* Build batch request payload using batch builder */
     size_t req_buf_size = s->count * (8 + NIPC_INCREMENT_PAYLOAD_SIZE) + 64;
-    uint8_t *req_buf = malloc(req_buf_size);
-    if (!req_buf) return NIPC_ERR_OVERFLOW;
+    if (!ctx->request_buf || req_buf_size > ctx->request_buf_size)
+        return NIPC_ERR_OVERFLOW;
 
     nipc_batch_builder_t bb;
-    nipc_batch_builder_init(&bb, req_buf, req_buf_size, s->count);
+    nipc_batch_builder_init(&bb, ctx->request_buf, ctx->request_buf_size, s->count);
 
     for (uint32_t i = 0; i < s->count; i++) {
         uint8_t item[NIPC_INCREMENT_PAYLOAD_SIZE];
         nipc_increment_encode(s->request_values[i], item, sizeof(item));
         nipc_error_t err = nipc_batch_builder_add(&bb, item, sizeof(item));
-        if (err != NIPC_OK) { free(req_buf); return err; }
+        if (err != NIPC_OK)
+            return err;
     }
 
     uint32_t out_count;
@@ -504,17 +529,18 @@ static nipc_error_t do_increment_batch_attempt(nipc_client_ctx_t *ctx,
     hdr.message_id = (uint64_t)(ctx->call_count + 1);
     hdr.transport_status = NIPC_STATUS_OK;
 
-    nipc_error_t err = transport_send(ctx, &hdr, req_buf, req_len);
-    free(req_buf);
-    if (err != NIPC_OK) return err;
+    nipc_error_t err = transport_send(ctx, &hdr, ctx->request_buf, req_len);
+    if (err != NIPC_OK)
+        return err;
 
     /* Receive batch response */
     nipc_header_t resp_hdr;
     const void *payload;
     size_t payload_len;
-    err = transport_receive(ctx, s->response_buf, s->response_buf_size,
+    err = transport_receive(ctx, ctx->response_buf, ctx->response_buf_size,
                             &resp_hdr, &payload, &payload_len);
-    if (err != NIPC_OK) return err;
+    if (err != NIPC_OK)
+        return err;
 
     if (resp_hdr.kind != NIPC_KIND_RESPONSE) return NIPC_ERR_BAD_KIND;
     if (resp_hdr.code != NIPC_METHOD_INCREMENT) return NIPC_ERR_BAD_LAYOUT;
@@ -541,15 +567,12 @@ static nipc_error_t do_increment_batch_attempt(nipc_client_ctx_t *ctx,
 nipc_error_t nipc_client_call_increment_batch(
     nipc_client_ctx_t *ctx,
     const uint64_t *request_values, uint32_t count,
-    uint64_t *response_values,
-    uint8_t *response_buf, size_t response_buf_size)
+    uint64_t *response_values)
 {
     increment_batch_state_t state = {
         .request_values    = request_values,
         .count             = count,
         .response_values   = response_values,
-        .response_buf      = response_buf,
-        .response_buf_size = response_buf_size,
     };
     return call_with_retry(ctx, do_increment_batch_attempt, &state);
 }
@@ -561,8 +584,6 @@ nipc_error_t nipc_client_call_increment_batch(
 typedef struct {
     const char *request_str;
     uint32_t    request_str_len;
-    uint8_t    *response_buf;
-    size_t      response_buf_size;
     nipc_string_reverse_view_t *view_out;
 } string_reverse_call_state_t;
 
@@ -571,29 +592,21 @@ static nipc_error_t do_string_reverse_attempt(nipc_client_ctx_t *ctx,
 {
     string_reverse_call_state_t *s = (string_reverse_call_state_t *)state;
 
-    /* Encode request -- worst case buffer: header + string + NUL */
     size_t req_buf_size = NIPC_STRING_REVERSE_HDR_SIZE + s->request_str_len + 1;
-    uint8_t stack_buf[256];
-    uint8_t *req_buf = (req_buf_size <= sizeof(stack_buf))
-                            ? stack_buf : malloc(req_buf_size);
-    if (!req_buf)
+    if (!ctx->request_buf || req_buf_size > ctx->request_buf_size)
         return NIPC_ERR_OVERFLOW;
 
     size_t req_len = nipc_string_reverse_encode(s->request_str,
                                                   s->request_str_len,
-                                                  req_buf, req_buf_size);
-    if (req_len == 0) {
-        if (req_buf != stack_buf) free(req_buf);
+                                                  ctx->request_buf, ctx->request_buf_size);
+    if (req_len == 0)
         return NIPC_ERR_TRUNCATED;
-    }
 
     const void *payload;
     size_t payload_len;
     nipc_error_t err = do_raw_call(ctx, NIPC_METHOD_STRING_REVERSE,
-                                     req_buf, req_len,
-                                     s->response_buf, s->response_buf_size,
+                                     ctx->request_buf, req_len,
                                      &payload, &payload_len);
-    if (req_buf != stack_buf) free(req_buf);
     if (err != NIPC_OK)
         return err;
 
@@ -604,15 +617,11 @@ nipc_error_t nipc_client_call_string_reverse(
     nipc_client_ctx_t *ctx,
     const char *request_str,
     uint32_t request_str_len,
-    uint8_t *response_buf,
-    size_t response_buf_size,
     nipc_string_reverse_view_t *view_out)
 {
     string_reverse_call_state_t state = {
         .request_str       = request_str,
         .request_str_len   = request_str_len,
-        .response_buf      = response_buf,
-        .response_buf_size = response_buf_size,
         .view_out          = view_out,
     };
     return call_with_retry(ctx, do_string_reverse_attempt, &state);
@@ -793,6 +802,56 @@ static void server_handle_session(nipc_managed_server_t *server,
     free(recv_buf);
 }
 
+static uint32_t server_snapshot_max_items(size_t response_buf_size,
+                                          const nipc_cgroups_handlers_t *handlers)
+{
+    if (handlers->snapshot_max_items != 0)
+        return handlers->snapshot_max_items;
+    return nipc_cgroups_builder_estimate_max_items(response_buf_size);
+}
+
+static bool server_typed_dispatch(void *user,
+                                  uint16_t method_code,
+                                  const uint8_t *request_payload,
+                                  size_t request_len,
+                                  uint8_t *response_buf,
+                                  size_t response_buf_size,
+                                  size_t *response_len_out)
+{
+    nipc_managed_server_t *server = (nipc_managed_server_t *)user;
+    nipc_cgroups_handlers_t *handlers = &server->typed_handlers;
+
+    switch (method_code) {
+    case NIPC_METHOD_INCREMENT:
+        if (!handlers->on_increment)
+            return false;
+        return nipc_dispatch_increment(
+            request_payload, request_len,
+            response_buf, response_buf_size, response_len_out,
+            handlers->on_increment, handlers->user);
+
+    case NIPC_METHOD_STRING_REVERSE:
+        if (!handlers->on_string_reverse)
+            return false;
+        return nipc_dispatch_string_reverse(
+            request_payload, request_len,
+            response_buf, response_buf_size, response_len_out,
+            handlers->on_string_reverse, handlers->user);
+
+    case NIPC_METHOD_CGROUPS_SNAPSHOT:
+        if (!handlers->on_cgroups_snapshot)
+            return false;
+        return nipc_dispatch_cgroups_snapshot(
+            request_payload, request_len,
+            response_buf, response_buf_size, response_len_out,
+            server_snapshot_max_items(response_buf_size, handlers),
+            handlers->on_cgroups_snapshot, handlers->user);
+
+    default:
+        return false;
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Internal: per-session handler thread                                */
 /* ------------------------------------------------------------------ */
@@ -851,14 +910,14 @@ static void server_reap_sessions_locked(nipc_managed_server_t *server)
 /*  Public API: managed server                                         */
 /* ------------------------------------------------------------------ */
 
-nipc_error_t nipc_server_init(nipc_managed_server_t *server,
-                               const char *run_dir,
-                               const char *service_name,
-                               const nipc_np_server_config_t *config,
-                               int worker_count,
-                               size_t response_buf_size,
-                               nipc_server_handler_fn handler,
-                               void *user)
+static nipc_error_t server_init_raw(nipc_managed_server_t *server,
+                                    const char *run_dir,
+                                    const char *service_name,
+                                    const nipc_np_server_config_t *config,
+                                    int worker_count,
+                                    size_t response_buf_size,
+                                    nipc_server_handler_fn handler,
+                                    void *user)
 {
     memset(server, 0, sizeof(*server));
     server->listener.pipe = INVALID_HANDLE_VALUE;
@@ -920,6 +979,44 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
     }
 
     return NIPC_OK;
+}
+
+nipc_error_t nipc_server_init_typed(nipc_managed_server_t *server,
+                                    const char *run_dir,
+                                    const char *service_name,
+                                    const nipc_np_server_config_t *config,
+                                    int worker_count,
+                                    const nipc_cgroups_handlers_t *handlers)
+{
+    if (!handlers)
+        return NIPC_ERR_BAD_LAYOUT;
+
+    size_t response_buf_size = (config && config->max_response_payload_bytes > 0)
+        ? (size_t)config->max_response_payload_bytes
+        : (size_t)NIPC_CLIENT_BUF_DEFAULT;
+
+    nipc_error_t err = server_init_raw(server, run_dir, service_name,
+                                       config, worker_count,
+                                       response_buf_size,
+                                       server_typed_dispatch, server);
+    if (err != NIPC_OK)
+        return err;
+
+    server->typed_handlers = *handlers;
+    return NIPC_OK;
+}
+
+nipc_error_t nipc_server_init_raw_for_tests(nipc_managed_server_t *server,
+                                            const char *run_dir,
+                                            const char *service_name,
+                                            const nipc_np_server_config_t *config,
+                                            int worker_count,
+                                            size_t response_buf_size,
+                                            nipc_server_handler_fn handler,
+                                            void *user)
+{
+    return server_init_raw(server, run_dir, service_name, config,
+                           worker_count, response_buf_size, handler, user);
 }
 
 void nipc_server_run(nipc_managed_server_t *server)
@@ -1292,30 +1389,16 @@ void nipc_cgroups_cache_init(nipc_cgroups_cache_t *cache,
     cache->refresh_success_count = 0;
     cache->refresh_failure_count = 0;
 
-    /* Allocate internal response buffer sized from negotiated limits.
-     * Falls back to default if config specifies 0. */
-    uint32_t max_resp = config ? config->max_response_payload_bytes : 0;
-    cache->response_buf_size = (max_resp > 0)
-        ? (size_t)max_resp + NIPC_HEADER_LEN
-        : NIPC_CGROUPS_CACHE_BUF_SIZE_DEFAULT;
-    cache->response_buf = malloc(cache->response_buf_size);
+    cache->response_buf = NULL;
+    cache->response_buf_size = 0;
 }
 
 bool nipc_cgroups_cache_refresh(nipc_cgroups_cache_t *cache)
 {
-    if (!cache->response_buf) {
-        cache->refresh_failure_count++;
-        return false;
-    }
-
     nipc_client_refresh(&cache->client);
 
-    uint8_t req_buf[4];
     nipc_cgroups_resp_view_t view;
-    nipc_error_t err = nipc_client_call_cgroups_snapshot(
-        &cache->client, req_buf,
-        cache->response_buf, cache->response_buf_size,
-        &view);
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(&cache->client, &view);
 
     if (err != NIPC_OK) {
         cache->refresh_failure_count++;

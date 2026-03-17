@@ -321,6 +321,23 @@ func ShmClientAttach(runDir, serviceName string, sessionID uint64) (*ShmContext,
 	respOff := binary.NativeEndian.Uint32(data[shmHeaderRespOffOff : shmHeaderRespOffOff+4])
 	respCap := binary.NativeEndian.Uint32(data[shmHeaderRespCapOff : shmHeaderRespCapOff+4])
 
+	headerEnd := shmAlign64(uint32(shmHeaderLen))
+	if reqOff < headerEnd || reqCap == 0 || respOff < headerEnd || respCap == 0 {
+		syscall.Munmap(data)
+		f.Close()
+		return nil, ErrShmNotReady
+	}
+
+	if reqOff%shmRegionAlignment != 0 ||
+		reqCap%shmRegionAlignment != 0 ||
+		respOff%shmRegionAlignment != 0 ||
+		respCap%shmRegionAlignment != 0 ||
+		respOff < shmAlign64(reqOff+reqCap) {
+		syscall.Munmap(data)
+		f.Close()
+		return nil, ErrShmBadSize
+	}
+
 	// Validate region size
 	reqEnd := int(reqOff) + int(reqCap)
 	respEnd := int(respOff) + int(respCap)

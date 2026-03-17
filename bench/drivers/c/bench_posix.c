@@ -864,8 +864,7 @@ static int run_snapshot_client(const char *run_dir, const char *service,
         uint64_t t0 = now_ns();
 
         nipc_cgroups_resp_view_t view;
-        nipc_error_t err = nipc_client_call_cgroups_snapshot(
-            &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+        nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
 
         uint64_t t1 = now_ns();
 

@@ -217,15 +217,10 @@ static void stop_stress_server(stress_server_ctx_t *sctx, pthread_t tid)
 /*  Client helper: call + verify N items                               */
 /* ------------------------------------------------------------------ */
 
-static bool do_call_verify_n(nipc_client_ctx_t *client,
-                             uint8_t *req_buf,
-                             uint8_t *resp_buf,
-                             size_t resp_buf_size,
-                             int expected_items)
+static bool do_call_verify_n(nipc_client_ctx_t *client, int expected_items)
 {
     nipc_cgroups_resp_view_t view;
-    nipc_error_t err = nipc_client_call_cgroups_snapshot(
-        client, req_buf, resp_buf, resp_buf_size, &view);
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(client, &view);
     if (err != NIPC_OK)
         return false;
 
@@ -271,15 +266,10 @@ static bool do_call_verify_n(nipc_client_ctx_t *client,
 }
 
 /* Full verification of ALL items */
-static bool do_call_verify_all(nipc_client_ctx_t *client,
-                               uint8_t *req_buf,
-                               uint8_t *resp_buf,
-                               size_t resp_buf_size,
-                               int expected_items)
+static bool do_call_verify_all(nipc_client_ctx_t *client, int expected_items)
 {
     nipc_cgroups_resp_view_t view;
-    nipc_error_t err = nipc_client_call_cgroups_snapshot(
-        client, req_buf, resp_buf, resp_buf_size, &view);
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(client, &view);
     if (err != NIPC_OK)
         return false;
 
@@ -352,16 +342,13 @@ static void test_snapshot_1000(void)
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
-    uint8_t req_buf[64];
-    uint8_t *resp_buf = malloc(BUF_1K);
-    bool ok = do_call_verify_all(&client, req_buf, resp_buf, BUF_1K, ITEMS_1K);
+    bool ok = do_call_verify_all(&client, ITEMS_1K);
 
     clock_gettime(CLOCK_MONOTONIC, &t1);
     printf("    1000 items: %.1f ms\n", elapsed_ms(&t0, &t1));
 
     check("all 1000 items verified correct", ok);
 
-    free(resp_buf);
     nipc_client_close(&client);
     stop_stress_server(&sctx, tid);
     cleanup_all(svc);
@@ -404,16 +391,13 @@ static void test_snapshot_5000(void)
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
-    uint8_t req_buf[64];
-    uint8_t *resp_buf = malloc(BUF_5K);
-    bool ok = do_call_verify_all(&client, req_buf, resp_buf, BUF_5K, ITEMS_5K);
+    bool ok = do_call_verify_all(&client, ITEMS_5K);
 
     clock_gettime(CLOCK_MONOTONIC, &t1);
     printf("    5000 items: %.1f ms\n", elapsed_ms(&t0, &t1));
 
     check("all 5000 items verified correct", ok);
 
-    free(resp_buf);
     nipc_client_close(&client);
     stop_stress_server(&sctx, tid);
     cleanup_all(svc);
@@ -680,8 +664,7 @@ static void test_rapid_connect_disconnect(void)
             continue;
         }
 
-        uint8_t req_buf[64], resp_buf[65536];
-        if (do_call_verify_n(&client, req_buf, resp_buf, sizeof(resp_buf), 3))
+        if (do_call_verify_n(&client, 3))
             success_count++;
         else
             call_failures++;
@@ -710,9 +693,7 @@ static void test_rapid_connect_disconnect(void)
         }
         bool healthy = false;
         if (nipc_client_ready(&probe)) {
-            uint8_t req_buf[64], resp_buf[65536];
-            healthy = do_call_verify_n(&probe, req_buf, resp_buf,
-                                       sizeof(resp_buf), 3);
+            healthy = do_call_verify_n(&probe, 3);
         }
         check("server healthy after 1000 cycles", healthy);
         nipc_client_close(&probe);
@@ -1062,8 +1043,7 @@ static void *mixed_client_fn(void *arg)
 
     /* Make 10 calls */
     for (int i = 0; i < 10; i++) {
-        uint8_t req_buf[64], resp_buf[65536];
-        if (do_call_verify_n(&client, req_buf, resp_buf, sizeof(resp_buf), 3))
+        if (do_call_verify_n(&client, 3))
             ctx->success++;
         else
             ctx->failure++;

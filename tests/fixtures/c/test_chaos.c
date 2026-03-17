@@ -238,8 +238,7 @@ static bool verify_server_alive(const char *service)
     uint8_t resp_buf[RESPONSE_BUF_SIZE];
     nipc_cgroups_resp_view_t view;
 
-    nipc_error_t err = nipc_client_call_cgroups_snapshot(
-        &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
 
     bool alive = (err == NIPC_OK && view.item_count == 2);
 
@@ -699,8 +698,7 @@ static void test_shm_chaos(void)
         if (connected) {
             uint8_t req_buf[64], resp_buf[RESPONSE_BUF_SIZE];
             nipc_cgroups_resp_view_t view;
-            nipc_error_t err = nipc_client_call_cgroups_snapshot(
-                &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+            nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
             check("initial SHM call succeeded", err == NIPC_OK);
         }
 
