@@ -125,6 +125,11 @@ static uint64_t latency_percentile(latency_recorder_t *lr, double pct)
     return lr->samples[idx];
 }
 
+static inline double latency_us(uint64_t ns)
+{
+    return (double)ns / 1000.0;
+}
+
 static void latency_free(latency_recorder_t *lr)
 {
     free(lr->samples);
@@ -597,14 +602,14 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
     double throughput = (double)total_items / wall_sec;
     double cpu_pct = (cpu_sec / wall_sec) * 100.0;
 
-    uint64_t p50 = latency_percentile(&lr, 50.0) / 1000;
-    uint64_t p95 = latency_percentile(&lr, 95.0) / 1000;
-    uint64_t p99 = latency_percentile(&lr, 99.0) / 1000;
+    double p50 = latency_us(latency_percentile(&lr, 50.0));
+    double p95 = latency_us(latency_percentile(&lr, 95.0));
+    double p99 = latency_us(latency_percentile(&lr, 99.0));
 
-    printf("%s,%s,%s,%.0f,%llu,%llu,%llu,%.1f,0.0,%.1f\n",
+    printf("%s,%s,%s,%.0f,%.3f,%.3f,%.3f,%.1f,0.0,%.1f\n",
            scenario, lang, lang,
            throughput,
-           (unsigned long long)p50, (unsigned long long)p95, (unsigned long long)p99,
+           p50, p95, p99,
            cpu_pct, cpu_pct);
     fflush(stdout);
 
@@ -803,14 +808,14 @@ static int run_ping_pong_client(const char *run_dir, const char *service,
     double throughput = (double)requests / wall_sec;
     double cpu_pct = (cpu_sec / wall_sec) * 100.0;
 
-    uint64_t p50 = latency_percentile(&lr, 50.0) / 1000;
-    uint64_t p95 = latency_percentile(&lr, 95.0) / 1000;
-    uint64_t p99 = latency_percentile(&lr, 99.0) / 1000;
+    double p50 = latency_us(latency_percentile(&lr, 50.0));
+    double p95 = latency_us(latency_percentile(&lr, 95.0));
+    double p99 = latency_us(latency_percentile(&lr, 99.0));
 
-    printf("%s,c,%s,%.0f,%llu,%llu,%llu,%.1f,0.0,%.1f\n",
+    printf("%s,c,%s,%.0f,%.3f,%.3f,%.3f,%.1f,0.0,%.1f\n",
            scenario, lang,
            throughput,
-           (unsigned long long)p50, (unsigned long long)p95, (unsigned long long)p99,
+           p50, p95, p99,
            cpu_pct, cpu_pct);
     fflush(stdout);
 
@@ -915,14 +920,14 @@ static int run_snapshot_client(const char *run_dir, const char *service,
     double throughput = (double)requests_cnt / wall_sec;
     double cpu_pct = (cpu_sec / wall_sec) * 100.0;
 
-    uint64_t p50 = latency_percentile(&lr, 50.0) / 1000;
-    uint64_t p95 = latency_percentile(&lr, 95.0) / 1000;
-    uint64_t p99 = latency_percentile(&lr, 99.0) / 1000;
+    double p50 = latency_us(latency_percentile(&lr, 50.0));
+    double p95 = latency_us(latency_percentile(&lr, 95.0));
+    double p99 = latency_us(latency_percentile(&lr, 99.0));
 
-    printf("%s,c,%s,%.0f,%llu,%llu,%llu,%.1f,0.0,%.1f\n",
+    printf("%s,c,%s,%.0f,%.3f,%.3f,%.3f,%.1f,0.0,%.1f\n",
            scenario, lang,
            throughput,
-           (unsigned long long)p50, (unsigned long long)p95, (unsigned long long)p99,
+           p50, p95, p99,
            cpu_pct, cpu_pct);
     fflush(stdout);
 
@@ -1327,17 +1332,17 @@ int main(int argc, char **argv)
         double throughput = (double)requests / wall_sec;
         double cpu_pct = (cpu_sec / wall_sec) * 100.0;
 
-        uint64_t p50 = latency_percentile(&lr, 50.0) / 1000;
-        uint64_t p95 = latency_percentile(&lr, 95.0) / 1000;
-        uint64_t p99 = latency_percentile(&lr, 99.0) / 1000;
+        double p50 = latency_us(latency_percentile(&lr, 50.0));
+        double p95 = latency_us(latency_percentile(&lr, 95.0));
+        double p99 = latency_us(latency_percentile(&lr, 99.0));
 
         char scenario[64];
         snprintf(scenario, sizeof(scenario), "np-pipeline-d%d", depth);
 
-        printf("%s,c,c,%.0f,%llu,%llu,%llu,%.1f,0.0,%.1f\n",
+        printf("%s,c,c,%.0f,%.3f,%.3f,%.3f,%.1f,0.0,%.1f\n",
                scenario,
                throughput,
-               (unsigned long long)p50, (unsigned long long)p95, (unsigned long long)p99,
+               p50, p95, p99,
                cpu_pct, cpu_pct);
         fflush(stdout);
 
@@ -1576,15 +1581,15 @@ int main(int argc, char **argv)
         double throughput = (double)total_items / wall_sec;
         double cpu_pct = (cpu_sec / wall_sec) * 100.0;
 
-        uint64_t p50 = latency_percentile(&lr, 50.0) / 1000;
-        uint64_t p95 = latency_percentile(&lr, 95.0) / 1000;
-        uint64_t p99 = latency_percentile(&lr, 99.0) / 1000;
+        double p50 = latency_us(latency_percentile(&lr, 50.0));
+        double p95 = latency_us(latency_percentile(&lr, 95.0));
+        double p99 = latency_us(latency_percentile(&lr, 99.0));
 
         char scenario[64];
         snprintf(scenario, sizeof(scenario), "np-pipeline-batch-d%d", depth);
-        printf("%s,c,c,%.0f,%llu,%llu,%llu,%.1f,0.0,%.1f\n",
+        printf("%s,c,c,%.0f,%.3f,%.3f,%.3f,%.1f,0.0,%.1f\n",
                scenario, throughput,
-               (unsigned long long)p50, (unsigned long long)p95, (unsigned long long)p99,
+               p50, p95, p99,
                cpu_pct, cpu_pct);
         fflush(stdout);
 

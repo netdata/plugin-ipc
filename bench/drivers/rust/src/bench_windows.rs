@@ -123,6 +123,10 @@ fn cpu_ns() -> u64 {
     (kernel + user) * 100
 }
 
+fn latency_us(ns: u64) -> f64 {
+    ns as f64 / 1000.0
+}
+
 // ---------------------------------------------------------------------------
 //  Latency recorder
 // ---------------------------------------------------------------------------
@@ -597,12 +601,12 @@ fn run_ping_pong_client(
     let throughput = requests as f64 / wall_sec;
     let cpu_pct = (cpu_sec / wall_sec) * 100.0;
 
-    let p50 = lr.percentile(50.0) / 1000;
-    let p95 = lr.percentile(95.0) / 1000;
-    let p99 = lr.percentile(99.0) / 1000;
+    let p50 = latency_us(lr.percentile(50.0));
+    let p95 = latency_us(lr.percentile(95.0));
+    let p99 = latency_us(lr.percentile(99.0));
 
     println!(
-        "{},rust,{},{:.0},{},{},{},{:.1},0.0,{:.1}",
+        "{},rust,{},{:.0},{:.3},{:.3},{:.3},{:.1},0.0,{:.1}",
         scenario, server_lang, throughput, p50, p95, p99, cpu_pct, cpu_pct
     );
 
@@ -699,12 +703,12 @@ fn run_snapshot_client(
     let throughput = requests as f64 / wall_sec;
     let cpu_pct = (cpu_sec / wall_sec) * 100.0;
 
-    let p50 = lr.percentile(50.0) / 1000;
-    let p95 = lr.percentile(95.0) / 1000;
-    let p99 = lr.percentile(99.0) / 1000;
+    let p50 = latency_us(lr.percentile(50.0));
+    let p95 = latency_us(lr.percentile(95.0));
+    let p99 = latency_us(lr.percentile(99.0));
 
     println!(
-        "{},rust,{},{:.0},{},{},{},{:.1},0.0,{:.1}",
+        "{},rust,{},{:.0},{:.3},{:.3},{:.3},{:.1},0.0,{:.1}",
         scenario, server_lang, throughput, p50, p95, p99, cpu_pct, cpu_pct
     );
 
@@ -915,12 +919,12 @@ fn run_batch_ping_pong_client(
     let throughput = total_items as f64 / wall_sec;
     let cpu_pct = (cpu_sec / wall_sec) * 100.0;
 
-    let p50 = lr.percentile(50.0) / 1000;
-    let p95 = lr.percentile(95.0) / 1000;
-    let p99 = lr.percentile(99.0) / 1000;
+    let p50 = latency_us(lr.percentile(50.0));
+    let p95 = latency_us(lr.percentile(95.0));
+    let p99 = latency_us(lr.percentile(99.0));
 
     println!(
-        "{},rust,{},{:.0},{},{},{},{:.1},0.0,{:.1}",
+        "{},rust,{},{:.0},{:.3},{:.3},{:.3},{:.1},0.0,{:.1}",
         scenario, server_lang, throughput, p50, p95, p99, cpu_pct, cpu_pct
     );
 
@@ -1064,13 +1068,13 @@ fn run_pipeline_client(
     let throughput = requests as f64 / wall_sec;
     let cpu_pct = (cpu_sec / wall_sec) * 100.0;
 
-    let p50 = lr.percentile(50.0) / 1000;
-    let p95 = lr.percentile(95.0) / 1000;
-    let p99 = lr.percentile(99.0) / 1000;
+    let p50 = latency_us(lr.percentile(50.0));
+    let p95 = latency_us(lr.percentile(95.0));
+    let p99 = latency_us(lr.percentile(99.0));
 
     let scenario = format!("np-pipeline-d{}", depth);
     println!(
-        "{},rust,{},{:.0},{},{},{},{:.1},0.0,{:.1}",
+        "{},rust,{},{:.0},{:.3},{:.3},{:.3},{:.1},0.0,{:.1}",
         scenario, server_lang, throughput, p50, p95, p99, cpu_pct, cpu_pct
     );
 
@@ -1291,13 +1295,13 @@ fn run_pipeline_batch_client(
     let throughput = total_items as f64 / wall_sec;
     let cpu_pct = (cpu_sec / wall_sec) * 100.0;
 
-    let p50 = lr.percentile(50.0) / 1000;
-    let p95 = lr.percentile(95.0) / 1000;
-    let p99 = lr.percentile(99.0) / 1000;
+    let p50 = latency_us(lr.percentile(50.0));
+    let p95 = latency_us(lr.percentile(95.0));
+    let p99 = latency_us(lr.percentile(99.0));
 
     let scenario = format!("np-pipeline-batch-d{}", depth);
     println!(
-        "{},rust,{},{:.0},{},{},{},{:.1},0.0,{:.1}",
+        "{},rust,{},{:.0},{:.3},{:.3},{:.3},{:.1},0.0,{:.1}",
         scenario, server_lang, throughput, p50, p95, p99, cpu_pct, cpu_pct
     );
 

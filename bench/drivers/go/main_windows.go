@@ -61,6 +61,7 @@ var (
 	procQueryPerformanceFrequency = kernel32.NewProc("QueryPerformanceFrequency")
 	procQueryPerformanceCounter   = kernel32.NewProc("QueryPerformanceCounter")
 	procGetProcessTimes           = kernel32.NewProc("GetProcessTimes")
+	procGetTickCount64            = kernel32.NewProc("GetTickCount64")
 )
 
 func nowNS() uint64 {
@@ -82,6 +83,11 @@ func cpuNSWin() uint64 {
 	k := uint64(kernel.HighDateTime)<<32 | uint64(kernel.LowDateTime)
 	u := uint64(user.HighDateTime)<<32 | uint64(user.LowDateTime)
 	return (k + u) * 100 // FILETIME is 100ns intervals
+}
+
+func tickMSWin() uint64 {
+	ret, _, _ := syscall.Syscall(procGetTickCount64.Addr(), 0, 0, 0, 0)
+	return uint64(ret)
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +125,23 @@ func (lr *latencyRecorderWin) percentile(pct float64) uint64 {
 		idx = len(lr.samples) - 1
 	}
 	return lr.samples[idx]
+}
+
+func latencyUSWin(ns uint64) float64 {
+	return float64(ns) / 1000.0
+}
+
+func sampleStartWin(counter uint64) uint64 {
+	if counter&63 == 0 {
+		return nowNS()
+	}
+	return 0
+}
+
+func sampleFinishWin(lr *latencyRecorderWin, startNS uint64) {
+	if startNS != 0 {
+		lr.record(nowNS() - startNS)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -379,10 +402,10 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 	var counter, totalItems, errors, msgSeq uint64
 
 	cpuStart := cpuNSWin()
-	wallStart := time.Now()
-	deadline := time.Duration(durationSec) * time.Second
+	wallStart := nowNS()
+	tickDeadline := tickMSWin() + uint64(durationSec)*1000
 
-	for time.Since(wallStart) < deadline {
+	for tickMSWin() < tickDeadline {
 		rl.wait()
 
 		// Random batch size 2-1000 (server treats itemCount==1 as non-batch)
@@ -420,7 +443,7 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 			TransportStatus: protocol.StatusOK,
 		}
 
-		t0 := time.Now()
+		t0 := sampleStartWin(totalItems)
 
 		if shm != nil {
 			// SHM path
@@ -496,8 +519,7 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 				}
 			}
 
-			t1 := time.Now()
-			lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+			sampleFinishWin(lr, t0)
 			_ = batchOK
 			totalItems += uint64(batchSize)
 		} else {
@@ -552,8 +574,7 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 				}
 			}
 
-			t1 := time.Now()
-			lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+			sampleFinishWin(lr, t0)
 			_ = batchOK
 			totalItems += uint64(batchSize)
 		}
@@ -561,17 +582,17 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 		counter += uint64(batchSize)
 	}
 
-	wallSec := time.Since(wallStart).Seconds()
+	wallSec := float64(nowNS()-wallStart) / 1e9
 	cpuEnd := cpuNSWin()
 	cpuSec := float64(cpuEnd-cpuStart) / 1e9
 	throughput := float64(totalItems) / wallSec
 	cpuPct := (cpuSec / wallSec) * 100.0
 
-	p50 := lr.percentile(50.0) / 1000
-	p95 := lr.percentile(95.0) / 1000
-	p99 := lr.percentile(99.0) / 1000
+	p50 := latencyUSWin(lr.percentile(50.0))
+	p95 := latencyUSWin(lr.percentile(95.0))
+	p99 := latencyUSWin(lr.percentile(99.0))
 
-	fmt.Printf("%s,go,%s,%.0f,%d,%d,%d,%.1f,0.0,%.1f\n",
+	fmt.Printf("%s,go,%s,%.0f,%.3f,%.3f,%.3f,%.1f,0.0,%.1f\n",
 		scenario, serverLang, throughput, p50, p95, p99, cpuPct, cpuPct)
 
 	if errors > 0 {
@@ -616,15 +637,15 @@ func runPipelineClientWin(runDir, service string, durationSec int, targetRPS uin
 	var counter, requests, errors, msgSeq uint64
 
 	cpuStart := cpuNSWin()
-	wallStart := time.Now()
-	deadline := time.Duration(durationSec) * time.Second
+	wallStart := nowNS()
+	tickDeadline := tickMSWin() + uint64(durationSec)*1000
 
 	recvBuf := make([]byte, 256)
 
-	for time.Since(wallStart) < deadline {
+	for tickMSWin() < tickDeadline {
 		rl.wait()
 
-		t0 := time.Now()
+		t0 := sampleStartWin(requests)
 
 		// Send `depth` requests with unique message IDs
 		sendOK := true
@@ -673,25 +694,24 @@ func runPipelineClientWin(runDir, service string, durationSec int, targetRPS uin
 			}
 		}
 
-		t1 := time.Now()
-		lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+		sampleFinishWin(lr, t0)
 
 		counter += uint64(depth)
 		requests += uint64(depth)
 	}
 
-	wallSec := time.Since(wallStart).Seconds()
+	wallSec := float64(nowNS()-wallStart) / 1e9
 	cpuEnd := cpuNSWin()
 	cpuSec := float64(cpuEnd-cpuStart) / 1e9
 	throughput := float64(requests) / wallSec
 	cpuPct := (cpuSec / wallSec) * 100.0
 
-	p50 := lr.percentile(50.0) / 1000
-	p95 := lr.percentile(95.0) / 1000
-	p99 := lr.percentile(99.0) / 1000
+	p50 := latencyUSWin(lr.percentile(50.0))
+	p95 := latencyUSWin(lr.percentile(95.0))
+	p99 := latencyUSWin(lr.percentile(99.0))
 
 	scenario := fmt.Sprintf("np-pipeline-d%d", depth)
-	fmt.Printf("%s,go,%s,%.0f,%d,%d,%d,%.1f,0.0,%.1f\n",
+	fmt.Printf("%s,go,%s,%.0f,%.3f,%.3f,%.3f,%.1f,0.0,%.1f\n",
 		scenario, serverLang, throughput, p50, p95, p99, cpuPct, cpuPct)
 
 	if errors > 0 {
@@ -752,13 +772,13 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 	inflightBudget := uint64(session.PacketSize) * 2
 
 	cpuStart := cpuNSWin()
-	wallStart := time.Now()
-	deadline := time.Duration(durationSec) * time.Second
+	wallStart := nowNS()
+	tickDeadline := tickMSWin() + uint64(durationSec)*1000
 
-	for time.Since(wallStart) < deadline {
+	for tickMSWin() < tickDeadline {
 		rl.wait()
 
-		t0 := time.Now()
+		t0 := sampleStartWin(totalItems)
 		for i := range slots {
 			slots[i] = pipelineBatchSlotWin{}
 		}
@@ -879,22 +899,21 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 			break
 		}
 
-		t1 := time.Now()
-		lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+		sampleFinishWin(lr, t0)
 	}
 
-	wallSec := time.Since(wallStart).Seconds()
+	wallSec := float64(nowNS()-wallStart) / 1e9
 	cpuEnd := cpuNSWin()
 	cpuSec := float64(cpuEnd-cpuStart) / 1e9
 	throughput := float64(totalItems) / wallSec
 	cpuPct := (cpuSec / wallSec) * 100.0
 
-	p50 := lr.percentile(50.0) / 1000
-	p95 := lr.percentile(95.0) / 1000
-	p99 := lr.percentile(99.0) / 1000
+	p50 := latencyUSWin(lr.percentile(50.0))
+	p95 := latencyUSWin(lr.percentile(95.0))
+	p99 := latencyUSWin(lr.percentile(99.0))
 
 	scenario := fmt.Sprintf("np-pipeline-batch-d%d", depth)
-	fmt.Printf("%s,go,%s,%.0f,%d,%d,%d,%.1f,0.0,%.1f\n",
+	fmt.Printf("%s,go,%s,%.0f,%.3f,%.3f,%.3f,%.1f,0.0,%.1f\n",
 		scenario, serverLang, throughput, p50, p95, p99, cpuPct, cpuPct)
 
 	if errors > 0 {
@@ -955,10 +974,10 @@ func runPingPongClientWin(runDir, service string, profiles uint32, durationSec i
 	var counter, requests, errors uint64
 
 	cpuStart := cpuNSWin()
-	wallStart := time.Now()
-	deadline := time.Duration(durationSec) * time.Second
+	wallStart := nowNS()
+	tickDeadline := tickMSWin() + uint64(durationSec)*1000
 
-	for time.Since(wallStart) < deadline {
+	for tickMSWin() < tickDeadline {
 		rl.wait()
 
 		reqPayload := make([]byte, 8)
@@ -974,7 +993,7 @@ func runPingPongClientWin(runDir, service string, profiles uint32, durationSec i
 			PayloadLen:      8,
 		}
 
-		t0 := time.Now()
+		t0 := sampleStartWin(requests)
 
 		if shm != nil {
 			// Win SHM path
@@ -1026,24 +1045,23 @@ func runPingPongClientWin(runDir, service string, profiles uint32, durationSec i
 			}
 		}
 
-		t1 := time.Now()
-		lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+		sampleFinishWin(lr, t0)
 
 		counter++
 		requests++
 	}
 
-	wallSec := time.Since(wallStart).Seconds()
+	wallSec := float64(nowNS()-wallStart) / 1e9
 	cpuEnd := cpuNSWin()
 	cpuSec := float64(cpuEnd-cpuStart) / 1e9
 	throughput := float64(requests) / wallSec
 	cpuPct := (cpuSec / wallSec) * 100.0
 
-	p50 := lr.percentile(50.0) / 1000
-	p95 := lr.percentile(95.0) / 1000
-	p99 := lr.percentile(99.0) / 1000
+	p50 := latencyUSWin(lr.percentile(50.0))
+	p95 := latencyUSWin(lr.percentile(95.0))
+	p99 := latencyUSWin(lr.percentile(99.0))
 
-	fmt.Printf("%s,go,%s,%.0f,%d,%d,%d,%.1f,0.0,%.1f\n",
+	fmt.Printf("%s,go,%s,%.0f,%.3f,%.3f,%.3f,%.1f,0.0,%.1f\n",
 		scenario, serverLang, throughput, p50, p95, p99, cpuPct, cpuPct)
 
 	if errors > 0 {
@@ -1087,15 +1105,14 @@ func runSnapshotClientWin(runDir, service string, profiles uint32, durationSec i
 	var requests, errors uint64
 
 	cpuStart := cpuNSWin()
-	wallStart := time.Now()
-	deadline := time.Duration(durationSec) * time.Second
-	for time.Since(wallStart) < deadline {
+	wallStart := nowNS()
+	tickDeadline := tickMSWin() + uint64(durationSec)*1000
+	for tickMSWin() < tickDeadline {
 		rl.wait()
 
-		t0 := time.Now()
+		t0 := sampleStartWin(requests)
 
 		view, err := client.CallSnapshot()
-		t1 := time.Now()
 
 		if err != nil {
 			errors++
@@ -1108,21 +1125,21 @@ func runSnapshotClientWin(runDir, service string, profiles uint32, durationSec i
 			errors++
 		}
 
-		lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+		sampleFinishWin(lr, t0)
 		requests++
 	}
 
-	wallSec := time.Since(wallStart).Seconds()
+	wallSec := float64(nowNS()-wallStart) / 1e9
 	cpuEnd := cpuNSWin()
 	cpuSec := float64(cpuEnd-cpuStart) / 1e9
 	throughput := float64(requests) / wallSec
 	cpuPct := (cpuSec / wallSec) * 100.0
 
-	p50 := lr.percentile(50.0) / 1000
-	p95 := lr.percentile(95.0) / 1000
-	p99 := lr.percentile(99.0) / 1000
+	p50 := latencyUSWin(lr.percentile(50.0))
+	p95 := latencyUSWin(lr.percentile(95.0))
+	p99 := latencyUSWin(lr.percentile(99.0))
 
-	fmt.Printf("%s,go,%s,%.0f,%d,%d,%d,%.1f,0.0,%.1f\n",
+	fmt.Printf("%s,go,%s,%.0f,%.3f,%.3f,%.3f,%.1f,0.0,%.1f\n",
 		scenario, serverLang, throughput, p50, p95, p99, cpuPct, cpuPct)
 
 	client.Close()
@@ -1172,10 +1189,10 @@ func runLookupBenchWin(durationSec int) int {
 	var lookups, hits uint64
 
 	cpuStart := cpuNSWin()
-	wallStart := time.Now()
-	deadline := time.Duration(durationSec) * time.Second
+	wallStart := nowNS()
+	tickDeadline := tickMSWin() + uint64(durationSec)*1000
 
-	for time.Since(wallStart) < deadline {
+	for tickMSWin() < tickDeadline {
 		for _, it := range items {
 			for j := range cacheItems {
 				if cacheItems[j].Hash == it.hash && cacheItems[j].Name == it.name {
@@ -1187,7 +1204,7 @@ func runLookupBenchWin(durationSec int) int {
 		}
 	}
 
-	wallSec := time.Since(wallStart).Seconds()
+	wallSec := float64(nowNS()-wallStart) / 1e9
 	cpuEnd := cpuNSWin()
 	cpuSec := float64(cpuEnd-cpuStart) / 1e9
 	throughput := float64(lookups) / wallSec

@@ -251,6 +251,60 @@ Current POSIX benchmark status after the SHM attach fix:
   - POSIX benchmark floor failures
   - failing Linux coverage gate
   - Windows default build entrypoint
+- New task on 2026-03-17: fix Windows benchmark measurement integrity before trusting the Windows benchmark reports fully.
+  - verified evidence:
+    - `tests/run-windows-bench.sh` kills the server in `stop_server()` and only then tries to parse `SERVER_CPU_SEC=` from the server stdout.
+    - all 3 Windows benchmark servers emit `SERVER_CPU_SEC=` only after their server loop exits normally.
+    - implication: current Windows benchmark rows report `server_cpu_pct=0.0` because the runner collects server CPU after an abrupt stop, not because the real CPU is zero.
+    - Windows latency collection is also inconsistent across languages:
+      - C and Rust sample latency only every 64th request and then truncate nanoseconds to integer microseconds.
+      - Go measures latency on every request with `time.Now()` and also truncates to integer microseconds.
+      - implication: many Windows `p50/p95/p99` values collapse to `0` for sub-microsecond samples, and Go rows are not directly comparable to C/Rust rows.
+- Decision required: how Windows benchmark servers should be stopped for CPU accounting.
+  - candidate directions:
+    - wait for the existing server-side timer/stop path and add only a bounded fallback kill for hung servers
+    - add an explicit graceful stop mechanism from runner to server
+    - move server CPU accounting out of the servers and into the runner/platform tooling
+- Decision required: how Windows latency percentiles should be represented after timing is unified.
+  - candidate directions:
+    - keep integer microseconds and accept legitimate `0us` percentiles for sub-microsecond samples
+    - keep the existing column names but emit fractional microseconds
+    - change the schema/reporting to nanoseconds
+- User direction on 2026-03-17 for the Windows benchmark measurement issue:
+  - implementation details delegated to the code changes
+  - chosen approach:
+    - unify Windows latency timing on the high-resolution per-language monotonic timer path already used by C/Rust
+    - keep the existing `*_us` schema but emit fractional microseconds so valid sub-microsecond samples are not reported as misleading `0`
+  - rationale:
+    - preserves the current report schema while making Windows latency output believable and cross-language comparable
+  - implementation update after real `win11` smoke validation on 2026-03-17:
+    - waiting for the existing server-side timed self-stop path is **not** reliable enough for CPU accounting
+    - evidence:
+      - the smoke run repeatedly hit the runner fallback path (`forcing stop for ... after 5s grace`) before any `SERVER_CPU_SEC=` line was harvested
+      - implication: direct graceful-stop harvesting would still leave many `server_cpu_pct=0.0` rows on Windows
+    - revised chosen approach:
+      - collect server CPU seconds directly in the Windows runner from the live server PID before teardown
+      - keep bounded forced termination only as a cleanup path after CPU collection
+  - implementation update after the real `win11` full 5-second suite on 2026-03-17:
+    - the Windows runner now produces non-zero `server_cpu_pct` for the active/high-throughput rows and the zero latency percentile issue is gone for non-lookup scenarios
+    - verified live CSV evidence:
+      - non-lookup rows no longer show `p50_us=0` once fractional microseconds are emitted
+      - `server_cpu_pct=0` remains only on low-rate rows such as `np-ping-pong @ 1000/s`, `snapshot-* @ 1000/s`, and some `shm-ping-pong @ 10000/s`
+    - implication:
+      - the remaining Windows benchmark CPU issue is no longer collection failure everywhere
+      - the remaining issue is precision loss from formatting server CPU to one decimal place, which truncates valid sub-0.1% server usage to `0.0`
+    - final chosen approach for this task:
+      - keep the runner-side Windows CPU collection path
+      - increase Windows benchmark CPU percentage precision so low-rate rows report small but non-zero server CPU when present
+  - final validation on 2026-03-17 with the exact 5-second `win11` rerun:
+    - `bash tests/run-windows-bench.sh benchmarks-windows.csv 5 && bash tests/generate-benchmarks-windows.sh benchmarks-windows.csv benchmarks-windows.md`
+      - completed successfully
+    - verified final CSV invariants:
+      - `201` total rows
+      - `0` zero-throughput rows
+      - `0` non-lookup rows with `server_cpu_pct=0`
+      - `0` non-lookup rows with `p50_us=0`
+      - the only remaining `server_cpu_pct=0` rows are the 3 `lookup` rows, which is correct because `lookup` has no separate server process
 - Decision required: what public L2 server surface C and Rust should expose after the Level 2 spec normalization.
   - evidence collected on 2026-03-17:
     - Go has already been moved to a typed public handler surface:

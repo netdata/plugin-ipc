@@ -42,6 +42,7 @@ BUILD_DIR="${ROOT_DIR}/build"
 OUTPUT_CSV="${1:-${ROOT_DIR}/benchmarks-windows.csv}"
 DURATION="${2:-5}"
 RUN_DIR="${TEMP:-/tmp}/netipc-bench-$$"
+POWERSHELL_EXE="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 
 # Binary locations
 BENCH_C="${BUILD_DIR}/bin/bench_windows_c.exe"
@@ -123,22 +124,52 @@ start_server() {
     return 1
 }
 
+server_cpu_seconds() {
+    local pid="$1"
+    local svc="$2"
+    local cpu=""
+    local svc_ps="${svc//\'/\'\'}"
+
+    if [ -x "$POWERSHELL_EXE" ]; then
+        cpu=$("$POWERSHELL_EXE" -NoProfile -Command \
+            "\$svc = '${svc_ps}'; \
+             \$p = Get-CimInstance Win32_Process | Where-Object { \
+                 \$_.CommandLine -and \$_.CommandLine -like ('*' + \$svc + '*') -and \$_.Name -like 'bench_windows*' \
+             } | Select-Object -First 1; \
+             if (-not \$p) { \$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if (\$p) { [Console]::Out.Write('{0:F6}' -f \$p.TotalProcessorTime.TotalSeconds) } } \
+             elseif (\$p) { [Console]::Out.Write('{0:F6}' -f ((([double]\$p.KernelModeTime) + ([double]\$p.UserModeTime)) / 10000000.0)) }" \
+            2>/dev/null | tr -d '\r')
+    fi
+
+    if [ -n "$cpu" ]; then
+        echo "$cpu"
+    else
+        echo "0.0"
+    fi
+}
+
 stop_server() {
     local pid="$1"
     local lang="$2"
     local svc="$3"
+    local server_out="${RUN_DIR}/server-${lang}-${svc}.out"
+    local server_cpu
+    server_cpu=$(server_cpu_from_output "$server_out")
 
-    kill "$pid" 2>/dev/null || true
+    if [ -z "$server_cpu" ]; then
+        server_cpu=$(server_cpu_seconds "$pid" "$svc")
+    fi
+
+    if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+    fi
     wait "$pid" 2>/dev/null || true
 
-    local server_out="${RUN_DIR}/server-${lang}-${svc}.out"
-    local server_cpu="0.0"
-
     if [ -f "$server_out" ]; then
-        local cpu_line
-        cpu_line=$(grep "^SERVER_CPU_SEC=" "$server_out" 2>/dev/null || true)
-        if [ -n "$cpu_line" ]; then
-            server_cpu="${cpu_line#SERVER_CPU_SEC=}"
+        local output_cpu
+        output_cpu=$(server_cpu_from_output "$server_out")
+        if [ -n "$output_cpu" ]; then
+            server_cpu="$output_cpu"
         fi
     fi
 
@@ -165,6 +196,29 @@ write_csv_row() {
 
 throughput_is_positive() {
     awk -v value="$1" 'BEGIN { exit ((value + 0) > 0 ? 0 : 1) }'
+}
+
+server_cpu_from_output() {
+    local server_out="$1"
+    local cpu_line
+    cpu_line=$(grep "^SERVER_CPU_SEC=" "$server_out" 2>/dev/null | tail -1 || true)
+    if [ -n "$cpu_line" ]; then
+        echo "${cpu_line#SERVER_CPU_SEC=}"
+    fi
+}
+
+cpu_pct_for_duration() {
+    awk -v cpu_sec="$1" -v duration_sec="$2" 'BEGIN {
+        if ((duration_sec + 0) <= 0) {
+            print "0.000"
+        } else {
+            printf "%.3f", ((cpu_sec + 0) / (duration_sec + 0)) * 100.0
+        }
+    }'
+}
+
+sum_cpu_pct() {
+    awk -v a="$1" -v b="$2" 'BEGIN { printf "%.3f", (a + 0) + (b + 0) }'
 }
 
 dump_client_error() {
@@ -225,12 +279,12 @@ run_pair() {
 
     log "  ${scenario}: ${client_lang}->${server_lang} @ ${rps_label}"
 
-    local server_duration=$((duration + 5))
+    local server_duration="$duration"
 
     local server_pid
     server_pid=$(start_server "$server_lang" "$server_subcmd" "$svc_name" "$server_duration") || return 1
 
-    sleep 1
+    sleep 0.2
 
     local client_bin
     client_bin="$(bench_bin "$client_lang")"
@@ -288,13 +342,8 @@ run_pair() {
     fi
 
     local server_cpu_pct total_cpu_pct
-    if command -v bc >/dev/null 2>&1; then
-        server_cpu_pct=$(echo "scale=1; ${server_cpu_sec} / ${duration} * 100" | bc 2>/dev/null || echo "0.0")
-        total_cpu_pct=$(echo "scale=1; ${client_cpu} + ${server_cpu_pct}" | bc 2>/dev/null || echo "0.0")
-    else
-        server_cpu_pct="0.0"
-        total_cpu_pct="$client_cpu"
-    fi
+    server_cpu_pct=$(cpu_pct_for_duration "$server_cpu_sec" "$duration")
+    total_cpu_pct=$(sum_cpu_pct "$client_cpu" "$server_cpu_pct")
 
     write_csv_row "$scenario" "$client_lang" "$server_lang" "$target_rps" \
         "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
@@ -489,14 +538,14 @@ main() {
 
             log "  np-pipeline: ${client_lang}->${server_lang} depth=${PIPELINE_DEPTH}"
 
-            local server_duration=$((DURATION + 5))
+            local server_duration="$DURATION"
             local server_pid
             server_pid=$(start_server "$server_lang" "np-ping-pong-server" "$pipe_svc" "$server_duration") || {
                 warn "  Failed to start pipeline server"
                 continue
             }
 
-            sleep 1
+            sleep 0.2
 
             local client_bin
             client_bin="$(bench_bin "$client_lang")"
@@ -542,13 +591,8 @@ main() {
                     fi
 
                     local server_cpu_pct total_cpu_pct
-                    if command -v bc >/dev/null 2>&1; then
-                        server_cpu_pct=$(echo "scale=1; ${server_cpu_sec} / ${DURATION} * 100" | bc 2>/dev/null || echo "0.0")
-                        total_cpu_pct=$(echo "scale=1; ${client_cpu} + ${server_cpu_pct}" | bc 2>/dev/null || echo "0.0")
-                    else
-                        server_cpu_pct="0.0"
-                        total_cpu_pct="$client_cpu"
-                    fi
+                    server_cpu_pct=$(cpu_pct_for_duration "$server_cpu_sec" "$DURATION")
+                    total_cpu_pct=$(sum_cpu_pct "$client_cpu" "$server_cpu_pct")
 
                     write_csv_row "np-pipeline-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
                         "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
@@ -576,14 +620,14 @@ main() {
 
             log "  np-pipeline-batch: ${client_lang}->${server_lang} depth=${PIPELINE_DEPTH}"
 
-            local server_duration=$((DURATION + 5))
+            local server_duration="$DURATION"
             local server_pid
             server_pid=$(start_server "$server_lang" "np-batch-ping-pong-server" "$pb_svc" "$server_duration") || {
                 warn "  Failed to start pipeline-batch server"
                 continue
             }
 
-            sleep 1
+            sleep 0.2
 
             local client_bin
             client_bin="$(bench_bin "$client_lang")"
@@ -629,13 +673,8 @@ main() {
                     fi
 
                     local server_cpu_pct total_cpu_pct
-                    if command -v bc >/dev/null 2>&1; then
-                        server_cpu_pct=$(echo "scale=1; ${server_cpu_sec} / ${DURATION} * 100" | bc 2>/dev/null || echo "0.0")
-                        total_cpu_pct=$(echo "scale=1; ${client_cpu} + ${server_cpu_pct}" | bc 2>/dev/null || echo "0.0")
-                    else
-                        server_cpu_pct="0.0"
-                        total_cpu_pct="$client_cpu"
-                    fi
+                    server_cpu_pct=$(cpu_pct_for_duration "$server_cpu_sec" "$DURATION")
+                    total_cpu_pct=$(sum_cpu_pct "$client_cpu" "$server_cpu_pct")
 
                     write_csv_row "np-pipeline-batch-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
                         "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
