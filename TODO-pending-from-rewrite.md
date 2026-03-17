@@ -151,18 +151,19 @@ Verified facts from the current codebase:
    - fail on partial/stale CSVs
    - generate sections for batch and pipeline+batch scenarios
 4. [x] Verify the scripts using the repo CSVs plus synthetic complete fixtures.
-5. [ ] Re-run real POSIX and Windows benchmark suites to regenerate CSV + markdown artifacts with the new schema.
+5. [x] Re-run real POSIX and Windows benchmark suites to regenerate CSV + markdown artifacts with the new schema.
    - POSIX rerun completed on 2026-03-16: `benchmarks-posix.csv` now has 201 rows and `benchmarks-posix.md` was regenerated from it.
    - POSIX generator exited non-zero because the measured floors currently fail on real data:
      - `snapshot-baseline`: `c->go 71009`, `rust->go 71400`, `go->go 65838` vs required `>= 100000`
      - `snapshot-shm` C/Rust pairs: `471413` to `624506` vs required `>= 1000000`
      - `snapshot-shm` Go pairs: `106397` to `175814` vs required `>= 800000`
-   - Windows rerun completed on 2026-03-16: `benchmarks-windows.csv` and `benchmarks-windows.md` were regenerated on `win11` under a MinGW64 toolchain from the MSYS login shell.
-   - Windows generator exited zero and reported all configured floors met.
-   - Fresh Windows data still reveals broken benchmark rows that are currently not rejected:
+   - First Windows rerun on 2026-03-16 exposed real runtime benchmark failures behind otherwise complete CSV output:
      - `shm-batch-ping-pong`: all 12 rows with `client=c` were emitted with `throughput=0`
      - `np-pipeline-batch-d16`: all 9 language pairs were emitted with `throughput=0`
-     - implication: row-count validation is now correct, but runtime benchmark failure can still pass through as zero-valued data
+   - Follow-up Windows rerun on 2026-03-17 completed cleanly on `win11` after the SHM and pipeline+batch client fixes:
+     - `benchmarks-windows.csv` and `benchmarks-windows.md` regenerated successfully
+     - generator exited zero and reported all configured floors met
+     - copied back to the local repo from `win11`
 6. [ ] Reassess remaining rewrite gaps after the report path is trustworthy.
 
 ## Fresh Benchmark Evidence (2026-03-16)
@@ -184,11 +185,11 @@ Verified facts from the current codebase:
   - benchmark reporting/validation bug: **fixed**
   - benchmark floor compliance: **still failing on current code**
 
-- Real Windows benchmark suite completed successfully enough to generate artifacts:
+- First real Windows benchmark suite on 2026-03-16 completed successfully enough to generate artifacts:
   - output file: `benchmarks-windows.csv`
   - generated report: `benchmarks-windows.md`
   - measurement count: `201`
-- Real Windows run confirms:
+- First Windows run confirmed:
   - Win SHM ping-pong floor currently passes on `win11`
     - `c -> c`: `2433943`
     - `rust -> c`: `2237817`
@@ -251,6 +252,64 @@ Verified facts from the current codebase:
     - implication:
       - the old mixed `pipeline-batch client: 1 errors` symptom was at least partly contaminated by the Windows SHM receive bug
       - the current remaining bug is specific to the Windows named-pipe pipeline+batch path itself
+  - follow-up fix implemented for Windows `np-pipeline-batch-d16` benchmark clients:
+    - files:
+      - `bench/drivers/c/bench_windows.c`
+      - `bench/drivers/go/main_windows.go`
+      - `bench/drivers/rust/src/bench_windows.rs`
+    - change:
+      - keep logical depth `16`
+      - replace the send-all-then-read-all client pattern with bounded in-flight flow control
+      - each client now drains responses by `message_id` before in-flight bytes exceed a conservative duplex named-pipe budget
+    - targeted verification on `win11`:
+      - `c -> c`: exit `0`, throughput `17276276`
+      - `go -> go`: exit `0`, throughput `9948091`
+      - `rust -> rust`: exit `0`, throughput `12352267`
+    - full Windows smoke verification on `win11`:
+      - command: `bash tests/run-windows-bench.sh /tmp/benchmarks-windows-smoke.csv 1`
+      - result: exit `0`
+      - measurement count: `201`
+      - `np-pipeline-batch-d16` now passes for all 9 language pairs:
+        - `c -> c`: `27039526`
+        - `rust -> c`: `27386522`
+        - `go -> c`: `23804745`
+        - `c -> rust`: `14222790`
+        - `rust -> rust`: `14781565`
+        - `go -> rust`: `13780909`
+        - `c -> go`: `15801053`
+        - `rust -> go`: `14520914`
+        - `go -> go`: `15431067`
+    - working conclusion:
+      - the Windows `np-pipeline-batch-d16` failure was caused by the benchmark client flooding a blocking full-duplex named pipe without draining responses
+      - no evidence was found for a transport-wide rule that Windows named pipes must cap pipeline depth below `16`
+  - second full Windows rerun completed on 2026-03-17 after both Windows fixes:
+    - command sequence on `win11`:
+      - `cmake --build build --target bench_windows_c bench_windows_go bench_windows_rs -j4`
+      - `bash tests/run-windows-bench.sh benchmarks-windows.csv 5`
+      - `bash tests/generate-benchmarks-windows.sh benchmarks-windows.csv benchmarks-windows.md`
+    - result:
+      - benchmark runner exit `0`
+      - generator exit `0`
+      - measurement count `201`
+      - all configured Windows floors met again
+    - artifacts copied back locally:
+      - `benchmarks-windows.csv`
+      - `benchmarks-windows.md`
+    - concrete `np-pipeline-batch-d16` results from the real 5-second run:
+      - `c -> c`: `23841905`
+      - `rust -> c`: `25975022`
+      - `go -> c`: `25377574`
+      - `c -> rust`: `13494555`
+      - `rust -> rust`: `14761094`
+      - `go -> rust`: `15518546`
+      - `c -> go`: `16791728`
+      - `rust -> go`: `15856614`
+      - `go -> go`: `13537047`
+    - concrete verification that the prior Windows benchmark failures are gone:
+      - no zero-throughput `shm-batch-ping-pong` rows
+      - no zero-throughput `np-pipeline-batch-d16` rows
+      - local parse-only verification on Linux also passes:
+        - `bash tests/generate-benchmarks-windows.sh benchmarks-windows.csv /tmp/benchmarks-windows-verify.md`
 
 ## Implied Decisions
 
