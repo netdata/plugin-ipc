@@ -6,12 +6,11 @@
 //! Server handles accept, read, dispatch, respond.
 
 use crate::protocol::{
-    self, CgroupsRequest, CgroupsResponseView, Header, NipcError, HEADER_SIZE,
-    KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT,
-    METHOD_STRING_REVERSE, STATUS_INTERNAL_ERROR, STATUS_OK, VERSION, FLAG_BATCH,
-    increment_decode, increment_encode, INCREMENT_PAYLOAD_SIZE,
-    string_reverse_decode, string_reverse_encode, STRING_REVERSE_HDR_SIZE,
-    BatchBuilder, batch_item_get,
+    self, batch_item_get, increment_decode, increment_encode, string_reverse_decode,
+    string_reverse_encode, BatchBuilder, CgroupsRequest, CgroupsResponseView, Header, NipcError,
+    FLAG_BATCH, HEADER_SIZE, INCREMENT_PAYLOAD_SIZE, KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG,
+    METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, METHOD_STRING_REVERSE, STATUS_INTERNAL_ERROR,
+    STATUS_OK, STRING_REVERSE_HDR_SIZE, VERSION,
 };
 
 #[cfg(unix)]
@@ -24,14 +23,12 @@ use crate::transport::posix::{ClientConfig, ServerConfig, UdsListener, UdsSessio
 use crate::transport::shm::ShmContext;
 
 #[cfg(windows)]
-use crate::transport::windows::{
-    ClientConfig, ServerConfig, NpSession, NpListener, NpError,
-};
+use crate::transport::windows::{ClientConfig, NpError, NpListener, NpSession, ServerConfig};
 
 #[cfg(windows)]
 use crate::transport::win_shm::{
-    WinShmContext, PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID,
-    PROFILE_BUSYWAIT as WIN_SHM_PROFILE_BUSYWAIT,
+    WinShmContext, PROFILE_BUSYWAIT as WIN_SHM_PROFILE_BUSYWAIT,
+    PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID,
 };
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -188,11 +185,7 @@ impl CgroupsClient {
         }
 
         let payload_len = self.call_with_retry(|client| {
-            client.do_raw_call(
-                METHOD_CGROUPS_SNAPSHOT,
-                &req_buf[..req_len],
-                response_buf,
-            )
+            client.do_raw_call(METHOD_CGROUPS_SNAPSHOT, &req_buf[..req_len], response_buf)
         })?;
 
         CgroupsResponseView::decode(&response_buf[..payload_len])
@@ -209,11 +202,7 @@ impl CgroupsClient {
 
         let mut response_buf = [0u8; INCREMENT_PAYLOAD_SIZE];
         let payload_len = self.call_with_retry(|client| {
-            client.do_raw_call(
-                METHOD_INCREMENT,
-                &req_buf[..req_len],
-                &mut response_buf,
-            )
+            client.do_raw_call(METHOD_INCREMENT, &req_buf[..req_len], &mut response_buf)
         })?;
 
         increment_decode(&response_buf[..payload_len])
@@ -409,7 +398,11 @@ impl CgroupsClient {
                         // the UDS handshake, so it may not exist yet.
                         let mut shm_ok = false;
                         for _ in 0..200 {
-                            match ShmContext::client_attach(&self.run_dir, &self.service_name, session_id) {
+                            match ShmContext::client_attach(
+                                &self.run_dir,
+                                &self.service_name,
+                                session_id,
+                            ) {
                                 Ok(ctx) => {
                                     self.shm = Some(ctx);
                                     shm_ok = true;
@@ -631,16 +624,15 @@ impl CgroupsClient {
 
     /// Receive via the active transport. Returns (header, payload_len).
     /// Payload bytes are written into response_buf[..payload_len].
-    fn transport_receive(
-        &mut self,
-        response_buf: &mut [u8],
-    ) -> Result<(Header, usize), NipcError> {
+    fn transport_receive(&mut self, response_buf: &mut [u8]) -> Result<(Header, usize), NipcError> {
         // SHM path (POSIX or Windows)
         #[cfg(target_os = "linux")]
         {
             if let Some(ref mut shm) = self.shm {
                 let mut shm_buf = vec![0u8; response_buf.len() + HEADER_SIZE];
-                let mlen = shm.receive(&mut shm_buf, 30000).map_err(|_| NipcError::Truncated)?;
+                let mlen = shm
+                    .receive(&mut shm_buf, 30000)
+                    .map_err(|_| NipcError::Truncated)?;
 
                 if mlen < HEADER_SIZE {
                     return Err(NipcError::Truncated);
@@ -662,7 +654,9 @@ impl CgroupsClient {
         {
             if let Some(ref mut shm) = self.shm {
                 let mut shm_buf = vec![0u8; response_buf.len() + HEADER_SIZE];
-                let mlen = shm.receive(&mut shm_buf, 30000).map_err(|_| NipcError::Truncated)?;
+                let mlen = shm
+                    .receive(&mut shm_buf, 30000)
+                    .map_err(|_| NipcError::Truncated)?;
 
                 if mlen < HEADER_SIZE {
                     return Err(NipcError::Truncated);
@@ -757,7 +751,14 @@ impl ManagedServer {
         _response_buf_size: usize,
         handler: HandlerFn,
     ) -> Self {
-        Self::with_workers(run_dir, service_name, config, _response_buf_size, handler, 8)
+        Self::with_workers(
+            run_dir,
+            service_name,
+            config,
+            _response_buf_size,
+            handler,
+            8,
+        )
     }
 
     /// Create a server with an explicit worker count limit.
@@ -950,8 +951,12 @@ impl ManagedServer {
             let mut guard = self.listener_handle.lock().unwrap();
             if let Some(h) = guard.take() {
                 // Close the listener pipe to unblock ConnectNamedPipe
-                extern "system" { fn CloseHandle(h: usize) -> i32; }
-                unsafe { CloseHandle(h); }
+                extern "system" {
+                    fn CloseHandle(h: usize) -> i32;
+                }
+                unsafe {
+                    CloseHandle(h);
+                }
             }
         }
     }
@@ -1005,7 +1010,6 @@ impl ManagedServer {
             Err(_) => None,
         }
     }
-
 }
 
 /// Windows: handle one client session over Named Pipe + optional Win SHM.
@@ -1066,18 +1070,23 @@ fn handle_session_win_threaded(
 
             for i in 0..batch_count {
                 match batch_item_get(&payload, batch_count, i) {
-                    Ok((item_data, _item_len)) => {
-                        match handler(hdr.code, item_data) {
-                            Some(resp_data) => item_responses.push(resp_data),
-                            None => { ok = false; break; }
+                    Ok((item_data, _item_len)) => match handler(hdr.code, item_data) {
+                        Some(resp_data) => item_responses.push(resp_data),
+                        None => {
+                            ok = false;
+                            break;
                         }
+                    },
+                    Err(_) => {
+                        ok = false;
+                        break;
                     }
-                    Err(_) => { ok = false; break; }
                 }
             }
 
             if ok {
-                let total_data: usize = item_responses.iter()
+                let total_data: usize = item_responses
+                    .iter()
                     .map(|r| protocol::align8(r.len()))
                     .sum();
                 let buf_size = protocol::align8(batch_count as usize * 8) + total_data + 64;
@@ -1093,7 +1102,12 @@ fn handle_session_win_threaded(
 
                 if ok {
                     let (total_len, _out_count) = bb.finish();
-                    (batch_buf[..total_len].to_vec(), true, FLAG_BATCH, batch_count)
+                    (
+                        batch_buf[..total_len].to_vec(),
+                        true,
+                        FLAG_BATCH,
+                        batch_count,
+                    )
                 } else {
                     (Vec::new(), false, 0u16, 1u32)
                 }
@@ -1239,19 +1253,24 @@ fn handle_session_threaded(
 
             for i in 0..batch_count {
                 match batch_item_get(&payload, batch_count, i) {
-                    Ok((item_data, _item_len)) => {
-                        match handler(hdr.code, item_data) {
-                            Some(resp_data) => item_responses.push(resp_data),
-                            None => { ok = false; break; }
+                    Ok((item_data, _item_len)) => match handler(hdr.code, item_data) {
+                        Some(resp_data) => item_responses.push(resp_data),
+                        None => {
+                            ok = false;
+                            break;
                         }
+                    },
+                    Err(_) => {
+                        ok = false;
+                        break;
                     }
-                    Err(_) => { ok = false; break; }
                 }
             }
 
             if ok {
                 // Assemble batch response
-                let total_data: usize = item_responses.iter()
+                let total_data: usize = item_responses
+                    .iter()
                     .map(|r| protocol::align8(r.len()))
                     .sum();
                 let buf_size = protocol::align8(batch_count as usize * 8) + total_data + 64;
@@ -1267,7 +1286,12 @@ fn handle_session_threaded(
 
                 if ok {
                     let (total_len, _out_count) = bb.finish();
-                    (batch_buf[..total_len].to_vec(), true, FLAG_BATCH, batch_count)
+                    (
+                        batch_buf[..total_len].to_vec(),
+                        true,
+                        FLAG_BATCH,
+                        batch_count,
+                    )
                 } else {
                     (Vec::new(), false, 0u16, 1u32)
                 }
@@ -1480,9 +1504,7 @@ impl CgroupsCache {
                             };
                             let path = match iv.path.as_str() {
                                 Ok(s) => s.to_string(),
-                                Err(_) => {
-                                    String::from_utf8_lossy(iv.path.as_bytes()).into_owned()
-                                }
+                                Err(_) => String::from_utf8_lossy(iv.path.as_bytes()).into_owned(),
                             };
                             new_items.push(CgroupsCacheItem {
                                 hash: iv.hash,
@@ -1636,9 +1658,21 @@ mod tests {
         let mut builder = CgroupsBuilder::new(&mut buf, 3, 1, 42);
 
         let items = [
-            (1001u32, 0u32, 1u32, b"docker-abc123" as &[u8], b"/sys/fs/cgroup/docker/abc123" as &[u8]),
+            (
+                1001u32,
+                0u32,
+                1u32,
+                b"docker-abc123" as &[u8],
+                b"/sys/fs/cgroup/docker/abc123" as &[u8],
+            ),
             (2002, 0, 1, b"k8s-pod-xyz", b"/sys/fs/cgroup/kubepods/xyz"),
-            (3003, 0, 0, b"systemd-user", b"/sys/fs/cgroup/user.slice/user-1000"),
+            (
+                3003,
+                0,
+                0,
+                b"systemd-user",
+                b"/sys/fs/cgroup/user.slice/user-1000",
+            ),
         ];
 
         for (hash, options, enabled, name, path) in &items {
@@ -1663,10 +1697,7 @@ mod tests {
     }
 
     impl TestServer {
-        fn start(
-            service: &str,
-            handler: fn(u16, &[u8]) -> Option<Vec<u8>>,
-        ) -> Self {
+        fn start(service: &str, handler: fn(u16, &[u8]) -> Option<Vec<u8>>) -> Self {
             Self::start_with_workers(service, handler, 8)
         }
 
@@ -1825,7 +1856,9 @@ mod tests {
         assert!(client.ready());
 
         let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-        let view = client.call_snapshot(&mut resp_buf).expect("call should succeed");
+        let view = client
+            .call_snapshot(&mut resp_buf)
+            .expect("call should succeed");
 
         assert_eq!(view.item_count, 3);
         assert_eq!(view.systemd_enabled, 1);
@@ -1907,7 +1940,9 @@ mod tests {
         assert!(client1.ready());
 
         let mut resp_buf1 = vec![0u8; RESPONSE_BUF_SIZE];
-        let view1 = client1.call_snapshot(&mut resp_buf1).expect("client 1 call");
+        let view1 = client1
+            .call_snapshot(&mut resp_buf1)
+            .expect("client 1 call");
         assert_eq!(view1.item_count, 3);
 
         // Now multi-client: keep client 1 open, connect client 2
@@ -1916,7 +1951,9 @@ mod tests {
         assert!(client2.ready());
 
         let mut resp_buf2 = vec![0u8; RESPONSE_BUF_SIZE];
-        let view2 = client2.call_snapshot(&mut resp_buf2).expect("client 2 call");
+        let view2 = client2
+            .call_snapshot(&mut resp_buf2)
+            .expect("client 2 call");
         assert_eq!(view2.item_count, 3);
 
         client1.close();
@@ -2069,9 +2106,8 @@ mod tests {
         let mut server = TestServer::start(svc, test_cgroups_handler);
 
         // Connect via raw UDS session
-        let mut session = UdsSession::connect(
-            TEST_RUN_DIR, svc, &client_config(),
-        ).expect("connect");
+        let mut session =
+            UdsSession::connect(TEST_RUN_DIR, svc, &client_config()).expect("connect");
 
         // Send a RESPONSE (not REQUEST) - protocol violation
         let mut hdr = Header {
@@ -2100,12 +2136,18 @@ mod tests {
                 transport_status: STATUS_OK,
                 ..Header::default()
             };
-            let req = CgroupsRequest { layout_version: 1, flags: 0 };
+            let req = CgroupsRequest {
+                layout_version: 1,
+                flags: 0,
+            };
             let mut req_buf = [0u8; 4];
             req.encode(&mut req_buf);
             let _ = session.send(&mut hdr2, &req_buf);
             let recv = session.receive(&mut recv_buf);
-            assert!(recv.is_err(), "server should have terminated session after non-request message");
+            assert!(
+                recv.is_err(),
+                "server should have terminated session after non-request message"
+            );
         }
 
         drop(session);
@@ -2113,12 +2155,19 @@ mod tests {
         // Verify server is still alive: connect a new client and do a normal call
         let mut verify_client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
         verify_client.refresh();
-        assert!(verify_client.ready(), "server should still be alive after bad client");
+        assert!(
+            verify_client.ready(),
+            "server should still be alive after bad client"
+        );
 
         let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-        let view = verify_client.call_snapshot(&mut resp_buf)
+        let view = verify_client
+            .call_snapshot(&mut resp_buf)
             .expect("normal call should succeed after bad client");
-        assert_eq!(view.item_count, 3, "response should be correct after bad client");
+        assert_eq!(
+            view.item_count, 3,
+            "response should be correct after bad client"
+        );
 
         verify_client.close();
         server.stop();
@@ -2316,8 +2365,13 @@ mod tests {
                 let name = format!("cgroup-{i}");
                 let path = format!("/sys/fs/cgroup/test/{i}");
                 if builder
-                    .add(i + 1000, 0, if i % 3 == 0 { 0 } else { 1 },
-                         name.as_bytes(), path.as_bytes())
+                    .add(
+                        i + 1000,
+                        0,
+                        if i % 3 == 0 { 0 } else { 1 },
+                        name.as_bytes(),
+                        path.as_bytes(),
+                    )
                     .is_err()
                 {
                     return None;
@@ -2367,7 +2421,10 @@ mod tests {
     fn simple_hash(s: &str) -> u32 {
         let mut hash: u32 = 5381;
         for c in s.bytes() {
-            hash = hash.wrapping_shl(5).wrapping_add(hash).wrapping_add(c as u32);
+            hash = hash
+                .wrapping_shl(5)
+                .wrapping_add(hash)
+                .wrapping_add(c as u32);
         }
         hash
     }
@@ -2407,8 +2464,10 @@ mod tests {
                         let path = format!("/sys/fs/cgroup/docker/{i:04}");
                         let hash = simple_hash(&name);
                         let enabled = if i % 5 == 0 { 0 } else { 1 };
-                        if builder.add(hash, 0x10, enabled,
-                                       name.as_bytes(), path.as_bytes()).is_err() {
+                        if builder
+                            .add(hash, 0x10, enabled, name.as_bytes(), path.as_bytes())
+                            .is_err()
+                        {
                             return None;
                         }
                     }
@@ -2418,13 +2477,7 @@ mod tests {
                     Some(buf)
                 });
 
-            let mut server = ManagedServer::new(
-                TEST_RUN_DIR,
-                &svc,
-                scfg,
-                resp_buf_size,
-                handler,
-            );
+            let mut server = ManagedServer::new(TEST_RUN_DIR, &svc, scfg, resp_buf_size, handler);
             let stop_flag = server.running_flag();
 
             let thread = thread::spawn(move || {
@@ -2479,7 +2532,9 @@ mod tests {
 
         let start = std::time::Instant::now();
         let mut resp_buf = vec![0u8; BUF_SIZE];
-        let view = client.call_snapshot(&mut resp_buf).expect("call should succeed");
+        let view = client
+            .call_snapshot(&mut resp_buf)
+            .expect("call should succeed");
         let elapsed = start.elapsed();
 
         eprintln!("  1000 items: {:?}", elapsed);
@@ -2490,7 +2545,9 @@ mod tests {
 
         // Verify ALL items
         for i in 0..N {
-            let item = view.item(i).unwrap_or_else(|_| panic!("item {i} decode failed"));
+            let item = view
+                .item(i)
+                .unwrap_or_else(|_| panic!("item {i} decode failed"));
             let expected_name = format!("container-{i:04}");
             let expected_path = format!("/sys/fs/cgroup/docker/{i:04}");
             let expected_hash = simple_hash(&expected_name);
@@ -2535,7 +2592,9 @@ mod tests {
 
         let start = std::time::Instant::now();
         let mut resp_buf = vec![0u8; BUF_SIZE];
-        let view = client.call_snapshot(&mut resp_buf).expect("call should succeed");
+        let view = client
+            .call_snapshot(&mut resp_buf)
+            .expect("call should succeed");
         let elapsed = start.elapsed();
 
         eprintln!("  5000 items: {:?}", elapsed);
@@ -2681,7 +2740,10 @@ mod tests {
         }
 
         let elapsed = start.elapsed();
-        eprintln!("  {CYCLES} rapid cycles: {successes} ok, {failures} fail, {:?}", elapsed);
+        eprintln!(
+            "  {CYCLES} rapid cycles: {successes} ok, {failures} fail, {:?}",
+            elapsed
+        );
 
         assert_eq!(successes, CYCLES, "all cycles should succeed");
         assert_eq!(failures, 0, "no failures expected");
@@ -2853,13 +2915,22 @@ mod tests {
         let mut responses_received = 0u64;
         for round in 0..10 {
             let sent = value;
-            let result = client.call_increment(sent)
+            let result = client
+                .call_increment(sent)
                 .unwrap_or_else(|e| panic!("round {round}: call_increment({sent}) failed: {e:?}"));
-            assert_eq!(result, sent + 1, "round {round}: expected {} got {result}", sent + 1);
+            assert_eq!(
+                result,
+                sent + 1,
+                "round {round}: expected {} got {result}",
+                sent + 1
+            );
             responses_received += 1;
             value = result;
         }
-        assert_eq!(responses_received, 10, "expected 10 responses, got {responses_received}");
+        assert_eq!(
+            responses_received, 10,
+            "expected 10 responses, got {responses_received}"
+        );
         assert_eq!(value, 10, "final value after 10 rounds");
 
         client.close();
@@ -2887,15 +2958,25 @@ mod tests {
         for round in 0..6 {
             let sent = current.clone();
             let expected: String = sent.chars().rev().collect();
-            let result = client.call_string_reverse(&sent)
-                .unwrap_or_else(|e| panic!("round {round}: call_string_reverse({sent:?}) failed: {e:?}"));
-            assert_eq!(result, expected, "round {round}: reverse of {sent:?} should be {expected:?}, got {result:?}");
+            let result = client.call_string_reverse(&sent).unwrap_or_else(|e| {
+                panic!("round {round}: call_string_reverse({sent:?}) failed: {e:?}")
+            });
+            assert_eq!(
+                result, expected,
+                "round {round}: reverse of {sent:?} should be {expected:?}, got {result:?}"
+            );
             responses_received += 1;
             current = result;
         }
-        assert_eq!(responses_received, 6, "expected 6 responses, got {responses_received}");
+        assert_eq!(
+            responses_received, 6,
+            "expected 6 responses, got {responses_received}"
+        );
         // even number of reversals = identity
-        assert_eq!(current, original, "6 reversals should restore original string");
+        assert_eq!(
+            current, original,
+            "6 reversals should restore original string"
+        );
 
         client.close();
         server.stop();
@@ -2917,21 +2998,41 @@ mod tests {
         // Interleave increment and string_reverse calls
         let inc_input_1 = 100u64;
         let v1 = client.call_increment(inc_input_1).expect("increment(100)");
-        assert_eq!(v1, inc_input_1 + 1, "increment({inc_input_1}) should be {}", inc_input_1 + 1);
+        assert_eq!(
+            v1,
+            inc_input_1 + 1,
+            "increment({inc_input_1}) should be {}",
+            inc_input_1 + 1
+        );
 
         let str_input_1 = "hello";
         let expected_s1: String = str_input_1.chars().rev().collect();
-        let s1 = client.call_string_reverse(str_input_1).expect("reverse(hello)");
-        assert_eq!(s1, expected_s1, "reverse of {str_input_1:?} should be {expected_s1:?}");
+        let s1 = client
+            .call_string_reverse(str_input_1)
+            .expect("reverse(hello)");
+        assert_eq!(
+            s1, expected_s1,
+            "reverse of {str_input_1:?} should be {expected_s1:?}"
+        );
 
         let inc_input_2 = v1;
         let v2 = client.call_increment(inc_input_2).expect("increment(101)");
-        assert_eq!(v2, inc_input_2 + 1, "increment({inc_input_2}) should be {}", inc_input_2 + 1);
+        assert_eq!(
+            v2,
+            inc_input_2 + 1,
+            "increment({inc_input_2}) should be {}",
+            inc_input_2 + 1
+        );
 
         let str_input_2 = "world";
         let expected_s2: String = str_input_2.chars().rev().collect();
-        let s2 = client.call_string_reverse(str_input_2).expect("reverse(world)");
-        assert_eq!(s2, expected_s2, "reverse of {str_input_2:?} should be {expected_s2:?}");
+        let s2 = client
+            .call_string_reverse(str_input_2)
+            .expect("reverse(world)");
+        assert_eq!(
+            s2, expected_s2,
+            "reverse of {str_input_2:?} should be {expected_s2:?}"
+        );
 
         client.close();
         server.stop();
@@ -3008,11 +3109,18 @@ mod tests {
 
         assert_eq!(results.len(), 5);
         for (i, (&input, &output)) in values.iter().zip(results.iter()).enumerate() {
-            assert_eq!(output, input + 1, "batch item {i}: expected {}, got {output}", input + 1);
+            assert_eq!(
+                output,
+                input + 1,
+                "batch item {i}: expected {}, got {output}",
+                input + 1
+            );
         }
 
         // Single item batch
-        let single = client.call_increment_batch(&[99]).expect("single-item batch");
+        let single = client
+            .call_increment_batch(&[99])
+            .expect("single-item batch");
         assert_eq!(single, vec![100]);
 
         // Empty batch
@@ -3213,7 +3321,12 @@ mod tests {
 
         let handler: HandlerFn = Arc::new(|_, _| None);
         let server = ManagedServer::with_workers(
-            TEST_RUN_DIR, svc, server_config(), RESPONSE_BUF_SIZE, handler, 0,
+            TEST_RUN_DIR,
+            svc,
+            server_config(),
+            RESPONSE_BUF_SIZE,
+            handler,
+            0,
         );
         assert_eq!(server.worker_count, 1);
 
@@ -3232,7 +3345,11 @@ mod tests {
 
         let handler: HandlerFn = Arc::new(|_, _| None);
         let server = ManagedServer::new(
-            TEST_RUN_DIR, svc, server_config(), RESPONSE_BUF_SIZE, handler,
+            TEST_RUN_DIR,
+            svc,
+            server_config(),
+            RESPONSE_BUF_SIZE,
+            handler,
         );
         let flag = server.running_flag();
         assert!(!flag.load(Ordering::Acquire));
@@ -3381,7 +3498,9 @@ mod tests {
         });
 
         for _ in 0..2000 {
-            if ready_flag.load(Ordering::Acquire) { break; }
+            if ready_flag.load(Ordering::Acquire) {
+                break;
+            }
             thread::sleep(Duration::from_micros(500));
         }
         thread::sleep(Duration::from_millis(50));

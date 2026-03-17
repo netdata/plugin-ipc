@@ -59,11 +59,7 @@ mod ffi {
             lpName: LPCWSTR,
         ) -> HANDLE;
 
-        pub fn OpenEventW(
-            dwDesiredAccess: DWORD,
-            bInheritHandle: BOOL,
-            lpName: LPCWSTR,
-        ) -> HANDLE;
+        pub fn OpenEventW(dwDesiredAccess: DWORD, bInheritHandle: BOOL, lpName: LPCWSTR) -> HANDLE;
 
         pub fn SetEvent(hEvent: HANDLE) -> BOOL;
 
@@ -268,9 +264,8 @@ impl WinShmContext {
             return Err(WinShmError::CreateMapping(last_error()));
         }
 
-        let base = unsafe {
-            ffi::MapViewOfFile(mapping, ffi::FILE_MAP_ALL_ACCESS, 0, 0, region_size)
-        };
+        let base =
+            unsafe { ffi::MapViewOfFile(mapping, ffi::FILE_MAP_ALL_ACCESS, 0, 0, region_size) };
         if base.is_null() {
             let e = last_error();
             unsafe { ffi::CloseHandle(mapping) };
@@ -308,7 +303,8 @@ impl WinShmContext {
                 return Err(WinShmError::CreateEvent(e));
             }
 
-            let rsp_name = build_object_name(hash, service_name, profile, session_id, "resp_event")?;
+            let rsp_name =
+                build_object_name(hash, service_name, profile, session_id, "resp_event")?;
             let rsp = unsafe { ffi::CreateEventW(std::ptr::null(), 0, 0, rsp_name.as_ptr()) };
             if rsp == 0 {
                 let e = last_error();
@@ -356,16 +352,13 @@ impl WinShmContext {
         let hash = compute_shm_hash(run_dir, service_name, auth_token);
         let mapping_name = build_object_name(hash, service_name, profile, session_id, "mapping")?;
 
-        let mapping = unsafe {
-            ffi::OpenFileMappingW(ffi::FILE_MAP_ALL_ACCESS, 0, mapping_name.as_ptr())
-        };
+        let mapping =
+            unsafe { ffi::OpenFileMappingW(ffi::FILE_MAP_ALL_ACCESS, 0, mapping_name.as_ptr()) };
         if mapping == 0 {
             return Err(WinShmError::OpenMapping(last_error()));
         }
 
-        let base = unsafe {
-            ffi::MapViewOfFile(mapping, ffi::FILE_MAP_ALL_ACCESS, 0, 0, 0)
-        };
+        let base = unsafe { ffi::MapViewOfFile(mapping, ffi::FILE_MAP_ALL_ACCESS, 0, 0, 0) };
         if base.is_null() {
             let e = last_error();
             unsafe { ffi::CloseHandle(mapping) };
@@ -428,7 +421,11 @@ impl WinShmContext {
         let (req_event, resp_event) = if profile == PROFILE_HYBRID {
             let re_name = build_object_name(hash, service_name, profile, session_id, "req_event")?;
             let re = unsafe {
-                ffi::OpenEventW(ffi::EVENT_MODIFY_STATE | ffi::SYNCHRONIZE, 0, re_name.as_ptr())
+                ffi::OpenEventW(
+                    ffi::EVENT_MODIFY_STATE | ffi::SYNCHRONIZE,
+                    0,
+                    re_name.as_ptr(),
+                )
             };
             if re == 0 {
                 let e = last_error();
@@ -439,7 +436,8 @@ impl WinShmContext {
                 return Err(WinShmError::OpenEvent(e));
             }
 
-            let rsp_name = build_object_name(hash, service_name, profile, session_id, "resp_event")?;
+            let rsp_name =
+                build_object_name(hash, service_name, profile, session_id, "resp_event")?;
             let rsp = unsafe {
                 ffi::OpenEventW(
                     ffi::EVENT_MODIFY_STATE | ffi::SYNCHRONIZE,
@@ -482,28 +480,29 @@ impl WinShmContext {
     /// Publish a message. Client sends to request area; server to response.
     pub fn send(&mut self, msg: &[u8]) -> Result<(), WinShmError> {
         if self.base.is_null() || msg.is_empty() {
-            return Err(WinShmError::BadParam("null context or empty message".into()));
+            return Err(WinShmError::BadParam(
+                "null context or empty message".into(),
+            ));
         }
 
-        let (area_off, area_cap, len_off, seq_off, peer_waiting_off, peer_event) =
-            match self.role {
-                WinShmRole::Client => (
-                    self.request_offset,
-                    self.request_capacity,
-                    OFF_REQ_LEN,
-                    OFF_REQ_SEQ,
-                    OFF_REQ_SERVER_WAITING,
-                    self.req_event,
-                ),
-                WinShmRole::Server => (
-                    self.response_offset,
-                    self.response_capacity,
-                    OFF_RESP_LEN,
-                    OFF_RESP_SEQ,
-                    OFF_RESP_CLIENT_WAITING,
-                    self.resp_event,
-                ),
-            };
+        let (area_off, area_cap, len_off, seq_off, peer_waiting_off, peer_event) = match self.role {
+            WinShmRole::Client => (
+                self.request_offset,
+                self.request_capacity,
+                OFF_REQ_LEN,
+                OFF_REQ_SEQ,
+                OFF_REQ_SERVER_WAITING,
+                self.req_event,
+            ),
+            WinShmRole::Server => (
+                self.response_offset,
+                self.response_capacity,
+                OFF_RESP_LEN,
+                OFF_RESP_SEQ,
+                OFF_RESP_CLIENT_WAITING,
+                self.resp_event,
+            ),
+        };
 
         if msg.len() > area_cap as usize {
             return Err(WinShmError::MsgTooLarge);
@@ -549,29 +548,37 @@ impl WinShmContext {
             return Err(WinShmError::BadParam("empty buffer".into()));
         }
 
-        let (area_off, area_cap, len_off, seq_off, self_waiting_off, peer_closed_off, wait_event, expected_seq) =
-            match self.role {
-                WinShmRole::Server => (
-                    self.request_offset,
-                    self.request_capacity,
-                    OFF_REQ_LEN,
-                    OFF_REQ_SEQ,
-                    OFF_REQ_SERVER_WAITING,
-                    OFF_REQ_CLIENT_CLOSED,
-                    self.req_event,
-                    self.local_req_seq + 1,
-                ),
-                WinShmRole::Client => (
-                    self.response_offset,
-                    self.response_capacity,
-                    OFF_RESP_LEN,
-                    OFF_RESP_SEQ,
-                    OFF_RESP_CLIENT_WAITING,
-                    OFF_RESP_SERVER_CLOSED,
-                    self.resp_event,
-                    self.local_resp_seq + 1,
-                ),
-            };
+        let (
+            area_off,
+            area_cap,
+            len_off,
+            seq_off,
+            self_waiting_off,
+            peer_closed_off,
+            wait_event,
+            expected_seq,
+        ) = match self.role {
+            WinShmRole::Server => (
+                self.request_offset,
+                self.request_capacity,
+                OFF_REQ_LEN,
+                OFF_REQ_SEQ,
+                OFF_REQ_SERVER_WAITING,
+                OFF_REQ_CLIENT_CLOSED,
+                self.req_event,
+                self.local_req_seq + 1,
+            ),
+            WinShmRole::Client => (
+                self.response_offset,
+                self.response_capacity,
+                OFF_RESP_LEN,
+                OFF_RESP_SEQ,
+                OFF_RESP_CLIENT_WAITING,
+                OFF_RESP_SERVER_CLOSED,
+                self.resp_event,
+                self.local_resp_seq + 1,
+            ),
+        };
 
         // The copy ceiling is the smaller of the caller buffer and the
         // SHM area capacity. Prevents out-of-bounds reads on forged lengths.
@@ -603,7 +610,11 @@ impl WinShmContext {
         // spurious wakes — same pattern as POSIX SHM Phase H6 fix).
         if !observed {
             if self.profile == PROFILE_HYBRID {
-                let deadline_ms = if timeout_ms == 0 { ffi::INFINITE } else { timeout_ms };
+                let deadline_ms = if timeout_ms == 0 {
+                    ffi::INFINITE
+                } else {
+                    timeout_ms
+                };
                 let start_tick = unsafe { ffi::GetTickCount64() };
 
                 loop {
@@ -791,7 +802,9 @@ fn validate_service_name(name: &str) -> Result<(), WinShmError> {
         return Err(WinShmError::BadParam("empty service name".into()));
     }
     if name == "." || name == ".." {
-        return Err(WinShmError::BadParam("service name cannot be '.' or '..'".into()));
+        return Err(WinShmError::BadParam(
+            "service name cannot be '.' or '..'".into(),
+        ));
     }
     for c in name.bytes() {
         match c {

@@ -6,15 +6,12 @@
 //! Same subcommands and output format as the C driver.
 
 use netipc::protocol::{
-    self, BatchBuilder, CgroupsBuilder, CgroupsRequest, Header,
-    HEADER_SIZE, KIND_REQUEST, KIND_RESPONSE, FLAG_BATCH, MAGIC_MSG,
-    METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE, PROFILE_SHM_HYBRID,
-    STATUS_OK, VERSION, INCREMENT_PAYLOAD_SIZE,
-    batch_item_get, increment_decode, increment_encode,
+    self, batch_item_get, increment_decode, increment_encode, BatchBuilder, CgroupsBuilder,
+    CgroupsRequest, Header, FLAG_BATCH, HEADER_SIZE, INCREMENT_PAYLOAD_SIZE, KIND_REQUEST,
+    KIND_RESPONSE, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE,
+    PROFILE_SHM_HYBRID, STATUS_OK, VERSION,
 };
-use netipc::service::cgroups::{
-    CgroupsCacheItem, CgroupsClient, ManagedServer,
-};
+use netipc::service::cgroups::{CgroupsCacheItem, CgroupsClient, ManagedServer};
 use netipc::transport::posix::{ClientConfig, ServerConfig, UdsSession};
 
 #[cfg(target_os = "linux")]
@@ -243,14 +240,15 @@ fn run_server(
     duration_sec: u32,
     handler_type: &str,
 ) -> i32 {
-    let handler: std::sync::Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync> = match handler_type {
-        "ping-pong" => std::sync::Arc::new(|code, payload| ping_pong_handler(code, payload)),
-        "snapshot" => std::sync::Arc::new(|code, payload| snapshot_handler(code, payload)),
-        _ => {
-            eprintln!("Unknown handler type: {handler_type}");
-            return 1;
-        }
-    };
+    let handler: std::sync::Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync> =
+        match handler_type {
+            "ping-pong" => std::sync::Arc::new(|code, payload| ping_pong_handler(code, payload)),
+            "snapshot" => std::sync::Arc::new(|code, payload| snapshot_handler(code, payload)),
+            _ => {
+                eprintln!("Unknown handler type: {handler_type}");
+                return 1;
+            }
+        };
 
     let mut server = ManagedServer::new(
         run_dir,
@@ -285,12 +283,7 @@ fn run_server(
 //  Batch server (same handler, higher batch/payload limits)
 // ---------------------------------------------------------------------------
 
-fn run_batch_server(
-    run_dir: &str,
-    service: &str,
-    profiles: u32,
-    duration_sec: u32,
-) -> i32 {
+fn run_batch_server(run_dir: &str, service: &str, profiles: u32, duration_sec: u32) -> i32 {
     let handler: std::sync::Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync> =
         std::sync::Arc::new(|code, payload| ping_pong_handler(code, payload));
 
@@ -374,7 +367,11 @@ fn run_batch_ping_pong_client(
         }
     };
 
-    let est_samples = if target_rps == 0 { 2_000_000 } else { (target_rps * duration_sec as u64) as usize };
+    let est_samples = if target_rps == 0 {
+        2_000_000
+    } else {
+        (target_rps * duration_sec as u64) as usize
+    };
     let mut lr = LatencyRecorder::new(est_samples);
     let mut rl = RateLimiter::new(target_rps);
     let mut rng = XorShift32::new();
@@ -496,10 +493,11 @@ fn run_batch_ping_pong_client(
         };
 
         #[cfg(not(target_os = "linux"))]
-        let io_result: Result<(Header, Vec<u8>), ()> = match session.send(&mut hdr, &req_buf[..req_len]) {
-            Ok(_) => session.receive(&mut recv_buf).map_err(|_| ()),
-            Err(_) => Err(()),
-        };
+        let io_result: Result<(Header, Vec<u8>), ()> =
+            match session.send(&mut hdr, &req_buf[..req_len]) {
+                Ok(_) => session.receive(&mut recv_buf).map_err(|_| ()),
+                Err(_) => Err(()),
+            };
 
         let (resp_hdr, resp_payload) = match io_result {
             Ok(r) => r,
@@ -524,22 +522,20 @@ fn run_batch_ping_pong_client(
         let mut batch_ok = true;
         for i in 0..batch_size {
             match batch_item_get(&resp_payload, batch_size, i) {
-                Ok((item_data, _item_len)) => {
-                    match increment_decode(item_data) {
-                        Ok(resp_val) => {
-                            if resp_val != expected[i as usize] {
-                                errors += 1;
-                                batch_ok = false;
-                                break;
-                            }
-                        }
-                        Err(_) => {
+                Ok((item_data, _item_len)) => match increment_decode(item_data) {
+                    Ok(resp_val) => {
+                        if resp_val != expected[i as usize] {
                             errors += 1;
                             batch_ok = false;
                             break;
                         }
                     }
-                }
+                    Err(_) => {
+                        errors += 1;
+                        batch_ok = false;
+                        break;
+                    }
+                },
                 Err(_) => {
                     errors += 1;
                     batch_ok = false;
@@ -580,10 +576,17 @@ fn run_batch_ping_pong_client(
     drop(session);
 
     if errors > 0 {
-        eprintln!("batch client: {} errors out of {} items", errors, total_items);
+        eprintln!(
+            "batch client: {} errors out of {} items",
+            errors, total_items
+        );
     }
 
-    if errors > 0 { 1 } else { 0 }
+    if errors > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -616,7 +619,11 @@ fn run_pipeline_client(
         }
     };
 
-    let est_samples = if target_rps == 0 { 5_000_000 } else { (target_rps * duration_sec as u64) as usize };
+    let est_samples = if target_rps == 0 {
+        5_000_000
+    } else {
+        (target_rps * duration_sec as u64) as usize
+    };
     let mut lr = LatencyRecorder::new(est_samples);
     let mut rl = RateLimiter::new(target_rps);
 
@@ -713,7 +720,11 @@ fn run_pipeline_client(
         eprintln!("pipeline client: {} errors", errors);
     }
 
-    if errors > 0 { 1 } else { 0 }
+    if errors > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -755,7 +766,9 @@ fn run_pipeline_batch_client(
     let mut errors: u64 = 0;
 
     let depth = depth.min(128) as usize;
-    let mut req_bufs: Vec<Vec<u8>> = (0..depth).map(|_| vec![0u8; BENCH_BATCH_BUF_SIZE]).collect();
+    let mut req_bufs: Vec<Vec<u8>> = (0..depth)
+        .map(|_| vec![0u8; BENCH_BATCH_BUF_SIZE])
+        .collect();
     let mut req_lens = vec![0usize; depth];
     let mut batch_sizes = vec![0u32; depth];
 
@@ -855,7 +868,11 @@ fn run_pipeline_batch_client(
         eprintln!("pipeline-batch client: {} errors", errors);
     }
 
-    if errors > 0 { 1 } else { 0 }
+    if errors > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -968,8 +985,11 @@ fn run_ping_pong_client(
             match shm_ctx.receive(&mut resp_shm_buf, 30000) {
                 Ok(resp_len) => {
                     if resp_len >= HEADER_SIZE + 8 {
-                        let resp_val =
-                            u64::from_ne_bytes(resp_shm_buf[HEADER_SIZE..HEADER_SIZE + 8].try_into().unwrap());
+                        let resp_val = u64::from_ne_bytes(
+                            resp_shm_buf[HEADER_SIZE..HEADER_SIZE + 8]
+                                .try_into()
+                                .unwrap(),
+                        );
                         if resp_val != counter + 1 {
                             eprintln!(
                                 "counter chain broken: expected {}, got {}",
@@ -1081,7 +1101,11 @@ fn run_ping_pong_client(
         eprintln!("client: {} errors", errors);
     }
 
-    if errors > 0 { 1 } else { 0 }
+    if errors > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1172,7 +1196,11 @@ fn run_snapshot_client(
         eprintln!("client: {} errors", errors);
     }
 
-    if errors > 0 { 1 } else { 0 }
+    if errors > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1202,7 +1230,9 @@ fn run_lookup_bench(duration_sec: u32) -> i32 {
     while wall_start.elapsed() < deadline {
         for item in &items {
             // Linear scan like the real L3 cache
-            let found = items.iter().find(|it| it.hash == item.hash && it.name == item.name);
+            let found = items
+                .iter()
+                .find(|it| it.hash == item.hash && it.name == item.name);
             if found.is_some() {
                 hits += 1;
             }
@@ -1216,7 +1246,10 @@ fn run_lookup_bench(duration_sec: u32) -> i32 {
     let throughput = lookups as f64 / wall_sec;
     let cpu_pct = (cpu_sec / wall_sec) * 100.0;
 
-    println!("lookup,rust,rust,{:.0},0,0,0,{:.1},0.0,{:.1}", throughput, cpu_pct, cpu_pct);
+    println!(
+        "lookup,rust,rust,{:.0},0,0,0,{:.1},0.0,{:.1}",
+        throughput, cpu_pct, cpu_pct
+    );
 
     if hits != lookups {
         eprintln!("lookup: missed {}/{}", lookups - hits, lookups);
@@ -1254,10 +1287,15 @@ fn main() {
     let cmd = &args[1];
 
     let rc = match cmd.as_str() {
-        "uds-ping-pong-server" | "shm-ping-pong-server"
-        | "snapshot-server" | "snapshot-shm-server" => {
+        "uds-ping-pong-server"
+        | "shm-ping-pong-server"
+        | "snapshot-server"
+        | "snapshot-shm-server" => {
             if args.len() < 4 {
-                eprintln!("Usage: {} {} <run_dir> <service> [duration_sec]", args[0], cmd);
+                eprintln!(
+                    "Usage: {} {} <run_dir> <service> [duration_sec]",
+                    args[0], cmd
+                );
                 std::process::exit(1);
             }
             let run_dir = &args[2];
@@ -1300,7 +1338,9 @@ fn main() {
                 _ => unreachable!(),
             };
 
-            run_ping_pong_client(run_dir, service, profiles, duration, target_rps, scenario, "rust")
+            run_ping_pong_client(
+                run_dir, service, profiles, duration, target_rps, scenario, "rust",
+            )
         }
 
         "snapshot-client" | "snapshot-shm-client" => {
@@ -1322,13 +1362,18 @@ fn main() {
                 _ => unreachable!(),
             };
 
-            run_snapshot_client(run_dir, service, profiles, duration, target_rps, scenario, "rust")
+            run_snapshot_client(
+                run_dir, service, profiles, duration, target_rps, scenario, "rust",
+            )
         }
 
         // Batch server subcommands
         "uds-batch-ping-pong-server" | "shm-batch-ping-pong-server" => {
             if args.len() < 4 {
-                eprintln!("Usage: {} {} <run_dir> <service> [duration_sec]", args[0], cmd);
+                eprintln!(
+                    "Usage: {} {} <run_dir> <service> [duration_sec]",
+                    args[0], cmd
+                );
                 std::process::exit(1);
             }
             let run_dir = &args[2];
@@ -1370,7 +1415,9 @@ fn main() {
                 (PROFILE_SHM, "shm-batch-ping-pong")
             };
 
-            run_batch_ping_pong_client(run_dir, service, profiles, duration, target_rps, scenario, "rust")
+            run_batch_ping_pong_client(
+                run_dir, service, profiles, duration, target_rps, scenario, "rust",
+            )
         }
 
         // Pipeline client

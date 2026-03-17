@@ -139,7 +139,10 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 4 {
-        eprintln!("Usage: {} <server|client> <run_dir> <service_name>", args[0]);
+        eprintln!(
+            "Usage: {} <server|client> <run_dir> <service_name>",
+            args[0]
+        );
         std::process::exit(1);
     }
 

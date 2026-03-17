@@ -10,7 +10,7 @@ pub const STRING_REVERSE_HDR_SIZE: usize = 8;
 /// Ephemeral view into a decoded STRING_REVERSE payload.
 #[derive(Debug, Clone)]
 pub struct StringReverseView<'a> {
-    pub str_data: &'a [u8],  // slice into payload, NUL-terminated
+    pub str_data: &'a [u8], // slice into payload, NUL-terminated
     pub str_len: u32,
 }
 
@@ -22,7 +22,9 @@ impl<'a> StringReverseView<'a> {
 
 pub fn string_reverse_encode(s: &[u8], buf: &mut [u8]) -> usize {
     let total = STRING_REVERSE_HDR_SIZE + s.len() + 1;
-    if buf.len() < total { return 0; }
+    if buf.len() < total {
+        return 0;
+    }
     let offset: u32 = STRING_REVERSE_HDR_SIZE as u32;
     let length: u32 = s.len() as u32;
     buf[0..4].copy_from_slice(&offset.to_ne_bytes());
@@ -35,11 +37,17 @@ pub fn string_reverse_encode(s: &[u8], buf: &mut [u8]) -> usize {
 }
 
 pub fn string_reverse_decode(buf: &[u8]) -> Result<StringReverseView<'_>, NipcError> {
-    if buf.len() < STRING_REVERSE_HDR_SIZE { return Err(NipcError::Truncated); }
+    if buf.len() < STRING_REVERSE_HDR_SIZE {
+        return Err(NipcError::Truncated);
+    }
     let str_offset = u32::from_ne_bytes(buf[0..4].try_into().unwrap()) as usize;
     let str_length = u32::from_ne_bytes(buf[4..8].try_into().unwrap()) as usize;
-    if str_offset + str_length + 1 > buf.len() { return Err(NipcError::OutOfBounds); }
-    if buf[str_offset + str_length] != 0 { return Err(NipcError::MissingNul); }
+    if str_offset + str_length + 1 > buf.len() {
+        return Err(NipcError::OutOfBounds);
+    }
+    if buf[str_offset + str_length] != 0 {
+        return Err(NipcError::MissingNul);
+    }
     Ok(StringReverseView {
         str_data: &buf[str_offset..str_offset + str_length],
         str_len: str_length as u32,
@@ -135,9 +143,9 @@ mod tests {
         let mut req_buf = [0u8; 64];
         string_reverse_encode(s, &mut req_buf);
         let mut resp = [0u8; 4]; // too small
-        let result = dispatch_string_reverse(
-            &req_buf, &mut resp, |data| Some(data.iter().rev().copied().collect()),
-        );
+        let result = dispatch_string_reverse(&req_buf, &mut resp, |data| {
+            Some(data.iter().rev().copied().collect())
+        });
         assert!(result.is_none());
     }
 
@@ -160,10 +168,10 @@ mod tests {
         let mut req_buf = [0u8; 64];
         let n = string_reverse_encode(b"abc", &mut req_buf);
         let mut resp = [0u8; 64];
-        let rn = dispatch_string_reverse(
-            &req_buf[..n], &mut resp,
-            |data| Some(data.iter().rev().copied().collect()),
-        ).unwrap();
+        let rn = dispatch_string_reverse(&req_buf[..n], &mut resp, |data| {
+            Some(data.iter().rev().copied().collect())
+        })
+        .unwrap();
         let view = string_reverse_decode(&resp[..rn]).unwrap();
         assert_eq!(view.str_data, b"cba");
     }

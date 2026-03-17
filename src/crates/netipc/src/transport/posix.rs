@@ -5,9 +5,8 @@
 //! Wire-compatible with the C implementation in netipc_uds.c.
 
 use crate::protocol::{
-    self, ChunkHeader, Header, Hello, HelloAck, HEADER_SIZE, KIND_REQUEST, KIND_RESPONSE,
-    MAGIC_CHUNK, MAGIC_MSG, MAX_PAYLOAD_DEFAULT, PROFILE_BASELINE, VERSION, FLAG_BATCH,
-    align8,
+    self, align8, ChunkHeader, Header, Hello, HelloAck, FLAG_BATCH, HEADER_SIZE, KIND_REQUEST,
+    KIND_RESPONSE, MAGIC_CHUNK, MAGIC_MSG, MAX_PAYLOAD_DEFAULT, PROFILE_BASELINE, VERSION,
 };
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -222,7 +221,9 @@ impl UdsSession {
 
         let result = connect_and_handshake(fd, &path, config);
         if result.is_err() {
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
         }
         result
     }
@@ -385,8 +386,12 @@ impl UdsSession {
                     return Err(UdsError::Protocol("batch directory exceeds payload".into()));
                 }
                 let packed_area_len = (payload.len() - dir_aligned) as u32;
-                protocol::batch_dir_validate(&payload[..dir_bytes], hdr.item_count, packed_area_len)
-                    .map_err(|e| UdsError::Protocol(format!("batch directory: {e:?}")))?;
+                protocol::batch_dir_validate(
+                    &payload[..dir_bytes],
+                    hdr.item_count,
+                    packed_area_len,
+                )
+                .map_err(|e| UdsError::Protocol(format!("batch directory: {e:?}")))?;
             }
 
             return Ok((hdr, payload));
@@ -483,7 +488,9 @@ impl UdsSession {
 impl Drop for UdsSession {
     fn drop(&mut self) {
         if self.fd >= 0 {
-            unsafe { libc::close(self.fd); }
+            unsafe {
+                libc::close(self.fd);
+            }
             self.fd = -1;
         }
     }
@@ -504,11 +511,7 @@ pub struct UdsListener {
 impl UdsListener {
     /// Create a listener on `{run_dir}/{service_name}.sock`.
     /// Performs stale endpoint recovery.
-    pub fn bind(
-        run_dir: &str,
-        service_name: &str,
-        config: ServerConfig,
-    ) -> Result<Self, UdsError> {
+    pub fn bind(run_dir: &str, service_name: &str, config: ServerConfig) -> Result<Self, UdsError> {
         let path = build_socket_path(run_dir, service_name)?;
 
         // Stale recovery
@@ -524,7 +527,9 @@ impl UdsListener {
 
         // Bind
         if let Err(e) = bind_unix(fd, &path) {
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
             return Err(e);
         }
 
@@ -536,7 +541,9 @@ impl UdsListener {
 
         if unsafe { libc::listen(fd, backlog) } < 0 {
             let e = errno();
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
             let _ = std::fs::remove_file(&path);
             return Err(UdsError::Socket(e));
         }
@@ -557,7 +564,8 @@ impl UdsListener {
     /// Accept one client. Performs the full handshake.
     /// Blocks until a client connects and the handshake completes.
     pub fn accept(&self) -> Result<UdsSession, UdsError> {
-        let client_fd = unsafe { libc::accept(self.fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let client_fd =
+            unsafe { libc::accept(self.fd, std::ptr::null_mut(), std::ptr::null_mut()) };
         if client_fd < 0 {
             return Err(UdsError::Accept(errno()));
         }
@@ -566,7 +574,9 @@ impl UdsListener {
         match server_handshake(client_fd, &self.config, session_id) {
             Ok(session) => Ok(session),
             Err(e) => {
-                unsafe { libc::close(client_fd); }
+                unsafe {
+                    libc::close(client_fd);
+                }
                 Err(e)
             }
         }
@@ -576,7 +586,9 @@ impl UdsListener {
 impl Drop for UdsListener {
     fn drop(&mut self) {
         if self.fd >= 0 {
-            unsafe { libc::close(self.fd); }
+            unsafe {
+                libc::close(self.fd);
+            }
             self.fd = -1;
         }
         if self.path.exists() {
@@ -599,14 +611,19 @@ fn validate_service_name(name: &str) -> Result<(), UdsError> {
         return Err(UdsError::BadParam("empty service name".into()));
     }
     if name == "." || name == ".." {
-        return Err(UdsError::BadParam("service name cannot be '.' or '..'".into()));
+        return Err(UdsError::BadParam(
+            "service name cannot be '.' or '..'".into(),
+        ));
     }
     for c in name.bytes() {
         match c {
             b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'_' | b'-' => {}
-            _ => return Err(UdsError::BadParam(
-                format!("service name contains invalid character: {:?}", c as char),
-            )),
+            _ => {
+                return Err(UdsError::BadParam(format!(
+                    "service name contains invalid character: {:?}",
+                    c as char
+                )))
+            }
         }
     }
     Ok(())
@@ -619,8 +636,8 @@ fn build_socket_path(run_dir: &str, service_name: &str) -> Result<String, UdsErr
     let path = format!("{run_dir}/{service_name}.sock");
 
     // sun_path is typically 108 bytes on Linux, 104 on macOS
-    let max_sun_path = std::mem::size_of::<libc::sockaddr_un>()
-        - std::mem::size_of::<libc::sa_family_t>();
+    let max_sun_path =
+        std::mem::size_of::<libc::sockaddr_un>() - std::mem::size_of::<libc::sa_family_t>();
 
     if path.len() >= max_sun_path {
         return Err(UdsError::PathTooLong);
@@ -659,7 +676,11 @@ fn highest_bit(mask: u32) -> u32 {
 }
 
 fn apply_default(val: u32, def: u32) -> u32 {
-    if val == 0 { def } else { val }
+    if val == 0 {
+        def
+    } else {
+        val
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -718,9 +739,7 @@ fn raw_send(fd: RawFd, data: &[u8]) -> Result<(), UdsError> {
 
 /// Receive one SEQPACKET message. Returns bytes received.
 fn raw_recv(fd: RawFd, buf: &mut [u8]) -> Result<usize, UdsError> {
-    let n = unsafe {
-        libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0)
-    };
+    let n = unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
     if n <= 0 {
         return Err(UdsError::Recv(if n == 0 { 0 } else { errno() }));
     }
@@ -816,7 +835,9 @@ fn check_and_recover_stale(path: &str) -> StaleResult {
         }
     };
 
-    unsafe { libc::close(probe); }
+    unsafe {
+        libc::close(probe);
+    }
     result
 }
 
@@ -849,10 +870,19 @@ fn connect_and_handshake(
         flags: 0,
         supported_profiles: supported,
         preferred_profiles: config.preferred_profiles,
-        max_request_payload_bytes: apply_default(config.max_request_payload_bytes, MAX_PAYLOAD_DEFAULT),
+        max_request_payload_bytes: apply_default(
+            config.max_request_payload_bytes,
+            MAX_PAYLOAD_DEFAULT,
+        ),
         max_request_batch_items: apply_default(config.max_request_batch_items, DEFAULT_BATCH_ITEMS),
-        max_response_payload_bytes: apply_default(config.max_response_payload_bytes, MAX_PAYLOAD_DEFAULT),
-        max_response_batch_items: apply_default(config.max_response_batch_items, DEFAULT_BATCH_ITEMS),
+        max_response_payload_bytes: apply_default(
+            config.max_response_payload_bytes,
+            MAX_PAYLOAD_DEFAULT,
+        ),
+        max_response_batch_items: apply_default(
+            config.max_response_batch_items,
+            DEFAULT_BATCH_ITEMS,
+        ),
         auth_token: config.auth_token,
         packet_size: pkt_size,
     };
@@ -886,8 +916,8 @@ fn connect_and_handshake(
     let n = raw_recv(fd, &mut buf)?;
 
     // Decode outer header
-    let ack_hdr = Header::decode(&buf[..n])
-        .map_err(|e| UdsError::Protocol(format!("ack header: {e}")))?;
+    let ack_hdr =
+        Header::decode(&buf[..n]).map_err(|e| UdsError::Protocol(format!("ack header: {e}")))?;
 
     if ack_hdr.kind != protocol::KIND_CONTROL || ack_hdr.code != protocol::CODE_HELLO_ACK {
         return Err(UdsError::Protocol("expected HELLO_ACK".into()));
@@ -933,7 +963,11 @@ fn connect_and_handshake(
 //  Handshake: server side
 // ---------------------------------------------------------------------------
 
-fn server_handshake(fd: RawFd, config: &ServerConfig, session_id: u64) -> Result<UdsSession, UdsError> {
+fn server_handshake(
+    fd: RawFd,
+    config: &ServerConfig,
+    session_id: u64,
+) -> Result<UdsSession, UdsError> {
     let server_pkt_size = if config.packet_size == 0 {
         detect_packet_size(fd)
     } else {
@@ -955,8 +989,8 @@ fn server_handshake(fd: RawFd, config: &ServerConfig, session_id: u64) -> Result
     let mut buf = [0u8; 128];
     let n = raw_recv(fd, &mut buf)?;
 
-    let hdr = Header::decode(&buf[..n])
-        .map_err(|e| UdsError::Protocol(format!("hello header: {e}")))?;
+    let hdr =
+        Header::decode(&buf[..n]).map_err(|e| UdsError::Protocol(format!("hello header: {e}")))?;
 
     if hdr.kind != protocol::KIND_CONTROL || hdr.code != protocol::CODE_HELLO {
         return Err(UdsError::Protocol("expected HELLO".into()));
@@ -1170,8 +1204,8 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
 
-        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config())
-            .expect("connect");
+        let mut session =
+            UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
 
         assert_eq!(session.selected_profile, PROFILE_BASELINE);
 
@@ -1302,8 +1336,8 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
 
-        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config())
-            .expect("connect");
+        let mut session =
+            UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
 
         // Send 3 requests
         for i in 1u64..=3 {
@@ -1352,8 +1386,7 @@ mod tests {
                 max_response_payload_bytes: 65536,
                 ..default_server_config()
             };
-            let listener =
-                UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
+            let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
             ready_clone.store(true, Ordering::Release);
 
             let mut session = listener.accept().expect("accept");
@@ -1376,8 +1409,7 @@ mod tests {
             max_response_payload_bytes: 65536,
             ..default_client_config()
         };
-        let mut session =
-            UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
+        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
 
         assert_eq!(session.packet_size, 128);
 
@@ -1463,8 +1495,7 @@ mod tests {
                 supported_profiles: protocol::PROFILE_SHM_FUTEX,
                 ..default_server_config()
             };
-            let listener =
-                UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
+            let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
             ready_clone.store(true, Ordering::Release);
             let _ = listener.accept();
         });
@@ -1557,8 +1588,8 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
 
-        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config())
-            .expect("connect");
+        let mut session =
+            UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
 
         let mut hdr = Header {
             kind: protocol::KIND_REQUEST,
@@ -1611,8 +1642,8 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
 
-        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config())
-            .expect("connect");
+        let mut session =
+            UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
 
         // Build batch using protocol layer
         let mut batch_buf = [0u8; 2048];
@@ -1687,8 +1718,7 @@ mod tests {
                 max_response_payload_bytes: 65536,
                 ..default_server_config()
             };
-            let listener =
-                UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
+            let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
             ready_clone.store(true, Ordering::Release);
 
             let mut session = listener.accept().expect("accept");
@@ -1713,8 +1743,7 @@ mod tests {
             max_response_payload_bytes: 65536,
             ..default_client_config()
         };
-        let mut session =
-            UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
+        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
 
         // Send 3 chunked messages in pipeline
         let sizes = [200usize, 500, 300];
@@ -1779,8 +1808,8 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
 
-        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config())
-            .expect("connect");
+        let mut session =
+            UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
 
         // Send 10 requests before reading any response
         for i in 1u64..=10 {
@@ -1830,8 +1859,7 @@ mod tests {
                 max_response_payload_bytes: 65536,
                 ..default_server_config()
             };
-            let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg)
-                .expect("listen");
+            let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
             ready_clone.store(true, Ordering::Release);
 
             let mut session = listener.accept().expect("accept");
@@ -1855,8 +1883,7 @@ mod tests {
             max_response_payload_bytes: 65536,
             ..default_client_config()
         };
-        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg)
-            .expect("connect");
+        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
 
         // Send 100 requests
         for i in 1u64..=100 {
@@ -1908,8 +1935,7 @@ mod tests {
                 max_response_payload_bytes: 65536,
                 ..default_server_config()
             };
-            let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg)
-                .expect("listen");
+            let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
             ready_clone.store(true, Ordering::Release);
 
             let mut session = listener.accept().expect("accept");
@@ -1933,8 +1959,7 @@ mod tests {
             max_response_payload_bytes: 65536,
             ..default_client_config()
         };
-        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg)
-            .expect("connect");
+        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
 
         // Send all messages with varying sizes
         for (i, &sz) in sizes.iter().enumerate() {
@@ -1988,8 +2013,7 @@ mod tests {
                 max_response_payload_bytes: 65536,
                 ..default_server_config()
             };
-            let listener =
-                UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
+            let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
             ready_clone.store(true, Ordering::Release);
 
             let mut session = listener.accept().expect("accept");
@@ -2013,8 +2037,7 @@ mod tests {
             max_response_payload_bytes: 65536,
             ..default_client_config()
         };
-        let mut session =
-            UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
+        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
 
         // Send all chunked messages
         for (i, &sz) in sizes.iter().enumerate() {
@@ -2051,9 +2074,16 @@ mod tests {
             assert!(result.is_err(), "should reject {:?}", name);
         }
 
-        let good_names = &["valid-name", "valid_name", "valid.name", "ValidName123", "a"];
+        let good_names = &[
+            "valid-name",
+            "valid_name",
+            "valid.name",
+            "ValidName123",
+            "a",
+        ];
         for name in good_names {
-            validate_service_name(name).unwrap_or_else(|e| panic!("{:?} should be valid: {e}", name));
+            validate_service_name(name)
+                .unwrap_or_else(|e| panic!("{:?} should be valid: {e}", name));
         }
     }
 
@@ -2102,7 +2132,10 @@ mod tests {
             (UdsError::LimitExceeded, "negotiated limit exceeded"),
             (UdsError::BadParam("foo".into()), "bad parameter: foo"),
             (UdsError::DuplicateMsgId(42), "duplicate message_id: 42"),
-            (UdsError::UnknownMsgId(99), "unknown response message_id: 99"),
+            (
+                UdsError::UnknownMsgId(99),
+                "unknown response message_id: 99",
+            ),
         ];
         for (err, expected) in cases {
             assert_eq!(format!("{}", err), expected);
@@ -2138,8 +2171,8 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
 
-        let session = UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config())
-            .expect("connect");
+        let session =
+            UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
         assert_eq!(session.role(), Role::Client);
 
         drop(session);
@@ -2172,12 +2205,14 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
 
-        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config())
-            .expect("connect");
+        let mut session =
+            UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
 
         // Simulate closed session by closing the fd via Drop-like behavior
         // We can't call close() (no such method), so we close fd directly
-        unsafe { libc::close(session.fd); }
+        unsafe {
+            libc::close(session.fd);
+        }
         session.fd = -1;
 
         let mut hdr = Header {
@@ -2226,8 +2261,8 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
 
-        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config())
-            .expect("connect");
+        let mut session =
+            UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
 
         // First send with message_id=42 should succeed
         let mut hdr1 = Header {
@@ -2439,8 +2474,8 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
 
-        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config())
-            .expect("connect");
+        let mut session =
+            UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
 
         let mut hdr = Header {
             kind: protocol::KIND_REQUEST,

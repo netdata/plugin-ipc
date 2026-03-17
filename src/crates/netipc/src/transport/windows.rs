@@ -5,9 +5,8 @@
 //! in message mode. Wire-compatible with the C and Go implementations.
 
 use crate::protocol::{
-    self, ChunkHeader, Header, Hello, HelloAck, HEADER_SIZE, KIND_REQUEST, KIND_RESPONSE,
-    MAGIC_CHUNK, MAGIC_MSG, MAX_PAYLOAD_DEFAULT, PROFILE_BASELINE, VERSION, FLAG_BATCH,
-    align8,
+    self, align8, ChunkHeader, Header, Hello, HelloAck, FLAG_BATCH, HEADER_SIZE, KIND_REQUEST,
+    KIND_RESPONSE, MAGIC_CHUNK, MAGIC_MSG, MAX_PAYLOAD_DEFAULT, PROFILE_BASELINE, VERSION,
 };
 use std::collections::HashSet;
 use std::ptr;
@@ -59,10 +58,7 @@ mod ffi {
             lpSecurityAttributes: *const core::ffi::c_void,
         ) -> HANDLE;
 
-        pub fn ConnectNamedPipe(
-            hNamedPipe: HANDLE,
-            lpOverlapped: *mut core::ffi::c_void,
-        ) -> BOOL;
+        pub fn ConnectNamedPipe(hNamedPipe: HANDLE, lpOverlapped: *mut core::ffi::c_void) -> BOOL;
 
         pub fn DisconnectNamedPipe(hNamedPipe: HANDLE) -> BOOL;
         pub fn FlushFileBuffers(hFile: HANDLE) -> BOOL;
@@ -288,7 +284,9 @@ fn validate_service_name(name: &str) -> Result<(), NpError> {
         return Err(NpError::BadParam("empty service name".into()));
     }
     if name == "." || name == ".." {
-        return Err(NpError::BadParam("service name cannot be '.' or '..'".into()));
+        return Err(NpError::BadParam(
+            "service name cannot be '.' or '..'".into(),
+        ));
     }
     for &b in name.as_bytes() {
         if (b >= b'a' && b <= b'z')
@@ -335,7 +333,11 @@ pub fn build_pipe_name(run_dir: &str, service_name: &str) -> Result<Vec<u16>, Np
 // ---------------------------------------------------------------------------
 
 fn apply_default(val: u32, def: u32) -> u32 {
-    if val == 0 { def } else { val }
+    if val == 0 {
+        def
+    } else {
+        val
+    }
 }
 
 fn min_u32(a: u32, b: u32) -> u32 {
@@ -432,7 +434,9 @@ fn raw_recv(handle: ffi::HANDLE, buf: &mut [u8]) -> Result<usize, NpError> {
 #[cfg(windows)]
 fn close_handle(handle: ffi::HANDLE) {
     if handle != ffi::INVALID_HANDLE_VALUE && handle != 0 {
-        unsafe { ffi::CloseHandle(handle); }
+        unsafe {
+            ffi::CloseHandle(handle);
+        }
     }
 }
 
@@ -500,9 +504,7 @@ impl NpSession {
 
         // Set read mode to message mode
         let mode: u32 = ffi::PIPE_READMODE_MESSAGE;
-        let ok = unsafe {
-            ffi::SetNamedPipeHandleState(handle, &mode, ptr::null(), ptr::null())
-        };
+        let ok = unsafe { ffi::SetNamedPipeHandleState(handle, &mode, ptr::null(), ptr::null()) };
         if ok == 0 {
             let err = last_error();
             close_handle(handle);
@@ -664,8 +666,12 @@ impl NpSession {
                     return Err(NpError::Protocol("batch directory exceeds payload".into()));
                 }
                 let packed_area_len = (payload.len() - dir_aligned) as u32;
-                protocol::batch_dir_validate(&payload[..dir_bytes], hdr.item_count, packed_area_len)
-                    .map_err(|e| NpError::Protocol(format!("batch directory: {e:?}")))?;
+                protocol::batch_dir_validate(
+                    &payload[..dir_bytes],
+                    hdr.item_count,
+                    packed_area_len,
+                )
+                .map_err(|e| NpError::Protocol(format!("batch directory: {e:?}")))?;
             }
 
             return Ok((hdr, payload));
@@ -756,9 +762,13 @@ impl NpSession {
     pub fn close(&mut self) {
         if self.handle != ffi::INVALID_HANDLE_VALUE && self.handle != 0 {
             // Flush pending writes so the peer reads all data
-            unsafe { ffi::FlushFileBuffers(self.handle); }
+            unsafe {
+                ffi::FlushFileBuffers(self.handle);
+            }
             if self.role == Role::Server {
-                unsafe { ffi::DisconnectNamedPipe(self.handle); }
+                unsafe {
+                    ffi::DisconnectNamedPipe(self.handle);
+                }
             }
             close_handle(self.handle);
             self.handle = ffi::INVALID_HANDLE_VALUE;
@@ -790,11 +800,7 @@ pub struct NpListener {
 #[cfg(windows)]
 impl NpListener {
     /// Create a listener on a Named Pipe derived from run_dir + service_name.
-    pub fn bind(
-        run_dir: &str,
-        service_name: &str,
-        config: ServerConfig,
-    ) -> Result<Self, NpError> {
+    pub fn bind(run_dir: &str, service_name: &str, config: ServerConfig) -> Result<Self, NpError> {
         let pipe_name = build_pipe_name(run_dir, service_name)?;
         let buf_size = apply_default(config.packet_size, DEFAULT_PIPE_BUF_SIZE);
 
@@ -837,7 +843,9 @@ impl NpListener {
         match server_handshake(session_handle, &self.config, session_id) {
             Ok(session) => Ok(session),
             Err(e) => {
-                unsafe { ffi::DisconnectNamedPipe(session_handle); }
+                unsafe {
+                    ffi::DisconnectNamedPipe(session_handle);
+                }
                 close_handle(session_handle);
                 Err(e)
             }
@@ -902,10 +910,7 @@ fn create_pipe_instance(
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-fn client_handshake(
-    handle: ffi::HANDLE,
-    config: &ClientConfig,
-) -> Result<NpSession, NpError> {
+fn client_handshake(handle: ffi::HANDLE, config: &ClientConfig) -> Result<NpSession, NpError> {
     let pkt_size = apply_default(config.packet_size, DEFAULT_PACKET_SIZE);
 
     let supported = if config.supported_profiles != 0 {
@@ -962,8 +967,8 @@ fn client_handshake(
     let mut ack_buf = [0u8; 128];
     let n = raw_recv(handle, &mut ack_buf)?;
 
-    let ack_hdr = Header::decode(&ack_buf[..n])
-        .map_err(|e| NpError::Protocol(format!("ack header: {e}")))?;
+    let ack_hdr =
+        Header::decode(&ack_buf[..n]).map_err(|e| NpError::Protocol(format!("ack header: {e}")))?;
 
     if ack_hdr.kind != protocol::KIND_CONTROL || ack_hdr.code != protocol::CODE_HELLO_ACK {
         return Err(NpError::Protocol("expected HELLO_ACK".into()));
@@ -1030,8 +1035,8 @@ fn server_handshake(
     let mut buf = [0u8; 128];
     let n = raw_recv(handle, &mut buf)?;
 
-    let hdr = Header::decode(&buf[..n])
-        .map_err(|e| NpError::Protocol(format!("hello header: {e}")))?;
+    let hdr =
+        Header::decode(&buf[..n]).map_err(|e| NpError::Protocol(format!("hello header: {e}")))?;
 
     if hdr.kind != protocol::KIND_CONTROL || hdr.code != protocol::CODE_HELLO {
         return Err(NpError::Protocol("expected HELLO".into()));
@@ -1219,13 +1224,13 @@ mod tests {
         // "\\\\.\\pipe\\netipc" - "hash" - "cgroups" - "snapshot"
         assert!(parts.len() >= 3);
         let hash_part = parts[1]; // after first '-'
-        // The pipe name is \\.\pipe\netipc-{hash}-{service}
-        // Splitting on '-': parts[0]="\\\\.\pipe\netipc", parts[1]=hash, rest=service parts
-        // Actually the prefix is "\\\\.\\pipe\\netipc" which contains no '-'
-        // So: parts = ["\\\\.", "\\pipe\\netipc", hash, "cgroups", "snapshot"]
-        // No, wait. The narrow string is literally: \\.\pipe\netipc-{hash}-cgroups-snapshot
-        // backslash is just a char. Split on '-':
-        // ["\\\\.\\pipe\\netipc", hash, "cgroups", "snapshot"]
+                                  // The pipe name is \\.\pipe\netipc-{hash}-{service}
+                                  // Splitting on '-': parts[0]="\\\\.\pipe\netipc", parts[1]=hash, rest=service parts
+                                  // Actually the prefix is "\\\\.\\pipe\\netipc" which contains no '-'
+                                  // So: parts = ["\\\\.", "\\pipe\\netipc", hash, "cgroups", "snapshot"]
+                                  // No, wait. The narrow string is literally: \\.\pipe\netipc-{hash}-cgroups-snapshot
+                                  // backslash is just a char. Split on '-':
+                                  // ["\\\\.\\pipe\\netipc", hash, "cgroups", "snapshot"]
         assert_eq!(parts[1].len(), 16, "hash should be 16 hex chars");
     }
 

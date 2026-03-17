@@ -90,10 +90,7 @@ fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Er
         ok = false;
     }
     if rpayload.len() != 256 {
-        eprintln!(
-            "client: payload length mismatch: {} vs 256",
-            rpayload.len()
-        );
+        eprintln!("client: payload length mismatch: {} vs 256", rpayload.len());
         ok = false;
     }
     if rpayload != payload {
@@ -114,7 +111,11 @@ fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Er
     }
 }
 
-fn run_pipeline_server(run_dir: &str, service: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> {
+fn run_pipeline_server(
+    run_dir: &str,
+    service: &str,
+    count: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     let listener = UdsListener::bind(run_dir, service, server_config())?;
 
     println!("READY");
@@ -123,20 +124,26 @@ fn run_pipeline_server(run_dir: &str, service: &str, count: usize) -> Result<(),
 
     for i in 0..count {
         let mut buf = [0u8; 65600];
-        let (hdr, payload) = session.receive(&mut buf)
+        let (hdr, payload) = session
+            .receive(&mut buf)
             .map_err(|e| format!("receive[{i}]: {e}"))?;
 
         let mut resp = hdr;
         resp.kind = protocol::KIND_RESPONSE;
         resp.transport_status = protocol::STATUS_OK;
-        session.send(&mut resp, &payload)
+        session
+            .send(&mut resp, &payload)
             .map_err(|e| format!("send[{i}]: {e}"))?;
     }
 
     Ok(())
 }
 
-fn run_pipeline_client(run_dir: &str, service: &str, count: usize) -> Result<(), Box<dyn std::error::Error>> {
+fn run_pipeline_client(
+    run_dir: &str,
+    service: &str,
+    count: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = UdsSession::connect(run_dir, service, &client_config())?;
 
     // Send all requests before reading any response
@@ -168,7 +175,10 @@ fn run_pipeline_client(run_dir: &str, service: &str, count: usize) -> Result<(),
             ok = false;
         }
         if rhdr.message_id != expected {
-            eprintln!("client: [{i}] message_id {}, want {expected}", rhdr.message_id);
+            eprintln!(
+                "client: [{i}] message_id {}, want {expected}",
+                rhdr.message_id
+            );
             ok = false;
         }
         if rpayload.len() != 8 {

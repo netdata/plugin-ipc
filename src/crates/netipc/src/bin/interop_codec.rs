@@ -216,10 +216,7 @@ fn do_decode(dir: &str) -> bool {
                 h.supported_profiles == (PROFILE_BASELINE | PROFILE_SHM_FUTEX),
                 "hello supported",
             );
-            c.check(
-                h.preferred_profiles == PROFILE_SHM_FUTEX,
-                "hello preferred",
-            );
+            c.check(h.preferred_profiles == PROFILE_SHM_FUTEX, "hello preferred");
             c.check(h.max_request_payload_bytes == 4096, "hello max_req_payload");
             c.check(h.max_request_batch_items == 100, "hello max_req_batch");
             c.check(
@@ -227,10 +224,7 @@ fn do_decode(dir: &str) -> bool {
                 "hello max_resp_payload",
             );
             c.check(h.max_response_batch_items == 1, "hello max_resp_batch");
-            c.check(
-                h.auth_token == 0xAABB_CCDD_EEFF_0011,
-                "hello auth_token",
-            );
+            c.check(h.auth_token == 0xAABB_CCDD_EEFF_0011, "hello auth_token");
             c.check(h.packet_size == 65536, "hello packet_size");
         }
     }
@@ -241,19 +235,31 @@ fn do_decode(dir: &str) -> bool {
         let ack = HelloAck::decode(&data);
         c.check(ack.is_ok(), "decode hello_ack");
         if let Ok(h) = ack {
-            c.check(h.server_supported_profiles == 0x07, "hello_ack server_supported");
+            c.check(
+                h.server_supported_profiles == 0x07,
+                "hello_ack server_supported",
+            );
             c.check(h.intersection_profiles == 0x05, "hello_ack intersection");
-            c.check(h.selected_profile == PROFILE_SHM_FUTEX, "hello_ack selected");
+            c.check(
+                h.selected_profile == PROFILE_SHM_FUTEX,
+                "hello_ack selected",
+            );
             c.check(
                 h.agreed_max_request_payload_bytes == 2048,
                 "hello_ack req_payload",
             );
-            c.check(h.agreed_max_request_batch_items == 50, "hello_ack req_batch");
+            c.check(
+                h.agreed_max_request_batch_items == 50,
+                "hello_ack req_batch",
+            );
             c.check(
                 h.agreed_max_response_payload_bytes == 65536,
                 "hello_ack resp_payload",
             );
-            c.check(h.agreed_max_response_batch_items == 1, "hello_ack resp_batch");
+            c.check(
+                h.agreed_max_response_batch_items == 1,
+                "hello_ack resp_batch",
+            );
             c.check(h.agreed_packet_size == 32768, "hello_ack pkt_size");
         }
     }

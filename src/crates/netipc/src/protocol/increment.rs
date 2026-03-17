@@ -5,13 +5,17 @@ use super::NipcError;
 pub const INCREMENT_PAYLOAD_SIZE: usize = 8;
 
 pub fn increment_encode(value: u64, buf: &mut [u8]) -> usize {
-    if buf.len() < INCREMENT_PAYLOAD_SIZE { return 0; }
+    if buf.len() < INCREMENT_PAYLOAD_SIZE {
+        return 0;
+    }
     buf[..8].copy_from_slice(&value.to_ne_bytes());
     INCREMENT_PAYLOAD_SIZE
 }
 
 pub fn increment_decode(buf: &[u8]) -> Result<u64, NipcError> {
-    if buf.len() < INCREMENT_PAYLOAD_SIZE { return Err(NipcError::Truncated); }
+    if buf.len() < INCREMENT_PAYLOAD_SIZE {
+        return Err(NipcError::Truncated);
+    }
     Ok(u64::from_ne_bytes(buf[..8].try_into().unwrap()))
 }
 

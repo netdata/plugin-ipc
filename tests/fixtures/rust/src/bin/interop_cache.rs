@@ -9,8 +9,7 @@
 //!     Creates L3 cache, refreshes, verifies lookup, prints PASS/FAIL.
 
 use netipc::protocol::{
-    CgroupsBuilder, CgroupsRequest, PROFILE_BASELINE, PROFILE_SHM_HYBRID,
-    METHOD_CGROUPS_SNAPSHOT,
+    CgroupsBuilder, CgroupsRequest, METHOD_CGROUPS_SNAPSHOT, PROFILE_BASELINE, PROFILE_SHM_HYBRID,
 };
 use netipc::service::cgroups::{CgroupsCache, ManagedServer};
 use netipc::transport::posix::{ClientConfig, ServerConfig};
@@ -40,9 +39,21 @@ fn cgroups_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> 
     let mut builder = CgroupsBuilder::new(&mut buf, 3, 1, 42);
 
     let items: &[(u32, u32, u32, &[u8], &[u8])] = &[
-        (1001, 0, 1, b"docker-abc123", b"/sys/fs/cgroup/docker/abc123"),
+        (
+            1001,
+            0,
+            1,
+            b"docker-abc123",
+            b"/sys/fs/cgroup/docker/abc123",
+        ),
         (2002, 0, 1, b"k8s-pod-xyz", b"/sys/fs/cgroup/kubepods/xyz"),
-        (3003, 0, 0, b"systemd-user", b"/sys/fs/cgroup/user.slice/user-1000"),
+        (
+            3003,
+            0,
+            0,
+            b"systemd-user",
+            b"/sys/fs/cgroup/user.slice/user-1000",
+        ),
     ];
 
     for &(hash, options, enabled, name, path) in items {
@@ -124,7 +135,10 @@ fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Er
         ok = false;
     }
     if status.systemd_enabled != 1 {
-        eprintln!("client: expected systemd_enabled=1, got {}", status.systemd_enabled);
+        eprintln!(
+            "client: expected systemd_enabled=1, got {}",
+            status.systemd_enabled
+        );
         ok = false;
     }
     if status.generation != 42 {

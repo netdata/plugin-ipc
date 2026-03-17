@@ -110,21 +110,21 @@ pub enum ShmRole {
 /// raw pointer arithmetic like the C implementation.
 #[repr(C)]
 struct RegionHeader {
-    magic: u32,              //  0
-    version: u16,            //  4
-    header_len: u16,         //  6
-    owner_pid: i32,          //  8
-    owner_generation: u32,   // 12
-    request_offset: u32,     // 16
-    request_capacity: u32,   // 20
-    response_offset: u32,    // 24
-    response_capacity: u32,  // 28
-    req_seq: u64,            // 32
-    resp_seq: u64,           // 40
-    req_len: u32,            // 48
-    resp_len: u32,           // 52
-    req_signal: u32,         // 56
-    resp_signal: u32,        // 60
+    magic: u32,             //  0
+    version: u16,           //  4
+    header_len: u16,        //  6
+    owner_pid: i32,         //  8
+    owner_generation: u32,  // 12
+    request_offset: u32,    // 16
+    request_capacity: u32,  // 20
+    response_offset: u32,   // 24
+    response_capacity: u32, // 28
+    req_seq: u64,           // 32
+    resp_seq: u64,          // 40
+    req_len: u32,           // 48
+    resp_len: u32,          // 52
+    req_signal: u32,        // 56
+    resp_signal: u32,       // 60
 }
 
 const _: () = assert!(std::mem::size_of::<RegionHeader>() == 64);
@@ -316,7 +316,11 @@ impl ShmContext {
     }
 
     /// Attach to an existing SHM region (client side).
-    pub fn client_attach(run_dir: &str, service_name: &str, session_id: u64) -> Result<Self, ShmError> {
+    pub fn client_attach(
+        run_dir: &str,
+        service_name: &str,
+        session_id: u64,
+    ) -> Result<Self, ShmError> {
         let path = build_shm_path(run_dir, service_name, session_id)?;
         let c_path = path_to_cstring(&path)?;
 
@@ -359,9 +363,8 @@ impl ShmContext {
         std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
 
         let hdr = base as *const RegionHeader;
-        let (magic, version, hdr_len) = unsafe {
-            ((*hdr).magic, (*hdr).version, (*hdr).header_len)
-        };
+        let (magic, version, hdr_len) =
+            unsafe { ((*hdr).magic, (*hdr).version, (*hdr).header_len) };
 
         if magic != REGION_MAGIC {
             unsafe {
@@ -460,11 +463,7 @@ impl ShmContext {
 
         // 1. Write message data into the area
         unsafe {
-            ptr::copy_nonoverlapping(
-                msg.as_ptr(),
-                self.base.add(area_offset as usize),
-                msg.len(),
-            );
+            ptr::copy_nonoverlapping(msg.as_ptr(), self.base.add(area_offset as usize), msg.len());
         }
 
         // 2. Store message length (release)
@@ -498,7 +497,8 @@ impl ShmContext {
             return Err(ShmError::BadParam("empty buffer".into()));
         }
 
-        let (area_offset, area_capacity, seq_off, len_off, sig_off, expected_seq) = match self.role {
+        let (area_offset, area_capacity, seq_off, len_off, sig_off, expected_seq) = match self.role
+        {
             ShmRole::Server => (
                 self.request_offset,
                 self.request_capacity,
@@ -549,10 +549,12 @@ impl ShmContext {
         // timeout_ms regardless of retries.
         if !observed {
             let deadline_ns: u64 = if timeout_ms > 0 {
-                let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+                let mut ts = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
                 unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-                ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
-                    + timeout_ms as u64 * 1_000_000
+                ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64 + timeout_ms as u64 * 1_000_000
             } else {
                 0
             };
@@ -567,10 +569,12 @@ impl ShmContext {
 
                 // Compute remaining timeout for this futex_wait call
                 let timeout = if deadline_ns > 0 {
-                    let mut now_ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+                    let mut now_ts = libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    };
                     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now_ts) };
-                    let now_val = now_ts.tv_sec as u64 * 1_000_000_000
-                        + now_ts.tv_nsec as u64;
+                    let now_val = now_ts.tv_sec as u64 * 1_000_000_000 + now_ts.tv_nsec as u64;
                     if now_val >= deadline_ns {
                         return Err(ShmError::Timeout);
                     }
@@ -765,14 +769,19 @@ fn validate_service_name(name: &str) -> Result<(), ShmError> {
         return Err(ShmError::BadParam("empty service name".into()));
     }
     if name == "." || name == ".." {
-        return Err(ShmError::BadParam("service name cannot be '.' or '..'".into()));
+        return Err(ShmError::BadParam(
+            "service name cannot be '.' or '..'".into(),
+        ));
     }
     for c in name.bytes() {
         match c {
             b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'_' | b'-' => {}
-            _ => return Err(ShmError::BadParam(
-                format!("service name contains invalid character: {:?}", c as char),
-            )),
+            _ => {
+                return Err(ShmError::BadParam(format!(
+                    "service name contains invalid character: {:?}",
+                    c as char
+                )))
+            }
         }
     }
     Ok(())
@@ -1018,12 +1027,7 @@ mod tests {
             // Parse and echo as response
             let hdr = protocol::Header::decode(msg).expect("decode");
             let payload = msg[protocol::HEADER_SIZE..].to_vec();
-            let resp = build_message(
-                protocol::KIND_RESPONSE,
-                hdr.code,
-                hdr.message_id,
-                &payload,
-            );
+            let resp = build_message(protocol::KIND_RESPONSE, hdr.code, hdr.message_id, &payload);
             ctx.send(&resp).expect("server send");
             ctx.destroy();
         });
@@ -1031,8 +1035,7 @@ mod tests {
         // Wait for server to create region
         thread::sleep(std::time::Duration::from_millis(50));
 
-        let mut client =
-            ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
+        let mut client = ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
 
         let payload = vec![0xCA, 0xFE, 0xBA, 0xBE];
         let msg = build_message(
@@ -1076,30 +1079,20 @@ mod tests {
                 let msg = &buf[..mlen];
                 let hdr = protocol::Header::decode(msg).expect("decode");
                 let payload = msg[protocol::HEADER_SIZE..].to_vec();
-                let resp = build_message(
-                    protocol::KIND_RESPONSE,
-                    hdr.code,
-                    hdr.message_id,
-                    &payload,
-                );
+                let resp =
+                    build_message(protocol::KIND_RESPONSE, hdr.code, hdr.message_id, &payload);
                 ctx.send(&resp).expect("server send");
             }
             ctx.destroy();
         });
 
         thread::sleep(std::time::Duration::from_millis(50));
-        let mut client =
-            ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
+        let mut client = ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
 
         let mut resp_buf = vec![0u8; 65536];
         for i in 0u64..10 {
             let payload = vec![i as u8];
-            let msg = build_message(
-                protocol::KIND_REQUEST,
-                1,
-                i + 1,
-                &payload,
-            );
+            let msg = build_message(protocol::KIND_REQUEST, 1, i + 1, &payload);
             client.send(&msg).expect("client send");
             let rlen = client.receive(&mut resp_buf, 5000).expect("client receive");
             let resp = &resp_buf[..rlen];
@@ -1122,8 +1115,8 @@ mod tests {
         cleanup_shm(svc, sid);
 
         // Create a region, corrupt owner_pid to simulate dead process
-        let mut first = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
-            .expect("first create");
+        let mut first =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("first create");
         let hdr = first.base as *mut RegionHeader;
         unsafe { (*hdr).owner_pid = 99999 }; // very unlikely alive
         first.close(); // close without unlink
@@ -1155,19 +1148,13 @@ mod tests {
             let msg = &buf[..mlen];
             let hdr = protocol::Header::decode(msg).expect("decode");
             let payload = msg[protocol::HEADER_SIZE..].to_vec();
-            let resp = build_message(
-                protocol::KIND_RESPONSE,
-                hdr.code,
-                hdr.message_id,
-                &payload,
-            );
+            let resp = build_message(protocol::KIND_RESPONSE, hdr.code, hdr.message_id, &payload);
             ctx.send(&resp).expect("server send");
             ctx.destroy();
         });
 
         thread::sleep(std::time::Duration::from_millis(50));
-        let mut client =
-            ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
+        let mut client = ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
 
         // 60000 bytes of payload
         let payload: Vec<u8> = (0..60000).map(|i| (i & 0xFF) as u8).collect();
@@ -1194,11 +1181,11 @@ mod tests {
         let sid: u64 = 100;
         cleanup_shm(svc, sid);
 
-        let mut server_ctx = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
-            .expect("server create");
+        let mut server_ctx =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
 
-        let mut client_ctx = ShmContext::client_attach(TEST_RUN_DIR, svc, sid)
-            .expect("client attach");
+        let mut client_ctx =
+            ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
 
         let base = server_ctx.base;
         let req_cap = server_ctx.request_capacity as usize;
@@ -1209,14 +1196,14 @@ mod tests {
         // Forged lengths that exceed capacity must produce MsgTooLarge.
         // Valid lengths (within capacity) must succeed normally.
         let forged_req_lengths: &[(u32, bool)] = &[
-            (0,                     false), // zero: copy skipped, Ok(0)
-            (1,                     false), // tiny valid
-            (req_cap as u32 - 1,    false), // just under capacity
-            (req_cap as u32,        false), // exactly at capacity
-            (req_cap as u32 + 1,    true),  // one over capacity
-            (0x0001_0000,           true),  // moderately large
-            (0x7FFF_FFFF,           true),  // large positive
-            (0xFFFF_FFFF,           true),  // u32::MAX
+            (0, false),                  // zero: copy skipped, Ok(0)
+            (1, false),                  // tiny valid
+            (req_cap as u32 - 1, false), // just under capacity
+            (req_cap as u32, false),     // exactly at capacity
+            (req_cap as u32 + 1, true),  // one over capacity
+            (0x0001_0000, true),         // moderately large
+            (0x7FFF_FFFF, true),         // large positive
+            (0xFFFF_FFFF, true),         // u32::MAX
         ];
 
         let mut recv_buf = vec![0u8; 65536];
@@ -1259,14 +1246,14 @@ mod tests {
         // --- Test forged resp_len (client-side receive) ---
 
         let forged_resp_lengths: &[(u32, bool)] = &[
-            (0,                      false),
-            (1,                      false),
-            (resp_cap as u32 - 1,    false),
-            (resp_cap as u32,        false),
-            (resp_cap as u32 + 1,    true),
-            (0x0001_0000,            true),
-            (0x7FFF_FFFF,            true),
-            (0xFFFF_FFFF,            true),
+            (0, false),
+            (1, false),
+            (resp_cap as u32 - 1, false),
+            (resp_cap as u32, false),
+            (resp_cap as u32 + 1, true),
+            (0x0001_0000, true),
+            (0x7FFF_FFFF, true),
+            (0xFFFF_FFFF, true),
         ];
 
         for &(forged_len, expect_too_large) in forged_resp_lengths {
@@ -1364,9 +1351,8 @@ mod tests {
             .map(|&sid| {
                 let svc_clone = svc_name.clone();
                 thread::spawn(move || {
-                    let mut client =
-                        ShmContext::client_attach(TEST_RUN_DIR, &svc_clone, sid)
-                            .expect(&format!("client attach sid={sid}"));
+                    let mut client = ShmContext::client_attach(TEST_RUN_DIR, &svc_clone, sid)
+                        .expect(&format!("client attach sid={sid}"));
 
                     // Unique payload: session_id repeated to fill a pattern
                     let unique_byte = sid as u8;
@@ -1379,9 +1365,7 @@ mod tests {
                         msg_id,
                         &payload,
                     );
-                    client
-                        .send(&msg)
-                        .expect(&format!("client send sid={sid}"));
+                    client.send(&msg).expect(&format!("client send sid={sid}"));
 
                     // Receive response
                     let mut resp_buf = vec![0u8; 8192];
@@ -1400,7 +1384,8 @@ mod tests {
                     // Verify the payload matches what we sent
                     let resp_payload = &resp[protocol::HEADER_SIZE..];
                     assert_eq!(
-                        resp_payload, &payload[..],
+                        resp_payload,
+                        &payload[..],
                         "sid={sid}: payload mismatch (cross-contamination?)"
                     );
 
@@ -1469,13 +1454,12 @@ mod tests {
         let sid: u64 = 50;
         cleanup_shm(svc, sid);
 
-        let server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
-            .expect("server create");
+        let server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
         assert_eq!(server.role(), ShmRole::Server);
         assert!(server.fd() >= 0);
 
-        let client = ShmContext::client_attach(TEST_RUN_DIR, svc, sid)
-            .expect("client attach");
+        let client = ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
         assert_eq!(client.role(), ShmRole::Client);
         assert!(client.fd() >= 0);
 
@@ -1498,15 +1482,14 @@ mod tests {
         let sid: u64 = 51;
         cleanup_shm(svc, sid);
 
-        let server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
-            .expect("server create");
+        let server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
 
         // Owner is the current process, so should be alive
         assert!(server.owner_alive());
 
         // Client should also report alive (same process owns it)
-        let client = ShmContext::client_attach(TEST_RUN_DIR, svc, sid)
-            .expect("client attach");
+        let client = ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
         assert!(client.owner_alive());
 
         let mut c = client;
@@ -1523,8 +1506,8 @@ mod tests {
         let sid: u64 = 52;
         cleanup_shm(svc, sid);
 
-        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
-            .expect("server create");
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
 
         // Forge a dead PID
         let hdr = server.base as *mut RegionHeader;
@@ -1543,8 +1526,8 @@ mod tests {
         let sid: u64 = 53;
         cleanup_shm(svc, sid);
 
-        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
-            .expect("server create");
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
 
         // Null base -> not alive
         let saved_base = server.base;
@@ -1564,8 +1547,8 @@ mod tests {
         let sid: u64 = 54;
         cleanup_shm(svc, sid);
 
-        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
-            .expect("server create");
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
 
         // Forge a different generation in the header
         let hdr = server.base as *mut RegionHeader;
@@ -1589,8 +1572,8 @@ mod tests {
         let sid: u64 = 55;
         cleanup_shm(svc, sid);
 
-        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
-            .expect("server create");
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
 
         // Empty message -> error
         assert!(matches!(server.send(&[]), Err(ShmError::BadParam(_))));
@@ -1598,7 +1581,10 @@ mod tests {
         // Null base -> error
         let saved_base = server.base;
         server.base = std::ptr::null_mut();
-        assert!(matches!(server.send(&[1, 2, 3]), Err(ShmError::BadParam(_))));
+        assert!(matches!(
+            server.send(&[1, 2, 3]),
+            Err(ShmError::BadParam(_))
+        ));
         server.base = saved_base;
 
         server.destroy();
@@ -1613,8 +1599,8 @@ mod tests {
         cleanup_shm(svc, sid);
 
         // Small capacity
-        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 64, 64)
-            .expect("server create");
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 64, 64).expect("server create");
 
         // Create a message bigger than response capacity
         let big = vec![0u8; 1024];
@@ -1635,17 +1621,23 @@ mod tests {
         let sid: u64 = 57;
         cleanup_shm(svc, sid);
 
-        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
-            .expect("server create");
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
 
         // Empty buffer -> error
-        assert!(matches!(server.receive(&mut [], 100), Err(ShmError::BadParam(_))));
+        assert!(matches!(
+            server.receive(&mut [], 100),
+            Err(ShmError::BadParam(_))
+        ));
 
         // Null base -> error
         let saved_base = server.base;
         server.base = std::ptr::null_mut();
         let mut buf = [0u8; 64];
-        assert!(matches!(server.receive(&mut buf, 100), Err(ShmError::BadParam(_))));
+        assert!(matches!(
+            server.receive(&mut buf, 100),
+            Err(ShmError::BadParam(_))
+        ));
         server.base = saved_base;
 
         server.destroy();
@@ -1663,8 +1655,8 @@ mod tests {
         let sid: u64 = 58;
         cleanup_shm(svc, sid);
 
-        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
-            .expect("server create");
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
 
         // No client sends anything, so receive must timeout
         let mut buf = [0u8; 1024];
@@ -1686,8 +1678,8 @@ mod tests {
         let sid: u64 = 59;
         cleanup_shm(svc, sid);
 
-        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
-            .expect("server create");
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
 
         // Corrupt magic
         let hdr = server.base as *mut RegionHeader;
@@ -1709,8 +1701,8 @@ mod tests {
         let sid: u64 = 60;
         cleanup_shm(svc, sid);
 
-        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
-            .expect("server create");
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
 
         let hdr = server.base as *mut RegionHeader;
         unsafe { (*hdr).version = 99 };
@@ -1730,8 +1722,8 @@ mod tests {
         let sid: u64 = 61;
         cleanup_shm(svc, sid);
 
-        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
-            .expect("server create");
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
 
         let hdr = server.base as *mut RegionHeader;
         unsafe { (*hdr).header_len = 128 };
@@ -1751,8 +1743,8 @@ mod tests {
         let sid: u64 = 62;
         cleanup_shm(svc, sid);
 
-        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
-            .expect("server create");
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
 
         // Corrupt response capacity to be huge, so region_size < needed
         let hdr = server.base as *mut RegionHeader;

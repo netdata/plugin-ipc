@@ -9,9 +9,9 @@
 //!     Connects, calls snapshot, verifies 3 items, prints PASS/FAIL.
 
 use netipc::protocol::{
-    CgroupsBuilder, CgroupsRequest, PROFILE_BASELINE, PROFILE_SHM_HYBRID,
-    METHOD_INCREMENT, METHOD_CGROUPS_SNAPSHOT, METHOD_STRING_REVERSE,
-    dispatch_increment, dispatch_string_reverse,
+    dispatch_increment, dispatch_string_reverse, CgroupsBuilder, CgroupsRequest,
+    METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, METHOD_STRING_REVERSE, PROFILE_BASELINE,
+    PROFILE_SHM_HYBRID,
 };
 use netipc::service::cgroups::{CgroupsClient, ManagedServer};
 use netipc::transport::posix::{ClientConfig, ServerConfig};
@@ -37,9 +37,21 @@ fn handle_cgroups(request_payload: &[u8]) -> Option<Vec<u8>> {
     let mut builder = CgroupsBuilder::new(&mut buf, 3, 1, 42);
 
     let items: &[(u32, u32, u32, &[u8], &[u8])] = &[
-        (1001, 0, 1, b"docker-abc123", b"/sys/fs/cgroup/docker/abc123"),
+        (
+            1001,
+            0,
+            1,
+            b"docker-abc123",
+            b"/sys/fs/cgroup/docker/abc123",
+        ),
         (2002, 0, 1, b"k8s-pod-xyz", b"/sys/fs/cgroup/kubepods/xyz"),
-        (3003, 0, 0, b"systemd-user", b"/sys/fs/cgroup/user.slice/user-1000"),
+        (
+            3003,
+            0,
+            0,
+            b"systemd-user",
+            b"/sys/fs/cgroup/user.slice/user-1000",
+        ),
     ];
 
     for &(hash, options, enabled, name, path) in items {

@@ -177,11 +177,9 @@ impl<'a> CgroupsResponseView<'a> {
         let packed_area_start = dir_start + dir_size;
 
         let dir_base = dir_start + index as usize * 8;
-        let item_off =
-            u32::from_ne_bytes(self.payload[dir_base..dir_base + 4].try_into().unwrap());
-        let item_len = u32::from_ne_bytes(
-            self.payload[dir_base + 4..dir_base + 8].try_into().unwrap(),
-        );
+        let item_off = u32::from_ne_bytes(self.payload[dir_base..dir_base + 4].try_into().unwrap());
+        let item_len =
+            u32::from_ne_bytes(self.payload[dir_base + 4..dir_base + 8].try_into().unwrap());
 
         let item_start = packed_area_start + item_off as usize;
         let item = &self.payload[item_start..item_start + item_len as usize];
@@ -283,14 +281,8 @@ pub struct CgroupsBuilder<'a> {
 impl<'a> CgroupsBuilder<'a> {
     /// Initialize the builder. `buf` must be caller-owned and large enough
     /// for the expected snapshot.
-    pub fn new(
-        buf: &'a mut [u8],
-        max_items: u32,
-        systemd_enabled: u32,
-        generation: u64,
-    ) -> Self {
-        let data_offset = CGROUPS_RESP_HDR_SIZE
-            + max_items as usize * CGROUPS_DIR_ENTRY_SIZE;
+    pub fn new(buf: &'a mut [u8], max_items: u32, systemd_enabled: u32, generation: u64) -> Self {
+        let data_offset = CGROUPS_RESP_HDR_SIZE + max_items as usize * CGROUPS_DIR_ENTRY_SIZE;
         CgroupsBuilder {
             buf,
             systemd_enabled,
@@ -355,12 +347,9 @@ impl<'a> CgroupsBuilder<'a> {
         self.buf[path_start + path.len()] = 0;
 
         // Write directory entry (absolute offset stored temporarily)
-        let dir_entry = CGROUPS_RESP_HDR_SIZE
-            + self.item_count as usize * CGROUPS_DIR_ENTRY_SIZE;
-        self.buf[dir_entry..dir_entry + 4]
-            .copy_from_slice(&(item_start as u32).to_ne_bytes());
-        self.buf[dir_entry + 4..dir_entry + 8]
-            .copy_from_slice(&(item_size as u32).to_ne_bytes());
+        let dir_entry = CGROUPS_RESP_HDR_SIZE + self.item_count as usize * CGROUPS_DIR_ENTRY_SIZE;
+        self.buf[dir_entry..dir_entry + 4].copy_from_slice(&(item_start as u32).to_ne_bytes());
+        self.buf[dir_entry + 4..dir_entry + 8].copy_from_slice(&(item_size as u32).to_ne_bytes());
 
         self.data_offset = item_start + item_size;
         self.item_count += 1;
@@ -383,8 +372,8 @@ impl<'a> CgroupsBuilder<'a> {
         }
 
         // Where the decoder expects packed data to start
-        let final_packed_start = CGROUPS_RESP_HDR_SIZE
-            + self.item_count as usize * CGROUPS_DIR_ENTRY_SIZE;
+        let final_packed_start =
+            CGROUPS_RESP_HDR_SIZE + self.item_count as usize * CGROUPS_DIR_ENTRY_SIZE;
 
         // Read the first directory entry to find where packed data begins
         let first_item_abs = u32::from_ne_bytes(
@@ -397,17 +386,17 @@ impl<'a> CgroupsBuilder<'a> {
 
         if final_packed_start < first_item_abs {
             // Shift packed data left
-            p.copy_within(first_item_abs..first_item_abs + packed_data_len,
-                          final_packed_start);
+            p.copy_within(
+                first_item_abs..first_item_abs + packed_data_len,
+                final_packed_start,
+            );
         }
 
         // Convert directory entries from absolute to relative offsets
         let dir_base = CGROUPS_RESP_HDR_SIZE;
         for i in 0..self.item_count as usize {
             let entry = dir_base + i * CGROUPS_DIR_ENTRY_SIZE;
-            let abs_off = u32::from_ne_bytes(
-                p[entry..entry + 4].try_into().unwrap(),
-            );
+            let abs_off = u32::from_ne_bytes(p[entry..entry + 4].try_into().unwrap());
             let rel_off = abs_off - first_item_abs as u32;
             p[entry..entry + 4].copy_from_slice(&rel_off.to_ne_bytes());
             // length stays the same
@@ -466,19 +455,18 @@ mod tests {
         let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
         let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
-                .try_into().unwrap(),
+                .try_into()
+                .unwrap(),
         ) as usize;
         let item_start = dir_end + item_off;
 
         // Set path_offset = name_offset (fully overlapping)
-        let name_off = u32::from_ne_bytes(
-            buf[item_start + 16..item_start + 20].try_into().unwrap(),
-        );
+        let name_off =
+            u32::from_ne_bytes(buf[item_start + 16..item_start + 20].try_into().unwrap());
         buf[item_start + 24..item_start + 28].copy_from_slice(&name_off.to_ne_bytes());
         // Set path_len = name_len
-        let name_len = u32::from_ne_bytes(
-            buf[item_start + 20..item_start + 24].try_into().unwrap(),
-        );
+        let name_len =
+            u32::from_ne_bytes(buf[item_start + 20..item_start + 24].try_into().unwrap());
         buf[item_start + 28..item_start + 32].copy_from_slice(&name_len.to_ne_bytes());
 
         let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
@@ -489,13 +477,14 @@ mod tests {
     fn dispatch_cgroups_empty_finish_returns_none() {
         // dispatch where handler adds no items and finish returns 24
         // (non-zero), so dispatch returns Some
-        let req = CgroupsRequest { layout_version: 1, flags: 0 };
+        let req = CgroupsRequest {
+            layout_version: 1,
+            flags: 0,
+        };
         let mut req_buf = [0u8; 4];
         req.encode(&mut req_buf);
         let mut resp = [0u8; 4096];
-        let result = dispatch_cgroups_snapshot(
-            &req_buf, &mut resp, 1, |_req, _builder| true,
-        );
+        let result = dispatch_cgroups_snapshot(&req_buf, &mut resp, 1, |_req, _builder| true);
         // finish() returns 24 for empty builder (header only), so Some(24)
         assert!(result.is_some());
         assert_eq!(result.unwrap(), CGROUPS_RESP_HDR_SIZE);

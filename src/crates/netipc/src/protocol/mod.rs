@@ -322,7 +322,11 @@ pub fn batch_dir_decode(
 /// Validate a batch directory without allocating. Checks alignment and
 /// that each entry falls within `packed_area_len`. Mirrors C's
 /// `nipc_batch_dir_validate`.
-pub fn batch_dir_validate(buf: &[u8], item_count: u32, packed_area_len: u32) -> Result<(), NipcError> {
+pub fn batch_dir_validate(
+    buf: &[u8],
+    item_count: u32,
+    packed_area_len: u32,
+) -> Result<(), NipcError> {
     let count = item_count as usize;
     let dir_size = count * 8;
     if buf.len() < dir_size {
@@ -389,7 +393,7 @@ pub struct BatchBuilder<'a> {
     buf: &'a mut [u8],
     item_count: u32,
     max_items: u32,
-    dir_end: usize,    // byte offset where directory reservation ends
+    dir_end: usize,     // byte offset where directory reservation ends
     data_offset: usize, // current offset within the packed data area (relative)
 }
 
@@ -432,10 +436,8 @@ impl<'a> BatchBuilder<'a> {
         // Write directory entry
         let idx = self.item_count as usize;
         let dir_base = idx * 8;
-        self.buf[dir_base..dir_base + 4]
-            .copy_from_slice(&(aligned_off as u32).to_ne_bytes());
-        self.buf[dir_base + 4..dir_base + 8]
-            .copy_from_slice(&(item.len() as u32).to_ne_bytes());
+        self.buf[dir_base..dir_base + 4].copy_from_slice(&(aligned_off as u32).to_ne_bytes());
+        self.buf[dir_base + 4..dir_base + 8].copy_from_slice(&(item.len() as u32).to_ne_bytes());
 
         self.data_offset = aligned_off + item.len();
         self.item_count += 1;
@@ -582,18 +584,10 @@ impl HelloAck {
             server_supported_profiles: u32::from_ne_bytes(buf[4..8].try_into().unwrap()),
             intersection_profiles: u32::from_ne_bytes(buf[8..12].try_into().unwrap()),
             selected_profile: u32::from_ne_bytes(buf[12..16].try_into().unwrap()),
-            agreed_max_request_payload_bytes: u32::from_ne_bytes(
-                buf[16..20].try_into().unwrap(),
-            ),
-            agreed_max_request_batch_items: u32::from_ne_bytes(
-                buf[20..24].try_into().unwrap(),
-            ),
-            agreed_max_response_payload_bytes: u32::from_ne_bytes(
-                buf[24..28].try_into().unwrap(),
-            ),
-            agreed_max_response_batch_items: u32::from_ne_bytes(
-                buf[28..32].try_into().unwrap(),
-            ),
+            agreed_max_request_payload_bytes: u32::from_ne_bytes(buf[16..20].try_into().unwrap()),
+            agreed_max_request_batch_items: u32::from_ne_bytes(buf[20..24].try_into().unwrap()),
+            agreed_max_response_payload_bytes: u32::from_ne_bytes(buf[24..28].try_into().unwrap()),
+            agreed_max_response_batch_items: u32::from_ne_bytes(buf[28..32].try_into().unwrap()),
             agreed_packet_size: u32::from_ne_bytes(buf[32..36].try_into().unwrap()),
             // skip padding at 36..40
             session_id: u64::from_ne_bytes(buf[40..48].try_into().unwrap()),
@@ -855,9 +849,18 @@ mod tests {
     #[test]
     fn batch_dir_roundtrip() {
         let entries = [
-            BatchEntry { offset: 0, length: 100 },
-            BatchEntry { offset: 104, length: 200 },
-            BatchEntry { offset: 304, length: 50 },
+            BatchEntry {
+                offset: 0,
+                length: 100,
+            },
+            BatchEntry {
+                offset: 104,
+                length: 200,
+            },
+            BatchEntry {
+                offset: 304,
+                length: 50,
+            },
         ];
 
         let mut buf = [0u8; 64];
@@ -873,21 +876,18 @@ mod tests {
     #[test]
     fn batch_dir_decode_truncated() {
         let buf = [0u8; 12];
-        assert_eq!(
-            batch_dir_decode(&buf, 2, 1000),
-            Err(NipcError::Truncated)
-        );
+        assert_eq!(batch_dir_decode(&buf, 2, 1000), Err(NipcError::Truncated));
     }
 
     #[test]
     fn batch_dir_decode_oob() {
-        let e = BatchEntry { offset: 0, length: 200 };
+        let e = BatchEntry {
+            offset: 0,
+            length: 200,
+        };
         let mut buf = [0u8; 8];
         batch_dir_encode(&[e], &mut buf);
-        assert_eq!(
-            batch_dir_decode(&buf, 1, 100),
-            Err(NipcError::OutOfBounds)
-        );
+        assert_eq!(batch_dir_decode(&buf, 1, 100), Err(NipcError::OutOfBounds));
     }
 
     #[test]
@@ -896,10 +896,7 @@ mod tests {
         // Manually write unaligned offset
         buf[0..4].copy_from_slice(&3u32.to_ne_bytes());
         buf[4..8].copy_from_slice(&10u32.to_ne_bytes());
-        assert_eq!(
-            batch_dir_decode(&buf, 1, 100),
-            Err(NipcError::BadAlignment)
-        );
+        assert_eq!(batch_dir_decode(&buf, 1, 100), Err(NipcError::BadAlignment));
     }
 
     // -----------------------------------------------------------------------
@@ -1301,12 +1298,10 @@ mod tests {
         ) as usize;
         let item_start = dir_end + item_off;
 
-        let noff = u32::from_ne_bytes(
-            buf[item_start + 16..item_start + 20].try_into().unwrap(),
-        ) as usize;
-        let nlen = u32::from_ne_bytes(
-            buf[item_start + 20..item_start + 24].try_into().unwrap(),
-        ) as usize;
+        let noff =
+            u32::from_ne_bytes(buf[item_start + 16..item_start + 20].try_into().unwrap()) as usize;
+        let nlen =
+            u32::from_ne_bytes(buf[item_start + 20..item_start + 24].try_into().unwrap()) as usize;
 
         buf[item_start + noff + nlen] = b'X'; // corrupt NUL
 
@@ -1332,8 +1327,7 @@ mod tests {
         ) as usize;
         let item_start = dir_end + item_off;
 
-        buf[item_start + 20..item_start + 24]
-            .copy_from_slice(&99999u32.to_ne_bytes());
+        buf[item_start + 20..item_start + 24].copy_from_slice(&99999u32.to_ne_bytes());
 
         // Re-decode after corruption
         let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
@@ -1345,10 +1339,7 @@ mod tests {
         let mut buf = [0u8; 64]; // too small for any real item
         let mut b = CgroupsBuilder::new(&mut buf, 1, 0, 0);
         let long_name = [b'A'; 200];
-        assert_eq!(
-            b.add(1, 0, 1, &long_name, b""),
-            Err(NipcError::Overflow)
-        );
+        assert_eq!(b.add(1, 0, 1, &long_name, b""), Err(NipcError::Overflow));
     }
 
     #[test]
@@ -1356,10 +1347,7 @@ mod tests {
         let mut buf = [0u8; 4096];
         let mut b = CgroupsBuilder::new(&mut buf, 1, 0, 0);
         b.add(1, 0, 1, b"a", b"b").unwrap();
-        assert_eq!(
-            b.add(2, 0, 1, b"c", b"d"),
-            Err(NipcError::Overflow)
-        );
+        assert_eq!(b.add(2, 0, 1, b"c", b"d"), Err(NipcError::Overflow));
     }
 
     #[test]
@@ -1430,12 +1418,12 @@ mod tests {
         // Known LE bytes for this header
         let expected: [u8; 32] = [
             0x43, 0x50, 0x49, 0x4e, // magic
-            0x01, 0x00,             // version
-            0x20, 0x00,             // header_len
-            0x01, 0x00,             // kind
-            0x01, 0x00,             // flags
-            0x02, 0x00,             // code
-            0x00, 0x00,             // transport_status
+            0x01, 0x00, // version
+            0x20, 0x00, // header_len
+            0x01, 0x00, // kind
+            0x01, 0x00, // flags
+            0x02, 0x00, // code
+            0x00, 0x00, // transport_status
             0x39, 0x30, 0x00, 0x00, // payload_len = 12345
             0x2a, 0x00, 0x00, 0x00, // item_count = 42
             0xbe, 0xba, 0xfe, 0xca, 0xef, 0xbe, 0xad, 0xde, // message_id
@@ -1460,8 +1448,8 @@ mod tests {
 
         let expected: [u8; 32] = [
             0x4b, 0x48, 0x43, 0x4e, // magic
-            0x01, 0x00,             // version
-            0x00, 0x00,             // flags
+            0x01, 0x00, // version
+            0x00, 0x00, // flags
             0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // message_id
             0x00, 0x01, 0x00, 0x00, // total_message_len = 256
             0x01, 0x00, 0x00, 0x00, // chunk_index
@@ -1527,7 +1515,10 @@ mod tests {
         assert_eq!(&rust_buf[4..8], &[0x07, 0x00, 0x00, 0x00]); // server_supported
         assert_eq!(&rust_buf[12..16], &[0x04, 0x00, 0x00, 0x00]); // selected = SHM_FUTEX
         assert_eq!(&rust_buf[36..40], &[0x00, 0x00, 0x00, 0x00]); // padding
-        assert_eq!(&rust_buf[40..48], &[0x07, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]); // session_id LE
+        assert_eq!(
+            &rust_buf[40..48],
+            &[0x07, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]
+        ); // session_id LE
 
         let out = HelloAck::decode(&rust_buf).unwrap();
         assert_eq!(out, h);
@@ -1553,8 +1544,14 @@ mod tests {
         // Build a snapshot with the exact same inputs as the C test
         let mut buf = [0u8; 4096];
         let mut b = CgroupsBuilder::new(&mut buf, 1, 0, 100);
-        b.add(12345, 0x01, 1, b"docker-abc123", b"/sys/fs/cgroup/docker/abc123")
-            .unwrap();
+        b.add(
+            12345,
+            0x01,
+            1,
+            b"docker-abc123",
+            b"/sys/fs/cgroup/docker/abc123",
+        )
+        .unwrap();
         let total = b.finish();
 
         // Verify the snapshot header bytes
@@ -1563,7 +1560,10 @@ mod tests {
         assert_eq!(&buf[4..8], &[0x01, 0x00, 0x00, 0x00]); // item_count
         assert_eq!(&buf[8..12], &[0x00, 0x00, 0x00, 0x00]); // systemd_enabled
         assert_eq!(&buf[12..16], &[0x00, 0x00, 0x00, 0x00]); // reserved
-        assert_eq!(&buf[16..24], &[0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // generation
+        assert_eq!(
+            &buf[16..24],
+            &[0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        ); // generation
 
         // Verify it decodes correctly
         let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
@@ -1672,12 +1672,10 @@ mod tests {
                 .unwrap(),
         ) as usize;
         let item_start = dir_end + item_off;
-        let poff = u32::from_ne_bytes(
-            buf[item_start + 24..item_start + 28].try_into().unwrap(),
-        ) as usize;
-        let plen = u32::from_ne_bytes(
-            buf[item_start + 28..item_start + 32].try_into().unwrap(),
-        ) as usize;
+        let poff =
+            u32::from_ne_bytes(buf[item_start + 24..item_start + 28].try_into().unwrap()) as usize;
+        let plen =
+            u32::from_ne_bytes(buf[item_start + 28..item_start + 32].try_into().unwrap()) as usize;
         buf[item_start + poff + plen] = b'X';
 
         // Re-decode after corruption
@@ -1921,8 +1919,14 @@ mod tests {
     #[test]
     fn batch_dir_encode_too_small() {
         let entries = [
-            BatchEntry { offset: 0, length: 8 },
-            BatchEntry { offset: 8, length: 8 },
+            BatchEntry {
+                offset: 0,
+                length: 8,
+            },
+            BatchEntry {
+                offset: 8,
+                length: 8,
+            },
         ];
         let mut buf = [0u8; 12]; // needs 16, only 12
         assert_eq!(batch_dir_encode(&entries, &mut buf), 0);
@@ -1935,10 +1939,7 @@ mod tests {
     #[test]
     fn batch_dir_validate_truncated() {
         let buf = [0u8; 4]; // too short for 1 entry (needs 8)
-        assert_eq!(
-            batch_dir_validate(&buf, 1, 100),
-            Err(NipcError::Truncated)
-        );
+        assert_eq!(batch_dir_validate(&buf, 1, 100), Err(NipcError::Truncated));
     }
 
     #[test]
@@ -1984,20 +1985,14 @@ mod tests {
         // Directory: 1 entry at offset 0 of buf
         buf[0..4].copy_from_slice(&3u32.to_ne_bytes()); // unaligned offset
         buf[4..8].copy_from_slice(&4u32.to_ne_bytes());
-        assert_eq!(
-            batch_item_get(&buf, 1, 0),
-            Err(NipcError::BadAlignment)
-        );
+        assert_eq!(batch_item_get(&buf, 1, 0), Err(NipcError::BadAlignment));
     }
 
     #[test]
     fn batch_item_get_truncated_dir() {
         // Payload too small to hold the directory
         let buf = [0u8; 4]; // needs at least 8 for 1 item directory
-        assert_eq!(
-            batch_item_get(&buf, 1, 0),
-            Err(NipcError::Truncated)
-        );
+        assert_eq!(batch_item_get(&buf, 1, 0), Err(NipcError::Truncated));
     }
 
     // -----------------------------------------------------------------------
@@ -2121,7 +2116,7 @@ mod tests {
         let mut buf = [0u8; 128];
         buf[0..2].copy_from_slice(&1u16.to_ne_bytes()); // layout_version
         buf[4..8].copy_from_slice(&1u32.to_ne_bytes()); // item_count = 1
-        // Dir entry at offset 24: offset=3 (unaligned), length=32
+                                                        // Dir entry at offset 24: offset=3 (unaligned), length=32
         buf[24..28].copy_from_slice(&3u32.to_ne_bytes());
         buf[28..32].copy_from_slice(&32u32.to_ne_bytes());
         assert_eq!(
@@ -2146,7 +2141,8 @@ mod tests {
         let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
         let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
-                .try_into().unwrap(),
+                .try_into()
+                .unwrap(),
         ) as usize;
         let item_start = dir_end + item_off;
 
@@ -2168,7 +2164,8 @@ mod tests {
         let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
         let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
-                .try_into().unwrap(),
+                .try_into()
+                .unwrap(),
         ) as usize;
         let item_start = dir_end + item_off;
 
@@ -2193,7 +2190,8 @@ mod tests {
         let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
         let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
-                .try_into().unwrap(),
+                .try_into()
+                .unwrap(),
         ) as usize;
         let item_start = dir_end + item_off;
 
@@ -2218,17 +2216,16 @@ mod tests {
         let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
         let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
-                .try_into().unwrap(),
+                .try_into()
+                .unwrap(),
         ) as usize;
         let item_start = dir_end + item_off;
 
         // Find the path NUL terminator and corrupt it
-        let path_off = u32::from_ne_bytes(
-            buf[item_start + 24..item_start + 28].try_into().unwrap(),
-        ) as usize;
-        let path_len = u32::from_ne_bytes(
-            buf[item_start + 28..item_start + 32].try_into().unwrap(),
-        ) as usize;
+        let path_off =
+            u32::from_ne_bytes(buf[item_start + 24..item_start + 28].try_into().unwrap()) as usize;
+        let path_len =
+            u32::from_ne_bytes(buf[item_start + 28..item_start + 32].try_into().unwrap()) as usize;
         buf[item_start + path_off + path_len] = b'X'; // corrupt path NUL
 
         let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
@@ -2249,7 +2246,8 @@ mod tests {
         let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
         let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
-                .try_into().unwrap(),
+                .try_into()
+                .unwrap(),
         ) as usize;
         let item_start = dir_end + item_off;
 
@@ -2274,13 +2272,13 @@ mod tests {
         let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
         let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
-                .try_into().unwrap(),
+                .try_into()
+                .unwrap(),
         ) as usize;
         let item_start = dir_end + item_off;
 
         // Corrupt path_length to huge value
-        buf[item_start + 28..item_start + 32]
-            .copy_from_slice(&99999u32.to_ne_bytes());
+        buf[item_start + 28..item_start + 32].copy_from_slice(&99999u32.to_ne_bytes());
 
         let view = CgroupsResponseView::decode(&buf[..total]).unwrap();
         assert_eq!(view.item(0).unwrap_err(), NipcError::OutOfBounds);
@@ -2294,37 +2292,42 @@ mod tests {
     fn dispatch_cgroups_snapshot_bad_request() {
         // Bad request (too short) -> dispatch returns None (line 438)
         let mut resp = [0u8; 4096];
-        let result = crate::protocol::dispatch_cgroups_snapshot(
-            &[], &mut resp, 1, |_req, _builder| true,
-        );
+        let result =
+            crate::protocol::dispatch_cgroups_snapshot(&[], &mut resp, 1, |_req, _builder| true);
         assert!(result.is_none());
     }
 
     #[test]
     fn dispatch_cgroups_snapshot_handler_returns_false() {
         // Handler returns false -> dispatch returns None (lines 440-441)
-        let req = CgroupsRequest { layout_version: 1, flags: 0 };
+        let req = CgroupsRequest {
+            layout_version: 1,
+            flags: 0,
+        };
         let mut req_buf = [0u8; 4];
         req.encode(&mut req_buf);
         let mut resp = [0u8; 4096];
-        let result = crate::protocol::dispatch_cgroups_snapshot(
-            &req_buf, &mut resp, 1, |_req, _builder| false,
-        );
+        let result =
+            crate::protocol::dispatch_cgroups_snapshot(&req_buf, &mut resp, 1, |_req, _builder| {
+                false
+            });
         assert!(result.is_none());
     }
 
     #[test]
     fn dispatch_cgroups_snapshot_success() {
-        let req = CgroupsRequest { layout_version: 1, flags: 0 };
+        let req = CgroupsRequest {
+            layout_version: 1,
+            flags: 0,
+        };
         let mut req_buf = [0u8; 4];
         req.encode(&mut req_buf);
         let mut resp = [0u8; 4096];
-        let result = crate::protocol::dispatch_cgroups_snapshot(
-            &req_buf, &mut resp, 2, |_req, builder| {
+        let result =
+            crate::protocol::dispatch_cgroups_snapshot(&req_buf, &mut resp, 2, |_req, builder| {
                 builder.add(1, 0, 1, b"cg1", b"/test").unwrap();
                 true
-            },
-        );
+            });
         assert!(result.is_some());
         let n = result.unwrap();
         let view = CgroupsResponseView::decode(&resp[..n]).unwrap();
@@ -2342,9 +2345,7 @@ mod tests {
         let mut req_buf = [0u8; 8];
         crate::protocol::increment_encode(req_val, &mut req_buf);
         let mut resp = [0u8; 4]; // too small for 8-byte response
-        let result = crate::protocol::dispatch_increment(
-            &req_buf, &mut resp, |v| Some(v + 1),
-        );
+        let result = crate::protocol::dispatch_increment(&req_buf, &mut resp, |v| Some(v + 1));
         assert!(result.is_none());
     }
 
@@ -2353,9 +2354,7 @@ mod tests {
         let mut req_buf = [0u8; 8];
         crate::protocol::increment_encode(42, &mut req_buf);
         let mut resp = [0u8; 8];
-        let result = crate::protocol::dispatch_increment(
-            &req_buf, &mut resp, |_| None,
-        );
+        let result = crate::protocol::dispatch_increment(&req_buf, &mut resp, |_| None);
         assert!(result.is_none());
     }
 
@@ -2365,9 +2364,9 @@ mod tests {
         let mut req_buf = [0u8; 64];
         crate::protocol::string_reverse_encode(s, &mut req_buf);
         let mut resp = [0u8; 4]; // too small
-        let result = crate::protocol::dispatch_string_reverse(
-            &req_buf, &mut resp, |data| Some(data.iter().rev().copied().collect()),
-        );
+        let result = crate::protocol::dispatch_string_reverse(&req_buf, &mut resp, |data| {
+            Some(data.iter().rev().copied().collect())
+        });
         assert!(result.is_none());
     }
 
@@ -2377,9 +2376,7 @@ mod tests {
         let mut req_buf = [0u8; 64];
         crate::protocol::string_reverse_encode(s, &mut req_buf);
         let mut resp = [0u8; 64];
-        let result = crate::protocol::dispatch_string_reverse(
-            &req_buf, &mut resp, |_| None,
-        );
+        let result = crate::protocol::dispatch_string_reverse(&req_buf, &mut resp, |_| None);
         assert!(result.is_none());
     }
 }
