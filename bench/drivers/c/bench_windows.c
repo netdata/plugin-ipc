@@ -1428,9 +1428,7 @@ int main(int argc, char **argv)
         uint64_t cpu_start = cpu_ns();
         uint64_t wall_start = now_ns();
         ULONGLONG tick_deadline = GetTickCount64() + (ULONGLONG)duration * 1000;
-        size_t inflight_budget = ((size_t)depth * (size_t)session.packet_size) / 2;
-        if (inflight_budget < (size_t)session.packet_size)
-            inflight_budget = (size_t)session.packet_size;
+        size_t inflight_budget = (size_t)session.packet_size * 2;
 
         while (GetTickCount64() < tick_deadline) {
             rate_limiter_wait(&rl);

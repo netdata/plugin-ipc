@@ -743,10 +743,7 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 	recvBuf := make([]byte, batchBufSizeWin+protocol.HeaderSize)
 
 	var counter, totalItems, errors, msgSeq uint64
-	inflightBudget := uint64(depth) * uint64(session.PacketSize) / 2
-	if inflightBudget < uint64(session.PacketSize) {
-		inflightBudget = uint64(session.PacketSize)
-	}
+	inflightBudget := uint64(session.PacketSize) * 2
 
 	cpuStart := cpuNSWin()
 	wallStart := time.Now()

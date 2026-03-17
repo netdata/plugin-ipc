@@ -1147,8 +1147,7 @@ fn run_pipeline_batch_client(
         .collect();
     let mut slots = vec![PipelineBatchSlot::default(); depth];
     let mut recv_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
-    let inflight_budget =
-        ((depth * session.packet_size as usize) / 2).max(session.packet_size as usize);
+    let inflight_budget = session.packet_size as usize * 2;
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
