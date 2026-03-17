@@ -136,6 +136,17 @@ Verified facts from the current codebase:
     - `shm-ping-pong` max-rate Go clients failed against C/Rust/Go servers with counter-chain mismatches
     - `shm-ping-pong` also showed non-zero correctness failures for some `c -> go` and `rust -> go` runs
     - implication: the old benchmark path was masking real Windows SHM correctness bugs by accepting client failures as usable measurements
+  - concrete root cause identified for the Windows SHM correctness failures:
+    - file: `src/go/pkg/netipc/transport/windows/shm.go`
+    - issue: the Go HYBRID receive path performed only one `WaitForSingleObject()` wake and then copied the shared-memory payload without looping until `seq >= expected_seq`
+    - evidence:
+      - C reference implementation in `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c` already uses a deadline-based retry loop
+      - Rust reference implementation in `src/crates/netipc/src/transport/win_shm.rs` already uses the same retry loop
+      - Microsoft event-object documentation states that auto-reset events remain signaled until a waiter consumes them, so a wake is not equivalent to “new payload is present”
+    - implication: a stale event wake could make Go read the previous payload and advance the local sequence, which matches the observed `counter chain broken: expected X, got X-1` failures
+    - current fix in progress:
+      - make Go `WinShmReceive()` mirror the C/Rust deadline-based retry loop
+      - add Windows-only regression tests that force a spurious wake and verify the second receive returns the new payload, not the stale one
   - `np-pipeline-batch-d16` still has a real runtime bug on Windows:
     - manual probes on `win11` show Rust and Go clients can print a throughput line but still exit non-zero with `pipeline-batch client: 1 errors`
     - the updated runner now rejects these runs instead of recording them as valid rows

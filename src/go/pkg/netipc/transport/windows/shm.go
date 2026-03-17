@@ -21,33 +21,33 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	winShmMagic          uint32 = 0x4e535748 // "NSWH"
-	winShmVersion        uint32 = 3
-	winShmHeaderLen      uint32 = 128
-	winShmCachelineSize  uint32 = 64
-	winShmDefaultSpin    uint32 = 1024
+	winShmMagic         uint32 = 0x4e535748 // "NSWH"
+	winShmVersion       uint32 = 3
+	winShmHeaderLen     uint32 = 128
+	winShmCachelineSize uint32 = 64
+	winShmDefaultSpin   uint32 = 1024
 
 	WinShmProfileHybrid   uint32 = 0x02
 	WinShmProfileBusywait uint32 = 0x04
 
 	// Header field offsets
-	wshOFFMagic            = 0
-	wshOFFVersion          = 4
-	wshOFFHeaderLen        = 8
-	wshOFFProfile          = 12
-	wshOFFReqOffset        = 16
-	wshOFFReqCapacity      = 20
-	wshOFFRespOffset       = 24
-	wshOFFRespCapacity     = 28
-	wshOFFSpinTries        = 32
-	wshOFFReqLen           = 36
-	wshOFFRespLen          = 40
-	wshOFFReqClientClosed  = 44
-	wshOFFReqServerWaiting = 48
-	wshOFFRespServerClosed = 52
+	wshOFFMagic             = 0
+	wshOFFVersion           = 4
+	wshOFFHeaderLen         = 8
+	wshOFFProfile           = 12
+	wshOFFReqOffset         = 16
+	wshOFFReqCapacity       = 20
+	wshOFFRespOffset        = 24
+	wshOFFRespCapacity      = 28
+	wshOFFSpinTries         = 32
+	wshOFFReqLen            = 36
+	wshOFFRespLen           = 40
+	wshOFFReqClientClosed   = 44
+	wshOFFReqServerWaiting  = 48
+	wshOFFRespServerClosed  = 52
 	wshOFFRespClientWaiting = 56
-	wshOFFReqSeq           = 64
-	wshOFFRespSeq          = 72
+	wshOFFReqSeq            = 64
+	wshOFFRespSeq           = 72
 )
 
 // ---------------------------------------------------------------------------
@@ -84,6 +84,7 @@ var (
 	procSetEvent           = modkernel32.NewProc("SetEvent")
 	procWaitForSingleObj   = modkernel32.NewProc("WaitForSingleObject")
 	procGetTickCount       = modkernel32.NewProc("GetTickCount")
+	procGetTickCount64     = modkernel32.NewProc("GetTickCount64")
 )
 
 const (
@@ -121,12 +122,12 @@ type WinShmContext struct {
 	reqEvent  syscall.Handle
 	respEvent syscall.Handle
 
-	profile         uint32
-	requestOffset   uint32
-	requestCapacity uint32
-	responseOffset  uint32
+	profile          uint32
+	requestOffset    uint32
+	requestCapacity  uint32
+	responseOffset   uint32
 	responseCapacity uint32
-	SpinTries       uint32
+	SpinTries        uint32
 
 	localReqSeq  int64
 	localRespSeq int64
@@ -165,7 +166,7 @@ func WinShmServerCreate(runDir, serviceName string, authToken, sessionID uint64,
 	// Create page-file backed mapping
 	r, _, callErr := procCreateFileMappingW.Call(
 		uintptr(syscall.InvalidHandle), // page file
-		0,                               // NULL security
+		0,                              // NULL security
 		uintptr(_PAGE_READWRITE),
 		uintptr(regionSize>>32),
 		uintptr(regionSize&0xFFFFFFFF),
@@ -591,43 +592,51 @@ func (c *WinShmContext) WinShmReceive(buf []byte, timeoutMs uint32) (int, error)
 	// Phase 2: kernel wait or busy-wait
 	if !observed {
 		if c.profile == WinShmProfileHybrid {
-			// Set waiting flag
-			atomic.StoreInt32((*int32)(unsafe.Pointer(&data[selfWaitingOff])), 1)
+			deadlineMs := uint32(_INFINITE)
+			if timeoutMs > 0 {
+				deadlineMs = timeoutMs
+			}
+			start, _, _ := procGetTickCount64.Call()
 
-			// Recheck
-			cur := atomic.LoadInt64((*int64)(unsafe.Pointer(&data[seqOff])))
-			if cur < expectedSeq {
-				waitMs := uintptr(_INFINITE)
-				if timeoutMs > 0 {
-					waitMs = uintptr(timeoutMs)
-				}
-				ret, _, _ := procWaitForSingleObj.Call(uintptr(waitEvent), waitMs)
+			for {
+				atomic.StoreInt32((*int32)(unsafe.Pointer(&data[selfWaitingOff])), 1)
+				atomic.LoadInt32((*int32)(unsafe.Pointer(&data[selfWaitingOff])))
 
-				atomic.StoreInt32((*int32)(unsafe.Pointer(&data[selfWaitingOff])), 0)
-
-				// Check sequence FIRST — data may be available even if
-				// the peer has also set its close flag.
-				cur = atomic.LoadInt64((*int64)(unsafe.Pointer(&data[seqOff])))
+				cur := atomic.LoadInt64((*int64)(unsafe.Pointer(&data[seqOff])))
 				if cur >= expectedSeq {
-					observed = true
+					atomic.StoreInt32((*int32)(unsafe.Pointer(&data[selfWaitingOff])), 0)
+					break
 				}
 
-				if !observed {
-					// Only check peer close if no data is available.
-					if atomic.LoadInt32((*int32)(unsafe.Pointer(&data[peerClosedOff]))) != 0 {
-						c.advanceSeq(expectedSeq)
-						return 0, ErrWinShmDisconnected
-					}
-
-					if ret == _WAIT_TIMEOUT {
+				waitMs := uintptr(_INFINITE)
+				if deadlineMs != _INFINITE {
+					now, _, _ := procGetTickCount64.Call()
+					elapsed := uint32(now - start)
+					if elapsed >= deadlineMs {
+						atomic.StoreInt32((*int32)(unsafe.Pointer(&data[selfWaitingOff])), 0)
 						return 0, ErrWinShmTimeout
 					}
+					waitMs = uintptr(deadlineMs - elapsed)
 				}
-			} else {
+
+				ret, _, _ := procWaitForSingleObj.Call(uintptr(waitEvent), waitMs)
 				atomic.StoreInt32((*int32)(unsafe.Pointer(&data[selfWaitingOff])), 0)
+
+				cur = atomic.LoadInt64((*int64)(unsafe.Pointer(&data[seqOff])))
+				if cur >= expectedSeq {
+					break
+				}
+
+				if atomic.LoadInt32((*int32)(unsafe.Pointer(&data[peerClosedOff]))) != 0 {
+					c.advanceSeq(expectedSeq)
+					return 0, ErrWinShmDisconnected
+				}
+
+				if ret == _WAIT_TIMEOUT {
+					return 0, ErrWinShmTimeout
+				}
 			}
 
-			// Copy after waking
 			mlen = atomic.LoadInt32((*int32)(unsafe.Pointer(&data[lenOff])))
 			if mlen > 0 && int(mlen) <= maxCopy {
 				copy(buf[:mlen], data[areaOff:areaOff+uint32(mlen)])
