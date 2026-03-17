@@ -57,6 +57,7 @@ mod posix_only {
         // Receive one message
         let mut buf = [0u8; 65600];
         let (hdr, payload) = session.receive(&mut buf)?;
+        let payload = payload.to_vec();
 
         // Echo as response
         let mut resp = hdr;
@@ -136,6 +137,7 @@ mod posix_only {
             let (hdr, payload) = session
                 .receive(&mut buf)
                 .map_err(|e| format!("receive[{i}]: {e}"))?;
+            let payload = payload.to_vec();
 
             let mut resp = hdr;
             resp.kind = protocol::KIND_RESPONSE;

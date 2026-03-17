@@ -155,6 +155,48 @@ Current POSIX benchmark status after the SHM attach fix:
 - Verified improvement:
   - previous `snapshot-baseline` floor failures are gone in the current rerun
   - the previous functional blocker in `shm-batch-ping-pong rust->c @ 1000/s` is gone
+- New measurement update on 2026-03-17 after the Rust typed-L2 / scratch-buffer refactor:
+  - isolated `snapshot-shm` runs with the current binaries are much faster than the stale low CSV rows had suggested:
+    - `c -> c`: `607564`
+    - `rust -> rust`: `1676618`
+    - `go -> go`: `1019376`
+    - repeated `go -> go` isolated runs stayed stable at `955352` to `1011301`
+  - a fresh short full-suite rerun (`tests/run-posix-bench.sh /tmp/benchmarks-posix-short.csv 2`) also restored high `snapshot-shm` numbers inside the suite itself:
+    - `c -> c`: `629963`
+    - `rust -> c`: `606750`
+    - `go -> c`: `593275`
+    - `c -> rust`: `1635801`
+    - `rust -> rust`: `1659948`
+    - `go -> rust`: `1513857`
+    - `c -> go`: `1110598`
+    - `rust -> go`: `1105865`
+    - `go -> go`: `1027782`
+  - implication:
+    - the earlier low `snapshot-shm` rows across all pairs were not trustworthy evidence of the current implementation state
+    - after the Rust L2 fixes, Rust and Go `snapshot-shm` are now comfortably above the configured floor
+    - the remaining verified underperformer is the **C snapshot server** (`~0.59M-0.63M`), which is consistent with the earlier `perf` evidence showing heavy per-request `snprintf()` cost in `bench/drivers/c/bench_posix.c`
+- Final validation update on 2026-03-17 after precomputing the C benchmark snapshot template:
+  - C benchmark snapshot server now precomputes the 16 synthetic names/paths once and reuses them on every request:
+    - `bench/drivers/c/bench_posix.c`
+  - isolated post-fix C-server `snapshot-shm` probes:
+    - `c -> c`: `1244800`
+    - `rust -> c`: `1264226`
+    - `go -> c`: `1161065`
+  - fresh authoritative rerun:
+    - `tests/run-posix-bench.sh benchmarks-posix.csv 5`: complete `201`-row matrix
+    - `tests/generate-benchmarks-posix.sh benchmarks-posix.csv benchmarks-posix.md`: **All performance floors met**
+    - `snapshot-shm @ max` final rows:
+      - `c -> c`: `1144291`
+      - `rust -> c`: `1301415`
+      - `go -> c`: `1136064`
+      - `c -> rust`: `1637537`
+      - `rust -> rust`: `1674035`
+      - `go -> rust`: `1510253`
+      - `c -> go`: `1119852`
+      - `rust -> go`: `1094485`
+      - `go -> go`: `988398`
+  - regression check:
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `36/36` passed
 
 ## Decisions
 
@@ -185,6 +227,19 @@ Current POSIX benchmark status after the SHM attach fix:
   - do a proper root-cause review of the remaining `snapshot-shm` underperformance after that commit
   - implication:
     - the remaining performance-floor failures are not to be “blindly fixed” in this phase without evidence
+- User direction after commit `97cbfaf`:
+  - proceed with root-cause analysis of the remaining POSIX `snapshot-shm` underperformance
+  - do not apply speculative fixes before there is concrete profiling/code evidence for the hot path
+- User decision on 2026-03-17 for the remaining `snapshot-shm` issue:
+  - choose option `C`
+  - implement the full proven fix set, not a benchmark-only workaround:
+    - precompute benchmark snapshot inputs in C and Rust
+    - remove Rust client SHM per-call allocations
+    - refactor Rust Level 2 server away from raw `HandlerFn -> Option<Vec<u8>>` and per-request payload copies toward typed borrowed requests plus library-owned reusable response scratch
+  - explicit rationale from user:
+    - this is the same underlying hot-path allocation/design problem seen earlier in Level 2
+    - public Level 2 should remain strongly typed and minimal
+    - the library, not the caller, owns buffer management and must avoid per-request allocations on the hot path
 
 ### Pending
 
@@ -662,6 +717,100 @@ Current POSIX benchmark status after the SHM attach fix:
     - `bash tests/run-windows-bench.sh benchmarks-windows.csv 5`: completed successfully with `201` rows
     - `bash tests/generate-benchmarks-windows.sh benchmarks-windows.csv benchmarks-windows.md`: exited zero
     - generator result: all configured Windows performance floors met
+
+## Snapshot-SHM Root-Cause Review (2026-03-17)
+
+Verified facts from the current POSIX rerun and targeted Linux profiling:
+
+- The remaining failing benchmark is **not** the L3 cache lookup path.
+  - `snapshot-shm` exercises the L2 snapshot RPC client calls:
+    - C benchmark client:
+      - `bench/drivers/c/bench_posix.c`
+      - `nipc_client_call_cgroups_snapshot(&client, &view)`
+    - Rust benchmark client:
+      - `bench/drivers/rust/src/main.rs`
+      - `client.call_snapshot(&mut resp_buf)`
+    - Go typed client API:
+      - `src/go/pkg/netipc/service/cgroups/client.go`
+      - `CallSnapshot()`
+  - The separate local lookup benchmark is already fast:
+    - `lookup,c,c,0,72213222`
+    - `lookup,rust,rust,0,206994940`
+    - `lookup,go,go,0,108100553`
+  - implication:
+    - current `snapshot-shm` floor failures are not evidence of a slow L3 lookup algorithm
+
+- The dominant performance driver is the **server language**, not the client language.
+  - current `snapshot-shm @ max` averages by **server**:
+    - server `c`: `568616`
+    - server `rust`: `419009`
+    - server `go`: `858067`
+  - current `snapshot-shm @ max` averages by **client**:
+    - client `c`: `655411`
+    - client `rust`: `546927`
+    - client `go`: `643354`
+  - implication:
+    - the primary bottleneck is the server-side snapshot path
+
+- C benchmark server hot path is dominated by per-request string formatting.
+  - benchmark code:
+    - `bench/drivers/c/bench_posix.c`
+    - inside `snapshot_handler()`:
+      - `snprintf(name, "cgroup-%d", i)`
+      - `snprintf(path, "/sys/fs/cgroup/bench/cg-%d", i)`
+  - targeted `perf report` on `c -> c snapshot-shm` server:
+    - `snapshot_handler`: `83.22%` children
+    - `snprintf`: `73.94%`
+    - `nipc_cgroups_builder_add`: `9.28%`
+  - implication:
+    - the C snapshot server spends most of its CPU budget rebuilding the same synthetic strings every request
+
+- Rust benchmark server has the same logical issue, plus per-request owned-response allocation.
+  - benchmark code:
+    - `bench/drivers/rust/src/main.rs`
+    - inside `snapshot_handler()`:
+      - `let mut buf = vec![0u8; RESPONSE_BUF_SIZE];`
+      - `let name = format!(...)`
+      - `let path = format!(...)`
+  - Rust managed-server API still forces owned response payloads:
+    - `src/crates/netipc/src/service/cgroups.rs`
+    - `pub type HandlerFn = Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync>;`
+  - targeted `perf report` on Rust snapshot server:
+    - `bench_posix::run_server::{{closure}}`
+    - `alloc::fmt::format::format_inner`
+    - `malloc`
+  - implication:
+    - Rust pays both formatting cost and allocation cost on the hot server path
+
+- Go benchmark server already precomputes the synthetic snapshot names/paths and reuses per-session buffers.
+  - benchmark code:
+    - `bench/drivers/go/main.go`
+    - `initSnapshotTemplate()` builds `snapshotNames` / `snapshotPaths` once
+    - `snapshotHandlers()` reuses those byte slices on every request
+  - Go server session path reuses buffers:
+    - `src/go/pkg/netipc/service/cgroups/client.go`
+    - `handleSession()` allocates `recvBuf`, `respBuf`, `itemRespBuf`, `msgBuf` once per session
+  - targeted `perf report` on Go snapshot server:
+    - main costs were `ShmSend`/futex wake and `CgroupsBuilder.Add`
+    - no hot `fmt.Sprintf()` per request in the server profile
+
+- There is also a secondary **Rust client-side** issue on SHM snapshot calls.
+  - Rust client SHM path still allocates a fresh `Vec` on every send and every receive:
+    - `src/crates/netipc/src/service/cgroups.rs`
+    - `transport_send()`:
+      - `let mut msg = vec![0u8; msg_len];`
+    - `transport_receive()`:
+      - `let mut shm_buf = vec![0u8; response_buf.len() + HEADER_SIZE];`
+  - C reuses internal buffers:
+    - `src/libnetdata/netipc/src/service/netipc_service.c`
+    - `transport_send()` uses `ctx->send_buf`
+    - `transport_receive()` reads directly into the caller/internal buffer
+  - Go reuses internal client scratch:
+    - `src/go/pkg/netipc/service/cgroups/client.go`
+    - `transportSend()` uses `ensureClientScratch(&c.sendBuf, ...)`
+    - `transportReceive()` uses `ensureClientScratch(&c.transportBuf, ...)`
+  - implication:
+    - this explains why `rust -> go` (`645122`) is materially slower than `c -> go` (`972244`) and `go -> go` (`956835`) even when the server is already efficient
 
 ## Implied Decisions
 

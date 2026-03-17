@@ -15,18 +15,17 @@ fn main() {
 mod posix_only {
 
     use netipc::protocol::{
-        self, batch_item_get, increment_decode, increment_encode, BatchBuilder, CgroupsBuilder,
-        CgroupsRequest, Header, FLAG_BATCH, HEADER_SIZE, INCREMENT_PAYLOAD_SIZE, KIND_REQUEST,
-        KIND_RESPONSE, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE,
-        PROFILE_SHM_HYBRID, STATUS_OK, VERSION,
+        self, batch_item_get, increment_decode, increment_encode, BatchBuilder, Header, FLAG_BATCH,
+        HEADER_SIZE, INCREMENT_PAYLOAD_SIZE, KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG,
+        METHOD_INCREMENT, PROFILE_BASELINE, PROFILE_SHM_HYBRID, STATUS_OK, VERSION,
     };
-    use netipc::service::cgroups::{CgroupsCacheItem, CgroupsClient, ManagedServer};
+    use netipc::service::cgroups::{CgroupsCacheItem, CgroupsClient, Handlers, ManagedServer};
     use netipc::transport::posix::{ClientConfig, ServerConfig, UdsSession};
 
     #[cfg(target_os = "linux")]
     use netipc::transport::shm::ShmContext;
 
-    use std::sync::atomic::Ordering;
+    use std::sync::{atomic::Ordering, OnceLock};
     use std::time::{Duration, Instant};
 
     // ---------------------------------------------------------------------------
@@ -186,56 +185,63 @@ mod posix_only {
     //  Ping-pong handler (INCREMENT method)
     // ---------------------------------------------------------------------------
 
-    fn ping_pong_handler(method_code: u16, payload: &[u8]) -> Option<Vec<u8>> {
-        if method_code != METHOD_INCREMENT {
-            return None;
+    fn ping_pong_handlers() -> Handlers {
+        Handlers {
+            on_increment: Some(std::sync::Arc::new(|counter| Some(counter + 1))),
+            ..Handlers::default()
         }
-        if payload.len() < 8 {
-            return None;
-        }
-
-        let mut counter = u64::from_ne_bytes(payload[..8].try_into().ok()?);
-        counter += 1;
-        Some(counter.to_ne_bytes().to_vec())
     }
 
     // ---------------------------------------------------------------------------
     //  Snapshot handler (16 cgroup items)
     // ---------------------------------------------------------------------------
 
-    fn snapshot_handler(method_code: u16, payload: &[u8]) -> Option<Vec<u8>> {
-        if method_code != METHOD_CGROUPS_SNAPSHOT {
-            return None;
+    fn snapshot_template() -> &'static Vec<(Box<[u8]>, Box<[u8]>)> {
+        static TEMPLATE: OnceLock<Vec<(Box<[u8]>, Box<[u8]>)>> = OnceLock::new();
+        TEMPLATE.get_or_init(|| {
+            (0..16u32)
+                .map(|i| {
+                    (
+                        format!("cgroup-{i}").into_bytes().into_boxed_slice(),
+                        format!("/sys/fs/cgroup/bench/cg-{i}")
+                            .into_bytes()
+                            .into_boxed_slice(),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    fn snapshot_handlers() -> Handlers {
+        Handlers {
+            on_snapshot: Some(std::sync::Arc::new(|request, builder| {
+                if request.layout_version != 1 || request.flags != 0 {
+                    return false;
+                }
+
+                thread_local! {
+                    static GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+                }
+                let gen = GEN.with(|g| {
+                    let v = g.get() + 1;
+                    g.set(v);
+                    v
+                });
+
+                builder.set_header(1, gen);
+                for (i, (name, path)) in snapshot_template().iter().enumerate() {
+                    if builder
+                        .add(1000 + i as u32, 0, i as u32 % 2, name, path)
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
+                true
+            })),
+            snapshot_max_items: 16,
+            ..Handlers::default()
         }
-        CgroupsRequest::decode(payload).ok()?;
-
-        // Thread-local generation counter
-        thread_local! {
-            static GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-        }
-        let gen = GEN.with(|g| {
-            let v = g.get() + 1;
-            g.set(v);
-            v
-        });
-
-        let mut buf = vec![0u8; RESPONSE_BUF_SIZE];
-        let mut builder = CgroupsBuilder::new(&mut buf, 16, 1, gen);
-
-        for i in 0..16u32 {
-            let name = format!("cgroup-{}", i);
-            let path = format!("/sys/fs/cgroup/bench/cg-{}", i);
-            if builder
-                .add(1000 + i, 0, i % 2, name.as_bytes(), path.as_bytes())
-                .is_err()
-            {
-                return None;
-            }
-        }
-
-        let total = builder.finish();
-        buf.truncate(total);
-        Some(buf)
     }
 
     // ---------------------------------------------------------------------------
@@ -249,25 +255,16 @@ mod posix_only {
         duration_sec: u32,
         handler_type: &str,
     ) -> i32 {
-        let handler: std::sync::Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync> =
-            match handler_type {
-                "ping-pong" => {
-                    std::sync::Arc::new(|code, payload| ping_pong_handler(code, payload))
-                }
-                "snapshot" => std::sync::Arc::new(|code, payload| snapshot_handler(code, payload)),
-                _ => {
-                    eprintln!("Unknown handler type: {handler_type}");
-                    return 1;
-                }
-            };
+        let handlers = match handler_type {
+            "ping-pong" => ping_pong_handlers(),
+            "snapshot" => snapshot_handlers(),
+            _ => {
+                eprintln!("Unknown handler type: {handler_type}");
+                return 1;
+            }
+        };
 
-        let mut server = ManagedServer::new(
-            run_dir,
-            service,
-            server_config(profiles),
-            RESPONSE_BUF_SIZE,
-            handler,
-        );
+        let mut server = ManagedServer::new(run_dir, service, server_config(profiles), handlers);
 
         println!("READY");
 
@@ -295,18 +292,11 @@ mod posix_only {
     // ---------------------------------------------------------------------------
 
     fn run_batch_server(run_dir: &str, service: &str, profiles: u32, duration_sec: u32) -> i32 {
-        let handler: std::sync::Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync> =
-            std::sync::Arc::new(|code, payload| ping_pong_handler(code, payload));
-
-        // Response buffer 2x payload to avoid batch builder/scratch overlap
-        let resp_buf_size = BENCH_BATCH_BUF_SIZE * 2;
-
         let mut server = ManagedServer::new(
             run_dir,
             service,
             batch_server_config(profiles),
-            resp_buf_size,
-            handler,
+            ping_pong_handlers(),
         );
 
         println!("READY");
@@ -479,7 +469,7 @@ mod posix_only {
 
             // Send + receive via SHM or UDS
             #[cfg(target_os = "linux")]
-            let io_result: Result<(Header, Vec<u8>), ()> = if let Some(ref mut shm_ctx) = shm {
+            let io_result = if let Some(ref mut shm_ctx) = shm {
                 // SHM path: assemble header + payload into one message
                 let msg_len = HEADER_SIZE + req_len;
                 let mut msg = vec![0u8; msg_len];
@@ -505,7 +495,7 @@ mod posix_only {
                             } else {
                                 match Header::decode(&recv_buf[..resp_len]) {
                                     Ok(resp_hdr) => {
-                                        let payload = recv_buf[HEADER_SIZE..resp_len].to_vec();
+                                        let payload = &recv_buf[HEADER_SIZE..resp_len];
                                         Ok((resp_hdr, payload))
                                     }
                                     Err(err) => {
@@ -530,11 +520,10 @@ mod posix_only {
             };
 
             #[cfg(not(target_os = "linux"))]
-            let io_result: Result<(Header, Vec<u8>), ()> =
-                match session.send(&mut hdr, &req_buf[..req_len]) {
-                    Ok(_) => session.receive(&mut recv_buf).map_err(|_| ()),
-                    Err(_) => Err(()),
-                };
+            let io_result = match session.send(&mut hdr, &req_buf[..req_len]) {
+                Ok(_) => session.receive(&mut recv_buf).map_err(|_| ()),
+                Err(_) => Err(()),
+            };
 
             let (resp_hdr, resp_payload) = match io_result {
                 Ok(r) => r,
@@ -1198,14 +1187,12 @@ mod posix_only {
         let wall_start = Instant::now();
         let deadline = Duration::from_secs(duration_sec as u64);
 
-        let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-
         while wall_start.elapsed() < deadline {
             rl.wait();
 
             let t0 = Instant::now();
 
-            match client.call_snapshot(&mut resp_buf) {
+            match client.call_snapshot() {
                 Ok(view) => {
                     if view.item_count != 16 {
                         eprintln!("snapshot: expected 16 items, got {}", view.item_count);

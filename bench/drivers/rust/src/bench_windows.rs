@@ -25,14 +25,14 @@ use netipc::protocol::{
     STATUS_OK, VERSION,
 };
 #[cfg(windows)]
-use netipc::service::cgroups::{CgroupsCacheItem, CgroupsClient, ManagedServer};
+use netipc::service::cgroups::{CgroupsCacheItem, CgroupsClient, Handlers, ManagedServer};
 #[cfg(windows)]
 use netipc::transport::win_shm::{WinShmContext, PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID};
 #[cfg(windows)]
 use netipc::transport::windows::{ClientConfig, NpSession, ServerConfig};
 
 #[cfg(windows)]
-use std::sync::atomic::Ordering;
+use std::sync::{atomic::Ordering, OnceLock};
 #[cfg(windows)]
 use std::time::{Duration, Instant};
 
@@ -279,17 +279,11 @@ fn batch_client_config(profiles: u32) -> ClientConfig {
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-fn ping_pong_handler(method_code: u16, payload: &[u8]) -> Option<Vec<u8>> {
-    if method_code != METHOD_INCREMENT {
-        return None;
+fn ping_pong_handlers() -> Handlers {
+    Handlers {
+        on_increment: Some(std::sync::Arc::new(|counter| Some(counter + 1))),
+        ..Handlers::default()
     }
-    if payload.len() < 8 {
-        return None;
-    }
-
-    let mut counter = u64::from_ne_bytes(payload[..8].try_into().ok()?);
-    counter += 1;
-    Some(counter.to_ne_bytes().to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -297,38 +291,53 @@ fn ping_pong_handler(method_code: u16, payload: &[u8]) -> Option<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-fn snapshot_handler(method_code: u16, payload: &[u8]) -> Option<Vec<u8>> {
-    if method_code != METHOD_CGROUPS_SNAPSHOT {
-        return None;
+fn snapshot_template() -> &'static Vec<(Box<[u8]>, Box<[u8]>)> {
+    static TEMPLATE: OnceLock<Vec<(Box<[u8]>, Box<[u8]>)>> = OnceLock::new();
+    TEMPLATE.get_or_init(|| {
+        (0..16u32)
+            .map(|i| {
+                (
+                    format!("cgroup-{i}").into_bytes().into_boxed_slice(),
+                    format!("/sys/fs/cgroup/bench/cg-{i}")
+                        .into_bytes()
+                        .into_boxed_slice(),
+                )
+            })
+            .collect()
+    })
+}
+
+#[cfg(windows)]
+fn snapshot_handlers() -> Handlers {
+    Handlers {
+        on_snapshot: Some(std::sync::Arc::new(|request, builder| {
+            if request.layout_version != 1 || request.flags != 0 {
+                return false;
+            }
+
+            thread_local! {
+                static GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+            }
+            let gen = GEN.with(|g| {
+                let v = g.get() + 1;
+                g.set(v);
+                v
+            });
+
+            builder.set_header(1, gen);
+            for (i, (name, path)) in snapshot_template().iter().enumerate() {
+                if builder
+                    .add(1000 + i as u32, 0, i as u32 % 2, name, path)
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+            true
+        })),
+        snapshot_max_items: 16,
+        ..Handlers::default()
     }
-    CgroupsRequest::decode(payload).ok()?;
-
-    thread_local! {
-        static GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    }
-    let gen = GEN.with(|g| {
-        let v = g.get() + 1;
-        g.set(v);
-        v
-    });
-
-    let mut buf = vec![0u8; RESPONSE_BUF_SIZE];
-    let mut builder = CgroupsBuilder::new(&mut buf, 16, 1, gen);
-
-    for i in 0..16u32 {
-        let name = format!("cgroup-{}", i);
-        let path = format!("/sys/fs/cgroup/bench/cg-{}", i);
-        if builder
-            .add(1000 + i, 0, i % 2, name.as_bytes(), path.as_bytes())
-            .is_err()
-        {
-            return None;
-        }
-    }
-
-    let total = builder.finish();
-    buf.truncate(total);
-    Some(buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -343,23 +352,16 @@ fn run_server(
     duration_sec: u32,
     handler_type: &str,
 ) -> i32 {
-    let handler: std::sync::Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync> =
-        match handler_type {
-            "ping-pong" => std::sync::Arc::new(|code, payload| ping_pong_handler(code, payload)),
-            "snapshot" => std::sync::Arc::new(|code, payload| snapshot_handler(code, payload)),
-            _ => {
-                eprintln!("Unknown handler type: {handler_type}");
-                return 1;
-            }
-        };
+    let handlers = match handler_type {
+        "ping-pong" => ping_pong_handlers(),
+        "snapshot" => snapshot_handlers(),
+        _ => {
+            eprintln!("Unknown handler type: {handler_type}");
+            return 1;
+        }
+    };
 
-    let mut server = ManagedServer::new(
-        run_dir,
-        service,
-        server_config(profiles),
-        RESPONSE_BUF_SIZE,
-        handler,
-    );
+    let mut server = ManagedServer::new(run_dir, service, server_config(profiles), handlers);
 
     println!("READY");
 
@@ -388,17 +390,11 @@ fn run_server(
 
 #[cfg(windows)]
 fn run_batch_server(run_dir: &str, service: &str, profiles: u32, duration_sec: u32) -> i32 {
-    let handler: std::sync::Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync> =
-        std::sync::Arc::new(|code, payload| ping_pong_handler(code, payload));
-
-    let resp_buf_size = BENCH_BATCH_BUF_SIZE * 2;
-
     let mut server = ManagedServer::new(
         run_dir,
         service,
         batch_server_config(profiles),
-        resp_buf_size,
-        handler,
+        ping_pong_handlers(),
     );
 
     println!("READY");
@@ -670,8 +666,6 @@ fn run_snapshot_client(
     let wall_start = Instant::now();
     let tick_deadline = TickDeadline::new(duration_sec);
 
-    let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-
     while !tick_deadline.expired() {
         rl.wait();
 
@@ -681,7 +675,7 @@ fn run_snapshot_client(
             None
         };
 
-        match client.call_snapshot(&mut resp_buf) {
+        match client.call_snapshot() {
             Ok(view) => {
                 if view.item_count != 16 {
                     eprintln!("snapshot: expected 16 items, got {}", view.item_count);
@@ -826,7 +820,7 @@ fn run_batch_ping_pong_client(
         };
 
         // Send + receive via SHM or Named Pipe
-        let io_result: Result<(Header, Vec<u8>), ()> = if let Some(ref mut shm_ctx) = shm {
+        let io_result = if let Some(ref mut shm_ctx) = shm {
             let msg_len = HEADER_SIZE + req_len;
             let mut msg = vec![0u8; msg_len];
             hdr.magic = MAGIC_MSG;
@@ -846,7 +840,7 @@ fn run_batch_ping_pong_client(
                         } else {
                             match Header::decode(&recv_buf[..resp_len]) {
                                 Ok(resp_hdr) => {
-                                    let payload = recv_buf[HEADER_SIZE..resp_len].to_vec();
+                                    let payload = &recv_buf[HEADER_SIZE..resp_len];
                                     Ok((resp_hdr, payload))
                                 }
                                 Err(_) => Err(()),

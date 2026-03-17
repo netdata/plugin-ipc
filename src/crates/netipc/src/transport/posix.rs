@@ -189,6 +189,7 @@ pub struct UdsSession {
 
     // Internal receive buffer for chunked reassembly
     recv_buf: Vec<u8>,
+    pkt_buf: Vec<u8>,
 
     // In-flight message_id set (client-side only)
     inflight_ids: HashSet<u64>,
@@ -203,6 +204,12 @@ impl UdsSession {
     /// Get the session role.
     pub fn role(&self) -> Role {
         self.role
+    }
+
+    /// Return the most recently reassembled payload stored in the internal
+    /// receive buffer.
+    pub fn received_payload(&self, len: usize) -> &[u8] {
+        &self.recv_buf[..len]
     }
 
     /// Connect to a server at `{run_dir}/{service_name}.sock`.
@@ -326,10 +333,9 @@ impl UdsSession {
 
     /// Receive one logical message. Blocks until a complete message arrives.
     ///
-    /// On success, returns (header, payload_vec). The payload is returned as
-    /// an owned Vec for lifetime simplicity. For non-chunked messages that fit
-    /// in the initial recv, the data is copied once.
-    pub fn receive(&mut self, buf: &mut [u8]) -> Result<(Header, Vec<u8>), UdsError> {
+    /// On success, returns (header, payload_view). The payload view is valid
+    /// until the next receive call on this session.
+    pub fn receive<'a>(&'a mut self, buf: &'a mut [u8]) -> Result<(Header, &'a [u8]), UdsError> {
         if self.fd < 0 {
             return Err(UdsError::BadParam("session closed".into()));
         }
@@ -376,7 +382,7 @@ impl UdsSession {
 
         // Non-chunked: entire message in one packet
         if n >= total_msg {
-            let payload = buf[HEADER_SIZE..HEADER_SIZE + hdr.payload_len as usize].to_vec();
+            let payload = &buf[HEADER_SIZE..HEADER_SIZE + hdr.payload_len as usize];
 
             // Validate batch directory
             if hdr.flags & FLAG_BATCH != 0 && hdr.item_count > 1 {
@@ -422,18 +428,19 @@ impl UdsSession {
         };
         let expected_chunk_count = 1 + expected_continuations as u32;
 
-        // Temporary buffer for reading continuation packets
-        let mut pkt_buf = vec![0u8; self.packet_size as usize];
+        if self.pkt_buf.len() < self.packet_size as usize {
+            self.pkt_buf.resize(self.packet_size as usize, 0);
+        }
 
         let mut ci = 1u32;
         while assembled < hdr.payload_len as usize {
-            let cn = raw_recv(self.fd, &mut pkt_buf)?;
+            let cn = raw_recv(self.fd, &mut self.pkt_buf)?;
 
             if cn < HEADER_SIZE {
                 return Err(UdsError::Chunk("continuation too short".into()));
             }
 
-            let chk = ChunkHeader::decode(&pkt_buf[..cn])
+            let chk = ChunkHeader::decode(&self.pkt_buf[..cn])
                 .map_err(|e| UdsError::Chunk(format!("chunk header: {e}")))?;
 
             // Validate chunk header
@@ -462,12 +469,12 @@ impl UdsSession {
             }
 
             self.recv_buf[assembled..assembled + chunk_data]
-                .copy_from_slice(&pkt_buf[HEADER_SIZE..HEADER_SIZE + chunk_data]);
+                .copy_from_slice(&self.pkt_buf[HEADER_SIZE..HEADER_SIZE + chunk_data]);
             assembled += chunk_data;
             ci += 1;
         }
 
-        let payload = self.recv_buf[..hdr.payload_len as usize].to_vec();
+        let payload = &self.recv_buf[..hdr.payload_len as usize];
 
         // Validate batch directory
         if hdr.flags & FLAG_BATCH != 0 && hdr.item_count > 1 {
@@ -955,6 +962,7 @@ fn connect_and_handshake(
         selected_profile: ack.selected_profile,
         session_id: ack.session_id,
         recv_buf: Vec::new(),
+        pkt_buf: Vec::new(),
         inflight_ids: HashSet::new(),
     })
 }
@@ -1105,6 +1113,7 @@ fn server_handshake(
         selected_profile: selected,
         session_id,
         recv_buf: Vec::new(),
+        pkt_buf: Vec::new(),
         inflight_ids: HashSet::new(),
     })
 }
@@ -1191,6 +1200,7 @@ mod tests {
 
             let mut buf = [0u8; 8192];
             let (hdr, payload) = session.receive(&mut buf).expect("recv");
+            let payload = payload.to_vec();
 
             // Echo back as response
             let mut resp = hdr;
@@ -1255,6 +1265,7 @@ mod tests {
                 let mut session = listener.accept().expect("accept");
                 let mut buf = [0u8; 8192];
                 let (hdr, payload) = session.receive(&mut buf).expect("recv");
+                let payload = payload.to_vec();
                 let mut resp = hdr;
                 resp.kind = protocol::KIND_RESPONSE;
                 resp.transport_status = protocol::STATUS_OK;
@@ -1325,6 +1336,7 @@ mod tests {
             for _ in 0..3 {
                 let mut buf = [0u8; 8192];
                 let (hdr, payload) = session.receive(&mut buf).expect("recv");
+                let payload = payload.to_vec();
                 let mut resp = hdr;
                 resp.kind = protocol::KIND_RESPONSE;
                 resp.transport_status = protocol::STATUS_OK;
@@ -1393,6 +1405,7 @@ mod tests {
 
             let mut buf = [0u8; 256]; // small buf, forces recv_buf usage
             let (hdr, payload) = session.receive(&mut buf).expect("recv");
+            let payload = payload.to_vec();
 
             let mut resp = hdr;
             resp.kind = protocol::KIND_RESPONSE;
@@ -1632,6 +1645,7 @@ mod tests {
             let mut session = listener.accept().expect("accept");
             let mut buf = [0u8; 8192];
             let (hdr, payload) = session.receive(&mut buf).expect("recv");
+            let payload = payload.to_vec();
             let mut resp = hdr;
             resp.kind = protocol::KIND_RESPONSE;
             resp.transport_status = protocol::STATUS_OK;
@@ -1727,6 +1741,7 @@ mod tests {
             for _ in 0..3 {
                 let mut buf = [0u8; 256];
                 let (hdr, payload) = session.receive(&mut buf).expect("recv");
+                let payload = payload.to_vec();
                 let mut resp = hdr;
                 resp.kind = protocol::KIND_RESPONSE;
                 session.send(&mut resp, &payload).expect("send");
@@ -1797,6 +1812,7 @@ mod tests {
             for _ in 0..10 {
                 let mut buf = [0u8; 8192];
                 let (hdr, payload) = session.receive(&mut buf).expect("recv");
+                let payload = payload.to_vec();
                 let mut resp = hdr;
                 resp.kind = protocol::KIND_RESPONSE;
                 resp.transport_status = protocol::STATUS_OK;
@@ -1867,6 +1883,7 @@ mod tests {
             for _ in 0..100 {
                 let mut buf = [0u8; 8192];
                 let (hdr, payload) = session.receive(&mut buf).expect("recv");
+                let payload = payload.to_vec();
                 let mut resp = hdr;
                 resp.kind = protocol::KIND_RESPONSE;
                 resp.transport_status = protocol::STATUS_OK;
@@ -1943,6 +1960,7 @@ mod tests {
             for _ in 0..count {
                 let mut buf = [0u8; 8192];
                 let (hdr, payload) = session.receive(&mut buf).expect("recv");
+                let payload = payload.to_vec();
                 let mut resp = hdr;
                 resp.kind = protocol::KIND_RESPONSE;
                 resp.transport_status = protocol::STATUS_OK;
@@ -2021,6 +2039,7 @@ mod tests {
             for _ in 0..count {
                 let mut buf = [0u8; 256];
                 let (hdr, payload) = session.receive(&mut buf).expect("recv");
+                let payload = payload.to_vec();
                 let mut resp = hdr;
                 resp.kind = protocol::KIND_RESPONSE;
                 session.send(&mut resp, &payload).expect("send");
@@ -2317,6 +2336,7 @@ mod tests {
             let mut session = listener.accept().expect("accept");
             let mut buf = [0u8; 8192];
             let (hdr, payload) = session.receive(&mut buf).expect("recv");
+            let payload = payload.to_vec();
             // Send a large response that exceeds client's negotiated limit
             let mut resp = hdr;
             resp.kind = protocol::KIND_RESPONSE;
@@ -2457,6 +2477,7 @@ mod tests {
             let mut session = listener.accept().expect("accept");
             let mut buf = [0u8; 8192];
             let (hdr, payload) = session.receive(&mut buf).expect("recv");
+            let payload = payload.to_vec();
 
             // Respond with a different message_id
             let mut resp = Header {

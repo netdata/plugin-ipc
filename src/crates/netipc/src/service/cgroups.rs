@@ -88,6 +88,11 @@ pub struct CgroupsClient {
     #[cfg(windows)]
     shm: Option<WinShmContext>,
 
+    // Reusable scratch buffers owned by the client for hot request paths.
+    request_buf: Vec<u8>,
+    send_buf: Vec<u8>,
+    transport_buf: Vec<u8>,
+
     // Stats
     connect_count: u32,
     reconnect_count: u32,
@@ -109,6 +114,9 @@ impl CgroupsClient {
             shm: None,
             #[cfg(windows)]
             shm: None,
+            request_buf: Vec::new(),
+            send_buf: Vec::new(),
+            transport_buf: Vec::new(),
             connect_count: 0,
             reconnect_count: 0,
             call_count: 0,
@@ -166,14 +174,11 @@ impl CgroupsClient {
     /// Blocking typed call: encode request, send, receive, check
     /// transport_status, decode response.
     ///
-    /// `response_buf` must be large enough for the expected snapshot.
+    /// The returned view is valid until the next typed call on this client.
     ///
     /// Retry policy (per spec): if the call fails and the context was
     /// previously READY, disconnect, reconnect (full handshake), retry ONCE.
-    pub fn call_snapshot<'a>(
-        &mut self,
-        response_buf: &'a mut [u8],
-    ) -> Result<CgroupsResponseView<'a>, NipcError> {
+    pub fn call_snapshot(&mut self) -> Result<CgroupsResponseView<'_>, NipcError> {
         let req = CgroupsRequest {
             layout_version: 1,
             flags: 0,
@@ -184,11 +189,8 @@ impl CgroupsClient {
             return Err(NipcError::Truncated);
         }
 
-        let payload_len = self.call_with_retry(|client| {
-            client.do_raw_call(METHOD_CGROUPS_SNAPSHOT, &req_buf[..req_len], response_buf)
-        })?;
-
-        CgroupsResponseView::decode(&response_buf[..payload_len])
+        let response = self.raw_call_with_retry(METHOD_CGROUPS_SNAPSHOT, &req_buf[..req_len])?;
+        CgroupsResponseView::decode(self.response_payload(response)?)
     }
 
     /// Blocking typed call: INCREMENT method.
@@ -200,37 +202,27 @@ impl CgroupsClient {
             return Err(NipcError::Truncated);
         }
 
-        let mut response_buf = [0u8; INCREMENT_PAYLOAD_SIZE];
-        let payload_len = self.call_with_retry(|client| {
-            client.do_raw_call(METHOD_INCREMENT, &req_buf[..req_len], &mut response_buf)
-        })?;
-
-        increment_decode(&response_buf[..payload_len])
+        let response = self.raw_call_with_retry(METHOD_INCREMENT, &req_buf[..req_len])?;
+        increment_decode(self.response_payload(response)?)
     }
 
     /// Blocking typed call: STRING_REVERSE method.
     /// Sends a string, receives the reversed string back.
-    /// Returns the reversed string as an owned `String`.
-    pub fn call_string_reverse(&mut self, s: &str) -> Result<String, NipcError> {
+    ///
+    /// The returned view is valid until the next typed call on this client.
+    pub fn call_string_reverse(
+        &mut self,
+        s: &str,
+    ) -> Result<protocol::StringReverseView<'_>, NipcError> {
         let req_size = STRING_REVERSE_HDR_SIZE + s.len() + 1;
-        let mut req_buf = vec![0u8; req_size];
-        let req_len = string_reverse_encode(s.as_bytes(), &mut req_buf);
+        let req_buf = ensure_client_scratch(&mut self.request_buf, req_size);
+        let req_len = string_reverse_encode(s.as_bytes(), req_buf);
         if req_len == 0 {
             return Err(NipcError::Truncated);
         }
 
-        let resp_size = STRING_REVERSE_HDR_SIZE + s.len() + 1;
-        let mut response_buf = vec![0u8; resp_size];
-        let payload_len = self.call_with_retry(|client| {
-            client.do_raw_call(
-                METHOD_STRING_REVERSE,
-                &req_buf[..req_len],
-                &mut response_buf,
-            )
-        })?;
-
-        let view = string_reverse_decode(&response_buf[..payload_len])?;
-        Ok(view.as_str().to_string())
+        let response = self.raw_call_with_retry_request_buf(METHOD_STRING_REVERSE, req_len)?;
+        string_reverse_decode(self.response_payload(response)?)
     }
 
     /// Blocking typed batch call: INCREMENT method.
@@ -248,47 +240,26 @@ impl CgroupsClient {
 
         let count = values.len() as u32;
 
-        // Pre-encode all items
-        let mut encoded_items: Vec<[u8; INCREMENT_PAYLOAD_SIZE]> = Vec::with_capacity(values.len());
-        for &v in values {
-            let mut item_buf = [0u8; INCREMENT_PAYLOAD_SIZE];
-            let n = increment_encode(v, &mut item_buf);
-            if n == 0 {
-                return Err(NipcError::Truncated);
-            }
-            encoded_items.push(item_buf);
-        }
-
-        // Response buffer large enough for batch directory + packed items
-        let resp_buf_size = protocol::align8(count as usize * 8)
+        let req_buf_size = protocol::align8(count as usize * 8)
             + count as usize * protocol::align8(INCREMENT_PAYLOAD_SIZE)
             + 64;
-        let mut response_buf = vec![0u8; resp_buf_size];
-
-        let payload_len = self.call_with_retry(|client| {
-            // Build batch request payload
-            let req_buf_size = protocol::align8(count as usize * 8)
-                + count as usize * protocol::align8(INCREMENT_PAYLOAD_SIZE)
-                + 64;
-            let mut req_buf = vec![0u8; req_buf_size];
-            let mut bb = BatchBuilder::new(&mut req_buf, count);
-
-            for item in &encoded_items {
-                bb.add(item).map_err(|_| NipcError::Overflow)?;
+        let req_buf = ensure_client_scratch(&mut self.request_buf, req_buf_size);
+        let req_len = {
+            let mut bb = BatchBuilder::new(req_buf, count);
+            for &v in values {
+                let mut item_buf = [0u8; INCREMENT_PAYLOAD_SIZE];
+                if increment_encode(v, &mut item_buf) == 0 {
+                    return Err(NipcError::Truncated);
+                }
+                bb.add(&item_buf).map_err(|_| NipcError::Overflow)?;
             }
-
             let (req_len, _out_count) = bb.finish();
+            req_len
+        };
 
-            client.do_raw_batch_call(
-                METHOD_INCREMENT,
-                &req_buf[..req_len],
-                count,
-                &mut response_buf,
-            )
-        })?;
-
-        // Extract and decode each response item
-        let resp_payload = &response_buf[..payload_len];
+        let response =
+            self.raw_batch_call_with_retry_request_buf(METHOD_INCREMENT, req_len, count)?;
+        let resp_payload = self.response_payload(response)?;
         let mut results = Vec::with_capacity(values.len());
         for i in 0..count {
             let (item_data, _item_len) = batch_item_get(resp_payload, count, i)?;
@@ -297,54 +268,6 @@ impl CgroupsClient {
         }
 
         Ok(results)
-    }
-
-    // ------------------------------------------------------------------
-    //  Generic retry wrapper
-    // ------------------------------------------------------------------
-
-    /// Execute `attempt` with at-least-once retry semantics.
-    /// If the first attempt fails and the client was READY, disconnect,
-    /// reconnect (full handshake), and retry ONCE.
-    fn call_with_retry<F, T>(&mut self, mut attempt: F) -> Result<T, NipcError>
-    where
-        F: FnMut(&mut Self) -> Result<T, NipcError>,
-    {
-        if self.state != ClientState::Ready {
-            self.error_count += 1;
-            return Err(NipcError::BadLayout);
-        }
-
-        match attempt(self) {
-            Ok(val) => {
-                self.call_count += 1;
-                Ok(val)
-            }
-            Err(first_err) => {
-                self.disconnect();
-                self.state = ClientState::Broken;
-
-                self.state = self.try_connect();
-                if self.state != ClientState::Ready {
-                    self.error_count += 1;
-                    return Err(first_err);
-                }
-                self.reconnect_count += 1;
-
-                match attempt(self) {
-                    Ok(val) => {
-                        self.call_count += 1;
-                        Ok(val)
-                    }
-                    Err(retry_err) => {
-                        self.disconnect();
-                        self.state = ClientState::Broken;
-                        self.error_count += 1;
-                        Err(retry_err)
-                    }
-                }
-            }
-        }
     }
 
     /// Tear down connection and release resources.
@@ -485,17 +408,120 @@ impl CgroupsClient {
         }
     }
 
+    /// Retry a single-item raw call once after a reconnect if the first
+    /// attempt fails while the client was READY.
+    fn raw_call_with_retry<'a>(
+        &mut self,
+        method_code: u16,
+        request_payload: &[u8],
+    ) -> Result<ClientResponseRef, NipcError> {
+        if self.state != ClientState::Ready {
+            self.error_count += 1;
+            return Err(NipcError::BadLayout);
+        }
+
+        match self.do_raw_call(method_code, request_payload) {
+            Ok(payload) => Ok(payload),
+            Err(first_err) => {
+                self.disconnect();
+                self.state = ClientState::Broken;
+                self.state = self.try_connect();
+                if self.state != ClientState::Ready {
+                    self.error_count += 1;
+                    return Err(first_err);
+                }
+                self.reconnect_count += 1;
+
+                match self.do_raw_call(method_code, request_payload) {
+                    Ok(payload) => Ok(payload),
+                    Err(retry_err) => {
+                        self.disconnect();
+                        self.state = ClientState::Broken;
+                        self.error_count += 1;
+                        Err(retry_err)
+                    }
+                }
+            }
+        }
+    }
+
+    fn raw_call_with_retry_request_buf<'a>(
+        &mut self,
+        method_code: u16,
+        req_len: usize,
+    ) -> Result<ClientResponseRef, NipcError> {
+        if self.state != ClientState::Ready {
+            self.error_count += 1;
+            return Err(NipcError::BadLayout);
+        }
+
+        match self.do_raw_call_from_request_buf(method_code, req_len) {
+            Ok(payload) => Ok(payload),
+            Err(first_err) => {
+                self.disconnect();
+                self.state = ClientState::Broken;
+                self.state = self.try_connect();
+                if self.state != ClientState::Ready {
+                    self.error_count += 1;
+                    return Err(first_err);
+                }
+                self.reconnect_count += 1;
+
+                match self.do_raw_call_from_request_buf(method_code, req_len) {
+                    Ok(payload) => Ok(payload),
+                    Err(retry_err) => {
+                        self.disconnect();
+                        self.state = ClientState::Broken;
+                        self.error_count += 1;
+                        Err(retry_err)
+                    }
+                }
+            }
+        }
+    }
+
+    fn raw_batch_call_with_retry_request_buf<'a>(
+        &mut self,
+        method_code: u16,
+        req_len: usize,
+        item_count: u32,
+    ) -> Result<ClientResponseRef, NipcError> {
+        if self.state != ClientState::Ready {
+            self.error_count += 1;
+            return Err(NipcError::BadLayout);
+        }
+
+        match self.do_raw_batch_call_from_request_buf(method_code, req_len, item_count) {
+            Ok(payload) => Ok(payload),
+            Err(first_err) => {
+                self.disconnect();
+                self.state = ClientState::Broken;
+                self.state = self.try_connect();
+                if self.state != ClientState::Ready {
+                    self.error_count += 1;
+                    return Err(first_err);
+                }
+                self.reconnect_count += 1;
+
+                match self.do_raw_batch_call_from_request_buf(method_code, req_len, item_count) {
+                    Ok(payload) => Ok(payload),
+                    Err(retry_err) => {
+                        self.disconnect();
+                        self.state = ClientState::Broken;
+                        self.error_count += 1;
+                        Err(retry_err)
+                    }
+                }
+            }
+        }
+    }
+
     /// Single attempt at a raw call for any method.
-    /// `method_code` identifies the method. `request_payload` is the
-    /// already-encoded request payload. Returns the response payload
-    /// length on success. The payload bytes are in
-    /// response_buf[..payload_len].
     fn do_raw_call(
         &mut self,
         method_code: u16,
         request_payload: &[u8],
-        response_buf: &mut [u8],
-    ) -> Result<usize, NipcError> {
+    ) -> Result<ClientResponseRef, NipcError> {
         // 1. Build outer header
         let mut hdr = Header {
             kind: KIND_REQUEST,
@@ -510,8 +536,8 @@ impl CgroupsClient {
         // 2. Send via L1 (SHM or UDS)
         self.transport_send(&mut hdr, request_payload)?;
 
-        // 3. Receive via L1 (payload written into response_buf)
-        let (resp_hdr, payload_len) = self.transport_receive(response_buf)?;
+        // 3. Receive via L1
+        let (resp_hdr, response) = self.transport_receive()?;
 
         // 4. Verify response envelope fields before decode
         if resp_hdr.kind != KIND_RESPONSE {
@@ -529,18 +555,53 @@ impl CgroupsClient {
             return Err(NipcError::BadLayout);
         }
 
-        Ok(payload_len)
+        self.call_count += 1;
+        Ok(response)
+    }
+
+    fn do_raw_call_from_request_buf(
+        &mut self,
+        method_code: u16,
+        req_len: usize,
+    ) -> Result<ClientResponseRef, NipcError> {
+        let mut hdr = Header {
+            kind: KIND_REQUEST,
+            code: method_code,
+            flags: 0,
+            item_count: 1,
+            message_id: (self.call_count as u64) + 1,
+            transport_status: STATUS_OK,
+            ..Header::default()
+        };
+
+        self.transport_send_request_buf(&mut hdr, req_len)?;
+        let (resp_hdr, response) = self.transport_receive()?;
+
+        if resp_hdr.kind != KIND_RESPONSE {
+            return Err(NipcError::BadKind);
+        }
+        if resp_hdr.code != method_code {
+            return Err(NipcError::BadLayout);
+        }
+        if resp_hdr.message_id != hdr.message_id {
+            return Err(NipcError::BadLayout);
+        }
+        if resp_hdr.transport_status != STATUS_OK {
+            return Err(NipcError::BadLayout);
+        }
+
+        self.call_count += 1;
+        Ok(response)
     }
 
     /// Single attempt at a raw batch call. Like `do_raw_call` but sets
     /// FLAG_BATCH and item_count, and validates the response matches.
-    fn do_raw_batch_call(
+    fn do_raw_batch_call_from_request_buf(
         &mut self,
         method_code: u16,
-        request_payload: &[u8],
+        req_len: usize,
         item_count: u32,
-        response_buf: &mut [u8],
-    ) -> Result<usize, NipcError> {
+    ) -> Result<ClientResponseRef, NipcError> {
         let mut hdr = Header {
             kind: KIND_REQUEST,
             code: method_code,
@@ -551,9 +612,9 @@ impl CgroupsClient {
             ..Header::default()
         };
 
-        self.transport_send(&mut hdr, request_payload)?;
+        self.transport_send_request_buf(&mut hdr, req_len)?;
 
-        let (resp_hdr, payload_len) = self.transport_receive(response_buf)?;
+        let (resp_hdr, response) = self.transport_receive()?;
 
         if resp_hdr.kind != KIND_RESPONSE {
             return Err(NipcError::BadKind);
@@ -571,7 +632,8 @@ impl CgroupsClient {
             return Err(NipcError::BadItemCount);
         }
 
-        Ok(payload_len)
+        self.call_count += 1;
+        Ok(response)
     }
 
     /// Send via the active transport (SHM if available, baseline otherwise).
@@ -581,7 +643,7 @@ impl CgroupsClient {
         {
             if let Some(ref mut shm) = self.shm {
                 let msg_len = HEADER_SIZE + payload.len();
-                let mut msg = vec![0u8; msg_len];
+                let msg = ensure_client_scratch(&mut self.send_buf, msg_len);
 
                 hdr.magic = MAGIC_MSG;
                 hdr.version = VERSION;
@@ -601,7 +663,7 @@ impl CgroupsClient {
         {
             if let Some(ref mut shm) = self.shm {
                 let msg_len = HEADER_SIZE + payload.len();
-                let mut msg = vec![0u8; msg_len];
+                let msg = ensure_client_scratch(&mut self.send_buf, msg_len);
 
                 hdr.magic = MAGIC_MSG;
                 hdr.version = VERSION;
@@ -622,55 +684,106 @@ impl CgroupsClient {
         session.send(hdr, payload).map_err(|_| NipcError::Overflow)
     }
 
-    /// Receive via the active transport. Returns (header, payload_len).
-    /// Payload bytes are written into response_buf[..payload_len].
-    fn transport_receive(&mut self, response_buf: &mut [u8]) -> Result<(Header, usize), NipcError> {
-        // SHM path (POSIX or Windows)
+    fn transport_send_request_buf(
+        &mut self,
+        hdr: &mut Header,
+        req_len: usize,
+    ) -> Result<(), NipcError> {
         #[cfg(target_os = "linux")]
         {
             if let Some(ref mut shm) = self.shm {
-                let mut shm_buf = vec![0u8; response_buf.len() + HEADER_SIZE];
-                let mlen = shm
-                    .receive(&mut shm_buf, 30000)
-                    .map_err(|_| NipcError::Truncated)?;
+                let msg_len = HEADER_SIZE + req_len;
+                let msg = ensure_client_scratch(&mut self.send_buf, msg_len);
 
-                if mlen < HEADER_SIZE {
-                    return Err(NipcError::Truncated);
+                hdr.magic = MAGIC_MSG;
+                hdr.version = VERSION;
+                hdr.header_len = protocol::HEADER_LEN;
+                hdr.payload_len = req_len as u32;
+
+                hdr.encode(&mut msg[..HEADER_SIZE]);
+                if req_len > 0 {
+                    msg[HEADER_SIZE..HEADER_SIZE + req_len]
+                        .copy_from_slice(&self.request_buf[..req_len]);
                 }
 
-                let hdr = Header::decode(&shm_buf[..mlen])?;
-                let payload_len = mlen - HEADER_SIZE;
-
-                if payload_len > response_buf.len() {
-                    return Err(NipcError::Overflow);
-                }
-
-                response_buf[..payload_len].copy_from_slice(&shm_buf[HEADER_SIZE..mlen]);
-                return Ok((hdr, payload_len));
+                return shm.send(&msg[..msg_len]).map_err(|_| NipcError::Overflow);
             }
         }
 
         #[cfg(windows)]
         {
             if let Some(ref mut shm) = self.shm {
-                let mut shm_buf = vec![0u8; response_buf.len() + HEADER_SIZE];
+                let msg_len = HEADER_SIZE + req_len;
+                let msg = ensure_client_scratch(&mut self.send_buf, msg_len);
+
+                hdr.magic = MAGIC_MSG;
+                hdr.version = VERSION;
+                hdr.header_len = protocol::HEADER_LEN;
+                hdr.payload_len = req_len as u32;
+
+                hdr.encode(&mut msg[..HEADER_SIZE]);
+                if req_len > 0 {
+                    msg[HEADER_SIZE..HEADER_SIZE + req_len]
+                        .copy_from_slice(&self.request_buf[..req_len]);
+                }
+
+                return shm.send(&msg[..msg_len]).map_err(|_| NipcError::Overflow);
+            }
+        }
+
+        let session = self.session.as_mut().ok_or(NipcError::Truncated)?;
+        session
+            .send(hdr, &self.request_buf[..req_len])
+            .map_err(|_| NipcError::Overflow)
+    }
+
+    /// Receive via the active transport. Returns (header, payload_view).
+    fn transport_receive(&mut self) -> Result<(Header, ClientResponseRef), NipcError> {
+        let needed = self.max_receive_message_bytes();
+        let scratch = ensure_client_scratch(&mut self.transport_buf, needed);
+
+        // SHM path (POSIX or Windows)
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(ref mut shm) = self.shm {
                 let mlen = shm
-                    .receive(&mut shm_buf, 30000)
+                    .receive(scratch, 30000)
                     .map_err(|_| NipcError::Truncated)?;
 
                 if mlen < HEADER_SIZE {
                     return Err(NipcError::Truncated);
                 }
 
-                let hdr = Header::decode(&shm_buf[..mlen])?;
-                let payload_len = mlen - HEADER_SIZE;
+                let hdr = Header::decode(&scratch[..mlen])?;
+                return Ok((
+                    hdr,
+                    ClientResponseRef {
+                        source: ClientResponseSource::TransportBuf,
+                        len: mlen - HEADER_SIZE,
+                    },
+                ));
+            }
+        }
 
-                if payload_len > response_buf.len() {
-                    return Err(NipcError::Overflow);
+        #[cfg(windows)]
+        {
+            if let Some(ref mut shm) = self.shm {
+                let mlen = shm
+                    .receive(scratch, 30000)
+                    .map_err(|_| NipcError::Truncated)?;
+
+                if mlen < HEADER_SIZE {
+                    return Err(NipcError::Truncated);
                 }
 
-                response_buf[..payload_len].copy_from_slice(&shm_buf[HEADER_SIZE..mlen]);
-                return Ok((hdr, payload_len));
+                let hdr = Header::decode(&scratch[..mlen])?;
+                return Ok((
+                    hdr,
+                    ClientResponseRef {
+                        source: ClientResponseSource::TransportBuf,
+                        len: mlen - HEADER_SIZE,
+                    },
+                ));
             }
         }
 
@@ -679,33 +792,86 @@ impl CgroupsClient {
 
         #[cfg(unix)]
         {
-            let mut scratch = vec![0u8; response_buf.len() + HEADER_SIZE];
-            let (hdr, payload_vec) = session
-                .receive(&mut scratch)
-                .map_err(|_| NipcError::Truncated)?;
-
-            let payload_len = payload_vec.len();
-            if payload_len > response_buf.len() {
-                return Err(NipcError::Overflow);
-            }
-            response_buf[..payload_len].copy_from_slice(&payload_vec);
-            Ok((hdr, payload_len))
+            let scratch_payload_ptr = unsafe { scratch.as_ptr().add(HEADER_SIZE) };
+            let (hdr, payload) = session.receive(scratch).map_err(|_| NipcError::Truncated)?;
+            let source = if payload.as_ptr() == scratch_payload_ptr {
+                ClientResponseSource::TransportBuf
+            } else {
+                ClientResponseSource::SessionBuf
+            };
+            Ok((
+                hdr,
+                ClientResponseRef {
+                    source,
+                    len: payload.len(),
+                },
+            ))
         }
 
         #[cfg(windows)]
         {
-            let mut scratch = vec![0u8; response_buf.len() + HEADER_SIZE];
-            let (hdr, payload_vec) = session
-                .receive(&mut scratch)
-                .map_err(|_| NipcError::Truncated)?;
-
-            let payload_len = payload_vec.len();
-            if payload_len > response_buf.len() {
-                return Err(NipcError::Overflow);
-            }
-            response_buf[..payload_len].copy_from_slice(&payload_vec);
-            Ok((hdr, payload_len))
+            let scratch_payload_ptr = unsafe { scratch.as_ptr().add(HEADER_SIZE) };
+            let (hdr, payload) = session.receive(scratch).map_err(|_| NipcError::Truncated)?;
+            let source = if payload.as_ptr() == scratch_payload_ptr {
+                ClientResponseSource::TransportBuf
+            } else {
+                ClientResponseSource::SessionBuf
+            };
+            Ok((
+                hdr,
+                ClientResponseRef {
+                    source,
+                    len: payload.len(),
+                },
+            ))
         }
+    }
+
+    fn response_payload(&self, response: ClientResponseRef) -> Result<&[u8], NipcError> {
+        match response.source {
+            ClientResponseSource::TransportBuf => {
+                let start = HEADER_SIZE;
+                let end = HEADER_SIZE + response.len;
+                if end > self.transport_buf.len() {
+                    return Err(NipcError::Truncated);
+                }
+                Ok(&self.transport_buf[start..end])
+            }
+            ClientResponseSource::SessionBuf => {
+                #[cfg(unix)]
+                {
+                    let session = self.session.as_ref().ok_or(NipcError::Truncated)?;
+                    return Ok(session.received_payload(response.len));
+                }
+                #[cfg(windows)]
+                {
+                    let session = self.session.as_ref().ok_or(NipcError::Truncated)?;
+                    return Ok(session.received_payload(response.len));
+                }
+                #[allow(unreachable_code)]
+                Err(NipcError::Truncated)
+            }
+        }
+    }
+
+    fn max_receive_message_bytes(&self) -> usize {
+        let mut max_payload = self.transport_config.max_response_payload_bytes as usize;
+        #[cfg(unix)]
+        if let Some(ref session) = self.session {
+            if session.max_response_payload_bytes > 0 {
+                max_payload = session.max_response_payload_bytes as usize;
+            }
+        }
+        #[cfg(windows)]
+        if let Some(ref session) = self.session {
+            if session.max_response_payload_bytes > 0 {
+                max_payload = session.max_response_payload_bytes as usize;
+            }
+        }
+        if max_payload == 0 {
+            max_payload = CACHE_RESPONSE_BUF_SIZE;
+        }
+        HEADER_SIZE + max_payload
     }
 }
 
@@ -715,18 +881,103 @@ impl Drop for CgroupsClient {
     }
 }
 
+fn ensure_client_scratch(buf: &mut Vec<u8>, needed: usize) -> &mut [u8] {
+    if buf.len() < needed {
+        buf.resize(needed, 0);
+    }
+    &mut buf[..needed]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientResponseSource {
+    TransportBuf,
+    SessionBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClientResponseRef {
+    source: ClientResponseSource,
+    len: usize,
+}
+
+fn dispatch_single(
+    handlers: &Handlers,
+    method_code: u16,
+    request: &[u8],
+    response_buf: &mut [u8],
+) -> (usize, bool) {
+    match method_code {
+        METHOD_INCREMENT => {
+            let Some(handler) = handlers.on_increment.as_ref() else {
+                return (0, false);
+            };
+            match protocol::dispatch_increment(request, response_buf, |value| handler(value)) {
+                Some(n) => (n, true),
+                None => (0, false),
+            }
+        }
+        METHOD_STRING_REVERSE => {
+            let Some(handler) = handlers.on_string_reverse.as_ref() else {
+                return (0, false);
+            };
+            match protocol::dispatch_string_reverse(request, response_buf, |data| {
+                let s = std::str::from_utf8(data).ok()?;
+                handler(s).map(String::into_bytes)
+            }) {
+                Some(n) => (n, true),
+                None => (0, false),
+            }
+        }
+        METHOD_CGROUPS_SNAPSHOT => {
+            let Some(handler) = handlers.on_snapshot.as_ref() else {
+                return (0, false);
+            };
+            let max_items = handlers.snapshot_max_items(response_buf.len());
+            if max_items == 0 {
+                return (0, false);
+            }
+            match protocol::dispatch_cgroups_snapshot(
+                request,
+                response_buf,
+                max_items,
+                |req, builder| handler(req, builder),
+            ) {
+                Some(n) => (n, true),
+                None => (0, false),
+            }
+        }
+        _ => (0, false),
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  Managed server
 // ---------------------------------------------------------------------------
 
-/// Handler function type. Receives (method_code, request_payload).
-/// Returns Some(response_payload) on success, None on failure
-/// (which maps to INTERNAL_ERROR + empty payload).
-///
-/// Must be Fn (not FnMut) + Send + Sync for multi-client concurrency.
-pub type HandlerFn = Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync>;
+pub type IncrementHandler = Arc<dyn Fn(u64) -> Option<u64> + Send + Sync>;
+pub type StringReverseHandler = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+pub type SnapshotHandler =
+    Arc<dyn for<'a> Fn(&CgroupsRequest, &mut protocol::CgroupsBuilder<'a>) -> bool + Send + Sync>;
 
-/// L2 managed server. Generic request/response dispatcher.
+/// Typed server handler surface for the cgroups service.
+#[derive(Clone, Default)]
+pub struct Handlers {
+    pub on_increment: Option<IncrementHandler>,
+    pub on_string_reverse: Option<StringReverseHandler>,
+    pub on_snapshot: Option<SnapshotHandler>,
+    pub snapshot_max_items: u32,
+}
+
+impl Handlers {
+    fn snapshot_max_items(&self, response_buf_size: usize) -> u32 {
+        if self.snapshot_max_items != 0 {
+            return self.snapshot_max_items;
+        }
+        protocol::estimate_cgroups_max_items(response_buf_size)
+    }
+}
+
+/// L2 managed server. Typed request/response dispatcher.
 ///
 /// Handles accept, spawns a thread per session (up to worker_count),
 /// reads requests, dispatches to handler, sends responses.
@@ -734,7 +985,7 @@ pub struct ManagedServer {
     run_dir: String,
     service_name: String,
     server_config: ServerConfig,
-    handler: HandlerFn,
+    handlers: Handlers,
     running: Arc<AtomicBool>,
     worker_count: usize,
     /// Windows: stored listener handle so stop() can close it to unblock Accept.
@@ -748,17 +999,9 @@ impl ManagedServer {
         run_dir: &str,
         service_name: &str,
         config: ServerConfig,
-        _response_buf_size: usize,
-        handler: HandlerFn,
+        handlers: Handlers,
     ) -> Self {
-        Self::with_workers(
-            run_dir,
-            service_name,
-            config,
-            _response_buf_size,
-            handler,
-            8,
-        )
+        Self::with_workers(run_dir, service_name, config, handlers, 8)
     }
 
     /// Create a server with an explicit worker count limit.
@@ -766,15 +1009,14 @@ impl ManagedServer {
         run_dir: &str,
         service_name: &str,
         config: ServerConfig,
-        _response_buf_size: usize,
-        handler: HandlerFn,
+        handlers: Handlers,
         worker_count: usize,
     ) -> Self {
         ManagedServer {
             run_dir: run_dir.to_string(),
             service_name: service_name.to_string(),
             server_config: config,
-            handler,
+            handlers,
             running: Arc::new(AtomicBool::new(false)),
             worker_count: if worker_count < 1 { 1 } else { worker_count },
             #[cfg(windows)]
@@ -851,7 +1093,7 @@ impl ManagedServer {
             }
 
             // Spawn a handler thread for this session
-            let handler = self.handler.clone();
+            let handlers = self.handlers.clone();
             let running = self.running.clone();
 
             let t = std::thread::spawn(move || {
@@ -861,7 +1103,7 @@ impl ManagedServer {
                     shm,
                     #[cfg(not(target_os = "linux"))]
                     shm,
-                    handler,
+                    handlers,
                     running,
                 );
             });
@@ -925,11 +1167,11 @@ impl ManagedServer {
                 continue;
             }
 
-            let handler = self.handler.clone();
+            let handlers = self.handlers.clone();
             let running = self.running.clone();
 
             let t = std::thread::spawn(move || {
-                handle_session_win_threaded(session, shm, handler, running);
+                handle_session_win_threaded(session, shm, handlers, running);
             });
             session_threads.push(t);
         }
@@ -1018,10 +1260,13 @@ impl ManagedServer {
 fn handle_session_win_threaded(
     mut session: NpSession,
     mut shm: Option<WinShmContext>,
-    handler: HandlerFn,
+    handlers: Handlers,
     running: Arc<AtomicBool>,
 ) {
     let mut recv_buf = vec![0u8; HEADER_SIZE + session.max_request_payload_bytes as usize];
+    let mut resp_buf = vec![0u8; session.max_response_payload_bytes as usize];
+    let mut item_resp_buf = vec![0u8; session.max_response_payload_bytes as usize];
+    let mut msg_buf = vec![0u8; HEADER_SIZE + session.max_response_payload_bytes as usize];
 
     while running.load(Ordering::Acquire) {
         let (hdr, payload) = {
@@ -1035,7 +1280,7 @@ fn handle_session_win_threaded(
                             Ok(h) => h,
                             Err(_) => break,
                         };
-                        let payload = recv_buf[HEADER_SIZE..mlen].to_vec();
+                        let payload = &recv_buf[HEADER_SIZE..mlen];
                         (hdr, payload)
                     }
                     Err(crate::transport::win_shm::WinShmError::Timeout) => continue,
@@ -1057,64 +1302,41 @@ fn handle_session_win_threaded(
 
         // Dispatch: single-item or batch
         let is_batch = (hdr.flags & FLAG_BATCH) != 0 && hdr.item_count >= 1;
+        let mut response_len = 0usize;
+        let mut ok = true;
 
-        let (response_payload, resp_ok, resp_flags, resp_item_count) = if !is_batch {
-            match handler(hdr.code, &payload) {
-                Some(data) => (data, true, 0u16, 1u32),
-                None => (Vec::new(), false, 0u16, 1u32),
+        if !is_batch {
+            let (n, dispatch_ok) = dispatch_single(&handlers, hdr.code, payload, &mut resp_buf);
+            ok = dispatch_ok && n <= resp_buf.len();
+            if ok {
+                response_len = n;
             }
         } else {
-            let batch_count = hdr.item_count;
-            let mut ok = true;
-            let mut item_responses: Vec<Vec<u8>> = Vec::with_capacity(batch_count as usize);
-
-            for i in 0..batch_count {
-                match batch_item_get(&payload, batch_count, i) {
-                    Ok((item_data, _item_len)) => match handler(hdr.code, item_data) {
-                        Some(resp_data) => item_responses.push(resp_data),
-                        None => {
-                            ok = false;
-                            break;
-                        }
-                    },
+            let mut bb = BatchBuilder::new(&mut resp_buf, hdr.item_count);
+            for i in 0..hdr.item_count {
+                let (item_data, _item_len) = match batch_item_get(payload, hdr.item_count, i) {
+                    Ok(v) => v,
                     Err(_) => {
                         ok = false;
                         break;
                     }
+                };
+                let (item_len, item_ok) =
+                    dispatch_single(&handlers, hdr.code, item_data, &mut item_resp_buf);
+                if !item_ok || item_len > item_resp_buf.len() {
+                    ok = false;
+                    break;
+                }
+                if bb.add(&item_resp_buf[..item_len]).is_err() {
+                    ok = false;
+                    break;
                 }
             }
-
             if ok {
-                let total_data: usize = item_responses
-                    .iter()
-                    .map(|r| protocol::align8(r.len()))
-                    .sum();
-                let buf_size = protocol::align8(batch_count as usize * 8) + total_data + 64;
-                let mut batch_buf = vec![0u8; buf_size];
-                let mut bb = BatchBuilder::new(&mut batch_buf, batch_count);
-
-                for resp in &item_responses {
-                    if bb.add(resp).is_err() {
-                        ok = false;
-                        break;
-                    }
-                }
-
-                if ok {
-                    let (total_len, _out_count) = bb.finish();
-                    (
-                        batch_buf[..total_len].to_vec(),
-                        true,
-                        FLAG_BATCH,
-                        batch_count,
-                    )
-                } else {
-                    (Vec::new(), false, 0u16, 1u32)
-                }
-            } else {
-                (Vec::new(), false, 0u16, 1u32)
+                let (n, _) = bb.finish();
+                response_len = n;
             }
-        };
+        }
 
         let mut resp_hdr = Header {
             kind: KIND_RESPONSE,
@@ -1123,37 +1345,46 @@ fn handle_session_win_threaded(
             ..Header::default()
         };
 
-        if resp_ok {
+        if ok {
             resp_hdr.transport_status = STATUS_OK;
-            resp_hdr.flags = resp_flags;
-            resp_hdr.item_count = resp_item_count;
+            if is_batch {
+                resp_hdr.flags = FLAG_BATCH;
+                resp_hdr.item_count = hdr.item_count;
+            } else {
+                resp_hdr.flags = 0;
+                resp_hdr.item_count = 1;
+            }
         } else {
             resp_hdr.transport_status = STATUS_INTERNAL_ERROR;
             resp_hdr.item_count = 1;
             resp_hdr.flags = 0;
+            response_len = 0;
         }
 
         if let Some(ref mut shm_ctx) = shm {
-            let msg_len = HEADER_SIZE + response_payload.len();
-            let mut msg = vec![0u8; msg_len];
+            let msg_len = HEADER_SIZE + response_len;
+            let msg = ensure_client_scratch(&mut msg_buf, msg_len);
 
             resp_hdr.magic = MAGIC_MSG;
             resp_hdr.version = VERSION;
             resp_hdr.header_len = protocol::HEADER_LEN;
-            resp_hdr.payload_len = response_payload.len() as u32;
+            resp_hdr.payload_len = response_len as u32;
 
             resp_hdr.encode(&mut msg[..HEADER_SIZE]);
-            if !response_payload.is_empty() {
-                msg[HEADER_SIZE..].copy_from_slice(&response_payload);
+            if response_len > 0 {
+                msg[HEADER_SIZE..].copy_from_slice(&resp_buf[..response_len]);
             }
 
-            if shm_ctx.send(&msg).is_err() {
+            if shm_ctx.send(msg).is_err() {
                 break;
             }
             continue;
         }
 
-        if session.send(&mut resp_hdr, &response_payload).is_err() {
+        if session
+            .send(&mut resp_hdr, &resp_buf[..response_len])
+            .is_err()
+        {
             break;
         }
     }
@@ -1170,10 +1401,13 @@ fn handle_session_threaded(
     mut session: UdsSession,
     #[cfg(target_os = "linux")] mut shm: Option<ShmContext>,
     #[cfg(not(target_os = "linux"))] _shm: Option<()>,
-    handler: HandlerFn,
+    handlers: Handlers,
     running: Arc<AtomicBool>,
 ) {
     let mut recv_buf = vec![0u8; HEADER_SIZE + session.max_request_payload_bytes as usize];
+    let mut resp_buf = vec![0u8; session.max_response_payload_bytes as usize];
+    let mut item_resp_buf = vec![0u8; session.max_response_payload_bytes as usize];
+    let mut msg_buf = vec![0u8; HEADER_SIZE + session.max_response_payload_bytes as usize];
 
     while running.load(Ordering::Acquire) {
         // Receive request via the active transport
@@ -1190,7 +1424,7 @@ fn handle_session_threaded(
                                 Ok(h) => h,
                                 Err(_) => break,
                             };
-                            let payload = recv_buf[HEADER_SIZE..mlen].to_vec();
+                            let payload = &recv_buf[HEADER_SIZE..mlen];
                             (hdr, payload)
                         }
                         Err(crate::transport::shm::ShmError::Timeout) => continue,
@@ -1207,7 +1441,7 @@ fn handle_session_threaded(
                     }
 
                     match session.receive(&mut recv_buf) {
-                        Ok((hdr, payload)) => (hdr, payload.to_vec()),
+                        Ok((hdr, payload)) => (hdr, payload),
                         Err(_) => break,
                     }
                 }
@@ -1224,7 +1458,7 @@ fn handle_session_threaded(
                 }
 
                 match session.receive(&mut recv_buf) {
-                    Ok((hdr, payload)) => (hdr, payload.to_vec()),
+                    Ok((hdr, payload)) => (hdr, payload),
                     Err(_) => break,
                 }
             }
@@ -1237,68 +1471,41 @@ fn handle_session_threaded(
 
         // Dispatch: single-item or batch
         let is_batch = (hdr.flags & FLAG_BATCH) != 0 && hdr.item_count >= 1;
+        let mut response_len = 0usize;
+        let mut ok = true;
 
-        let (response_payload, resp_ok, resp_flags, resp_item_count) = if !is_batch {
-            // Single-item dispatch
-            match handler(hdr.code, &payload) {
-                Some(data) => (data, true, 0u16, 1u32),
-                None => (Vec::new(), false, 0u16, 1u32),
+        if !is_batch {
+            let (n, dispatch_ok) = dispatch_single(&handlers, hdr.code, payload, &mut resp_buf);
+            ok = dispatch_ok && n <= resp_buf.len();
+            if ok {
+                response_len = n;
             }
         } else {
-            // Batch dispatch: extract each item, call handler per item,
-            // reassemble responses using BatchBuilder.
-            let batch_count = hdr.item_count;
-            let mut ok = true;
-            let mut item_responses: Vec<Vec<u8>> = Vec::with_capacity(batch_count as usize);
-
-            for i in 0..batch_count {
-                match batch_item_get(&payload, batch_count, i) {
-                    Ok((item_data, _item_len)) => match handler(hdr.code, item_data) {
-                        Some(resp_data) => item_responses.push(resp_data),
-                        None => {
-                            ok = false;
-                            break;
-                        }
-                    },
+            let mut bb = BatchBuilder::new(&mut resp_buf, hdr.item_count);
+            for i in 0..hdr.item_count {
+                let (item_data, _item_len) = match batch_item_get(payload, hdr.item_count, i) {
+                    Ok(v) => v,
                     Err(_) => {
                         ok = false;
                         break;
                     }
+                };
+                let (item_len, item_ok) =
+                    dispatch_single(&handlers, hdr.code, item_data, &mut item_resp_buf);
+                if !item_ok || item_len > item_resp_buf.len() {
+                    ok = false;
+                    break;
+                }
+                if bb.add(&item_resp_buf[..item_len]).is_err() {
+                    ok = false;
+                    break;
                 }
             }
-
             if ok {
-                // Assemble batch response
-                let total_data: usize = item_responses
-                    .iter()
-                    .map(|r| protocol::align8(r.len()))
-                    .sum();
-                let buf_size = protocol::align8(batch_count as usize * 8) + total_data + 64;
-                let mut batch_buf = vec![0u8; buf_size];
-                let mut bb = BatchBuilder::new(&mut batch_buf, batch_count);
-
-                for resp in &item_responses {
-                    if bb.add(resp).is_err() {
-                        ok = false;
-                        break;
-                    }
-                }
-
-                if ok {
-                    let (total_len, _out_count) = bb.finish();
-                    (
-                        batch_buf[..total_len].to_vec(),
-                        true,
-                        FLAG_BATCH,
-                        batch_count,
-                    )
-                } else {
-                    (Vec::new(), false, 0u16, 1u32)
-                }
-            } else {
-                (Vec::new(), false, 0u16, 1u32)
+                let (n, _) = bb.finish();
+                response_len = n;
             }
-        };
+        }
 
         // Build response header
         let mut resp_hdr = Header {
@@ -1308,34 +1515,40 @@ fn handle_session_threaded(
             ..Header::default()
         };
 
-        if resp_ok {
+        if ok {
             resp_hdr.transport_status = STATUS_OK;
-            resp_hdr.flags = resp_flags;
-            resp_hdr.item_count = resp_item_count;
+            if is_batch {
+                resp_hdr.flags = FLAG_BATCH;
+                resp_hdr.item_count = hdr.item_count;
+            } else {
+                resp_hdr.flags = 0;
+                resp_hdr.item_count = 1;
+            }
         } else {
             resp_hdr.transport_status = STATUS_INTERNAL_ERROR;
             resp_hdr.item_count = 1;
             resp_hdr.flags = 0;
+            response_len = 0;
         }
 
         // Send response via the active transport
         #[cfg(target_os = "linux")]
         {
             if let Some(ref mut shm_ctx) = shm {
-                let msg_len = HEADER_SIZE + response_payload.len();
-                let mut msg = vec![0u8; msg_len];
+                let msg_len = HEADER_SIZE + response_len;
+                let msg = ensure_client_scratch(&mut msg_buf, msg_len);
 
                 resp_hdr.magic = MAGIC_MSG;
                 resp_hdr.version = VERSION;
                 resp_hdr.header_len = protocol::HEADER_LEN;
-                resp_hdr.payload_len = response_payload.len() as u32;
+                resp_hdr.payload_len = response_len as u32;
 
                 resp_hdr.encode(&mut msg[..HEADER_SIZE]);
-                if !response_payload.is_empty() {
-                    msg[HEADER_SIZE..].copy_from_slice(&response_payload);
+                if response_len > 0 {
+                    msg[HEADER_SIZE..].copy_from_slice(&resp_buf[..response_len]);
                 }
 
-                if shm_ctx.send(&msg).is_err() {
+                if shm_ctx.send(msg).is_err() {
                     break;
                 }
                 continue;
@@ -1343,7 +1556,10 @@ fn handle_session_threaded(
         }
 
         // UDS path
-        if session.send(&mut resp_hdr, &response_payload).is_err() {
+        if session
+            .send(&mut resp_hdr, &resp_buf[..response_len])
+            .is_err()
+        {
             break;
         }
     }
@@ -1446,7 +1662,6 @@ pub struct CgroupsCache {
     populated: bool,
     refresh_success_count: u32,
     refresh_failure_count: u32,
-    response_buf: Vec<u8>,
     /// Monotonic reference point for timestamp calculation
     epoch: std::time::Instant,
     /// Monotonic ms of last successful refresh (0 if never)
@@ -1458,11 +1673,6 @@ impl CgroupsCache {
     /// Does NOT connect. Does NOT require the server to be running.
     /// Cache starts empty (populated == false).
     pub fn new(run_dir: &str, service_name: &str, config: ClientConfig) -> Self {
-        let buf_size = if config.max_response_payload_bytes > 0 {
-            HEADER_SIZE + config.max_response_payload_bytes as usize
-        } else {
-            CACHE_RESPONSE_BUF_SIZE
-        };
         CgroupsCache {
             client: CgroupsClient::new(run_dir, service_name, config),
             items: Vec::new(),
@@ -1472,7 +1682,6 @@ impl CgroupsCache {
             populated: false,
             refresh_success_count: 0,
             refresh_failure_count: 0,
-            response_buf: vec![0u8; buf_size],
             epoch: std::time::Instant::now(),
             last_refresh_ts: 0,
         }
@@ -1488,7 +1697,7 @@ impl CgroupsCache {
         self.client.refresh();
 
         // Attempt snapshot call
-        match self.client.call_snapshot(&mut self.response_buf) {
+        match self.client.call_snapshot() {
             Ok(view) => {
                 // Build new cache from snapshot view
                 let mut new_items = Vec::with_capacity(view.item_count as usize);
@@ -1643,20 +1852,7 @@ mod tests {
         }
     }
 
-    /// Test handler: build a snapshot with 3 items.
-    fn test_cgroups_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
-        if method_code != METHOD_CGROUPS_SNAPSHOT {
-            return None;
-        }
-
-        // Validate request
-        if CgroupsRequest::decode(request_payload).is_err() {
-            return None;
-        }
-
-        let mut buf = vec![0u8; RESPONSE_BUF_SIZE];
-        let mut builder = CgroupsBuilder::new(&mut buf, 3, 1, 42);
-
+    fn fill_test_cgroups_snapshot(builder: &mut CgroupsBuilder<'_>) -> bool {
         let items = [
             (
                 1001u32,
@@ -1677,18 +1873,33 @@ mod tests {
 
         for (hash, options, enabled, name, path) in &items {
             if builder.add(*hash, *options, *enabled, name, path).is_err() {
-                return None;
+                return false;
             }
         }
 
-        let total = builder.finish();
-        buf.truncate(total);
-        Some(buf)
+        true
     }
 
-    /// Handler that always fails.
-    fn failing_handler(_method_code: u16, _request_payload: &[u8]) -> Option<Vec<u8>> {
-        None
+    fn test_cgroups_handlers() -> Handlers {
+        Handlers {
+            on_snapshot: Some(Arc::new(|req, builder| {
+                if req.layout_version != 1 || req.flags != 0 {
+                    return false;
+                }
+                builder.set_header(1, 42);
+                fill_test_cgroups_snapshot(builder)
+            })),
+            snapshot_max_items: 3,
+            ..Handlers::default()
+        }
+    }
+
+    fn pingpong_handlers() -> Handlers {
+        Handlers {
+            on_increment: Some(Arc::new(|value| Some(value + 1))),
+            on_string_reverse: Some(Arc::new(|s| Some(s.chars().rev().collect()))),
+            ..Handlers::default()
+        }
     }
 
     struct TestServer {
@@ -1697,15 +1908,11 @@ mod tests {
     }
 
     impl TestServer {
-        fn start(service: &str, handler: fn(u16, &[u8]) -> Option<Vec<u8>>) -> Self {
-            Self::start_with_workers(service, handler, 8)
+        fn start(service: &str, handlers: Handlers) -> Self {
+            Self::start_with_workers(service, handlers, 8)
         }
 
-        fn start_with_workers(
-            service: &str,
-            handler: fn(u16, &[u8]) -> Option<Vec<u8>>,
-            worker_count: usize,
-        ) -> Self {
+        fn start_with_workers(service: &str, handlers: Handlers, worker_count: usize) -> Self {
             ensure_run_dir();
             cleanup_all(service);
 
@@ -1717,8 +1924,7 @@ mod tests {
                 TEST_RUN_DIR,
                 &svc,
                 server_config(),
-                RESPONSE_BUF_SIZE,
-                Arc::new(move |code, payload| handler(code, payload)),
+                handlers,
                 worker_count,
             );
             let stop_flag = server.running_flag();
@@ -1747,11 +1953,7 @@ mod tests {
             }
         }
 
-        fn start_with_resp_size(
-            service: &str,
-            handler: fn(u16, &[u8]) -> Option<Vec<u8>>,
-            resp_buf_size: usize,
-        ) -> Self {
+        fn start_with_resp_size(service: &str, handlers: Handlers, resp_buf_size: usize) -> Self {
             ensure_run_dir();
             cleanup_all(service);
 
@@ -1762,13 +1964,7 @@ mod tests {
             let mut scfg = server_config();
             scfg.max_response_payload_bytes = resp_buf_size as u32;
 
-            let mut server = ManagedServer::new(
-                TEST_RUN_DIR,
-                &svc,
-                scfg,
-                resp_buf_size,
-                Arc::new(move |code, payload| handler(code, payload)),
-            );
+            let mut server = ManagedServer::new(TEST_RUN_DIR, &svc, scfg, handlers);
             let stop_flag = server.running_flag();
 
             let thread = thread::spawn(move || {
@@ -1821,7 +2017,7 @@ mod tests {
         assert_eq!(client.state, ClientState::NotFound);
 
         // Start server
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         // Refresh -> READY
         let changed = client.refresh();
@@ -1849,16 +2045,13 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
         client.refresh();
         assert!(client.ready());
 
-        let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-        let view = client
-            .call_snapshot(&mut resp_buf)
-            .expect("call should succeed");
+        let view = client.call_snapshot().expect("call should succeed");
 
         assert_eq!(view.item_count, 3);
         assert_eq!(view.systemd_enabled, 1);
@@ -1893,15 +2086,14 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server1 = TestServer::start(svc, test_cgroups_handler);
+        let mut server1 = TestServer::start(svc, test_cgroups_handlers());
 
         let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
         client.refresh();
         assert!(client.ready());
 
         // First call succeeds
-        let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-        let view = client.call_snapshot(&mut resp_buf).expect("first call");
+        let view = client.call_snapshot().expect("first call");
         assert_eq!(view.item_count, 3);
 
         // Kill server
@@ -1910,11 +2102,10 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
 
         // Restart server
-        let mut server2 = TestServer::start(svc, test_cgroups_handler);
+        let mut server2 = TestServer::start(svc, test_cgroups_handlers());
 
         // Next call triggers reconnect + retry
-        let mut resp_buf2 = vec![0u8; RESPONSE_BUF_SIZE];
-        let view2 = client.call_snapshot(&mut resp_buf2).expect("retry call");
+        let view2 = client.call_snapshot().expect("retry call");
         assert_eq!(view2.item_count, 3);
 
         // Verify reconnect happened
@@ -1932,17 +2123,14 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         // Create and connect client 1
         let mut client1 = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
         client1.refresh();
         assert!(client1.ready());
 
-        let mut resp_buf1 = vec![0u8; RESPONSE_BUF_SIZE];
-        let view1 = client1
-            .call_snapshot(&mut resp_buf1)
-            .expect("client 1 call");
+        let view1 = client1.call_snapshot().expect("client 1 call");
         assert_eq!(view1.item_count, 3);
 
         // Now multi-client: keep client 1 open, connect client 2
@@ -1950,10 +2138,7 @@ mod tests {
         client2.refresh();
         assert!(client2.ready());
 
-        let mut resp_buf2 = vec![0u8; RESPONSE_BUF_SIZE];
-        let view2 = client2
-            .call_snapshot(&mut resp_buf2)
-            .expect("client 2 call");
+        let view2 = client2.call_snapshot().expect("client 2 call");
         assert_eq!(view2.item_count, 3);
 
         client1.close();
@@ -1968,7 +2153,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         const NUM_CLIENTS: usize = 5;
         const REQUESTS_PER: usize = 10;
@@ -1993,8 +2178,7 @@ mod tests {
 
                 let mut successes = 0usize;
                 for _ in 0..REQUESTS_PER {
-                    let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-                    match client.call_snapshot(&mut resp_buf) {
+                    match client.call_snapshot() {
                         Ok(view) => {
                             assert_eq!(view.item_count, 3);
                             assert_eq!(view.generation, 42);
@@ -2035,15 +2219,14 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, failing_handler);
+        let mut server = TestServer::start(svc, Handlers::default());
 
         let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
         client.refresh();
         assert!(client.ready());
 
         // Call should fail (handler returns None -> INTERNAL_ERROR)
-        let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-        let err = client.call_snapshot(&mut resp_buf);
+        let err = client.call_snapshot();
         assert!(err.is_err());
 
         let status = client.status();
@@ -2060,7 +2243,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
         client.refresh();
@@ -2074,8 +2257,7 @@ mod tests {
 
         // Make 3 successful calls
         for _ in 0..3 {
-            let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-            client.call_snapshot(&mut resp_buf).expect("call ok");
+            client.call_snapshot().expect("call ok");
         }
 
         let s1 = client.status();
@@ -2084,8 +2266,7 @@ mod tests {
 
         // Call on disconnected client
         client.close();
-        let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-        let err = client.call_snapshot(&mut resp_buf);
+        let err = client.call_snapshot();
         assert!(err.is_err());
 
         let s2 = client.status();
@@ -2103,7 +2284,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         // Connect via raw UDS session
         let mut session =
@@ -2160,9 +2341,8 @@ mod tests {
             "server should still be alive after bad client"
         );
 
-        let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
         let view = verify_client
-            .call_snapshot(&mut resp_buf)
+            .call_snapshot()
             .expect("normal call should succeed after bad client");
         assert_eq!(
             view.item_count, 3,
@@ -2184,7 +2364,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, client_config());
         assert!(!cache.ready());
@@ -2233,7 +2413,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, client_config());
 
@@ -2267,7 +2447,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server1 = TestServer::start(svc, test_cgroups_handler);
+        let mut server1 = TestServer::start(svc, test_cgroups_handlers());
 
         let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, client_config());
         assert!(cache.refresh());
@@ -2278,7 +2458,7 @@ mod tests {
         cleanup_all(svc);
         thread::sleep(Duration::from_millis(50));
 
-        let mut server2 = TestServer::start(svc, test_cgroups_handler);
+        let mut server2 = TestServer::start(svc, test_cgroups_handlers());
 
         // Refresh should reconnect and rebuild cache
         let updated = cache.refresh();
@@ -2298,7 +2478,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, client_config());
         assert!(cache.refresh());
@@ -2349,50 +2529,45 @@ mod tests {
         const N: u32 = 1000;
 
         // Handler that builds N items
-        fn large_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
-            if method_code != METHOD_CGROUPS_SNAPSHOT {
-                return None;
-            }
-            if CgroupsRequest::decode(request_payload).is_err() {
-                return None;
-            }
+        fn large_handlers() -> Handlers {
+            Handlers {
+                on_snapshot: Some(Arc::new(|req, builder| {
+                    if req.layout_version != 1 || req.flags != 0 {
+                        return false;
+                    }
+                    builder.set_header(1, 100);
 
-            let buf_size = 256 * N as usize;
-            let mut buf = vec![0u8; buf_size];
-            let mut builder = CgroupsBuilder::new(&mut buf, N, 1, 100);
+                    for i in 0..N {
+                        let name = format!("cgroup-{i}");
+                        let path = format!("/sys/fs/cgroup/test/{i}");
+                        if builder
+                            .add(
+                                i + 1000,
+                                0,
+                                if i % 3 == 0 { 0 } else { 1 },
+                                name.as_bytes(),
+                                path.as_bytes(),
+                            )
+                            .is_err()
+                        {
+                            return false;
+                        }
+                    }
 
-            for i in 0..N {
-                let name = format!("cgroup-{i}");
-                let path = format!("/sys/fs/cgroup/test/{i}");
-                if builder
-                    .add(
-                        i + 1000,
-                        0,
-                        if i % 3 == 0 { 0 } else { 1 },
-                        name.as_bytes(),
-                        path.as_bytes(),
-                    )
-                    .is_err()
-                {
-                    return None;
-                }
+                    true
+                })),
+                snapshot_max_items: N,
+                ..Handlers::default()
             }
-
-            let total = builder.finish();
-            buf.truncate(total);
-            Some(buf)
         }
 
         // Use a larger response buf size
         let mut cfg = client_config();
         cfg.max_response_payload_bytes = 256 * N;
 
-        let mut server = TestServer::start_with_resp_size(svc, large_handler, 256 * N as usize);
+        let mut server = TestServer::start_with_resp_size(svc, large_handlers(), 256 * N as usize);
 
         let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, cfg);
-
-        // Need larger response buf
-        cache.response_buf = vec![0u8; 256 * N as usize];
 
         assert!(cache.refresh());
         assert_eq!(cache.status().item_count, N);
@@ -2447,17 +2622,12 @@ mod tests {
             scfg.max_response_payload_bytes = resp_buf_size as u32;
             scfg.packet_size = 65536; // force smaller packets for chunked transport
 
-            let handler: Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync> =
-                Arc::new(move |method_code, request_payload| {
-                    if method_code != METHOD_CGROUPS_SNAPSHOT {
-                        return None;
+            let handlers = Handlers {
+                on_snapshot: Some(Arc::new(move |req, builder| {
+                    if req.layout_version != 1 || req.flags != 0 {
+                        return false;
                     }
-                    if CgroupsRequest::decode(request_payload).is_err() {
-                        return None;
-                    }
-
-                    let mut buf = vec![0u8; resp_buf_size];
-                    let mut builder = CgroupsBuilder::new(&mut buf, n, 1, 42);
+                    builder.set_header(1, 42);
 
                     for i in 0..n {
                         let name = format!("container-{i:04}");
@@ -2468,16 +2638,17 @@ mod tests {
                             .add(hash, 0x10, enabled, name.as_bytes(), path.as_bytes())
                             .is_err()
                         {
-                            return None;
+                            return false;
                         }
                     }
 
-                    let total = builder.finish();
-                    buf.truncate(total);
-                    Some(buf)
-                });
+                    true
+                })),
+                snapshot_max_items: n,
+                ..Handlers::default()
+            };
 
-            let mut server = ManagedServer::new(TEST_RUN_DIR, &svc, scfg, resp_buf_size, handler);
+            let mut server = ManagedServer::new(TEST_RUN_DIR, &svc, scfg, handlers);
             let stop_flag = server.running_flag();
 
             let thread = thread::spawn(move || {
@@ -2531,10 +2702,7 @@ mod tests {
         assert!(client.ready(), "client not ready");
 
         let start = std::time::Instant::now();
-        let mut resp_buf = vec![0u8; BUF_SIZE];
-        let view = client
-            .call_snapshot(&mut resp_buf)
-            .expect("call should succeed");
+        let view = client.call_snapshot().expect("call should succeed");
         let elapsed = start.elapsed();
 
         eprintln!("  1000 items: {:?}", elapsed);
@@ -2591,10 +2759,7 @@ mod tests {
         assert!(client.ready(), "client not ready");
 
         let start = std::time::Instant::now();
-        let mut resp_buf = vec![0u8; BUF_SIZE];
-        let view = client
-            .call_snapshot(&mut resp_buf)
-            .expect("call should succeed");
+        let view = client.call_snapshot().expect("call should succeed");
         let elapsed = start.elapsed();
 
         eprintln!("  5000 items: {:?}", elapsed);
@@ -2624,7 +2789,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start_with_workers(svc, test_cgroups_handler, 64);
+        let mut server = TestServer::start_with_workers(svc, test_cgroups_handlers(), 64);
 
         const NUM_CLIENTS: usize = 50;
         const REQUESTS_PER: usize = 10;
@@ -2649,8 +2814,7 @@ mod tests {
 
                 let mut successes = 0usize;
                 for _ in 0..REQUESTS_PER {
-                    let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-                    match client.call_snapshot(&mut resp_buf) {
+                    match client.call_snapshot() {
                         Ok(view) => {
                             assert_eq!(view.item_count, 3);
                             assert_eq!(view.generation, 42);
@@ -2697,7 +2861,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         const CYCLES: usize = 1000;
         let mut successes = 0usize;
@@ -2724,8 +2888,7 @@ mod tests {
                 continue;
             }
 
-            let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-            match client.call_snapshot(&mut resp_buf) {
+            match client.call_snapshot() {
                 Ok(view) => {
                     if view.item_count == 3 && view.generation == 42 {
                         successes += 1;
@@ -2758,7 +2921,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start_with_workers(svc, test_cgroups_handler, 16);
+        let mut server = TestServer::start_with_workers(svc, test_cgroups_handlers(), 16);
 
         const NUM_CLIENTS: usize = 10;
         const REQUESTS_PER: usize = 100;
@@ -2815,7 +2978,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         const NUM_CLIENTS: usize = 5;
         let run_duration = Duration::from_secs(30);
@@ -2876,35 +3039,13 @@ mod tests {
     //  Ping-pong tests (INCREMENT + STRING_REVERSE)
     // ---------------------------------------------------------------
 
-    /// Multi-method handler: INCREMENT (method 1) and STRING_REVERSE (method 3).
-    /// Uses typed dispatch helpers from protocol.
-    fn pingpong_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
-        match method_code {
-            METHOD_INCREMENT => {
-                let mut buf = [0u8; INCREMENT_PAYLOAD_SIZE];
-                let len = protocol::dispatch_increment(request_payload, &mut buf, |v| Some(v + 1))?;
-                Some(buf[..len].to_vec())
-            }
-            METHOD_STRING_REVERSE => {
-                // Need a buffer large enough for the response
-                let resp_size = STRING_REVERSE_HDR_SIZE + request_payload.len() + 1;
-                let mut buf = vec![0u8; resp_size];
-                let len = protocol::dispatch_string_reverse(request_payload, &mut buf, |data| {
-                    Some(data.iter().rev().copied().collect())
-                })?;
-                Some(buf[..len].to_vec())
-            }
-            _ => None,
-        }
-    }
-
     #[test]
     fn test_increment_ping_pong() {
         let svc = "rs_pp_incr";
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, pingpong_handler);
+        let mut server = TestServer::start(svc, pingpong_handlers());
 
         let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
         client.refresh();
@@ -2944,7 +3085,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, pingpong_handler);
+        let mut server = TestServer::start(svc, pingpong_handlers());
 
         let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
         client.refresh();
@@ -2962,11 +3103,12 @@ mod tests {
                 panic!("round {round}: call_string_reverse({sent:?}) failed: {e:?}")
             });
             assert_eq!(
-                result, expected,
+                result.as_str(),
+                expected,
                 "round {round}: reverse of {sent:?} should be {expected:?}, got {result:?}"
             );
             responses_received += 1;
-            current = result;
+            current = result.as_str().to_string();
         }
         assert_eq!(
             responses_received, 6,
@@ -2989,7 +3131,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, pingpong_handler);
+        let mut server = TestServer::start(svc, pingpong_handlers());
 
         let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
         client.refresh();
@@ -3011,7 +3153,8 @@ mod tests {
             .call_string_reverse(str_input_1)
             .expect("reverse(hello)");
         assert_eq!(
-            s1, expected_s1,
+            s1.as_str(),
+            expected_s1,
             "reverse of {str_input_1:?} should be {expected_s1:?}"
         );
 
@@ -3030,7 +3173,8 @@ mod tests {
             .call_string_reverse(str_input_2)
             .expect("reverse(world)");
         assert_eq!(
-            s2, expected_s2,
+            s2.as_str(),
+            expected_s2,
             "reverse of {str_input_2:?} should be {expected_s2:?}"
         );
 
@@ -3080,8 +3224,7 @@ mod tests {
             TEST_RUN_DIR,
             &svc_name,
             batch_server_config(),
-            RESPONSE_BUF_SIZE,
-            Arc::new(move |code, payload| pingpong_handler(code, payload)),
+            pingpong_handlers(),
             8,
         );
         let stop_flag = server_obj.running_flag();
@@ -3143,7 +3286,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         // Client with wrong auth token
         let mut bad_cfg = client_config();
@@ -3174,7 +3317,7 @@ mod tests {
         cleanup_all(svc);
 
         // Server supports only PROFILE_BASELINE, but start it first
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         // Client requires SHM_FUTEX only (no baseline)
         let mut bad_cfg = client_config();
@@ -3215,8 +3358,7 @@ mod tests {
         let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
         assert_eq!(client.state, ClientState::Disconnected);
 
-        let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
-        let result = client.call_snapshot(&mut resp_buf);
+        let result = client.call_snapshot();
         assert!(result.is_err());
         assert_eq!(client.status().error_count, 1);
 
@@ -3242,7 +3384,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
         client.refresh();
@@ -3272,7 +3414,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, test_cgroups_handler);
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
 
         let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, client_config());
         assert!(cache.refresh());
@@ -3303,8 +3445,10 @@ mod tests {
         cfg.max_response_payload_bytes = 0;
 
         let cache = CgroupsCache::new(TEST_RUN_DIR, svc, cfg);
-        // Should use CACHE_RESPONSE_BUF_SIZE (65536)
-        assert_eq!(cache.response_buf.len(), 65536);
+        assert_eq!(
+            cache.client.max_receive_message_bytes(),
+            HEADER_SIZE + CACHE_RESPONSE_BUF_SIZE
+        );
 
         cleanup_all(svc);
     }
@@ -3319,15 +3463,8 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let handler: HandlerFn = Arc::new(|_, _| None);
-        let server = ManagedServer::with_workers(
-            TEST_RUN_DIR,
-            svc,
-            server_config(),
-            RESPONSE_BUF_SIZE,
-            handler,
-            0,
-        );
+        let server =
+            ManagedServer::with_workers(TEST_RUN_DIR, svc, server_config(), Handlers::default(), 0);
         assert_eq!(server.worker_count, 1);
 
         cleanup_all(svc);
@@ -3343,14 +3480,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let handler: HandlerFn = Arc::new(|_, _| None);
-        let server = ManagedServer::new(
-            TEST_RUN_DIR,
-            svc,
-            server_config(),
-            RESPONSE_BUF_SIZE,
-            handler,
-        );
+        let server = ManagedServer::new(TEST_RUN_DIR, svc, server_config(), Handlers::default());
         let flag = server.running_flag();
         assert!(!flag.load(Ordering::Acquire));
 
@@ -3391,7 +3521,7 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, pingpong_handler);
+        let mut server = TestServer::start(svc, pingpong_handlers());
 
         let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
         client.refresh();
@@ -3411,14 +3541,14 @@ mod tests {
         ensure_run_dir();
         cleanup_all(svc);
 
-        let mut server = TestServer::start(svc, pingpong_handler);
+        let mut server = TestServer::start(svc, pingpong_handlers());
 
         let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
         client.refresh();
         assert!(client.ready());
 
         let result = client.call_string_reverse("hello").expect("reverse");
-        assert_eq!(result, "olleh");
+        assert_eq!(result.as_str(), "olleh");
 
         client.close();
         server.stop();
@@ -3436,21 +3566,15 @@ mod tests {
         cleanup_all(svc);
 
         // Handler that fails on the 2nd item
-        fn fail_second_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
+        fn fail_second_increment_handler() -> IncrementHandler {
             static CALL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let n = CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if method_code == METHOD_INCREMENT {
+            Arc::new(move |value| {
+                let n = CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if n % 3 == 1 {
-                    // Fail on the second call of every batch
                     return None;
                 }
-                let val = increment_decode(request_payload).ok()?;
-                let mut buf = [0u8; INCREMENT_PAYLOAD_SIZE];
-                increment_encode(val + 1, &mut buf);
-                Some(buf.to_vec())
-            } else {
-                None
-            }
+                Some(value + 1)
+            })
         }
 
         fn batch_server_config() -> ServerConfig {
@@ -3486,8 +3610,10 @@ mod tests {
             TEST_RUN_DIR,
             &svc_name,
             batch_server_config(),
-            RESPONSE_BUF_SIZE,
-            Arc::new(move |code, payload| fail_second_handler(code, payload)),
+            Handlers {
+                on_increment: Some(fail_second_increment_handler()),
+                ..Handlers::default()
+            },
             8,
         );
         let stop_flag = server_obj.running_flag();

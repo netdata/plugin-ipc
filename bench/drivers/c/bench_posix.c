@@ -190,6 +190,34 @@ static bool ping_pong_handler(void *user,
 /*  Snapshot handler (16 cgroup items)                                  */
 /* ------------------------------------------------------------------ */
 
+typedef struct {
+    uint32_t hash;
+    uint32_t options;
+    uint32_t enabled;
+    uint32_t name_len;
+    uint32_t path_len;
+    char name[32];
+    char path[96];
+} snapshot_template_item_t;
+
+static snapshot_template_item_t g_snapshot_template[16];
+static pthread_once_t g_snapshot_template_once = PTHREAD_ONCE_INIT;
+
+static void snapshot_template_init(void)
+{
+    for (int i = 0; i < 16; i++) {
+        snapshot_template_item_t *item = &g_snapshot_template[i];
+
+        item->hash = (uint32_t)(1000 + i);
+        item->options = 0;
+        item->enabled = (uint32_t)(i % 2);
+        item->name_len = (uint32_t)snprintf(
+            item->name, sizeof(item->name), "cgroup-%d", i);
+        item->path_len = (uint32_t)snprintf(
+            item->path, sizeof(item->path), "/sys/fs/cgroup/bench/cg-%d", i);
+    }
+}
+
 static bool snapshot_handler(void *user,
                               uint16_t method_code,
                               const uint8_t *request_payload,
@@ -207,6 +235,8 @@ static bool snapshot_handler(void *user,
     if (nipc_cgroups_req_decode(request_payload, request_len, &req) != NIPC_OK)
         return false;
 
+    pthread_once(&g_snapshot_template_once, snapshot_template_init);
+
     static uint64_t gen = 0;
     gen++;
 
@@ -215,17 +245,15 @@ static bool snapshot_handler(void *user,
                                16, 1, gen);
 
     for (int i = 0; i < 16; i++) {
-        char name[64], path[128];
-        snprintf(name, sizeof(name), "cgroup-%d", i);
-        snprintf(path, sizeof(path), "/sys/fs/cgroup/bench/cg-%d", i);
+        const snapshot_template_item_t *item = &g_snapshot_template[i];
 
         nipc_error_t err = nipc_cgroups_builder_add(
             &builder,
-            (uint32_t)(1000 + i), /* hash */
-            0,                     /* options */
-            (uint32_t)(i % 2),     /* enabled */
-            name, (uint32_t)strlen(name),
-            path, (uint32_t)strlen(path));
+            item->hash,
+            item->options,
+            item->enabled,
+            item->name, item->name_len,
+            item->path, item->path_len);
 
         if (err != NIPC_OK)
             return false;

@@ -461,6 +461,7 @@ pub struct NpSession {
 
     // Internal receive buffer for chunked reassembly
     recv_buf: Vec<u8>,
+    pkt_buf: Vec<u8>,
 
     // In-flight message_id set (client-side only)
     inflight_ids: HashSet<u64>,
@@ -476,6 +477,12 @@ impl NpSession {
     /// Get the session role.
     pub fn role(&self) -> Role {
         self.role
+    }
+
+    /// Return the most recently reassembled payload stored in the internal
+    /// receive buffer.
+    pub fn received_payload(&self, len: usize) -> &[u8] {
+        &self.recv_buf[..len]
     }
 
     /// Connect to a server pipe derived from run_dir + service_name.
@@ -611,7 +618,8 @@ impl NpSession {
     }
 
     /// Receive one logical message. buf is a scratch buffer for the first read.
-    pub fn receive(&mut self, buf: &mut [u8]) -> Result<(Header, Vec<u8>), NpError> {
+    /// The payload view is valid until the next receive call on this session.
+    pub fn receive<'a>(&'a mut self, buf: &'a mut [u8]) -> Result<(Header, &'a [u8]), NpError> {
         if self.handle == ffi::INVALID_HANDLE_VALUE {
             return Err(NpError::BadParam("session closed".into()));
         }
@@ -656,7 +664,7 @@ impl NpSession {
 
         // Non-chunked
         if n >= total_msg {
-            let payload = buf[HEADER_SIZE..HEADER_SIZE + hdr.payload_len as usize].to_vec();
+            let payload = &buf[HEADER_SIZE..HEADER_SIZE + hdr.payload_len as usize];
 
             // Validate batch directory
             if hdr.flags & FLAG_BATCH != 0 && hdr.item_count > 1 {
@@ -698,17 +706,19 @@ impl NpSession {
         };
         let expected_chunk_count = 1 + expected_continuations as u32;
 
-        let mut pkt_buf = vec![0u8; self.packet_size as usize];
+        if self.pkt_buf.len() < self.packet_size as usize {
+            self.pkt_buf.resize(self.packet_size as usize, 0);
+        }
 
         let mut ci: u32 = 1;
         while assembled < hdr.payload_len as usize {
-            let cn = raw_recv(self.handle, &mut pkt_buf)?;
+            let cn = raw_recv(self.handle, &mut self.pkt_buf)?;
 
             if cn < HEADER_SIZE {
                 return Err(NpError::Chunk("continuation too short".into()));
             }
 
-            let chk = ChunkHeader::decode(&pkt_buf[..cn])
+            let chk = ChunkHeader::decode(&self.pkt_buf[..cn])
                 .map_err(|e| NpError::Chunk(format!("chunk header: {e}")))?;
 
             if chk.message_id != hdr.message_id {
@@ -736,12 +746,12 @@ impl NpSession {
             }
 
             self.recv_buf[assembled..assembled + chunk_data]
-                .copy_from_slice(&pkt_buf[HEADER_SIZE..HEADER_SIZE + chunk_data]);
+                .copy_from_slice(&self.pkt_buf[HEADER_SIZE..HEADER_SIZE + chunk_data]);
             assembled += chunk_data;
             ci += 1;
         }
 
-        let payload = self.recv_buf[..hdr.payload_len as usize].to_vec();
+        let payload = &self.recv_buf[..hdr.payload_len as usize];
 
         // Validate batch directory
         if hdr.flags & FLAG_BATCH != 0 && hdr.item_count > 1 {
@@ -1005,6 +1015,7 @@ fn client_handshake(handle: ffi::HANDLE, config: &ClientConfig) -> Result<NpSess
         selected_profile: ack.selected_profile,
         session_id: ack.session_id,
         recv_buf: Vec::new(),
+        pkt_buf: Vec::new(),
         inflight_ids: HashSet::new(),
     })
 }
@@ -1148,6 +1159,7 @@ fn server_handshake(
         selected_profile: selected,
         session_id,
         recv_buf: Vec::new(),
+        pkt_buf: Vec::new(),
         inflight_ids: HashSet::new(),
     })
 }

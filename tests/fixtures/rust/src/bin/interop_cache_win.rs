@@ -5,11 +5,9 @@
 //!   interop_cache_win client <run_dir> <service_name>
 
 #[cfg(windows)]
-use netipc::protocol::{
-    CgroupsBuilder, CgroupsRequest, METHOD_CGROUPS_SNAPSHOT, PROFILE_BASELINE, PROFILE_SHM_HYBRID,
-};
+use netipc::protocol::{PROFILE_BASELINE, PROFILE_SHM_HYBRID};
 #[cfg(windows)]
-use netipc::service::cgroups::{CgroupsCache, ManagedServer};
+use netipc::service::cgroups::{CgroupsCache, Handlers, ManagedServer};
 #[cfg(windows)]
 use netipc::transport::windows::{ClientConfig, ServerConfig};
 
@@ -28,44 +26,42 @@ fn detect_profiles() -> u32 {
 }
 
 #[cfg(windows)]
-fn test_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
-    if method_code != METHOD_CGROUPS_SNAPSHOT {
-        return None;
+fn server_handlers() -> Handlers {
+    Handlers {
+        on_snapshot: Some(std::sync::Arc::new(|request, builder| {
+            if request.layout_version != 1 || request.flags != 0 {
+                return false;
+            }
+
+            builder.set_header(1, 42);
+            let items = [
+                (
+                    1001u32,
+                    0u32,
+                    1u32,
+                    b"docker-abc123" as &[u8],
+                    b"/sys/fs/cgroup/docker/abc123" as &[u8],
+                ),
+                (2002, 0, 1, b"k8s-pod-xyz", b"/sys/fs/cgroup/kubepods/xyz"),
+                (
+                    3003,
+                    0,
+                    0,
+                    b"systemd-user",
+                    b"/sys/fs/cgroup/user.slice/user-1000",
+                ),
+            ];
+
+            for (hash, options, enabled, name, path) in &items {
+                if builder.add(*hash, *options, *enabled, name, path).is_err() {
+                    return false;
+                }
+            }
+            true
+        })),
+        snapshot_max_items: 3,
+        ..Handlers::default()
     }
-    if CgroupsRequest::decode(request_payload).is_err() {
-        return None;
-    }
-
-    let mut buf = vec![0u8; RESPONSE_BUF_SIZE];
-    let mut builder = CgroupsBuilder::new(&mut buf, 3, 1, 42);
-
-    let items = [
-        (
-            1001u32,
-            0u32,
-            1u32,
-            b"docker-abc123" as &[u8],
-            b"/sys/fs/cgroup/docker/abc123" as &[u8],
-        ),
-        (2002, 0, 1, b"k8s-pod-xyz", b"/sys/fs/cgroup/kubepods/xyz"),
-        (
-            3003,
-            0,
-            0,
-            b"systemd-user",
-            b"/sys/fs/cgroup/user.slice/user-1000",
-        ),
-    ];
-
-    for (hash, options, enabled, name, path) in &items {
-        if builder.add(*hash, *options, *enabled, name, path).is_err() {
-            return None;
-        }
-    }
-
-    let total = builder.finish();
-    buf.truncate(total);
-    Some(buf)
 }
 
 #[cfg(windows)]
@@ -81,13 +77,7 @@ fn run_server(run_dir: &str, service: &str) -> i32 {
         ..ServerConfig::default()
     };
 
-    let mut server = ManagedServer::new(
-        run_dir,
-        service,
-        config,
-        RESPONSE_BUF_SIZE,
-        std::sync::Arc::new(test_handler),
-    );
+    let mut server = ManagedServer::new(run_dir, service, config, server_handlers());
 
     let stop_flag = server.running_flag();
 

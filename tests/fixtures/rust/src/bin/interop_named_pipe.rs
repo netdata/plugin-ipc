@@ -53,6 +53,7 @@ fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Er
     // Receive one message
     let mut buf = [0u8; 65600];
     let (hdr, payload) = session.receive(&mut buf)?;
+    let payload = payload.to_vec();
 
     // Echo as response
     let mut resp = hdr;

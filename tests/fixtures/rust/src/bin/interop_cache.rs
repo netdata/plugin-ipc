@@ -17,11 +17,8 @@ fn main() {
 #[cfg(not(windows))]
 mod posix_only {
 
-    use netipc::protocol::{
-        CgroupsBuilder, CgroupsRequest, METHOD_CGROUPS_SNAPSHOT, PROFILE_BASELINE,
-        PROFILE_SHM_HYBRID,
-    };
-    use netipc::service::cgroups::{CgroupsCache, ManagedServer};
+    use netipc::protocol::{PROFILE_BASELINE, PROFILE_SHM_HYBRID};
+    use netipc::service::cgroups::{CgroupsCache, Handlers, ManagedServer};
     use netipc::transport::posix::{ClientConfig, ServerConfig};
 
     const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;
@@ -35,46 +32,42 @@ mod posix_only {
         }
     }
 
-    /// Build a snapshot with 3 test items.
-    fn cgroups_handler(method_code: u16, request_payload: &[u8]) -> Option<Vec<u8>> {
-        if method_code != METHOD_CGROUPS_SNAPSHOT {
-            return None;
+    fn server_handlers() -> Handlers {
+        Handlers {
+            on_snapshot: Some(std::sync::Arc::new(|request, builder| {
+                if request.layout_version != 1 || request.flags != 0 {
+                    return false;
+                }
+
+                builder.set_header(1, 42);
+                let items: &[(u32, u32, u32, &[u8], &[u8])] = &[
+                    (
+                        1001,
+                        0,
+                        1,
+                        b"docker-abc123",
+                        b"/sys/fs/cgroup/docker/abc123",
+                    ),
+                    (2002, 0, 1, b"k8s-pod-xyz", b"/sys/fs/cgroup/kubepods/xyz"),
+                    (
+                        3003,
+                        0,
+                        0,
+                        b"systemd-user",
+                        b"/sys/fs/cgroup/user.slice/user-1000",
+                    ),
+                ];
+
+                for &(hash, options, enabled, name, path) in items {
+                    if builder.add(hash, options, enabled, name, path).is_err() {
+                        return false;
+                    }
+                }
+                true
+            })),
+            snapshot_max_items: 3,
+            ..Handlers::default()
         }
-
-        if CgroupsRequest::decode(request_payload).is_err() {
-            return None;
-        }
-
-        let mut buf = vec![0u8; RESPONSE_BUF_SIZE];
-        let mut builder = CgroupsBuilder::new(&mut buf, 3, 1, 42);
-
-        let items: &[(u32, u32, u32, &[u8], &[u8])] = &[
-            (
-                1001,
-                0,
-                1,
-                b"docker-abc123",
-                b"/sys/fs/cgroup/docker/abc123",
-            ),
-            (2002, 0, 1, b"k8s-pod-xyz", b"/sys/fs/cgroup/kubepods/xyz"),
-            (
-                3003,
-                0,
-                0,
-                b"systemd-user",
-                b"/sys/fs/cgroup/user.slice/user-1000",
-            ),
-        ];
-
-        for &(hash, options, enabled, name, path) in items {
-            if builder.add(hash, options, enabled, name, path).is_err() {
-                return None;
-            }
-        }
-
-        let total = builder.finish();
-        buf.truncate(total);
-        Some(buf)
     }
 
     fn server_config() -> ServerConfig {
@@ -107,13 +100,7 @@ mod posix_only {
     }
 
     fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut server = ManagedServer::new(
-            run_dir,
-            service,
-            server_config(),
-            RESPONSE_BUF_SIZE,
-            std::sync::Arc::new(|code, payload| cgroups_handler(code, payload)),
-        );
+        let mut server = ManagedServer::new(run_dir, service, server_config(), server_handlers());
 
         println!("READY");
 

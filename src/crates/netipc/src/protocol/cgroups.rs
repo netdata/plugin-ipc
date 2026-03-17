@@ -293,6 +293,12 @@ impl<'a> CgroupsBuilder<'a> {
         }
     }
 
+    /// Update the response header fields written by `finish()`.
+    pub fn set_header(&mut self, systemd_enabled: u32, generation: u64) {
+        self.systemd_enabled = systemd_enabled;
+        self.generation = generation;
+    }
+
     /// Add one cgroup item. Handles offset bookkeeping, NUL termination,
     /// and alignment.
     pub fn add(
@@ -412,6 +418,18 @@ impl<'a> CgroupsBuilder<'a> {
 
         final_packed_start + packed_data_len
     }
+}
+
+/// Estimate a safe upper bound for the number of cgroup items that can fit in
+/// `buf_size`. This is a reservation hint for the builder, not a guarantee for
+/// arbitrary string lengths.
+pub fn estimate_cgroups_max_items(buf_size: usize) -> u32 {
+    if buf_size <= CGROUPS_RESP_HDR_SIZE {
+        return 0;
+    }
+
+    let min_aligned_item = align8(CGROUPS_ITEM_HDR_SIZE + 2);
+    ((buf_size - CGROUPS_RESP_HDR_SIZE) / (CGROUPS_DIR_ENTRY_SIZE + min_aligned_item)) as u32
 }
 
 /// CGROUPS_SNAPSHOT dispatch: decode request, build response via handler.
