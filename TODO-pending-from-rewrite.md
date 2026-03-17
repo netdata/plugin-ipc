@@ -12,10 +12,11 @@ Restore a fully clean validation state after the rewrite and the repo-wide Rust 
 
 ## TL;DR
 
-Two categories of incomplete work remaining from the plugin-ipc rewrite:
+Current remaining work after the verified Linux and Windows reruns on 2026-03-17:
 
 1. **Test coverage**: Target is 100% line coverage across all 3 languages on both POSIX and Windows. Exceptions allowed only if justified and documented.
-2. **Benchmark/stress-test matrix**: Must cover all scenarios × all language pairs × both transports × both platforms, including batching and pipelining.
+2. **Hardening and stress coverage**: The benchmark matrix and generated reports are now green on both POSIX and Windows, but Windows stress tests, SHM/service edge-case coverage, and cache-failure coverage are still missing.
+3. **Final production gate**: External review and Costa approval still remain.
 
 ## Review Update (2026-03-16)
 
@@ -240,6 +241,9 @@ Current POSIX benchmark status after the SHM attach fix:
     - this is the same underlying hot-path allocation/design problem seen earlier in Level 2
     - public Level 2 should remain strongly typed and minimal
     - the library, not the caller, owns buffer management and must avoid per-request allocations on the hot path
+- User direction on 2026-03-17 after pushing `f7d1356`:
+  - run a final `win11` build/test/benchmark validation on the current `main`
+  - then clean up this TODO so only real remaining work stays unchecked
 
 ### Pending
 
@@ -452,11 +456,10 @@ Current POSIX benchmark status after the SHM attach fix:
 
 - [x] Add explicit run metadata to benchmark CSV output, starting with `target_rps`.
 - [x] Update both benchmark generators to validate the full matrix from explicit CSV data and fail on incomplete inputs.
-- [ ] Bring the C Level 2 implementation back in sync with the normalized typed public API.
+- [x] Bring the C Level 2 implementation back in sync with the normalized typed public API.
   - Verified on 2026-03-17:
-    - `src/libnetdata/netipc/include/netipc/netipc_service.h` already exposes the new typed public L2 contract.
-    - `src/libnetdata/netipc/src/service/netipc_service.c` and `src/libnetdata/netipc/src/service/netipc_service_win.c` still implement the old caller-buffer API.
-    - the tree does not build until those sources and the C call sites are migrated.
+    - `src/libnetdata/netipc/include/netipc/netipc_service.h`, `src/libnetdata/netipc/src/service/netipc_service.c`, and `src/libnetdata/netipc/src/service/netipc_service_win.c` now match the typed public L2 contract closely enough for the full Linux and Windows validation paths to build and pass.
+    - the earlier header/source mismatch note is stale.
 
 ## Plan
 
@@ -481,24 +484,21 @@ Current POSIX benchmark status after the SHM attach fix:
      - `benchmarks-windows.csv` and `benchmarks-windows.md` regenerated successfully
      - generator exited zero and reported all configured floors met
      - copied back to the local repo from `win11`
-6. [ ] Commit the currently verified rerun state before deeper snapshot-performance changes.
-7. [ ] Analyze the remaining rerun gaps with concrete evidence before editing code:
-   - Windows default build still broken because `netipc_rust` in `ALL` builds POSIX-only Rust bins on Windows
-   - POSIX snapshot benchmark floors still fail on current code
-   - Linux C coverage threshold still fails on current code
-8. [ ] Complete the allocation audit for L1/L2 request paths across C, Go, and Rust:
-   - identify every per-request heap allocation in baseline and SHM client paths
-   - separate benchmark-only rebuild costs from production library costs
-   - confirm which allocations are unavoidable API-return allocations versus reusable transport scratch buffers
-   - redesign public L2 APIs so buffer reuse stays internal to the library, while L1 may continue exposing caller-managed scratch semantics
-9. [ ] Implement the required fixes.
+6. [x] Commit the currently verified rerun state before deeper snapshot-performance changes.
+7. [x] Analyze the remaining rerun gaps with concrete evidence before editing code.
+   - Windows default build issue: fixed
+   - POSIX snapshot benchmark floor failures: fixed
+   - Linux C coverage threshold gap: still open and tracked in the coverage section below
+8. [x] Complete the allocation audit for L1/L2 request paths across C, Go, and Rust.
+9. [x] Implement the required benchmark/runtime fixes.
    - precompute snapshot benchmark payload inputs to remove per-request string formatting/rebuild cost from the synthetic handlers
-   - eliminate per-request production-path allocations in L1/L2 client/service paths by reusing owned scratch buffers
+   - eliminate per-request production-path allocations in hot L1/L2 paths where the typed API allows internal scratch reuse
    - keep public L2 APIs strongly typed, with internal buffer ownership/reuse hidden from callers
    - make the Windows default build usable on Windows
-   - close the Linux C coverage gap
-10. [ ] Rerun the affected Linux and Windows validation paths.
-11. [ ] Commit the verified fixes and refreshed artifacts with explicit file selection.
+10. [x] Rerun the affected Linux and Windows validation paths.
+    - Linux validation rerun: green
+    - Windows validation rerun on exact current `main` (2026-03-17): green
+11. [x] Commit the verified fixes and refreshed artifacts with explicit file selection.
 
 ## Fresh Benchmark Evidence (2026-03-16)
 
@@ -999,7 +999,7 @@ Ping-pong scenarios (1–4) must additionally be tested at:
 - [x] Ping-pong + batching (baseline + SHM) exists in the benchmark drivers and runner scripts on both platforms.
 - [x] Pipelining + batching exists in the runner scripts and benchmark drivers.
 - [x] Rust and Go pipelining clients exist.
-- [ ] What remains is regenerating real benchmark artifacts with the new runner/generator path.
+- [x] Real benchmark artifacts regenerated with the new runner/generator path.
 
 #### B. Missing Language Coverage
 
@@ -1032,22 +1032,22 @@ Ping-pong scenarios (1–4) must additionally be tested at:
   - reject incomplete/stale CSVs
   - generate sections for batch and pipeline+batch scenarios
   - stop assuming Windows is always 2×2 or pipeline is C-only
-- [ ] **Real artifacts must be regenerated**
+- [x] **Real artifacts regenerated from complete runs**
   - `benchmarks-posix.csv` / `benchmarks-posix.md`
   - `benchmarks-windows.csv` / `benchmarks-windows.md`
 
 #### F. Benchmark Reporting Requirements (from TODO-rewrite.md, TODO-hardening.md)
 
 Each benchmark run must report (CSV columns already partially exist):
-- [ ] **Actual throughput** (req/s) — already present
-- [ ] **Server CPU utilization** (% of one core) — already present (from `SERVER_CPU_SEC`)
-- [ ] **Client CPU utilization** (% of one core) — already present
-- [ ] **Total CPU utilization** (client + server) — already present
-- [ ] **Latency percentiles**: p50, p95, p99 (µs) — already present
+- [x] **Actual throughput** (req/s) — already present
+- [x] **Server CPU utilization** (% of one core) — already present (from `SERVER_CPU_SEC`)
+- [x] **Client CPU utilization** (% of one core) — already present
+- [x] **Total CPU utilization** (client + server) — already present
+- [x] **Latency percentiles**: p50, p95, p99 (µs) — already present
 - [ ] **Correctness verification** — counter chain / payload verification per run (from TODO-rewrite.md: "Each benchmark validates correctness (counter chain verification)")
 
 Additional reporting requirements from TODO-rewrite.md Phase 13:
-- [ ] **Performance floors must be enforced** (below = bug, not acceptable):
+- [x] **Performance floors are enforced by the report generators** (below = bug, not acceptable):
   - SHM ping-pong max: ≥ 1M req/s for all pairs
   - SHM snapshot refresh max: ≥ 1M req/s for C/Rust pairs, ≥ 800k for Go pairs
   - UDS ping-pong max: ≥ 150k req/s for all pairs
@@ -1058,7 +1058,7 @@ Additional reporting requirements from TODO-rewrite.md Phase 13:
   - SHM ping-pong: C→C ~3.2M, Rust→Rust ~2.9M, Go→Go ~1.2M
   - UDS ping-pong: C→C ~220k, Rust→Rust ~240k, Go→Go ~164k
   - Local lookup: C ~25M (now ~79M), Rust ~23M (now ~185M), Go ~13M (now ~109M)
-- [ ] **Benchmark docs generated from complete runs, never hand-edited**:
+- [x] **Benchmark docs generated from complete runs, never hand-edited**:
   - `benchmarks-posix.md`
   - `benchmarks-windows.md`
 
@@ -1088,19 +1088,19 @@ Additional reporting requirements from TODO-rewrite.md Phase 13:
 ### From TODO-hardening.md (completion criteria, unchecked items)
 
 - [ ] 100% line coverage proven in all 3 languages
-- [ ] benchmarks-posix.md generated from current code
-- [ ] benchmarks-windows.md generated from current code
-- [ ] All performance floors met
+- [x] benchmarks-posix.md generated from current code
+- [x] benchmarks-windows.md generated from current code
+- [x] All performance floors met
 - [ ] All 4 external reviewers agree: production-ready
 - [ ] Costa approves
 
 ### From TODO-spec-compliance.md (unchecked items)
 
-- [ ] 1. L2 typed call spec — update docs to match returned-view API
-- [ ] 2. L3 status fields — ~~done in previous session~~
-- [ ] 3. L2 batch client calls — ~~done in previous session~~
-- [ ] 4. L2 server batch dispatch — ~~done in previous session~~
-- [ ] 5. SHM interop tests — ~~done in previous session~~
+- [x] 1. L2 typed call spec — update docs to match returned-view API
+- [x] 2. L3 status fields — done
+- [x] 3. L2 batch client calls — done
+- [x] 4. L2 server batch dispatch — done
+- [x] 5. SHM interop tests — done
 - [ ] 6. Windows service/cache test coverage — still open (Rust service tests unix-only)
 - [ ] 7. Coverage tooling — 100% target, not 90%
 - [ ] 8. File size discipline — large files still exist (cgroups.rs ~3000 lines)
@@ -1167,7 +1167,7 @@ Coverage required for hardening revalidation that is NOT yet done:
 
 - [x] ~~Service layers skip unexpected non-request messages~~ — **FIXED**: All 6 implementations (C/Rust/Go × POSIX/Windows) now break out of the session loop when `kind != REQUEST`, terminating the session.
 - [x] ~~Client typed-call paths don't validate response headers~~ — **FIXED in single-call paths**: All 6 implementations validate kind, code, message_id, and transport_status in `do_raw_call()`.
-- [ ] **C batch path missing message_id validation** — `do_increment_batch_attempt()` in `netipc_service.c` and `netipc_service_win.c` checks kind, code, transport_status, item_count but **NOT message_id**. Rust and Go batch paths DO check message_id. This is a cross-language inconsistency and a correctness bug.
+- [x] **C batch path missing message_id validation** — fixed in both `netipc_service.c` and `netipc_service_win.c`. All 3 languages now validate `kind`, `code`, `message_id`, `transport_status`, and batch sizing in the batch response path.
 - [ ] No test verifies that unexpected message kinds/codes terminate the session (test gap, not code gap).
 
 ### 7.3 Codec Overlap Validation (from TODO-production-readiness-review.md)
@@ -1273,42 +1273,30 @@ Rust and Go have deterministic helper-level negative tests. C does not.
 
 ### BLOCKING for production (must fix before Netdata integration)
 
-1. ~~Protocol violation handling~~ — **VERIFIED FIXED** (session terminates on bad kind). ~~C batch path missing message_id check~~ — **NOW FIXED** in both `netipc_service.c` and `netipc_service_win.c`.
-2. ~~Client response validation~~ — **VERIFIED FIXED** in all paths (single + batch).
-3. ~~Codec overlap rejection~~ — **VERIFIED ALREADY IMPLEMENTED**. Add to spec docs.
-4. 100% test coverage across all 3 languages (current: 70-98% depending on file)
-5. ~~Rust/Go L3 cache O(1)~~ — **VERIFIED ALREADY IMPLEMENTED** (HashMap/map).
+1. 100% test coverage across all 3 languages, with documented exceptions only where truly unavoidable
+2. Windows coverage tooling and Windows-specific gap tests
+3. Windows stress tests in C, Rust, and Go
+4. Final multi-agent external review and Costa approval
 
-### HIGH priority (spec compliance / performance)
+### HIGH priority (quality / completeness)
 
-6. Complete benchmark matrix (324 runs + cache lookups)
-7. Rust Windows bench driver (does not exist)
-8. Pipelining for Rust and Go bench drivers (only C has it)
-9. Batching benchmarks (random 1-1000, no bench driver supports batching today)
-10. Windows stress tests (none exist in any language)
-11. Rust L2 service unit tests on Windows (`#[cfg(all(test, unix))]` — zero Windows tests)
-12. ~~Resolve pending decisions (44, 45, 46)~~ — **ALL RESOLVED** (see section 7.1)
-13. Verify Windows SHM interop post-redesign (need to test on win11)
-14. ~~Fix C `worker_count=0` rejection~~ — **NOW FIXED** (clamps to 1, matching Rust/Go)
-15. Rename `CgroupsServer` → generic name in Rust/Go (misleading naming)
+5. Rust L2 service unit tests on Windows (`#[cfg(all(test, unix))]` — zero Windows tests today)
+6. SHM-mode L2 service test (L2 client+server with SHM negotiation)
+7. Server session capacity and growth path tests
+8. Cache build failure-path tests (malloc-failure injection)
+9. Performance floors enforcement in CI
 
-### MEDIUM priority (quality / completeness)
+### MEDIUM priority (maintainability / cleanup)
 
-16. ~~L3 response buffer sizing~~ — **VERIFIED ALREADY CORRECT** (derived from config)
-17. File size discipline — large files need splitting (Costa decision needed)
-18. L2 typed call spec document alignment (`level2-typed-api.md`)
-19. Add codec overlap rejection to spec (`codec-cgroups-snapshot.md`)
-20. SEQPACKET first-packet truncation test
-21. C helper deterministic negative tests
-22. SHM-mode L2 service test (L2 client+server with SHM negotiation)
-23. Test: unexpected message kind terminates session
-24. Performance floors enforcement in CI
+10. File size discipline — large files still need splitting
+11. SEQPACKET first-packet truncation test
+12. C helper deterministic negative tests
 
 ---
 
-## 3. Decisions (Resolved)
+## 3. Decisions (Current)
 
-1. **Windows Rust coverage**: Documented exclusion. Rust Windows coverage relies on interop tests + code review. Justified: cargo-tarpaulin is Linux-only, llvm-cov doesn't work with windows-gnu target.
+1. **Windows Rust coverage**: Still unresolved. `cargo-tarpaulin` is Linux-only, and `cargo-llvm-cov` feasibility with the `x86_64-pc-windows-gnu` target still needs investigation. Until that investigation is finished, the target remains 100% Windows coverage across all 3 languages.
 2. **Pipelining on Windows**: Implement and test. Named Pipes should support pipelining — investigate any claim otherwise.
 3. **Batch sizes for benchmarks**: Random 1–1000 per request.
 
@@ -1407,10 +1395,10 @@ Small, independent, low-risk items.
 | B: POSIX coverage | **DONE** | C: 90.5%, Rust: 87.0%, Go: 86.2% (298 new tests total) |
 | C: Windows coverage | Not started | Scripts + gap tests for C and Go on Windows |
 | D: All bench drivers | **DONE** | C/Rust/Go × POSIX/Windows, all 6 scenarios |
-| E: POSIX benchmarks | **DONE** | 325 measurements, full matrix |
-| E: Windows benchmarks | **NEEDS RE-RUN** | Previous run used pre-QPC-fix binaries |
+| E: POSIX benchmarks | **DONE** | Regenerated from current code, floors met |
+| E: Windows benchmarks | **DONE** | Exact-current-commit rerun on `win11`, reports regenerated, floors met |
 | F: Stress parity | Not started | Windows stress tests (C/Rust/Go) |
-| G: Windows SHM verify | Not started | Verify 4 previously-failing interop pairs |
+| G: Windows SHM verify | **DONE** | Final `win11` validation on current `main` passed `23/23` tests |
 | H: Final validation | Not started | Multi-agent review |
 
 ### Bugs found and fixed during implementation (10 total)
@@ -1435,17 +1423,14 @@ Small, independent, low-risk items.
 
 ### Remaining work
 
-1. [ ] **Re-run full Windows benchmark matrix** with QPC-fixed binaries (all 3 languages)
-2. [ ] **Windows stress tests** (Phase F) — none exist in any language
-   - Port C test_stress.c to Windows (Win32 threads + Named Pipes)
+1. [ ] **Windows stress tests** (Phase F) — none exist in any language
+   - Port C `test_stress.c` to Windows (Win32 threads + Named Pipes)
    - Add Rust/Go Windows stress tests
    - Add batch stress tests
-3. [ ] **Windows SHM interop verification** (Phase G) — verify 4 previously-failing pairs
-4. [ ] **Windows coverage scripts** (Phase C) — run-coverage-c-windows.sh, run-coverage-go-windows.sh
-5. [ ] **Rust SHM performance** — 1.6M vs 4.5M historical (investigate)
-6. [ ] **Go snapshot baseline** — 50k vs C 121k (bench driver per-request allocation)
-7. [ ] **Regenerate benchmark reports** (benchmarks-posix.md, benchmarks-windows.md)
-8. [ ] **Final multi-agent review** (Phase H) — 4 external reviewers, fix findings, re-review
+2. [ ] **Windows coverage scripts** (Phase C) — `run-coverage-c-windows.sh`, `run-coverage-go-windows.sh`
+3. [ ] **Rust Windows service/cache coverage** — Rust L2 service tests are still Unix-only
+4. [ ] **SHM/service hardening tests** — SHM-mode L2 service, session growth, cache failure paths
+5. [ ] **Final multi-agent review** (Phase H) — 4 external reviewers, fix findings, re-review
 
 ### Dependencies
 - A, B, D, F, G: independent — can run in parallel
