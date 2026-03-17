@@ -44,6 +44,44 @@ Verified facts from the current codebase:
   - they were generated before the duplicate-row cleanup / stricter validation
   - implication: they must be regenerated from fresh benchmark runs before they can be used again
 
+## Documentation Review Update (2026-03-17)
+
+Verified facts from `docs/`:
+
+- The top-level docs declare the specifications authoritative:
+  - `docs/README.md`
+  - "When code and spec disagree, the spec is right unless explicitly revised."
+- The Codec docs are clear about borrowed view semantics:
+  - `docs/codec.md`
+  - decode returns ephemeral typed views
+  - zero-allocation decode is the default path
+  - library calls/callbacks may aggressively reuse buffers
+- The Level 2 docs are partly clear, but internally inconsistent:
+  - `docs/level2-typed-api.md` says:
+    - Level 2 callers interact only with typed request/response structures
+    - server callbacks are strongly typed and single-item
+    - typed handlers should not see transport details or wire format
+  - the same document later specifies:
+    - public managed server uses a raw-byte handler:
+      - `handler(method_code, request_payload_bytes, response_buffer) -> success/failure`
+    - client examples/signatures still expose caller-managed response buffers for typed calls
+- `docs/getting-started.md` reinforces the weaker/rawer L2 shape in examples:
+  - C/Rust/Go client examples allocate and pass `resp_buf` / `responseBuf` into public L2 calls
+  - C server example uses a raw top-level handler that dispatches to typed codec helpers
+  - Rust and Go server examples also expose raw request bytes and raw response buffers / owned response bytes
+- `docs/level3-snapshot-api.md` matches the borrowed-view model better:
+  - Level 3 consumes ephemeral L2 views and materializes owned cache data
+
+Working conclusion from the docs:
+
+- This is not only implementation drift.
+- The authoritative docs already contain two competing L2 models:
+  - a stronger model in the principles:
+    - L2 is typed and transport-hidden
+  - a weaker model in the handler/signature/examples:
+    - L2 still exposes raw request bytes and caller-managed response buffers
+- Therefore the next code changes must be preceded by a doc correction/normalization pass for Level 2, so implementation is aligned with one explicit model instead of a mixed one.
+
 ## Decisions
 
 ### Made
@@ -62,33 +100,123 @@ Verified facts from the current codebase:
 
 ### Pending
 
-- No unresolved user decision is pending right now.
 - Current task is to fix the remaining verified rerun gaps and commit:
   - POSIX benchmark floor failures
   - failing Linux coverage gate
   - Windows default build entrypoint
-- Decision required: what exactly the POSIX snapshot benchmarks should measure.
+- Decision required: what public L2 server surface C and Rust should expose after the Level 2 spec normalization.
   - evidence collected on 2026-03-17:
-    - current max-tier failures are structural, not a rustfmt regression:
-      - `snapshot-baseline`
-        - `c -> go`: `71376`
-        - `rust -> go`: `72365`
-        - `go -> go`: `70011`
-        - floor: `100000`
-      - `snapshot-shm`
-        - C/Rust-only pairs: `467887` to `618470`
-        - Go-involved pairs: `107163` to `177478`
-        - floors: `1000000` for C/Rust-only, `800000` for any Go-involved pair
-    - these numbers are almost unchanged from the previously committed benchmark artifacts, so the problem predates the formatting rerun
-    - all three benchmark servers rebuild the same 16-item snapshot payload on every request:
-      - C POSIX: `bench/drivers/c/bench_posix.c`
-      - Go POSIX: `bench/drivers/go/main.go`
-      - Rust POSIX: `bench/drivers/rust/src/main.rs`
-      - each handler does string formatting + builder work for all 16 items per call
-    - the Go POSIX L2 client also allocates temporary send/receive buffers on every call in `src/go/pkg/netipc/service/cgroups/client.go`, which explains why `go -> c` on `snapshot-shm` is far below `c -> c`
+    - Go has already been moved to a typed public handler surface:
+      - `src/go/pkg/netipc/service/cgroups/types.go`
+      - `type Handlers struct { OnIncrement ... OnStringReverse ... OnSnapshot ... SnapshotMaxItems ... }`
+    - C still exposes a raw public managed-server callback:
+      - `src/libnetdata/netipc/include/netipc/netipc_service.h`
+      - `typedef bool (*nipc_server_handler_fn)(void *user, uint16_t method_code, const uint8_t *request_payload, size_t request_len, uint8_t *response_buf, size_t response_buf_size, size_t *response_len_out);`
+    - Rust still exposes a raw public managed-server callback returning owned response bytes:
+      - `src/crates/netipc/src/service/cgroups.rs`
+      - `pub type HandlerFn = Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync>;`
+      - `ManagedServer::new(..., _response_buf_size, handler)`
+    - both C and Rust public L2 clients still expose caller-managed response buffers:
+      - C:
+        - `nipc_client_call_cgroups_snapshot(... request_buf, response_buf, ...)`
+        - `nipc_client_call_increment(... response_buf, ...)`
+        - `nipc_client_call_string_reverse(... response_buf, ...)`
+      - Rust:
+        - `call_snapshot(&mut response_buf)`
+        - `call_string_reverse()` and `call_increment_batch()` still allocate per call internally
+    - implication:
+      - the remaining refactor is no longer just “make buffers internal”
+      - C and Rust need a public typed L2 server registration surface that matches the normalized spec, or they remain out of contract even if internal scratch reuse is fixed
+  - concrete design fork:
+    - either replace the current public raw managed-server API in C/Rust with a typed cgroups-specific handler surface
+    - or keep the raw managed-server public and add a typed wrapper beside it
+  - recommendation:
+    - replace the current public raw L2 server surface with a typed cgroups handler surface, and keep the raw dispatch/session loop as an internal implementation detail
+    - reason:
+      - this matches the corrected L2 spec directly
+      - it keeps the public surface minimal
+      - it avoids having two competing public L2 models again
+  - follow-up doc verification on 2026-03-17:
+    - the normalized spec is already explicit here, so this is no longer a real design choice:
+      - `docs/level2-typed-api.md`
+        - "Public Level 2 APIs are strongly typed and single-item by default"
+        - server side:
+          - "Registers typed callbacks per supported method"
+          - "Never exposes raw payload bytes, raw response buffers, or outer transport metadata to the callback"
+      - `docs/getting-started.md`
+        - "Servers register typed callbacks only"
+        - "User code never switches on method_code and never touches raw payload bytes or raw response buffers"
+    - implication:
+      - option `A` is the spec-aligned implementation
+      - options that keep a raw public L2 server API beside the typed one would contradict the current normalized specification
+- Decision required: how far to change the Go/Rust L2 server APIs to achieve zero-allocation request handling.
+  - evidence collected on 2026-03-17:
+    - Go handler API returns owned response bytes:
+      - `src/go/pkg/netipc/service/cgroups/types.go`
+      - `type HandlerFunc func(methodCode uint16, request []byte) ([]byte, bool)`
+    - Rust handler API returns owned response bytes:
+      - `src/crates/netipc/src/service/cgroups.rs`
+      - `pub type HandlerFn = Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync>`
+    - Go server session path copies request payloads into owned slices and allocates response buffers per request:
+      - `src/go/pkg/netipc/service/cgroups/client.go`
+      - `src/go/pkg/netipc/transport/posix/uds.go`
+    - Rust server session path does the same:
+      - `src/crates/netipc/src/service/cgroups.rs`
+      - `src/crates/netipc/src/transport/posix.rs`
+    - C is closer to the desired model already:
+      - handler writes into caller-provided response buffer
+      - remaining per-request allocations are mostly SHM message assembly and some batch scratch buffers
   - implication:
-    - one part of the gap is real L2/L1 client overhead
-    - another part is benchmark-server synthetic payload-construction work
+    - eliminating client/transport scratch allocations is straightforward and should be done
+    - eliminating all server-side request allocations in Go/Rust may require changing the public handler API to a caller-buffer/write-into-scratch model closer to C
+  - user decision on 2026-03-17:
+    - chosen option: `B`
+    - change Go/Rust L2 server APIs to match the C-style write-into-caller-buffer model
+    - compatibility wrappers are not the chosen path for this task
+  - superseded by later API-boundary clarification on 2026-03-17:
+    - L1 may expose caller-managed buffers / borrowed payload views
+    - L2 must remain strongly typed and must not require caller-side buffer management
+    - implication:
+      - the library must own and reuse any scratch/response buffers needed internally for L2
+      - public L2 APIs should return typed values/views, not require `responseBuf` arguments
+      - internal L2 handlers/session loops may still use reusable per-session scratch buffers behind the API
+- Decision required: how to handle the Go/Rust L1 `Receive()` API semantics while removing per-request allocations.
+  - evidence collected on 2026-03-17:
+    - C L1 already exposes borrowed payload views via caller/internal buffers
+    - Go and Rust L1 currently return owned payload buffers from `Receive()`
+    - after changing Go `Receive()` to return borrowed slices, the existing Go pipelining test starts failing because it stores payloads across later receives:
+      - `src/go/pkg/netipc/transport/posix/uds_test.go`
+      - the test appends `rPayload` into a request list / response map and compares it after additional receives
+    - implication:
+    - borrowed-slice `Receive()` aligns Go/Rust with C and supports zero-allocation hot paths
+    - but it changes the semantics of a public L1 API that currently behaves like ownership transfer
+  - user clarification on 2026-03-17 narrows this decision:
+    - caller-managed scratch is acceptable at L1
+    - implication:
+      - borrowed payload views are acceptable for L1 as long as the lifetime is documented clearly
+      - the public-API ownership debate now primarily belongs to L2, not L1
+- Decision required: what public ownership/lifetime model L2 should expose once buffer ownership moves inside the library.
+  - evidence collected on 2026-03-17:
+    - current public L2 client APIs still expose response buffers directly:
+      - C: `nipc_client_call_cgroups_snapshot(... request_buf, response_buf, ..., &view_out)`
+      - Rust: `call_snapshot(&mut response_buf) -> Result<CgroupsResponseView>`
+      - Go: `CallSnapshot(responseBuf) -> (*CgroupsResponseView, error)`
+    - current public L2 server APIs in Go and Rust are also not strongly typed yet:
+      - Go `HandlerFunc func(methodCode uint16, request []byte, responseBuf []byte) (int, bool)`
+      - Rust `HandlerFn = Arc<dyn Fn(u16, &[u8]) -> Option<Vec<u8>> + Send + Sync>`
+    - C already has protocol-level typed dispatch helpers that match the desired layering better:
+      - `nipc_dispatch_increment()`
+      - `nipc_dispatch_string_reverse()`
+      - `nipc_dispatch_cgroups_snapshot()`
+      - these decode raw requests, call typed business handlers, and encode into a provided response buffer
+    - L3 caches in Go and Rust already demonstrate the desired ownership boundary:
+      - the library owns reusable response buffers internally and exposes typed cache operations to callers
+  - implication:
+    - removing `responseBuf` from public L2 client calls is not enough by itself
+    - public L2 server callbacks should also stop exposing raw transport/request-response buffers if L2 is to remain truly typed
+    - some methods need an explicit lifetime model for returned data:
+      - snapshot can naturally return an ephemeral typed view backed by internal reusable storage
+      - variable-size string/batch results can either return ephemeral typed views, owned results, or both APIs
 
 ### User Decisions
 
@@ -125,6 +253,57 @@ Verified facts from the current codebase:
     - the snapshot path is L2 and should likely perform substantially better
     - possible causes may be outside the transport layer
     - L3 cache lookup is only a hypothesis and must be verified from code, not assumed
+- 2026-03-17:
+  - User decision after root-cause review:
+    - precompute the benchmark snapshot payload inputs instead of formatting strings on every request
+    - fix the library so L1/L2 request paths do not allocate per request in production
+  - implications:
+    - benchmark handlers may cache prebuilt names/paths and, if needed, the serialized snapshot payload template
+    - library clients/transports need reusable scratch buffers owned by the client/session context, not fresh heap allocations on each call
+    - this is a real production-path performance requirement, not a benchmark-only workaround
+  - risks to control:
+    - reusable buffers must remain per-client/per-session, never shared unsafely across concurrent requests
+    - cached snapshot benchmark payloads must keep wire correctness when the generation field changes
+    - changes must preserve zero-allocation behavior for both baseline and SHM paths where practical, not just one language or one transport
+- 2026-03-17:
+  - User clarified the API boundary explicitly:
+    - L1 is the bits-and-pieces layer, so caller-managed buffer lifetimes are acceptable there
+    - L2 is the strongly typed layer, so the caller should only work with its own typed structures/views
+    - L2 must not require the caller to provide scratch/response buffers or manage transport buffers
+    - the library must ensure zero-copy / reusable-buffer behavior internally for L2 hot paths
+    - L2 contract clarified further:
+      - each L2 method owns its typed request encoder and typed response decoder
+      - L2 client callers provide typed request objects/values, not transport buffers
+      - L2 server callers register typed callbacks and receive typed request objects/values, not raw wire payloads
+      - typed response shape determines whether zero-allocation decode is possible via views or requires owned materialization
+      - apart from method-specific encode/decode constraints, the rest of the L2 hot path must remain zero-copy / zero-allocation
+  - implications:
+    - previous direction to expose C-style caller response buffers directly in Go/Rust L2 is not acceptable
+    - Go/Rust/C L2 public APIs must converge toward internal buffer ownership with typed return values/views
+    - benchmark and transport work must separate internal hot-path scratch management from public L2 caller semantics
+    - method-specific codec design now becomes the primary place where allocation policy is decided:
+      - fixed-size scalars should decode with no heap allocation
+      - structured variable-size payloads should decode to ephemeral typed views over internal reusable buffers where possible
+      - owned result materialization should happen only when the typed API explicitly promises ownership
+- 2026-03-17:
+  - User decision for the documentation/spec work:
+    - fix the specifications so Level 2 is explicit and unambiguous
+    - L2 must expose the absolute minimum requirements from clients and servers
+    - public L2 APIs must be typed and must not leak transport buffers, raw payload bytes, or method-code dispatch to callers
+  - scope for this documentation pass:
+    - normalize `docs/level2-typed-api.md`
+    - normalize `docs/getting-started.md`
+    - update any related docs that still reinforce the weaker/raw-byte L2 model
+  - expected outcome:
+    - one consistent L2 contract across principles, examples, and terminology
+    - explicit separation between:
+      - L1 caller-managed scratch / payload buffers
+      - Codec typed encode/decode + typed builders/views
+      - L2 typed convenience API with internal reusable buffers
+  - risks to control:
+    - typed views returned by L2 need a clearly documented lifetime model
+    - any internal reusable buffers must be per-client/per-session to preserve concurrency safety
+    - moving buffer ownership inside L2 may require API adjustments in all three languages, not only Go/Rust
 
 ### Current Implementation Chunk
 
@@ -159,9 +338,19 @@ Verified facts from the current codebase:
    - Windows default build still broken because `netipc_rust` in `ALL` builds POSIX-only Rust bins on Windows
    - POSIX snapshot benchmark floors still fail on current code
    - Linux C coverage threshold still fails on current code
-8. [ ] Implement the required fixes.
-9. [ ] Rerun the affected Linux and Windows validation paths.
-10. [ ] Commit the verified fixes and refreshed artifacts with explicit file selection.
+8. [ ] Complete the allocation audit for L1/L2 request paths across C, Go, and Rust:
+   - identify every per-request heap allocation in baseline and SHM client paths
+   - separate benchmark-only rebuild costs from production library costs
+   - confirm which allocations are unavoidable API-return allocations versus reusable transport scratch buffers
+   - redesign public L2 APIs so buffer reuse stays internal to the library, while L1 may continue exposing caller-managed scratch semantics
+9. [ ] Implement the required fixes.
+   - precompute snapshot benchmark payload inputs to remove per-request string formatting/rebuild cost from the synthetic handlers
+   - eliminate per-request production-path allocations in L1/L2 client/service paths by reusing owned scratch buffers
+   - keep public L2 APIs strongly typed, with internal buffer ownership/reuse hidden from callers
+   - make the Windows default build usable on Windows
+   - close the Linux C coverage gap
+10. [ ] Rerun the affected Linux and Windows validation paths.
+11. [ ] Commit the verified fixes and refreshed artifacts with explicit file selection.
 
 ## Fresh Benchmark Evidence (2026-03-16)
 

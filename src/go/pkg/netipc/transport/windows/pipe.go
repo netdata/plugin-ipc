@@ -300,10 +300,7 @@ func rawWrite(handle syscall.Handle, data []byte) error {
 	return nil
 }
 
-func rawSendMsg(handle syscall.Handle, hdr, payload []byte) error {
-	msg := make([]byte, len(hdr)+len(payload))
-	copy(msg, hdr)
-	copy(msg[len(hdr):], payload)
+func rawSendMsg(handle syscall.Handle, msg []byte) error {
 	return rawWrite(handle, msg)
 }
 
@@ -354,6 +351,10 @@ type Session struct {
 	// Internal receive buffer for chunked reassembly
 	recvBuf []byte
 
+	// Reusable packet scratch buffers for send/receive chunk assembly.
+	sendBuf []byte
+	pktBuf  []byte
+
 	// In-flight message_id set (client-side only)
 	inflightIDs map[uint64]struct{}
 }
@@ -380,6 +381,8 @@ func (s *Session) Close() {
 		s.handle = syscall.InvalidHandle
 	}
 	s.recvBuf = nil
+	s.sendBuf = nil
+	s.pktBuf = nil
 }
 
 // Connect establishes a session to a server pipe derived from runDir + serviceName.
@@ -456,9 +459,10 @@ func (s *Session) sendInner(hdr *protocol.Header, payload []byte) error {
 
 	// Single packet?
 	if totalMsg <= int(s.PacketSize) {
-		var hdrBuf [protocol.HeaderSize]byte
-		hdr.Encode(hdrBuf[:])
-		return rawSendMsg(s.handle, hdrBuf[:], payload)
+		msg := ensurePipeScratchBuf(&s.sendBuf, totalMsg)
+		hdr.Encode(msg[:protocol.HeaderSize])
+		copy(msg[protocol.HeaderSize:], payload)
+		return rawSendMsg(s.handle, msg[:totalMsg])
 	}
 
 	// Chunked send
@@ -480,9 +484,10 @@ func (s *Session) sendInner(hdr *protocol.Header, payload []byte) error {
 	chunkCount := 1 + continuationChunks
 
 	// First chunk
-	var hdrBuf [protocol.HeaderSize]byte
-	hdr.Encode(hdrBuf[:])
-	if err := rawSendMsg(s.handle, hdrBuf[:], payload[:firstChunkPayload]); err != nil {
+	pktBuf := ensurePipeScratchBuf(&s.sendBuf, int(s.PacketSize))
+	hdr.Encode(pktBuf[:protocol.HeaderSize])
+	copy(pktBuf[protocol.HeaderSize:], payload[:firstChunkPayload])
+	if err := rawSendMsg(s.handle, pktBuf[:protocol.HeaderSize+firstChunkPayload]); err != nil {
 		return err
 	}
 
@@ -506,9 +511,9 @@ func (s *Session) sendInner(hdr *protocol.Header, payload []byte) error {
 			ChunkPayloadLen: uint32(thisChunk),
 		}
 
-		var chkBuf [protocol.HeaderSize]byte
-		chk.Encode(chkBuf[:])
-		if err := rawSendMsg(s.handle, chkBuf[:], payload[offset:offset+thisChunk]); err != nil {
+		chk.Encode(pktBuf[:protocol.HeaderSize])
+		copy(pktBuf[protocol.HeaderSize:], payload[offset:offset+thisChunk])
+		if err := rawSendMsg(s.handle, pktBuf[:protocol.HeaderSize+thisChunk]); err != nil {
 			return err
 		}
 
@@ -579,8 +584,7 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 
 	// Non-chunked
 	if n >= totalMsg {
-		payload := make([]byte, hdr.PayloadLen)
-		copy(payload, buf[protocol.HeaderSize:protocol.HeaderSize+int(hdr.PayloadLen)])
+		payload := buf[protocol.HeaderSize : protocol.HeaderSize+int(hdr.PayloadLen)]
 
 		// Validate batch directory
 		if hdr.Flags&protocol.FlagBatch != 0 && hdr.ItemCount > 1 {
@@ -617,7 +621,7 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 	}
 	expectedChunkCount := 1 + expectedContinuations
 
-	pktBuf := make([]byte, s.PacketSize)
+	pktBuf := ensurePipeScratchBuf(&s.pktBuf, int(s.PacketSize))
 
 	ci := uint32(1)
 	for assembled < int(hdr.PayloadLen) {
@@ -662,8 +666,7 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 		ci++
 	}
 
-	payload := make([]byte, hdr.PayloadLen)
-	copy(payload, s.recvBuf[:hdr.PayloadLen])
+	payload := s.recvBuf[:hdr.PayloadLen]
 
 	// Validate batch directory
 	if hdr.Flags&protocol.FlagBatch != 0 && hdr.ItemCount > 1 {
@@ -679,6 +682,13 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 	}
 
 	return hdr, payload, nil
+}
+
+func ensurePipeScratchBuf(buf *[]byte, needed int) []byte {
+	if len(*buf) < needed {
+		*buf = make([]byte, needed)
+	}
+	return (*buf)[:needed]
 }
 
 // ---------------------------------------------------------------------------

@@ -209,18 +209,12 @@ func batchClientConfigWin(profiles uint32) windows.ClientConfig {
 //  Ping-pong handler
 // ---------------------------------------------------------------------------
 
-func pingPongHandlerWin(methodCode uint16, request []byte) ([]byte, bool) {
-	if methodCode != protocol.MethodIncrement {
-		return nil, false
+func pingPongHandlersWin() cgroups.Handlers {
+	return cgroups.Handlers{
+		OnIncrement: func(counter uint64) (uint64, bool) {
+			return counter + 1, true
+		},
 	}
-	if len(request) < 8 {
-		return nil, false
-	}
-	counter := binary.NativeEndian.Uint64(request[:8])
-	counter++
-	resp := make([]byte, 8)
-	binary.NativeEndian.PutUint64(resp, counter)
-	return resp, true
 }
 
 // ---------------------------------------------------------------------------
@@ -228,29 +222,41 @@ func pingPongHandlerWin(methodCode uint16, request []byte) ([]byte, bool) {
 // ---------------------------------------------------------------------------
 
 var snapshotGenWin uint64
+var snapshotNamesWin [][]byte
+var snapshotPathsWin [][]byte
 
-func snapshotHandlerWin(methodCode uint16, request []byte) ([]byte, bool) {
-	if methodCode != protocol.MethodCgroupsSnapshot {
-		return nil, false
+func initSnapshotTemplateWin() bool {
+	if snapshotNamesWin != nil {
+		return true
 	}
-	if _, err := protocol.DecodeCgroupsRequest(request); err != nil {
-		return nil, false
-	}
 
-	gen := atomic.AddUint64(&snapshotGenWin, 1)
-	buf := make([]byte, responseBufSizeWin)
-	builder := protocol.NewCgroupsBuilder(buf, 16, 1, gen)
-
+	snapshotNamesWin = make([][]byte, 16)
+	snapshotPathsWin = make([][]byte, 16)
 	for i := uint32(0); i < 16; i++ {
 		name := fmt.Sprintf("cgroup-%d", i)
 		path := fmt.Sprintf("/sys/fs/cgroup/bench/cg-%d", i)
-		if err := builder.Add(1000+i, 0, i%2, []byte(name), []byte(path)); err != nil {
-			return nil, false
-		}
+		snapshotNamesWin[i] = []byte(name)
+		snapshotPathsWin[i] = []byte(path)
 	}
+	return true
+}
 
-	total := builder.Finish()
-	return buf[:total], true
+func snapshotHandlersWin() cgroups.Handlers {
+	return cgroups.Handlers{
+		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+			if request.LayoutVersion != 1 || request.Flags != 0 || !initSnapshotTemplateWin() {
+				return false
+			}
+			builder.SetHeader(1, atomic.AddUint64(&snapshotGenWin, 1))
+			for i := uint32(0); i < 16; i++ {
+				if err := builder.Add(1000+i, 0, i%2, snapshotNamesWin[i], snapshotPathsWin[i]); err != nil {
+					return false
+				}
+			}
+			return true
+		},
+		SnapshotMaxItems: 16,
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -258,18 +264,18 @@ func snapshotHandlerWin(methodCode uint16, request []byte) ([]byte, bool) {
 // ---------------------------------------------------------------------------
 
 func runServerWin(runDir, service string, profiles uint32, durationSec int, handlerType string) int {
-	var handler cgroups.HandlerFunc
+	var handlers cgroups.Handlers
 	switch handlerType {
 	case "ping-pong":
-		handler = pingPongHandlerWin
+		handlers = pingPongHandlersWin()
 	case "snapshot":
-		handler = snapshotHandlerWin
+		handlers = snapshotHandlersWin()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown handler type: %s\n", handlerType)
 		return 1
 	}
 
-	server := cgroups.NewServer(runDir, service, serverConfigWin(profiles), handler)
+	server := cgroups.NewServer(runDir, service, serverConfigWin(profiles), handlers)
 
 	fmt.Println("READY")
 
@@ -299,7 +305,7 @@ func runBatchServerWin(runDir, service string, profiles uint32, durationSec int)
 	cfg := batchServerConfigWin(profiles)
 	cfg.MaxResponsePayloadBytes = batchBufSizeWin * 2 // extra room for builder overhead
 
-	server := cgroups.NewServer(runDir, service, cfg, pingPongHandlerWin)
+	server := cgroups.NewServer(runDir, service, cfg, pingPongHandlersWin())
 
 	fmt.Println("READY")
 
@@ -1083,14 +1089,12 @@ func runSnapshotClientWin(runDir, service string, profiles uint32, durationSec i
 	cpuStart := cpuNSWin()
 	wallStart := time.Now()
 	deadline := time.Duration(durationSec) * time.Second
-	respBuf := make([]byte, responseBufSizeWin)
-
 	for time.Since(wallStart) < deadline {
 		rl.wait()
 
 		t0 := time.Now()
 
-		view, err := client.CallSnapshot(respBuf)
+		view, err := client.CallSnapshot()
 		t1 := time.Now()
 
 		if err != nil {

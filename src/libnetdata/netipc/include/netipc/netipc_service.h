@@ -94,6 +94,14 @@ typedef struct {
     uint32_t reconnect_count;
     uint32_t call_count;
     uint32_t error_count;
+
+    /* Internal reusable Level 2 scratch, derived from negotiated limits. */
+    uint8_t *request_buf;
+    size_t   request_buf_size;
+    uint8_t *response_buf;
+    size_t   response_buf_size;
+    uint8_t *send_buf;
+    size_t   send_buf_size;
 } nipc_client_ctx_t;
 
 /* ------------------------------------------------------------------ */
@@ -149,9 +157,6 @@ void nipc_client_close(nipc_client_ctx_t *ctx);
  * Blocking typed call: encode request, send, receive, check
  * transport_status, decode response.
  *
- * request_buf: caller-owned buffer for encoding the request (>= 4 bytes).
- * response_buf/response_buf_size: caller-owned buffer for receiving
- *   the response. Must be large enough for the expected snapshot.
  * view_out: on success, filled with the ephemeral snapshot view.
  *   Valid only until the next call on this context.
  *
@@ -164,9 +169,6 @@ void nipc_client_close(nipc_client_ctx_t *ctx);
  */
 nipc_error_t nipc_client_call_cgroups_snapshot(
     nipc_client_ctx_t *ctx,
-    uint8_t *request_buf,
-    uint8_t *response_buf,
-    size_t response_buf_size,
     nipc_cgroups_resp_view_t *view_out);
 
 /* ------------------------------------------------------------------ */
@@ -176,7 +178,6 @@ nipc_error_t nipc_client_call_cgroups_snapshot(
 /*
  * Blocking typed call: send value, receive incremented value.
  *
- * response_buf: caller-owned buffer (>= 8 + NIPC_HEADER_LEN bytes).
  * value_out:    on success, the response value.
  *
  * Same retry policy as cgroups snapshot.
@@ -184,8 +185,6 @@ nipc_error_t nipc_client_call_cgroups_snapshot(
 nipc_error_t nipc_client_call_increment(
     nipc_client_ctx_t *ctx,
     uint64_t request_value,
-    uint8_t *response_buf,
-    size_t response_buf_size,
     uint64_t *value_out);
 
 /*
@@ -193,15 +192,13 @@ nipc_error_t nipc_client_call_increment(
  *
  * request_values/count: array of values to send.
  * response_values: caller-owned array (>= count elements) for results.
- * response_buf/size: scratch buffer for the batch message.
  *
  * Returns NIPC_OK on success (all count responses decoded).
  */
 nipc_error_t nipc_client_call_increment_batch(
     nipc_client_ctx_t *ctx,
     const uint64_t *request_values, uint32_t count,
-    uint64_t *response_values,
-    uint8_t *response_buf, size_t response_buf_size);
+    uint64_t *response_values);
 
 /* ------------------------------------------------------------------ */
 /*  Typed STRING_REVERSE call                                          */
@@ -210,9 +207,7 @@ nipc_error_t nipc_client_call_increment_batch(
 /*
  * Blocking typed call: send string, receive reversed string.
  *
- * response_buf: caller-owned buffer (large enough for header + reversed
- *   string + NUL).
- * view_out:     on success, ephemeral view into response_buf. Valid
+ * view_out:     on success, ephemeral view into internal client storage. Valid
  *   only until the next call on this context.
  *
  * Same retry policy as cgroups snapshot.
@@ -221,33 +216,33 @@ nipc_error_t nipc_client_call_string_reverse(
     nipc_client_ctx_t *ctx,
     const char *request_str,
     uint32_t request_str_len,
-    uint8_t *response_buf,
-    size_t response_buf_size,
     nipc_string_reverse_view_t *view_out);
 
 /* ------------------------------------------------------------------ */
 /*  Managed server                                                     */
 /* ------------------------------------------------------------------ */
 
-/*
- * Server handler callback. Receives raw request payload and must
- * produce raw response payload.
- *
- * method_code: the method from the outer envelope (e.g. 2 for cgroups).
- * request_payload/request_len: the decoded request payload bytes.
- * response_buf/response_buf_size: buffer for the handler to write
- *   the response payload into.
- * response_len_out: the handler sets this to the actual response size.
- *
- * Return true on success, false on failure. Failure results in
- * transport_status = INTERNAL_ERROR with empty payload.
- */
+/* Internal dispatch callback shape used by the managed-server loop. */
 typedef bool (*nipc_server_handler_fn)(
     void *user,
     uint16_t method_code,
     const uint8_t *request_payload, size_t request_len,
     uint8_t *response_buf, size_t response_buf_size,
     size_t *response_len_out);
+
+/* Typed managed-server callbacks for the cgroups service surface. */
+typedef struct {
+    nipc_increment_handler_fn      on_increment;
+    nipc_string_reverse_handler_fn on_string_reverse;
+    nipc_cgroups_handler_fn        on_cgroups_snapshot;
+
+    /* Optional explicit reservation hint for snapshot builders. When 0,
+     * the library derives a safe upper bound from negotiated response
+     * limits. */
+    uint32_t snapshot_max_items;
+
+    void *user;
+} nipc_cgroups_handlers_t;
 
 typedef struct nipc_managed_server nipc_managed_server_t;
 
@@ -281,6 +276,7 @@ struct nipc_managed_server {
     /* Callback */
     nipc_server_handler_fn handler;
     void *handler_user;
+    nipc_cgroups_handlers_t typed_handlers;
 
     /* Response buffer size (per-session allocation) */
     size_t   response_buf_size;
@@ -316,10 +312,11 @@ struct nipc_managed_server {
 };
 
 /*
- * Initialize and start listening. Does NOT start workers.
- * Call nipc_server_run() to start the acceptor+worker loop.
+ * Initialize and start listening with typed cgroups handlers.
+ * Does NOT start workers. Call nipc_server_run() to start the
+ * acceptor+worker loop.
  */
-nipc_error_t nipc_server_init(nipc_managed_server_t *server,
+nipc_error_t nipc_server_init_typed(nipc_managed_server_t *server,
                                const char *run_dir,
                                const char *service_name,
 #ifdef _WIN32
@@ -328,9 +325,7 @@ nipc_error_t nipc_server_init(nipc_managed_server_t *server,
                                const nipc_uds_server_config_t *config,
 #endif
                                int worker_count,
-                               size_t response_buf_size,
-                               nipc_server_handler_fn handler,
-                               void *user);
+                               const nipc_cgroups_handlers_t *handlers);
 
 /*
  * Run the acceptor loop. Blocking. Accepts clients, reads requests,

@@ -19,7 +19,7 @@ func TestClientRefreshFromReady(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testCgroupsHandler)
+	ts := startTestServer(svc, testHandlers())
 	defer ts.stop()
 
 	client := NewClient(testRunDir, svc, testClientConfig())
@@ -47,7 +47,7 @@ func TestClientRefreshFromAuthFailed(t *testing.T) {
 	// Server with token=1
 	sCfg := testServerConfig()
 	sCfg.AuthToken = 0x1111
-	s := NewServer(testRunDir, svc, sCfg, testCgroupsHandler)
+	s := NewServer(testRunDir, svc, sCfg, testHandlers())
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
@@ -87,7 +87,7 @@ func TestClientRefreshFromIncompatible(t *testing.T) {
 	// Server supports only SHMFutex
 	sCfg := testServerConfig()
 	sCfg.SupportedProfiles = protocol.ProfileSHMFutex
-	s := NewServer(testRunDir, svc, sCfg, testCgroupsHandler)
+	s := NewServer(testRunDir, svc, sCfg, testHandlers())
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
@@ -124,7 +124,7 @@ func TestClientRefreshFromBroken(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testCgroupsHandler)
+	ts := startTestServer(svc, testHandlers())
 
 	client := NewClient(testRunDir, svc, testClientConfig())
 	defer client.Close()
@@ -140,8 +140,7 @@ func TestClientRefreshFromBroken(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Force a call to break the connection
-	respBuf := make([]byte, responseBufSize)
-	_, _ = client.CallSnapshot(respBuf)
+	_, _ = client.CallSnapshot()
 
 	// At this point, state should be BROKEN
 	if client.state != StateBroken {
@@ -150,7 +149,7 @@ func TestClientRefreshFromBroken(t *testing.T) {
 	}
 
 	// Start a new server
-	ts2 := startTestServer(svc, testCgroupsHandler)
+	ts2 := startTestServer(svc, testHandlers())
 	defer ts2.stop()
 
 	// Refresh from BROKEN should reconnect
@@ -180,8 +179,7 @@ func TestCallWithRetryNotReady(t *testing.T) {
 	defer client.Close()
 
 	// Don't call Refresh - client is DISCONNECTED
-	respBuf := make([]byte, responseBufSize)
-	_, err := client.CallSnapshot(respBuf)
+	_, err := client.CallSnapshot()
 	if err == nil {
 		t.Fatal("expected error when client is not ready")
 	}
@@ -195,11 +193,11 @@ func TestCallWithRetryNotReady(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNewServerWithWorkersMinimum(t *testing.T) {
-	s := NewServerWithWorkers("/tmp", "test", posix.ServerConfig{}, testCgroupsHandler, 0)
+	s := NewServerWithWorkers("/tmp", "test", posix.ServerConfig{}, testHandlers(), 0)
 	if s.workerCount != 1 {
 		t.Fatalf("expected workerCount=1 for input 0, got %d", s.workerCount)
 	}
-	s2 := NewServerWithWorkers("/tmp", "test", posix.ServerConfig{}, testCgroupsHandler, -5)
+	s2 := NewServerWithWorkers("/tmp", "test", posix.ServerConfig{}, testHandlers(), -5)
 	if s2.workerCount != 1 {
 		t.Fatalf("expected workerCount=1 for input -5, got %d", s2.workerCount)
 	}
@@ -286,7 +284,7 @@ func TestCacheCloseResetsState(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testCgroupsHandler)
+	ts := startTestServer(svc, testHandlers())
 	defer ts.stop()
 
 	cache := NewCache(testRunDir, svc, testClientConfig())
@@ -322,8 +320,8 @@ func TestCacheCustomBufferSize(t *testing.T) {
 	defer cache.Close()
 
 	expectedBufSize := protocol.HeaderSize + 1024
-	if len(cache.responseBuf) != expectedBufSize {
-		t.Fatalf("expected response buf size=%d, got %d", expectedBufSize, len(cache.responseBuf))
+	if got := cache.client.maxReceiveMessageBytes(); got != expectedBufSize {
+		t.Fatalf("expected response buf size=%d, got %d", expectedBufSize, got)
 	}
 }
 
@@ -334,8 +332,9 @@ func TestCacheDefaultBufferSize(t *testing.T) {
 	cache := NewCache(testRunDir, "default", cfg)
 	defer cache.Close()
 
-	if len(cache.responseBuf) != cacheResponseBufSize {
-		t.Fatalf("expected response buf size=%d, got %d", cacheResponseBufSize, len(cache.responseBuf))
+	expectedBufSize := protocol.HeaderSize + cacheResponseBufSize
+	if got := cache.client.maxReceiveMessageBytes(); got != expectedBufSize {
+		t.Fatalf("expected response buf size=%d, got %d", expectedBufSize, got)
 	}
 }
 
@@ -348,7 +347,7 @@ func TestCacheLookupHashNameMismatch(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testCgroupsHandler)
+	ts := startTestServer(svc, testHandlers())
 	defer ts.stop()
 
 	cache := NewCache(testRunDir, svc, testClientConfig())
@@ -394,7 +393,7 @@ func TestCallIncrementBatchEmpty(t *testing.T) {
 	client := NewClient(testRunDir, svc, testClientConfig())
 	defer client.Close()
 
-	results, err := client.CallIncrementBatch(nil, nil)
+	results, err := client.CallIncrementBatch(nil)
 	if err != nil {
 		t.Fatalf("expected nil error for empty batch, got %v", err)
 	}
@@ -402,7 +401,7 @@ func TestCallIncrementBatchEmpty(t *testing.T) {
 		t.Fatalf("expected nil results for empty batch, got %v", results)
 	}
 
-	results2, err := client.CallIncrementBatch([]uint64{}, nil)
+	results2, err := client.CallIncrementBatch([]uint64{})
 	if err != nil {
 		t.Fatalf("expected nil error for empty slice, got %v", err)
 	}

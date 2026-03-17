@@ -52,27 +52,77 @@ caller using Level 1 + Codec directly.
 If a feature cannot be expressed as a composition of Level 1 + Codec, it
 does not belong in Level 2 — it belongs in Level 1 or Codec.
 
-### 2. Callers do not see transports
+### 2. Callers do not see transports or transport buffers
 
 Level 2 clients and servers have no visibility into transport details.
 They do not know whether the underlying connection is UDS, Named Pipe,
 or SHM. They do not know whether their request was chunked. They do not
-manage connections, sessions, or handshakes.
+manage connections, sessions, handshakes, packet boundaries, or batch
+directories.
 
-The entire transport layer is invisible. Level 2 callers interact only
-with typed request/response structures and service identities.
+The entire transport layer is invisible. Public Level 2 callers interact
+only with:
 
-### 3. Callbacks are strongly typed and single-item
+- Typed request values or request views
+- Typed response values or response views
+- Service identity and connection policy
+- Typed handler registration on the server side
 
-Server callbacks receive one decoded typed request view and one response
-builder. They produce one typed response. Period.
+Public Level 2 APIs must not require callers to pass request scratch
+buffers, response scratch buffers, batch assembly buffers, or raw payload
+byte slices.
 
-The typed handler does not know and does not care about transport
-details, wire format, or session state. It receives decoded data and
-returns a result. The Codec dispatch helper handles encoding and
-decoding.
+### 3. Public Level 2 APIs are strongly typed and single-item by default
 
-### 4. At-least-once call semantics
+Each Level 2 method exposes a typed client call and a typed server
+callback contract for exactly one logical request/response item.
+
+The client side:
+
+- Accepts one typed request value or request object
+- Returns one typed response value or typed response view
+- Never exposes raw payload bytes or method codes
+
+The server side:
+
+- Registers typed callbacks per supported method
+- Receives one decoded typed request value or typed request view
+- Returns one typed response value or fills one typed response builder,
+  depending on the message type
+- Never exposes raw payload bytes, raw response buffers, or outer
+  transport metadata to the callback
+
+Method-code dispatch, raw request decoding, raw response encoding, and
+batch extraction are internal Level 2 concerns implemented using Codec +
+Level 1 primitives.
+
+### 4. Internal reusable buffers are owned by the library
+
+To keep the hot path allocation-free where the typed message shape allows
+it, Level 2 owns and reuses its internal wire buffers.
+
+Examples of internal reusable state:
+
+- Per-client request/response scratch buffers
+- Per-session receive buffers and response builders
+- Batch assembly and batch extraction scratch
+
+These buffers are implementation details. Their sizing is derived from
+the negotiated limits and the method-specific Codec contracts. They are
+never part of the public Level 2 API.
+
+Borrowed typed views returned by Level 2 therefore have explicit
+lifetime rules:
+
+- Client-side response views are valid until the next typed call on the
+  same client context, or until the client is closed
+- Server-side request views and response builders are valid only for the
+  duration of the current callback invocation
+
+If a caller needs to retain data longer, it must explicitly materialize
+or copy the typed data.
+
+### 5. At-least-once call semantics
 
 Level 2 client calls are intentionally at-least-once, not exactly-once.
 
@@ -86,7 +136,7 @@ without attempting reconnection.
 
 If the retry also fails, Level 2 reports failure to the caller.
 
-### 5. No hidden background threads (client)
+### 6. No hidden background threads (client)
 
 Level 2 clients do not spawn background threads for connection management.
 Connection state transitions (connect, reconnect, disconnect) happen
@@ -151,22 +201,34 @@ Level 2 exposes per-method-type blocking call functions. Each call:
 5. Decodes the response payload using the Codec
 6. Returns the decoded result directly to the caller
 
-For simple types (INCREMENT), the call returns a scalar value (or via
-out-parameter in C). For complex types (CGROUPS_SNAPSHOT), the call
-returns an ephemeral view that borrows the response buffer and is valid
-until the next call.
+The public call signature is typed. The caller provides typed request
+data only. It does not provide transport scratch buffers.
+
+Response ownership is defined per method type:
+
+- Fixed-size simple responses return scalar values (or out-parameters in
+  C) with no heap allocation
+- Variable-size structured responses should return ephemeral typed views
+  that borrow internal reusable client storage
+- Owned/materialized results are allowed only when the public method
+  contract explicitly promises ownership instead of a borrowed view
 
 There are no callbacks on the client side. Every typed call is a
-synchronous function that returns the decoded result:
+synchronous function that returns the decoded result. The public shape is
+equivalent to:
 
-- **C**: `nipc_client_call_increment(&client, value, &result)` returns an
-  error code, result via out-parameter.
-  `nipc_client_call_cgroups_snapshot(&client, req_buf, resp_buf, resp_size, &view)`
-  returns an error code, view via out-parameter.
+- **C**: `call_increment(&client, value, &result)` returns an error code,
+  result via out-parameter. `call_snapshot(&client, &view)` returns an
+  error code, view via out-parameter.
 - **Rust**: `client.call_increment(value)` returns `Result<u64>`.
-  `client.call_snapshot(&mut resp_buf)` returns `Result<SnapshotView>`.
+  `client.call_snapshot()` returns `Result<SnapshotView<'_>>`.
 - **Go**: `client.CallIncrement(value)` returns `(uint64, error)`.
-  `client.CallSnapshot(respBuf)` returns `(*SnapshotView, error)`.
+  `client.CallSnapshot()` returns `(*SnapshotView, error)`.
+
+When a client call returns a borrowed response view, that view is valid
+until the next typed call on the same client context or until the client
+is closed, unless the method-specific contract states a narrower
+lifetime.
 
 If the client is not READY, the call fails immediately without I/O.
 
@@ -185,6 +247,17 @@ call:
 7. Decodes each response item using the Codec
 8. Returns decoded results to the caller
 
+The public batch-call signature is also typed. The caller provides typed
+request items only. It does not provide raw batch payloads or batch
+scratch buffers.
+
+The returned result is method-specific:
+
+- For fixed-size items, a typed collection of values may be returned
+- For variable-size items, a typed batch view may be returned
+- Owned/materialized collections are allowed only when the public method
+  contract explicitly promises ownership
+
 Items are correlated by position: response item 0 corresponds to
 request item 0. The batch travels as one logical message — no
 pipelining overhead, one round-trip for N items.
@@ -202,7 +275,8 @@ The caller provides at initialization:
 - Auth token for handshake verification
 - Supported/preferred profiles and directional limits
 - Maximum concurrent sessions (worker count limit)
-- A handler callback that dispatches by method code to typed helpers
+- A typed handler table / typed service implementation for the supported
+  methods
 
 The service set is fixed after startup. Adding or removing services
 requires process restart.
@@ -215,52 +289,44 @@ The managed server internally:
 2. Runs an acceptor loop that accepts incoming Level 1 sessions
 3. Spawns a thread (C, Rust) or goroutine (Go) per accepted session,
    up to the configured maximum concurrent sessions
-4. Each session thread reads one Level 1 message at a time, calls the
-   handler callback with the raw request payload, and sends the handler's
-   response back via Level 1
-5. The handler dispatches by `method_code` and delegates to per-method
-   typed dispatch helpers (see Handler contract below)
-6. Per-session isolation: each session has its own recv buffer and
-   response buffer, no cross-session coordination
+4. Each session thread reads one Level 1 message at a time into internal
+   reusable per-session storage
+5. Level 2 dispatches internally by `method_code`, decodes the request
+   with the appropriate Codec helper, invokes the typed callback, encodes
+   the typed response, and sends it back via Level 1
+6. Per-session isolation: each session has its own internal reusable
+   buffers and builders, with no cross-session coordination
 
 ### Handler contract
 
-The managed server uses a raw-byte handler at the transport level:
+The public managed-server contract is typed.
 
-```
-handler(method_code, request_payload_bytes, response_buffer) → success/failure
-```
+The caller registers one typed callback per supported method (or an
+equivalent typed service object / handler table). Level 2 performs the
+method-code dispatch internally.
 
-Each method type provides a **typed dispatch helper** in the Codec layer
-that wraps decode → typed handler → encode. The raw handler dispatches
-by `method_code` and delegates to the appropriate typed helper:
-
-```
-handler(method_code, req, resp) {
-    switch(method_code) {
-        INCREMENT:      dispatch_increment(req, resp, on_increment)
-        STRING_REVERSE: dispatch_string_reverse(req, resp, on_reverse)
-        CGROUPS:        dispatch_cgroups(req, resp, on_cgroups)
-    }
-}
-```
-
-The typed business-logic handler:
+The typed business-logic callback:
 
 - Receives decoded typed data (not raw bytes)
 - For simple types (INCREMENT): receives and returns scalar values
 - For complex types (CGROUPS_SNAPSHOT): receives a decoded request
   and fills a response builder
 - Returns success or failure
-- Never sees transport details, wire format, or raw offsets
-- Never does encode/decode — the dispatch helper handles it
+- Never sees transport details, wire format, raw response buffers, or
+  outer message headers
+- Never does encode/decode — Level 2 + Codec handle that internally
+
+Internal note:
+
+- Implementations may still use method-code switches and per-method Codec
+  dispatch helpers internally
+- That internal structure is not part of the public Level 2 contract
 
 Handler failure semantics:
 
-- If the handler returns success, the dispatch helper's encoded output
-  becomes the response payload and the outer envelope carries
-  `transport_status = OK`.
-- If the handler returns failure, the library sends a response with
+- If the typed callback returns success, the encoded output becomes the
+  response payload and the outer envelope carries `transport_status = OK`.
+- If the typed callback returns failure, the library sends a response with
   `transport_status = INTERNAL_ERROR` and an empty payload
   (`payload_len = 0`, `item_count = 1`). Clients receiving
   INTERNAL_ERROR must not attempt to decode the payload.
@@ -274,10 +340,11 @@ When a batch request arrives (BATCH flag set, item_count > 1), the
 managed server:
 
 1. Extracts each item payload using Level 1 batch extraction
-2. Calls the handler once per item, collecting each response
-3. Assembles individual responses into one Level 1 batch response
+2. Decodes each request item to its typed request form
+3. Calls the typed callback once per item, collecting each typed response
+4. Assembles individual responses into one Level 1 batch response
    using the batch builder, preserving request order
-4. Sends the batch response as one logical message
+5. Sends the batch response as one logical message
 
 Items are correlated by position: response item 0 corresponds to
 request item 0. If the handler fails on any item, the entire batch
@@ -305,6 +372,8 @@ Level 2 must have:
 - **Batch dispatch tests**: single-item message dispatch, batch message
   dispatch with 1 worker, batch message dispatch with multiple workers,
   response order preservation, mixed single and batch messages.
+- **Typed API boundary tests**: public Level 2 clients and servers never
+  require caller-managed wire buffers or raw payload bytes.
 - **Multi-client tests**: multiple concurrent clients to one managed
   server, independent session failure, correct response routing.
 - **Convenience path tests**: call when ready, call when not ready

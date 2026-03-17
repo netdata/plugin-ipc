@@ -172,8 +172,8 @@ When a successful snapshot response arrives, Level 3:
 1. Iterates over the snapshot items using Codec decode functions
    (accessed via Level 2's typed call path)
 2. Copies the needed data from ephemeral views into owned local
-   storage (views are only valid during the callback — Level 3 must
-   materialize them)
+   storage (Level 2 response views are ephemeral and must be
+   materialized before the next typed call on that client context)
 3. Builds or rebuilds the local lookup index (e.g., hash table keyed
    by hash + name)
 4. Replaces the previous cache atomically (the old cache remains valid

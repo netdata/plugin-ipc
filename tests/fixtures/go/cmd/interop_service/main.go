@@ -65,71 +65,46 @@ func clientConfig() posix.ClientConfig {
 	}
 }
 
-// handleCgroups builds a snapshot with 3 test items.
-func handleCgroups(request []byte) ([]byte, bool) {
-	if _, err := protocol.DecodeCgroupsRequest(request); err != nil {
-		return nil, false
-	}
-
-	buf := make([]byte, responseBufSize)
-	builder := protocol.NewCgroupsBuilder(buf, 3, 1, 42)
-
-	items := []struct {
-		hash, options, enabled uint32
-		name, path             []byte
-	}{
-		{1001, 0, 1, []byte("docker-abc123"), []byte("/sys/fs/cgroup/docker/abc123")},
-		{2002, 0, 1, []byte("k8s-pod-xyz"), []byte("/sys/fs/cgroup/kubepods/xyz")},
-		{3003, 0, 0, []byte("systemd-user"), []byte("/sys/fs/cgroup/user.slice/user-1000")},
-	}
-
-	for _, item := range items {
-		if err := builder.Add(item.hash, item.options, item.enabled, item.name, item.path); err != nil {
-			return nil, false
-		}
-	}
-
-	total := builder.Finish()
-	return buf[:total], true
-}
-
-// testHandler dispatches INCREMENT, CGROUPS_SNAPSHOT, and STRING_REVERSE.
-func testHandler(methodCode uint16, request []byte) ([]byte, bool) {
-	switch methodCode {
-	case protocol.MethodIncrement:
-		resp := make([]byte, protocol.IncrementPayloadSize)
-		n, ok := protocol.DispatchIncrement(request, resp, func(v uint64) (uint64, bool) {
+func testHandlers() cgroups.Handlers {
+	return cgroups.Handlers{
+		OnIncrement: func(v uint64) (uint64, bool) {
 			return v + 1, true
-		})
-		if !ok {
-			return nil, false
-		}
-		return resp[:n], true
+		},
+		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+			if request.LayoutVersion != 1 || request.Flags != 0 {
+				return false
+			}
+			builder.SetHeader(1, 42)
 
-	case protocol.MethodCgroupsSnapshot:
-		return handleCgroups(request)
+			items := []struct {
+				hash, options, enabled uint32
+				name, path             []byte
+			}{
+				{1001, 0, 1, []byte("docker-abc123"), []byte("/sys/fs/cgroup/docker/abc123")},
+				{2002, 0, 1, []byte("k8s-pod-xyz"), []byte("/sys/fs/cgroup/kubepods/xyz")},
+				{3003, 0, 0, []byte("systemd-user"), []byte("/sys/fs/cgroup/user.slice/user-1000")},
+			}
 
-	case protocol.MethodStringReverse:
-		resp := make([]byte, responseBufSize)
-		n, ok := protocol.DispatchStringReverse(request, resp, func(s string) (string, bool) {
+			for _, item := range items {
+				if err := builder.Add(item.hash, item.options, item.enabled, item.name, item.path); err != nil {
+					return false
+				}
+			}
+			return true
+		},
+		OnStringReverse: func(s string) (string, bool) {
 			runes := []rune(s)
 			for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
 				runes[i], runes[j] = runes[j], runes[i]
 			}
 			return string(runes), true
-		})
-		if !ok {
-			return nil, false
-		}
-		return resp[:n], true
-
-	default:
-		return nil, false
+		},
+		SnapshotMaxItems: 3,
 	}
 }
 
 func runServer(runDir, service string) int {
-	server := cgroups.NewServer(runDir, service, serverConfig(), testHandler)
+	server := cgroups.NewServer(runDir, service, serverConfig(), testHandlers())
 
 	fmt.Println("READY")
 
@@ -155,11 +130,10 @@ func runClient(runDir, service string) int {
 		return 1
 	}
 
-	respBuf := make([]byte, responseBufSize)
 	ok := true
 
 	// --- Test INCREMENT: 42 -> 43 ---
-	incResult, err := client.CallIncrement(42, respBuf)
+	incResult, err := client.CallIncrement(42)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "client: increment call failed: %v\n", err)
 		ok = false
@@ -169,7 +143,7 @@ func runClient(runDir, service string) int {
 	}
 
 	// --- Test CGROUPS_SNAPSHOT: 3 items ---
-	view, err := client.CallSnapshot(respBuf)
+	view, err := client.CallSnapshot()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "client: cgroups call failed: %v\n", err)
 		ok = false
@@ -209,7 +183,7 @@ func runClient(runDir, service string) int {
 	}
 
 	// --- Test INCREMENT batch: [10,20,30] -> [11,21,31] ---
-	batchResults, err := client.CallIncrementBatch([]uint64{10, 20, 30}, respBuf)
+	batchResults, err := client.CallIncrementBatch([]uint64{10, 20, 30})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "client: increment batch call failed: %v\n", err)
 		ok = false
@@ -231,7 +205,7 @@ func runClient(runDir, service string) int {
 	}
 
 	// --- Test STRING_REVERSE: "hello" -> "olleh" ---
-	srView, err := client.CallStringReverse("hello", respBuf)
+	srView, err := client.CallStringReverse("hello")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "client: string_reverse call failed: %v\n", err)
 		ok = false

@@ -7,7 +7,6 @@ package cgroups
 import (
 	"time"
 
-	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
 )
 
@@ -31,22 +30,15 @@ type Cache struct {
 	refreshFailureCount uint32
 	epoch               time.Time // monotonic reference point
 	lastRefreshTs       int64     // elapsed ms since epoch
-
-	responseBuf []byte
 }
 
 // NewCache creates a new L3 cache. Creates the underlying L2 client
 // context. Does NOT connect. Does NOT require the server to be running.
 // Cache starts empty (populated == false).
 func NewCache(runDir, serviceName string, config posix.ClientConfig) *Cache {
-	bufSize := cacheResponseBufSize
-	if config.MaxResponsePayloadBytes > 0 {
-		bufSize = protocol.HeaderSize + int(config.MaxResponsePayloadBytes)
-	}
 	return &Cache{
-		client:      NewClient(runDir, serviceName, config),
-		epoch:       time.Now(),
-		responseBuf: make([]byte, bufSize),
+		client: NewClient(runDir, serviceName, config),
+		epoch:  time.Now(),
 	}
 }
 
@@ -58,7 +50,7 @@ func NewCache(runDir, serviceName string, config posix.ClientConfig) *Cache {
 func (c *Cache) Refresh() bool {
 	c.client.Refresh()
 
-	view, err := c.client.CallSnapshot(c.responseBuf)
+	view, err := c.client.CallSnapshot()
 	if err != nil {
 		c.refreshFailureCount++
 		return false

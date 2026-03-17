@@ -298,6 +298,26 @@ func NewCgroupsBuilder(buf []byte, maxItems uint32, systemdEnabled uint32, gener
 	}
 }
 
+// SetHeader updates the response header fields written by Finish().
+func (b *CgroupsBuilder) SetHeader(systemdEnabled uint32, generation uint64) {
+	b.systemdEnabled = systemdEnabled
+	b.generation = generation
+}
+
+// EstimateCgroupsMaxItems returns a safe upper bound for the number of
+// cgroup items that can fit in a response buffer of size bufSize.
+//
+// This is an upper bound for builder reservation, not a promise that all of
+// those items will fit with arbitrary string lengths.
+func EstimateCgroupsMaxItems(bufSize int) uint32 {
+	if bufSize <= cgroupsRespHdr {
+		return 0
+	}
+
+	minAlignedItem := Align8(cgroupsItemHdr + 2)
+	return uint32((bufSize - cgroupsRespHdr) / (cgroupsDirEntry + minAlignedItem))
+}
+
 // Add adds one cgroup item. Handles offset bookkeeping, NUL termination,
 // and alignment.
 func (b *CgroupsBuilder) Add(hash, options, enabled uint32, name, path []byte) error {

@@ -33,16 +33,16 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	authToken          = uint64(0xBE4C400000C0FFEE)
-	responseBufSize    = 65536
-	maxLatencySamples  = 10_000_000
-	defaultDuration    = 30
-	profileUDS         = protocol.ProfileBaseline
-	profileSHM         = protocol.ProfileBaseline | protocol.ProfileSHMHybrid
+	authToken         = uint64(0xBE4C400000C0FFEE)
+	responseBufSize   = 65536
+	maxLatencySamples = 10_000_000
+	defaultDuration   = 30
+	profileUDS        = protocol.ProfileBaseline
+	profileSHM        = protocol.ProfileBaseline | protocol.ProfileSHMHybrid
 
 	// Batch scenario limits (mirrors C driver).
-	maxBatchItems   = 1000
-	batchBufSize    = maxBatchItems*48 + 4096 // 52096
+	maxBatchItems = 1000
+	batchBufSize  = maxBatchItems*48 + 4096 // 52096
 )
 
 // ---------------------------------------------------------------------------
@@ -181,54 +181,53 @@ func batchClientConfig(profiles uint32) posix.ClientConfig {
 }
 
 // ---------------------------------------------------------------------------
-//  Ping-pong handler (INCREMENT method)
-// ---------------------------------------------------------------------------
-
-func pingPongHandler(methodCode uint16, request []byte) ([]byte, bool) {
-	if methodCode != protocol.MethodIncrement {
-		return nil, false
-	}
-	if len(request) < 8 {
-		return nil, false
-	}
-
-	counter := binary.NativeEndian.Uint64(request[:8])
-	counter++
-	resp := make([]byte, 8)
-	binary.NativeEndian.PutUint64(resp, counter)
-	return resp, true
-}
-
-// ---------------------------------------------------------------------------
 //  Snapshot handler (16 cgroup items)
 // ---------------------------------------------------------------------------
 
 var snapshotGen uint64
+var snapshotNames [][]byte
+var snapshotPaths [][]byte
 
-func snapshotHandler(methodCode uint16, request []byte) ([]byte, bool) {
-	if methodCode != protocol.MethodCgroupsSnapshot {
-		return nil, false
+func initSnapshotTemplate() bool {
+	if snapshotNames != nil {
+		return true
 	}
 
-	if _, err := protocol.DecodeCgroupsRequest(request); err != nil {
-		return nil, false
-	}
-
-	gen := atomic.AddUint64(&snapshotGen, 1)
-
-	buf := make([]byte, responseBufSize)
-	builder := protocol.NewCgroupsBuilder(buf, 16, 1, gen)
-
+	snapshotNames = make([][]byte, 16)
+	snapshotPaths = make([][]byte, 16)
 	for i := uint32(0); i < 16; i++ {
 		name := fmt.Sprintf("cgroup-%d", i)
 		path := fmt.Sprintf("/sys/fs/cgroup/bench/cg-%d", i)
-		if err := builder.Add(1000+i, 0, i%2, []byte(name), []byte(path)); err != nil {
-			return nil, false
-		}
+		snapshotNames[i] = []byte(name)
+		snapshotPaths[i] = []byte(path)
 	}
+	return true
+}
 
-	total := builder.Finish()
-	return buf[:total], true
+func pingPongHandlers() cgroups.Handlers {
+	return cgroups.Handlers{
+		OnIncrement: func(counter uint64) (uint64, bool) {
+			return counter + 1, true
+		},
+	}
+}
+
+func snapshotHandlers() cgroups.Handlers {
+	return cgroups.Handlers{
+		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+			if request.LayoutVersion != 1 || request.Flags != 0 || !initSnapshotTemplate() {
+				return false
+			}
+			builder.SetHeader(1, atomic.AddUint64(&snapshotGen, 1))
+			for i := uint32(0); i < 16; i++ {
+				if err := builder.Add(1000+i, 0, i%2, snapshotNames[i], snapshotPaths[i]); err != nil {
+					return false
+				}
+			}
+			return true
+		},
+		SnapshotMaxItems: 16,
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -236,18 +235,18 @@ func snapshotHandler(methodCode uint16, request []byte) ([]byte, bool) {
 // ---------------------------------------------------------------------------
 
 func runServer(runDir, service string, profiles uint32, durationSec int, handlerType string) int {
-	var handler cgroups.HandlerFunc
+	var handlers cgroups.Handlers
 	switch handlerType {
 	case "ping-pong":
-		handler = pingPongHandler
+		handlers = pingPongHandlers()
 	case "snapshot":
-		handler = snapshotHandler
+		handlers = snapshotHandlers()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown handler type: %s\n", handlerType)
 		return 1
 	}
 
-	server := cgroups.NewServer(runDir, service, serverConfig(profiles), handler)
+	server := cgroups.NewServer(runDir, service, serverConfig(profiles), handlers)
 
 	fmt.Println("READY")
 
@@ -277,7 +276,7 @@ func runBatchServer(runDir, service string, profiles uint32, durationSec int) in
 	cfg := batchServerConfig(profiles)
 	cfg.MaxResponsePayloadBytes = batchBufSize * 2 // extra room for builder overhead
 
-	server := cgroups.NewServerWithWorkers(runDir, service, cfg, pingPongHandler, 4)
+	server := cgroups.NewServerWithWorkers(runDir, service, cfg, pingPongHandlers(), 4)
 
 	fmt.Println("READY")
 
@@ -985,14 +984,12 @@ func runSnapshotClient(runDir, service string, profiles uint32, durationSec int,
 	cpuStart := cpuNS()
 	wallStart := time.Now()
 	deadline := time.Duration(durationSec) * time.Second
-	respBuf := make([]byte, responseBufSize)
-
 	for time.Since(wallStart) < deadline {
 		rl.wait()
 
 		t0 := time.Now()
 
-		view, err := client.CallSnapshot(respBuf)
+		view, err := client.CallSnapshot()
 		t1 := time.Now()
 
 		if err != nil {

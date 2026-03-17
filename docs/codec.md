@@ -59,13 +59,24 @@ via a materialize/copy helper.
 
 ### 3. Ephemeral view lifetime
 
-Decoded request and response views are valid only within the current
-library call or callback invocation. The caller must either use the data
-immediately or copy it before the function/callback returns. After that
-point, the view must be considered invalid.
+Decoded request and response views are tied to the lifetime of the
+underlying payload buffer. The exact lifetime therefore depends on which
+layer owns that buffer:
 
-The library is free to reuse internal buffers aggressively. Views become
-stale the moment the library call that produced them completes.
+- Direct Codec use or Level 1 caller-managed buffers:
+  the view is valid only while the caller keeps the backing buffer alive
+  and unchanged
+- Level 2 client calls:
+  response views are valid until the next typed call on the same client
+  context, or until that client is closed, unless the method-specific
+  contract states a narrower lifetime
+- Level 2 server callbacks:
+  request views and response builders are valid only for the duration of
+  the current callback invocation
+
+The library is free to reuse internal buffers aggressively. Once the
+buffer owner is allowed to reuse or release the underlying storage, the
+view becomes invalid immediately.
 
 This is a hard contract, not a suggestion.
 
@@ -130,7 +141,7 @@ decoded structures impossible to miss:
 Comments and documentation on all `View` types must explicitly state:
 
 - borrowed / ephemeral
-- valid only during the current library call or callback
+- the exact lifetime contract for the owning layer
 - copy immediately if the data is needed later
 
 ## Encode contract
@@ -156,8 +167,8 @@ The decoder:
 - Returns the view (or an error if validation fails)
 
 The returned view borrows the payload bytes. It is valid only as long as
-the underlying buffer is valid, and in practice only within the current
-callback or library call.
+the underlying buffer is valid. The owning layer defines the exact
+lifetime contract for that buffer.
 
 ## Builder contract
 

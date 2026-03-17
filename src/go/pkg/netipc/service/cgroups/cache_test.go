@@ -17,7 +17,7 @@ func TestCacheFullRoundTrip(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testCgroupsHandler)
+	ts := startTestServer(svc, testHandlers())
 	defer ts.stop()
 
 	cache := NewCache(testRunDir, svc, testClientConfig())
@@ -102,7 +102,7 @@ func TestCacheRefreshFailurePreserves(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testCgroupsHandler)
+	ts := startTestServer(svc, testHandlers())
 
 	cache := NewCache(testRunDir, svc, testClientConfig())
 
@@ -153,7 +153,7 @@ func TestCacheReconnectRebuilds(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts1 := startTestServer(svc, testCgroupsHandler)
+	ts1 := startTestServer(svc, testHandlers())
 
 	cache := NewCache(testRunDir, svc, testClientConfig())
 	if !cache.Refresh() {
@@ -168,7 +168,7 @@ func TestCacheReconnectRebuilds(t *testing.T) {
 	cleanupAll(svc)
 	time.Sleep(50 * time.Millisecond)
 
-	ts2 := startTestServer(svc, testCgroupsHandler)
+	ts2 := startTestServer(svc, testHandlers())
 	defer ts2.stop()
 
 	// Refresh should reconnect and rebuild cache
@@ -195,7 +195,7 @@ func TestCacheLookupNotFound(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testCgroupsHandler)
+	ts := startTestServer(svc, testHandlers())
 	defer ts.stop()
 
 	cache := NewCache(testRunDir, svc, testClientConfig())
@@ -268,33 +268,28 @@ func TestCacheLargeDataset(t *testing.T) {
 	const N = 1000
 
 	// Handler that builds N items
-	largeHandler := func(methodCode uint16, request []byte) ([]byte, bool) {
-		if methodCode != protocol.MethodCgroupsSnapshot {
-			return nil, false
-		}
-		if _, err := protocol.DecodeCgroupsRequest(request); err != nil {
-			return nil, false
-		}
-
-		bufSize := 256 * N
-		buf := make([]byte, bufSize)
-		builder := protocol.NewCgroupsBuilder(buf, N, 1, 100)
-
-		for i := uint32(0); i < N; i++ {
-			name := fmt.Sprintf("cgroup-%d", i)
-			path := fmt.Sprintf("/sys/fs/cgroup/test/%d", i)
-			enabled := uint32(1)
-			if i%3 == 0 {
-				enabled = 0
+	largeHandler := Handlers{
+		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+			if request.LayoutVersion != 1 || request.Flags != 0 {
+				return false
 			}
-			if err := builder.Add(i+1000, 0, enabled,
-				[]byte(name), []byte(path)); err != nil {
-				return nil, false
-			}
-		}
+			builder.SetHeader(1, 100)
 
-		total := builder.Finish()
-		return buf[:total], true
+			for i := uint32(0); i < N; i++ {
+				name := fmt.Sprintf("cgroup-%d", i)
+				path := fmt.Sprintf("/sys/fs/cgroup/test/%d", i)
+				enabled := uint32(1)
+				if i%3 == 0 {
+					enabled = 0
+				}
+				if err := builder.Add(i+1000, 0, enabled,
+					[]byte(name), []byte(path)); err != nil {
+					return false
+				}
+			}
+			return true
+		},
+		SnapshotMaxItems: N,
 	}
 
 	cfg := testServerConfig()
@@ -317,8 +312,6 @@ func TestCacheLargeDataset(t *testing.T) {
 	ccfg.MaxResponsePayloadBytes = 256 * N
 
 	cache := NewCache(testRunDir, svc, ccfg)
-	cache.responseBuf = make([]byte, 256*N)
-
 	if !cache.Refresh() {
 		t.Fatal("refresh should succeed")
 	}

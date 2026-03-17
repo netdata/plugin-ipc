@@ -127,6 +127,10 @@ type Session struct {
 	// Internal receive buffer for chunked reassembly
 	recvBuf []byte
 
+	// Reusable packet scratch buffers for send/receive chunk assembly.
+	sendBuf []byte
+	pktBuf  []byte
+
 	// In-flight message_id set (client-side only)
 	inflightIDs map[uint64]struct{}
 }
@@ -148,6 +152,8 @@ func (s *Session) Close() {
 		s.fd = -1
 	}
 	s.recvBuf = nil
+	s.sendBuf = nil
+	s.pktBuf = nil
 }
 
 // Connect establishes a session to a server at {runDir}/{serviceName}.sock.
@@ -216,9 +222,10 @@ func (s *Session) sendInner(hdr *protocol.Header, payload []byte) error {
 
 	// Single packet?
 	if totalMsg <= int(s.PacketSize) {
-		var hdrBuf [protocol.HeaderSize]byte
-		hdr.Encode(hdrBuf[:])
-		return rawSendIov(s.fd, hdrBuf[:], payload)
+		msg := ensureScratchBuf(&s.sendBuf, totalMsg)
+		hdr.Encode(msg[:protocol.HeaderSize])
+		copy(msg[protocol.HeaderSize:], payload)
+		return rawSendMsg(s.fd, msg[:totalMsg])
 	}
 
 	// Chunked send
@@ -240,9 +247,10 @@ func (s *Session) sendInner(hdr *protocol.Header, payload []byte) error {
 	chunkCount := 1 + continuationChunks
 
 	// Send first chunk: outer header + first part of payload
-	var hdrBuf [protocol.HeaderSize]byte
-	hdr.Encode(hdrBuf[:])
-	if err := rawSendIov(s.fd, hdrBuf[:], payload[:firstChunkPayload]); err != nil {
+	pktBuf := ensureScratchBuf(&s.sendBuf, int(s.PacketSize))
+	hdr.Encode(pktBuf[:protocol.HeaderSize])
+	copy(pktBuf[protocol.HeaderSize:], payload[:firstChunkPayload])
+	if err := rawSendMsg(s.fd, pktBuf[:protocol.HeaderSize+firstChunkPayload]); err != nil {
 		return err
 	}
 
@@ -266,9 +274,9 @@ func (s *Session) sendInner(hdr *protocol.Header, payload []byte) error {
 			ChunkPayloadLen: uint32(thisChunk),
 		}
 
-		var chkBuf [protocol.HeaderSize]byte
-		chk.Encode(chkBuf[:])
-		if err := rawSendIov(s.fd, chkBuf[:], payload[offset:offset+thisChunk]); err != nil {
+		chk.Encode(pktBuf[:protocol.HeaderSize])
+		copy(pktBuf[protocol.HeaderSize:], payload[offset:offset+thisChunk])
+		if err := rawSendMsg(s.fd, pktBuf[:protocol.HeaderSize+thisChunk]); err != nil {
 			return err
 		}
 
@@ -280,8 +288,8 @@ func (s *Session) sendInner(hdr *protocol.Header, payload []byte) error {
 
 // Receive reads one logical message. Blocks until a complete message
 // arrives. buf is a caller-provided scratch buffer for the first packet.
-// On success, returns the header and payload (payload may reference
-// internal buffers — valid until the next Receive call).
+// On success, returns the header and a payload view valid until the next
+// Receive call on this session.
 func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 	if s.fd < 0 {
 		return protocol.Header{}, nil, wrapErr(ErrBadParam, "session closed")
@@ -344,8 +352,7 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 
 	// Non-chunked: entire message in one packet
 	if n >= totalMsg {
-		payload := make([]byte, hdr.PayloadLen)
-		copy(payload, buf[protocol.HeaderSize:protocol.HeaderSize+int(hdr.PayloadLen)])
+		payload := buf[protocol.HeaderSize : protocol.HeaderSize+int(hdr.PayloadLen)]
 
 		// Validate batch directory
 		if hdr.Flags&protocol.FlagBatch != 0 && hdr.ItemCount > 1 {
@@ -387,7 +394,7 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 	expectedChunkCount := 1 + expectedContinuations
 
 	// Temporary buffer for continuation packets
-	pktBuf := make([]byte, s.PacketSize)
+	pktBuf := ensureScratchBuf(&s.pktBuf, int(s.PacketSize))
 
 	ci := uint32(1)
 	for assembled < int(hdr.PayloadLen) {
@@ -428,13 +435,12 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 			return protocol.Header{}, nil, wrapErr(ErrChunk, "chunk exceeds payload_len")
 		}
 
-		copy(s.recvBuf[assembled:assembled+chunkData], pktBuf[protocol.HeaderSize:protocol.HeaderSize+chunkData])
-		assembled += chunkData
-		ci++
-	}
+			copy(s.recvBuf[assembled:assembled+chunkData], pktBuf[protocol.HeaderSize:protocol.HeaderSize+chunkData])
+			assembled += chunkData
+			ci++
+		}
 
-	payload := make([]byte, hdr.PayloadLen)
-	copy(payload, s.recvBuf[:hdr.PayloadLen])
+	payload := s.recvBuf[:hdr.PayloadLen]
 
 	// Validate batch directory
 	if hdr.Flags&protocol.FlagBatch != 0 && hdr.ItemCount > 1 {
@@ -620,31 +626,22 @@ func minU32(a, b uint32) uint32 {
 // ---------------------------------------------------------------------------
 
 // rawSendIov sends header + payload as one SEQPACKET message using sendmsg.
-func rawSendIov(fd int, hdr, payload []byte) error {
-	total := len(hdr) + len(payload)
-
-	// Build a single contiguous buffer for sendmsg.
-	// Go's syscall.Sendmsg doesn't support iovec natively, so we use
-	// the lower-level syscall.Sendmsg with p and oob, or concatenate.
-	// syscall.SendmsgN expects a single p []byte and oob []byte.
-	// For SEQPACKET, we need the entire message in one syscall.
-	//
-	// We can use syscall.Sendmsg with concatenated buffer. For small
-	// messages (the common case), stack allocation would be nice but
-	// Go doesn't give us that. For large payloads, the caller sends
-	// chunks, so individual packets are bounded by packet_size.
-	msg := make([]byte, total)
-	copy(msg, hdr)
-	copy(msg[len(hdr):], payload)
-
+func rawSendMsg(fd int, msg []byte) error {
 	n, err := syscall.SendmsgN(fd, msg, nil, nil, 0)
 	if err != nil {
 		return wrapErr(ErrSend, err.Error())
 	}
-	if n != total {
-		return wrapErr(ErrSend, fmt.Sprintf("short write: %d/%d", n, total))
+	if n != len(msg) {
+		return wrapErr(ErrSend, fmt.Sprintf("short write: %d/%d", n, len(msg)))
 	}
 	return nil
+}
+
+func ensureScratchBuf(buf *[]byte, needed int) []byte {
+	if len(*buf) < needed {
+		*buf = make([]byte, needed)
+	}
+	return (*buf)[:needed]
 }
 
 // rawRecv receives one SEQPACKET message. Returns bytes received.
@@ -964,4 +961,3 @@ func serverHandshake(fd int, config *ServerConfig, sessionID uint64) (*Session, 
 		inflightIDs:             make(map[uint64]struct{}),
 	}, nil
 }
-

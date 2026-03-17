@@ -51,38 +51,36 @@ func clientConfig() windows.ClientConfig {
 	}
 }
 
-func testHandler(methodCode uint16, request []byte) ([]byte, bool) {
-	if methodCode != protocol.MethodCgroupsSnapshot {
-		return nil, false
-	}
-	if _, err := protocol.DecodeCgroupsRequest(request); err != nil {
-		return nil, false
-	}
+func testHandlers() cgroups.Handlers {
+	return cgroups.Handlers{
+		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+			if request.LayoutVersion != 1 || request.Flags != 0 {
+				return false
+			}
+			builder.SetHeader(1, 42)
 
-	buf := make([]byte, responseBufSize)
-	builder := protocol.NewCgroupsBuilder(buf, 3, 1, 42)
+			items := []struct {
+				hash, options, enabled uint32
+				name, path             []byte
+			}{
+				{1001, 0, 1, []byte("docker-abc123"), []byte("/sys/fs/cgroup/docker/abc123")},
+				{2002, 0, 1, []byte("k8s-pod-xyz"), []byte("/sys/fs/cgroup/kubepods/xyz")},
+				{3003, 0, 0, []byte("systemd-user"), []byte("/sys/fs/cgroup/user.slice/user-1000")},
+			}
 
-	items := []struct {
-		hash, options, enabled uint32
-		name, path             []byte
-	}{
-		{1001, 0, 1, []byte("docker-abc123"), []byte("/sys/fs/cgroup/docker/abc123")},
-		{2002, 0, 1, []byte("k8s-pod-xyz"), []byte("/sys/fs/cgroup/kubepods/xyz")},
-		{3003, 0, 0, []byte("systemd-user"), []byte("/sys/fs/cgroup/user.slice/user-1000")},
+			for _, item := range items {
+				if err := builder.Add(item.hash, item.options, item.enabled, item.name, item.path); err != nil {
+					return false
+				}
+			}
+			return true
+		},
+		SnapshotMaxItems: 3,
 	}
-
-	for _, item := range items {
-		if err := builder.Add(item.hash, item.options, item.enabled, item.name, item.path); err != nil {
-			return nil, false
-		}
-	}
-
-	total := builder.Finish()
-	return buf[:total], true
 }
 
 func runServer(runDir, service string) int {
-	server := cgroups.NewServer(runDir, service, serverConfig(), testHandler)
+	server := cgroups.NewServer(runDir, service, serverConfig(), testHandlers())
 
 	fmt.Println("READY")
 

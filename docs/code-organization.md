@@ -177,6 +177,10 @@ policy, connection management, and typed dispatch remain consistent.
 3. These codec functions are immediately available to Level 1 integrators.
 4. Add Level 2 typed wrappers in the service module if convenience
    client/server support is needed.
+   Public Level 2 client calls must accept and return typed values or
+   typed views only. Public Level 2 server APIs must register typed
+   callbacks only. Any request/response scratch buffers remain internal
+   to Level 2.
 5. Add tests: round-trip (all languages), cross-language interop (all
    pairs), fuzz (decode), boundary, validation rejection.
 6. No transport module changes are needed — the new message type uses

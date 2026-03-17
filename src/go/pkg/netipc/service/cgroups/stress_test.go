@@ -23,35 +23,30 @@ func simpleHash(s string) uint32 {
 }
 
 // largeHandler builds a snapshot with N items (realistic container names).
-func largeHandler(n int) HandlerFunc {
-	return func(methodCode uint16, request []byte) ([]byte, bool) {
-		if methodCode != protocol.MethodCgroupsSnapshot {
-			return nil, false
-		}
-		if _, err := protocol.DecodeCgroupsRequest(request); err != nil {
-			return nil, false
-		}
-
-		bufSize := 300 * n
-		buf := make([]byte, bufSize)
-		builder := protocol.NewCgroupsBuilder(buf, uint32(n), 1, 42)
-
-		for i := 0; i < n; i++ {
-			name := fmt.Sprintf("container-%04d", i)
-			path := fmt.Sprintf("/sys/fs/cgroup/docker/%04d", i)
-			hash := simpleHash(name)
-			enabled := uint32(1)
-			if i%5 == 0 {
-				enabled = 0
+func largeHandler(n int) Handlers {
+	return Handlers{
+		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+			if request.LayoutVersion != 1 || request.Flags != 0 {
+				return false
 			}
-			if err := builder.Add(hash, 0x10, enabled,
-				[]byte(name), []byte(path)); err != nil {
-				return nil, false
-			}
-		}
+			builder.SetHeader(1, 42)
 
-		total := builder.Finish()
-		return buf[:total], true
+			for i := 0; i < n; i++ {
+				name := fmt.Sprintf("container-%04d", i)
+				path := fmt.Sprintf("/sys/fs/cgroup/docker/%04d", i)
+				hash := simpleHash(name)
+				enabled := uint32(1)
+				if i%5 == 0 {
+					enabled = 0
+				}
+				if err := builder.Add(hash, 0x10, enabled,
+					[]byte(name), []byte(path)); err != nil {
+					return false
+				}
+			}
+			return true
+		},
+		SnapshotMaxItems: uint32(n),
 	}
 }
 
@@ -114,7 +109,7 @@ func verifySnapshot(t *testing.T, view *protocol.CgroupsResponseView, n int) boo
 // startLargeServer creates a server with a large response buffer.
 // startLargeServer creates a server with large response buffer and explicit
 // packet_size to enable chunked transport for payloads > 64KB.
-func startLargeServer(service string, handler HandlerFunc, maxResp uint32) *testServer {
+func startLargeServer(service string, handlers Handlers, maxResp uint32) *testServer {
 	ensureRunDir()
 	cleanupAll(service)
 
@@ -122,7 +117,7 @@ func startLargeServer(service string, handler HandlerFunc, maxResp uint32) *test
 	cfg.MaxResponsePayloadBytes = maxResp
 	cfg.PacketSize = 65536 // force smaller packets for reliable chunking
 
-	s := NewServer(testRunDir, service, cfg, handler)
+	s := NewServer(testRunDir, service, cfg, handlers)
 	doneCh := make(chan struct{})
 
 	go func() {
@@ -135,11 +130,11 @@ func startLargeServer(service string, handler HandlerFunc, maxResp uint32) *test
 }
 
 // startServerWithWorkers creates a server with explicit worker count.
-func startServerWithWorkers(service string, handler HandlerFunc, workers int) *testServer {
+func startServerWithWorkers(service string, handlers Handlers, workers int) *testServer {
 	ensureRunDir()
 	cleanupAll(service)
 
-	s := NewServerWithWorkers(testRunDir, service, testServerConfig(), handler, workers)
+	s := NewServerWithWorkers(testRunDir, service, testServerConfig(), handlers, workers)
 	doneCh := make(chan struct{})
 
 	go func() {
@@ -170,8 +165,7 @@ func TestStress1000Items(t *testing.T) {
 	}
 
 	start := time.Now()
-	respBuf := make([]byte, bufSize)
-	view, err := client.CallSnapshot(respBuf)
+	view, err := client.CallSnapshot()
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("call failed: %v", err)
@@ -225,8 +219,7 @@ func TestStress5000Items(t *testing.T) {
 	}
 
 	start := time.Now()
-	respBuf := make([]byte, bufSize)
-	view, err := client.CallSnapshot(respBuf)
+	view, err := client.CallSnapshot()
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("call failed: %v", err)
@@ -252,7 +245,7 @@ func TestStress50Clients(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startServerWithWorkers(svc, testCgroupsHandler, 64)
+	ts := startServerWithWorkers(svc, testHandlers(), 64)
 	defer ts.stop()
 
 	const numClients = 50
@@ -289,8 +282,7 @@ func TestStress50Clients(t *testing.T) {
 			}
 
 			for j := 0; j < requestsPerClient; j++ {
-				respBuf := make([]byte, responseBufSize)
-				view, err := client.CallSnapshot(respBuf)
+				view, err := client.CallSnapshot()
 				if err != nil || view.ItemCount != 3 {
 					r.failures++
 					continue
@@ -343,7 +335,7 @@ func TestStressConcurrentCacheClients(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startServerWithWorkers(svc, testCgroupsHandler, 16)
+	ts := startServerWithWorkers(svc, testHandlers(), 16)
 	defer ts.stop()
 
 	const numClients = 10
@@ -416,7 +408,7 @@ func TestStressRapidConnectDisconnect(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startServerWithWorkers(svc, testCgroupsHandler, 16)
+	ts := startServerWithWorkers(svc, testHandlers(), 16)
 	defer ts.stop()
 
 	const cycles = 1000
@@ -442,8 +434,7 @@ func TestStressRapidConnectDisconnect(t *testing.T) {
 			continue
 		}
 
-		respBuf := make([]byte, responseBufSize)
-		view, err := client.CallSnapshot(respBuf)
+		view, err := client.CallSnapshot()
 		if err != nil || view.ItemCount != 3 {
 			failures++
 		} else {
@@ -477,7 +468,7 @@ func TestStressLongRunning60s(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startServerWithWorkers(svc, testCgroupsHandler, 8)
+	ts := startServerWithWorkers(svc, testHandlers(), 8)
 	defer ts.stop()
 
 	const numClients = 5
@@ -555,7 +546,7 @@ func TestStressMixedTransport(t *testing.T) {
 		Backlog:                 16,
 	}
 
-	s := NewServer(testRunDir, svc, cfg, testCgroupsHandler)
+	s := NewServer(testRunDir, svc, cfg, testHandlers())
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
@@ -596,8 +587,7 @@ func TestStressMixedTransport(t *testing.T) {
 		}
 
 		for i := 0; i < 10; i++ {
-			respBuf := make([]byte, responseBufSize)
-			view, err := client.CallSnapshot(respBuf)
+			view, err := client.CallSnapshot()
 			if err == nil && view.ItemCount == 3 {
 				item0, ierr := view.Item(0)
 				if ierr == nil && item0.Hash == 1001 {
@@ -629,8 +619,7 @@ func TestStressMixedTransport(t *testing.T) {
 		}
 
 		for i := 0; i < 10; i++ {
-			respBuf := make([]byte, responseBufSize)
-			view, err := client.CallSnapshot(respBuf)
+			view, err := client.CallSnapshot()
 			if err == nil && view.ItemCount == 3 {
 				r.success++
 			} else {
@@ -659,8 +648,7 @@ func TestStressMixedTransport(t *testing.T) {
 		}
 
 		for i := 0; i < 10; i++ {
-			respBuf := make([]byte, responseBufSize)
-			view, err := client.CallSnapshot(respBuf)
+			view, err := client.CallSnapshot()
 			if err == nil && view.ItemCount == 3 {
 				item0, ierr := view.Item(0)
 				if ierr == nil && item0.Hash == 1001 {

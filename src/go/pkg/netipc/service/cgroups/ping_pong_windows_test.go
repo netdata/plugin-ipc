@@ -48,8 +48,8 @@ type winTestServer struct {
 
 // startTestServerWin creates a Windows Server (Named Pipe transport)
 // and starts it in a background goroutine. Returns a handle for cleanup.
-func startTestServerWin(service string, handler HandlerFunc) *winTestServer {
-	s := NewServer(winTestRunDir, service, testWinServerConfig(), handler)
+func startTestServerWin(service string, handlers Handlers) *winTestServer {
+	s := NewServer(winTestRunDir, service, testWinServerConfig(), handlers)
 	doneCh := make(chan struct{})
 
 	go func() {
@@ -68,32 +68,14 @@ func (ts *winTestServer) stop() {
 	<-ts.doneCh
 }
 
-// winPingPongHandler handles INCREMENT (code 1) and STRING_REVERSE (code 3).
-// Same logic as the POSIX pingPongHandler.
-func winPingPongHandler(methodCode uint16, request []byte) ([]byte, bool) {
-	switch methodCode {
-	case protocol.MethodIncrement:
-		var buf [protocol.IncrementPayloadSize]byte
-		n, ok := protocol.DispatchIncrement(request, buf[:], func(v uint64) (uint64, bool) {
+func winPingPongHandlers() Handlers {
+	return Handlers{
+		OnIncrement: func(v uint64) (uint64, bool) {
 			return v + 1, true
-		})
-		if !ok {
-			return nil, false
-		}
-		return buf[:n], true
-
-	case protocol.MethodStringReverse:
-		buf := make([]byte, protocol.StringReverseHdrSize+len(request)+1)
-		n, ok := protocol.DispatchStringReverse(request, buf, func(s string) (string, bool) {
+		},
+		OnStringReverse: func(s string) (string, bool) {
 			return winReverseString(s), true
-		})
-		if !ok {
-			return nil, false
-		}
-		return buf[:n], true
-
-	default:
-		return nil, false
+		},
 	}
 }
 
@@ -109,7 +91,7 @@ func winReverseString(s string) string {
 func TestWinIncrementPingPong(t *testing.T) {
 	svc := "go_win_pp_incr"
 
-	ts := startTestServerWin(svc, winPingPongHandler)
+	ts := startTestServerWin(svc, winPingPongHandlers())
 	defer ts.stop()
 
 	client := NewClient(winTestRunDir, svc, testWinClientConfig())
@@ -121,9 +103,8 @@ func TestWinIncrementPingPong(t *testing.T) {
 	// 10 rounds: send 0 -> get 1 -> send 1 -> get 2 -> ... -> value == 10
 	var val uint64
 	responsesReceived := 0
-	respBuf := make([]byte, winResponseBufSize)
 	for i := 0; i < 10; i++ {
-		got, err := client.CallIncrement(val, respBuf)
+		got, err := client.CallIncrement(val)
 		if err != nil {
 			t.Fatalf("round %d: CallIncrement(%d) failed: %v", i, val, err)
 		}
@@ -156,7 +137,7 @@ func TestWinIncrementPingPong(t *testing.T) {
 func TestWinStringReversePingPong(t *testing.T) {
 	svc := "go_win_pp_strrev"
 
-	ts := startTestServerWin(svc, winPingPongHandler)
+	ts := startTestServerWin(svc, winPingPongHandlers())
 	defer ts.stop()
 
 	client := NewClient(winTestRunDir, svc, testWinClientConfig())
@@ -165,14 +146,13 @@ func TestWinStringReversePingPong(t *testing.T) {
 		t.Fatal("client not ready")
 	}
 
-	respBuf := make([]byte, winResponseBufSize)
 	original := "abcdefghijklmnopqrstuvwxyz"
 
 	// 6 rounds: feed each response back as the next request
 	responsesReceived := 0
 	current := original
 	for i := 0; i < 6; i++ {
-		view, err := client.CallStringReverse(current, respBuf)
+		view, err := client.CallStringReverse(current)
 		if err != nil {
 			t.Fatalf("round %d: CallStringReverse(%q) failed: %v", i+1, current, err)
 		}
@@ -209,7 +189,7 @@ func TestWinStringReversePingPong(t *testing.T) {
 func TestWinMixedMethods(t *testing.T) {
 	svc := "go_win_pp_mixed"
 
-	ts := startTestServerWin(svc, winPingPongHandler)
+	ts := startTestServerWin(svc, winPingPongHandlers())
 	defer ts.stop()
 
 	client := NewClient(winTestRunDir, svc, testWinClientConfig())
@@ -218,10 +198,8 @@ func TestWinMixedMethods(t *testing.T) {
 		t.Fatal("client not ready")
 	}
 
-	respBuf := make([]byte, winResponseBufSize)
-
 	// increment(100) -> 101
-	val, err := client.CallIncrement(100, respBuf)
+	val, err := client.CallIncrement(100)
 	if err != nil {
 		t.Fatalf("increment(100) failed: %v", err)
 	}
@@ -231,7 +209,7 @@ func TestWinMixedMethods(t *testing.T) {
 
 	// reverse("hello") -> verify locally computed reverse
 	helloStr := "hello"
-	view, err := client.CallStringReverse(helloStr, respBuf)
+	view, err := client.CallStringReverse(helloStr)
 	if err != nil {
 		t.Fatalf("reverse(%q) failed: %v", helloStr, err)
 	}
@@ -241,7 +219,7 @@ func TestWinMixedMethods(t *testing.T) {
 	}
 
 	// increment(101) -> 102
-	val, err = client.CallIncrement(101, respBuf)
+	val, err = client.CallIncrement(101)
 	if err != nil {
 		t.Fatalf("increment(101) failed: %v", err)
 	}
@@ -251,7 +229,7 @@ func TestWinMixedMethods(t *testing.T) {
 
 	// reverse("world") -> verify locally computed reverse
 	worldStr := "world"
-	view, err = client.CallStringReverse(worldStr, respBuf)
+	view, err = client.CallStringReverse(worldStr)
 	if err != nil {
 		t.Fatalf("reverse(%q) failed: %v", worldStr, err)
 	}

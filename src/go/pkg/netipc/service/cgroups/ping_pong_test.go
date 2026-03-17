@@ -5,37 +5,16 @@ package cgroups
 import (
 	"testing"
 	"time"
-
-	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 )
 
-// pingPongHandler handles INCREMENT (code 1) and STRING_REVERSE (code 3).
-// INCREMENT: decode u64, add 1, encode.
-// STRING_REVERSE: decode string, reverse bytes, encode.
-func pingPongHandler(methodCode uint16, request []byte) ([]byte, bool) {
-	switch methodCode {
-	case protocol.MethodIncrement:
-		var buf [protocol.IncrementPayloadSize]byte
-		n, ok := protocol.DispatchIncrement(request, buf[:], func(v uint64) (uint64, bool) {
+func pingPongHandlers() Handlers {
+	return Handlers{
+		OnIncrement: func(v uint64) (uint64, bool) {
 			return v + 1, true
-		})
-		if !ok {
-			return nil, false
-		}
-		return buf[:n], true
-
-	case protocol.MethodStringReverse:
-		buf := make([]byte, protocol.StringReverseHdrSize+len(request)+1)
-		n, ok := protocol.DispatchStringReverse(request, buf, func(s string) (string, bool) {
+		},
+		OnStringReverse: func(s string) (string, bool) {
 			return reverseString(s), true
-		})
-		if !ok {
-			return nil, false
-		}
-		return buf[:n], true
-
-	default:
-		return nil, false
+		},
 	}
 }
 
@@ -53,7 +32,7 @@ func TestIncrementPingPong(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, pingPongHandler)
+	ts := startTestServer(svc, pingPongHandlers())
 	defer ts.stop()
 
 	client := NewClient(testRunDir, svc, testClientConfig())
@@ -65,9 +44,8 @@ func TestIncrementPingPong(t *testing.T) {
 	// 10 rounds: send 0 -> get 1 -> send 1 -> get 2 -> ... -> value == 10
 	var val uint64
 	responsesReceived := 0
-	respBuf := make([]byte, responseBufSize)
 	for i := 0; i < 10; i++ {
-		got, err := client.CallIncrement(val, respBuf)
+		got, err := client.CallIncrement(val)
 		if err != nil {
 			t.Fatalf("round %d: CallIncrement(%d) failed: %v", i, val, err)
 		}
@@ -103,7 +81,7 @@ func TestStringReversePingPong(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, pingPongHandler)
+	ts := startTestServer(svc, pingPongHandlers())
 	defer ts.stop()
 
 	client := NewClient(testRunDir, svc, testClientConfig())
@@ -112,14 +90,13 @@ func TestStringReversePingPong(t *testing.T) {
 		t.Fatal("client not ready")
 	}
 
-	respBuf := make([]byte, responseBufSize)
 	original := "abcdefghijklmnopqrstuvwxyz"
 
 	// 6 rounds: feed each response back as the next request
 	responsesReceived := 0
 	current := original
 	for i := 0; i < 6; i++ {
-		view, err := client.CallStringReverse(current, respBuf)
+		view, err := client.CallStringReverse(current)
 		if err != nil {
 			t.Fatalf("round %d: CallStringReverse(%q) failed: %v", i+1, current, err)
 		}
@@ -166,7 +143,7 @@ func TestIncrementBatch(t *testing.T) {
 	sCfg.MaxResponseBatchItems = 16
 	sCfg.MaxRequestPayloadBytes = 65536
 
-	s := NewServer(testRunDir, svc, sCfg, pingPongHandler)
+	s := NewServer(testRunDir, svc, sCfg, pingPongHandlers())
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
@@ -192,10 +169,9 @@ func TestIncrementBatch(t *testing.T) {
 		t.Fatal("client not ready")
 	}
 
-	respBuf := make([]byte, responseBufSize)
 	input := []uint64{10, 20, 30, 40, 50}
 
-	results, err := client.CallIncrementBatch(input, respBuf)
+	results, err := client.CallIncrementBatch(input)
 	if err != nil {
 		t.Fatalf("CallIncrementBatch failed: %v", err)
 	}
@@ -228,7 +204,7 @@ func TestMixedMethods(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, pingPongHandler)
+	ts := startTestServer(svc, pingPongHandlers())
 	defer ts.stop()
 
 	client := NewClient(testRunDir, svc, testClientConfig())
@@ -237,10 +213,8 @@ func TestMixedMethods(t *testing.T) {
 		t.Fatal("client not ready")
 	}
 
-	respBuf := make([]byte, responseBufSize)
-
 	// increment(100) -> 101
-	val, err := client.CallIncrement(100, respBuf)
+	val, err := client.CallIncrement(100)
 	if err != nil {
 		t.Fatalf("increment(100) failed: %v", err)
 	}
@@ -250,7 +224,7 @@ func TestMixedMethods(t *testing.T) {
 
 	// reverse("hello") -> verify locally computed reverse
 	helloStr := "hello"
-	view, err := client.CallStringReverse(helloStr, respBuf)
+	view, err := client.CallStringReverse(helloStr)
 	if err != nil {
 		t.Fatalf("reverse(%q) failed: %v", helloStr, err)
 	}
@@ -260,7 +234,7 @@ func TestMixedMethods(t *testing.T) {
 	}
 
 	// increment(101) -> 102
-	val, err = client.CallIncrement(101, respBuf)
+	val, err = client.CallIncrement(101)
 	if err != nil {
 		t.Fatalf("increment(101) failed: %v", err)
 	}
@@ -270,7 +244,7 @@ func TestMixedMethods(t *testing.T) {
 
 	// reverse("world") -> verify locally computed reverse
 	worldStr := "world"
-	view, err = client.CallStringReverse(worldStr, respBuf)
+	view, err = client.CallStringReverse(worldStr)
 	if err != nil {
 		t.Fatalf("reverse(%q) failed: %v", worldStr, err)
 	}

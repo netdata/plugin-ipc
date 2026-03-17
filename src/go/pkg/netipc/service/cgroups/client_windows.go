@@ -33,6 +33,10 @@ type Client struct {
 	session *windows.Session
 	shm     *windows.WinShmContext
 
+	requestBuf   []byte
+	sendBuf      []byte
+	transportBuf []byte
+
 	connectCount   uint32
 	reconnectCount uint32
 	callCount      uint32
@@ -133,8 +137,8 @@ func (c *Client) callWithRetry(attempt func() error) error {
 }
 
 // doRawCall sends a request and receives/validates the response envelope.
-// Returns the validated response header and payload length in responseBuf.
-func (c *Client) doRawCall(methodCode uint16, reqPayload, responseBuf []byte) (protocol.Header, int, error) {
+// Returns the validated response header and a borrowed payload view.
+func (c *Client) doRawCall(methodCode uint16, reqPayload []byte) (protocol.Header, []byte, error) {
 	hdr := protocol.Header{
 		Kind:            protocol.KindRequest,
 		Code:            methodCode,
@@ -145,32 +149,32 @@ func (c *Client) doRawCall(methodCode uint16, reqPayload, responseBuf []byte) (p
 	}
 
 	if err := c.transportSend(&hdr, reqPayload); err != nil {
-		return protocol.Header{}, 0, err
+		return protocol.Header{}, nil, err
 	}
 
-	respHdr, payloadLen, err := c.transportReceive(responseBuf)
+	respHdr, payload, err := c.transportReceive()
 	if err != nil {
-		return protocol.Header{}, 0, err
+		return protocol.Header{}, nil, err
 	}
 
 	if respHdr.Kind != protocol.KindResponse {
-		return protocol.Header{}, 0, protocol.ErrBadKind
+		return protocol.Header{}, nil, protocol.ErrBadKind
 	}
 	if respHdr.Code != methodCode {
-		return protocol.Header{}, 0, protocol.ErrBadLayout
+		return protocol.Header{}, nil, protocol.ErrBadLayout
 	}
 	if respHdr.MessageID != hdr.MessageID {
-		return protocol.Header{}, 0, protocol.ErrBadLayout
+		return protocol.Header{}, nil, protocol.ErrBadLayout
 	}
 	if respHdr.TransportStatus != protocol.StatusOK {
-		return protocol.Header{}, 0, protocol.ErrBadLayout
+		return protocol.Header{}, nil, protocol.ErrBadLayout
 	}
 
-	return respHdr, payloadLen, nil
+	return respHdr, payload, nil
 }
 
 // CallSnapshot performs a blocking typed cgroups snapshot call.
-func (c *Client) CallSnapshot(responseBuf []byte) (*protocol.CgroupsResponseView, error) {
+func (c *Client) CallSnapshot() (*protocol.CgroupsResponseView, error) {
 	var result *protocol.CgroupsResponseView
 
 	err := c.callWithRetry(func() error {
@@ -180,12 +184,12 @@ func (c *Client) CallSnapshot(responseBuf []byte) (*protocol.CgroupsResponseView
 			return protocol.ErrTruncated
 		}
 
-		_, payloadLen, rerr := c.doRawCall(protocol.MethodCgroupsSnapshot, reqBuf[:], responseBuf)
+		_, payload, rerr := c.doRawCall(protocol.MethodCgroupsSnapshot, reqBuf[:])
 		if rerr != nil {
 			return rerr
 		}
 
-		view, derr := protocol.DecodeCgroupsResponse(responseBuf[:payloadLen])
+		view, derr := protocol.DecodeCgroupsResponse(payload)
 		if derr != nil {
 			return derr
 		}
@@ -200,7 +204,7 @@ func (c *Client) CallSnapshot(responseBuf []byte) (*protocol.CgroupsResponseView
 
 // CallIncrement performs a blocking INCREMENT call.
 // Sends requestValue, returns the server's response value.
-func (c *Client) CallIncrement(requestValue uint64, responseBuf []byte) (uint64, error) {
+func (c *Client) CallIncrement(requestValue uint64) (uint64, error) {
 	var result uint64
 
 	err := c.callWithRetry(func() error {
@@ -209,12 +213,12 @@ func (c *Client) CallIncrement(requestValue uint64, responseBuf []byte) (uint64,
 			return protocol.ErrTruncated
 		}
 
-		_, payloadLen, rerr := c.doRawCall(protocol.MethodIncrement, reqBuf[:], responseBuf)
+		_, payload, rerr := c.doRawCall(protocol.MethodIncrement, reqBuf[:])
 		if rerr != nil {
 			return rerr
 		}
 
-		val, derr := protocol.IncrementDecode(responseBuf[:payloadLen])
+		val, derr := protocol.IncrementDecode(payload)
 		if derr != nil {
 			return derr
 		}
@@ -226,21 +230,21 @@ func (c *Client) CallIncrement(requestValue uint64, responseBuf []byte) (uint64,
 
 // CallStringReverse performs a blocking STRING_REVERSE call.
 // Sends requestStr, returns the server's reversed string view.
-func (c *Client) CallStringReverse(requestStr string, responseBuf []byte) (*protocol.StringReverseView, error) {
+func (c *Client) CallStringReverse(requestStr string) (*protocol.StringReverseView, error) {
 	var result *protocol.StringReverseView
 
 	err := c.callWithRetry(func() error {
-		reqBuf := make([]byte, protocol.StringReverseHdrSize+len(requestStr)+1)
+		reqBuf := ensureClientScratch(&c.requestBuf, protocol.StringReverseHdrSize+len(requestStr)+1)
 		if protocol.StringReverseEncode(requestStr, reqBuf) == 0 {
 			return protocol.ErrTruncated
 		}
 
-		_, payloadLen, rerr := c.doRawCall(protocol.MethodStringReverse, reqBuf, responseBuf)
+		_, payload, rerr := c.doRawCall(protocol.MethodStringReverse, reqBuf)
 		if rerr != nil {
 			return rerr
 		}
 
-		view, derr := protocol.StringReverseDecode(responseBuf[:payloadLen])
+		view, derr := protocol.StringReverseDecode(payload)
 		if derr != nil {
 			return derr
 		}
@@ -255,7 +259,7 @@ func (c *Client) CallStringReverse(requestStr string, responseBuf []byte) (*prot
 
 // CallIncrementBatch performs a blocking batch INCREMENT call.
 // Sends multiple values, returns the server's response values.
-func (c *Client) CallIncrementBatch(values []uint64, responseBuf []byte) ([]uint64, error) {
+func (c *Client) CallIncrementBatch(values []uint64) ([]uint64, error) {
 	if len(values) == 0 {
 		return nil, nil
 	}
@@ -266,7 +270,7 @@ func (c *Client) CallIncrementBatch(values []uint64, responseBuf []byte) ([]uint
 	err := c.callWithRetry(func() error {
 		// Build batch request payload
 		batchBufSize := protocol.Align8(int(itemCount)*8) + int(itemCount)*protocol.IncrementPayloadSize + int(itemCount)*protocol.Alignment
-		batchBuf := make([]byte, batchBufSize)
+		batchBuf := ensureClientScratch(&c.requestBuf, batchBufSize)
 		bb := protocol.NewBatchBuilder(batchBuf, itemCount)
 
 		for _, v := range values {
@@ -297,7 +301,7 @@ func (c *Client) CallIncrementBatch(values []uint64, responseBuf []byte) ([]uint
 		}
 
 		// Receive response
-		respHdr, payloadLen, err := c.transportReceive(responseBuf)
+		respHdr, respPayload, err := c.transportReceive()
 		if err != nil {
 			return err
 		}
@@ -319,7 +323,6 @@ func (c *Client) CallIncrementBatch(values []uint64, responseBuf []byte) ([]uint
 		}
 
 		// Extract each response item
-		respPayload := responseBuf[:payloadLen]
 		out := make([]uint64, itemCount)
 		for i := uint32(0); i < itemCount; i++ {
 			itemData, gerr := protocol.BatchItemGet(respPayload, itemCount, i)
@@ -404,7 +407,7 @@ func (c *Client) tryConnect() ClientState {
 func (c *Client) transportSend(hdr *protocol.Header, payload []byte) error {
 	if c.shm != nil {
 		msgLen := protocol.HeaderSize + len(payload)
-		msg := make([]byte, msgLen)
+		msg := ensureClientScratch(&c.sendBuf, msgLen)
 
 		hdr.Magic = protocol.MagicMsg
 		hdr.Version = protocol.Version
@@ -416,7 +419,7 @@ func (c *Client) transportSend(hdr *protocol.Header, payload []byte) error {
 			copy(msg[protocol.HeaderSize:], payload)
 		}
 
-		return c.shm.WinShmSend(msg)
+		return c.shm.WinShmSend(msg[:msgLen])
 	}
 
 	if c.session == nil {
@@ -425,46 +428,45 @@ func (c *Client) transportSend(hdr *protocol.Header, payload []byte) error {
 	return c.session.Send(hdr, payload)
 }
 
-func (c *Client) transportReceive(responseBuf []byte) (protocol.Header, int, error) {
+func (c *Client) transportReceive() (protocol.Header, []byte, error) {
+	scratch := ensureClientScratch(&c.transportBuf, c.maxReceiveMessageBytes())
+
 	if c.shm != nil {
-		shmBuf := make([]byte, len(responseBuf)+protocol.HeaderSize)
-		mlen, err := c.shm.WinShmReceive(shmBuf, 30000)
+		mlen, err := c.shm.WinShmReceive(scratch, 30000)
 		if err != nil {
-			return protocol.Header{}, 0, protocol.ErrTruncated
+			return protocol.Header{}, nil, protocol.ErrTruncated
 		}
 		if mlen < protocol.HeaderSize {
-			return protocol.Header{}, 0, protocol.ErrTruncated
+			return protocol.Header{}, nil, protocol.ErrTruncated
 		}
 
-		hdr, err := protocol.DecodeHeader(shmBuf[:mlen])
+		hdr, err := protocol.DecodeHeader(scratch[:mlen])
 		if err != nil {
-			return protocol.Header{}, 0, err
+			return protocol.Header{}, nil, err
 		}
-
-		payloadLen := mlen - protocol.HeaderSize
-		if payloadLen > len(responseBuf) {
-			return protocol.Header{}, 0, protocol.ErrOverflow
-		}
-		copy(responseBuf[:payloadLen], shmBuf[protocol.HeaderSize:mlen])
-		return hdr, payloadLen, nil
+		return hdr, scratch[protocol.HeaderSize:mlen], nil
 	}
 
 	if c.session == nil {
-		return protocol.Header{}, 0, protocol.ErrTruncated
+		return protocol.Header{}, nil, protocol.ErrTruncated
 	}
 
-	scratch := make([]byte, len(responseBuf)+protocol.HeaderSize)
 	hdr, payload, err := c.session.Receive(scratch)
 	if err != nil {
-		return protocol.Header{}, 0, protocol.ErrTruncated
+		return protocol.Header{}, nil, protocol.ErrTruncated
 	}
+	return hdr, payload, nil
+}
 
-	payloadLen := len(payload)
-	if payloadLen > len(responseBuf) {
-		return protocol.Header{}, 0, protocol.ErrOverflow
+func (c *Client) maxReceiveMessageBytes() int {
+	maxPayload := c.config.MaxResponsePayloadBytes
+	if c.session != nil && c.session.MaxResponsePayloadBytes > 0 {
+		maxPayload = c.session.MaxResponsePayloadBytes
 	}
-	copy(responseBuf[:payloadLen], payload)
-	return hdr, payloadLen, nil
+	if maxPayload == 0 {
+		maxPayload = cacheResponseBufSize
+	}
+	return protocol.HeaderSize + int(maxPayload)
 }
 
 // Error classification helpers
@@ -489,18 +491,47 @@ type Server struct {
 	runDir      string
 	serviceName string
 	config      windows.ServerConfig
-	handler     HandlerFunc
+	handlers    Handlers
 	running     atomic.Bool
 	listener    *windows.Listener // stored so Stop() can close it
 }
 
 // NewServer creates a new managed server.
-func NewServer(runDir, serviceName string, config windows.ServerConfig, handler HandlerFunc) *Server {
+func NewServer(runDir, serviceName string, config windows.ServerConfig, handlers Handlers) *Server {
 	return &Server{
 		runDir:      runDir,
 		serviceName: serviceName,
 		config:      config,
-		handler:     handler,
+		handlers:    handlers,
+	}
+}
+
+func (s *Server) dispatchSingle(methodCode uint16, request []byte, responseBuf []byte) (int, bool) {
+	switch methodCode {
+	case protocol.MethodIncrement:
+		if s.handlers.OnIncrement == nil {
+			return 0, false
+		}
+		return protocol.DispatchIncrement(request, responseBuf, s.handlers.OnIncrement)
+
+	case protocol.MethodStringReverse:
+		if s.handlers.OnStringReverse == nil {
+			return 0, false
+		}
+		return protocol.DispatchStringReverse(request, responseBuf, s.handlers.OnStringReverse)
+
+	case protocol.MethodCgroupsSnapshot:
+		if s.handlers.OnSnapshot == nil {
+			return 0, false
+		}
+		maxItems := s.handlers.snapshotMaxItems(len(responseBuf))
+		if maxItems == 0 {
+			return 0, false
+		}
+		return protocol.DispatchCgroupsSnapshot(request, responseBuf, maxItems, s.handlers.OnSnapshot)
+
+	default:
+		return 0, false
 	}
 }
 
@@ -564,6 +595,9 @@ func (s *Server) Stop() {
 
 func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmContext) {
 	recvBuf := make([]byte, protocol.HeaderSize+int(session.MaxRequestPayloadBytes))
+	respBuf := make([]byte, int(session.MaxResponsePayloadBytes))
+	itemRespBuf := make([]byte, int(session.MaxResponsePayloadBytes))
+	msgBuf := make([]byte, int(session.MaxResponsePayloadBytes)+protocol.HeaderSize)
 
 	defer func() {
 		if shm != nil {
@@ -592,8 +626,7 @@ func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmCont
 				return
 			}
 			hdr = h
-			payload = make([]byte, mlen-protocol.HeaderSize)
-			copy(payload, recvBuf[protocol.HeaderSize:mlen])
+			payload = recvBuf[protocol.HeaderSize:mlen]
 		} else {
 			// Named Pipe path
 			h, p, err := session.Receive(recvBuf)
@@ -601,8 +634,7 @@ func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmCont
 				return
 			}
 			hdr = h
-			payload = make([]byte, len(p))
-			copy(payload, p)
+			payload = p
 		}
 
 		// Protocol violation: unexpected message kind terminates session
@@ -611,23 +643,21 @@ func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmCont
 		}
 
 		// Dispatch: single-item or batch
-		var respPayload []byte
+		responseLen := 0
 		ok := true
 		isBatch := (hdr.Flags&protocol.FlagBatch != 0) && hdr.ItemCount >= 1
 
 		if !isBatch {
 			// Single-item dispatch
-			respPayload, ok = s.handler(hdr.Code, payload)
+			responseLen, ok = s.dispatchSingle(hdr.Code, payload, respBuf)
+			if responseLen < 0 || responseLen > len(respBuf) {
+				ok = false
+				responseLen = 0
+			}
 		} else {
 			// Batch dispatch: extract each item, call handler per item,
 			// reassemble responses using batch builder.
-			batchBufSize := int(session.MaxResponsePayloadBytes)
-			batchBuf := make([]byte, batchBufSize)
-			bb := protocol.NewBatchBuilder(batchBuf, hdr.ItemCount)
-
-			// Per-item response scratch buffer
-			itemRespSize := batchBufSize / 2
-			itemResp := make([]byte, itemRespSize)
+			bb := protocol.NewBatchBuilder(respBuf, hdr.ItemCount)
 
 			for i := uint32(0); i < hdr.ItemCount && ok; i++ {
 				itemData, gerr := protocol.BatchItemGet(payload, hdr.ItemCount, i)
@@ -636,27 +666,20 @@ func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmCont
 					break
 				}
 
-				itemResult, handlerOk := s.handler(hdr.Code, itemData)
-				if !handlerOk {
+				itemResultLen, handlerOk := s.dispatchSingle(hdr.Code, itemData, itemRespBuf)
+				if !handlerOk || itemResultLen < 0 || itemResultLen > len(itemRespBuf) {
 					ok = false
 					break
 				}
 
-				if len(itemResult) > itemRespSize {
-					ok = false
-					break
-				}
-				copy(itemResp, itemResult)
-
-				if aerr := bb.Add(itemResp[:len(itemResult)]); aerr != nil {
+				if aerr := bb.Add(itemRespBuf[:itemResultLen]); aerr != nil {
 					ok = false
 					break
 				}
 			}
 
 			if ok {
-				totalLen, _ := bb.Finish()
-				respPayload = batchBuf[:totalLen]
+				responseLen, _ = bb.Finish()
 			}
 		}
 
@@ -679,28 +702,31 @@ func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmCont
 			// Handler/batch failure: INTERNAL_ERROR + empty payload
 			respHdr.TransportStatus = protocol.StatusInternalError
 			respHdr.ItemCount = 1
-			respPayload = nil
+			responseLen = 0
 		}
 
 		if shm != nil {
-			msgLen := protocol.HeaderSize + len(respPayload)
-			msg := make([]byte, msgLen)
+			msgLen := protocol.HeaderSize + responseLen
+			if len(msgBuf) < msgLen {
+				msgBuf = make([]byte, msgLen)
+			}
+			msg := msgBuf[:msgLen]
 
 			respHdr.Magic = protocol.MagicMsg
 			respHdr.Version = protocol.Version
 			respHdr.HeaderLen = protocol.HeaderLen
-			respHdr.PayloadLen = uint32(len(respPayload))
+			respHdr.PayloadLen = uint32(responseLen)
 
 			respHdr.Encode(msg[:protocol.HeaderSize])
-			if len(respPayload) > 0 {
-				copy(msg[protocol.HeaderSize:], respPayload)
+			if responseLen > 0 {
+				copy(msg[protocol.HeaderSize:], respBuf[:responseLen])
 			}
 
 			if err := shm.WinShmSend(msg); err != nil {
 				return
 			}
 		} else {
-			if err := session.Send(&respHdr, respPayload); err != nil {
+			if err := session.Send(&respHdr, respBuf[:responseLen]); err != nil {
 				return
 			}
 		}

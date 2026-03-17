@@ -374,6 +374,16 @@ void nipc_cgroups_builder_init(nipc_cgroups_builder_t *b,
                                uint32_t systemd_enabled,
                                uint64_t generation);
 
+/* Update the snapshot header fields that finish() writes. */
+void nipc_cgroups_builder_set_header(nipc_cgroups_builder_t *b,
+                                     uint32_t systemd_enabled,
+                                     uint64_t generation);
+
+/* Return a safe upper bound for the number of snapshot items that can
+ * fit in a response buffer of size buf_len. This is for directory
+ * reservation only, not a promise for arbitrary string sizes. */
+uint32_t nipc_cgroups_builder_estimate_max_items(size_t buf_len);
+
 /*
  * Add one cgroup item. The builder handles offset bookkeeping,
  * NUL termination, and alignment.

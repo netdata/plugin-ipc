@@ -579,6 +579,22 @@ void nipc_cgroups_builder_init(nipc_cgroups_builder_t *b,
                      (size_t)max_items * NIPC_CGROUPS_DIR_ENTRY_SIZE;
 }
 
+void nipc_cgroups_builder_set_header(nipc_cgroups_builder_t *b,
+                                     uint32_t systemd_enabled,
+                                     uint64_t generation) {
+    b->systemd_enabled = systemd_enabled;
+    b->generation = generation;
+}
+
+uint32_t nipc_cgroups_builder_estimate_max_items(size_t buf_len) {
+    if (buf_len <= NIPC_CGROUPS_RESP_HDR_SIZE)
+        return 0;
+
+    size_t min_aligned_item = nipc_align8(NIPC_CGROUPS_ITEM_HDR_SIZE + 2u);
+    return (uint32_t)((buf_len - NIPC_CGROUPS_RESP_HDR_SIZE) /
+                      (NIPC_CGROUPS_DIR_ENTRY_SIZE + min_aligned_item));
+}
+
 nipc_error_t nipc_cgroups_builder_add(nipc_cgroups_builder_t *b,
                                       uint32_t hash,
                                       uint32_t options,

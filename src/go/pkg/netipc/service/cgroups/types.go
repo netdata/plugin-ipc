@@ -8,6 +8,8 @@
 // Pure Go — no cgo. Works with CGO_ENABLED=0.
 package cgroups
 
+import "github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
+
 // Poll/receive timeout for server loops (ms). Controls shutdown detection latency.
 const serverPollTimeoutMs = 100
 
@@ -38,13 +40,30 @@ type ClientStatus struct {
 }
 
 // ---------------------------------------------------------------------------
-//  Server handler (shared across platforms)
+//  Typed server handlers (shared across platforms)
 // ---------------------------------------------------------------------------
 
-// HandlerFunc is the server handler callback. Receives (methodCode,
-// requestPayload). Returns (responsePayload, ok). If ok is false,
-// transport_status = INTERNAL_ERROR with empty payload.
-type HandlerFunc func(methodCode uint16, request []byte) ([]byte, bool)
+// Handlers defines the public typed callback surface for the managed server.
+//
+// All callbacks are optional. A nil callback means the method is unsupported
+// and should fail with INTERNAL_ERROR if requested.
+type Handlers struct {
+	OnIncrement     func(uint64) (uint64, bool)
+	OnStringReverse func(string) (string, bool)
+	OnSnapshot      func(*protocol.CgroupsRequest, *protocol.CgroupsBuilder) bool
+
+	// SnapshotMaxItems optionally caps the number of snapshot items the
+	// internal builder reserves directory space for. When zero, the library
+	// derives a safe upper bound from the negotiated response buffer size.
+	SnapshotMaxItems uint32
+}
+
+func (h Handlers) snapshotMaxItems(responseBufSize int) uint32 {
+	if h.SnapshotMaxItems != 0 {
+		return h.SnapshotMaxItems
+	}
+	return protocol.EstimateCgroupsMaxItems(responseBufSize)
+}
 
 // ---------------------------------------------------------------------------
 //  L3 cache types (shared across platforms)

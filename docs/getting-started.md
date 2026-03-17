@@ -20,6 +20,13 @@ The library has four layers:
 Transports: UDS + SHM (POSIX/Linux), Named Pipe + Win SHM (Windows).
 SHM upgrade is negotiated during handshake and transparent to L2/L3.
 
+The Level 2 examples below are schematic. They show the intended public
+API shape from the specifications:
+
+- Clients use typed calls only
+- Servers register typed callbacks only
+- Request/response scratch buffers remain internal to the library
+
 ## Client (L2 typed calls)
 
 ### C
@@ -41,10 +48,8 @@ nipc_client_init(&client, "/run/netdata", "cgroups", &cfg);
 nipc_client_refresh(&client);  /* attempt connect */
 
 if (nipc_client_ready(&client)) {
-    uint8_t req_buf[64], resp_buf[65536];
     nipc_cgroups_resp_view_t view;
-    nipc_error_t err = nipc_client_call_cgroups_snapshot(
-        &client, req_buf, resp_buf, sizeof(resp_buf), &view);
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
 
     if (err == NIPC_OK) {
         /* view.item_count, view.generation, etc. */
@@ -53,6 +58,7 @@ if (nipc_client_ready(&client)) {
             nipc_cgroups_resp_item(&view, i, &item);
             /* item.hash, item.name.ptr/len, item.path.ptr/len */
         }
+        /* view is valid until the next typed call on this client */
     }
 }
 
@@ -79,13 +85,13 @@ let mut client = CgroupsClient::new("/run/netdata", "cgroups", config);
 client.refresh();  // attempt connect
 
 if client.ready() {
-    let mut resp_buf = vec![0u8; 65536];
-    match client.call_snapshot(&mut resp_buf) {
+    match client.call_snapshot() {
         Ok(view) => {
             for i in 0..view.item_count {
                 let item = view.item(i).unwrap();
                 // item.hash, item.name.as_str(), item.path.as_str()
             }
+            // view is valid until the next typed call on this client
         }
         Err(e) => eprintln!("call failed: {:?}", e),
     }
@@ -115,22 +121,27 @@ defer client.Close()
 client.Refresh() // attempt connect
 
 if client.Ready() {
-    responseBuf := make([]byte, 65536)
-    view, err := client.CallSnapshot(responseBuf)
+    view, err := client.CallSnapshot()
     if err == nil {
         for i := uint32(0); i < view.ItemCount; i++ {
             item, _ := view.Item(i)
             // item.Hash, item.Name, item.Path
         }
+        // view is valid until the next typed call on this client
     }
 }
 ```
 
 ## Managed Server (L2)
 
-The server handler dispatches by method code and delegates to typed
-dispatch helpers. Typed handlers receive decoded data and never touch
-wire format.
+The managed server receives wire messages, but that is internal to the
+library. The public L2 server contract is typed:
+
+- You register typed callbacks for the supported methods
+- Callbacks receive decoded request data
+- Callbacks return typed response data or fill typed builders
+- User code never switches on `method_code` and never touches raw payload
+  bytes or raw response buffers
 
 ### C
 
@@ -149,19 +160,12 @@ bool on_cgroups(void *user, const nipc_cgroups_req_t *req,
     return true;
 }
 
-/* Raw handler dispatches to typed helpers */
-bool my_handler(void *user, uint16_t method_code,
-                const uint8_t *req, size_t req_len,
-                uint8_t *resp, size_t resp_size,
-                size_t *resp_len_out) {
-    switch (method_code) {
-    case NIPC_METHOD_INCREMENT:
-        return nipc_dispatch_increment(req, req_len, resp, resp_size,
-                                       resp_len_out, on_increment, user);
-    default:
-        return false;
-    }
-}
+/* Public L2 shape: register typed callbacks, not raw handlers */
+nipc_cgroups_handlers_t handlers = {
+    .on_increment = on_increment,
+    .on_cgroups   = on_cgroups,
+    .user         = NULL,
+};
 
 nipc_uds_server_config_t scfg = {
     .supported_profiles        = NIPC_PROFILE_BASELINE,
@@ -174,12 +178,10 @@ nipc_uds_server_config_t scfg = {
 };
 
 nipc_managed_server_t server;
-nipc_server_init(&server, "/run/netdata", "cgroups", &scfg,
-                 4,       /* max concurrent sessions */
-                 65536,   /* per-session response buffer */
-                 my_handler, NULL);
+nipc_server_init_typed(&server, "/run/netdata", "cgroups", &scfg,
+                       4, &handlers);
 
-/* Blocking: accepts clients, dispatches to handler threads */
+/* Blocking: accepts clients, performs typed dispatch internally */
 nipc_server_run(&server);
 
 /* From another thread: */
@@ -193,22 +195,20 @@ nipc_server_destroy(&server);
 ### Rust
 
 ```rust
-use netipc::service::cgroups::{CgroupsServer, ServerConfig};
-use netipc::protocol;
+use netipc::service::cgroups::{CgroupsHandlers, CgroupsServer, ServerConfig};
 
-let handler = Arc::new(|method: u16, req: &[u8]| -> Option<Vec<u8>> {
-    match method {
-        protocol::METHOD_INCREMENT => {
-            protocol::dispatch_increment(req, &mut resp, |v| Some(v + 1))
-                .map(|n| resp[..n].to_vec())
-        }
-        _ => None,
-    }
-});
+let handlers = CgroupsHandlers {
+    on_increment: Box::new(|req| Ok(req + 1)),
+    on_cgroups: Box::new(|req, builder| {
+        // Fill builder with cgroup items
+        Ok(())
+    }),
+    ..Default::default()
+};
 
 let config = ServerConfig { /* ... */ };
 let mut server = CgroupsServer::new(
-    "/run/netdata", "cgroups", config, 65536, handler);
+    "/run/netdata", "cgroups", config, 4, handlers);
 
 server.run().unwrap();
 server.stop();
@@ -217,22 +217,19 @@ server.stop();
 ### Go
 
 ```go
-handler := func(methodCode uint16, req []byte) ([]byte, bool) {
-    switch methodCode {
-    case protocol.MethodIncrement:
-        resp := make([]byte, 8)
-        n, ok := protocol.DispatchIncrement(req, resp,
-            func(v uint64) (uint64, bool) { return v + 1, true })
-        if !ok { return nil, false }
-        return resp[:n], true
-    default:
-        return nil, false
-    }
+handlers := cgroups.Handlers{
+    OnIncrement: func(v uint64) (uint64, bool) {
+        return v + 1, true
+    },
+    OnSnapshot: func(req protocol.CgroupsRequestView, builder *protocol.CgroupsBuilder) bool {
+        // Fill builder with cgroup items
+        return true
+    },
 }
 
 config := posix.ServerConfig{ /* ... */ }
 server := cgroups.NewServerWithWorkers(
-    "/run/netdata", "cgroups", config, handler, 4)
+    "/run/netdata", "cgroups", config, handlers, 4)
 
 go server.Run()
 server.Stop()

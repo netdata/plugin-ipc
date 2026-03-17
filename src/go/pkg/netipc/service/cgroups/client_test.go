@@ -12,9 +12,9 @@ import (
 )
 
 const (
-	testRunDir       = "/tmp/nipc_svc_go_test"
-	authToken        = uint64(0xDEADBEEFCAFEBABE)
-	responseBufSize  = 65536
+	testRunDir      = "/tmp/nipc_svc_go_test"
+	authToken       = uint64(0xDEADBEEFCAFEBABE)
+	responseBufSize = 65536
 )
 
 func ensureRunDir() {
@@ -50,18 +50,12 @@ func testClientConfig() posix.ClientConfig {
 }
 
 // testCgroupsHandler builds a snapshot with 3 test items.
-func testCgroupsHandler(methodCode uint16, request []byte) ([]byte, bool) {
-	if methodCode != protocol.MethodCgroupsSnapshot {
-		return nil, false
+func testCgroupsHandler(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+	if request.LayoutVersion != 1 || request.Flags != 0 {
+		return false
 	}
 
-	// Validate request
-	if _, err := protocol.DecodeCgroupsRequest(request); err != nil {
-		return nil, false
-	}
-
-	buf := make([]byte, responseBufSize)
-	builder := protocol.NewCgroupsBuilder(buf, 3, 1, 42)
+	builder.SetHeader(1, 42)
 
 	items := []struct {
 		hash, options, enabled uint32
@@ -74,17 +68,30 @@ func testCgroupsHandler(methodCode uint16, request []byte) ([]byte, bool) {
 
 	for _, item := range items {
 		if err := builder.Add(item.hash, item.options, item.enabled, item.name, item.path); err != nil {
-			return nil, false
+			return false
 		}
 	}
 
-	total := builder.Finish()
-	return buf[:total], true
+	return true
 }
 
 // failingHandler always fails.
-func failingHandler(methodCode uint16, request []byte) ([]byte, bool) {
-	return nil, false
+func failingHandler(*protocol.CgroupsRequest, *protocol.CgroupsBuilder) bool {
+	return false
+}
+
+func testHandlers() Handlers {
+	return Handlers{
+		OnSnapshot:       testCgroupsHandler,
+		SnapshotMaxItems: 3,
+	}
+}
+
+func failingHandlers() Handlers {
+	return Handlers{
+		OnSnapshot:       failingHandler,
+		SnapshotMaxItems: 3,
+	}
 }
 
 type testServer struct {
@@ -92,11 +99,11 @@ type testServer struct {
 	doneCh chan struct{}
 }
 
-func startTestServer(service string, handler HandlerFunc) *testServer {
+func startTestServer(service string, handlers Handlers) *testServer {
 	ensureRunDir()
 	cleanupAll(service)
 
-	s := NewServer(testRunDir, service, testServerConfig(), handler)
+	s := NewServer(testRunDir, service, testServerConfig(), handlers)
 	doneCh := make(chan struct{})
 
 	go func() {
@@ -139,7 +146,7 @@ func TestClientLifecycle(t *testing.T) {
 	}
 
 	// Start server
-	ts := startTestServer(svc, testCgroupsHandler)
+	ts := startTestServer(svc, testHandlers())
 	defer ts.stop()
 
 	// Refresh -> READY
@@ -180,7 +187,7 @@ func TestCgroupsCall(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testCgroupsHandler)
+	ts := startTestServer(svc, testHandlers())
 	defer ts.stop()
 
 	client := NewClient(testRunDir, svc, testClientConfig())
@@ -189,8 +196,7 @@ func TestCgroupsCall(t *testing.T) {
 		t.Fatal("client not ready")
 	}
 
-	respBuf := make([]byte, responseBufSize)
-	view, err := client.CallSnapshot(respBuf)
+	view, err := client.CallSnapshot()
 	if err != nil {
 		t.Fatalf("call failed: %v", err)
 	}
@@ -256,7 +262,7 @@ func TestRetryOnFailure(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts1 := startTestServer(svc, testCgroupsHandler)
+	ts1 := startTestServer(svc, testHandlers())
 
 	client := NewClient(testRunDir, svc, testClientConfig())
 	client.Refresh()
@@ -265,8 +271,7 @@ func TestRetryOnFailure(t *testing.T) {
 	}
 
 	// First call succeeds
-	respBuf := make([]byte, responseBufSize)
-	view, err := client.CallSnapshot(respBuf)
+	view, err := client.CallSnapshot()
 	if err != nil {
 		t.Fatalf("first call failed: %v", err)
 	}
@@ -280,12 +285,11 @@ func TestRetryOnFailure(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Restart server
-	ts2 := startTestServer(svc, testCgroupsHandler)
+	ts2 := startTestServer(svc, testHandlers())
 	defer ts2.stop()
 
 	// Next call triggers reconnect + retry
-	respBuf2 := make([]byte, responseBufSize)
-	view2, err := client.CallSnapshot(respBuf2)
+	view2, err := client.CallSnapshot()
 	if err != nil {
 		t.Fatalf("retry call failed: %v", err)
 	}
@@ -308,7 +312,7 @@ func TestMultipleClients(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testCgroupsHandler)
+	ts := startTestServer(svc, testHandlers())
 	defer ts.stop()
 
 	// Client 1
@@ -318,8 +322,7 @@ func TestMultipleClients(t *testing.T) {
 		t.Fatal("client 1 not ready")
 	}
 
-	respBuf1 := make([]byte, responseBufSize)
-	view1, err := client1.CallSnapshot(respBuf1)
+	view1, err := client1.CallSnapshot()
 	if err != nil {
 		t.Fatalf("client 1 call failed: %v", err)
 	}
@@ -334,8 +337,7 @@ func TestMultipleClients(t *testing.T) {
 		t.Fatal("client 2 not ready")
 	}
 
-	respBuf2 := make([]byte, responseBufSize)
-	view2, err := client2.CallSnapshot(respBuf2)
+	view2, err := client2.CallSnapshot()
 	if err != nil {
 		t.Fatalf("client 2 call failed: %v", err)
 	}
@@ -353,7 +355,7 @@ func TestConcurrentClients(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testCgroupsHandler)
+	ts := startTestServer(svc, testHandlers())
 	defer ts.stop()
 
 	const numClients = 5
@@ -387,8 +389,7 @@ func TestConcurrentClients(t *testing.T) {
 			}
 
 			for j := 0; j < requestsPerClient; j++ {
-				respBuf := make([]byte, responseBufSize)
-				view, err := client.CallSnapshot(respBuf)
+				view, err := client.CallSnapshot()
 				if err != nil || view.ItemCount != 3 {
 					r.failures++
 					continue
@@ -429,7 +430,7 @@ func TestHandlerFailure(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, failingHandler)
+	ts := startTestServer(svc, failingHandlers())
 	defer ts.stop()
 
 	client := NewClient(testRunDir, svc, testClientConfig())
@@ -438,8 +439,7 @@ func TestHandlerFailure(t *testing.T) {
 		t.Fatal("client not ready")
 	}
 
-	respBuf := make([]byte, responseBufSize)
-	_, err := client.CallSnapshot(respBuf)
+	_, err := client.CallSnapshot()
 	if err == nil {
 		t.Fatal("expected error when handler fails")
 	}
@@ -458,7 +458,7 @@ func TestStatusReporting(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testCgroupsHandler)
+	ts := startTestServer(svc, testHandlers())
 	defer ts.stop()
 
 	client := NewClient(testRunDir, svc, testClientConfig())
@@ -481,8 +481,7 @@ func TestStatusReporting(t *testing.T) {
 
 	// Make 3 successful calls
 	for i := 0; i < 3; i++ {
-		respBuf := make([]byte, responseBufSize)
-		_, err := client.CallSnapshot(respBuf)
+		_, err := client.CallSnapshot()
 		if err != nil {
 			t.Fatalf("call %d failed: %v", i, err)
 		}
@@ -498,8 +497,7 @@ func TestStatusReporting(t *testing.T) {
 
 	// Call on disconnected client
 	client.Close()
-	respBuf := make([]byte, responseBufSize)
-	_, err := client.CallSnapshot(respBuf)
+	_, err := client.CallSnapshot()
 	if err == nil {
 		t.Fatal("expected error on disconnected client")
 	}
@@ -517,7 +515,7 @@ func TestNonRequestTerminatesSession(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testCgroupsHandler)
+	ts := startTestServer(svc, testHandlers())
 	defer ts.stop()
 
 	// Connect via raw UDS session (transport level)
@@ -580,8 +578,7 @@ func TestNonRequestTerminatesSession(t *testing.T) {
 		t.Fatal("server should still be alive after bad client")
 	}
 
-	verifyBuf := make([]byte, responseBufSize)
-	view, err := verifyClient.CallSnapshot(verifyBuf)
+	view, err := verifyClient.CallSnapshot()
 	if err != nil {
 		t.Fatalf("normal call should succeed after bad client: %v", err)
 	}
