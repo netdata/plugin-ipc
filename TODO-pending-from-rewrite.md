@@ -2,11 +2,13 @@
 
 ## Purpose
 
-Produce benchmark and coverage artifacts that are fit for Netdata integration:
+Restore a fully clean validation state after the rewrite and the repo-wide Rust formatting:
 
 - full cross-language evidence, not partial spot checks
 - fail-closed validation when benchmark runs are incomplete or stale
 - generated reports that reflect the actual matrix being executed today
+- both Linux and Windows reruns green for the supported test/benchmark entrypoints
+- commit the verified fixes and refreshed artifacts only after all known current rerun failures are addressed
 
 ## TL;DR
 
@@ -60,71 +62,33 @@ Verified facts from the current codebase:
 
 ### Pending
 
-- Decision required: how to make Windows `np-pipeline-batch-d16` fit for purpose without hiding transport limits.
-  - evidence:
-    - the Windows pipeline+batch client sends all `depth` batch requests before reading any responses:
-      - C Windows: `bench/drivers/c/bench_windows.c:1420-1467`
-      - Go Windows: `bench/drivers/go/main_windows.go` pipeline+batch loop mirrors the same pattern
-    - the POSIX version uses the same send-all-then-receive-all pattern and works over UDS:
-      - `bench/drivers/c/bench_posix.c:1241-1289`
-    - Windows named pipes are created with a default 64 KiB pipe buffer:
-      - Go transport constants: `src/go/pkg/netipc/transport/windows/pipe.go`
-      - `defaultPacketSize = 65536`
-      - `defaultPipeBufSize = 65536`
-      - pipe creation uses that buffer size in `createPipeInstance()`
-    - batch payload sizing is large:
-      - `BENCH_BATCH_BUF_SIZE = BENCH_MAX_BATCH_ITEMS * 48 + 4096`
-      - with `BENCH_MAX_BATCH_ITEMS = 1000`, that is about 52 KiB per batch message
-    - verified depth sweep on `win11` for `c -> c`:
-      - depth `1`: success
-      - depth `2`: success
-      - depth `4`: success
-      - depth `8`: success
-      - depth `16`: timeout (`exit 124`)
-  - working theory:
-    - Windows named-pipe pipeline+batch deadlocks when both sides keep large batch messages in flight without draining responses soon enough
-    - this is consistent with the transport buffer sizes and with the fact that smaller pipeline depth still works
-  - options:
-    - `A.` Benchmark-only cap for Windows named pipes
-      - change Windows `np-pipeline-batch` to use a smaller fixed depth such as `8`
-      - benefits:
-        - minimal code churn
-        - matches what the current transport reliably supports on `win11`
-      - implications:
-        - Windows benchmark matrix diverges from POSIX (`d8` on Windows vs `d16` on POSIX)
-        - report scripts and docs must encode that platform-specific depth difference explicitly
-      - risks:
-        - this may be seen as lowering coverage instead of fixing the underlying transport limitation
-        - depth `8` works on `win11`, but that does not prove it is the safe limit on every Windows system
-    - `B.` Keep logical depth `16`, but make the Windows pipeline+batch clients use a bounded in-flight window
-      - instead of send-16-then-read-16, maintain up to `depth` requests in flight while draining responses as needed
-      - benefits:
-        - preserves the intent of a depth-16 pipeline benchmark
-        - avoids depending on a specific named-pipe buffer size
-        - likely portable across Windows systems
-      - implications:
-        - benchmark client logic changes in C, Rust, and Go
-        - latency accounting must be updated carefully so the benchmark remains comparable and honest
-      - risks:
-        - more implementation and review work
-        - if done carelessly, it can change what the benchmark actually measures
-    - `C.` Keep send-16-then-read-16 and increase Windows named-pipe packet/buffer size for this scenario
-      - raise `packet_size` / pipe buffer size enough to hold the larger in-flight window
-      - benefits:
-        - preserves the current benchmark algorithm
-        - probably smaller code change than option `B`
-      - implications:
-        - benchmark becomes dependent on an inflated Windows pipe buffer configuration
-        - transport settings for this one scenario diverge from the rest of the suite
-      - risks:
-        - may still deadlock if total in-flight request/response volume exceeds the larger buffer
-        - this treats the symptom, not the backpressure pattern
-  - recommendation:
-    - `B`
-    - reasoning:
-      - it keeps the benchmark purpose intact: a real depth-16 pipeline+batch stress case
-      - it addresses the actual backpressure problem instead of hiding it behind a smaller depth or a larger pipe buffer
-      - it should remain valid even if batch sizes or Windows buffer behavior change later
+- No unresolved user decision is pending right now.
+- Current task is to fix the remaining verified rerun gaps and commit:
+  - POSIX benchmark floor failures
+  - failing Linux coverage gate
+  - Windows default build entrypoint
+- Decision required: what exactly the POSIX snapshot benchmarks should measure.
+  - evidence collected on 2026-03-17:
+    - current max-tier failures are structural, not a rustfmt regression:
+      - `snapshot-baseline`
+        - `c -> go`: `71376`
+        - `rust -> go`: `72365`
+        - `go -> go`: `70011`
+        - floor: `100000`
+      - `snapshot-shm`
+        - C/Rust-only pairs: `467887` to `618470`
+        - Go-involved pairs: `107163` to `177478`
+        - floors: `1000000` for C/Rust-only, `800000` for any Go-involved pair
+    - these numbers are almost unchanged from the previously committed benchmark artifacts, so the problem predates the formatting rerun
+    - all three benchmark servers rebuild the same 16-item snapshot payload on every request:
+      - C POSIX: `bench/drivers/c/bench_posix.c`
+      - Go POSIX: `bench/drivers/go/main.go`
+      - Rust POSIX: `bench/drivers/rust/src/main.rs`
+      - each handler does string formatting + builder work for all 16 items per call
+    - the Go POSIX L2 client also allocates temporary send/receive buffers on every call in `src/go/pkg/netipc/service/cgroups/client.go`, which explains why `go -> c` on `snapshot-shm` is far below `c -> c`
+  - implication:
+    - one part of the gap is real L2/L1 client overhead
+    - another part is benchmark-server synthetic payload-construction work
 
 ### User Decisions
 
@@ -135,6 +99,32 @@ Verified facts from the current codebase:
     - Windows benchmark clients in C, Go, and Rust
     - no transport-wide limit reduction
     - no benchmark-only downgrade to depth `8`
+- 2026-03-17:
+  - User approved running Rust formatting repo-wide.
+  - After formatting, rerun all tests and benchmark suites again.
+  - Scope:
+    - format all Rust code in the repo with the standard formatter
+    - rerun the available local Linux test matrix
+    - rerun POSIX benchmarks locally
+    - rerun Windows tests and benchmarks on `win11`
+- 2026-03-17:
+  - User wants all currently known rerun gaps fixed and committed.
+  - Scope for this phase:
+    - make the Windows default build usable on Windows
+    - eliminate the remaining current POSIX benchmark floor failures
+    - eliminate the current Linux coverage gate failure
+    - rerun the affected test and benchmark suites
+    - commit only the relevant fixes and refreshed artifacts
+- 2026-03-17:
+  - User decision for the POSIX snapshot underperformance:
+    - do not apply a blind benchmark-only semantic change yet
+    - commit the currently verified rerun state first
+    - then perform a proper root-cause review of the underperforming implementations
+    - benchmark floors/semantics are not to be changed before the root cause is understood
+  - User concern to investigate explicitly:
+    - the snapshot path is L2 and should likely perform substantially better
+    - possible causes may be outside the transport layer
+    - L3 cache lookup is only a hypothesis and must be verified from code, not assumed
 
 ### Current Implementation Chunk
 
@@ -164,7 +154,14 @@ Verified facts from the current codebase:
      - `benchmarks-windows.csv` and `benchmarks-windows.md` regenerated successfully
      - generator exited zero and reported all configured floors met
      - copied back to the local repo from `win11`
-6. [ ] Reassess remaining rewrite gaps after the report path is trustworthy.
+6. [ ] Commit the currently verified rerun state before deeper snapshot-performance changes.
+7. [ ] Analyze the remaining rerun gaps with concrete evidence before editing code:
+   - Windows default build still broken because `netipc_rust` in `ALL` builds POSIX-only Rust bins on Windows
+   - POSIX snapshot benchmark floors still fail on current code
+   - Linux C coverage threshold still fails on current code
+8. [ ] Implement the required fixes.
+9. [ ] Rerun the affected Linux and Windows validation paths.
+10. [ ] Commit the verified fixes and refreshed artifacts with explicit file selection.
 
 ## Fresh Benchmark Evidence (2026-03-16)
 
@@ -310,6 +307,70 @@ Verified facts from the current codebase:
       - no zero-throughput `np-pipeline-batch-d16` rows
       - local parse-only verification on Linux also passes:
         - `bash tests/generate-benchmarks-windows.sh benchmarks-windows.csv /tmp/benchmarks-windows-verify.md`
+
+## Validation Update (2026-03-17)
+
+- Repo-wide Rust formatting was run via:
+  - `cargo fmt --all --manifest-path src/crates/netipc/Cargo.toml`
+- Local Linux validation results after formatting:
+  - `/usr/bin/ctest --test-dir build --output-on-failure`: `36/36` passed
+  - `bash tests/run-go-race.sh`: passed
+  - `bash tests/run-sanitizer-asan.sh`: passed
+  - `bash tests/run-sanitizer-tsan.sh`: passed
+  - `bash tests/run-valgrind.sh`: passed
+  - `bash tests/run-extended-fuzz.sh`: passed
+- Coverage results after formatting:
+  - `bash tests/run-coverage-c.sh`: failed threshold
+    - total `90.3%`
+    - `netipc_uds.c`: `88.7%`
+    - `netipc_service.c`: `86.7%`
+  - `bash tests/run-coverage-go.sh`: report completed
+    - total `86.4%`
+    - lowest major files:
+      - `service/cgroups/client.go`: `82.2%`
+      - `transport/posix/shm_linux.go`: `78.6%`
+      - `transport/posix/uds.go`: `83.7%`
+  - `bash tests/run-coverage-rust.sh`: completed with tarpaulin
+    - total `86.72%` (`1561/1800`)
+- POSIX benchmark rerun after formatting:
+  - first full `bash tests/run-posix-bench.sh benchmarks-posix.csv 5` run failed closed on one runtime error:
+    - `shm-batch-ping-pong`
+    - `rust -> c`
+    - `10000/s`
+    - stderr: `batch client: 1 errors out of 0 items`
+  - targeted repro probe for that exact pair passed cleanly
+  - second full `bash tests/run-posix-bench.sh benchmarks-posix.csv 5` run completed successfully with `201` rows
+  - `bash tests/generate-benchmarks-posix.sh benchmarks-posix.csv benchmarks-posix.md` still exits non-zero on the same configured floor violations:
+    - `snapshot-baseline` `* -> go`
+    - all `snapshot-shm` pairs
+- Windows validation and benchmark rerun after formatting:
+  - targeted Windows-only rebuild on `win11` completed successfully after `git reset --hard origin/main` and `git clean -fd`
+  - the default `cmake --build build` path is still not a valid Windows entrypoint:
+    - `CMakeLists.txt` keeps `netipc_rust` in `ALL`
+    - that target runs plain `cargo build` and tries to compile POSIX-only Rust bins (`bench_posix`, `interop_uds`, `interop_service`, `interop_cache`) on Windows
+    - implication: Windows validation currently requires the explicit Windows-only target list used in this rerun
+  - one temporary false failure in `bash tests/test_named_pipe_interop.sh` was traced to a leaked old debug process from `2026-03-15`, not to the current code:
+    - stale process: `build/bin/interop_named_pipe_c.exe server /tmp np-debug`
+    - effect: Rust server reported `pipe name already in use by live server` and the shell script surfaced that as `server exited early`
+    - resolution: kill the exact leaked PIDs on `win11`, rerun the script, confirm all `9/9` Named Pipe interop pairs pass
+  - Windows test results after cleanup:
+    - `./build/bin/test_protocol.exe`: `245 passed, 0 failed`
+    - `./build/bin/fuzz_protocol.exe`: passed
+    - `cargo test --lib -- --test-threads=1` in `src/crates/netipc`: `137 passed, 0 failed`
+    - `go test ./pkg/netipc/protocol ./pkg/netipc/transport/windows`: passed
+    - `bash tests/interop_codec.sh`: passed
+    - `./build/bin/test_named_pipe.exe`: `26 passed, 0 failed`
+    - `bash tests/test_named_pipe_interop.sh`: `9 passed, 0 failed`
+    - `./build/bin/test_win_shm.exe`: `25 passed, 0 failed`
+    - `bash tests/test_win_shm_interop.sh`: `9 passed, 0 failed`
+    - `bash tests/test_service_win_interop.sh`: `9 passed, 0 failed`
+    - `bash tests/test_service_win_shm_interop.sh`: `9 passed, 0 failed`
+    - `bash tests/test_cache_win_interop.sh`: `9 passed, 0 failed`
+    - `bash tests/test_cache_win_shm_interop.sh`: `9 passed, 0 failed`
+  - full Windows benchmark rerun:
+    - `bash tests/run-windows-bench.sh benchmarks-windows.csv 5`: completed successfully with `201` rows
+    - `bash tests/generate-benchmarks-windows.sh benchmarks-windows.csv benchmarks-windows.md`: exited zero
+    - generator result: all configured Windows performance floors met
 
 ## Implied Decisions
 
