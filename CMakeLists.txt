@@ -746,6 +746,7 @@ if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
     )
     set_tests_properties(test_service_win_interop PROPERTIES
         TIMEOUT 120
+        RESOURCE_LOCK win_service_interop_tests
         ENVIRONMENT "INTEROP_SVC_C=$<TARGET_FILE:interop_service_win_c>;INTEROP_SVC_RS=${INTEROP_SVC_WIN_RS};INTEROP_SVC_GO=${INTEROP_SVC_WIN_GO}"
     )
 
@@ -756,6 +757,7 @@ if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
     )
     set_tests_properties(test_service_win_shm_interop PROPERTIES
         TIMEOUT 120
+        RESOURCE_LOCK win_service_interop_tests
         ENVIRONMENT "INTEROP_SVC_C=$<TARGET_FILE:interop_service_win_c>;INTEROP_SVC_RS=${INTEROP_SVC_WIN_RS};INTEROP_SVC_GO=${INTEROP_SVC_WIN_GO}"
     )
 endif()
@@ -772,6 +774,7 @@ if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
     )
     set_tests_properties(test_cache_win_interop PROPERTIES
         TIMEOUT 120
+        RESOURCE_LOCK win_cache_interop_tests
         ENVIRONMENT "INTEROP_CACHE_C=$<TARGET_FILE:interop_cache_win_c>;INTEROP_CACHE_RS=${INTEROP_CACHE_WIN_RS};INTEROP_CACHE_GO=${INTEROP_CACHE_WIN_GO}"
     )
 
@@ -782,6 +785,7 @@ if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
     )
     set_tests_properties(test_cache_win_shm_interop PROPERTIES
         TIMEOUT 120
+        RESOURCE_LOCK win_cache_interop_tests
         ENVIRONMENT "INTEROP_CACHE_C=$<TARGET_FILE:interop_cache_win_c>;INTEROP_CACHE_RS=${INTEROP_CACHE_WIN_RS};INTEROP_CACHE_GO=${INTEROP_CACHE_WIN_GO}"
     )
 endif()

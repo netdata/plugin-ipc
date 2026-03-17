@@ -167,6 +167,15 @@ Current POSIX benchmark status after the SHM attach fix:
   - `cd ~/src/plugin-ipc.git/`
   - work under `MSYSTEM=MSYS`
   - local workflow is: develop locally, commit, push, then pull/build/test on `win11`
+  - use the native Windows toolchains for validation on `win11`:
+    - official Windows Go
+    - official Windows Rust (`cargo.exe`, `rustc.exe`)
+    - do **not** use the MSYS2-provided Go/Rust shims for this repo
+  - validated native toolchain paths on `win11`:
+    - Go: `/c/Program Files/Go/bin/go.exe`
+    - Cargo: `/c/Users/costa/.cargo/bin/cargo.exe`
+    - Rustc: `/c/Users/costa/.cargo/bin/rustc.exe`
+    - MinGW C/C++: `/mingw64/bin/gcc`, `/mingw64/bin/g++`
 - User-approved exception:
   - the `win11` clone of this repo is disposable for this task
   - it may be cleaned/reset there before pull/build/test if needed
@@ -612,34 +621,43 @@ Current POSIX benchmark status after the SHM attach fix:
     - `10000/s`
     - stderr: `batch client: 1 errors out of 0 items`
   - targeted repro probe for that exact pair passed cleanly
-  - second full `bash tests/run-posix-bench.sh benchmarks-posix.csv 5` run completed successfully with `201` rows
-  - `bash tests/generate-benchmarks-posix.sh benchmarks-posix.csv benchmarks-posix.md` still exits non-zero on the same configured floor violations:
-    - `snapshot-baseline` `* -> go`
-    - all `snapshot-shm` pairs
+  - fresh Linux rerun after the Rust Windows-stub changes:
+    - `cmake --build build -j4`: passed
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `36/36` passed
+    - `bash tests/run-posix-bench.sh benchmarks-posix.csv 5`: completed successfully with `201` rows
+    - `bash tests/generate-benchmarks-posix.sh benchmarks-posix.csv benchmarks-posix.md`: generated the report and exited non-zero only on `snapshot-shm` max-rate floor violations
+  - current verified POSIX floor violations:
+    - `snapshot-shm c->c`: `581614` vs min `1000000`
+    - `snapshot-shm rust->c`: `568074` vs min `1000000`
+    - `snapshot-shm go->c`: `556160` vs min `800000`
+    - `snapshot-shm c->rust`: `412376` vs min `1000000`
+    - `snapshot-shm rust->rust`: `427585` vs min `1000000`
+    - `snapshot-shm go->rust`: `417066` vs min `800000`
+    - `snapshot-shm rust->go`: `645122` vs min `800000`
 - Windows validation and benchmark rerun after formatting:
   - targeted Windows-only rebuild on `win11` completed successfully after `git reset --hard origin/main` and `git clean -fd`
-  - the default `cmake --build build` path is still not a valid Windows entrypoint:
-    - `CMakeLists.txt` keeps `netipc_rust` in `ALL`
-    - that target runs plain `cargo build` and tries to compile POSIX-only Rust bins (`bench_posix`, `interop_uds`, `interop_service`, `interop_cache`) on Windows
-    - implication: Windows validation currently requires the explicit Windows-only target list used in this rerun
+  - Windows default build entrypoint is now usable again:
+    - POSIX-only Rust fixture/benchmark bins compile to explicit unsupported stubs on Windows instead of pulling POSIX transports into the Windows graph
+    - `cmake --build build -j4` now succeeds on `win11` with the native Windows Go/Rust toolchains
+  - Windows Rust build noise was also cleaned up:
+    - the duplicate `CloseHandle` FFI declaration in `src/crates/netipc/src/service/cgroups.rs` now matches the Windows transport modules
+  - Windows CTest scheduling is now deterministic for the service/cache interop variants:
+    - `test_service_win_interop` and `test_service_win_shm_interop` share a `RESOURCE_LOCK`
+    - `test_cache_win_interop` and `test_cache_win_shm_interop` share a `RESOURCE_LOCK`
+    - reason:
+      - the baseline and SHM variants reuse the same Windows service names inside their shell scripts
+      - without serialization they can race under `ctest -j4` and fail with `pipe name already in use by live server` / `server init failed: 6`
   - one temporary false failure in `bash tests/test_named_pipe_interop.sh` was traced to a leaked old debug process from `2026-03-15`, not to the current code:
     - stale process: `build/bin/interop_named_pipe_c.exe server /tmp np-debug`
     - effect: Rust server reported `pipe name already in use by live server` and the shell script surfaced that as `server exited early`
     - resolution: kill the exact leaked PIDs on `win11`, rerun the script, confirm all `9/9` Named Pipe interop pairs pass
-  - Windows test results after cleanup:
-    - `./build/bin/test_protocol.exe`: `245 passed, 0 failed`
-    - `./build/bin/fuzz_protocol.exe`: passed
-    - `cargo test --lib -- --test-threads=1` in `src/crates/netipc`: `137 passed, 0 failed`
-    - `go test ./pkg/netipc/protocol ./pkg/netipc/transport/windows`: passed
-    - `bash tests/interop_codec.sh`: passed
-    - `./build/bin/test_named_pipe.exe`: `26 passed, 0 failed`
-    - `bash tests/test_named_pipe_interop.sh`: `9 passed, 0 failed`
-    - `./build/bin/test_win_shm.exe`: `25 passed, 0 failed`
-    - `bash tests/test_win_shm_interop.sh`: `9 passed, 0 failed`
-    - `bash tests/test_service_win_interop.sh`: `9 passed, 0 failed`
-    - `bash tests/test_service_win_shm_interop.sh`: `9 passed, 0 failed`
-    - `bash tests/test_cache_win_interop.sh`: `9 passed, 0 failed`
-    - `bash tests/test_cache_win_shm_interop.sh`: `9 passed, 0 failed`
+  - Windows test results with the native Windows toolchains:
+    - `cmake -S . -B build -G "MinGW Makefiles" -DGO_EXECUTABLE="/c/Program Files/Go/bin/go.exe" -DCARGO_EXECUTABLE="/c/Users/costa/.cargo/bin/cargo.exe"`: passed
+    - `cmake --build build -j4`: passed
+    - `/mingw64/bin/ctest --test-dir build --output-on-failure -j4`: `23/23` passed
+    - key previously failing harness entries now pass in that full CTest run:
+      - `fuzz_protocol_30s`
+      - `test_protocol_rust`
   - full Windows benchmark rerun:
     - `bash tests/run-windows-bench.sh benchmarks-windows.csv 5`: completed successfully with `201` rows
     - `bash tests/generate-benchmarks-windows.sh benchmarks-windows.csv benchmarks-windows.md`: exited zero

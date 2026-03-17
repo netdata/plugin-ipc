@@ -952,10 +952,10 @@ impl ManagedServer {
             if let Some(h) = guard.take() {
                 // Close the listener pipe to unblock ConnectNamedPipe
                 extern "system" {
-                    fn CloseHandle(h: usize) -> i32;
+                    fn CloseHandle(h: isize) -> i32;
                 }
                 unsafe {
-                    CloseHandle(h);
+                    CloseHandle(h as isize);
                 }
             }
         }
