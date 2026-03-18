@@ -77,4 +77,30 @@ else
 fi
 
 echo
-echo -e "${GREEN}Coverage measurement complete.${NC}"
+
+# Threshold check - Rust testable ceiling is ~85% due to transport error paths
+# that require OS/kernel failures (socket, mmap, futex, etc.)
+# See COVERAGE-EXCLUSIONS.md for detailed justifications
+THRESHOLD=${1:-80}
+
+# Parse coverage percentage from tarpaulin output
+# Format: "XX.XX% coverage, NNNN/MMMM lines covered"
+if [[ "$TOOL" == "tarpaulin" ]]; then
+    coverage_line=$(cargo tarpaulin --lib --out Stdout --skip-clean --exclude-files "src/bin/*" --exclude-files "tests/*" -- --test-threads=1 2>&1 | grep "coverage," | tail -1)
+    if [[ -n "$coverage_line" ]]; then
+        total_pct=$(echo "$coverage_line" | grep -oE '^[0-9]+\.[0-9]+%')
+        total_pct_num=$(echo "$total_pct" | tr -d '%')
+        total_pct_int=${total_pct_num%.*}
+
+        if [[ $total_pct_int -ge $THRESHOLD ]]; then
+            echo -e "${GREEN}Rust coverage ${total_pct} meets threshold ${THRESHOLD}%.${NC}"
+            echo -e "${GRAY}Note: Rust testable ceiling is ~85% due to transport error paths.${NC}"
+            exit 0
+        else
+            echo -e "${RED}Rust coverage ${total_pct} is below threshold ${THRESHOLD}%.${NC}"
+            exit 1
+        fi
+    fi
+fi
+
+echo -e "${GREEN}Rust coverage measurement complete.${NC}"

@@ -298,6 +298,15 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_compile_definitions(test_chaos PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_chaos COMMAND test_chaos)
     set_tests_properties(test_chaos PROPERTIES TIMEOUT 120)
+
+    # Hardening tests (Phase 3: security-critical edge cases)
+    add_executable(test_hardening tests/fixtures/c/test_hardening.c)
+    target_link_libraries(test_hardening PRIVATE
+        netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
+    )
+    target_compile_definitions(test_hardening PRIVATE NIPC_INTERNAL_TESTING=1)
+    add_test(NAME test_hardening COMMAND test_hardening)
+    set_tests_properties(test_hardening PROPERTIES TIMEOUT 120)
 endif()
 
 # --- Rust UDS transport tests ---------------------------------------------
@@ -635,6 +644,13 @@ if(NETIPC_WINDOWS_RUNTIME)
     target_link_libraries(test_win_shm PRIVATE netipc_win_shm netipc_named_pipe netipc_protocol)
     add_test(NAME test_win_shm COMMAND test_win_shm)
     set_tests_properties(test_win_shm PROPERTIES TIMEOUT 30)
+
+    add_executable(test_win_stress tests/fixtures/c/test_win_stress.c)
+    target_link_libraries(test_win_stress PRIVATE
+        netipc_service_win netipc_win_shm netipc_named_pipe netipc_protocol
+    )
+    add_test(NAME test_win_stress COMMAND test_win_stress)
+    set_tests_properties(test_win_stress PROPERTIES TIMEOUT 120)
 
     # C Windows SHM interop binary
     add_executable(interop_win_shm_c tests/fixtures/c/interop_win_shm.c)

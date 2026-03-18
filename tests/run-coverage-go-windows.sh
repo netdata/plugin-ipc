@@ -1,6 +1,5 @@
 #!/bin/bash
-# Go library coverage measurement
-# Runs tests with -coverprofile for all library packages and reports coverage.
+# Windows Go coverage measurement for the native win11 environment.
 
 set -euo pipefail
 
@@ -15,6 +14,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 GO_DIR="$ROOT_DIR/src/go"
 
+PACKAGES=(
+    "./pkg/netipc/protocol/"
+    "./pkg/netipc/service/cgroups/"
+    "./pkg/netipc/transport/windows/"
+)
+
+THRESHOLD=${1:-80}
+
 run() {
     printf >&2 "${GRAY}$(pwd) >${NC} "
     printf >&2 "${YELLOW}"
@@ -27,20 +34,25 @@ run() {
     fi
 }
 
-echo -e "${CYAN}=== Go Library Coverage ===${NC}"
+echo -e "${CYAN}=== Windows Go Coverage ===${NC}"
 echo
+
+if [[ "$(uname -s)" != *MINGW* ]] && [[ "$(uname -s)" != *MSYS* ]] && [[ "${OS:-}" != "Windows_NT" ]]; then
+    echo -e "${RED}ERROR:${NC} This script must run on Windows."
+    exit 1
+fi
+
+export PATH="/c/Program Files/Go/bin:/mingw64/bin:$PATH"
+
+if ! command -v go >/dev/null 2>&1; then
+    echo -e "${RED}ERROR:${NC} Go is not available in PATH."
+    exit 1
+fi
 
 cd "$GO_DIR"
 
-# Packages to measure (POSIX only -- Windows packages can't be tested here)
-PACKAGES=(
-    "./pkg/netipc/protocol/"
-    "./pkg/netipc/transport/posix/"
-    "./pkg/netipc/service/cgroups/"
-)
-
 COVERDIR=$(mktemp -d)
-trap "rm -rf $COVERDIR" EXIT
+trap "rm -rf \"$COVERDIR\"" EXIT
 
 total_covered=0
 total_statements=0
@@ -50,19 +62,18 @@ for pkg in "${PACKAGES[@]}"; do
     coverfile="$COVERDIR/${pkg_name//\//_}.out"
 
     echo -e "${YELLOW}Testing $pkg_name...${NC}"
-    if CGO_ENABLED=0 go test -count=1 -timeout=120s \
+    if CGO_ENABLED=0 go test -count=1 -timeout=300s \
         -coverprofile="$coverfile" \
         -covermode=count \
         "$pkg" 2>&1; then
         echo -e "  ${GREEN}PASSED${NC}"
     else
         echo -e "  ${RED}FAILED${NC}"
-        continue
+        exit 1
     fi
     echo
 done
 
-# Merge all coverage files
 MERGED="$COVERDIR/merged.out"
 echo "mode: count" > "$MERGED"
 for f in "$COVERDIR"/*.out; do
@@ -70,6 +81,11 @@ for f in "$COVERDIR"/*.out; do
     [[ -f "$f" ]] || continue
     tail -n +2 "$f" >> "$MERGED"
 done
+
+if ! grep -q "transport/windows" "$MERGED"; then
+    echo -e "${RED}ERROR:${NC} No Windows transport coverage was collected."
+    exit 1
+fi
 
 echo
 echo -e "${CYAN}=== Per-Function Coverage ===${NC}"
@@ -79,20 +95,16 @@ echo
 echo -e "${CYAN}=== Per-File Coverage Summary ===${NC}"
 echo
 
-# Parse the coverage file to compute per-file line coverage
-# Each line: file:startLine.startCol,endLine.endCol stmts count
 declare -A file_covered
 declare -A file_total
 
 while IFS= read -r line; do
     [[ "$line" == "mode:"* ]] && continue
-    # Format: github.com/.../file.go:10.2,15.5 3 1
+
     file=$(echo "$line" | cut -d: -f1)
     rest=$(echo "$line" | cut -d: -f2)
     stmts=$(echo "$rest" | awk '{print $2}')
     count=$(echo "$rest" | awk '{print $3}')
-
-    # Extract just the filename relative to pkg/netipc/
     short_file=$(echo "$file" | sed 's|.*/pkg/netipc/||')
 
     file_total[$short_file]=$(( ${file_total[$short_file]:-0} + stmts ))
@@ -114,16 +126,15 @@ for file in $(echo "${!file_total[@]}" | tr ' ' '\n' | sort); do
     fi
 
     pct_int=$(echo "$pct" | cut -d. -f1)
-    if [[ $pct_int -ge 90 ]]; then
+    if [[ $pct_int -ge $THRESHOLD ]]; then
         color=$GREEN
-    elif [[ $pct_int -ge 75 ]]; then
+    elif [[ $pct_int -ge 70 ]]; then
         color=$YELLOW
     else
         color=$RED
     fi
 
     printf "%-40s ${color}%6s%%${NC} %6d/%-6d\n" "$file" "$pct" "$cov" "$tot"
-
     total_covered=$((total_covered + cov))
     total_statements=$((total_statements + tot))
 done
@@ -134,21 +145,15 @@ if [[ $total_statements -gt 0 ]]; then
     printf "%-40s %6s%% %6d/%-6d\n" "TOTAL" "$total_pct" "$total_covered" "$total_statements"
 else
     echo "TOTAL: No coverage data collected"
+    exit 1
 fi
 
 echo
-
-# Threshold check - Go testable ceiling is ~86% due to transport error paths
-# that require OS/kernel failures (socket, mmap, etc.)
-# See COVERAGE-EXCLUSIONS.md for detailed justifications
-THRESHOLD=${1:-85}
 total_pct_int=$(echo "$total_pct" | cut -d. -f1)
-
 if [[ $total_pct_int -ge $THRESHOLD ]]; then
-    echo -e "${GREEN}Go coverage ${total_pct}% meets threshold ${THRESHOLD}%.${NC}"
-    echo -e "${GRAY}Note: Go testable ceiling is ~86% due to transport error paths.${NC}"
+    echo -e "${GREEN}Windows Go coverage ${total_pct}% meets threshold ${THRESHOLD}%.${NC}"
     exit 0
-else
-    echo -e "${RED}Go coverage ${total_pct}% is below threshold ${THRESHOLD}%.${NC}"
-    exit 1
 fi
+
+echo -e "${RED}Windows Go coverage ${total_pct}% is below threshold ${THRESHOLD}%.${NC}"
+exit 1

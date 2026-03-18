@@ -1,6 +1,7 @@
 #!/bin/bash
-# C library coverage measurement using gcov
-# Builds with coverage flags, runs all C tests, reports per-file line coverage.
+# Windows C coverage measurement for the native win11 environment.
+# Uses the same MinGW64 + Ninja toolchain flow that is already validated for
+# normal Windows builds in this repository.
 
 set -euo pipefail
 
@@ -13,26 +14,15 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUILD_DIR="$ROOT_DIR/build-coverage"
+BUILD_DIR="$ROOT_DIR/build-windows-coverage-c"
 
-# Library source files to measure (relative to ROOT_DIR)
 LIB_SOURCES=(
-    "src/libnetdata/netipc/src/protocol/netipc_protocol.c"
-    "src/libnetdata/netipc/src/transport/posix/netipc_uds.c"
-    "src/libnetdata/netipc/src/transport/posix/netipc_shm.c"
-    "src/libnetdata/netipc/src/service/netipc_service.c"
+    "src/libnetdata/netipc/src/service/netipc_service_win.c"
+    "src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c"
+    "src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c"
 )
 
-# Threshold for C library coverage
-# Overall coverage: ~88% (226 lines excluded due to OS/malloc failures, race conditions)
-# Per-file coverage varies due to different exclusion counts:
-#   - netipc_protocol.c: ~98% (achieved 100% on testable lines)
-#   - netipc_uds.c: ~89% (all uncovered are exclusions)
-#   - netipc_shm.c: ~91% (all uncovered are exclusions)
-#   - netipc_service.c: ~82% (many exclusions for malloc/OS failures)
-# See COVERAGE-EXCLUSIONS.md for detailed justifications
-# Threshold is set to minimum per-file coverage
-THRESHOLD=${1:-82}
+THRESHOLD=${1:-80}
 
 run() {
     printf >&2 "${GRAY}$(pwd) >${NC} "
@@ -46,74 +36,59 @@ run() {
     fi
 }
 
-echo -e "${CYAN}=== C Library Coverage ===${NC}"
+echo -e "${CYAN}=== Windows C Coverage ===${NC}"
 echo
 
-# Clean previous coverage build
-rm -rf "$BUILD_DIR"
-mkdir -p "$BUILD_DIR"
+if [[ "$(uname -s)" != *MINGW* ]] && [[ "$(uname -s)" != *MSYS* ]] && [[ "${OS:-}" != "Windows_NT" ]]; then
+    echo -e "${RED}ERROR:${NC} This script must run on Windows."
+    exit 1
+fi
 
-# Configure with coverage enabled
-echo -e "${YELLOW}Configuring with coverage...${NC}"
-run cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DNETIPC_COVERAGE=ON \
-    -DCMAKE_C_COMPILER=gcc 2>&1
+export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
+export MSYSTEM=MINGW64
+export CC="${CC:-/mingw64/bin/gcc}"
+export CXX="${CXX:-/mingw64/bin/g++}"
 
-# Build all test binaries
-echo -e "${YELLOW}Building test binaries...${NC}"
-run cmake --build "$BUILD_DIR" -j"$(nproc)" 2>&1
-
-# Run all POSIX C tests that exercise the library.
-echo -e "${YELLOW}Running tests...${NC}"
-TESTS=(
-    test_protocol
-    test_uds
-    test_shm
-    test_service
-    test_cache
-    test_multi_server
-    test_chaos
-    test_hardening
-    test_ping_pong
-    test_stress
-)
-all_pass=true
-for t in "${TESTS[@]}"; do
-    binary="$BUILD_DIR/bin/$t"
-    if [[ -x "$binary" ]]; then
-        echo -e "  ${GRAY}Running $t...${NC}"
-        if ! "$binary" >/dev/null 2>&1; then
-            echo -e "  ${RED}$t FAILED${NC}"
-            all_pass=false
-        else
-            echo -e "  ${GREEN}$t PASSED${NC}"
-        fi
-    else
-        echo -e "  ${YELLOW}$t not found, skipping${NC}"
-        all_pass=false
+for tool in cmake ninja "$CC" gcov; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo -e "${RED}ERROR:${NC} Required tool not found: $tool"
+        exit 1
     fi
 done
+
+run rm -rf "$BUILD_DIR"
+run mkdir -p "$BUILD_DIR"
+
+echo -e "${YELLOW}Configuring Windows coverage build...${NC}"
+run cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
+    -G Ninja \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DNETIPC_COVERAGE=ON \
+    -DCMAKE_C_COMPILER="$CC" \
+    -DCMAKE_CXX_COMPILER="$CXX"
+
+echo -e "${YELLOW}Building Windows binaries...${NC}"
+run cmake --build "$BUILD_DIR" -j4
+
+echo -e "${YELLOW}Running Windows test suite...${NC}"
+run ctest --test-dir "$BUILD_DIR" --output-on-failure -j4
+
+echo
+echo -e "${YELLOW}Collecting gcov data for Windows C sources...${NC}"
 echo
 
-# Collect coverage data using gcov
-echo -e "${YELLOW}Collecting coverage...${NC}"
-echo
+GCOV_OUT="$BUILD_DIR/gcov-output"
+run rm -rf "$GCOV_OUT"
+run mkdir -p "$GCOV_OUT"
 
 total_covered=0
 total_lines=0
 declare -A file_covered
 declare -A file_total
-
-# gcov output directory for all results
-GCOV_OUT="$BUILD_DIR/gcov-output"
-mkdir -p "$GCOV_OUT"
+all_pass=true
 
 for src in "${LIB_SOURCES[@]}"; do
     basename_c=$(basename "$src")
-
-    # Find the .gcno file for this source
-    # GCC 15 names them: netipc_protocol.c.gcno (with the .c extension)
     gcno_file=$(find "$BUILD_DIR" -name "${basename_c}.gcno" 2>/dev/null | head -1)
 
     if [[ -z "$gcno_file" ]]; then
@@ -123,13 +98,8 @@ for src in "${LIB_SOURCES[@]}"; do
     fi
 
     gcno_dir=$(dirname "$gcno_file")
-
-    # Run gcov from the .gcno/.gcda directory, passing the .gcno file
     gcov_output=$(cd "$gcno_dir" && gcov "${basename_c}.gcno" 2>&1)
 
-    # Parse gcov output for this specific source file
-    # Format: "Lines executed:XX.XX% of YYY"
-    # gcov outputs multiple sections if headers are included; match our source file
     pct_line=$(echo "$gcov_output" | grep -A1 "File '.*${basename_c}'" | grep "Lines executed:" | head -1 | sed 's/.*Lines executed:\([0-9.]*\)% of \([0-9]*\)/\1 \2/')
     if [[ -n "$pct_line" ]]; then
         pct=$(echo "$pct_line" | awk '{print $1}')
@@ -142,14 +112,12 @@ for src in "${LIB_SOURCES[@]}"; do
         total_lines=$((total_lines + total_l))
     fi
 
-    # Move gcov output file to our output dir for later analysis
     gcov_result_file="$gcno_dir/${basename_c}.gcov"
     if [[ -f "$gcov_result_file" ]]; then
         cp "$gcov_result_file" "$GCOV_OUT/"
     fi
 done
 
-# Print results table
 echo -e "${CYAN}=== Coverage Results ===${NC}"
 echo
 printf "%-30s %8s %12s\n" "File" "Coverage" "Lines"
@@ -166,11 +134,10 @@ for src in "${LIB_SOURCES[@]}"; do
             pct="0.0"
         fi
 
-        # Color based on threshold
         pct_int=$(echo "$pct" | cut -d. -f1)
         if [[ $pct_int -ge $THRESHOLD ]]; then
             color=$GREEN
-        elif [[ $pct_int -ge 75 ]]; then
+        elif [[ $pct_int -ge 70 ]]; then
             color=$YELLOW
         else
             color=$RED
@@ -193,10 +160,10 @@ if [[ $total_lines -gt 0 ]]; then
     printf "%-30s %6s%% %6d/%-6d\n" "TOTAL" "$total_pct" "$total_covered" "$total_lines"
 else
     echo "TOTAL: No coverage data collected"
+    exit 1
 fi
-echo
 
-# Show uncovered lines per file
+echo
 echo -e "${CYAN}=== Uncovered Lines ===${NC}"
 for src in "${LIB_SOURCES[@]}"; do
     basename_c=$(basename "$src")
@@ -205,7 +172,6 @@ for src in "${LIB_SOURCES[@]}"; do
         uncovered_count=$(grep -c "^    #####:" "$gcov_file" 2>/dev/null || true)
         if [[ $uncovered_count -gt 0 ]]; then
             echo -e "\n${YELLOW}$basename_c${NC} ($uncovered_count uncovered lines):"
-            # gcov format: "    #####:  123:    code here"
             grep "^    #####:" "$gcov_file" | sed -n '1,40p' | while IFS= read -r line; do
                 lineno=$(echo "$line" | awk -F: '{gsub(/^[ \t]+/,"",$2); print $2}')
                 code=$(echo "$line" | cut -d: -f3-)
@@ -217,13 +183,12 @@ for src in "${LIB_SOURCES[@]}"; do
         fi
     fi
 done
-echo
 
-# Exit status
+echo
 if $all_pass; then
-    echo -e "${GREEN}All files meet the ${THRESHOLD}% coverage threshold.${NC}"
+    echo -e "${GREEN}All Windows C files meet the ${THRESHOLD}% coverage threshold.${NC}"
     exit 0
-else
-    echo -e "${RED}Some files are below the ${THRESHOLD}% coverage threshold.${NC}"
-    exit 1
 fi
+
+echo -e "${RED}Some Windows C files are below the ${THRESHOLD}% coverage threshold.${NC}"
+exit 1

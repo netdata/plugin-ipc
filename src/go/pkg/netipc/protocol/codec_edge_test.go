@@ -865,3 +865,56 @@ func TestDecodeHelloBadPadding(t *testing.T) {
 		t.Fatalf("expected ErrBadLayout for bad padding, got %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+//  CgroupsBuilder utility functions
+// ---------------------------------------------------------------------------
+
+func TestCgroupsBuilderSetHeader(t *testing.T) {
+	var buf [4096]byte
+	b := NewCgroupsBuilder(buf[:], 10, 0, 0)
+
+	// Initial values should be zero
+	if b.systemdEnabled != 0 {
+		t.Fatalf("initial systemdEnabled should be 0, got %d", b.systemdEnabled)
+	}
+	if b.generation != 0 {
+		t.Fatalf("initial generation should be 0, got %d", b.generation)
+	}
+
+	// Set header values
+	b.SetHeader(1, 12345)
+
+	if b.systemdEnabled != 1 {
+		t.Fatalf("SetHeader systemdEnabled should be 1, got %d", b.systemdEnabled)
+	}
+	if b.generation != 12345 {
+		t.Fatalf("SetHeader generation should be 12345, got %d", b.generation)
+	}
+}
+
+func TestEstimateCgroupsMaxItems(t *testing.T) {
+	// Buffer too small - should return 0
+	maxItems := EstimateCgroupsMaxItems(cgroupsRespHdr)
+	if maxItems != 0 {
+		t.Fatalf("EstimateCgroupsMaxItems(%d) should be 0, got %d", cgroupsRespHdr, maxItems)
+	}
+
+	// Small buffer - should return 0
+	maxItems = EstimateCgroupsMaxItems(cgroupsRespHdr + 10)
+	if maxItems != 0 {
+		t.Fatalf("EstimateCgroupsMaxItems(small) should be 0, got %d", maxItems)
+	}
+
+	// Reasonable buffer - should return positive value
+	maxItems = EstimateCgroupsMaxItems(4096)
+	if maxItems == 0 {
+		t.Fatalf("EstimateCgroupsMaxItems(4096) should be > 0, got 0")
+	}
+
+	// Larger buffer - should return larger value
+	maxItemsLarge := EstimateCgroupsMaxItems(65536)
+	if maxItemsLarge <= maxItems {
+		t.Fatalf("EstimateCgroupsMaxItems(65536)=%d should be > EstimateCgroupsMaxItems(4096)=%d", maxItemsLarge, maxItems)
+	}
+}
