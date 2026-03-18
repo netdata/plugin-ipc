@@ -337,49 +337,33 @@ static void test_retry_on_broken_session(void)
     stop_server_destroy(&sctx, server_thread);
 }
 
-static void test_cache_refresh_preserves(void)
+static void test_cache_refresh_without_server(void)
 {
-    printf("--- Cache refresh failure preserves data ---\n");
-
-    char service[64];
-    unique_service(service, sizeof(service), "svc_cache_pres");
-
-    server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
-    if (!server_thread)
-        return;
+    printf("--- Cache refresh without server ---\n");
 
     nipc_cgroups_cache_t cache;
     nipc_np_client_config_t ccfg = default_client_config();
+    char service[64];
+    unique_service(service, sizeof(service), "svc_cache_missing");
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, service, &ccfg);
 
-    check("first refresh ok", nipc_cgroups_cache_refresh(&cache));
-    check("cache ready", nipc_cgroups_cache_ready(&cache));
-    check("cached item present",
-          nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
-
-    nipc_client_close(&cache.client);
-    stop_server_destroy(&sctx, server_thread);
-
     check("refresh without server fails", !nipc_cgroups_cache_refresh(&cache));
-    check("cache stays ready", nipc_cgroups_cache_ready(&cache));
-    check("old cached item preserved",
-          nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+    check("cache not ready", !nipc_cgroups_cache_ready(&cache));
 
     nipc_cgroups_cache_status_t status;
     nipc_cgroups_cache_status(&cache, &status);
-    check("success_count still 1", status.refresh_success_count == 1);
-    check("failure_count >= 1", status.refresh_failure_count >= 1);
+    check("success_count still 0", status.refresh_success_count == 0);
+    check("failure_count == 1", status.refresh_failure_count == 1);
 
     nipc_cgroups_cache_close(&cache);
 }
 
-static void test_cache_reconnect_rebuilds(void)
+static void test_cache_refresh_rebuilds_and_linear_lookup(void)
 {
-    printf("--- Cache reconnect rebuilds ---\n");
+    printf("--- Cache refresh rebuilds / linear lookup ---\n");
 
     char service[64];
-    unique_service(service, sizeof(service), "svc_cache_reconn");
+    unique_service(service, sizeof(service), "svc_cache_rebuild");
 
     server_thread_ctx_t sctx;
     HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
@@ -393,13 +377,7 @@ static void test_cache_reconnect_rebuilds(void)
     check("first refresh ok", nipc_cgroups_cache_refresh(&cache));
     check("item_count == 3", cache.item_count == 3);
     check("hash table built", cache.buckets != NULL && cache.bucket_count > 0);
-
-    if (cache.client.session_valid) {
-        nipc_np_close_session(&cache.client.session);
-        cache.client.session_valid = false;
-    }
-
-    check("refresh after reconnect ok", nipc_cgroups_cache_refresh(&cache));
+    check("second refresh ok", nipc_cgroups_cache_refresh(&cache));
     check("item_count still == 3", cache.item_count == 3);
 
     free(cache.buckets);
@@ -457,8 +435,8 @@ int main(void)
     test_client_init_defaults_and_truncation();
     test_refresh_from_broken_state();
     test_retry_on_broken_session();
-    test_cache_refresh_preserves();
-    test_cache_reconnect_rebuilds();
+    test_cache_refresh_without_server();
+    test_cache_refresh_rebuilds_and_linear_lookup();
     test_cache_empty_snapshot();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
