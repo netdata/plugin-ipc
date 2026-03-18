@@ -16,17 +16,21 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-18)
 
-- Expand Windows coverage materially instead of adjusting thresholds.
-- Immediate targets, based on verified `win11` coverage results:
+- Coverage parity and hardening, not emergency benchmark or transport fixes.
+- Verified current Windows coverage state:
   - C:
-    - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c` (`69.0%`)
-    - `src/libnetdata/netipc/src/service/netipc_service_win.c` (`77.5%`)
-    - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c` (`77.8%`)
+    - `src/libnetdata/netipc/src/service/netipc_service_win.c` (`80.4%`)
+    - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c` (`86.0%`)
+    - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c` (`83.5%`)
+    - total: `82.7%`
   - Go:
-    - Windows Go coverage is now above the draft target (`81.8%` total).
-    - Remaining work there is expansion and stabilization, not an active threshold failure.
-- Constraint:
-  - do not treat low coverage as “unavoidable” until the ordinary testable paths are exhausted
+    - total: `81.8%`
+  - Rust:
+    - still no validated Windows-native coverage workflow
+- Immediate remaining coverage work:
+  - Windows Rust coverage
+  - raise all coverage thresholds toward `100%`
+  - convert the remaining uncovered ordinary branches into tests or documented exclusions
 
 ## Summary Of Work Done
 
@@ -86,12 +90,14 @@ Verified on `2026-03-18`:
 
 - `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo`: passing
 - `cmake --build build -j4`: passing
-- `ctest --test-dir build --output-on-failure -j4`: `25/25` passing
+- `ctest --test-dir build --output-on-failure -j4`: `26/26` passing
 
 Important facts:
 
 - The Go fuzz tests are now serialized in CTest with `RESOURCE_LOCK`.
   - This fixed the previous `go_FuzzDecodeCgroupsResponse` timeout on `win11`.
+- The current exact head was revalidated again after the coverage work.
+  - `ctest --test-dir build --output-on-failure -j4`: `26/26` passing
 - `test_win_stress` is now wired and validated.
   - Current default scope is only the validated WinSHM lifecycle repetition.
   - The managed-service stress subcases were intentionally removed from the default Windows `ctest` path because Windows managed-server shutdown under stress still needs a separate investigation.
@@ -116,13 +122,13 @@ Current measured results:
 
 - C:
   - `bash tests/run-coverage-c-windows.sh 80`
-  - full Windows `ctest` suite passed inside the script
-  - coverage result: `75.1%`
+  - Windows C coverage run now passes
+  - coverage result: `82.7%`
   - per-file:
-    - `netipc_service_win.c`: `77.5%`
-    - `netipc_named_pipe.c`: `69.0%`
-    - `netipc_win_shm.c`: `77.8%`
-  - status: below the draft `80%` target
+    - `netipc_service_win.c`: `80.4%`
+    - `netipc_named_pipe.c`: `86.0%`
+    - `netipc_win_shm.c`: `83.5%`
+  - status: above the draft `80%` target
 
 - Go:
   - `bash tests/run-coverage-go-windows.sh 80`
@@ -141,6 +147,10 @@ Important facts:
 - The Windows C service coverage harness was trimmed to keep `ctest` trustworthy.
   - The broken-session retry and cache subcases need a smaller dedicated Windows-only harness.
   - Keeping them in the monolithic `test_win_service.exe` caused intermittent deadlocks and poisoned full-suite validation.
+- Windows C coverage no longer depends on `test_win_service.exe`.
+  - The coverage script now uses the smaller `test_win_service_extra.exe` plus the Windows interop/stress tests.
+  - Reason: if a large gcov-instrumented process times out, its coverage data is unreliable or lost.
+  - The normal Windows `ctest` suite still validates `test_win_service.exe` separately.
 
 - Rust:
   - no validated Windows-native Rust coverage script yet
