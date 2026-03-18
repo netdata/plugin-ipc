@@ -14,6 +14,20 @@ Finish the rewrite to a production-ready state with:
 - The rewrite itself is in good shape. Linux is green, Windows tests are green, and POSIX/Windows benchmark floors are green.
 - The remaining work is not about core correctness regressions. It is about coverage completeness, Windows coverage parity, and one deferred Windows managed-server stress investigation.
 
+## Current Focus (2026-03-18)
+
+- Expand Windows coverage materially instead of adjusting thresholds.
+- Immediate targets, based on verified `win11` coverage results:
+  - C:
+    - `src/libnetdata/netipc/src/service/netipc_service_win.c` (`63.9%`)
+    - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c` (`66.0%`)
+  - Go:
+    - `src/go/pkg/netipc/service/cgroups/client_windows.go` (`37.7%`)
+    - `src/go/pkg/netipc/service/cgroups/cache_windows.go` (`0.0%`)
+    - `src/go/pkg/netipc/transport/windows/pipe.go` (`5.8%`)
+- Constraint:
+  - do not treat low coverage as “unavoidable” until the ordinary testable paths are exhausted
+
 ## Summary Of Work Done
 
 - Normalized the public specifications so Level 2 is clearly typed-only and transport/buffer details remain internal.
@@ -283,9 +297,12 @@ Facts:
 
 Required next work:
 
-- Decide the real target and policy:
-  - keep `80%` and write the missing tests
-  - or revise the threshold only after a line-by-line justification
+- Current implementation strategy for the next pass:
+  - keep the draft `80%` target for Windows C and Go
+  - do not lower thresholds again before ordinary reachable branches are covered
+  - add Windows C managed-service coverage directly, instead of relying only on `test_win_stress`
+  - port the existing Unix Go lifecycle/cache/retry test patterns to Windows-specific test files
+  - port the existing Unix Go named-pipe integration patterns to `transport/windows/pipe_test.go`
 - Expand Windows C coverage:
   - especially `netipc_service_win.c`
   - especially `netipc_named_pipe.c`

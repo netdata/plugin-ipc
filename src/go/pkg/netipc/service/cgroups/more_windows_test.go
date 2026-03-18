@@ -1,0 +1,733 @@
+//go:build windows
+
+package cgroups
+
+import (
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
+	windows "github.com/netdata/plugin-ipc/go/pkg/netipc/transport/windows"
+)
+
+func TestWinClientStatusFresh(t *testing.T) {
+	client := NewClient(winTestRunDir, uniqueWinService("go_win_fresh"), testWinClientConfig())
+	defer client.Close()
+
+	status := client.Status()
+	if status.State != StateDisconnected {
+		t.Fatalf("expected DISCONNECTED, got %d", status.State)
+	}
+	if status.ConnectCount != 0 || status.ReconnectCount != 0 || status.CallCount != 0 || status.ErrorCount != 0 {
+		t.Fatalf("unexpected fresh counters: %+v", status)
+	}
+}
+
+func TestWinClientLifecycle(t *testing.T) {
+	svc := uniqueWinService("go_win_lifecycle")
+
+	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	defer client.Close()
+
+	if client.state != StateDisconnected {
+		t.Fatalf("expected DISCONNECTED, got %d", client.state)
+	}
+	if client.Ready() {
+		t.Fatal("client should not be ready before refresh")
+	}
+
+	changed := client.Refresh()
+	if !changed {
+		t.Fatal("refresh without server should change state")
+	}
+	if client.state != StateNotFound {
+		t.Fatalf("expected NOT_FOUND, got %d", client.state)
+	}
+
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+
+	changed = client.Refresh()
+	if !changed {
+		t.Fatal("refresh with server should change state")
+	}
+	if client.state != StateReady {
+		t.Fatalf("expected READY, got %d", client.state)
+	}
+	if !client.Ready() {
+		t.Fatal("client should be ready")
+	}
+
+	status := client.Status()
+	if status.ConnectCount != 1 {
+		t.Fatalf("expected connect_count=1, got %d", status.ConnectCount)
+	}
+	if status.ReconnectCount != 0 {
+		t.Fatalf("expected reconnect_count=0, got %d", status.ReconnectCount)
+	}
+
+	client.Close()
+	if client.state != StateDisconnected {
+		t.Fatalf("expected DISCONNECTED after close, got %d", client.state)
+	}
+
+	ts.stop()
+}
+
+func TestWinClientRefreshFromReadyNoop(t *testing.T) {
+	svc := uniqueWinService("go_win_ready")
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	defer ts.stop()
+
+	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	defer client.Close()
+
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatal("client not ready")
+	}
+
+	changed := client.Refresh()
+	if changed {
+		t.Fatal("refresh from READY should be a no-op")
+	}
+	if client.state != StateReady {
+		t.Fatalf("expected READY, got %d", client.state)
+	}
+}
+
+func TestWinClientRefreshFromAuthFailed(t *testing.T) {
+	svc := uniqueWinService("go_win_auth")
+
+	scfg := testWinServerConfig()
+	scfg.AuthToken = 0x1111
+	ts := startTestServerWinWithConfig(svc, scfg, winTestHandlers())
+	defer ts.stop()
+
+	ccfg := testWinClientConfig()
+	ccfg.AuthToken = 0x2222
+	client := NewClient(winTestRunDir, svc, ccfg)
+	defer client.Close()
+
+	client.Refresh()
+	if client.state != StateAuthFailed {
+		t.Fatalf("expected AUTH_FAILED, got %d", client.state)
+	}
+
+	changed := client.Refresh()
+	if changed {
+		t.Fatal("refresh from AUTH_FAILED should be a no-op")
+	}
+}
+
+func TestWinClientRefreshFromIncompatible(t *testing.T) {
+	svc := uniqueWinService("go_win_incompat")
+
+	scfg := testWinServerConfig()
+	scfg.SupportedProfiles = protocol.ProfileSHMFutex
+	ts := startTestServerWinWithConfig(svc, scfg, winTestHandlers())
+	defer ts.stop()
+
+	ccfg := testWinClientConfig()
+	ccfg.SupportedProfiles = protocol.ProfileBaseline
+	client := NewClient(winTestRunDir, svc, ccfg)
+	defer client.Close()
+
+	client.Refresh()
+	if client.state != StateIncompatible {
+		t.Fatalf("expected INCOMPATIBLE, got %d", client.state)
+	}
+
+	changed := client.Refresh()
+	if changed {
+		t.Fatal("refresh from INCOMPATIBLE should be a no-op")
+	}
+}
+
+func TestWinClientRefreshFromBroken(t *testing.T) {
+	svc := uniqueWinService("go_win_broken")
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	defer ts.stop()
+
+	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	defer client.Close()
+
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatal("client not ready")
+	}
+
+	client.session.Close()
+	client.state = StateBroken
+
+	changed := client.Refresh()
+	if !changed {
+		t.Fatal("refresh from BROKEN should change state")
+	}
+	if client.state != StateReady {
+		t.Fatalf("expected READY after reconnect, got %d", client.state)
+	}
+	if client.reconnectCount < 1 {
+		t.Fatalf("expected reconnect_count >= 1, got %d", client.reconnectCount)
+	}
+}
+
+func TestWinCallWithRetryNotReady(t *testing.T) {
+	client := NewClient(winTestRunDir, uniqueWinService("go_win_notready"), testWinClientConfig())
+	defer client.Close()
+
+	if _, err := client.CallSnapshot(); err == nil {
+		t.Fatal("expected error when client is not ready")
+	}
+	if client.errorCount != 1 {
+		t.Fatalf("expected error_count=1, got %d", client.errorCount)
+	}
+}
+
+func TestWinCgroupsCall(t *testing.T) {
+	svc := uniqueWinService("go_win_cgroups")
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	defer ts.stop()
+
+	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	defer client.Close()
+
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatal("client not ready")
+	}
+
+	view, err := client.CallSnapshot()
+	if err != nil {
+		t.Fatalf("snapshot call failed: %v", err)
+	}
+	if view.ItemCount != 3 {
+		t.Fatalf("expected 3 items, got %d", view.ItemCount)
+	}
+	if view.SystemdEnabled != 1 {
+		t.Fatalf("expected systemd_enabled=1, got %d", view.SystemdEnabled)
+	}
+	if view.Generation != 42 {
+		t.Fatalf("expected generation=42, got %d", view.Generation)
+	}
+
+	item0, err := view.Item(0)
+	if err != nil {
+		t.Fatalf("item 0 error: %v", err)
+	}
+	if item0.Hash != 1001 || item0.Enabled != 1 {
+		t.Fatalf("unexpected item0: %+v", item0)
+	}
+	if item0.Name.String() != "docker-abc123" {
+		t.Fatalf("unexpected item0 name: %q", item0.Name.String())
+	}
+	if item0.Path.String() != "/sys/fs/cgroup/docker/abc123" {
+		t.Fatalf("unexpected item0 path: %q", item0.Path.String())
+	}
+
+	status := client.Status()
+	if status.CallCount != 1 || status.ErrorCount != 0 {
+		t.Fatalf("unexpected status after snapshot: %+v", status)
+	}
+}
+
+func TestWinCallIncrementBatch(t *testing.T) {
+	svc := uniqueWinService("go_win_batch")
+	cfg := testWinServerConfig()
+	cfg.MaxRequestBatchItems = 16
+	cfg.MaxResponseBatchItems = 16
+	ts := startTestServerWinWithConfig(svc, cfg, winTestHandlers())
+	defer ts.stop()
+
+	ccfg := testWinClientConfig()
+	ccfg.MaxRequestBatchItems = 16
+	ccfg.MaxResponseBatchItems = 16
+	client := NewClient(winTestRunDir, svc, ccfg)
+	defer client.Close()
+
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatal("client not ready")
+	}
+
+	got, err := client.CallIncrementBatch([]uint64{1, 41, 99, 1000})
+	if err != nil {
+		t.Fatalf("CallIncrementBatch failed: %v", err)
+	}
+
+	want := []uint64{2, 42, 100, 1001}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d results, got %d", len(want), len(got))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("result[%d] = %d, want %d", i, got[i], want[i])
+		}
+	}
+}
+
+func TestWinCallIncrementBatchEmpty(t *testing.T) {
+	client := NewClient(winTestRunDir, uniqueWinService("go_win_empty_batch"), testWinClientConfig())
+	defer client.Close()
+
+	results, err := client.CallIncrementBatch(nil)
+	if err != nil {
+		t.Fatalf("expected nil error for nil batch, got %v", err)
+	}
+	if results != nil {
+		t.Fatalf("expected nil results, got %v", results)
+	}
+
+	results, err = client.CallIncrementBatch([]uint64{})
+	if err != nil {
+		t.Fatalf("expected nil error for empty slice, got %v", err)
+	}
+	if results != nil {
+		t.Fatalf("expected nil results, got %v", results)
+	}
+}
+
+func TestWinRetryOnClosedSession(t *testing.T) {
+	svc := uniqueWinService("go_win_retry")
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	defer ts.stop()
+
+	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	defer client.Close()
+
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatal("client not ready")
+	}
+
+	if _, err := client.CallSnapshot(); err != nil {
+		t.Fatalf("first call failed: %v", err)
+	}
+
+	client.session.Close()
+
+	view, err := client.CallSnapshot()
+	if err != nil {
+		t.Fatalf("retry call failed: %v", err)
+	}
+	if view.ItemCount != 3 {
+		t.Fatalf("expected 3 items after retry, got %d", view.ItemCount)
+	}
+
+	status := client.Status()
+	if status.ReconnectCount < 1 {
+		t.Fatalf("expected reconnect_count >= 1, got %d", status.ReconnectCount)
+	}
+}
+
+func TestWinHandlerFailure(t *testing.T) {
+	svc := uniqueWinService("go_win_handler_fail")
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winFailingHandlers())
+	defer ts.stop()
+
+	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	defer client.Close()
+
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatal("client not ready")
+	}
+
+	if _, err := client.CallSnapshot(); err == nil {
+		t.Fatal("expected error when handler fails")
+	}
+
+	status := client.Status()
+	if status.ErrorCount < 1 {
+		t.Fatalf("expected error_count >= 1, got %d", status.ErrorCount)
+	}
+}
+
+func TestWinStatusReporting(t *testing.T) {
+	svc := uniqueWinService("go_win_status")
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+
+	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatal("client not ready")
+	}
+
+	s0 := client.Status()
+	if s0.ConnectCount != 1 || s0.CallCount != 0 || s0.ErrorCount != 0 {
+		t.Fatalf("unexpected initial status: %+v", s0)
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := client.CallSnapshot(); err != nil {
+			t.Fatalf("call %d failed: %v", i, err)
+		}
+	}
+
+	s1 := client.Status()
+	if s1.CallCount != 3 || s1.ErrorCount != 0 {
+		t.Fatalf("unexpected status after calls: %+v", s1)
+	}
+
+	client.Close()
+	if _, err := client.CallSnapshot(); err == nil {
+		t.Fatal("expected error on disconnected client")
+	}
+
+	s2 := client.Status()
+	if s2.ErrorCount != 1 {
+		t.Fatalf("expected error_count=1, got %+v", s2)
+	}
+
+	ts.stop()
+}
+
+func TestWinCacheLookupBeforeRefresh(t *testing.T) {
+	cache := NewCache(winTestRunDir, uniqueWinService("go_win_cache_empty"), testWinClientConfig())
+	defer cache.Close()
+
+	if cache.Ready() {
+		t.Fatal("cache should not be ready")
+	}
+	if _, found := cache.Lookup(123, "anything"); found {
+		t.Fatal("lookup before refresh should miss")
+	}
+}
+
+func TestWinCacheStatusFresh(t *testing.T) {
+	cache := NewCache(winTestRunDir, uniqueWinService("go_win_cache_status"), testWinClientConfig())
+	defer cache.Close()
+
+	status := cache.Status()
+	if status.Populated || status.ItemCount != 0 || status.RefreshSuccessCount != 0 || status.RefreshFailureCount != 0 || status.LastRefreshTs != 0 {
+		t.Fatalf("unexpected fresh cache status: %+v", status)
+	}
+}
+
+func TestWinCacheFullRoundTrip(t *testing.T) {
+	svc := uniqueWinService("go_win_cache_rt")
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+
+	cache := NewCache(winTestRunDir, svc, testWinClientConfig())
+	if cache.Ready() {
+		t.Fatal("cache should not be ready before refresh")
+	}
+
+	time.Sleep(2 * time.Millisecond)
+
+	if !cache.Refresh() {
+		t.Fatal("refresh should succeed")
+	}
+	if !cache.Ready() {
+		t.Fatal("cache should be ready after refresh")
+	}
+
+	item, found := cache.Lookup(1001, "docker-abc123")
+	if !found {
+		t.Fatal("expected cached item")
+	}
+	if item.Path != "/sys/fs/cgroup/docker/abc123" {
+		t.Fatalf("unexpected cached path: %q", item.Path)
+	}
+
+	status := cache.Status()
+	if !status.Populated || status.ItemCount != 3 || status.SystemdEnabled != 1 || status.Generation != 42 || status.RefreshSuccessCount != 1 || status.RefreshFailureCount != 0 || status.ConnectionState != StateReady || status.LastRefreshTs <= 0 {
+		t.Fatalf("unexpected cache status: %+v", status)
+	}
+
+	cache.Close()
+	ts.stop()
+}
+
+func TestWinCacheRefreshNoServer(t *testing.T) {
+	cache := NewCache(winTestRunDir, uniqueWinService("go_win_cache_noserver"), testWinClientConfig())
+	defer cache.Close()
+
+	if cache.Refresh() {
+		t.Fatal("refresh should fail with no server")
+	}
+	if cache.Ready() {
+		t.Fatal("cache should not be ready")
+	}
+	if cache.Status().RefreshFailureCount != 1 {
+		t.Fatalf("expected failure_count=1, got %d", cache.Status().RefreshFailureCount)
+	}
+}
+
+func TestWinCacheRefreshFailurePreserves(t *testing.T) {
+	svc := uniqueWinService("go_win_cache_preserve")
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+
+	cache := NewCache(winTestRunDir, svc, testWinClientConfig())
+	if !cache.Refresh() {
+		t.Fatal("first refresh should succeed")
+	}
+	if !cache.Ready() {
+		t.Fatal("cache should be ready")
+	}
+	if _, found := cache.Lookup(1001, "docker-abc123"); !found {
+		t.Fatal("expected first cached item")
+	}
+
+	cache.client.Close()
+	ts.stop()
+
+	if cache.Refresh() {
+		t.Fatal("refresh should fail without server")
+	}
+	if !cache.Ready() {
+		t.Fatal("cache should preserve readiness")
+	}
+	if _, found := cache.Lookup(1001, "docker-abc123"); !found {
+		t.Fatal("old cache data should be preserved")
+	}
+
+	status := cache.Status()
+	if status.RefreshSuccessCount != 1 || status.RefreshFailureCount < 1 {
+		t.Fatalf("unexpected preserved cache status: %+v", status)
+	}
+
+	cache.Close()
+}
+
+func TestWinCacheReconnectRebuilds(t *testing.T) {
+	svc := uniqueWinService("go_win_cache_reconnect")
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	defer ts.stop()
+
+	cache := NewCache(winTestRunDir, svc, testWinClientConfig())
+	defer cache.Close()
+
+	if !cache.Refresh() {
+		t.Fatal("first refresh should succeed")
+	}
+
+	cache.client.session.Close()
+
+	if !cache.Refresh() {
+		t.Fatal("refresh after reconnect should succeed")
+	}
+	if cache.Status().RefreshSuccessCount != 2 {
+		t.Fatalf("expected success_count=2, got %d", cache.Status().RefreshSuccessCount)
+	}
+}
+
+func TestWinCacheLookupHashNameMismatch(t *testing.T) {
+	svc := uniqueWinService("go_win_cache_lookup")
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	defer ts.stop()
+
+	cache := NewCache(winTestRunDir, svc, testWinClientConfig())
+	defer cache.Close()
+
+	if !cache.Refresh() {
+		t.Fatal("refresh should succeed")
+	}
+
+	if _, found := cache.Lookup(1001, "wrong-name"); found {
+		t.Fatal("lookup with wrong name should miss")
+	}
+	if _, found := cache.Lookup(9999, "docker-abc123"); found {
+		t.Fatal("lookup with wrong hash should miss")
+	}
+	if item, found := cache.Lookup(1001, "docker-abc123"); !found || item.Hash != 1001 {
+		t.Fatalf("expected exact hash+name match, got found=%v item=%+v", found, item)
+	}
+}
+
+func TestWinCacheCloseResetsState(t *testing.T) {
+	svc := uniqueWinService("go_win_cache_close")
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+
+	cache := NewCache(winTestRunDir, svc, testWinClientConfig())
+	if !cache.Refresh() {
+		t.Fatal("refresh should succeed")
+	}
+	cache.Close()
+
+	if cache.Ready() {
+		t.Fatal("cache should not be ready after close")
+	}
+	if _, found := cache.Lookup(1001, "docker-abc123"); found {
+		t.Fatal("lookup after close should miss")
+	}
+
+	ts.stop()
+}
+
+func TestWinCacheCustomAndDefaultBufferSize(t *testing.T) {
+	customCfg := testWinClientConfig()
+	customCfg.MaxResponsePayloadBytes = 1024
+	custom := NewCache(winTestRunDir, uniqueWinService("go_win_custom_buf"), customCfg)
+	defer custom.Close()
+
+	if got, want := custom.client.maxReceiveMessageBytes(), protocol.HeaderSize+1024; got != want {
+		t.Fatalf("custom buffer size = %d, want %d", got, want)
+	}
+
+	defaultCfg := testWinClientConfig()
+	defaultCfg.MaxResponsePayloadBytes = 0
+	def := NewCache(winTestRunDir, uniqueWinService("go_win_default_buf"), defaultCfg)
+	defer def.Close()
+
+	if got, want := def.client.maxReceiveMessageBytes(), protocol.HeaderSize+cacheResponseBufSize; got != want {
+		t.Fatalf("default buffer size = %d, want %d", got, want)
+	}
+}
+
+func TestWinCacheLargeDataset(t *testing.T) {
+	svc := uniqueWinService("go_win_cache_large")
+	const itemCount = 512
+
+	cfg := testWinServerConfig()
+	cfg.MaxResponsePayloadBytes = 256 * itemCount
+	ts := startTestServerWinWithConfig(svc, cfg, Handlers{
+		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+			if request.LayoutVersion != 1 || request.Flags != 0 {
+				return false
+			}
+			builder.SetHeader(1, 100)
+
+			for i := uint32(0); i < itemCount; i++ {
+				name := fmt.Sprintf("cgroup-%d", i)
+				path := fmt.Sprintf("/sys/fs/cgroup/test/%d", i)
+				enabled := uint32(1)
+				if i%3 == 0 {
+					enabled = 0
+				}
+				if err := builder.Add(i+1000, 0, enabled, []byte(name), []byte(path)); err != nil {
+					return false
+				}
+			}
+			return true
+		},
+		SnapshotMaxItems: itemCount,
+	})
+	defer ts.stop()
+
+	ccfg := testWinClientConfig()
+	ccfg.MaxResponsePayloadBytes = 256 * itemCount
+
+	cache := NewCache(winTestRunDir, svc, ccfg)
+	defer cache.Close()
+
+	if !cache.Refresh() {
+		t.Fatal("refresh should succeed")
+	}
+	if got := cache.Status().ItemCount; got != itemCount {
+		t.Fatalf("expected %d items, got %d", itemCount, got)
+	}
+
+	for i := uint32(0); i < itemCount; i++ {
+		name := fmt.Sprintf("cgroup-%d", i)
+		item, found := cache.Lookup(i+1000, name)
+		if !found {
+			t.Fatalf("item %d not found", i)
+		}
+		wantPath := fmt.Sprintf("/sys/fs/cgroup/test/%d", i)
+		if item.Path != wantPath {
+			t.Fatalf("item %d path = %q, want %q", i, item.Path, wantPath)
+		}
+	}
+}
+
+func TestWinIsErrorHelpers(t *testing.T) {
+	if !isConnectError(windows.ErrConnect) || !isConnectError(windows.ErrCreatePipe) {
+		t.Fatal("connect errors should match")
+	}
+	if isConnectError(windows.ErrAuthFailed) || isConnectError(windows.ErrNoProfile) || isConnectError(nil) {
+		t.Fatal("non-connect errors should not match connect classification")
+	}
+
+	if !isAuthError(windows.ErrAuthFailed) || isAuthError(windows.ErrConnect) || isAuthError(nil) {
+		t.Fatal("auth error classification mismatch")
+	}
+
+	if !isProfileError(windows.ErrNoProfile) || isProfileError(windows.ErrAuthFailed) || isProfileError(nil) {
+		t.Fatal("profile error classification mismatch")
+	}
+}
+
+func TestWinNonRequestTerminatesSession(t *testing.T) {
+	svc := uniqueWinService("go_win_nonreq")
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	defer ts.stop()
+
+	ccfg := testWinClientConfig()
+	session, err := windows.Connect(winTestRunDir, svc, &ccfg)
+	if err != nil {
+		t.Fatalf("raw connect failed: %v", err)
+	}
+
+	badHdr := &protocol.Header{
+		Kind:            protocol.KindResponse,
+		Code:            protocol.MethodCgroupsSnapshot,
+		ItemCount:       0,
+		MessageID:       1,
+		TransportStatus: protocol.StatusOK,
+	}
+	if err := session.Send(badHdr, nil); err != nil {
+		t.Fatalf("send non-request failed: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	req := protocol.CgroupsRequest{LayoutVersion: 1, Flags: 0}
+	var reqBuf [4]byte
+	if req.Encode(reqBuf[:]) == 0 {
+		t.Fatal("request encode failed")
+	}
+	goodHdr := &protocol.Header{
+		Kind:            protocol.KindRequest,
+		Code:            protocol.MethodCgroupsSnapshot,
+		ItemCount:       1,
+		MessageID:       2,
+		TransportStatus: protocol.StatusOK,
+	}
+	_ = session.Send(goodHdr, reqBuf[:])
+
+	recvBuf := make([]byte, 4096)
+	if _, _, err := session.Receive(recvBuf); err == nil {
+		t.Fatal("receive after non-request should fail")
+	}
+	session.Close()
+
+	verify := NewClient(winTestRunDir, svc, testWinClientConfig())
+	defer verify.Close()
+
+	verify.Refresh()
+	if !verify.Ready() {
+		t.Fatal("server should still accept new clients after bad session")
+	}
+
+	view, err := verify.CallSnapshot()
+	if err != nil {
+		t.Fatalf("normal call after bad session failed: %v", err)
+	}
+	if view.ItemCount != 3 {
+		t.Fatalf("expected 3 items after recovery, got %d", view.ItemCount)
+	}
+}
+
+func TestWinCallSnapshotWithMalformedTransportState(t *testing.T) {
+	svc := uniqueWinService("go_win_malformed_state")
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	defer ts.stop()
+
+	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	defer client.Close()
+
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatal("client not ready")
+	}
+
+	client.session = nil
+	view, err := client.CallSnapshot()
+	if err != nil {
+		t.Fatalf("expected reconnect to recover from nil session, got %v", err)
+	}
+	if view.ItemCount != 3 {
+		t.Fatalf("expected recovered snapshot, got %d items", view.ItemCount)
+	}
+}

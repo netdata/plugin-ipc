@@ -648,6 +648,13 @@ if(NETIPC_WINDOWS_RUNTIME)
     add_test(NAME test_win_shm COMMAND test_win_shm)
     set_tests_properties(test_win_shm PROPERTIES TIMEOUT 30)
 
+    add_executable(test_win_service tests/fixtures/c/test_win_service.c)
+    target_link_libraries(test_win_service PRIVATE
+        netipc_service_win netipc_win_shm netipc_named_pipe netipc_protocol
+    )
+    add_test(NAME test_win_service COMMAND test_win_service)
+    set_tests_properties(test_win_service PROPERTIES TIMEOUT 120)
+
     add_executable(test_win_stress tests/fixtures/c/test_win_stress.c)
     target_link_libraries(test_win_stress PRIVATE
         netipc_service_win netipc_win_shm netipc_named_pipe netipc_protocol
