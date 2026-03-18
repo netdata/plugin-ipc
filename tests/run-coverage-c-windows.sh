@@ -22,6 +22,11 @@ LIB_SOURCES=(
     "src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c"
 )
 
+# C coverage is about the C transport/service stack. Running the full Windows
+# suite here adds unrelated Go fuzz tests that do not contribute gcov data for
+# these files and can starve long-running C tests under coverage builds.
+COVERAGE_TEST_REGEX='^(test_protocol|interop_codec|fuzz_protocol_30s|test_named_pipe|test_named_pipe_interop|test_win_shm|test_win_service|test_win_service_extra|test_win_stress|test_win_shm_interop|test_service_win_interop|test_service_win_shm_interop|test_cache_win_interop|test_cache_win_shm_interop)$'
+
 THRESHOLD=${1:-80}
 
 run() {
@@ -73,7 +78,7 @@ echo -e "${YELLOW}Building Windows binaries...${NC}"
 run cmake --build "$BUILD_DIR" -j4
 
 echo -e "${YELLOW}Running Windows test suite...${NC}"
-run ctest --test-dir "$BUILD_DIR" --output-on-failure -j4
+run ctest --test-dir "$BUILD_DIR" --output-on-failure -j1 -R "$COVERAGE_TEST_REGEX"
 
 echo
 echo -e "${YELLOW}Collecting gcov data for Windows C sources...${NC}"

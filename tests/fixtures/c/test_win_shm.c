@@ -330,6 +330,229 @@ static void test_multiple_roundtrips(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: BUSYWAIT profile paths                                       */
+/* ------------------------------------------------------------------ */
+
+static DWORD WINAPI busywait_server_thread(LPVOID arg)
+{
+    server_args_t *sa = (server_args_t *)arg;
+    sa->result = 1;
+
+    nipc_win_shm_ctx_t ctx;
+    nipc_win_shm_error_t err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, sa->service, AUTH_TOKEN, 2,
+        NIPC_WIN_SHM_PROFILE_BUSYWAIT, 65536, 65536, &ctx);
+    if (err != NIPC_WIN_SHM_OK)
+        return 1;
+
+    ctx.spin_tries = 0; /* force the busywait receive path */
+
+    uint8_t msg[65536];
+    size_t msg_len;
+    err = nipc_win_shm_receive(&ctx, msg, sizeof(msg), &msg_len, 10000);
+    if (err != NIPC_WIN_SHM_OK) {
+        nipc_win_shm_destroy(&ctx);
+        return 1;
+    }
+
+    nipc_header_t hdr;
+    nipc_header_decode(msg, msg_len, &hdr);
+    size_t payload_len = msg_len - NIPC_HEADER_LEN;
+
+    uint8_t resp[65536];
+    size_t resp_len = build_message(resp, sizeof(resp),
+                                     NIPC_KIND_RESPONSE, hdr.code,
+                                     hdr.message_id,
+                                     msg + NIPC_HEADER_LEN, payload_len);
+    err = nipc_win_shm_send(&ctx, resp, resp_len);
+
+    nipc_win_shm_destroy(&ctx);
+    sa->result = (err == NIPC_WIN_SHM_OK) ? 0 : 1;
+    return (err == NIPC_WIN_SHM_OK) ? 0 : 1;
+}
+
+static void test_busywait_roundtrip(void)
+{
+    printf("--- Basic roundtrip (BUSYWAIT) ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    server_args_t sa = { .service = service };
+    HANDLE thread = CreateThread(NULL, 0, busywait_server_thread, &sa, 0, NULL);
+    check("busywait server thread created", thread != NULL);
+    if (!thread)
+        return;
+
+    Sleep(100);
+
+    nipc_win_shm_ctx_t client;
+    nipc_win_shm_error_t err = NIPC_WIN_SHM_ERR_OPEN_MAPPING;
+    for (int i = 0; i < 100; i++) {
+        err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
+                                          2, NIPC_WIN_SHM_PROFILE_BUSYWAIT, &client);
+        if (err == NIPC_WIN_SHM_OK)
+            break;
+        Sleep(10);
+    }
+    check("busywait client attach", err == NIPC_WIN_SHM_OK);
+
+    if (err == NIPC_WIN_SHM_OK) {
+        client.spin_tries = 0; /* force the busywait receive path */
+
+        uint8_t payload[256];
+        for (int i = 0; i < 256; i++)
+            payload[i] = (uint8_t)(255 - i);
+
+        uint8_t msg[512];
+        size_t msg_len = build_message(msg, sizeof(msg),
+                                        NIPC_KIND_REQUEST, NIPC_METHOD_INCREMENT,
+                                        99, payload, sizeof(payload));
+
+        err = nipc_win_shm_send(&client, msg, msg_len);
+        check("busywait client send", err == NIPC_WIN_SHM_OK);
+
+        uint8_t resp[65536];
+        size_t resp_len;
+        err = nipc_win_shm_receive(&client, resp, sizeof(resp), &resp_len, 10000);
+        check("busywait client receive", err == NIPC_WIN_SHM_OK);
+
+        if (err == NIPC_WIN_SHM_OK) {
+            nipc_header_t rhdr;
+            nipc_header_decode(resp, resp_len, &rhdr);
+            check("busywait response kind", rhdr.kind == NIPC_KIND_RESPONSE);
+            check("busywait response message_id", rhdr.message_id == 99);
+            check("busywait payload echo",
+                  resp_len == NIPC_HEADER_LEN + sizeof(payload) &&
+                  memcmp(resp + NIPC_HEADER_LEN, payload, sizeof(payload)) == 0);
+        }
+
+        nipc_win_shm_close(&client);
+    }
+
+    WaitForSingleObject(thread, 10000);
+    CloseHandle(thread);
+    check("busywait server completed ok", sa.result == 0);
+}
+
+typedef struct {
+    const char *service;
+    int result;
+} small_recv_args_t;
+
+static DWORD WINAPI small_recv_server_thread(LPVOID arg)
+{
+    small_recv_args_t *sa = (small_recv_args_t *)arg;
+    sa->result = 1;
+
+    nipc_win_shm_ctx_t ctx;
+    nipc_win_shm_error_t err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, sa->service, AUTH_TOKEN, 3,
+        NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &ctx);
+    if (err != NIPC_WIN_SHM_OK)
+        return 1;
+
+    uint8_t msg[32];
+    size_t msg_len;
+    err = nipc_win_shm_receive(&ctx, msg, sizeof(msg), &msg_len, 10000);
+    sa->result = (err == NIPC_WIN_SHM_ERR_MSG_TOO_LARGE) ? 0 : 1;
+
+    nipc_win_shm_destroy(&ctx);
+    return sa->result;
+}
+
+static void test_receive_msg_too_large(void)
+{
+    printf("--- Receive into small buffer -> MSG_TOO_LARGE ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    small_recv_args_t sa = { .service = service };
+    HANDLE thread = CreateThread(NULL, 0, small_recv_server_thread, &sa, 0, NULL);
+    check("small-recv server thread created", thread != NULL);
+    if (!thread)
+        return;
+
+    Sleep(100);
+
+    nipc_win_shm_ctx_t client;
+    nipc_win_shm_error_t err = NIPC_WIN_SHM_ERR_OPEN_MAPPING;
+    for (int i = 0; i < 100; i++) {
+        err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
+                                          3, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+        if (err == NIPC_WIN_SHM_OK)
+            break;
+        Sleep(10);
+    }
+    check("small-recv client attach", err == NIPC_WIN_SHM_OK);
+
+    if (err == NIPC_WIN_SHM_OK) {
+        uint8_t big_msg[256];
+        memset(big_msg, 0xAA, sizeof(big_msg));
+        nipc_header_t hdr = {
+            .magic = NIPC_MAGIC_MSG,
+            .version = NIPC_VERSION,
+            .header_len = NIPC_HEADER_LEN,
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = 1,
+            .payload_len = sizeof(big_msg) - NIPC_HEADER_LEN,
+            .transport_status = NIPC_STATUS_OK,
+        };
+        nipc_header_encode(&hdr, big_msg, NIPC_HEADER_LEN);
+
+        err = nipc_win_shm_send(&client, big_msg, sizeof(big_msg));
+        check("small-recv client send", err == NIPC_WIN_SHM_OK);
+        nipc_win_shm_close(&client);
+    }
+
+    WaitForSingleObject(thread, 10000);
+    CloseHandle(thread);
+    check("server got MSG_TOO_LARGE", sa.result == 0);
+}
+
+static void test_send_too_large(void)
+{
+    printf("--- Send too large ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_win_shm_ctx_t server;
+    nipc_win_shm_error_t err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, service, AUTH_TOKEN, 4,
+        NIPC_WIN_SHM_PROFILE_HYBRID, 128, 128, &server);
+    check("too-large server create", err == NIPC_WIN_SHM_OK);
+
+    if (err == NIPC_WIN_SHM_OK) {
+        nipc_win_shm_ctx_t client;
+        err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
+                                          4, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+        check("too-large client attach", err == NIPC_WIN_SHM_OK);
+
+        if (err == NIPC_WIN_SHM_OK) {
+            uint8_t msg[256];
+            memset(msg, 0x55, sizeof(msg));
+            err = nipc_win_shm_send(&client, msg, sizeof(msg));
+            check("send too large rejected", err == NIPC_WIN_SHM_ERR_MSG_TOO_LARGE);
+            nipc_win_shm_close(&client);
+        }
+
+        nipc_win_shm_destroy(&server);
+    }
+}
+
+static void test_null_close_destroy(void)
+{
+    printf("--- NULL close/destroy ---\n");
+    nipc_win_shm_close(NULL);
+    nipc_win_shm_destroy(NULL);
+    check("NULL close/destroy no-op", 1);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Test: service name validation                                      */
 /* ------------------------------------------------------------------ */
 
@@ -380,6 +603,10 @@ int main(void)
     test_service_name_validation();
     test_basic_roundtrip();
     test_multiple_roundtrips();
+    test_busywait_roundtrip();
+    test_receive_msg_too_large();
+    test_send_too_large();
+    test_null_close_destroy();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

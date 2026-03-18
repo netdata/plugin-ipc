@@ -335,6 +335,331 @@ static void test_auth_failure(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: chunked request/response                                     */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    const char *run_dir;
+    const char *service;
+    int         server_ok;
+    HANDLE      ready_event;
+} chunked_server_ctx_t;
+
+static DWORD WINAPI chunked_server_thread(LPVOID arg)
+{
+    chunked_server_ctx_t *ctx = (chunked_server_ctx_t *)arg;
+    nipc_np_server_config_t cfg = default_server_config();
+    cfg.packet_size = 128;
+    cfg.max_request_payload_bytes = 65536;
+    cfg.max_response_payload_bytes = 65536;
+
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(ctx->run_dir, ctx->service,
+                                          &cfg, &listener);
+    if (err != NIPC_NP_OK) {
+        SetEvent(ctx->ready_event);
+        return 1;
+    }
+
+    SetEvent(ctx->ready_event);
+
+    nipc_np_session_t session;
+    err = nipc_np_accept(&listener, 1, &session);
+    if (err != NIPC_NP_OK) {
+        nipc_np_close_listener(&listener);
+        return 1;
+    }
+
+    uint8_t buf[256];
+    nipc_header_t hdr;
+    const void *payload;
+    size_t payload_len;
+
+    err = nipc_np_receive(&session, buf, sizeof(buf), &hdr, &payload, &payload_len);
+    if (err == NIPC_NP_OK) {
+        nipc_header_t resp = hdr;
+        resp.kind = NIPC_KIND_RESPONSE;
+        resp.transport_status = NIPC_STATUS_OK;
+        err = nipc_np_send(&session, &resp, payload, payload_len);
+    }
+
+    ctx->server_ok = (err == NIPC_NP_OK);
+    nipc_np_close_session(&session);
+    nipc_np_close_listener(&listener);
+    return 0;
+}
+
+static void test_chunked_ping_pong(void)
+{
+    printf("--- Chunked request/response ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    chunked_server_ctx_t ctx = {
+        .run_dir = TEST_RUN_DIR,
+        .service = service,
+        .server_ok = 0,
+        .ready_event = ready_event,
+    };
+
+    HANDLE thread = CreateThread(NULL, 0, chunked_server_thread, &ctx, 0, NULL);
+    WaitForSingleObject(ready_event, 5000);
+    CloseHandle(ready_event);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    ccfg.packet_size = 128;
+    ccfg.max_request_payload_bytes = 65536;
+    ccfg.max_response_payload_bytes = 65536;
+
+    nipc_np_session_t session;
+    nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("chunked connect", err == NIPC_NP_OK);
+
+    if (err == NIPC_NP_OK) {
+        check("chunked negotiated packet_size", session.packet_size == 128);
+
+        size_t big_len = 500;
+        uint8_t *big = (uint8_t *)malloc(big_len);
+        check("chunked payload alloc", big != NULL);
+
+        if (big) {
+            for (size_t i = 0; i < big_len; i++)
+                big[i] = (uint8_t)(i & 0xFF);
+
+            nipc_header_t hdr = {
+                .kind = NIPC_KIND_REQUEST,
+                .code = NIPC_METHOD_INCREMENT,
+                .item_count = 1,
+                .message_id = 7,
+            };
+
+            err = nipc_np_send(&session, &hdr, big, big_len);
+            check("send chunked request", err == NIPC_NP_OK);
+
+            uint8_t rbuf[256];
+            nipc_header_t rhdr;
+            const void *rpayload;
+            size_t rpayload_len;
+
+            err = nipc_np_receive(&session, rbuf, sizeof(rbuf),
+                                   &rhdr, &rpayload, &rpayload_len);
+            check("receive chunked response", err == NIPC_NP_OK);
+            check("chunked response message_id", err == NIPC_NP_OK && rhdr.message_id == 7);
+            check("chunked response payload len", err == NIPC_NP_OK && rpayload_len == big_len);
+            check("chunked response payload data",
+                  err == NIPC_NP_OK &&
+                  rpayload_len == big_len &&
+                  memcmp(rpayload, big, big_len) == 0);
+
+            free(big);
+        }
+
+        nipc_np_close_session(&session);
+    }
+
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    check("chunked server ok", ctx.server_ok);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: duplicate / unknown message_id                               */
+/* ------------------------------------------------------------------ */
+
+static DWORD WINAPI wrong_id_server_thread(LPVOID arg)
+{
+    server_thread_ctx_t *ctx = (server_thread_ctx_t *)arg;
+    nipc_np_server_config_t cfg = default_server_config();
+    nipc_np_listener_t listener;
+
+    nipc_np_error_t err = nipc_np_listen(ctx->run_dir, ctx->service,
+                                          &cfg, &listener);
+    if (err != NIPC_NP_OK) {
+        SetEvent(ctx->ready_event);
+        return 1;
+    }
+
+    SetEvent(ctx->ready_event);
+
+    nipc_np_session_t session;
+    err = nipc_np_accept(&listener, 1, &session);
+    if (err != NIPC_NP_OK) {
+        nipc_np_close_listener(&listener);
+        return 1;
+    }
+
+    uint8_t buf[256];
+    nipc_header_t hdr;
+    const void *payload;
+    size_t payload_len;
+    err = nipc_np_receive(&session, buf, sizeof(buf), &hdr, &payload, &payload_len);
+    if (err == NIPC_NP_OK) {
+        nipc_header_t resp = hdr;
+        resp.kind = NIPC_KIND_RESPONSE;
+        resp.transport_status = NIPC_STATUS_OK;
+        resp.message_id = hdr.message_id + 1000;
+        err = nipc_np_send(&session, &resp, payload, payload_len);
+    }
+
+    ctx->server_ok = (err == NIPC_NP_OK);
+    nipc_np_close_session(&session);
+    nipc_np_close_listener(&listener);
+    return 0;
+}
+
+static void test_duplicate_message_id(void)
+{
+    printf("--- Duplicate request message_id ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    server_thread_ctx_t ctx = {
+        .run_dir = TEST_RUN_DIR,
+        .service = service,
+        .server_ok = 0,
+        .ready_event = ready_event,
+    };
+
+    HANDLE thread = CreateThread(NULL, 0, server_thread, &ctx, 0, NULL);
+    WaitForSingleObject(ready_event, 5000);
+    CloseHandle(ready_event);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_np_session_t session;
+    nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("duplicate connect", err == NIPC_NP_OK);
+
+    if (err == NIPC_NP_OK) {
+        uint8_t payload[] = { 0xAA };
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = 100,
+        };
+
+        err = nipc_np_send(&session, &hdr, payload, sizeof(payload));
+        check("first send ok", err == NIPC_NP_OK);
+
+        err = nipc_np_send(&session, &hdr, payload, sizeof(payload));
+        check("duplicate message_id rejected", err == NIPC_NP_ERR_DUPLICATE_MSG_ID);
+
+        uint8_t rbuf[256];
+        nipc_header_t rhdr;
+        const void *rpayload;
+        size_t rpayload_len;
+        err = nipc_np_receive(&session, rbuf, sizeof(rbuf), &rhdr, &rpayload, &rpayload_len);
+        check("first response still received", err == NIPC_NP_OK);
+
+        nipc_np_close_session(&session);
+    }
+
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    check("duplicate server ok", ctx.server_ok);
+}
+
+static void test_unknown_response_message_id(void)
+{
+    printf("--- Unknown response message_id ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    server_thread_ctx_t ctx = {
+        .run_dir = TEST_RUN_DIR,
+        .service = service,
+        .server_ok = 0,
+        .ready_event = ready_event,
+    };
+
+    HANDLE thread = CreateThread(NULL, 0, wrong_id_server_thread, &ctx, 0, NULL);
+    WaitForSingleObject(ready_event, 5000);
+    CloseHandle(ready_event);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_np_session_t session;
+    nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("unknown-id connect", err == NIPC_NP_OK);
+
+    if (err == NIPC_NP_OK) {
+        uint8_t payload[] = { 0x11 };
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = 5,
+        };
+        err = nipc_np_send(&session, &hdr, payload, sizeof(payload));
+        check("unknown-id request send", err == NIPC_NP_OK);
+
+        uint8_t rbuf[256];
+        nipc_header_t rhdr;
+        const void *rpayload;
+        size_t rpayload_len;
+        err = nipc_np_receive(&session, rbuf, sizeof(rbuf), &rhdr, &rpayload, &rpayload_len);
+        check("unknown response message_id rejected", err == NIPC_NP_ERR_UNKNOWN_MSG_ID);
+
+        nipc_np_close_session(&session);
+    }
+
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    check("unknown-id server ok", ctx.server_ok);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: listener conflicts / bad params / noop close                 */
+/* ------------------------------------------------------------------ */
+
+static void test_addr_in_use(void)
+{
+    printf("--- Address in use ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_np_server_config_t cfg = default_server_config();
+    nipc_np_listener_t a;
+    nipc_np_listener_t b;
+
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, service, &cfg, &a);
+    check("first listen ok", err == NIPC_NP_OK);
+
+    if (err == NIPC_NP_OK) {
+        err = nipc_np_listen(TEST_RUN_DIR, service, &cfg, &b);
+        check("second listen gets addr_in_use", err == NIPC_NP_ERR_ADDR_IN_USE);
+        nipc_np_close_listener(&a);
+    }
+}
+
+static void test_bad_params_and_noop_close(void)
+{
+    printf("--- Bad params / noop close ---\n");
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_np_server_config_t scfg = default_server_config();
+    nipc_np_session_t session = {0};
+    session.pipe = INVALID_HANDLE_VALUE;
+    nipc_np_listener_t listener = {0};
+    listener.pipe = INVALID_HANDLE_VALUE;
+
+    check("connect bad service param",
+          nipc_np_connect(TEST_RUN_DIR, NULL, &ccfg, &session) == NIPC_NP_ERR_BAD_PARAM);
+    check("listen bad out param",
+          nipc_np_listen(TEST_RUN_DIR, "svc", &scfg, NULL) == NIPC_NP_ERR_BAD_PARAM);
+
+    nipc_np_close_session(&session);
+    nipc_np_close_listener(&listener);
+    check("noop close on invalid handles", 1);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Test: service name validation                                      */
 /* ------------------------------------------------------------------ */
 
@@ -381,7 +706,12 @@ int main(void)
     test_pipe_name();
     test_service_validation();
     test_ping_pong();
+    test_chunked_ping_pong();
     test_auth_failure();
+    test_duplicate_message_id();
+    test_unknown_response_message_id();
+    test_addr_in_use();
+    test_bad_params_and_noop_close();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
