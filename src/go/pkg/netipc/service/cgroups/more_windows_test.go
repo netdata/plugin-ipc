@@ -722,6 +722,7 @@ func TestWinCallSnapshotWithMalformedTransportState(t *testing.T) {
 		t.Fatal("client not ready")
 	}
 
+	client.session.Close()
 	client.session = nil
 	view, err := client.CallSnapshot()
 	if err != nil {
