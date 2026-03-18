@@ -153,7 +153,6 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
     InterlockedExchange(&ctx->init_ok, 1);
     SetEvent(ctx->ready_event);
     nipc_server_run(&ctx->server);
-    nipc_server_destroy(&ctx->server);
     return 0;
 }
 
@@ -198,8 +197,9 @@ static void stop_server(server_thread_ctx_t *ctx, HANDLE thread)
 {
     nipc_server_stop(&ctx->server);
     DWORD wr = WaitForSingleObject(thread, 10000);
-    check("server stop completed", wr == WAIT_OBJECT_0);
+    check("server acceptor exited", wr == WAIT_OBJECT_0);
     CloseHandle(thread);
+    check("server drained cleanly", nipc_server_drain(&ctx->server, 10000));
 }
 
 static bool refresh_until_ready(nipc_client_ctx_t *client, int max_tries, DWORD sleep_ms)
