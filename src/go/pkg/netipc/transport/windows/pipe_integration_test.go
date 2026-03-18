@@ -1023,59 +1023,51 @@ func TestPipePipelineChunked(t *testing.T) {
 		}
 	}()
 
-	type receiveResult struct {
-		hdr     protocol.Header
-		payload []byte
-		err     error
-	}
-	clientRecvCh := make(chan receiveResult, len(sizes))
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, forcedPacketSize)
-		for i := 0; i < len(sizes); i++ {
-			rHdr, rPayload, err := client.Receive(buf)
-			if err == nil {
-				rPayload = append([]byte(nil), rPayload...)
-			}
-			clientRecvCh <- receiveResult{hdr: rHdr, payload: rPayload, err: err}
-			if err != nil {
-				return
-			}
-		}
-	}()
+	const maxInflight = 2
+	buf := make([]byte, forcedPacketSize)
+	nextSend := 0
+	nextRecv := 0
+	inflight := 0
 
-	for i, sz := range sizes {
-		payload := make([]byte, sz)
-		for j := range payload {
-			payload[j] = byte((i + j) & 0xFF)
+	for nextRecv < len(sizes) {
+		for inflight < maxInflight && nextSend < len(sizes) {
+			sz := sizes[nextSend]
+			payload := make([]byte, sz)
+			for j := range payload {
+				payload[j] = byte((nextSend + j) & 0xFF)
+			}
+			hdr := protocol.Header{
+				Kind:      protocol.KindRequest,
+				Code:      protocol.MethodIncrement,
+				ItemCount: 1,
+				MessageID: uint64(nextSend + 1),
+			}
+			if err := client.Send(&hdr, payload); err != nil {
+				t.Fatalf("client Send[%d]: %v", nextSend, err)
+			}
+			nextSend++
+			inflight++
 		}
-		hdr := protocol.Header{
-			Kind:      protocol.KindRequest,
-			Code:      protocol.MethodIncrement,
-			ItemCount: 1,
-			MessageID: uint64(i + 1),
-		}
-		if err := client.Send(&hdr, payload); err != nil {
-			t.Fatalf("client Send[%d]: %v", i, err)
-		}
-	}
 
-	for i, sz := range sizes {
-		clientRecv := <-clientRecvCh
-		if clientRecv.err != nil {
-			t.Fatalf("client Receive[%d]: %v", i, clientRecv.err)
+		rHdr, rPayload, err := client.Receive(buf)
+		if err != nil {
+			t.Fatalf("client Receive[%d]: %v", nextRecv, err)
 		}
-		if clientRecv.hdr.MessageID != uint64(i+1) || len(clientRecv.payload) != sz {
-			t.Fatalf("unexpected pipeline chunked response[%d]: hdr=%+v len=%d", i, clientRecv.hdr, len(clientRecv.payload))
+
+		sz := sizes[nextRecv]
+		if rHdr.MessageID != uint64(nextRecv+1) || len(rPayload) != sz {
+			t.Fatalf("unexpected pipeline chunked response[%d]: hdr=%+v len=%d", nextRecv, rHdr, len(rPayload))
 		}
 		expected := make([]byte, sz)
 		for j := range expected {
-			expected[j] = byte((i + j) & 0xFF)
+			expected[j] = byte((nextRecv + j) & 0xFF)
 		}
-		if !bytes.Equal(clientRecv.payload, expected) {
-			t.Fatalf("payload mismatch for response[%d]", i)
+		if !bytes.Equal(rPayload, expected) {
+			t.Fatalf("payload mismatch for response[%d]", nextRecv)
 		}
+
+		nextRecv++
+		inflight--
 	}
 
 	wg.Wait()
