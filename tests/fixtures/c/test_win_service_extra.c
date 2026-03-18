@@ -124,6 +124,16 @@ static bool on_snapshot_empty(void *user,
     return request->layout_version == 1 && request->flags == 0;
 }
 
+static bool on_snapshot_fail(void *user,
+                             const nipc_cgroups_req_t *request,
+                             nipc_cgroups_builder_t *builder)
+{
+    (void)user;
+    (void)request;
+    (void)builder;
+    return false;
+}
+
 static nipc_cgroups_handlers_t full_handlers = {
     .on_increment = on_increment,
     .on_string_reverse = NULL,
@@ -137,6 +147,14 @@ static nipc_cgroups_handlers_t empty_snapshot_handlers = {
     .on_string_reverse = NULL,
     .on_cgroups_snapshot = on_snapshot_empty,
     .snapshot_max_items = 1,
+    .user = NULL,
+};
+
+static nipc_cgroups_handlers_t failing_snapshot_handlers = {
+    .on_increment = on_increment,
+    .on_string_reverse = NULL,
+    .on_cgroups_snapshot = on_snapshot_fail,
+    .snapshot_max_items = 3,
     .user = NULL,
 };
 
@@ -214,13 +232,12 @@ static HANDLE start_default_server_named(server_thread_ctx_t *ctx,
     return start_server_named(ctx, service, worker_count, &config, handlers);
 }
 
-static void stop_server_destroy(server_thread_ctx_t *ctx, HANDLE thread)
+static void stop_server_drain(server_thread_ctx_t *ctx, HANDLE thread)
 {
     nipc_server_stop(&ctx->server);
     check("server thread exited", WaitForSingleObject(thread, 10000) == WAIT_OBJECT_0);
     CloseHandle(thread);
-    nipc_server_destroy(&ctx->server);
-    check("server destroy completed", 1);
+    check("server drain completed", nipc_server_drain(&ctx->server, 10000));
 }
 
 static bool refresh_until_ready(nipc_client_ctx_t *client, int max_tries, DWORD sleep_ms)
@@ -294,7 +311,7 @@ static void test_refresh_from_broken_state(void)
     }
 
     nipc_client_close(&client);
-    stop_server_destroy(&sctx, server_thread);
+    stop_server_drain(&sctx, server_thread);
 }
 
 static void test_retry_on_broken_session(void)
@@ -334,7 +351,7 @@ static void test_retry_on_broken_session(void)
     }
 
     nipc_client_close(&client);
-    stop_server_destroy(&sctx, server_thread);
+    stop_server_drain(&sctx, server_thread);
 }
 
 static void test_cache_refresh_without_server(void)
@@ -356,6 +373,82 @@ static void test_cache_refresh_without_server(void)
     check("failure_count == 1", status.refresh_failure_count == 1);
 
     nipc_cgroups_cache_close(&cache);
+}
+
+static void test_handler_failure(void)
+{
+    printf("--- Handler failure ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_hfail");
+
+    server_thread_ctx_t sctx;
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &failing_snapshot_handlers);
+    if (!server_thread)
+        return;
+
+    nipc_client_ctx_t client;
+    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    check("client ready", refresh_until_ready(&client, 100, 10));
+
+    if (nipc_client_ready(&client)) {
+        nipc_cgroups_resp_view_t view;
+        nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
+        check("snapshot fails when handler fails", err != NIPC_OK);
+    }
+
+    nipc_client_close(&client);
+    stop_server_drain(&sctx, server_thread);
+}
+
+static void test_client_auth_failure(void)
+{
+    printf("--- Client auth failure mapping ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_auth");
+
+    server_thread_ctx_t sctx;
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
+    if (!server_thread)
+        return;
+
+    nipc_client_ctx_t client;
+    nipc_np_client_config_t ccfg = default_client_config();
+    ccfg.auth_token = 0x1111111111111111ull;
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    nipc_client_refresh(&client);
+    check("state is AUTH_FAILED", client.state == NIPC_CLIENT_AUTH_FAILED);
+
+    nipc_client_close(&client);
+    stop_server_drain(&sctx, server_thread);
+}
+
+static void test_client_incompatible(void)
+{
+    printf("--- Client incompatible profile mapping ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_incompat");
+
+    nipc_np_server_config_t scfg = default_server_config();
+    scfg.supported_profiles = NIPC_PROFILE_SHM_HYBRID;
+
+    server_thread_ctx_t sctx;
+    HANDLE server_thread = start_server_named(&sctx, service, 4, &scfg, &full_handlers);
+    if (!server_thread)
+        return;
+
+    nipc_client_ctx_t client;
+    nipc_np_client_config_t ccfg = default_client_config();
+    ccfg.supported_profiles = NIPC_PROFILE_BASELINE;
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    nipc_client_refresh(&client);
+    check("state is INCOMPATIBLE", client.state == NIPC_CLIENT_INCOMPATIBLE);
+
+    nipc_client_close(&client);
+    stop_server_drain(&sctx, server_thread);
 }
 
 static void test_cache_refresh_rebuilds_and_linear_lookup(void)
@@ -393,7 +486,7 @@ static void test_cache_refresh_rebuilds_and_linear_lookup(void)
     check("refresh_success_count == 2", status.refresh_success_count == 2);
 
     nipc_cgroups_cache_close(&cache);
-    stop_server_destroy(&sctx, server_thread);
+    stop_server_drain(&sctx, server_thread);
 }
 
 static void test_cache_empty_snapshot(void)
@@ -424,7 +517,7 @@ static void test_cache_empty_snapshot(void)
     check("status success_count == 1", status.refresh_success_count == 1);
 
     nipc_cgroups_cache_close(&cache);
-    stop_server_destroy(&sctx, server_thread);
+    stop_server_drain(&sctx, server_thread);
 }
 
 int main(void)
@@ -435,6 +528,9 @@ int main(void)
     test_client_init_defaults_and_truncation();
     test_refresh_from_broken_state();
     test_retry_on_broken_session();
+    test_handler_failure();
+    test_client_auth_failure();
+    test_client_incompatible();
     test_cache_refresh_without_server();
     test_cache_refresh_rebuilds_and_linear_lookup();
     test_cache_empty_snapshot();

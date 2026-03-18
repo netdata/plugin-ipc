@@ -25,7 +25,7 @@ LIB_SOURCES=(
 # C coverage is about the C transport/service stack. Running the full Windows
 # suite here adds unrelated Go fuzz tests that do not contribute gcov data for
 # these files and can starve long-running C tests under coverage builds.
-COVERAGE_TEST_REGEX='^(test_protocol|interop_codec|fuzz_protocol_30s|test_named_pipe|test_named_pipe_interop|test_win_shm|test_win_service|test_win_service_extra|test_win_stress|test_win_shm_interop|test_service_win_interop|test_service_win_shm_interop|test_cache_win_interop|test_cache_win_shm_interop)$'
+COVERAGE_TEST_REGEX='^(test_protocol|interop_codec|fuzz_protocol_30s|test_named_pipe|test_named_pipe_interop|test_win_shm|test_win_service_extra|test_win_stress|test_win_shm_interop|test_service_win_interop|test_service_win_shm_interop|test_cache_win_interop|test_cache_win_shm_interop)$'
 
 THRESHOLD=${1:-80}
 
