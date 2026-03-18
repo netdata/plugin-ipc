@@ -20,7 +20,9 @@ run() {
     printf >&2 "${YELLOW}"
     printf >&2 "%q " "$@"
     printf >&2 "${NC}\n"
-    if ! "$@"; then
+    if "$@"; then
+        return 0
+    else
         local exit_code=$?
         echo -e >&2 "${RED}[ERROR]${NC} Command failed with exit code ${exit_code}: $*"
         return $exit_code

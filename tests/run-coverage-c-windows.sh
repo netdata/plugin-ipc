@@ -29,7 +29,9 @@ run() {
     printf >&2 "${YELLOW}"
     printf >&2 "%q " "$@"
     printf >&2 "${NC}\n"
-    if ! "$@"; then
+    if "$@"; then
+        return 0
+    else
         local exit_code=$?
         echo -e >&2 "${RED}[ERROR]${NC} Command failed with exit code ${exit_code}: $*"
         return $exit_code
@@ -46,15 +48,15 @@ fi
 
 export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
 export MSYSTEM=MINGW64
-export CC="${CC:-/mingw64/bin/gcc}"
-export CXX="${CXX:-/mingw64/bin/g++}"
-
-for tool in cmake ninja "$CC" gcov; do
+for tool in cmake ninja gcc g++ gcov cygpath; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo -e "${RED}ERROR:${NC} Required tool not found: $tool"
         exit 1
     fi
 done
+
+CC_BIN=$(cygpath -m "$(command -v gcc)")
+CXX_BIN=$(cygpath -m "$(command -v g++)")
 
 run rm -rf "$BUILD_DIR"
 run mkdir -p "$BUILD_DIR"
@@ -64,8 +66,8 @@ run cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
     -G Ninja \
     -DCMAKE_BUILD_TYPE=Debug \
     -DNETIPC_COVERAGE=ON \
-    -DCMAKE_C_COMPILER="$CC" \
-    -DCMAKE_CXX_COMPILER="$CXX"
+    -DCMAKE_C_COMPILER="$CC_BIN" \
+    -DCMAKE_CXX_COMPILER="$CXX_BIN"
 
 echo -e "${YELLOW}Building Windows binaries...${NC}"
 run cmake --build "$BUILD_DIR" -j4
