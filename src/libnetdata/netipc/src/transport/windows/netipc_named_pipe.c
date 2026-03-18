@@ -689,6 +689,20 @@ void nipc_np_close_listener(nipc_np_listener_t *listener)
         return;
 
     if (listener->pipe != INVALID_HANDLE_VALUE && listener->pipe != NULL) {
+        /* A loopback connect reliably wakes a blocking ConnectNamedPipe()
+         * so the accept thread can observe shutdown and exit. */
+        if (listener->pipe_name[0] != L'\0') {
+            HANDLE wake = CreateFileW(
+                listener->pipe_name,
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                NULL,
+                OPEN_EXISTING,
+                0,
+                NULL);
+            if (wake != INVALID_HANDLE_VALUE)
+                CloseHandle(wake);
+        }
         CloseHandle(listener->pipe);
         listener->pipe = INVALID_HANDLE_VALUE;
     }

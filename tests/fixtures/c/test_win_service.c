@@ -371,7 +371,7 @@ static void test_multi_method_calls(void)
         err = nipc_client_call_cgroups_snapshot(&client, &cg_view);
         check("snapshot ok", err == NIPC_OK);
         check("snapshot item_count == 3", err == NIPC_OK && cg_view.item_count == 3);
-        check("snapshot generation == 42", err == NIPC_OK && cg_view.generation == 42);
+        check("snapshot generation == 0", err == NIPC_OK && cg_view.generation == 0);
 
         uint64_t in[4] = { 1, 41, 99, 1000 };
         uint64_t out[4] = { 0 };

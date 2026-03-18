@@ -340,17 +340,31 @@ func TestPipeChunking(t *testing.T) {
 		ItemCount: 1,
 		MessageID: 99,
 	}
+	recvBuf := make([]byte, forcedPacketSize)
+	type receiveResult struct {
+		hdr     protocol.Header
+		payload []byte
+		err     error
+	}
+	serverRecvCh := make(chan receiveResult, 1)
+	go func() {
+		rHdr, rPayload, err := server.Receive(recvBuf)
+		if err == nil {
+			rPayload = append([]byte(nil), rPayload...)
+		}
+		serverRecvCh <- receiveResult{hdr: rHdr, payload: rPayload, err: err}
+	}()
+
 	if err := client.Send(&hdr, largePayload); err != nil {
 		t.Fatalf("client Send (chunked): %v", err)
 	}
 
-	recvBuf := make([]byte, forcedPacketSize)
-	rHdr, rPayload, err := server.Receive(recvBuf)
-	if err != nil {
-		t.Fatalf("server Receive (chunked): %v", err)
+	serverRecv := <-serverRecvCh
+	if serverRecv.err != nil {
+		t.Fatalf("server Receive (chunked): %v", serverRecv.err)
 	}
-	if rHdr.MessageID != 99 || !bytes.Equal(rPayload, largePayload) {
-		t.Fatalf("unexpected chunked receive: hdr=%+v payload-len=%d", rHdr, len(rPayload))
+	if serverRecv.hdr.MessageID != 99 || !bytes.Equal(serverRecv.payload, largePayload) {
+		t.Fatalf("unexpected chunked receive: hdr=%+v payload-len=%d", serverRecv.hdr, len(serverRecv.payload))
 	}
 
 	resp := protocol.Header{
@@ -359,16 +373,25 @@ func TestPipeChunking(t *testing.T) {
 		ItemCount: 1,
 		MessageID: 99,
 	}
-	if err := server.Send(&resp, rPayload); err != nil {
+	clientRecvCh := make(chan receiveResult, 1)
+	go func() {
+		rHdr, rPayload, err := client.Receive(recvBuf)
+		if err == nil {
+			rPayload = append([]byte(nil), rPayload...)
+		}
+		clientRecvCh <- receiveResult{hdr: rHdr, payload: rPayload, err: err}
+	}()
+
+	if err := server.Send(&resp, serverRecv.payload); err != nil {
 		t.Fatalf("server Send (chunked echo): %v", err)
 	}
 
-	rHdr, rPayload, err = client.Receive(recvBuf)
-	if err != nil {
-		t.Fatalf("client Receive (chunked): %v", err)
+	clientRecv := <-clientRecvCh
+	if clientRecv.err != nil {
+		t.Fatalf("client Receive (chunked): %v", clientRecv.err)
 	}
-	if rHdr.MessageID != 99 || !bytes.Equal(rPayload, largePayload) {
-		t.Fatalf("unexpected client chunked receive: hdr=%+v payload-len=%d", rHdr, len(rPayload))
+	if clientRecv.hdr.MessageID != 99 || !bytes.Equal(clientRecv.payload, largePayload) {
+		t.Fatalf("unexpected client chunked receive: hdr=%+v payload-len=%d", clientRecv.hdr, len(clientRecv.payload))
 	}
 }
 
@@ -745,6 +768,26 @@ func TestPipeMultipleChunkedMessages(t *testing.T) {
 	server := sr.session
 	defer server.Close()
 
+	type receiveResult struct {
+		hdr     protocol.Header
+		payload []byte
+		err     error
+	}
+	serverRecvCh := make(chan receiveResult, 3)
+	go func() {
+		buf := make([]byte, forcedPacketSize)
+		for i := 0; i < 3; i++ {
+			rHdr, rPayload, err := server.Receive(buf)
+			if err == nil {
+				rPayload = append([]byte(nil), rPayload...)
+			}
+			serverRecvCh <- receiveResult{hdr: rHdr, payload: rPayload, err: err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
 	for i := 0; i < 3; i++ {
 		size := 500 + i*200
 		payload := make([]byte, size)
@@ -762,13 +805,12 @@ func TestPipeMultipleChunkedMessages(t *testing.T) {
 			t.Fatalf("Send[%d]: %v", i, err)
 		}
 
-		buf := make([]byte, forcedPacketSize)
-		rHdr, rPayload, err := server.Receive(buf)
-		if err != nil {
-			t.Fatalf("Receive[%d]: %v", i, err)
+		serverRecv := <-serverRecvCh
+		if serverRecv.err != nil {
+			t.Fatalf("Receive[%d]: %v", i, serverRecv.err)
 		}
-		if rHdr.MessageID != uint64(i+1) || !bytes.Equal(rPayload, payload) {
-			t.Fatalf("unexpected chunked message[%d]: hdr=%+v len=%d", i, rHdr, len(rPayload))
+		if serverRecv.hdr.MessageID != uint64(i+1) || !bytes.Equal(serverRecv.payload, payload) {
+			t.Fatalf("unexpected chunked message[%d]: hdr=%+v len=%d", i, serverRecv.hdr, len(serverRecv.payload))
 		}
 	}
 }
@@ -981,6 +1023,28 @@ func TestPipePipelineChunked(t *testing.T) {
 		}
 	}()
 
+	type receiveResult struct {
+		hdr     protocol.Header
+		payload []byte
+		err     error
+	}
+	clientRecvCh := make(chan receiveResult, len(sizes))
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, forcedPacketSize)
+		for i := 0; i < len(sizes); i++ {
+			rHdr, rPayload, err := client.Receive(buf)
+			if err == nil {
+				rPayload = append([]byte(nil), rPayload...)
+			}
+			clientRecvCh <- receiveResult{hdr: rHdr, payload: rPayload, err: err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
 	for i, sz := range sizes {
 		payload := make([]byte, sz)
 		for j := range payload {
@@ -997,20 +1061,19 @@ func TestPipePipelineChunked(t *testing.T) {
 		}
 	}
 
-	buf := make([]byte, forcedPacketSize)
 	for i, sz := range sizes {
-		rHdr, rPayload, err := client.Receive(buf)
-		if err != nil {
-			t.Fatalf("client Receive[%d]: %v", i, err)
+		clientRecv := <-clientRecvCh
+		if clientRecv.err != nil {
+			t.Fatalf("client Receive[%d]: %v", i, clientRecv.err)
 		}
-		if rHdr.MessageID != uint64(i+1) || len(rPayload) != sz {
-			t.Fatalf("unexpected pipeline chunked response[%d]: hdr=%+v len=%d", i, rHdr, len(rPayload))
+		if clientRecv.hdr.MessageID != uint64(i+1) || len(clientRecv.payload) != sz {
+			t.Fatalf("unexpected pipeline chunked response[%d]: hdr=%+v len=%d", i, clientRecv.hdr, len(clientRecv.payload))
 		}
 		expected := make([]byte, sz)
 		for j := range expected {
 			expected[j] = byte((i + j) & 0xFF)
 		}
-		if !bytes.Equal(rPayload, expected) {
+		if !bytes.Equal(clientRecv.payload, expected) {
 			t.Fatalf("payload mismatch for response[%d]", i)
 		}
 	}
