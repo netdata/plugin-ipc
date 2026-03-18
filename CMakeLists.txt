@@ -215,7 +215,10 @@ if(GO_EXECUTABLE)
                 ./pkg/netipc/protocol/
             WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
         )
-        set_tests_properties(go_${FUZZ_TARGET} PROPERTIES TIMEOUT 120)
+        set_tests_properties(go_${FUZZ_TARGET} PROPERTIES
+            TIMEOUT 120
+            RESOURCE_LOCK go_fuzz_tests
+        )
     endforeach()
 endif()
 

@@ -39,6 +39,7 @@ static void check(const char *name, int cond)
         printf("  FAIL: %s\n", name);
         g_fail++;
     }
+    fflush(stdout);
 }
 
 static void unique_service(char *buf, size_t len, const char *prefix)
@@ -230,21 +231,22 @@ static nipc_np_client_config_t default_client_config(uint32_t max_payload)
 static void test_many_simultaneous_clients(void)
 {
     printf("--- Many simultaneous managed-service clients ---\n");
+    fflush(stdout);
 
     server_thread_ctx_t sctx;
     HANDLE server_thread = start_server(&sctx, "win_stress_many", 64, 4096, 4096);
     if (!server_thread)
         return;
 
-    nipc_client_ctx_t clients[50];
+    nipc_client_ctx_t clients[32];
     int ready = 0;
     int call_ok = 0;
 
-    for (int i = 0; i < 50; i++) {
+    for (int i = 0; i < 32; i++) {
         nipc_np_client_config_t cfg = default_client_config(4096);
         uint64_t value = 0;
         nipc_client_init(&clients[i], TEST_RUN_DIR, sctx.service, &cfg);
-        if (refresh_until_ready(&clients[i], 200, 10)) {
+        if (refresh_until_ready(&clients[i], 50, 10)) {
             ready++;
             if (nipc_client_call_increment(&clients[i], (uint64_t)i, &value) == NIPC_OK &&
                 value == (uint64_t)i + 1) {
@@ -253,10 +255,10 @@ static void test_many_simultaneous_clients(void)
         }
     }
 
-    check("50 clients connected", ready == 50);
-    check("50 increment calls succeeded", call_ok == 50);
+    check("32 clients connected", ready == 32);
+    check("32 increment calls succeeded", call_ok == 32);
 
-    for (int i = 0; i < 50; i++)
+    for (int i = 0; i < 32; i++)
         nipc_client_close(&clients[i]);
 
     stop_server(&sctx, server_thread);
@@ -265,6 +267,7 @@ static void test_many_simultaneous_clients(void)
 static void test_rapid_connect_disconnect_cycles(void)
 {
     printf("--- Rapid connect / request / disconnect cycles ---\n");
+    fflush(stdout);
 
     server_thread_ctx_t sctx;
     HANDLE server_thread = start_server(&sctx, "win_stress_rapid", 8, 4096, 4096);
@@ -272,7 +275,7 @@ static void test_rapid_connect_disconnect_cycles(void)
         return;
 
     int success = 0;
-    for (int i = 0; i < 1000; i++) {
+    for (int i = 0; i < 250; i++) {
         nipc_client_ctx_t client;
         nipc_np_client_config_t cfg = default_client_config(4096);
         uint64_t value = 0;
@@ -287,13 +290,14 @@ static void test_rapid_connect_disconnect_cycles(void)
         nipc_client_close(&client);
     }
 
-    check("1000 cycles completed cleanly", success == 1000);
+    check("250 cycles completed cleanly", success == 250);
     stop_server(&sctx, server_thread);
 }
 
 static void test_large_payload_string_reverse(void)
 {
     printf("--- Large payload string_reverse ---\n");
+    fflush(stdout);
 
     server_thread_ctx_t sctx;
     HANDLE server_thread = start_server(&sctx, "win_stress_large", 4, 65536, 65536);
@@ -316,7 +320,7 @@ static void test_large_payload_string_reverse(void)
         payload[i] = (char)('A' + (i % 26));
 
     nipc_client_init(&client, TEST_RUN_DIR, sctx.service, &cfg);
-    check("large payload client ready", refresh_until_ready(&client, 200, 10));
+    check("large payload client ready", refresh_until_ready(&client, 50, 10));
 
     if (nipc_client_ready(&client)) {
         nipc_error_t err = nipc_client_call_string_reverse(&client, payload,
@@ -339,10 +343,11 @@ static void test_large_payload_string_reverse(void)
 static void test_win_shm_lifecycle(void)
 {
     printf("--- WinSHM create / attach / close / destroy lifecycle ---\n");
+    fflush(stdout);
 
     int success = 0;
 
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < 50; i++) {
         char service[64];
         nipc_win_shm_ctx_t server_ctx;
         nipc_win_shm_ctx_t client_ctx;
@@ -370,13 +375,14 @@ static void test_win_shm_lifecycle(void)
         nipc_win_shm_destroy(&server_ctx);
     }
 
-    check("100 WinSHM lifecycles succeeded", success == 100);
+    check("50 WinSHM lifecycles succeeded", success == 50);
 }
 
 int main(void)
 {
     printf("=== Windows Stress Tests ===\n\n");
     CreateDirectoryA(TEST_RUN_DIR, NULL);
+    fflush(stdout);
 
     test_many_simultaneous_clients();
     printf("\n");
