@@ -525,6 +525,9 @@ nipc_np_error_t nipc_np_listen(const char *run_dir,
                                 const nipc_np_server_config_t *config,
                                 nipc_np_listener_t *out)
 {
+    if (!config || !out)
+        return NIPC_NP_ERR_BAD_PARAM;
+
     memset(out, 0, sizeof(*out));
     out->pipe = INVALID_HANDLE_VALUE;
 
@@ -560,6 +563,9 @@ nipc_np_error_t nipc_np_accept(nipc_np_listener_t *listener,
                                 uint64_t session_id,
                                 nipc_np_session_t *out)
 {
+    if (!listener || !out)
+        return NIPC_NP_ERR_BAD_PARAM;
+
     memset(out, 0, sizeof(*out));
     out->pipe = INVALID_HANDLE_VALUE;
 
@@ -611,6 +617,9 @@ nipc_np_error_t nipc_np_connect(const char *run_dir,
                                  const nipc_np_client_config_t *config,
                                  nipc_np_session_t *out)
 {
+    if (!config || !out)
+        return NIPC_NP_ERR_BAD_PARAM;
+
     memset(out, 0, sizeof(*out));
     out->pipe = INVALID_HANDLE_VALUE;
 
