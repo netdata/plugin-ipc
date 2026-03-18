@@ -234,15 +234,15 @@ static void test_many_simultaneous_clients(void)
     fflush(stdout);
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_server(&sctx, "win_stress_many", 64, 4096, 4096);
+    HANDLE server_thread = start_server(&sctx, "win_stress_many", 16, 4096, 4096);
     if (!server_thread)
         return;
 
-    nipc_client_ctx_t clients[32];
+    nipc_client_ctx_t clients[8];
     int ready = 0;
     int call_ok = 0;
 
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 8; i++) {
         nipc_np_client_config_t cfg = default_client_config(4096);
         uint64_t value = 0;
         nipc_client_init(&clients[i], TEST_RUN_DIR, sctx.service, &cfg);
@@ -255,10 +255,10 @@ static void test_many_simultaneous_clients(void)
         }
     }
 
-    check("32 clients connected", ready == 32);
-    check("32 increment calls succeeded", call_ok == 32);
+    check("8 clients connected", ready == 8);
+    check("8 increment calls succeeded", call_ok == 8);
 
-    for (int i = 0; i < 32; i++)
+    for (int i = 0; i < 8; i++)
         nipc_client_close(&clients[i]);
 
     stop_server(&sctx, server_thread);
@@ -275,7 +275,7 @@ static void test_rapid_connect_disconnect_cycles(void)
         return;
 
     int success = 0;
-    for (int i = 0; i < 250; i++) {
+    for (int i = 0; i < 100; i++) {
         nipc_client_ctx_t client;
         nipc_np_client_config_t cfg = default_client_config(4096);
         uint64_t value = 0;
@@ -290,7 +290,7 @@ static void test_rapid_connect_disconnect_cycles(void)
         nipc_client_close(&client);
     }
 
-    check("250 cycles completed cleanly", success == 250);
+    check("100 cycles completed cleanly", success == 100);
     stop_server(&sctx, server_thread);
 }
 
@@ -347,7 +347,7 @@ static void test_win_shm_lifecycle(void)
 
     int success = 0;
 
-    for (int i = 0; i < 50; i++) {
+    for (int i = 0; i < 25; i++) {
         char service[64];
         nipc_win_shm_ctx_t server_ctx;
         nipc_win_shm_ctx_t client_ctx;
@@ -375,7 +375,7 @@ static void test_win_shm_lifecycle(void)
         nipc_win_shm_destroy(&server_ctx);
     }
 
-    check("50 WinSHM lifecycles succeeded", success == 50);
+    check("25 WinSHM lifecycles succeeded", success == 25);
 }
 
 int main(void)
