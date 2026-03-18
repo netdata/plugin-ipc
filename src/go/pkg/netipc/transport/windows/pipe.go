@@ -372,9 +372,10 @@ func (s *Session) GetRole() Role {
 // Close closes the session and releases resources.
 func (s *Session) Close() {
 	if s.handle != syscall.InvalidHandle {
-		// Flush pending writes so the peer reads all data
-		flushFileBuffers(s.handle)
 		if s.role == RoleServer {
+			// Flush before server-side disconnect so the client can
+			// consume any final response bytes already written.
+			flushFileBuffers(s.handle)
 			disconnectNamedPipe(s.handle)
 		}
 		syscall.CloseHandle(s.handle)
