@@ -1,80 +1,171 @@
 # Coverage Exclusions
 
-Lines that cannot reach 100% coverage without special infrastructure
-(malloc injection, kernel fault injection, etc.). Each exclusion is
-justified. Target: 100% coverage on all testable lines.
+Purpose:
 
-## C Library (104 excluded lines out of 1923 total = 94.6% testable ceiling)
+- record what has been measured
+- separate ordinary missing test coverage from branches that really need
+  special infrastructure
+- avoid overstating “coverage complete” when the numbers do not support it
 
-### netipc_protocol.c — 0 exclusions (all 29 uncovered lines are testable)
+## Verified Measurements
 
-### netipc_uds.c — 25 exclusions
+### Linux / POSIX
 
-| Lines | Reason |
-|-------|--------|
-| 73 | `getsockopt` failure on valid socket — unreachable on any supported OS |
-| 78 | `SO_SNDBUF <= 0` — kernel always returns positive |
-| 113 | `raw_send` short write on local UDS SEQPACKET — race condition |
-| 209, 214 | Handshake `raw_send`/`raw_recv` failure — requires mid-handshake connection drop |
-| 238 | Hello-ack decode failure — well-formed ACK always decodes |
-| 399 | `send_ack` failure during server handshake — mid-handshake drop |
-| 431 | `socket()` fails in stale check — OS resource exhaustion |
-| 480, 494-496 | `socket()`/`listen()` fails — OS resource exhaustion |
-| 520 | `accept()` fails — OS resource exhaustion |
-| 556 | `socket()` fails in connect — OS resource exhaustion |
-| 634 | `inflight_add` realloc failure — malloc failure |
-| 676 | `LIMIT_EXCEEDED` from inflight alloc failure — malloc failure |
-| 707 | `chunk_payload_budget == 0` — unreachable (SO_SNDBUF always >> 32) |
-| 733-735, 737 | Send rollback on single-packet failure — mid-send local socket failure |
-| 766-768, 770 | Send rollback on chunked-send failure — mid-send failure |
-| 793 | `realloc` failure in `ensure_recv_buf` — malloc failure |
-| 885 | `ensure_recv_buf` fails during chunked receive — malloc failure |
-| 908 | `pkt_buf` malloc failure during chunked receive — malloc failure |
+Verified on `2026-03-18`:
 
-### netipc_shm.c — 21 exclusions
+- C:
+  - script: `tests/run-coverage-c.sh`
+  - result: `90.5%`
+  - threshold: `82%`
+- Go:
+  - script: `tests/run-coverage-go.sh`
+  - result: `86.1%`
+  - threshold: `85%`
+- Rust:
+  - script: `tests/run-coverage-rust.sh`
+  - result: `81.46%`
+  - threshold: `80%`
 
-| Lines | Reason |
-|-------|--------|
-| 154 | `stat()` fails on file from directory listing — TOCTOU race |
-| 171-172 | `mmap` fails in stale check — memory pressure required |
-| 246-248 | `ftruncate` fails after open — filesystem quota / RO FS |
-| 254-256 | `mmap` fails in server_create — memory pressure |
-| 360-361 | `fstat` fails on valid fd — unreachable |
-| 374-375 | `mmap` fails in client_attach — memory pressure |
-| 626 | Timeout before `futex_wait` — precise timing race |
+### Windows (`win11`)
 
-### netipc_service.c — 58 exclusions
+Verified on `2026-03-18`:
 
-| Lines | Category | Reason |
-|-------|----------|--------|
-| 133 | malloc | SHM path transport_send malloc |
-| 174, 177, 181 | defensive | SHM receive error/truncation/decode in transport_receive |
-| 234, 236, 238 | defensive | Response kind/code/message_id mismatch in do_raw_call |
-| 307 | defensive | cgroups_req_encode always succeeds (4-byte buffer) |
-| 446, 455 | defensive | increment_encode always succeeds / do_raw_call path |
-| 496, 593, 599-600 | malloc | Batch/string_reverse allocation failures |
-| 681 | malloc | recv_buf in server session handler |
-| 696, 698, 702 | defensive | SHM receive unexpected error/truncation/decode in server |
-| 716 | defensive | UDS receive failure in server (covered by disconnect) |
-| 814 | malloc | SHM response malloc for large message |
-| 824, 829 | defensive | SHM/UDS send failure in server |
-| 943 | malloc | sessions array calloc |
-| 1020-1023 | SHM | SHM server_create fails after successful handshake |
-| 1031-1034 | malloc | sctx calloc |
-| 1045-1057 | growth | Session array realloc (initial capacity sufficient) |
-| 1068-1081 | OS | pthread_create failure |
-| 1258 | malloc | Hash buckets calloc |
-| 1297 | malloc | Cache items calloc |
-| 1304-1305 | defensive | Item decode fails after successful resp_decode |
-| 1315-1316, 1325-1327 | malloc | Item name/path strdup |
-| 1398-1399 | malloc | cache_build_items returns NULL |
+- C:
+  - script: `tests/run-coverage-c-windows.sh 80`
+  - result: `67.5%`
+  - per-file:
+    - `netipc_service_win.c`: `63.9%`
+    - `netipc_named_pipe.c`: `66.0%`
+    - `netipc_win_shm.c`: `76.8%`
+  - status: below target
 
-## Summary
+- Go:
+  - script: `tests/run-coverage-go-windows.sh 80`
+  - result: `52.4%`
+  - selected low-coverage files:
+    - `service/cgroups/cache_windows.go`: `0.0%`
+    - `service/cgroups/client_windows.go`: `37.7%`
+    - `transport/windows/pipe.go`: `5.8%`
+    - `transport/windows/shm.go`: `72.5%`
+  - status: below target
 
-| File | Total Lines | Uncovered | Testable | Exclusions | Testable Ceiling |
-|------|------------|-----------|----------|------------|-----------------|
-| netipc_protocol.c | 375 | 29 | 29 | 0 | 100.0% |
-| netipc_uds.c | 467 | 66 | 41 | 25 | 94.6% |
-| netipc_shm.c | 348 | 52 | 31 | 21 | 93.9% |
-| netipc_service.c | 733 | 173 | 115 | 58 | 92.1% |
-| **Total** | **1923** | **320** | **216** | **104** | **94.6%** |
+- Rust:
+  - no validated Windows-native coverage workflow yet
+
+## What Is Actually Excluded
+
+These categories genuinely need special infrastructure beyond ordinary tests.
+
+### 1. Integer-overflow guard branches
+
+Examples:
+
+- `src/libnetdata/netipc/src/protocol/netipc_protocol.c:146`
+- `src/libnetdata/netipc/src/protocol/netipc_protocol.c:203`
+- `src/libnetdata/netipc/src/protocol/netipc_protocol.c:223`
+- `src/libnetdata/netipc/src/protocol/netipc_protocol.c:248`
+- `src/libnetdata/netipc/src/protocol/netipc_protocol.c:453`
+- `src/libnetdata/netipc/src/protocol/netipc_protocol.c:489`
+
+These require absurd sizes such as `item_count > SIZE_MAX / N` or wire values
+that are not produced by normal encoders. They are reasonable candidates for
+fault-injection or synthetic corruption harnesses.
+
+### 2. Allocation-failure branches
+
+Examples:
+
+- `malloc` / `calloc` / `realloc` failure cleanup in C service and transport code
+- low-memory allocation paths in Windows C `netipc_service_win.c`
+- low-memory branches in Go and Rust transport scratch growth
+
+These require deterministic allocation-failure injection to cover reliably.
+
+### 3. OS / kernel failure branches
+
+Examples:
+
+- socket creation failures
+- `mmap` / `CreateFileMapping` / `MapViewOfFile` failures
+- `pthread_create` / Win32 handle creation failures
+- named-pipe creation / handshake API failures
+
+These are not “ordinary missing tests”. They require fault injection,
+resource exhaustion, or environment simulation.
+
+### 4. Timing / race branches
+
+Examples:
+
+- futex timeout and EINTR races
+- TOCTOU stale-cleanup paths
+- mid-send or mid-receive disconnect timing
+- Windows accept / shutdown timing edges
+
+These need race orchestration or deterministic hooks.
+
+### 5. Windows-only Rust coverage
+
+Facts:
+
+- `src/crates/netipc/src/transport/windows.rs`
+- `src/crates/netipc/src/transport/win_shm.rs`
+
+These modules are excluded from Linux builds and cannot be measured by the
+current Linux coverage path. This is a tooling / environment gap, not proof
+that the remaining lines are untestable.
+
+## What Is Not Justified As “Impossible”
+
+The following are still ordinary missing coverage and should not be treated as
+hard exclusions yet.
+
+### Windows C coverage gaps
+
+Current evidence:
+
+- `netipc_service_win.c` is only `63.9%`
+- `netipc_named_pipe.c` is only `66.0%`
+
+Brutal truth:
+
+- this is too low to explain away as “only fault injection remains”
+- there are still many normal branches and scenarios that simply do not have
+  tests yet
+
+### Windows Go coverage gaps
+
+Current evidence:
+
+- `service/cgroups/cache_windows.go`: `0.0%`
+- `service/cgroups/client_windows.go`: `37.7%`
+- `transport/windows/pipe.go`: `5.8%`
+
+Brutal truth:
+
+- these numbers prove the Windows Go side is far from coverage-complete
+- Phase 2 is not blocked only by impossible branches; it is still missing a
+  large amount of ordinary test coverage
+
+### Linux / POSIX remaining gaps
+
+Even on POSIX, not every remaining uncovered line should be assumed
+unreachable. Some are likely still coverable with better malformed-input or
+disconnect tests.
+
+## Practical Reading Of The Current State
+
+- Linux / POSIX:
+  - the scripts are working
+  - the current lowered thresholds pass
+  - coverage improved meaningfully, especially C
+- Windows:
+  - coverage measurement now exists and is validated
+  - the numbers are far below the draft targets
+  - more ordinary test work is required before any “coverage parity” claim is honest
+
+## Conclusion
+
+- `100%` overall coverage is not currently achieved.
+- Some branches truly need special infrastructure.
+- A large part of the remaining Windows coverage gap is still plain missing test work, not a technical impossibility.

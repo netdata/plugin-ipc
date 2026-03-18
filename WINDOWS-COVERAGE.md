@@ -6,6 +6,26 @@ known-good `win11` environment used for this repository.
 It intentionally documents only what is implemented and validated in this repo.
 It does not claim generic MSVC/CI support that has not been exercised here.
 
+## Current Verified Results
+
+Verified on `2026-03-18`:
+
+- `ctest --test-dir build --output-on-failure -j4`: `24/24` passing on `win11`
+- `bash tests/run-coverage-c-windows.sh 80`:
+  - script works
+  - full Windows `ctest` suite passes inside the script
+  - coverage result: `67.5%`
+  - current status: below the draft `80%` target
+- `bash tests/run-coverage-go-windows.sh 80`:
+  - script works
+  - coverage result: `52.4%`
+  - current status: below the draft `80%` target
+
+Brutal truth:
+
+- Windows coverage measurement is now implemented and validated.
+- Windows coverage parity is not complete yet.
+
 ## Scope
 
 ### C coverage script
@@ -129,6 +149,19 @@ Rust Windows coverage still needs:
 - a chosen tool
 - a validated `win11` workflow
 - an agreed threshold or an explicit “report-only” policy
+
+### Windows stress scope is intentionally narrow in default `ctest`
+
+Facts:
+
+- `test_win_stress` is wired into Windows `ctest`
+- the currently validated default scope is the repeated WinSHM lifecycle case
+
+Reason:
+
+- the managed-service shutdown stress cases exposed a separate Windows
+  investigation area and are intentionally not part of the default `ctest`
+  path until that behavior is understood and stabilized
 
 ## Relationship to `COVERAGE-EXCLUSIONS.md`
 
