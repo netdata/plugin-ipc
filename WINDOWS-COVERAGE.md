@@ -22,15 +22,16 @@ Verified on `2026-03-23`:
   - current status: script passes, including the per-file `80%` gate
 - `bash tests/run-coverage-go-windows.sh 80`:
   - script prints valid coverage results on `win11`
-  - total coverage result: `83.5%`
+  - total coverage result: `85.8%`
   - selected key files:
-    - `service/cgroups/client_windows.go`: `69.9%`
+    - `service/cgroups/client_windows.go`: `72.9%`
     - `service/cgroups/types.go`: `100.0%`
     - `transport/windows/pipe.go`: `83.3%`
-    - `transport/windows/shm.go`: `76.7%`
+    - `transport/windows/shm.go`: `84.5%`
   - current status:
     - reported above the draft `80%` target
     - Windows Go service/cache tests are now also wired into `ctest`
+    - latest malformed-response and SHM corruption/timeout tests materially raised the weak Windows client/SHM paths
 - `bash tests/run-coverage-rust-windows.sh`:
   - script works on `win11`
   - workflow:
@@ -54,6 +55,7 @@ Brutal truth:
 - Windows C is no longer the red gate.
 - The Windows Go script reliability issue is fixed.
 - The remaining Windows Go work is now concentrated in `client_windows.go` and `shm.go`, plus the deferred Windows managed-server retry/shutdown behavior.
+- One transient `test_protocol_rust` failure was observed once under parallel `ctest`, but it did not reproduce on immediate isolated or full reruns. This is not a confirmed active blocker.
 
 ## Scope
 

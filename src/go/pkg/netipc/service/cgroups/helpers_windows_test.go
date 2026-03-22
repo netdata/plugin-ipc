@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
@@ -30,6 +31,57 @@ func startTestServerWinWithConfig(service string, cfg windows.ServerConfig, hand
 	time.Sleep(200 * time.Millisecond)
 
 	return &winTestServer{server: s, doneCh: doneCh}
+}
+
+type winRawSessionServer struct {
+	listener *windows.Listener
+	doneCh   chan error
+}
+
+func startRawWinSessionServer(t *testing.T, service string, cfg windows.ServerConfig,
+	handler func(*windows.Session, protocol.Header, []byte) error) *winRawSessionServer {
+	t.Helper()
+
+	listener, err := windows.Listen(winTestRunDir, service, cfg)
+	if err != nil {
+		t.Fatalf("windows.Listen failed: %v", err)
+	}
+
+	srv := &winRawSessionServer{
+		listener: listener,
+		doneCh:   make(chan error, 1),
+	}
+
+	go func() {
+		defer close(srv.doneCh)
+		defer listener.Close()
+
+		session, err := listener.Accept()
+		if err != nil {
+			srv.doneCh <- err
+			return
+		}
+		defer session.Close()
+
+		recvBuf := make([]byte, protocol.HeaderSize+int(cfg.MaxRequestPayloadBytes))
+		hdr, payload, err := session.Receive(recvBuf)
+		if err != nil {
+			srv.doneCh <- err
+			return
+		}
+
+		srv.doneCh <- handler(session, hdr, payload)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	return srv
+}
+
+func (s *winRawSessionServer) wait(t *testing.T) {
+	t.Helper()
+	if err := <-s.doneCh; err != nil {
+		t.Fatalf("raw windows session server failed: %v", err)
+	}
 }
 
 func winTestCgroupsHandler(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {

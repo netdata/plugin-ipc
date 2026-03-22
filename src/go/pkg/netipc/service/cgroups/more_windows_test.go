@@ -3,6 +3,7 @@
 package cgroups
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"testing"
@@ -814,5 +815,219 @@ func TestWinCallSnapshotWithMalformedTransportState(t *testing.T) {
 	}
 	if view.ItemCount != 3 {
 		t.Fatalf("expected recovered snapshot, got %d items", view.ItemCount)
+	}
+}
+
+func TestWinCallIncrementRejectsMalformedResponseEnvelope(t *testing.T) {
+	cases := []struct {
+		name   string
+		want   error
+		mutate func(*protocol.Header)
+	}{
+		{
+			name: "bad kind",
+			want: protocol.ErrBadKind,
+			mutate: func(h *protocol.Header) {
+				h.Kind = protocol.KindRequest
+			},
+		},
+		{
+			name: "bad code",
+			want: protocol.ErrBadLayout,
+			mutate: func(h *protocol.Header) {
+				h.Code = protocol.MethodStringReverse
+			},
+		},
+		{
+			name: "bad status",
+			want: protocol.ErrBadLayout,
+			mutate: func(h *protocol.Header) {
+				h.TransportStatus = protocol.StatusInternalError
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := uniqueWinService("go_win_bad_resp")
+			srv := startRawWinSessionServer(t, svc, testWinServerConfig(),
+				func(session *windows.Session, hdr protocol.Header, payload []byte) error {
+					if hdr.Kind != protocol.KindRequest || hdr.Code != protocol.MethodIncrement {
+						return fmt.Errorf("unexpected request header: %+v", hdr)
+					}
+
+					var respPayload [protocol.IncrementPayloadSize]byte
+					protocol.IncrementEncode(42, respPayload[:])
+
+					respHdr := protocol.Header{
+						Kind:            protocol.KindResponse,
+						Code:            protocol.MethodIncrement,
+						ItemCount:       1,
+						MessageID:       hdr.MessageID,
+						TransportStatus: protocol.StatusOK,
+					}
+					tc.mutate(&respHdr)
+					return session.Send(&respHdr, respPayload[:])
+				})
+
+			client := NewClient(winTestRunDir, svc, testWinClientConfig())
+			defer client.Close()
+
+			client.Refresh()
+			if !client.Ready() {
+				t.Fatal("client not ready")
+			}
+
+			_, err := client.CallIncrement(41)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("CallIncrement error = %v, want %v", err, tc.want)
+			}
+
+			srv.wait(t)
+		})
+	}
+}
+
+func TestWinCallIncrementRejectsMalformedPayload(t *testing.T) {
+	svc := uniqueWinService("go_win_bad_incr_payload")
+	srv := startRawWinSessionServer(t, svc, testWinServerConfig(),
+		func(session *windows.Session, hdr protocol.Header, payload []byte) error {
+			if hdr.Kind != protocol.KindRequest || hdr.Code != protocol.MethodIncrement {
+				return fmt.Errorf("unexpected request header: %+v", hdr)
+			}
+
+			respHdr := protocol.Header{
+				Kind:            protocol.KindResponse,
+				Code:            protocol.MethodIncrement,
+				ItemCount:       1,
+				MessageID:       hdr.MessageID,
+				TransportStatus: protocol.StatusOK,
+			}
+			return session.Send(&respHdr, []byte{1, 2, 3, 4})
+		})
+
+	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	defer client.Close()
+
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatal("client not ready")
+	}
+
+	_, err := client.CallIncrement(41)
+	if !errors.Is(err, protocol.ErrTruncated) {
+		t.Fatalf("CallIncrement error = %v, want %v", err, protocol.ErrTruncated)
+	}
+
+	srv.wait(t)
+}
+
+func TestWinCallStringReverseRejectsMalformedPayload(t *testing.T) {
+	svc := uniqueWinService("go_win_bad_str_payload")
+	srv := startRawWinSessionServer(t, svc, testWinServerConfig(),
+		func(session *windows.Session, hdr protocol.Header, payload []byte) error {
+			if hdr.Kind != protocol.KindRequest || hdr.Code != protocol.MethodStringReverse {
+				return fmt.Errorf("unexpected request header: %+v", hdr)
+			}
+
+			respHdr := protocol.Header{
+				Kind:            protocol.KindResponse,
+				Code:            protocol.MethodStringReverse,
+				ItemCount:       1,
+				MessageID:       hdr.MessageID,
+				TransportStatus: protocol.StatusOK,
+			}
+
+			// Valid offsets/lengths, but missing the required NUL terminator.
+			respPayload := make([]byte, protocol.StringReverseHdrSize+3)
+			binary.NativeEndian.PutUint32(respPayload[0:4], uint32(protocol.StringReverseHdrSize))
+			binary.NativeEndian.PutUint32(respPayload[4:8], 2)
+			copy(respPayload[8:], []byte{'o', 'k', 'x'})
+			return session.Send(&respHdr, respPayload)
+		})
+
+	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	defer client.Close()
+
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatal("client not ready")
+	}
+
+	_, err := client.CallStringReverse("hello")
+	if !errors.Is(err, protocol.ErrMissingNul) {
+		t.Fatalf("CallStringReverse error = %v, want %v", err, protocol.ErrMissingNul)
+	}
+
+	srv.wait(t)
+}
+
+func TestWinCallIncrementBatchRejectsMalformedResponseEnvelope(t *testing.T) {
+	cases := []struct {
+		name   string
+		want   error
+		mutate func(*protocol.Header)
+	}{
+		{
+			name: "missing batch flag",
+			want: protocol.ErrBadItemCount,
+			mutate: func(h *protocol.Header) {
+				h.Flags = 0
+			},
+		},
+		{
+			name: "wrong item count",
+			want: protocol.ErrBadItemCount,
+			mutate: func(h *protocol.Header) {
+				h.Flags = protocol.FlagBatch
+				h.ItemCount = 1
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testWinServerConfig()
+			cfg.MaxRequestBatchItems = 16
+			cfg.MaxResponseBatchItems = 16
+
+			svc := uniqueWinService("go_win_bad_batch_resp")
+			srv := startRawWinSessionServer(t, svc, cfg,
+				func(session *windows.Session, hdr protocol.Header, payload []byte) error {
+					if hdr.Kind != protocol.KindRequest || hdr.Code != protocol.MethodIncrement {
+						return fmt.Errorf("unexpected request header: %+v", hdr)
+					}
+
+					respHdr := protocol.Header{
+						Kind:            protocol.KindResponse,
+						Code:            protocol.MethodIncrement,
+						Flags:           protocol.FlagBatch,
+						ItemCount:       hdr.ItemCount,
+						MessageID:       hdr.MessageID,
+						TransportStatus: protocol.StatusOK,
+					}
+					tc.mutate(&respHdr)
+					return session.Send(&respHdr, nil)
+				})
+
+			ccfg := testWinClientConfig()
+			ccfg.MaxRequestBatchItems = 16
+			ccfg.MaxResponseBatchItems = 16
+
+			client := NewClient(winTestRunDir, svc, ccfg)
+			defer client.Close()
+
+			client.Refresh()
+			if !client.Ready() {
+				t.Fatal("client not ready")
+			}
+
+			_, err := client.CallIncrementBatch([]uint64{1, 2})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("CallIncrementBatch error = %v, want %v", err, tc.want)
+			}
+
+			srv.wait(t)
+		})
 	}
 }

@@ -41,12 +41,12 @@ Verified on `2026-03-23`:
 
 - Go:
   - script: `tests/run-coverage-go-windows.sh 80`
-  - result: `83.5%`
+  - result: `85.8%`
   - selected key files:
-    - `service/cgroups/client_windows.go`: `69.9%`
+    - `service/cgroups/client_windows.go`: `72.9%`
     - `service/cgroups/types.go`: `100.0%`
     - `transport/windows/pipe.go`: `83.3%`
-    - `transport/windows/shm.go`: `76.7%`
+    - `transport/windows/shm.go`: `84.5%`
   - status:
     - reported above target
     - the script exits cleanly in noninteractive `ssh`
@@ -151,10 +151,10 @@ Brutal truth:
 
 Current evidence:
 
-- Windows Go total is now `83.5%`
+- Windows Go total is now `85.8%`
 - `service/cgroups/client_windows.go` still has weak spots in reconnect / transport helper paths
 - `transport/windows/pipe.go` is now above `80%`
-- `transport/windows/shm.go` still has ordinary uncovered receive / attach branches
+- `transport/windows/shm.go` is now above `80%`, but it still has ordinary uncovered attach / edge-case branches
 
 Brutal truth:
 

@@ -3,6 +3,7 @@
 package windows
 
 import (
+	"encoding/binary"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -101,6 +102,66 @@ func TestWinShmCreateAttachAndCloseValidation(t *testing.T) {
 	}
 }
 
+func TestWinShmClientAttachRejectsCorruptHeader(t *testing.T) {
+	cases := []struct {
+		name   string
+		want   error
+		mutate func([]byte)
+	}{
+		{
+			name: "bad magic",
+			want: ErrWinShmBadMagic,
+			mutate: func(data []byte) {
+				binary.NativeEndian.PutUint32(data[wshOFFMagic:], 0)
+			},
+		},
+		{
+			name: "bad version",
+			want: ErrWinShmBadVersion,
+			mutate: func(data []byte) {
+				binary.NativeEndian.PutUint32(data[wshOFFVersion:], winShmVersion+1)
+			},
+		},
+		{
+			name: "bad header len",
+			want: ErrWinShmBadHeader,
+			mutate: func(data []byte) {
+				binary.NativeEndian.PutUint32(data[wshOFFHeaderLen:], winShmHeaderLen+64)
+			},
+		},
+		{
+			name: "bad profile",
+			want: ErrWinShmBadProfile,
+			mutate: func(data []byte) {
+				binary.NativeEndian.PutUint32(data[wshOFFProfile:], WinShmProfileBusywait)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runDir := t.TempDir()
+			service := "corrupt-header"
+			const authToken uint64 = 0x123456
+			const sessionID uint64 = 15
+
+			server, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileHybrid, 4096, 4096)
+			if err != nil {
+				t.Fatalf("WinShmServerCreate failed: %v", err)
+			}
+			defer server.WinShmDestroy()
+
+			data := unsafe.Slice((*byte)(unsafe.Pointer(server.base)), server.size)
+			tc.mutate(data)
+
+			_, err = WinShmClientAttach(runDir, service, authToken, sessionID, WinShmProfileHybrid)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("WinShmClientAttach error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestWinShmSendReceiveValidation(t *testing.T) {
 	runDir := t.TempDir()
 	service := "validation-io"
@@ -180,6 +241,54 @@ func TestWinShmReceiveDetectsPeerClosed(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("WinShmReceive did not observe peer close")
+	}
+}
+
+func TestWinShmReceiveTimeoutHybrid(t *testing.T) {
+	runDir := t.TempDir()
+	service := "timeout-hybrid"
+	const authToken uint64 = 0x8912
+	const sessionID uint64 = 17
+
+	server, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileHybrid, 4096, 4096)
+	if err != nil {
+		t.Fatalf("WinShmServerCreate failed: %v", err)
+	}
+	defer server.WinShmDestroy()
+
+	client, err := WinShmClientAttach(runDir, service, authToken, sessionID, WinShmProfileHybrid)
+	if err != nil {
+		t.Fatalf("WinShmClientAttach failed: %v", err)
+	}
+	defer client.WinShmClose()
+
+	buf := make([]byte, 128)
+	if _, err := server.WinShmReceive(buf, 10); !errors.Is(err, ErrWinShmTimeout) {
+		t.Fatalf("WinShmReceive hybrid timeout = %v, want %v", err, ErrWinShmTimeout)
+	}
+}
+
+func TestWinShmReceiveTimeoutBusywait(t *testing.T) {
+	runDir := t.TempDir()
+	service := "timeout-busywait"
+	const authToken uint64 = 0x8913
+	const sessionID uint64 = 19
+
+	server, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileBusywait, 4096, 4096)
+	if err != nil {
+		t.Fatalf("WinShmServerCreate failed: %v", err)
+	}
+	defer server.WinShmDestroy()
+
+	client, err := WinShmClientAttach(runDir, service, authToken, sessionID, WinShmProfileBusywait)
+	if err != nil {
+		t.Fatalf("WinShmClientAttach failed: %v", err)
+	}
+	defer client.WinShmClose()
+
+	buf := make([]byte, 128)
+	if _, err := server.WinShmReceive(buf, 10); !errors.Is(err, ErrWinShmTimeout) {
+		t.Fatalf("WinShmReceive busywait timeout = %v, want %v", err, ErrWinShmTimeout)
 	}
 }
 

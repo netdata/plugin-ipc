@@ -17,6 +17,11 @@ Finish the rewrite to a production-ready state with:
 ## Current Focus (2026-03-23)
 
 - Coverage parity and documentation honesty, not emergency benchmark or transport fixes.
+- Current execution slice after the Windows Go parity expansion:
+  - verify whether full `win11` `ctest` is still green after the new Windows Go tests
+  - isolate the new `test_protocol_rust` failure seen only under parallel `ctest`
+  - if isolated `test_protocol_rust` passes, treat it as Windows test-isolation work, not a Rust protocol regression
+  - only after restoring full `win11` `ctest` green, sync the TODO/docs to the new Windows Go numbers and continue coverage expansion
 - Verified current Windows coverage state on `2026-03-23`:
   - C:
     - `src/libnetdata/netipc/src/service/netipc_service_win.c` (`82.5%`)
@@ -25,19 +30,20 @@ Finish the rewrite to a production-ready state with:
     - total: `83.7%`
     - status: the script now passes the per-file `80%` gate
   - Go:
-    - total: `83.5%`
+    - total: `85.8%`
     - package coverage:
-      - `service/cgroups`: `72.7%`
-      - `transport/windows`: `80.4%`
+      - `service/cgroups`: `75.3%`
+      - `transport/windows`: `83.9%`
     - key files:
-      - `service/cgroups/client_windows.go`: `69.9%`
+      - `service/cgroups/client_windows.go`: `72.9%`
       - `service/cgroups/types.go`: `100.0%`
       - `transport/windows/pipe.go`: `83.3%`
-      - `transport/windows/shm.go`: `76.7%`
+      - `transport/windows/shm.go`: `84.5%`
     - status:
       - reported above the draft `80%` target
       - the noninteractive exit problem is fixed
       - first-class Windows Go CTest targets now exist for service/cache coverage parity
+      - latest added Windows-only malformed-response and SHM corruption/timeout tests increased `client_windows.go` and `shm.go` materially
   - Rust:
     - validated workflow: `cargo-llvm-cov` + `rustup component add llvm-tools-preview`
     - measured with Windows-native unit tests + Rust interop ctests, with Rust bin / benchmark noise excluded from the report:
@@ -156,7 +162,13 @@ Verified on `2026-03-23`:
 
 - `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo`: passing
 - `cmake --build build -j4`: passing
-- `ctest --test-dir build --output-on-failure -j4`: `28/28` passing
+- `ctest --test-dir build --output-on-failure -j4`:
+  - current verified state: `28/28` passing
+  - note:
+    - `test_protocol_rust` failed once during one parallel rerun after the latest Windows Go test additions
+    - immediate isolated rerun with `ctest --test-dir build --output-on-failure -j1 -R ^test_protocol_rust$` passed
+    - immediate full rerun with `ctest --test-dir build --output-on-failure -j4` also passed `28/28`
+    - implication: no confirmed active Rust Windows blocker, but the transient should remain in mind if more parallel Windows test expansion lands
 
 Important facts:
 
@@ -202,17 +214,18 @@ Current measured results:
 
 - Go:
   - `bash tests/run-coverage-go-windows.sh 80`
-  - coverage result: `83.5%`
+  - coverage result: `85.8%`
   - package coverage:
     - `protocol`: `99.5%`
-    - `service/cgroups`: `72.7%`
-    - `transport/windows`: `80.4%`
+    - `service/cgroups`: `75.3%`
+    - `transport/windows`: `83.9%`
   - status:
     - reported above the draft `80%` target
     - focused helper tests raised:
       - `transport/windows/pipe.go` to `83.3%`
-      - `transport/windows/shm.go` to `76.7%`
+      - `transport/windows/shm.go` to `84.5%`
       - `service/cgroups/types.go` to `100.0%`
+      - `service/cgroups/client_windows.go` to `72.9%`
     - first-class Windows Go CTest targets are now real and passing on `win11`
 
 Important facts:
@@ -428,6 +441,10 @@ Required next work:
      - `test_named_pipe_go`
      - `test_service_win_go`
      - `test_cache_win_go`
+4. Current execution slice (`2026-03-23`):
+   - inspect the remaining weak Windows Go paths function-by-function
+   - add tests only for real uncovered logic in `client_windows.go` and `shm.go`
+   - re-measure on `win11` before deciding whether to continue on Go or switch to the next parity gap
 
 ### 2. Cross-platform validation parity is only partial
 
