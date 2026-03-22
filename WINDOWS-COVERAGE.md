@@ -41,10 +41,10 @@ Verified on `2026-03-23`:
     - Windows Rust interop ctests
   - current threshold policy: same total `80%` gate as Linux Rust coverage
   - current measured result after excluding Rust bin / benchmark noise from the report:
-    - `service/cgroups.rs`: `77.28%`
-    - `transport/windows.rs`: `76.17%`
-    - `transport/win_shm.rs`: `78.86%`
-    - total line coverage: `87.98%`
+    - `service/cgroups.rs`: `83.57%` line coverage
+    - `transport/windows.rs`: `76.03%` line coverage
+    - `transport/win_shm.rs`: `87.74%` line coverage
+    - total line coverage: `90.32%`
   - current caveat:
     - `test_retry_on_failure_windows` is intentionally ignored because Windows managed-server shutdown/reconnect still needs a dedicated investigation
 
@@ -54,7 +54,9 @@ Brutal truth:
 - Windows coverage parity is much closer, but not finished.
 - Windows C is no longer the red gate.
 - The Windows Go script reliability issue is fixed.
-- The remaining Windows Go work is now concentrated in `client_windows.go` and `shm.go`, plus the deferred Windows managed-server retry/shutdown behavior.
+- The recent Rust Windows coverage work materially raised `service/cgroups.rs` and `win_shm.rs`.
+- The current weakest Windows Rust file is now `transport/windows.rs`.
+- The remaining Windows Go work is now concentrated in `client_windows.go`, plus the deferred Windows managed-server retry/shutdown behavior.
 - One transient `test_protocol_rust` failure was observed once under parallel `ctest`, but it did not reproduce on immediate isolated or full reruns. This is not a confirmed active blocker.
 
 ## Scope

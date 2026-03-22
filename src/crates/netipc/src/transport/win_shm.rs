@@ -935,6 +935,33 @@ fn cpu_relax() {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    use std::sync::atomic::{AtomicU64, Ordering};
+    #[cfg(windows)]
+    use std::thread;
+    #[cfg(windows)]
+    use std::time::Duration;
+
+    #[cfg(windows)]
+    static WIN_SHM_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(windows)]
+    fn test_run_dir() -> String {
+        let dir = std::env::temp_dir().join("nipc_win_shm_rust_test");
+        let _ = std::fs::create_dir_all(&dir);
+        dir.display().to_string()
+    }
+
+    #[cfg(windows)]
+    fn unique_service(prefix: &str) -> String {
+        format!(
+            "{}_{}_{}",
+            prefix,
+            std::process::id(),
+            WIN_SHM_TEST_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+        )
+    }
+
     #[test]
     fn test_fnv1a_64_deterministic() {
         let h1 = fnv1a_64(b"C:\\Temp\\netdata\ncgroups-snapshot\n12345");
@@ -981,5 +1008,268 @@ mod tests {
             .collect();
         assert!(narrow.starts_with("Local\\netipc-"));
         assert!(narrow.contains("-test-svc-p2-s0000000000000042-mapping"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_client_attach_bad_magic_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_bad_magic");
+        let auth_token: u64 = 0x123456;
+        let session_id: u64 = 15;
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create");
+
+        write_u32(server.base, OFF_MAGIC, 0);
+        let err = match WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        ) {
+            Ok(_) => panic!("bad magic must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, WinShmError::BadMagic);
+
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_client_attach_bad_version_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_bad_version");
+        let auth_token: u64 = 0x123457;
+        let session_id: u64 = 16;
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create");
+
+        write_u32(server.base, OFF_VERSION, REGION_VERSION + 1);
+        let err = match WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        ) {
+            Ok(_) => panic!("bad version must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, WinShmError::BadVersion);
+
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_client_attach_bad_header_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_bad_header");
+        let auth_token: u64 = 0x123458;
+        let session_id: u64 = 17;
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create");
+
+        write_u32(server.base, OFF_HEADER_LEN, HEADER_LEN + 64);
+        let err = match WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        ) {
+            Ok(_) => panic!("bad header_len must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, WinShmError::BadHeader);
+
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_client_attach_bad_profile_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_bad_profile");
+        let auth_token: u64 = 0x123459;
+        let session_id: u64 = 18;
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create");
+
+        write_u32(server.base, OFF_PROFILE, PROFILE_BUSYWAIT);
+        let err = match WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        ) {
+            Ok(_) => panic!("bad profile must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, WinShmError::BadProfile);
+
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_receive_timeout_hybrid_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_timeout_h");
+        let auth_token: u64 = 0x8912;
+        let session_id: u64 = 19;
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create");
+        let mut client = WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        )
+        .expect("client_attach");
+
+        let mut buf = [0u8; 128];
+        assert_eq!(server.receive(&mut buf, 10), Err(WinShmError::Timeout));
+
+        client.close();
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_receive_timeout_busywait_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_timeout_b");
+        let auth_token: u64 = 0x8913;
+        let session_id: u64 = 20;
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_BUSYWAIT,
+            4096,
+            4096,
+        )
+        .expect("server_create");
+        let mut client = WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_BUSYWAIT,
+        )
+        .expect("client_attach");
+
+        let mut buf = [0u8; 128];
+        assert_eq!(server.receive(&mut buf, 10), Err(WinShmError::Timeout));
+
+        client.close();
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_receive_detects_peer_closed_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_peer_closed");
+        let auth_token: u64 = 0x789a;
+        let session_id: u64 = 21;
+
+        let server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create");
+        let mut client = WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        )
+        .expect("client_attach");
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        let server_ptr = std::sync::Arc::new(std::sync::Mutex::new(server));
+        let recv_server = server_ptr.clone();
+        let handle = thread::spawn(move || {
+            let mut buf = [0u8; 128];
+            let mut guard = recv_server.lock().unwrap();
+            let recv = guard.receive(&mut buf, 1000);
+            sender.send(recv).unwrap();
+        });
+
+        thread::sleep(Duration::from_millis(20));
+        client.close();
+
+        let recv = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("receive result");
+        assert_eq!(recv, Err(WinShmError::Disconnected));
+
+        handle.join().expect("receiver thread");
+        let mutex = match std::sync::Arc::try_unwrap(server_ptr) {
+            Ok(mutex) => mutex,
+            Err(_) => panic!("receiver thread still holds the SHM server"),
+        };
+        let mut server = mutex.into_inner().expect("mutex");
+        server.destroy();
     }
 }

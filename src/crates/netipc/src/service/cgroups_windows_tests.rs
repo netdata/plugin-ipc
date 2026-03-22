@@ -1,9 +1,10 @@
 use super::*;
 use crate::protocol::{
-    CgroupsBuilder, CgroupsRequest, Header, KIND_REQUEST, KIND_RESPONSE, METHOD_CGROUPS_SNAPSHOT,
-    PROFILE_BASELINE, PROFILE_SHM_HYBRID, STATUS_OK,
+    increment_encode, BatchBuilder, CgroupsBuilder, CgroupsRequest, Header, NipcError, FLAG_BATCH,
+    INCREMENT_PAYLOAD_SIZE, KIND_REQUEST, KIND_RESPONSE, METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT,
+    METHOD_STRING_REVERSE, PROFILE_BASELINE, PROFILE_SHM_HYBRID, STATUS_INTERNAL_ERROR, STATUS_OK,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -11,12 +12,22 @@ use std::time::Duration;
 const TEST_RUN_DIR: &str = r"C:\Temp\nipc_svc_rust_test";
 const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;
 const RESPONSE_BUF_SIZE: usize = 65536;
+static WIN_SERVICE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn ensure_run_dir() {
     let _ = std::fs::create_dir_all(TEST_RUN_DIR);
 }
 
 fn cleanup_all(_service: &str) {}
+
+fn unique_service(prefix: &str) -> String {
+    format!(
+        "{}_{}_{}",
+        prefix,
+        std::process::id(),
+        WIN_SERVICE_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+    )
+}
 
 fn server_config() -> ServerConfig {
     ServerConfig {
@@ -231,6 +242,52 @@ impl TestServer {
 impl Drop for TestServer {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+struct RawSessionServer {
+    thread: Option<thread::JoinHandle<Result<(), String>>>,
+}
+
+fn start_raw_session_server<F>(service: &str, cfg: ServerConfig, handler: F) -> RawSessionServer
+where
+    F: FnOnce(&mut NpSession, Header, &[u8]) -> Result<(), String> + Send + 'static,
+{
+    ensure_run_dir();
+    cleanup_all(service);
+
+    let svc = service.to_string();
+    let thread = thread::spawn(move || {
+        let mut listener =
+            NpListener::bind(TEST_RUN_DIR, &svc, cfg).map_err(|e| format!("bind: {e}"))?;
+        let mut session = listener.accept().map_err(|e| format!("accept: {e}"))?;
+
+        let (hdr, payload) = {
+            let mut recv_buf = vec![0u8; RESPONSE_BUF_SIZE];
+            let (hdr, payload) = session
+                .receive(&mut recv_buf)
+                .map_err(|e| format!("receive: {e}"))?;
+            (hdr, payload.to_vec())
+        };
+
+        handler(&mut session, hdr, &payload)
+    });
+
+    thread::sleep(Duration::from_millis(200));
+    RawSessionServer {
+        thread: Some(thread),
+    }
+}
+
+impl RawSessionServer {
+    fn wait(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            match thread.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => panic!("raw windows session server failed: {err}"),
+                Err(_) => panic!("raw windows session server panicked"),
+            }
+        }
     }
 }
 
@@ -527,4 +584,215 @@ fn test_server_stop_flag_windows() {
 
     server.stop();
     assert!(!flag.load(Ordering::Acquire));
+}
+
+#[test]
+fn test_transport_without_session_windows() {
+    let svc = unique_service("rs_win_transport");
+    let mut client = CgroupsClient::new(TEST_RUN_DIR, &svc, client_config());
+
+    let mut hdr = Header {
+        kind: KIND_REQUEST,
+        code: METHOD_INCREMENT,
+        flags: 0,
+        item_count: 1,
+        message_id: 1,
+        transport_status: STATUS_OK,
+        ..Header::default()
+    };
+
+    assert_eq!(
+        client.transport_send(&mut hdr, &[]),
+        Err(NipcError::Truncated)
+    );
+    assert!(matches!(
+        client.transport_receive(),
+        Err(NipcError::Truncated)
+    ));
+    client.close();
+}
+
+#[test]
+fn test_call_increment_rejects_malformed_response_envelope_windows() {
+    struct Case {
+        name: &'static str,
+        kind: u16,
+        code: u16,
+        status: u16,
+        want: NipcError,
+    }
+
+    let cases = [
+        Case {
+            name: "bad kind",
+            kind: KIND_REQUEST,
+            code: METHOD_INCREMENT,
+            status: STATUS_OK,
+            want: NipcError::BadKind,
+        },
+        Case {
+            name: "bad code",
+            kind: KIND_RESPONSE,
+            code: METHOD_STRING_REVERSE,
+            status: STATUS_OK,
+            want: NipcError::BadLayout,
+        },
+        Case {
+            name: "bad status",
+            kind: KIND_RESPONSE,
+            code: METHOD_INCREMENT,
+            status: STATUS_INTERNAL_ERROR,
+            want: NipcError::BadLayout,
+        },
+    ];
+
+    for tc in cases {
+        let svc = unique_service("rs_win_inc_env");
+        let mut server =
+            start_raw_session_server(&svc, server_config(), move |session, req_hdr, _| {
+                let mut payload = [0u8; INCREMENT_PAYLOAD_SIZE];
+                let n = increment_encode(43, &mut payload);
+                if n != INCREMENT_PAYLOAD_SIZE {
+                    return Err(format!("increment_encode returned {n}"));
+                }
+
+                let mut resp_hdr = Header {
+                    kind: tc.kind,
+                    code: tc.code,
+                    flags: 0,
+                    item_count: 1,
+                    message_id: req_hdr.message_id,
+                    transport_status: tc.status,
+                    ..Header::default()
+                };
+                session
+                    .send(&mut resp_hdr, &payload)
+                    .map_err(|e| format!("send: {e}"))
+            });
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, &svc, client_config());
+        connect_ready(&mut client);
+
+        let err = client.call_increment(42).expect_err(tc.name);
+        assert_eq!(err, tc.want, "{}", tc.name);
+
+        client.close();
+        server.wait();
+    }
+}
+
+#[test]
+fn test_call_increment_rejects_malformed_payload_windows() {
+    let svc = unique_service("rs_win_inc_payload");
+    let mut server = start_raw_session_server(&svc, server_config(), move |session, req_hdr, _| {
+        let payload = [1u8, 2, 3, 4];
+        let mut resp_hdr = Header {
+            kind: KIND_RESPONSE,
+            code: METHOD_INCREMENT,
+            flags: 0,
+            item_count: 1,
+            message_id: req_hdr.message_id,
+            transport_status: STATUS_OK,
+            ..Header::default()
+        };
+        session
+            .send(&mut resp_hdr, &payload)
+            .map_err(|e| format!("send: {e}"))
+    });
+
+    let mut client = CgroupsClient::new(TEST_RUN_DIR, &svc, client_config());
+    connect_ready(&mut client);
+
+    let err = client
+        .call_increment(42)
+        .expect_err("malformed increment response");
+    assert_eq!(err, NipcError::Truncated);
+
+    client.close();
+    server.wait();
+}
+
+#[test]
+fn test_call_string_reverse_rejects_missing_nul_windows() {
+    let svc = unique_service("rs_win_str_payload");
+    let mut server = start_raw_session_server(&svc, server_config(), move |session, req_hdr, _| {
+        let payload = [
+            8u8, 0, 0, 0, // str_offset = 8
+            2, 0, 0, 0, // str_length = 2
+            b'o', b'k', b'!', // missing trailing NUL
+        ];
+        let mut resp_hdr = Header {
+            kind: KIND_RESPONSE,
+            code: METHOD_STRING_REVERSE,
+            flags: 0,
+            item_count: 1,
+            message_id: req_hdr.message_id,
+            transport_status: STATUS_OK,
+            ..Header::default()
+        };
+        session
+            .send(&mut resp_hdr, &payload)
+            .map_err(|e| format!("send: {e}"))
+    });
+
+    let mut client = CgroupsClient::new(TEST_RUN_DIR, &svc, client_config());
+    connect_ready(&mut client);
+
+    let err = client
+        .call_string_reverse("ok")
+        .expect_err("malformed string response");
+    assert_eq!(err, NipcError::MissingNul);
+
+    client.close();
+    server.wait();
+}
+
+#[test]
+fn test_call_increment_batch_rejects_wrong_item_count_windows() {
+    let svc = unique_service("rs_win_batch_count");
+    let mut server =
+        start_raw_session_server(&svc, batch_server_config(), move |session, req_hdr, _| {
+            let mut encoded = [0u8; INCREMENT_PAYLOAD_SIZE];
+            let n = increment_encode(11, &mut encoded);
+            if n != INCREMENT_PAYLOAD_SIZE {
+                return Err(format!("increment_encode returned {n}"));
+            }
+
+            let mut response_buf = vec![0u8; 128];
+            let resp_len = {
+                let mut batch = BatchBuilder::new(&mut response_buf, 2);
+                batch
+                    .add(&encoded)
+                    .map_err(|e| format!("batch add 1: {e:?}"))?;
+                batch
+                    .add(&encoded)
+                    .map_err(|e| format!("batch add 2: {e:?}"))?;
+                let (len, _count) = batch.finish();
+                len
+            };
+
+            let mut resp_hdr = Header {
+                kind: KIND_RESPONSE,
+                code: METHOD_INCREMENT,
+                flags: FLAG_BATCH,
+                item_count: 1,
+                message_id: req_hdr.message_id,
+                transport_status: STATUS_OK,
+                ..Header::default()
+            };
+            session
+                .send(&mut resp_hdr, &response_buf[..resp_len])
+                .map_err(|e| format!("send: {e}"))
+        });
+
+    let mut client = CgroupsClient::new(TEST_RUN_DIR, &svc, batch_client_config());
+    connect_ready(&mut client);
+
+    let err = client
+        .call_increment_batch(&[10, 20])
+        .expect_err("wrong batch item_count");
+    assert_eq!(err, NipcError::BadItemCount);
+
+    client.close();
+    server.wait();
 }

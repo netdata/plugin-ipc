@@ -18,10 +18,15 @@ Finish the rewrite to a production-ready state with:
 
 - Coverage parity and documentation honesty, not emergency benchmark or transport fixes.
 - Current execution slice after the Windows Go parity expansion:
-  - verify whether full `win11` `ctest` is still green after the new Windows Go tests
-  - isolate the new `test_protocol_rust` failure seen only under parallel `ctest`
-  - if isolated `test_protocol_rust` passes, treat it as Windows test-isolation work, not a Rust protocol regression
-  - only after restoring full `win11` `ctest` green, sync the TODO/docs to the new Windows Go numbers and continue coverage expansion
+  - revalidated full `win11` `ctest` after the Windows Go coverage additions
+  - synced the TODO and coverage docs to the latest Windows Go numbers
+  - next target:
+    - increase Windows Rust coverage with the same style of ordinary edge-case tests already added on the Windows Go side
+    - current result:
+      - malformed-response tests raised `service/cgroups.rs`
+      - WinSHM edge-case tests raised `transport/win_shm.rs`
+      - the next remaining weak Windows Rust file is now `transport/windows.rs`
+    - keep focusing on ordinary testable branches first, not the deferred managed-server retry/shutdown investigation
 - Verified current Windows coverage state on `2026-03-23`:
   - C:
     - `src/libnetdata/netipc/src/service/netipc_service_win.c` (`82.5%`)
@@ -47,10 +52,10 @@ Finish the rewrite to a production-ready state with:
   - Rust:
     - validated workflow: `cargo-llvm-cov` + `rustup component add llvm-tools-preview`
     - measured with Windows-native unit tests + Rust interop ctests, with Rust bin / benchmark noise excluded from the report:
-      - `src/service/cgroups.rs`: `77.28%`
-      - `src/transport/windows.rs`: `76.17%`
-      - `src/transport/win_shm.rs`: `78.86%`
-      - total line coverage: `87.98%`
+      - `src/service/cgroups.rs`: `83.57%` line coverage
+      - `src/transport/windows.rs`: `76.03%` line coverage
+      - `src/transport/win_shm.rs`: `87.74%` line coverage
+      - total line coverage: `90.32%`
     - implication: Windows Rust coverage is now real and useful, but one retry/shutdown test is still intentionally ignored pending the separate managed-server investigation
 - Approved next sequence:
   - document the new Windows Rust numbers honestly in the TODO and coverage docs
@@ -68,10 +73,10 @@ Finish the rewrite to a production-ready state with:
 Facts:
 
 - The validated Windows Rust workflow now reports:
-  - total line coverage: `87.98%`
-  - `src/service/cgroups.rs`: `77.28%`
-  - `src/transport/windows.rs`: `76.17%`
-  - `src/transport/win_shm.rs`: `78.86%`
+  - total line coverage: `90.32%`
+  - `src/service/cgroups.rs`: `83.57%`
+  - `src/transport/windows.rs`: `76.03%`
+  - `src/transport/win_shm.rs`: `87.74%`
 - `cargo-llvm-cov` has a built-in total-line gate via `--fail-under-lines`, but not a built-in per-file gate.
 - The current Windows C script enforces per-file gates on the exact Windows C files it cares about.
 - The current Windows Go script enforces only a total-package threshold.
@@ -169,6 +174,8 @@ Verified on `2026-03-23`:
     - immediate isolated rerun with `ctest --test-dir build --output-on-failure -j1 -R ^test_protocol_rust$` passed
     - immediate full rerun with `ctest --test-dir build --output-on-failure -j4` also passed `28/28`
     - implication: no confirmed active Rust Windows blocker, but the transient should remain in mind if more parallel Windows test expansion lands
+    - one attempted rerun failed only because `ctest` and `cargo llvm-cov clean --workspace` were mistakenly run in parallel on the same `win11` tree
+    - that failure was invalid test orchestration, not a product regression
 
 Important facts:
 
@@ -251,14 +258,15 @@ Important facts:
   - validated script:
     - `bash tests/run-coverage-rust-windows.sh`
   - current measured report from `win11` with Windows-native Rust L2/L3 unit tests + Rust interop ctests, after excluding Rust bin / benchmark noise from the report:
-    - `service/cgroups.rs`: `77.28%`
-    - `transport/windows.rs`: `76.17%`
-    - `transport/win_shm.rs`: `78.86%`
-    - total: `87.98%`
+    - `service/cgroups.rs`: `83.57%` line coverage
+    - `transport/windows.rs`: `76.03%` line coverage
+    - `transport/win_shm.rs`: `87.74%` line coverage
+    - total: `90.32%` line coverage
   - status:
     - the workflow is real and scripted
     - the report is now meaningful for the Windows Rust service path too
     - the script should enforce the same `80%` total threshold policy as Linux Rust
+    - the remaining weak Windows Rust file is now the named-pipe transport file, not the WinSHM file
     - one Windows retry/shutdown test is intentionally ignored because it belongs to the separate managed-server shutdown investigation
 
 ## Not Remaining

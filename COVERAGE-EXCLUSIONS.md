@@ -54,11 +54,11 @@ Verified on `2026-03-23`:
 
 - Rust:
   - script: `tests/run-coverage-rust-windows.sh`
-  - result: `87.98%` line coverage after excluding Rust bin / benchmark noise from the report
+  - result: `90.32%` line coverage after excluding Rust bin / benchmark noise from the report
   - key files:
-    - `service/cgroups.rs`: `77.28%`
-    - `transport/windows.rs`: `76.17%`
-    - `transport/win_shm.rs`: `78.86%`
+    - `service/cgroups.rs`: `83.57%` line coverage
+    - `transport/windows.rs`: `76.03%` line coverage
+    - `transport/win_shm.rs`: `87.74%` line coverage
   - status: validated workflow with the same total `80%` threshold policy as Linux Rust coverage
   - caveat: `test_retry_on_failure_windows` is intentionally ignored because the Windows managed-server shutdown/reconnect behavior is still a separate investigation
 
@@ -167,9 +167,9 @@ Brutal truth:
 Current evidence:
 
 - Windows Rust now has a validated threshold-enforced workflow
-- `service/cgroups.rs` is now `77.28%`
-- `transport/windows.rs` is `76.17%`
-- `transport/win_shm.rs` is `78.86%`
+- `service/cgroups.rs` is now `83.57%` line coverage
+- `transport/windows.rs` is `76.03%` line coverage
+- `transport/win_shm.rs` is `87.74%` line coverage
 - one retry/shutdown test is intentionally ignored for now
 
 Brutal truth:
@@ -177,6 +177,7 @@ Brutal truth:
 - Windows Rust is no longer a tooling gap
 - it is no longer blocked on `service/cgroups.rs` being `0.00%`
 - it is now threshold-enforced at the same total `80%` policy as Linux Rust coverage
+- `transport/windows.rs` is now the remaining weak Windows Rust file
 - it still needs more ordinary coverage work, and the retry/shutdown investigation stays outside the normal coverage path
 
 ### Linux / POSIX remaining gaps
