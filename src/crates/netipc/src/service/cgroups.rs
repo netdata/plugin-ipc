@@ -3647,3 +3647,7 @@ mod tests {
         cleanup_all(svc);
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "cgroups_windows_tests.rs"]
+mod windows_tests;

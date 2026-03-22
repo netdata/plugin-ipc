@@ -662,6 +662,7 @@ if(NETIPC_WINDOWS_RUNTIME)
     target_link_libraries(test_win_service_extra PRIVATE
         netipc_service_win netipc_win_shm netipc_named_pipe netipc_protocol
     )
+    target_compile_definitions(test_win_service_extra PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_win_service_extra COMMAND test_win_service_extra)
     set_tests_properties(test_win_service_extra PROPERTIES
         TIMEOUT 120

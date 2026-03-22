@@ -85,28 +85,35 @@ echo
 # Each line: file:startLine.startCol,endLine.endCol stmts count
 declare -A file_covered
 declare -A file_total
+sorted_files=()
 
-while IFS= read -r line; do
-    [[ "$line" == "mode:"* ]] && continue
-    # Format: github.com/.../file.go:10.2,15.5 3 1
-    file=$(echo "$line" | cut -d: -f1)
-    rest=$(echo "$line" | cut -d: -f2)
-    stmts=$(echo "$rest" | awk '{print $2}')
-    count=$(echo "$rest" | awk '{print $3}')
-
-    # Extract just the filename relative to pkg/netipc/
-    short_file=$(echo "$file" | sed 's|.*/pkg/netipc/||')
-
-    file_total[$short_file]=$(( ${file_total[$short_file]:-0} + stmts ))
-    if [[ "$count" -gt 0 ]]; then
-        file_covered[$short_file]=$(( ${file_covered[$short_file]:-0} + stmts ))
-    fi
-done < "$MERGED"
+while IFS=$'\t' read -r short_file covered total; do
+    [[ -n "$short_file" ]] || continue
+    file_total[$short_file]=$total
+    file_covered[$short_file]=$covered
+    sorted_files+=("$short_file")
+done < <(
+    awk '
+        $1 == "mode:" { next }
+        {
+            file = $1
+            sub(/:.*/, "", file)
+            sub(/^.*\/pkg\/netipc\//, "", file)
+            total[file] += $2
+            if ($3 > 0)
+                covered[file] += $2
+        }
+        END {
+            for (file in total)
+                printf "%s\t%d\t%d\n", file, covered[file] + 0, total[file]
+        }
+    ' "$MERGED" | sort
+)
 
 printf "%-40s %8s %12s\n" "File" "Coverage" "Stmts"
 printf "%-40s %8s %12s\n" "----" "--------" "-----"
 
-for file in $(echo "${!file_total[@]}" | tr ' ' '\n' | sort); do
+for file in "${sorted_files[@]}"; do
     cov=${file_covered[$file]:-0}
     tot=${file_total[$file]}
     if [[ $tot -gt 0 ]]; then

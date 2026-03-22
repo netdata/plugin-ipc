@@ -11,7 +11,7 @@ Purpose:
 
 ### Linux / POSIX
 
-Verified on `2026-03-18`:
+Verified on `2026-03-22`:
 
 - C:
   - script: `tests/run-coverage-c.sh`
@@ -28,29 +28,35 @@ Verified on `2026-03-18`:
 
 ### Windows (`win11`)
 
-Verified on `2026-03-18`:
+Verified on `2026-03-22`:
 
 - C:
   - script: `tests/run-coverage-c-windows.sh 80`
-  - result: `67.5%`
+  - result: `83.7%`
   - per-file:
-    - `netipc_service_win.c`: `63.9%`
-    - `netipc_named_pipe.c`: `66.0%`
-    - `netipc_win_shm.c`: `76.8%`
-  - status: below target
+    - `netipc_service_win.c`: `82.5%`
+    - `netipc_named_pipe.c`: `85.8%`
+    - `netipc_win_shm.c`: `83.2%`
+  - status: passes the current per-file and total `80%` gates
 
 - Go:
   - script: `tests/run-coverage-go-windows.sh 80`
-  - result: `52.4%`
+  - result: `81.8%`
   - selected low-coverage files:
-    - `service/cgroups/cache_windows.go`: `0.0%`
-    - `service/cgroups/client_windows.go`: `37.7%`
-    - `transport/windows/pipe.go`: `5.8%`
-    - `transport/windows/shm.go`: `72.5%`
-  - status: below target
+    - `service/cgroups/client_windows.go`: hot-path helpers still range from `47.4%` to `73.3%`
+    - `transport/windows/pipe.go`: some helpers remain very low, including `isDisconnectError` at `0.0%`
+    - `transport/windows/shm.go`: `WinShmReceive` is still around `70.5%`
+  - status: reported above target, and the script now exits cleanly in noninteractive `ssh`
 
 - Rust:
-  - no validated Windows-native coverage workflow yet
+  - script: `tests/run-coverage-rust-windows.sh`
+  - result: `87.98%` line coverage after excluding Rust bin / benchmark noise from the report
+  - key files:
+    - `service/cgroups.rs`: `77.28%`
+    - `transport/windows.rs`: `76.17%`
+    - `transport/win_shm.rs`: `78.86%`
+  - status: validated workflow with the same total `80%` threshold policy as Linux Rust coverage
+  - caveat: `test_retry_on_failure_windows` is intentionally ignored because the Windows managed-server shutdown/reconnect behavior is still a separate investigation
 
 ## What Is Actually Excluded
 
@@ -110,10 +116,13 @@ Facts:
 
 - `src/crates/netipc/src/transport/windows.rs`
 - `src/crates/netipc/src/transport/win_shm.rs`
+- `src/crates/netipc/src/service/cgroups.rs`
 
 These modules are excluded from Linux builds and cannot be measured by the
-current Linux coverage path. This is a tooling / environment gap, not proof
-that the remaining lines are untestable.
+current Linux coverage path. The tooling / environment gap is now solved on
+Windows. The remaining Windows Rust caveat is no longer the service file; it
+is the deferred retry/shutdown investigation plus ordinary missing transport
+coverage.
 
 ## What Is Not Justified As “Impossible”
 
@@ -124,28 +133,47 @@ hard exclusions yet.
 
 Current evidence:
 
-- `netipc_service_win.c` is only `63.9%`
-- `netipc_named_pipe.c` is only `66.0%`
+- `netipc_service_win.c` is now `82.5%`
+- `netipc_named_pipe.c` is `85.8%`
+- `netipc_win_shm.c` is `83.2%`
 
 Brutal truth:
 
-- this is too low to explain away as “only fault injection remains”
-- there are still many normal branches and scenarios that simply do not have
-  tests yet
+- the current Windows C gate is green
+- this does not mean Windows C is coverage-complete
+- the remaining uncovered branches are still a mix of ordinary missing tests and branches that would need fault injection
 
 ### Windows Go coverage gaps
 
 Current evidence:
 
-- `service/cgroups/cache_windows.go`: `0.0%`
-- `service/cgroups/client_windows.go`: `37.7%`
-- `transport/windows/pipe.go`: `5.8%`
+- Windows Go total is now `81.8%`
+- `service/cgroups/client_windows.go` still has weak spots in reconnect / transport helper paths
+- `transport/windows/pipe.go` still has several low-coverage helper branches
+- `transport/windows/shm.go` still has ordinary uncovered receive / attach branches
 
 Brutal truth:
 
-- these numbers prove the Windows Go side is far from coverage-complete
-- Phase 2 is not blocked only by impossible branches; it is still missing a
-  large amount of ordinary test coverage
+- Windows Go is no longer the red gate for the draft `80%` target
+- but it is still not honest to call it coverage-complete
+- the remaining low-coverage helpers are still ordinary test-work candidates, not hard exclusions
+
+### Windows Rust coverage gaps
+
+Current evidence:
+
+- Windows Rust now has a validated threshold-enforced workflow
+- `service/cgroups.rs` is now `77.28%`
+- `transport/windows.rs` is `76.17%`
+- `transport/win_shm.rs` is `78.86%`
+- one retry/shutdown test is intentionally ignored for now
+
+Brutal truth:
+
+- Windows Rust is no longer a tooling gap
+- it is no longer blocked on `service/cgroups.rs` being `0.00%`
+- it is now threshold-enforced at the same total `80%` policy as Linux Rust coverage
+- it still needs more ordinary coverage work, and the retry/shutdown investigation stays outside the normal coverage path
 
 ### Linux / POSIX remaining gaps
 
@@ -161,11 +189,13 @@ disconnect tests.
   - coverage improved meaningfully, especially C
 - Windows:
   - coverage measurement now exists and is validated
-  - the numbers are far below the draft targets
+  - Windows C now passes its draft gate
+  - Windows Go is above the draft target, and the script reliability issue is fixed
+  - Windows Rust coverage now has a real threshold-enforced entrypoint
   - more ordinary test work is required before any “coverage parity” claim is honest
 
 ## Conclusion
 
 - `100%` overall coverage is not currently achieved.
 - Some branches truly need special infrastructure.
-- A large part of the remaining Windows coverage gap is still plain missing test work, not a technical impossibility.
+- A meaningful part of the remaining Windows coverage gap is still plain missing test work, not a technical impossibility.

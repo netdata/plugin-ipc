@@ -8,23 +8,49 @@ It does not claim generic MSVC/CI support that has not been exercised here.
 
 ## Current Verified Results
 
-Verified on `2026-03-18`:
+Verified on `2026-03-22`:
 
-- `ctest --test-dir build --output-on-failure -j4`: `24/24` passing on `win11`
+- `ctest --test-dir build --output-on-failure -j4`: `26/26` passing on `win11`
 - `bash tests/run-coverage-c-windows.sh 80`:
   - script works
-  - full Windows `ctest` suite passes inside the script
-  - coverage result: `67.5%`
-  - current status: below the draft `80%` target
+  - coverage-only Windows test subset passes inside the script
+  - total coverage result: `83.7%`
+  - per-file:
+    - `netipc_service_win.c`: `82.5%`
+    - `netipc_named_pipe.c`: `85.8%`
+    - `netipc_win_shm.c`: `83.2%`
+  - current status: script passes, including the per-file `80%` gate
 - `bash tests/run-coverage-go-windows.sh 80`:
-  - script works
-  - coverage result: `52.4%`
-  - current status: below the draft `80%` target
+  - script prints valid coverage results on `win11`
+  - total coverage result: `81.8%`
+  - selected lower-coverage files:
+    - `service/cgroups/client_windows.go`: `47.4%` to `73.3%` across key hot-path helpers
+    - `transport/windows/pipe.go`: some helpers still very low, including `isDisconnectError` at `0.0%`
+    - `transport/windows/shm.go`: key receive path still around `70.5%`
+  - current status: reported above the draft `80%` target
+- `bash tests/run-coverage-rust-windows.sh`:
+  - script works on `win11`
+  - workflow:
+    - `cargo-llvm-cov`
+    - `rustup component add llvm-tools-preview`
+    - Windows-native Rust L2/L3 unit tests
+    - Windows Rust interop ctests
+  - current threshold policy: same total `80%` gate as Linux Rust coverage
+  - current measured result after excluding Rust bin / benchmark noise from the report:
+    - `service/cgroups.rs`: `77.28%`
+    - `transport/windows.rs`: `76.17%`
+    - `transport/win_shm.rs`: `78.86%`
+    - total line coverage: `87.98%`
+  - current caveat:
+    - `test_retry_on_failure_windows` is intentionally ignored because Windows managed-server shutdown/reconnect still needs a dedicated investigation
 
 Brutal truth:
 
-- Windows coverage measurement is now implemented and validated.
-- Windows coverage parity is not complete yet.
+- Windows coverage measurement is real and useful now.
+- Windows coverage parity is much closer, but not finished.
+- Windows C is no longer the red gate.
+- The Windows Go script reliability issue is fixed.
+- The remaining platform-proof gaps are better proof for low-coverage Windows Go helpers and the deferred Windows managed-server retry/shutdown behavior.
 
 ## Scope
 
@@ -64,15 +90,18 @@ What it does:
 
 ### Rust coverage
 
-There is no validated Windows Rust coverage script in this repository yet.
+Script: `tests/run-coverage-rust-windows.sh`
 
 Facts:
 
 - Windows Rust code exists in:
-  - `src/crates/netipc/src/transport/windows.rs`
-  - `src/crates/netipc/src/transport/win_shm.rs`
-- Linux coverage runs do not execute these modules.
-- A reliable Windows-native Rust coverage workflow still needs to be designed and validated separately.
+- `src/crates/netipc/src/transport/windows.rs`
+- `src/crates/netipc/src/transport/win_shm.rs`
+- `src/crates/netipc/src/service/cgroups.rs`
+- Linux coverage runs do not execute these Windows modules.
+- The current validated Windows Rust workflow enforces the same total `80%` threshold policy as Linux Rust coverage.
+- It now produces meaningful Windows Rust service coverage on `win11`.
+- The remaining Windows Rust caveat is the ignored retry/shutdown test that belongs to the separate managed-server investigation.
 
 ## win11 environment
 
@@ -113,6 +142,12 @@ bash tests/run-coverage-c-windows.sh 80
 bash tests/run-coverage-go-windows.sh 80
 ```
 
+### Rust coverage
+
+```bash
+bash tests/run-coverage-rust-windows.sh 80
+```
+
 ## Current limitations
 
 ### Native Windows execution is required
@@ -141,14 +176,13 @@ Examples:
 - overlapped or wait-related timeout/error branches
 - low-memory allocation failures in the Windows L2 layer
 
-### Rust Windows coverage remains open
+### Rust Windows coverage is threshold-enforced, but not coverage-complete
 
-This repository now has validated Windows C and Go coverage entrypoints.
+This repository now has validated Windows C, Go, and Rust coverage entrypoints.
 Rust Windows coverage still needs:
 
-- a chosen tool
-- a validated `win11` workflow
-- an agreed threshold or an explicit “report-only” policy
+- more test work for the lower-coverage transport files
+- the deferred retry/shutdown investigation to be resolved separately from the normal coverage gate
 
 ### Windows stress scope is intentionally narrow in default `ctest`
 

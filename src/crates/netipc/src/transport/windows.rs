@@ -1235,14 +1235,8 @@ mod tests {
         // Actually the split is on '-' so:
         // "\\\\.\\pipe\\netipc" - "hash" - "cgroups" - "snapshot"
         assert!(parts.len() >= 3);
-        let hash_part = parts[1]; // after first '-'
-                                  // The pipe name is \\.\pipe\netipc-{hash}-{service}
-                                  // Splitting on '-': parts[0]="\\\\.\pipe\netipc", parts[1]=hash, rest=service parts
-                                  // Actually the prefix is "\\\\.\\pipe\\netipc" which contains no '-'
-                                  // So: parts = ["\\\\.", "\\pipe\\netipc", hash, "cgroups", "snapshot"]
-                                  // No, wait. The narrow string is literally: \\.\pipe\netipc-{hash}-cgroups-snapshot
-                                  // backslash is just a char. Split on '-':
-                                  // ["\\\\.\\pipe\\netipc", hash, "cgroups", "snapshot"]
+        // The pipe name is \\.\pipe\netipc-{hash}-{service}, so parts[1]
+        // is the 16-character hash component.
         assert_eq!(parts[1].len(), 16, "hash should be 16 hex chars");
     }
 

@@ -14,23 +14,74 @@ Finish the rewrite to a production-ready state with:
 - The rewrite itself is in good shape. Linux is green, Windows tests are green, and POSIX/Windows benchmark floors are green.
 - The remaining work is not about core correctness regressions. It is about coverage completeness, Windows coverage parity, and one deferred Windows managed-server stress investigation.
 
-## Current Focus (2026-03-18)
+## Current Focus (2026-03-23)
 
-- Coverage parity and hardening, not emergency benchmark or transport fixes.
-- Verified current Windows coverage state:
+- Coverage parity and documentation honesty, not emergency benchmark or transport fixes.
+- Verified current Windows coverage state on `2026-03-22`:
   - C:
-    - `src/libnetdata/netipc/src/service/netipc_service_win.c` (`80.4%`)
-    - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c` (`86.0%`)
-    - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c` (`83.5%`)
-    - total: `82.7%`
+    - `src/libnetdata/netipc/src/service/netipc_service_win.c` (`82.5%`)
+    - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c` (`85.8%`)
+    - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c` (`83.2%`)
+    - total: `83.7%`
+    - status: the script now passes the per-file `80%` gate
   - Go:
     - total: `81.8%`
+    - status: reported above the draft `80%` target, and the noninteractive exit problem is fixed
   - Rust:
-    - still no validated Windows-native coverage workflow
-- Immediate remaining coverage work:
-  - Windows Rust coverage
-  - raise all coverage thresholds toward `100%`
-  - convert the remaining uncovered ordinary branches into tests or documented exclusions
+    - validated workflow: `cargo-llvm-cov` + `rustup component add llvm-tools-preview`
+    - measured with Windows-native unit tests + Rust interop ctests, with Rust bin / benchmark noise excluded from the report:
+      - `src/service/cgroups.rs`: `77.28%`
+      - `src/transport/windows.rs`: `76.17%`
+      - `src/transport/win_shm.rs`: `78.86%`
+      - total line coverage: `87.98%`
+    - implication: Windows Rust coverage is now real and useful, but one retry/shutdown test is still intentionally ignored pending the separate managed-server investigation
+- Approved next sequence:
+  - document the new Windows Rust numbers honestly in the TODO and coverage docs
+  - align Linux and Windows Rust coverage scripts to the same enforced `80%` threshold
+  - after that, start raising the relaxed coverage gates toward `100%`
+
+## Recorded Decision
+
+### 1. Windows Rust coverage gate policy
+
+Facts:
+
+- The validated Windows Rust workflow now reports:
+  - total line coverage: `87.98%`
+  - `src/service/cgroups.rs`: `77.28%`
+  - `src/transport/windows.rs`: `76.17%`
+  - `src/transport/win_shm.rs`: `78.86%`
+- `cargo-llvm-cov` has a built-in total-line gate via `--fail-under-lines`, but not a built-in per-file gate.
+- The current Windows C script enforces per-file gates on the exact Windows C files it cares about.
+- The current Windows Go script enforces only a total-package threshold.
+- One Windows Rust retry/shutdown test is still intentionally ignored because it belongs to the separate managed-server investigation.
+
+User decision (`2026-03-23`):
+
+- Windows Rust coverage policy should match Linux Rust coverage policy unless there is a proven technical reason for divergence.
+- Do not invent a Windows-only coverage policy if the real issue is just script drift.
+
+Implementation consequence:
+
+- The Linux and Windows Rust coverage scripts must enforce the same total-threshold policy.
+- First shared Rust threshold remains the current script default of `80%` until the later threshold-raising phase.
+
+### 2. Cross-platform test-framework parity expectation
+
+User requirement (`2026-03-23`):
+
+- Linux and Windows should have similar validation scope across all implementations.
+- This includes:
+  - unit and integration coverage
+  - interoperability tests
+  - fuzz / chaos style validation where technically possible
+  - benchmarks
+  - interop benchmarks
+
+Implication:
+
+- Before increasing coverage further, the repository needs an honest parity review of Linux vs Windows validation scope.
+- Any meaningful Windows-vs-Linux gaps must be documented clearly in this TODO instead of being hidden behind partial scripts.
 
 ## Summary Of Work Done
 
@@ -63,7 +114,7 @@ Finish the rewrite to a production-ready state with:
 
 ### Linux Coverage
 
-Verified on `2026-03-18`:
+Verified on `2026-03-22`:
 
 - C:
   - `bash tests/run-coverage-c.sh`
@@ -86,7 +137,7 @@ Important fact:
 
 ### Windows (`win11`)
 
-Verified on `2026-03-18`:
+Verified on `2026-03-22`:
 
 - `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo`: passing
 - `cmake --build build -j4`: passing
@@ -122,13 +173,12 @@ Current measured results:
 
 - C:
   - `bash tests/run-coverage-c-windows.sh 80`
-  - Windows C coverage run now passes
-  - coverage result: `82.7%`
+  - coverage result: `83.7%`
   - per-file:
-    - `netipc_service_win.c`: `80.4%`
-    - `netipc_named_pipe.c`: `86.0%`
-    - `netipc_win_shm.c`: `83.5%`
-  - status: above the draft `80%` target
+    - `netipc_service_win.c`: `82.5%`
+    - `netipc_named_pipe.c`: `85.8%`
+    - `netipc_win_shm.c`: `83.2%`
+  - status: passes the draft `80%` target, including the per-file gate
 
 - Go:
   - `bash tests/run-coverage-go-windows.sh 80`
@@ -137,7 +187,7 @@ Current measured results:
     - `protocol`: `99.5%`
     - `service/cgroups`: `70.8%`
     - `transport/windows`: `77.9%`
-  - status: above the draft `80%` target
+  - status: reported above the draft `80%` target
 
 Important facts:
 
@@ -151,9 +201,26 @@ Important facts:
   - The coverage script now uses the smaller `test_win_service_extra.exe` plus the Windows interop/stress tests.
   - Reason: if a large gcov-instrumented process times out, its coverage data is unreliable or lost.
   - The normal Windows `ctest` suite still validates `test_win_service.exe` separately.
+- The Windows Go coverage script no longer stalls in noninteractive `ssh`.
+  - Root cause was the script's own slow shell post-processing, not MSYS / SSH.
+  - The per-file aggregation now uses one `awk` pass and exits cleanly on `win11`.
 
 - Rust:
-  - no validated Windows-native Rust coverage script yet
+  - validated tool choice:
+    - `cargo-llvm-cov`
+    - `rustup component add llvm-tools-preview`
+  - validated script:
+    - `bash tests/run-coverage-rust-windows.sh`
+  - current measured report from `win11` with Windows-native Rust L2/L3 unit tests + Rust interop ctests, after excluding Rust bin / benchmark noise from the report:
+    - `service/cgroups.rs`: `77.28%`
+    - `transport/windows.rs`: `76.17%`
+    - `transport/win_shm.rs`: `78.86%`
+    - total: `87.98%`
+  - status:
+    - the workflow is real and scripted
+    - the report is now meaningful for the Windows Rust service path too
+    - the script should enforce the same `80%` total threshold policy as Linux Rust
+    - one Windows retry/shutdown test is intentionally ignored because it belongs to the separate managed-server shutdown investigation
 
 ## Not Remaining
 
@@ -163,6 +230,7 @@ Important facts:
 - No active Windows benchmark floor failure
 - No active Windows benchmark reporting bug
 - No active stale benchmark artifact problem
+- No active Windows C coverage regression
 
 ## Windows Handoff (`win11`)
 
@@ -240,7 +308,7 @@ ctest --test-dir build --output-on-failure -j4
 
 Current expected result:
 
-- `24/24` tests passing
+- `26/26` tests passing
 
 Important note:
 
@@ -265,12 +333,19 @@ Current expected result:
 ```bash
 bash tests/run-coverage-c-windows.sh 80
 bash tests/run-coverage-go-windows.sh 80
+bash tests/run-coverage-rust-windows.sh
 ```
 
 Current expected result:
 
-- both scripts run correctly
-- both currently fail the `80%` threshold
+- `bash tests/run-coverage-c-windows.sh 80`
+  - passes with all tracked Windows C files above `80%`
+- `bash tests/run-coverage-go-windows.sh 80`
+  - currently reports `81.8%`
+- `bash tests/run-coverage-rust-windows.sh`
+  - currently reports `87.98%`
+  - should now enforce the same `80%` total threshold used by Linux Rust
+  - key remaining gap is no longer missing service coverage; it is raising coverage further and finishing the separate retry/shutdown investigation
 
 ### Copy benchmark artifacts back to the local repo
 
@@ -308,29 +383,62 @@ taskkill //PID <pid> //T //F
 Facts:
 
 - Linux coverage scripts are working and pass their current lowered thresholds.
-- Windows coverage scripts are now working, but both miss the draft `80%` goal badly:
-  - C: `67.5%`
-  - Go: `52.4%`
-- Rust Windows coverage still has no validated workflow.
+- Windows coverage docs now match the measured numbers from `2026-03-22`.
+- Windows C coverage currently passes:
+  - total: `83.7%`
+  - `netipc_service_win.c`: `82.5%`
+- Windows Go coverage currently reports `81.8%`.
+- Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
 
-- Current implementation strategy for the next pass:
-  - keep the draft `80%` target for Windows C and Go
-  - do not lower thresholds again before ordinary reachable branches are covered
-  - add Windows C managed-service coverage directly, instead of relying only on `test_win_stress`
-  - port the existing Unix Go lifecycle/cache/retry test patterns to Windows-specific test files
-  - port the existing Unix Go named-pipe integration patterns to `transport/windows/pipe_test.go`
-- Expand Windows C coverage:
-  - especially `netipc_service_win.c`
-  - especially `netipc_named_pipe.c`
-- Expand Windows Go coverage:
-  - especially `client_windows.go`
-  - especially `cache_windows.go`
-  - especially `transport/windows/pipe.go`
-- Design and validate a Windows-native Rust coverage workflow
+1. Keep the deferred Windows retry/shutdown investigation separate from the normal coverage gate
+2. Start raising the relaxed coverage thresholds toward `100%`
 
-### 2. Windows managed-server stress is only partially covered
+### 2. Cross-platform validation parity is only partial
+
+Facts:
+
+- Linux currently registers `37` CTest tests:
+  - `/usr/bin/ctest --test-dir build -N`
+- Windows currently registers `26` CTest tests:
+  - `ctest --test-dir build -N` on `win11`
+- Parity is reasonably good for:
+  - protocol fuzzing:
+    - C standalone fuzz target and Go fuzz targets are defined before platform splits in [CMakeLists.txt](/home/costa/src/plugin-ipc.git/CMakeLists.txt)
+  - cross-language transport / L2 / L3 interop:
+    - POSIX UDS / SHM / service / cache interop on Linux
+    - Named Pipe / WinSHM / service / cache interop on Windows
+  - benchmark matrices:
+    - POSIX and Windows runners both execute 9 scenario families and generate `201` rows
+    - see [run-posix-bench.sh](/home/costa/src/plugin-ipc.git/tests/run-posix-bench.sh) and [run-windows-bench.sh](/home/costa/src/plugin-ipc.git/tests/run-windows-bench.sh)
+- Parity is not good yet for:
+  - chaos testing:
+    - Linux has `test_chaos`
+    - Windows has no equivalent CTest target
+  - hardening:
+    - Linux has `test_hardening`
+    - Windows has no equivalent CTest target
+  - stress:
+    - Linux has C, Go, and Rust stress targets
+    - Windows currently has only `test_win_stress` and its default scope is intentionally narrow
+  - single-language Rust / Go Windows CTest coverage:
+    - Linux has direct Rust and Go service / transport test targets in CTest
+    - Windows still relies more on coverage scripts and interop passes than on first-class Rust / Go CTest targets
+
+Brutal truth:
+
+- The repository is not yet in the Linux/Windows parity you expect.
+- It is strongest on benchmarks and interop.
+- It is weakest on Windows chaos, hardening, and multi-language stress coverage.
+
+Required next work:
+
+1. Decide which missing Windows parity items are mandatory for the production gate
+2. Add Windows equivalents where technically possible
+3. Document clearly where exact parity is impossible because the transports themselves differ (`UDS` / POSIX SHM vs `Named Pipe` / WinSHM)
+
+### 3. Windows managed-server stress is only partially covered
 
 Facts:
 
@@ -342,10 +450,25 @@ Required next work:
 - investigate Windows managed-server shutdown behavior under stressed live sessions
 - reintroduce managed-service stress subtests only after they are stable and diagnostically useful
 
-### 3. Final production gate is still open
+### 4. Final production gate is still open
 
 Required next work:
 
 - finish the coverage program honestly
 - rerun external multi-agent review against the final state
 - get final user approval
+
+## Deferred Future Work (Not Part Of The Current Red Gate)
+
+- Rust file-size discipline:
+  - `src/crates/netipc/src/service/cgroups.rs`
+  - `src/crates/netipc/src/protocol/mod.rs`
+  - `src/crates/netipc/src/transport/posix.rs`
+  - These files are still too large and should eventually be split by concern.
+- Native-endian optimization:
+  - the separate endianness-removal / native-byte-order optimization remains a future performance task
+  - it is not part of the current production-readiness gate
+- Historical phase notes:
+  - the old per-phase and per-feature TODO files are being retired in favor of:
+    - this active summary/plan
+    - `TODO-plugin-ipc.history.md` as the historical transcript

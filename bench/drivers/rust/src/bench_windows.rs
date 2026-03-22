@@ -19,10 +19,9 @@ fn main() {
 
 #[cfg(windows)]
 use netipc::protocol::{
-    self, batch_item_get, increment_decode, increment_encode, BatchBuilder, CgroupsBuilder,
-    CgroupsRequest, Header, FLAG_BATCH, HEADER_SIZE, INCREMENT_PAYLOAD_SIZE, KIND_REQUEST,
-    KIND_RESPONSE, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE,
-    STATUS_OK, VERSION,
+    self, batch_item_get, increment_decode, increment_encode, BatchBuilder, Header, FLAG_BATCH,
+    HEADER_SIZE, INCREMENT_PAYLOAD_SIZE, KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG, METHOD_INCREMENT,
+    PROFILE_BASELINE, STATUS_OK, VERSION,
 };
 #[cfg(windows)]
 use netipc::service::cgroups::{CgroupsCacheItem, CgroupsClient, Handlers, ManagedServer};
@@ -123,6 +122,7 @@ fn cpu_ns() -> u64 {
     (kernel + user) * 100
 }
 
+#[cfg(windows)]
 fn latency_us(ns: u64) -> f64 {
     ns as f64 / 1000.0
 }

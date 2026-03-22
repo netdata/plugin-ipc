@@ -1,6 +1,6 @@
 #!/bin/bash
-# Rust library coverage measurement using cargo-llvm-cov or cargo-tarpaulin
-# Reports line coverage for library source files (excludes test/bin code).
+# Rust library coverage measurement using cargo-llvm-cov or cargo-tarpaulin.
+# Enforces a total line-coverage threshold for library source files.
 
 set -euo pipefail
 
@@ -14,6 +14,7 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CRATE_DIR="$ROOT_DIR/src/crates/netipc"
+THRESHOLD=${1:-80}
 
 run() {
     printf >&2 "${GRAY}$(pwd) >${NC} "
@@ -51,6 +52,7 @@ echo -e "${YELLOW}Using: $TOOL${NC}"
 echo
 
 cd "$CRATE_DIR"
+total_pct=""
 
 if [[ "$TOOL" == "llvm-cov" ]]; then
     # cargo-llvm-cov approach
@@ -63,46 +65,45 @@ if [[ "$TOOL" == "llvm-cov" ]]; then
     # Also show uncovered regions
     echo -e "${CYAN}=== Uncovered Regions ===${NC}"
     cargo llvm-cov report --show-missing-regions 2>&1 || true
+
+    summary_log=$(mktemp)
+    trap 'rm -f "$summary_log"' EXIT
+    cargo llvm-cov report --summary-only > "$summary_log"
+    total_pct=$(awk '/^TOTAL[[:space:]]/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+%$/) last = $i; print last }' "$summary_log" | tail -n 1)
 else
     # cargo-tarpaulin approach
     echo -e "${YELLOW}Running tests with tarpaulin coverage...${NC}"
     # --lib: only measure library code (not bins)
     # --out: output format
     # --test-threads=1: serialize tests that use sockets
+    tarpaulin_log=$(mktemp)
+    trap 'rm -f "$tarpaulin_log"' EXIT
     cargo tarpaulin \
         --lib \
         --out Stdout \
         --skip-clean \
         --exclude-files "src/bin/*" \
         --exclude-files "tests/*" \
-        -- --test-threads=1 2>&1
+        -- --test-threads=1 > "$tarpaulin_log" 2>&1
+    cat "$tarpaulin_log"
+    total_pct=$(grep "coverage," "$tarpaulin_log" | tail -1 | grep -oE '^[0-9]+\.[0-9]+%')
 fi
 
 echo
 
-# Threshold check - Rust testable ceiling is ~85% due to transport error paths
-# that require OS/kernel failures (socket, mmap, futex, etc.)
-# See COVERAGE-EXCLUSIONS.md for detailed justifications
-THRESHOLD=${1:-80}
-
-# Parse coverage percentage from tarpaulin output
-# Format: "XX.XX% coverage, NNNN/MMMM lines covered"
-if [[ "$TOOL" == "tarpaulin" ]]; then
-    coverage_line=$(cargo tarpaulin --lib --out Stdout --skip-clean --exclude-files "src/bin/*" --exclude-files "tests/*" -- --test-threads=1 2>&1 | grep "coverage," | tail -1)
-    if [[ -n "$coverage_line" ]]; then
-        total_pct=$(echo "$coverage_line" | grep -oE '^[0-9]+\.[0-9]+%')
-        total_pct_num=$(echo "$total_pct" | tr -d '%')
-        total_pct_int=${total_pct_num%.*}
-
-        if [[ $total_pct_int -ge $THRESHOLD ]]; then
-            echo -e "${GREEN}Rust coverage ${total_pct} meets threshold ${THRESHOLD}%.${NC}"
-            echo -e "${GRAY}Note: Rust testable ceiling is ~85% due to transport error paths.${NC}"
-            exit 0
-        else
-            echo -e "${RED}Rust coverage ${total_pct} is below threshold ${THRESHOLD}%.${NC}"
-            exit 1
-        fi
-    fi
+if [[ -z "$total_pct" ]]; then
+    echo -e "${RED}ERROR:${NC} Failed to parse total Rust coverage."
+    exit 1
 fi
 
-echo -e "${GREEN}Rust coverage measurement complete.${NC}"
+total_pct_num=$(echo "$total_pct" | tr -d '%')
+total_pct_int=${total_pct_num%.*}
+
+if [[ $total_pct_int -ge $THRESHOLD ]]; then
+    echo -e "${GREEN}Rust coverage ${total_pct} meets threshold ${THRESHOLD}%.${NC}"
+    echo -e "${GRAY}Note: Rust testable ceiling is still expected to stay below 100% without fault injection and OS failure simulation.${NC}"
+    exit 0
+fi
+
+echo -e "${RED}Rust coverage ${total_pct} is below threshold ${THRESHOLD}%.${NC}"
+exit 1

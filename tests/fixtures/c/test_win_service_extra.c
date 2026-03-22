@@ -78,6 +78,22 @@ static bool on_increment(void *user, uint64_t request, uint64_t *response)
     return true;
 }
 
+static bool raw_noop_handler(void *user,
+                             uint16_t method_code,
+                             const uint8_t *request_payload, size_t request_len,
+                             uint8_t *response_buf, size_t response_buf_size,
+                             size_t *response_len_out)
+{
+    (void)user;
+    (void)method_code;
+    (void)request_payload;
+    (void)request_len;
+    (void)response_buf;
+    (void)response_buf_size;
+    *response_len_out = 0;
+    return true;
+}
+
 static bool on_snapshot(void *user,
                         const nipc_cgroups_req_t *request,
                         nipc_cgroups_builder_t *builder)
@@ -276,6 +292,62 @@ static void test_client_init_defaults_and_truncation(void)
     check("service_name NUL-terminated", client.service_name[sizeof(client.service_name) - 1] == '\0');
 
     nipc_client_close(&client);
+}
+
+static void test_server_init_argument_validation(void)
+{
+    printf("--- Server init argument validation ---\n");
+
+    nipc_managed_server_t server;
+    nipc_np_server_config_t scfg = default_server_config();
+
+    check("raw init null run_dir",
+          nipc_server_init(&server, NULL, "svc_raw_null_run",
+                           &scfg, 1, RESPONSE_BUF_SIZE,
+                           raw_noop_handler, NULL)
+              == NIPC_ERR_BAD_LAYOUT);
+
+    check("raw init null service_name",
+          nipc_server_init(&server, TEST_RUN_DIR, NULL,
+                           &scfg, 1, RESPONSE_BUF_SIZE,
+                           raw_noop_handler, NULL)
+              == NIPC_ERR_BAD_LAYOUT);
+
+    check("raw init null handler",
+          nipc_server_init(&server, TEST_RUN_DIR, "svc_raw_null_handler",
+                           &scfg, 1, RESPONSE_BUF_SIZE,
+                           NULL, NULL)
+              == NIPC_ERR_BAD_LAYOUT);
+
+    check("typed init null handlers",
+          nipc_server_init_typed(&server, TEST_RUN_DIR, "svc_typed_null_handlers",
+                                 &scfg, 1, NULL)
+              == NIPC_ERR_BAD_LAYOUT);
+
+    check("raw init invalid service name",
+          nipc_server_init(&server, TEST_RUN_DIR, "svc/raw_bad_name",
+                           &scfg, 1, RESPONSE_BUF_SIZE,
+                           raw_noop_handler, NULL)
+              == NIPC_ERR_BAD_LAYOUT);
+}
+
+static void test_server_init_worker_count_clamp(void)
+{
+    printf("--- Server init worker_count clamp ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_worker_clamp");
+
+    nipc_managed_server_t server;
+    nipc_np_server_config_t scfg = default_server_config();
+    nipc_error_t err = nipc_server_init_typed(&server, TEST_RUN_DIR, service,
+                                              &scfg, 0, &full_handlers);
+    check("typed init with worker_count 0 succeeds", err == NIPC_OK);
+    if (err == NIPC_OK) {
+        check("worker_count clamped to 1", server.worker_count == 1);
+        check("session_capacity minimum 16", server.session_capacity == 16);
+        nipc_server_destroy(&server);
+    }
 }
 
 static void test_refresh_from_broken_state(void)
@@ -526,6 +598,8 @@ int main(void)
     CreateDirectoryA(TEST_RUN_DIR, NULL);
 
     test_client_init_defaults_and_truncation();
+    test_server_init_argument_validation();
+    test_server_init_worker_count_clamp();
     test_refresh_from_broken_state();
     test_retry_on_broken_session();
     test_handler_failure();
