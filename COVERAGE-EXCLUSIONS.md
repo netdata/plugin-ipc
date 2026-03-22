@@ -11,7 +11,7 @@ Purpose:
 
 ### Linux / POSIX
 
-Verified on `2026-03-22`:
+Verified on `2026-03-23`:
 
 - C:
   - script: `tests/run-coverage-c.sh`
@@ -28,7 +28,7 @@ Verified on `2026-03-22`:
 
 ### Windows (`win11`)
 
-Verified on `2026-03-22`:
+Verified on `2026-03-23`:
 
 - C:
   - script: `tests/run-coverage-c-windows.sh 80`
@@ -41,12 +41,16 @@ Verified on `2026-03-22`:
 
 - Go:
   - script: `tests/run-coverage-go-windows.sh 80`
-  - result: `81.8%`
-  - selected low-coverage files:
-    - `service/cgroups/client_windows.go`: hot-path helpers still range from `47.4%` to `73.3%`
-    - `transport/windows/pipe.go`: some helpers remain very low, including `isDisconnectError` at `0.0%`
-    - `transport/windows/shm.go`: `WinShmReceive` is still around `70.5%`
-  - status: reported above target, and the script now exits cleanly in noninteractive `ssh`
+  - result: `83.5%`
+  - selected key files:
+    - `service/cgroups/client_windows.go`: `69.9%`
+    - `service/cgroups/types.go`: `100.0%`
+    - `transport/windows/pipe.go`: `83.3%`
+    - `transport/windows/shm.go`: `76.7%`
+  - status:
+    - reported above target
+    - the script exits cleanly in noninteractive `ssh`
+    - first-class Windows Go service/cache tests now also run under `ctest`
 
 - Rust:
   - script: `tests/run-coverage-rust-windows.sh`
@@ -147,9 +151,9 @@ Brutal truth:
 
 Current evidence:
 
-- Windows Go total is now `81.8%`
+- Windows Go total is now `83.5%`
 - `service/cgroups/client_windows.go` still has weak spots in reconnect / transport helper paths
-- `transport/windows/pipe.go` still has several low-coverage helper branches
+- `transport/windows/pipe.go` is now above `80%`
 - `transport/windows/shm.go` still has ordinary uncovered receive / attach branches
 
 Brutal truth:
@@ -190,7 +194,7 @@ disconnect tests.
 - Windows:
   - coverage measurement now exists and is validated
   - Windows C now passes its draft gate
-  - Windows Go is above the draft target, and the script reliability issue is fixed
+  - Windows Go is above the draft target, the script reliability issue is fixed, and Windows Go service/cache tests are now part of `ctest`
   - Windows Rust coverage now has a real threshold-enforced entrypoint
   - more ordinary test work is required before any “coverage parity” claim is honest
 

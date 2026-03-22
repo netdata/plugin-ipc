@@ -607,12 +607,38 @@ endif()
 
 if(GO_EXECUTABLE AND NETIPC_WINDOWS_RUNTIME)
     add_test(NAME test_named_pipe_go
-        COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
-            ${GO_EXECUTABLE} test -count=1 -timeout=60s
+        COMMAND ${GO_EXECUTABLE} test -count=1 -timeout=60s
             ./pkg/netipc/transport/windows/
         WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
     )
-    set_tests_properties(test_named_pipe_go PROPERTIES TIMEOUT 60)
+    set_tests_properties(test_named_pipe_go PROPERTIES
+        TIMEOUT 60
+        ENVIRONMENT "CGO_ENABLED=0"
+    )
+
+    add_test(NAME test_service_win_go
+        COMMAND ${GO_EXECUTABLE} test -count=1 -timeout=120s
+            -run "^(TestWin(Client|Call|Retry|Handler|Status|Increment|StringReverse|Mixed|NonRequest|IsErrorHelpers))"
+            ./pkg/netipc/service/cgroups/
+        WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
+    )
+    set_tests_properties(test_service_win_go PROPERTIES
+        TIMEOUT 180
+        RESOURCE_LOCK go_windows_service_tests
+        ENVIRONMENT "CGO_ENABLED=0"
+    )
+
+    add_test(NAME test_cache_win_go
+        COMMAND ${GO_EXECUTABLE} test -count=1 -timeout=120s
+            -run ^TestWinCache
+            ./pkg/netipc/service/cgroups/
+        WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
+    )
+    set_tests_properties(test_cache_win_go PROPERTIES
+        TIMEOUT 180
+        RESOURCE_LOCK go_windows_service_tests
+        ENVIRONMENT "CGO_ENABLED=0"
+    )
 
     # Build Go Named Pipe interop binary
     add_custom_target(interop_named_pipe_go ALL

@@ -17,7 +17,7 @@ Finish the rewrite to a production-ready state with:
 ## Current Focus (2026-03-23)
 
 - Coverage parity and documentation honesty, not emergency benchmark or transport fixes.
-- Verified current Windows coverage state on `2026-03-22`:
+- Verified current Windows coverage state on `2026-03-23`:
   - C:
     - `src/libnetdata/netipc/src/service/netipc_service_win.c` (`82.5%`)
     - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c` (`85.8%`)
@@ -25,8 +25,19 @@ Finish the rewrite to a production-ready state with:
     - total: `83.7%`
     - status: the script now passes the per-file `80%` gate
   - Go:
-    - total: `81.8%`
-    - status: reported above the draft `80%` target, and the noninteractive exit problem is fixed
+    - total: `83.5%`
+    - package coverage:
+      - `service/cgroups`: `72.7%`
+      - `transport/windows`: `80.4%`
+    - key files:
+      - `service/cgroups/client_windows.go`: `69.9%`
+      - `service/cgroups/types.go`: `100.0%`
+      - `transport/windows/pipe.go`: `83.3%`
+      - `transport/windows/shm.go`: `76.7%`
+    - status:
+      - reported above the draft `80%` target
+      - the noninteractive exit problem is fixed
+      - first-class Windows Go CTest targets now exist for service/cache coverage parity
   - Rust:
     - validated workflow: `cargo-llvm-cov` + `rustup component add llvm-tools-preview`
     - measured with Windows-native unit tests + Rust interop ctests, with Rust bin / benchmark noise excluded from the report:
@@ -39,6 +50,10 @@ Finish the rewrite to a production-ready state with:
   - document the new Windows Rust numbers honestly in the TODO and coverage docs
   - align Linux and Windows Rust coverage scripts to the same enforced `80%` threshold
   - after that, start raising the relaxed coverage gates toward `100%`
+  - resolved during the Windows Go parity pass:
+    - Windows Go CTest commands now execute reliably on `win11`
+    - the fix was to define the tests as direct `go test` commands and let CTest inject `CGO_ENABLED=0` via test environment properties
+    - current validated Windows CTest inventory is now `28` tests, not `26`
 
 ## Recorded Decision
 
@@ -114,7 +129,7 @@ Implication:
 
 ### Linux Coverage
 
-Verified on `2026-03-22`:
+Verified on `2026-03-23`:
 
 - C:
   - `bash tests/run-coverage-c.sh`
@@ -137,21 +152,26 @@ Important fact:
 
 ### Windows (`win11`)
 
-Verified on `2026-03-22`:
+Verified on `2026-03-23`:
 
 - `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo`: passing
 - `cmake --build build -j4`: passing
-- `ctest --test-dir build --output-on-failure -j4`: `26/26` passing
+- `ctest --test-dir build --output-on-failure -j4`: `28/28` passing
 
 Important facts:
 
 - The Go fuzz tests are now serialized in CTest with `RESOURCE_LOCK`.
   - This fixed the previous `go_FuzzDecodeCgroupsResponse` timeout on `win11`.
 - The current exact head was revalidated again after the coverage work.
-  - `ctest --test-dir build --output-on-failure -j4`: `26/26` passing
+  - `ctest --test-dir build --output-on-failure -j4`: `28/28` passing
 - `test_win_stress` is now wired and validated.
   - Current default scope is only the validated WinSHM lifecycle repetition.
   - The managed-service stress subcases were intentionally removed from the default Windows `ctest` path because Windows managed-server shutdown under stress still needs a separate investigation.
+- Windows Go parity improved:
+  - `test_named_pipe_go`
+  - `test_service_win_go`
+  - `test_cache_win_go`
+  - all three now execute successfully via `ctest` on `win11`
 
 ### Windows Benchmarks
 
@@ -182,12 +202,18 @@ Current measured results:
 
 - Go:
   - `bash tests/run-coverage-go-windows.sh 80`
-  - coverage result: `81.8%`
+  - coverage result: `83.5%`
   - package coverage:
     - `protocol`: `99.5%`
-    - `service/cgroups`: `70.8%`
-    - `transport/windows`: `77.9%`
-  - status: reported above the draft `80%` target
+    - `service/cgroups`: `72.7%`
+    - `transport/windows`: `80.4%`
+  - status:
+    - reported above the draft `80%` target
+    - focused helper tests raised:
+      - `transport/windows/pipe.go` to `83.3%`
+      - `transport/windows/shm.go` to `76.7%`
+      - `service/cgroups/types.go` to `100.0%`
+    - first-class Windows Go CTest targets are now real and passing on `win11`
 
 Important facts:
 
@@ -308,7 +334,7 @@ ctest --test-dir build --output-on-failure -j4
 
 Current expected result:
 
-- `26/26` tests passing
+- `28/28` tests passing
 
 Important note:
 
@@ -341,7 +367,7 @@ Current expected result:
 - `bash tests/run-coverage-c-windows.sh 80`
   - passes with all tracked Windows C files above `80%`
 - `bash tests/run-coverage-go-windows.sh 80`
-  - currently reports `81.8%`
+  - currently reports `83.5%`
 - `bash tests/run-coverage-rust-windows.sh`
   - currently reports `87.98%`
   - should now enforce the same `80%` total threshold used by Linux Rust
@@ -383,17 +409,25 @@ taskkill //PID <pid> //T //F
 Facts:
 
 - Linux coverage scripts are working and pass their current lowered thresholds.
-- Windows coverage docs now match the measured numbers from `2026-03-22`.
+- Windows coverage docs now match the measured numbers from `2026-03-23`.
 - Windows C coverage currently passes:
   - total: `83.7%`
   - `netipc_service_win.c`: `82.5%`
-- Windows Go coverage currently reports `81.8%`.
+- Windows Go coverage currently reports `83.5%`.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
 
 1. Keep the deferred Windows retry/shutdown investigation separate from the normal coverage gate
 2. Start raising the relaxed coverage thresholds toward `100%`
+3. Immediate next pass:
+   - continue raising Windows Go coverage in the real remaining weak files:
+     - `service/cgroups/client_windows.go`
+     - `transport/windows/shm.go`
+   - keep Windows Go CTest parity honest:
+     - `test_named_pipe_go`
+     - `test_service_win_go`
+     - `test_cache_win_go`
 
 ### 2. Cross-platform validation parity is only partial
 
@@ -401,7 +435,7 @@ Facts:
 
 - Linux currently registers `37` CTest tests:
   - `/usr/bin/ctest --test-dir build -N`
-- Windows currently registers `26` CTest tests:
+- Windows currently registers `28` CTest tests:
   - `ctest --test-dir build -N` on `win11`
 - Parity is reasonably good for:
   - protocol fuzzing:

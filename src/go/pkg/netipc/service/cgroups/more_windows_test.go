@@ -3,6 +3,7 @@
 package cgroups
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -181,6 +182,89 @@ func TestWinCallWithRetryNotReady(t *testing.T) {
 	}
 	if client.errorCount != 1 {
 		t.Fatalf("expected error_count=1, got %d", client.errorCount)
+	}
+}
+
+func TestWinHandlersSnapshotMaxItems(t *testing.T) {
+	h := Handlers{}
+
+	got := h.snapshotMaxItems(4096)
+	want := protocol.EstimateCgroupsMaxItems(4096)
+	if got != want {
+		t.Fatalf("snapshotMaxItems default = %d, want %d", got, want)
+	}
+
+	h.SnapshotMaxItems = 7
+	if got := h.snapshotMaxItems(4096); got != 7 {
+		t.Fatalf("snapshotMaxItems override = %d, want 7", got)
+	}
+}
+
+func TestWinClientTransportWithoutSession(t *testing.T) {
+	client := NewClient(winTestRunDir, uniqueWinService("go_win_transport"), testWinClientConfig())
+	defer client.Close()
+
+	hdr := protocol.Header{
+		Kind:            protocol.KindRequest,
+		Code:            protocol.MethodIncrement,
+		ItemCount:       1,
+		MessageID:       1,
+		TransportStatus: protocol.StatusOK,
+	}
+
+	if err := client.transportSend(&hdr, nil); !errors.Is(err, protocol.ErrTruncated) {
+		t.Fatalf("transportSend without session = %v, want ErrTruncated", err)
+	}
+
+	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTruncated) {
+		t.Fatalf("transportReceive without session = %v, want ErrTruncated", err)
+	}
+}
+
+func TestWinClientMaxReceiveMessageBytes(t *testing.T) {
+	client := NewClient(winTestRunDir, uniqueWinService("go_win_recvmax"), testWinClientConfig())
+	defer client.Close()
+
+	if got := client.maxReceiveMessageBytes(); got != protocol.HeaderSize+cacheResponseBufSize {
+		t.Fatalf("default maxReceiveMessageBytes = %d, want %d", got, protocol.HeaderSize+cacheResponseBufSize)
+	}
+
+	client.config.MaxResponsePayloadBytes = 1234
+	if got := client.maxReceiveMessageBytes(); got != protocol.HeaderSize+1234 {
+		t.Fatalf("config maxReceiveMessageBytes = %d, want %d", got, protocol.HeaderSize+1234)
+	}
+
+	client.session = &windows.Session{MaxResponsePayloadBytes: 4321}
+	if got := client.maxReceiveMessageBytes(); got != protocol.HeaderSize+4321 {
+		t.Fatalf("session maxReceiveMessageBytes = %d, want %d", got, protocol.HeaderSize+4321)
+	}
+}
+
+func TestWinServerDispatchSingleMissingHandlers(t *testing.T) {
+	server := &Server{handlers: Handlers{}}
+	responseBuf := make([]byte, 128)
+
+	for _, methodCode := range []uint16{
+		protocol.MethodIncrement,
+		protocol.MethodStringReverse,
+		protocol.MethodCgroupsSnapshot,
+		0xFFFF,
+	} {
+		if n, ok := server.dispatchSingle(methodCode, nil, responseBuf); ok || n != 0 {
+			t.Fatalf("dispatchSingle(%d) = (%d, %v), want (0, false)", methodCode, n, ok)
+		}
+	}
+}
+
+func TestWinServerDispatchSingleSnapshotZeroCapacity(t *testing.T) {
+	server := &Server{
+		handlers: Handlers{
+			OnSnapshot: winTestCgroupsHandler,
+		},
+	}
+
+	if n, ok := server.dispatchSingle(protocol.MethodCgroupsSnapshot, nil, nil); ok || n != 0 {
+		t.Fatalf("dispatchSingle snapshot with zero response buffer = (%d, %v), want (0, false)", n, ok)
 	}
 }
 

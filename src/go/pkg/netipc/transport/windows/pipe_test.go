@@ -3,8 +3,74 @@
 package windows
 
 import (
+	"errors"
+	"syscall"
 	"testing"
 )
+
+func TestApplyDefault(t *testing.T) {
+	if got := applyDefault(0, 42); got != 42 {
+		t.Fatalf("applyDefault(0, 42) = %d, want 42", got)
+	}
+	if got := applyDefault(7, 42); got != 7 {
+		t.Fatalf("applyDefault(7, 42) = %d, want 7", got)
+	}
+}
+
+func TestMinU32(t *testing.T) {
+	if got := minU32(1, 9); got != 1 {
+		t.Fatalf("minU32(1, 9) = %d, want 1", got)
+	}
+	if got := minU32(9, 1); got != 1 {
+		t.Fatalf("minU32(9, 1) = %d, want 1", got)
+	}
+	if got := minU32(5, 5); got != 5 {
+		t.Fatalf("minU32(5, 5) = %d, want 5", got)
+	}
+}
+
+func TestHighestBit(t *testing.T) {
+	cases := []struct {
+		mask uint32
+		want uint32
+	}{
+		{0, 0},
+		{1, 1},
+		{2, 2},
+		{3, 2},
+		{0x10, 0x10},
+		{0x101, 0x100},
+		{0x80000001, 0x80000000},
+	}
+
+	for _, tc := range cases {
+		if got := highestBit(tc.mask); got != tc.want {
+			t.Fatalf("highestBit(0x%x) = 0x%x, want 0x%x", tc.mask, got, tc.want)
+		}
+	}
+}
+
+func TestIsDisconnectError(t *testing.T) {
+	for _, errno := range []syscall.Errno{
+		_ERROR_BROKEN_PIPE,
+		_ERROR_NO_DATA,
+		_ERROR_PIPE_NOT_CONNECTED,
+	} {
+		if !isDisconnectError(errno) {
+			t.Fatalf("isDisconnectError(%v) = false, want true", errno)
+		}
+	}
+
+	for _, err := range []error{
+		nil,
+		errors.New("plain"),
+		syscall.Errno(_ERROR_ACCESS_DENIED),
+	} {
+		if isDisconnectError(err) {
+			t.Fatalf("isDisconnectError(%v) = true, want false", err)
+		}
+	}
+}
 
 func TestFNV1a64Empty(t *testing.T) {
 	got := FNV1a64([]byte{})

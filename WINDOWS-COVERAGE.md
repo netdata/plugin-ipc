@@ -8,9 +8,9 @@ It does not claim generic MSVC/CI support that has not been exercised here.
 
 ## Current Verified Results
 
-Verified on `2026-03-22`:
+Verified on `2026-03-23`:
 
-- `ctest --test-dir build --output-on-failure -j4`: `26/26` passing on `win11`
+- `ctest --test-dir build --output-on-failure -j4`: `28/28` passing on `win11`
 - `bash tests/run-coverage-c-windows.sh 80`:
   - script works
   - coverage-only Windows test subset passes inside the script
@@ -22,12 +22,15 @@ Verified on `2026-03-22`:
   - current status: script passes, including the per-file `80%` gate
 - `bash tests/run-coverage-go-windows.sh 80`:
   - script prints valid coverage results on `win11`
-  - total coverage result: `81.8%`
-  - selected lower-coverage files:
-    - `service/cgroups/client_windows.go`: `47.4%` to `73.3%` across key hot-path helpers
-    - `transport/windows/pipe.go`: some helpers still very low, including `isDisconnectError` at `0.0%`
-    - `transport/windows/shm.go`: key receive path still around `70.5%`
-  - current status: reported above the draft `80%` target
+  - total coverage result: `83.5%`
+  - selected key files:
+    - `service/cgroups/client_windows.go`: `69.9%`
+    - `service/cgroups/types.go`: `100.0%`
+    - `transport/windows/pipe.go`: `83.3%`
+    - `transport/windows/shm.go`: `76.7%`
+  - current status:
+    - reported above the draft `80%` target
+    - Windows Go service/cache tests are now also wired into `ctest`
 - `bash tests/run-coverage-rust-windows.sh`:
   - script works on `win11`
   - workflow:
@@ -50,7 +53,7 @@ Brutal truth:
 - Windows coverage parity is much closer, but not finished.
 - Windows C is no longer the red gate.
 - The Windows Go script reliability issue is fixed.
-- The remaining platform-proof gaps are better proof for low-coverage Windows Go helpers and the deferred Windows managed-server retry/shutdown behavior.
+- The remaining Windows Go work is now concentrated in `client_windows.go` and `shm.go`, plus the deferred Windows managed-server retry/shutdown behavior.
 
 ## Scope
 
