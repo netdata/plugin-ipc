@@ -19,6 +19,9 @@ Finish the rewrite to a production-ready state with:
 - Latest authoritative slice:
   - Linux Rust ordinary coverage
   - added ordinary tests for:
+    - managed-server worker-capacity rejection in `run()`
+    - Linux SHM malformed batch-request item decode failure returning `INTERNAL_ERROR`
+    - chunked batch-directory invalidation across a real continuation boundary
     - retry-once success and retry-second-failure on typed string-reverse and increment-batch calls
     - Linux SHM attach failure in `try_connect()`
     - Linux SHM short-response rejection in `transport_receive()`
@@ -27,23 +30,26 @@ Finish the rewrite to a production-ready state with:
 - Latest verified Linux Rust result:
   - `bash tests/run-coverage-rust.sh 80`
   - tool on this host: `tarpaulin`
-  - total: `90.06%`
+  - total: `90.35%`
   - key files:
-    - `src/service/cgroups.rs`: `639/664`
-    - `src/transport/posix.rs`: `383/401`
+    - `src/service/cgroups.rs`: `641/664`
+    - `src/transport/posix.rs`: `386/401`
     - `src/transport/shm.rs`: `346/375`
 - Latest verified Linux validation for this slice:
-  - `cargo test --lib --manifest-path src/crates/netipc/Cargo.toml -- --test-threads=1`: `260/260` passing
+  - `cargo test --lib --manifest-path src/crates/netipc/Cargo.toml -- --test-threads=1`: `263/263` passing
   - `cmake --build build -j4`: passing
   - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
 - Immediate next target:
   - keep only deterministic Linux Rust branches in scope:
-    - `src/service/cgroups.rs`: `1074`, `1090`, `1230`, `1489`
-    - `src/transport/posix.rs`: `398`, `486-488` if a concrete malformed packet can still reach them
+    - `src/service/cgroups.rs`: `1090`, `1230`, `1594-1598`, `1613`, `1919`, `1922`, `1946`, `2024`, `2058`, `2116`, `2132-2133`
+    - `src/transport/posix.rs`: `398`, `427`, `486-488`, `532`, `550-555`, `577`, `671`, `742`, `830` if a concrete malformed packet can still reach them
   - if the next rerun yields only marginal gains, stop grinding Rust and switch to threshold raising plus honest exclusions
 - Note:
   - the older slice notes below are historical context
   - they are no longer the authoritative current state
+  - one new layering fact is now explicit:
+    - malformed batch directories on POSIX UDS are rejected by L1 before the managed Rust L2 loop can return `INTERNAL_ERROR`
+    - the honest ordinary coverage path for that branch is Linux SHM, not UDS
 
 - Coverage parity and documentation honesty, not emergency benchmark or transport fixes.
 - Current execution slice after `f4fdc10`:
@@ -350,10 +356,10 @@ Finish the rewrite to a production-ready state with:
   - fresh Linux Rust coverage measurement from the current machine:
     - `bash tests/run-coverage-rust.sh 80`
     - current tool on this host: `tarpaulin`
-    - current result: `90.06%`
+    - current result: `90.35%`
     - current largest uncovered Rust files from the report:
-      - `src/service/cgroups.rs`: `639/664`
-      - `src/transport/posix.rs`: `383/401`
+      - `src/service/cgroups.rs`: `641/664`
+      - `src/transport/posix.rs`: `386/401`
       - `src/transport/shm.rs`: `346/375`
     - implication:
       - Linux Rust is now the next biggest ordinary coverage target, not Linux Go
@@ -662,7 +668,7 @@ Verified on `2026-03-23`:
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
-  - result: `90.06%`
+  - result: `90.35%`
   - current threshold: `80%`
 
 Important fact:

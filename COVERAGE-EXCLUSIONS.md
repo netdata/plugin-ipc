@@ -23,16 +23,19 @@ Verified on `2026-03-23`:
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
-  - result: `90.06%`
+  - result: `90.35%`
   - threshold: `80%`
   - note:
     - the current Linux script used `tarpaulin` on this machine
     - the report still includes Windows-tagged Rust files in the total line count
     - latest ordinary Linux Rust slice raised:
-      - `src/service/cgroups.rs` to `639/664`
-      - `src/transport/posix.rs` to `383/401`
+      - `src/service/cgroups.rs` to `641/664`
+      - `src/transport/posix.rs` to `386/401`
       - `src/transport/shm.rs` to `346/375`
     - latest slice covered:
+      - managed-server worker-capacity rejection in the Rust L2 loop
+      - malformed Linux SHM batch-request item decode failure returning `INTERNAL_ERROR`
+      - chunked batch-directory invalidation across a real continuation boundary
       - typed retry-once and retry-second-failure paths for string-reverse and increment-batch
       - Linux SHM attach-failure and short-response rejection in the L2 client
       - managed-server batch builder overflow
@@ -41,6 +44,8 @@ Verified on `2026-03-23`:
       - the remaining Linux Rust total is now a mix of real special-infrastructure branches and Windows-tagged Rust lines still counted by `tarpaulin`
       - one concrete layering fact is now proven:
         - on POSIX baseline, a bad response `message_id` is rejected by L1 before the L2 typed wrappers can map it to `BadLayout`
+        - malformed batch directories on POSIX UDS are rejected by L1 before the Rust managed-service loop can map them to `INTERNAL_ERROR`
+        - the honest ordinary coverage path for that branch is Linux SHM
 
 Latest Linux Go notes from the current ordinary POSIX slice:
 

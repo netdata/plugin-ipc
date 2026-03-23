@@ -2662,6 +2662,108 @@ mod tests {
     }
 
     #[test]
+    fn test_server_rejects_session_at_worker_capacity() {
+        let svc = "rs_svc_worker_capacity";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let handler_calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+
+        let handlers = {
+            let handler_calls = handler_calls.clone();
+            let release = release.clone();
+            Handlers {
+                on_increment: Some(Arc::new(move |value| {
+                    handler_calls.fetch_add(1, Ordering::AcqRel);
+                    while !release.load(Ordering::Acquire) {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Some(value + 1)
+                })),
+                ..Handlers::default()
+            }
+        };
+
+        let mut server = TestServer::start_with_workers(svc, handlers, 1);
+
+        let (call_tx, call_rx) = std::sync::mpsc::channel();
+        let svc_name = svc.to_string();
+        let caller = thread::spawn(move || {
+            let mut client = CgroupsClient::new(TEST_RUN_DIR, &svc_name, client_config());
+            connect_ready(&mut client);
+            let result = client.call_increment(41);
+            client.close();
+            call_tx.send(result).expect("send first call result");
+        });
+
+        for _ in 0..500 {
+            if handler_calls.load(Ordering::Acquire) >= 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            handler_calls.load(Ordering::Acquire),
+            1,
+            "first client should occupy the only worker slot"
+        );
+
+        let mut session2 =
+            UdsSession::connect(TEST_RUN_DIR, svc, &client_config()).expect("second connect");
+        let mut req_hdr = Header {
+            kind: KIND_REQUEST,
+            code: METHOD_INCREMENT,
+            item_count: 1,
+            message_id: 1,
+            ..Header::default()
+        };
+        let mut req_payload = [0u8; INCREMENT_PAYLOAD_SIZE];
+        assert_eq!(
+            increment_encode(9, &mut req_payload),
+            INCREMENT_PAYLOAD_SIZE,
+            "IncrementEncode should fill the request buffer"
+        );
+
+        let send_err = session2.send(&mut req_hdr, &req_payload).err();
+        let recv_ok = if send_err.is_none() {
+            let mut recv_buf = [0u8; HEADER_SIZE + 64];
+            session2.receive(&mut recv_buf).is_ok()
+        } else {
+            false
+        };
+        assert!(
+            !(send_err.is_none() && recv_ok),
+            "second session should be rejected while the server is at worker capacity"
+        );
+        assert_eq!(
+            handler_calls.load(Ordering::Acquire),
+            1,
+            "second session should not enter the handler while the first session is active"
+        );
+        drop(session2);
+
+        release.store(true, Ordering::Release);
+        let first_result = call_rx.recv().expect("first call result");
+        assert_eq!(first_result.expect("first call should succeed"), 42);
+        caller.join().expect("caller join");
+
+        thread::sleep(Duration::from_millis(100));
+
+        let mut verify = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
+        connect_ready(&mut verify);
+        assert_eq!(
+            verify.call_increment(1).expect("verification call"),
+            2,
+            "server should remain healthy after rejecting a session at capacity"
+        );
+        verify.close();
+
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
     fn test_concurrent_clients() {
         let svc = "rs_svc_concurrent";
         ensure_run_dir();
@@ -4761,6 +4863,68 @@ mod tests {
             .call_increment_batch(&[10, 20])
             .expect_err("batch builder overflow should fail");
         assert_eq!(err, NipcError::BadLayout);
+
+        client.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_shm_batch_request_item_decode_failure_returns_internal_error() {
+        let svc = "rs_svc_shm_batch_bad_item";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start_with(svc, shm_server_config(), pingpong_handlers(), 8);
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, shm_client_config());
+        connect_ready(&mut client);
+        assert!(
+            client.shm.is_some(),
+            "expected SHM transport to be negotiated"
+        );
+
+        let mut bad_payload = [0u8; 16];
+        bad_payload[0..4].copy_from_slice(&0u32.to_ne_bytes());
+        bad_payload[4..8].copy_from_slice(&32u32.to_ne_bytes());
+        bad_payload[8..12].copy_from_slice(&0u32.to_ne_bytes());
+        bad_payload[12..16].copy_from_slice(&4u32.to_ne_bytes());
+
+        let req_hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION,
+            header_len: protocol::HEADER_LEN,
+            kind: KIND_REQUEST,
+            code: METHOD_INCREMENT,
+            flags: FLAG_BATCH,
+            payload_len: bad_payload.len() as u32,
+            item_count: 2,
+            message_id: 7,
+            transport_status: STATUS_OK,
+        };
+        let mut msg = [0u8; HEADER_SIZE + 16];
+        req_hdr.encode(&mut msg[..HEADER_SIZE]);
+        msg[HEADER_SIZE..].copy_from_slice(&bad_payload);
+        client
+            .shm
+            .as_mut()
+            .expect("shm")
+            .send(&msg)
+            .expect("send malformed batch request");
+
+        let (resp_hdr, response) = client.transport_receive().expect("receive response");
+        assert_eq!(resp_hdr.kind, KIND_RESPONSE);
+        assert_eq!(resp_hdr.code, METHOD_INCREMENT);
+        assert_eq!(resp_hdr.transport_status, STATUS_INTERNAL_ERROR);
+        assert_eq!(resp_hdr.flags, 0);
+        assert_eq!(resp_hdr.item_count, 1);
+        assert!(
+            client
+                .response_payload(response)
+                .expect("response payload view")
+                .is_empty(),
+            "internal-error response should have no payload"
+        );
 
         client.close();
         server.stop();

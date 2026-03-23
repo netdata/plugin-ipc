@@ -2668,7 +2668,7 @@ mod tests {
     #[test]
     fn test_receive_chunked_batch_directory_too_short() {
         let (fd0, fd1) = socketpair_seqpacket();
-        let mut session = test_session(fd0, Role::Server, (HEADER_SIZE + 8) as u32);
+        let mut session = test_session(fd0, Role::Server, (HEADER_SIZE + 16) as u32);
 
         let first_payload = [0u8; 8];
         let hdr = Header {
@@ -2708,6 +2708,60 @@ mod tests {
         let err = session
             .receive(&mut buf)
             .expect_err("chunked batch directory too short");
+        assert!(matches!(err, UdsError::Protocol(_)));
+
+        unsafe { libc::close(fd1) };
+    }
+
+    #[test]
+    fn test_receive_chunked_batch_directory_invalid() {
+        let (fd0, fd1) = socketpair_seqpacket();
+        let mut session = test_session(fd0, Role::Server, (HEADER_SIZE + 8) as u32);
+
+        let mut full_payload = [0u8; 24];
+        full_payload[0..4].copy_from_slice(&0u32.to_ne_bytes());
+        full_payload[4..8].copy_from_slice(&16u32.to_ne_bytes());
+        full_payload[8..12].copy_from_slice(&0u32.to_ne_bytes());
+        full_payload[12..16].copy_from_slice(&4u32.to_ne_bytes());
+        full_payload[16..24].copy_from_slice(b"payload!");
+
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION,
+            header_len: protocol::HEADER_LEN,
+            kind: KIND_REQUEST,
+            code: 1,
+            flags: FLAG_BATCH,
+            transport_status: protocol::STATUS_OK,
+            payload_len: full_payload.len() as u32,
+            item_count: 2,
+            message_id: 46,
+        };
+        let mut first_pkt = [0u8; HEADER_SIZE + 16];
+        hdr.encode(&mut first_pkt[..HEADER_SIZE]);
+        first_pkt[HEADER_SIZE..].copy_from_slice(&full_payload[..16]);
+        raw_send(fd1, &first_pkt).expect("send first chunk");
+
+        let second_payload = &full_payload[16..];
+        let chk = ChunkHeader {
+            magic: MAGIC_CHUNK,
+            version: VERSION,
+            flags: 0,
+            message_id: 46,
+            total_message_len: (HEADER_SIZE + full_payload.len()) as u32,
+            chunk_index: 1,
+            chunk_count: 2,
+            chunk_payload_len: second_payload.len() as u32,
+        };
+        let mut second_pkt = [0u8; HEADER_SIZE + 8];
+        chk.encode(&mut second_pkt[..HEADER_SIZE]);
+        second_pkt[HEADER_SIZE..HEADER_SIZE + second_payload.len()].copy_from_slice(second_payload);
+        raw_send(fd1, &second_pkt).expect("send invalid continuation");
+
+        let mut buf = [0u8; 64];
+        let err = session
+            .receive(&mut buf)
+            .expect_err("chunked batch directory validation should fail");
         assert!(matches!(err, UdsError::Protocol(_)));
 
         unsafe { libc::close(fd1) };
