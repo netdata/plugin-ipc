@@ -19,12 +19,21 @@ Verified on `2026-03-23`:
   - threshold: `82%`
 - Go:
   - script: `tests/run-coverage-go.sh`
-  - result: `95.0%`
+  - result: `95.2%`
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
   - result: `81.46%`
   - threshold: `80%`
+
+Latest Linux Go notes from the current ordinary POSIX slice:
+
+- `service/cgroups/client.go`: `94.3%`
+- `transport/posix/shm_linux.go`: `91.4%`
+- `transport/posix/uds.go`: `95.6%`
+- the latest rerun also exposed two real Unix Go harness bugs, not library regressions:
+  - the worker-capacity test used a readiness helper that briefly consumed the only worker slot
+  - the non-request termination test relied on one-shot raw connect / refresh assumptions instead of retry-style readiness
 
 ### Windows (`win11`)
 
@@ -273,10 +282,13 @@ Concrete evidence from the latest Linux Go UDS transport slice:
   - chunked batch-directory validation after successful reassembly
   - `detectPacketSize()` fallback / success helper behavior
 - result:
-  - `transport/posix/uds.go` is now `94.5%`
+  - `transport/posix/uds.go` is now `95.6%`
   - `Send()` is now `100.0%`
   - `Receive()` moved to `97.8%`
   - `detectPacketSize()` is now `100.0%`
+  - `Listen()` moved to `81.0%`
+  - `connectAndHandshake()` moved to `93.2%`
+  - `serverHandshake()` moved to `95.3%`
 - implication:
   - the remaining weak `uds.go` lines are now much more concentrated in raw
     syscall-failure and short-write territory:

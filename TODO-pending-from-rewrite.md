@@ -20,16 +20,16 @@ Finish the rewrite to a production-ready state with:
 - Current execution slice after the latest POSIX Go UDS / SHM stability pass:
   - revalidated the exact current Linux / POSIX Go transport package coverage from the real module root
   - current package result:
-    - `transport/posix` total: `92.9%`
+    - `transport/posix` total: `93.5%`
     - `transport/posix/shm_linux.go`: `91.4%`
-    - `transport/posix/uds.go`: `94.5%`
+    - `transport/posix/uds.go`: `95.6%`
   - current verified weak POSIX UDS functions:
     - `Receive()`: `97.8%`
-    - `Listen()`: `71.4%`
+    - `Listen()`: `81.0%`
     - `detectPacketSize()`: `100.0%`
     - `rawSendMsg()`: `83.3%`
-    - `connectAndHandshake()`: `90.9%`
-    - `serverHandshake()`: `93.8%`
+    - `connectAndHandshake()`: `93.2%`
+    - `serverHandshake()`: `95.3%`
   - completed the next ordinary POSIX UDS coverage slice
   - validated ordinary raw UDS tests for:
     - client `Send()` initialization of the first in-flight request set
@@ -71,6 +71,39 @@ Finish the rewrite to a production-ready state with:
     - classify the remainder honestly into:
       - still ordinary
       - or special-infrastructure / syscall-failure territory
+    - latest line-by-line classification from the current local rerun:
+      - still ordinary:
+        - `Listen()` bind failure when the run directory does not exist
+        - client handshake peer disconnect before `HELLO_ACK`
+        - server handshake peer disconnect before `HELLO`
+      - not ordinary:
+        - raw socket creation failures
+        - short writes in `rawSendMsg()` and handshake send paths
+        - forced `listen(2)` failure after a successful bind
+  - follow-up validation after the low-level UDS slice exposed and fixed two more real Unix Go harness bugs:
+    - `TestUnixServerRejectsSessionAtWorkerCapacity`
+      - failing symptom before the fix:
+        - `first client did not occupy the only worker slot`
+      - evidence:
+        - the readiness probe in `startServerWithWorkers()` used `waitUnixServerReady()`
+        - that helper performs a real connection / handshake probe
+        - for the `workers=1` capacity test, this probe could consume the only worker slot briefly before the real test client connected
+      - fix:
+        - added a socket-ready startup helper for this test instead of a full handshake probe
+    - `TestNonRequestTerminatesSession`
+      - failing symptom before the fix:
+        - repeated isolated runs later failed at `server should still be alive after bad client`
+      - evidence:
+        - the test used a one-shot raw `posix.Connect(...)`
+        - and later checked recovery with a single `verifyClient.Refresh()`
+      - fix:
+        - raw connect now retries readiness
+        - the recovery check now uses the existing retry-style client readiness helper
+  - final validation of the slice:
+    - `go test -count=20 -run '^TestUnixServerRejectsSessionAtWorkerCapacity$' ./pkg/netipc/service/cgroups`: passing
+    - `go test -count=20 -run '^TestNonRequestTerminatesSession$' ./pkg/netipc/service/cgroups`: passing
+    - `bash tests/run-coverage-go.sh 85`: passing
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
 - Current execution slice after the Windows Go parity expansion:
   - completed the next Linux / POSIX Go SHM service follow-up slice
   - validated ordinary POSIX SHM service tests for:
@@ -326,7 +359,7 @@ Verified on `2026-03-23`:
   - current threshold: `82%`
 - Go:
   - `bash tests/run-coverage-go.sh`
-  - result: `95.0%`
+  - result: `95.2%`
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
@@ -629,7 +662,7 @@ Facts:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
 - Windows Go coverage currently reports `96.7%`.
-- Linux Go coverage currently reports `95.0%` with the remaining ordinary gaps now reduced to a smaller POSIX low-level transport/service residue.
+- Linux Go coverage currently reports `95.2%` with the remaining ordinary gaps now reduced to a smaller POSIX low-level transport/service residue.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
@@ -706,18 +739,18 @@ Required next work:
        - result of the latest ordinary UDS slice:
          - file moved from `83.7%` to `92.0%`
        - result of the latest focused UDS follow-up slice:
-         - file moved from `92.0%` to `94.5%`
+         - file moved from `92.0%` to `95.6%`
        - `Connect`: `90.9%`
        - `Send`: `100.0%`
        - `sendInner`: `94.3%`
        - `Receive`: `97.8%`
-       - `Listen`: `71.4%`
+       - `Listen`: `81.0%`
        - `Accept`: `100.0%`
        - `detectPacketSize`: `100.0%`
        - `rawSendMsg`: `83.3%`
        - `rawRecv`: `100.0%`
-       - `connectAndHandshake`: `90.9%`
-       - `serverHandshake`: `93.8%`
+       - `connectAndHandshake`: `93.2%`
+       - `serverHandshake`: `95.3%`
      - implication:
        - the next honest ordinary target is still Linux Go, but no longer the ordinary `Receive()` / `Send()` / helper work in `transport/posix/uds.go`
    - next ordinary target:

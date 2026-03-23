@@ -138,6 +138,22 @@ func newRawPosixShmClient(t *testing.T) (*Client, *posix.ShmContext) {
 	return client, server
 }
 
+func startServerWithWorkersSocketReady(service string, handlers Handlers, workers int) *testServer {
+	ensureRunDir()
+	cleanupAll(service)
+
+	s := NewServerWithWorkers(testRunDir, service, testServerConfig(), handlers, workers)
+	doneCh := make(chan struct{})
+
+	go func() {
+		defer close(doneCh)
+		s.Run()
+	}()
+
+	waitUnixSocketReady(service)
+	return &testServer{server: s, doneCh: doneCh}
+}
+
 func TestUnixServerStopWhileIdle(t *testing.T) {
 	svc := uniqueUnixService("go_unix_stop_idle")
 	cleanupAll(svc)
@@ -209,7 +225,7 @@ func TestUnixServerRejectsSessionAtWorkerCapacity(t *testing.T) {
 	defer releaseOnce()
 
 	var handlerCalls atomic.Int32
-	ts := startServerWithWorkers(svc, Handlers{
+	ts := startServerWithWorkersSocketReady(svc, Handlers{
 		OnIncrement: func(v uint64) (uint64, bool) {
 			handlerCalls.Add(1)
 			if v == 41 {

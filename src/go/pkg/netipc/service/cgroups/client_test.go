@@ -52,6 +52,20 @@ func waitUnixServerReady(service string) {
 	}
 }
 
+func waitUnixRawSessionConnect(service string, cfg posix.ClientConfig) (*posix.Session, error) {
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		session, err := posix.Connect(testRunDir, service, &cfg)
+		if err == nil {
+			return session, nil
+		}
+		lastErr = err
+		time.Sleep(10 * time.Millisecond)
+	}
+	return nil, lastErr
+}
+
 func testServerConfig() posix.ServerConfig {
 	return posix.ServerConfig{
 		SupportedProfiles:       protocol.ProfileBaseline,
@@ -545,7 +559,7 @@ func TestNonRequestTerminatesSession(t *testing.T) {
 	defer ts.stop()
 
 	// Connect via raw UDS session (transport level)
-	session, err := posix.Connect(testRunDir, svc, &posix.ClientConfig{
+	session, err := waitUnixRawSessionConnect(svc, posix.ClientConfig{
 		SupportedProfiles:       protocol.ProfileBaseline,
 		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
@@ -599,10 +613,7 @@ func TestNonRequestTerminatesSession(t *testing.T) {
 
 	// Verify server is still alive: connect a new client and do a normal call
 	verifyClient := NewClient(testRunDir, svc, testClientConfig())
-	verifyClient.Refresh()
-	if !verifyClient.Ready() {
-		t.Fatal("server should still be alive after bad client")
-	}
+	refreshUnixClientReady(t, verifyClient)
 
 	view, err := verifyClient.CallSnapshot()
 	if err != nil {

@@ -191,6 +191,17 @@ func TestUdsAcceptOnClosedListener(t *testing.T) {
 	}
 }
 
+func TestUdsListenFailsWhenRunDirMissing(t *testing.T) {
+	runDir := filepath.Join(t.TempDir(), "missing")
+	_, err := Listen(runDir, uniqueService(t), defaultServerConfig())
+	if !errors.Is(err, ErrSocket) {
+		t.Fatalf("Listen(missing runDir) = %v, want ErrSocket", err)
+	}
+	if !containsErrText(err, "bind:") {
+		t.Fatalf("Listen(missing runDir) = %v, want bind failure detail", err)
+	}
+}
+
 func TestUdsRawGenericErrors(t *testing.T) {
 	if err := rawSendMsg(-1, []byte("x")); !errors.Is(err, ErrSend) {
 		t.Fatalf("rawSendMsg(invalid fd) = %v, want ErrSend", err)
@@ -640,6 +651,39 @@ func TestUdsClientHandshakeRejectsMalformedAck(t *testing.T) {
 	}
 }
 
+func TestUdsClientHandshakePeerDisconnectBeforeAck(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	lfd, path := rawSeqpacketListener(t, runDir, service)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		nfd, _, err := syscall.Accept(lfd)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		var helloBuf [128]byte
+		_, recvErr := rawRecv(nfd, helloBuf[:])
+		_ = syscall.Close(nfd)
+		serverDone <- recvErr
+	}()
+
+	client, err := Connect(runDir, service, defaultClientConfigPtr())
+	if client != nil {
+		client.Close()
+	}
+	if err == nil {
+		t.Fatal("Connect should fail when peer disconnects before HELLO_ACK")
+	}
+	if !errors.Is(err, ErrRecv) {
+		t.Fatalf("Connect error = %v, want ErrRecv", err)
+	}
+	if serr := <-serverDone; serr != nil && !errors.Is(serr, ErrRecv) {
+		t.Fatalf("raw server failed: %v (path %s)", serr, path)
+	}
+}
+
 func TestUdsServerHandshakeRejectsMalformedHello(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -726,6 +770,36 @@ func TestUdsServerHandshakeRejectsMalformedHello(t *testing.T) {
 				t.Fatalf("serverHandshake error = %v, want text %q", err, tc.wantText)
 			}
 		})
+	}
+}
+
+func TestUdsServerHandshakePeerDisconnectBeforeHello(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	lfd, path := rawSeqpacketListener(t, runDir, service)
+
+	handshakeDone := make(chan error, 1)
+	go func() {
+		nfd, _, err := syscall.Accept(lfd)
+		if err != nil {
+			handshakeDone <- err
+			return
+		}
+		defer syscall.Close(nfd)
+
+		_, err = serverHandshake(nfd, defaultServerConfigPtr(), 1)
+		handshakeDone <- err
+	}()
+
+	cfd := rawSeqpacketConnect(t, path)
+	_ = syscall.Close(cfd)
+
+	err := <-handshakeDone
+	if err == nil {
+		t.Fatal("serverHandshake should fail when peer disconnects before HELLO")
+	}
+	if !errors.Is(err, ErrRecv) {
+		t.Fatalf("serverHandshake error = %v, want ErrRecv", err)
 	}
 }
 
