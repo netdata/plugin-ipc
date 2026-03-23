@@ -62,7 +62,11 @@ Finish the rewrite to a production-ready state with:
         - raw malformed WinSHM requests now also cover the real managed-server SHM session teardown and reconnect path
       - split of remaining Go gaps:
         - ordinary testable now:
-          - decide whether the tiny remaining low-level `transport/windows/pipe.go` branches are still honest ordinary targets
+          - Windows Go ordinary coverage is no longer the main gap
+          - next honest Go target is Linux / POSIX:
+            - `service/cgroups/client.go` (`88.0%`)
+            - `transport/posix/shm_linux.go` (`77.5%`)
+            - `transport/posix/uds.go` (`83.7%`)
           - keep the deferred managed-server retry/shutdown investigation separate from ordinary coverage
         - likely requires special orchestration later:
           - fixed-size encode / builder overflow guards in `client_windows.go` that the current scratch sizing makes unreachable in normal calls
@@ -535,6 +539,7 @@ Facts:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
 - Windows Go coverage currently reports `96.7%`.
+- Linux Go coverage currently reports `87.5%` with the real weak files now in POSIX Go transport paths.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
@@ -542,36 +547,64 @@ Required next work:
 1. Keep the deferred Windows retry/shutdown investigation separate from the normal coverage gate
 2. Start raising the relaxed coverage thresholds toward `100%`
 3. Immediate next pass:
-   - stop treating `client_windows.go`, `transport/windows/shm.go` create / attach, and broad `pipe.go` handshake validation as the main ordinary Windows Go targets
-   - review the tiny remaining low-level `transport/windows/pipe.go` gaps and classify them honestly:
+   - stop treating Windows Go as the main ordinary Go target
+   - review the Linux / POSIX Go gaps and classify them honestly:
      - ordinary testable
      - or genuinely fault-injection / Win32-failure territory
    - keep managed-server shutdown / retry behavior handled separately from ordinary coverage
-   - keep Windows Go CTest parity honest:
-     - `test_named_pipe_go`
-     - `test_service_win_go`
-     - `test_cache_win_go`
+   - keep Linux and Windows Go validation parity honest
 4. Current execution slice (`2026-03-23`):
-   - inspect the remaining weak Windows Go and Rust service paths function-by-function on `win11`
+   - inspect the remaining weak Linux Go and Rust service paths function-by-function
    - add tests only for real ordinary uncovered logic, not for branches that already require orchestration or fault injection
-   - re-measure on `win11` before deciding whether to continue on Go or switch to the next parity gap
-   - current function-level evidence from `bash tests/run-coverage-go-windows.sh 85`:
-     - `transport/windows/pipe.go`
-       - `rawWrite`: `88.9%`
-       - `rawRecv`: `91.7%`
-       - `Connect`: `86.7%`
-       - `Send`: `94.1%`
-       - `Accept`: `78.9%`
-     - `transport/windows/shm.go`
-       - `WinShmServerCreate`: `84.1%`
-       - `WinShmClientAttach`: `86.8%`
+   - re-measure on the active platform before deciding whether to continue on Go or switch to the next parity gap
+   - immediate implementation focus:
+     - bring Linux Go service tests closer to the existing Windows raw malformed-response coverage
+     - add ordinary UDS-based L2 tests for:
+       - malformed response envelopes
+       - malformed typed payloads
+       - transport-without-session safety
+       - reconnect after a poisoned nil-session transport state
+       - idle stop / unsupported dispatch helpers
+     - use the real POSIX listener/session transport for these tests, not synthetic mocks
+   - current function-level evidence from `bash tests/run-coverage-go.sh 85`:
+     - `service/cgroups/client.go`
+       - `Refresh`: `58.3%`
+       - `doRawCall`: `93.3%`
+       - `CallSnapshot`: `94.1%`
+       - `CallIncrement`: `92.9%`
+       - `CallStringReverse`: `93.8%`
+       - `CallIncrementBatch`: `90.9%`
+       - `transportReceive`: `82.4%`
+       - `dispatchSingle`: `92.9%`
+       - `Run`: `78.9%`
+       - `handleSession`: `82.4%`
+     - `transport/posix/shm_linux.go`
+       - `OwnerAlive`: `70.0%`
+       - `ShmServerCreate`: `66.7%`
+       - `ShmClientAttach`: `58.7%`
+       - `ShmSend`: `86.2%`
+       - `ShmReceive`: `86.1%`
+       - `ShmCleanupStale`: `75.0%`
+       - `checkShmStale`: `59.3%`
+     - `transport/posix/uds.go`
+       - `Connect`: `90.9%`
+       - `Send`: `88.2%`
+       - `sendInner`: `91.4%`
+       - `Receive`: `70.8%`
+       - `Listen`: `71.4%`
+       - `Accept`: `88.9%`
+       - `detectPacketSize`: `75.0%`
+       - `rawSendMsg`: `66.7%`
+       - `rawRecv`: `83.3%`
+       - `connectAndHandshake`: `79.5%`
+       - `serverHandshake`: `89.1%`
      - implication:
-       - ordinary remaining Windows Go work is no longer in WinSHM create / attach edge cases or the L2 client hot path
-       - the next honest review is whether the remaining `pipe.go` low-level branches are still worth ordinary testing at all
+       - the next honest ordinary target is still Linux Go, but no longer `service/cgroups/client.go`
    - next ordinary target:
-     - if any remain honest, add tests only for `transport/windows/pipe.go` branches that still do not need Win32 fault injection
-     - re-check whether any remaining `transport/windows/shm.go` gap is still ordinary after the new create / attach edge tests
-     - do not treat low-level Win32 mapping / event creation API failures as ordinary test targets
+     - start with Linux Go `transport/posix/uds.go`
+     - then move to Linux Go `transport/posix/shm_linux.go`
+     - keep Windows Go low-level branches documented, but no longer treat them as the first ordinary target
+     - do not treat low-level OS failure or fault-injection branches as ordinary test targets
 
 ### 2. Cross-platform validation parity is only partial
 

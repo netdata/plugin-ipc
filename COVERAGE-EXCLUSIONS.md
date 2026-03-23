@@ -19,7 +19,7 @@ Verified on `2026-03-23`:
   - threshold: `82%`
 - Go:
   - script: `tests/run-coverage-go.sh`
-  - result: `86.1%`
+  - result: `87.5%`
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`

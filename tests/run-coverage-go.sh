@@ -147,15 +147,17 @@ fi
 
 echo
 
-# Threshold check - Go testable ceiling is ~86% due to transport error paths
-# that require OS/kernel failures (socket, mmap, etc.)
-# See COVERAGE-EXCLUSIONS.md for detailed justifications
+# Threshold check.
+# Do not treat any previous "~86% ceiling" note as authoritative: the measured
+# total already exceeds that. Some remaining branches still need special
+# infrastructure, but ordinary POSIX transport/service gains are still possible.
+# See COVERAGE-EXCLUSIONS.md for the current evidence.
 THRESHOLD=${1:-85}
 total_pct_int=$(echo "$total_pct" | cut -d. -f1)
 
 if [[ $total_pct_int -ge $THRESHOLD ]]; then
     echo -e "${GREEN}Go coverage ${total_pct}% meets threshold ${THRESHOLD}%.${NC}"
-    echo -e "${GRAY}Note: Go testable ceiling is ~86% due to transport error paths.${NC}"
+    echo -e "${GRAY}Note: remaining gaps are a mix of ordinary POSIX transport/service work and branches that need special infrastructure; see COVERAGE-EXCLUSIONS.md.${NC}"
     exit 0
 else
     echo -e "${RED}Go coverage ${total_pct}% is below threshold ${THRESHOLD}%.${NC}"
