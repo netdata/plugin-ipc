@@ -80,7 +80,7 @@ Verified on `2026-03-23`:
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
-  - result: `90.66%`
+  - result: `90.76%`
   - threshold: `80%`
   - note:
     - the current Linux script used `tarpaulin` on this machine
@@ -88,7 +88,7 @@ Verified on `2026-03-23`:
     - latest ordinary Linux Rust slice raised:
       - `src/service/cgroups.rs` to `686/710`
       - `src/transport/posix.rs` to `388/401`
-      - `src/transport/shm.rs` to `347/375`
+      - `src/transport/shm.rs` to `349/375`
     - latest slice covered:
       - Linux SHM response `message_id` mismatch on the 3 Rust client call paths
       - Linux managed-server SHM-upgrade rejection when `server_create()` is obstructed on disk
@@ -97,6 +97,9 @@ Verified on `2026-03-23`:
       - managed-server worker-capacity rejection in the Rust L2 loop
       - malformed Linux SHM batch-request item decode failure returning `INTERNAL_ERROR`
       - chunked batch-directory invalidation across a real continuation boundary
+      - direct `check_shm_stale()` helper paths for:
+        - nonexistent file -> `StaleResult::NotExist`
+        - invalid `CString` path -> `StaleResult::NotExist`
     - implication:
       - the remaining Linux Rust total is now dominated by helper / fault-injection / Windows-tagged territory
       - one concrete layering fact is now proven:

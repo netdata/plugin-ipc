@@ -995,6 +995,9 @@ fn check_shm_stale(path: &Path) -> StaleResult {
 mod tests {
     use super::*;
     use crate::protocol;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::path::PathBuf;
     use std::thread;
 
     const TEST_RUN_DIR: &str = "/tmp/nipc_shm_rust_test";
@@ -2001,6 +2004,25 @@ mod tests {
         ensure_run_dir();
         let result = ShmContext::client_attach(TEST_RUN_DIR, "rs_shm_nofile", 99999);
         assert!(matches!(result, Err(ShmError::Open(_))));
+    }
+
+    #[test]
+    fn test_check_shm_stale_nonexistent_returns_not_exist() {
+        ensure_run_dir();
+        let svc = "rs_shm_stale_missing";
+        let sid: u64 = 700;
+        cleanup_shm(svc, sid);
+
+        let path = build_shm_path(TEST_RUN_DIR, svc, sid).expect("path");
+        assert!(matches!(check_shm_stale(&path), StaleResult::NotExist));
+    }
+
+    #[test]
+    fn test_check_shm_stale_invalid_cstring_returns_not_exist() {
+        let bad_path = PathBuf::from(OsString::from_vec(vec![
+            b'/', b't', b'm', b'p', b'/', b'n', b'i', b'p', b'c', 0, b'b',
+        ]));
+        assert!(matches!(check_shm_stale(&bad_path), StaleResult::NotExist));
     }
 
     #[test]

@@ -44,6 +44,46 @@ Finish the rewrite to a production-ready state with:
     - stop grinding Linux C for now
     - switch the next ordinary deterministic slice back to Linux Rust coverage
     - use the current C state as the new baseline when raising thresholds
+- Fresh Linux Rust baseline on the exact current tree:
+  - `bash tests/run-coverage-rust.sh 80`
+  - tool on this host: `tarpaulin`
+  - total: `90.76%` (`1886/2078`)
+  - current largest Linux-side uncovered files from the report:
+    - `src/service/cgroups.rs`: `686/710`
+    - `src/transport/posix.rs`: `388/401`
+    - `src/transport/shm.rs`: `349/375`
+  - latest ordinary Rust gain on this exact tree:
+    - direct `check_shm_stale()` helper paths for:
+      - nonexistent file -> `StaleResult::NotExist`
+      - invalid `CString` path -> `StaleResult::NotExist`
+  - Linux-side ordinary candidates still visible in the report:
+    - `src/service/cgroups.rs`
+      - helper / deterministic branches around:
+        - `1594-1598`
+        - `1613`
+        - `2166`
+        - `2170`
+        - `2183`
+        - `2193`
+        - `2210-2211`
+    - `src/transport/posix.rs`
+      - helper / deterministic branches around:
+        - `398`
+        - `452-453`
+    - `src/transport/shm.rs`
+      - stale / validation / guard branches around:
+        - `755`
+  - explicit non-goals for the next Rust slice:
+    - fixed-size encode guards:
+      - `src/service/cgroups.rs`: `189`, `202`, `221`, `252`
+    - chunk-count zero-arm lines that are structurally unreachable in the chunked path:
+      - `src/transport/posix.rs`: `298`, `427`
+    - raw socket / listen / bind / syscall-failure branches:
+      - `src/transport/posix.rs`: `226`, `532`, `550`, `552`, `554-555`, `577`, `830`
+    - Windows-tagged files still counted by `tarpaulin`:
+      - `src/service/cgroups_windows_tests.rs`
+      - `src/transport/windows.rs`
+      - `src/transport/win_shm.rs`
 - Note:
   - the older slice notes below are historical context
   - they are no longer the authoritative current state
