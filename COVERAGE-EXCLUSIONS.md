@@ -15,12 +15,12 @@ Verified on `2026-03-23`:
 
 - C:
   - script: `tests/run-coverage-c.sh`
-  - result: `93.4%`
+  - result: `94.0%`
   - threshold: `82%`
   - latest ordinary C slices raised:
-    - `netipc_uds.c` to `92.7%` (`433/467`)
+    - `netipc_uds.c` to `92.5%` (`432/467`)
     - `netipc_service.c` to `92.1%` (`734/797`)
-    - `netipc_shm.c` to `91.8%`
+    - `netipc_shm.c` to `95.1%` (`346/364`)
   - latest ordinary C additions covered:
     - malformed client `HELLO_ACK` handling:
       - short packet
@@ -35,6 +35,12 @@ Verified on `2026-03-23`:
       - response `item_count` over limit
       - bad continuation header
       - missing continuation packet after a valid first chunk
+    - malformed SHM attach metadata and stale-scan paths:
+      - bad on-disk `header_len`
+      - invalid aligned region metadata / overlap
+      - declared region larger than the file
+      - direct `nipc_shm_owner_alive(NULL)` false path
+      - `cleanup_stale()` ignoring non-matching directory entries
     - plus the earlier Linux C service coverage gains:
       - client init default-buffer sizing and truncation
       - empty increment-batch fast-path
@@ -56,6 +62,10 @@ Verified on `2026-03-23`:
         - negotiated-capacity send overflow
         - malformed raw batch response propagation
         - response `item_count` mismatch
+  - note:
+    - the SHM slice briefly exposed a parallel-only `ctest` collision between
+      `test_uds_rust` and `test_shm_rust`
+    - the fix was CMake-side isolation with a shared `RESOURCE_LOCK`, not a Rust SHM code change
 - Go:
   - script: `tests/run-coverage-go.sh`
   - result: `95.8%`

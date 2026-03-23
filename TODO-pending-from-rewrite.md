@@ -17,46 +17,65 @@ Finish the rewrite to a production-ready state with:
 ## Current Focus (2026-03-23)
 
 - Latest authoritative slice:
-  - Linux C ordinary UDS transport coverage
-  - added deterministic `test_uds` coverage for:
-    - malformed client `HELLO_ACK` handling:
-      - short packet
-      - wrong kind
-      - unexpected transport status
-      - truncated payload
-    - malformed client `HELLO` payload on server accept
-    - malformed response receive paths:
-      - short packet
-      - too-short batch directory
-      - short continuation packet
-      - response `item_count` over limit
-      - bad continuation header
-      - missing continuation packet after a valid first chunk
+  - Linux C ordinary SHM transport coverage
+  - added deterministic `test_shm` coverage for:
+    - bad on-disk `header_len` on client attach
+    - invalid aligned-region metadata / overlap on client attach
+    - declared region larger than the file on client attach
+    - direct `nipc_shm_owner_alive(NULL)` false path
+    - `cleanup_stale()` ignoring non-matching directory entries
 - Latest verified Linux C result:
   - `bash tests/run-coverage-c.sh 82`
-  - total: `93.4%`
+  - total: `94.0%`
   - key files:
     - `netipc_protocol.c`: `98.7%`
-    - `netipc_uds.c`: `92.7%` (`433/467`)
-    - `netipc_shm.c`: `91.8%`
+    - `netipc_uds.c`: `92.5%` (`432/467`)
+    - `netipc_shm.c`: `95.1%` (`346/364`)
     - `netipc_service.c`: `92.1%` (`734/797`)
-- Latest verified Linux validation for this slice:
-  - `./build/bin/test_uds`: `129 passed, 0 failed`
-  - `cmake --build build -j4 --target test_uds`: passing
+- Latest verified test results for this slice:
+  - `cmake --build build -j4 --target test_shm`: passing
+  - `./build/bin/test_shm`: `100 passed, 0 failed`
+- Latest verified full Linux validation after this slice:
   - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
+- Resolved blocker during this slice:
+  - full parallel `ctest` initially failed on:
+    - `test_uds_rust`
+    - `test_shm_rust`
+  - the actual failing Rust test reported by both wrappers was:
+    - `transport::shm::tests::test_shm_multi_client`
+  - observed failure signatures:
+    - `client attach sid=1: Open(2)`
+    - `client attach sid=2: Open(2)`
+    - `client attach sid=3: Open(2)`
+    - and, in another overlapping run:
+      - `server receive sid=1: Timeout`
+      - `server receive sid=2: Timeout`
+      - `server receive sid=3: Timeout`
+- Verified facts behind the fix:
+  - serial rerun passes:
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j1 -R '^test_uds_rust$|^test_shm_rust$'`
+    - result: `2/2` passing
+  - `CMakeLists.txt` had defined:
+    - `test_uds_rust` with only `TIMEOUT 30`
+    - `test_shm_rust` with only `TIMEOUT 30`
+  - the repo already uses `RESOURCE_LOCK` / `RUN_SERIAL` for other parallel-sensitive test groups
+  - the Rust SHM tests share the same crate test binary and shared SHM test run directory:
+    - `src/crates/netipc/src/transport/shm.rs`
+    - `const TEST_RUN_DIR: &str = "/tmp/nipc_shm_rust_test";`
+  - fix applied:
+    - shared CMake `RESOURCE_LOCK rust_posix_transport_tests` on:
+      - `test_uds_rust`
+      - `test_shm_rust`
 - Immediate next target:
-  - pause `netipc_uds.c` unless a new clearly ordinary target appears
-  - fresh evidence from the current uncovered list:
-    - the remaining `netipc_uds.c` holes are now mostly:
-      - helper fallbacks / probe defaults (`73`, `78`, `86`, `431`)
-      - raw send / sendmsg failure paths (`113`, `143`, `209`, `399`, `733-737`, `766-770`)
-      - listen / accept / socket failures (`480`, `494-496`, `520`, `556`)
-      - allocation failure paths (`634`, `793`, `908`)
-      - lower-level chunk validation / cleanup paths that still need more crafted corruption (`934-946`, `961`)
-      - direct invalid-session guards that are not hit cleanly in gcov despite parameter tests (`667`, `707`)
-  - recommendation:
-    - treat POSIX UDS ordinary deterministic coverage as largely exhausted for now
-    - move next either to threshold-raising / honest exclusions, or to the next file with clearer deterministic wins after review
+  - finish and commit the SHM slice:
+    - `tests/fixtures/c/test_shm.c`
+    - `CMakeLists.txt`
+    - docs/TODO sync
+  - then re-review the remaining Linux C uncovered lines to decide the next honest deterministic target
+  - current recommendation from the fresh uncovered list:
+    - pause `netipc_shm.c` unless a new clearly ordinary target appears
+    - treat the remaining `netipc_uds.c` holes as mostly helper-fallback, allocation, send-failure rollback, or socket/open/accept territory
+    - prefer a fresh review of `netipc_service.c` before starting another C slice
 - Note:
   - the older slice notes below are historical context
   - they are no longer the authoritative current state

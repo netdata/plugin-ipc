@@ -239,7 +239,7 @@ Linux / POSIX:
 
 - build: passing
 - `ctest`: `37/37` passing
-- C coverage: `93.4%`
+- C coverage: `94.0%`
 - Go coverage: `95.8%`
 - Rust coverage: `90.66%`
   - measured with `tarpaulin` on this host

@@ -67,6 +67,13 @@ static void cleanup_socket(const char *service)
     unlink(path);
 }
 
+static void build_shm_test_path(char *path, size_t path_len,
+                                const char *service, uint64_t session_id)
+{
+    snprintf(path, path_len, "%s/%s-%016" PRIx64 ".ipcshm",
+             TEST_RUN_DIR, service, session_id);
+}
+
 static void cleanup_all(const char *service)
 {
     cleanup_shm(service);
@@ -1292,6 +1299,17 @@ static void test_owner_generation_mismatch(void)
     cleanup_shm(svc);
 }
 
+static void test_owner_alive_null(void)
+{
+    printf("Test: owner_alive with NULL and null base\n");
+
+    check("owner_alive(NULL) returns false", !nipc_shm_owner_alive(NULL));
+
+    nipc_shm_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    check("owner_alive with null base returns false", !nipc_shm_owner_alive(&ctx));
+}
+
 /* ------------------------------------------------------------------ */
 /*  Coverage: cleanup_stale with NULL params, invalid service, no dir   */
 /* ------------------------------------------------------------------ */
@@ -1496,6 +1514,127 @@ static void test_stale_bad_magic_file(void)
     cleanup_shm(svc);
 }
 
+static void test_shm_bad_header_len_file(void)
+{
+    printf("Test: Client attach to file with bad header_len\n");
+    const char *svc = "shm_bad_hdrlen";
+    cleanup_shm(svc);
+
+    nipc_shm_ctx_t server;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 4096, 4096, &server);
+    check("server create", err == NIPC_SHM_OK);
+
+    if (err == NIPC_SHM_OK) {
+        nipc_shm_region_header_t *hdr =
+            (nipc_shm_region_header_t *)server.base;
+        uint16_t saved = hdr->header_len;
+        hdr->header_len = NIPC_SHM_HEADER_LEN - 8;
+
+        nipc_shm_ctx_t client;
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
+        check("bad header_len rejected", err == NIPC_SHM_ERR_BAD_HEADER);
+
+        hdr->header_len = saved;
+        nipc_shm_destroy(&server);
+    }
+
+    cleanup_shm(svc);
+}
+
+static void test_shm_bad_size_alignment_file(void)
+{
+    printf("Test: Client attach to file with bad aligned size metadata\n");
+    const char *svc = "shm_bad_size_align";
+    cleanup_shm(svc);
+
+    nipc_shm_ctx_t server;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 4096, 4096, &server);
+    check("server create", err == NIPC_SHM_OK);
+
+    if (err == NIPC_SHM_OK) {
+        nipc_shm_region_header_t *hdr =
+            (nipc_shm_region_header_t *)server.base;
+        uint32_t saved_resp_off = hdr->response_offset;
+        hdr->response_offset = hdr->request_offset + 32;
+
+        nipc_shm_ctx_t client;
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
+        check("bad aligned size rejected", err == NIPC_SHM_ERR_BAD_SIZE);
+
+        hdr->response_offset = saved_resp_off;
+        nipc_shm_destroy(&server);
+    }
+
+    cleanup_shm(svc);
+}
+
+static void test_shm_declared_area_exceeds_file(void)
+{
+    printf("Test: Client attach to file with declared area beyond file size\n");
+    const char *svc = "shm_bad_size_file";
+    cleanup_shm(svc);
+
+    nipc_shm_ctx_t server;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 4096, 4096, &server);
+    check("server create", err == NIPC_SHM_OK);
+
+    if (err == NIPC_SHM_OK) {
+        nipc_shm_region_header_t *hdr =
+            (nipc_shm_region_header_t *)server.base;
+        uint32_t saved_resp_cap = hdr->response_capacity;
+        hdr->response_capacity += 4096;
+
+        nipc_shm_ctx_t client;
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
+        check("declared area beyond file rejected", err == NIPC_SHM_ERR_BAD_SIZE);
+
+        hdr->response_capacity = saved_resp_cap;
+        nipc_shm_destroy(&server);
+    }
+
+    cleanup_shm(svc);
+}
+
+static void test_cleanup_stale_ignores_nonmatching_files(void)
+{
+    printf("Test: cleanup_stale ignores non-matching directory entries\n");
+    const char *svc = "shm_scan_filter";
+    cleanup_shm(svc);
+
+    char short_path[256];
+    char wrong_prefix[256];
+    char wrong_suffix[256];
+
+    snprintf(short_path, sizeof(short_path), "%s/%s", TEST_RUN_DIR, svc);
+    snprintf(wrong_prefix, sizeof(wrong_prefix), "%s/other-0000000000000001.ipcshm",
+             TEST_RUN_DIR);
+    snprintf(wrong_suffix, sizeof(wrong_suffix), "%s/%s-0000000000000001.tmp",
+             TEST_RUN_DIR, svc);
+
+    int fd = open(short_path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0)
+        close(fd);
+    fd = open(wrong_prefix, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0)
+        close(fd);
+    fd = open(wrong_suffix, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0)
+        close(fd);
+
+    nipc_shm_cleanup_stale(TEST_RUN_DIR, svc);
+
+    check("short entry ignored", access(short_path, F_OK) == 0);
+    check("wrong-prefix entry ignored", access(wrong_prefix, F_OK) == 0);
+    check("wrong-suffix entry ignored", access(wrong_suffix, F_OK) == 0);
+
+    unlink(short_path);
+    unlink(wrong_prefix);
+    unlink(wrong_suffix);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
@@ -1531,11 +1670,16 @@ int main(void)
     test_pid_zero();                   printf("\n");
     test_owner_dead_pid();             printf("\n");
     test_owner_generation_mismatch();  printf("\n");
+    test_owner_alive_null();           printf("\n");
     test_cleanup_stale_params();       printf("\n");
     test_cleanup_stale_with_files();   printf("\n");
+    test_cleanup_stale_ignores_nonmatching_files(); printf("\n");
     test_shm_receive_msg_too_large();  printf("\n");
     test_stale_undersized_file();      printf("\n");
     test_stale_bad_magic_file();       printf("\n");
+    test_shm_bad_header_len_file();    printf("\n");
+    test_shm_bad_size_alignment_file(); printf("\n");
+    test_shm_declared_area_exceeds_file(); printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

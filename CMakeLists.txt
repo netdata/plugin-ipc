@@ -319,7 +319,10 @@ if(CARGO_EXECUTABLE)
         COMMAND ${CARGO_EXECUTABLE} test transport -- --test-threads=1
         WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
     )
-    set_tests_properties(test_uds_rust PROPERTIES TIMEOUT 30)
+    set_tests_properties(test_uds_rust PROPERTIES
+        TIMEOUT 30
+        RESOURCE_LOCK rust_posix_transport_tests
+    )
 
     # Build the Rust interop binary
     add_custom_target(interop_uds_rs ALL
@@ -334,7 +337,10 @@ if(CARGO_EXECUTABLE)
             COMMAND ${CARGO_EXECUTABLE} test shm -- --test-threads=1
             WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
         )
-        set_tests_properties(test_shm_rust PROPERTIES TIMEOUT 30)
+        set_tests_properties(test_shm_rust PROPERTIES
+            TIMEOUT 30
+            RESOURCE_LOCK rust_posix_transport_tests
+        )
 
         # Build the Rust SHM interop binary
         add_custom_target(interop_shm_rs ALL
