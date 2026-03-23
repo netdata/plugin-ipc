@@ -15,8 +15,32 @@ Verified on `2026-03-23`:
 
 - C:
   - script: `tests/run-coverage-c.sh`
-  - result: `90.5%`
+  - result: `92.8%`
   - threshold: `82%`
+  - latest ordinary C service slices raised:
+    - `netipc_service.c` to `92.1%` (`734/797`)
+    - `netipc_shm.c` to `91.8%`
+  - latest ordinary C additions covered:
+    - client init default-buffer sizing and truncation
+    - empty increment-batch fast-path
+    - tiny request-buffer overflow guards for batch, string-reverse, and SHM increment send
+    - negotiated SHM obstruction covering both server create rejection and client attach failure
+    - typed server missing-handler and success-dispatch paths
+    - server worker-count floor and long run_dir truncation
+    - raw SHM malformed response handling on the client side:
+      - forged oversize response length
+      - short response
+      - bad decoded header
+      - wrong kind / code / message_id
+    - raw SHM malformed request handling on the server side:
+      - forged oversize request length
+      - short request
+      - bad header
+    - typed server unknown-method dispatch and typed-init error propagation
+    - SHM batch client error propagation:
+      - negotiated-capacity send overflow
+      - malformed raw batch response propagation
+      - response `item_count` mismatch
 - Go:
   - script: `tests/run-coverage-go.sh`
   - result: `95.8%`

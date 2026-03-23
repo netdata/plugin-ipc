@@ -159,6 +159,7 @@ typedef struct {
     int worker_count;
     size_t response_buf_size;
     bool typed;
+    const nipc_cgroups_handlers_t *typed_handlers;
     nipc_server_handler_fn raw_handler;
     void *raw_user;
     nipc_managed_server_t server;
@@ -176,7 +177,7 @@ static void *server_thread_fn(void *arg)
 
     if (ctx->typed) {
         err = nipc_server_init_typed(&ctx->server, TEST_RUN_DIR, ctx->service,
-                                     &scfg, ctx->worker_count, &g_typed_handlers);
+                                     &scfg, ctx->worker_count, ctx->typed_handlers);
     } else {
         err = nipc_server_init(&ctx->server, TEST_RUN_DIR, ctx->service,
                                &scfg, ctx->worker_count, ctx->response_buf_size,
@@ -207,6 +208,34 @@ static void start_typed_server(server_thread_ctx_t *ctx,
     ctx->worker_count = worker_count;
     ctx->response_buf_size = response_buf_size;
     ctx->typed = true;
+    ctx->typed_handlers = &g_typed_handlers;
+    __atomic_store_n(&ctx->ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ctx->done, 0, __ATOMIC_RELAXED);
+
+    pthread_create(tid, NULL, server_thread_fn, ctx);
+
+    for (int i = 0;
+         i < 2000 &&
+         !__atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE) &&
+         !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE);
+         i++) {
+        usleep(500);
+    }
+}
+
+static void start_typed_server_with_handlers(server_thread_ctx_t *ctx,
+                                             const char *service,
+                                             int worker_count,
+                                             size_t response_buf_size,
+                                             const nipc_cgroups_handlers_t *handlers,
+                                             pthread_t *tid)
+{
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->service = service;
+    ctx->worker_count = worker_count;
+    ctx->response_buf_size = response_buf_size;
+    ctx->typed = true;
+    ctx->typed_handlers = handlers;
     __atomic_store_n(&ctx->ready, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&ctx->done, 0, __ATOMIC_RELAXED);
 
@@ -383,6 +412,189 @@ static void test_typed_server_rejects_null_handlers(void)
     cleanup_all("hard_null_handlers");
 }
 
+static void test_typed_server_missing_method_handlers(void)
+{
+    printf("--- Typed server reports missing method handlers as INTERNAL_ERROR ---\n");
+
+    const char *svc = "hard_missing_handlers";
+    server_thread_ctx_t sctx;
+    pthread_t server_tid;
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_cgroups_handlers_t handlers = {
+        .on_increment = NULL,
+        .on_string_reverse = NULL,
+        .on_cgroups_snapshot = NULL,
+        .snapshot_max_items = 0,
+        .user = NULL,
+    };
+
+    cleanup_all(svc);
+    start_typed_server_with_handlers(&sctx, svc, 2, RESPONSE_BUF_SIZE,
+                                     &handlers, &server_tid);
+    check("missing handlers: server started",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    {
+        nipc_client_ctx_t client;
+        uint64_t value = 0;
+        nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+        nipc_client_refresh(&client);
+        check("missing handlers: increment client ready", nipc_client_ready(&client));
+        if (nipc_client_ready(&client)) {
+            nipc_error_t err = nipc_client_call_increment(&client, 7, &value);
+            check("missing handlers: increment returns BAD_LAYOUT",
+                  err == NIPC_ERR_BAD_LAYOUT);
+        }
+        nipc_client_close(&client);
+    }
+
+    {
+        nipc_client_ctx_t client;
+        nipc_string_reverse_view_t view;
+        nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+        nipc_client_refresh(&client);
+        check("missing handlers: string client ready", nipc_client_ready(&client));
+        if (nipc_client_ready(&client)) {
+            nipc_error_t err = nipc_client_call_string_reverse(&client, "hello", 5, &view);
+            check("missing handlers: string returns BAD_LAYOUT",
+                  err == NIPC_ERR_BAD_LAYOUT);
+        }
+        nipc_client_close(&client);
+    }
+
+    {
+        nipc_client_ctx_t client;
+        nipc_cgroups_resp_view_t view;
+        nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+        nipc_client_refresh(&client);
+        check("missing handlers: snapshot client ready", nipc_client_ready(&client));
+        if (nipc_client_ready(&client)) {
+            nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
+            check("missing handlers: snapshot returns BAD_LAYOUT",
+                  err == NIPC_ERR_BAD_LAYOUT);
+        }
+        nipc_client_close(&client);
+    }
+
+    stop_server(&sctx, server_tid);
+    cleanup_all(svc);
+}
+
+static void test_typed_server_dispatches_supported_methods(void)
+{
+    printf("--- Typed server dispatches supported methods through typed wrappers ---\n");
+
+    const char *svc = "hard_typed_dispatch";
+    server_thread_ctx_t sctx;
+    pthread_t server_tid;
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_cgroups_handlers_t handlers = g_typed_handlers;
+    nipc_client_ctx_t client;
+    nipc_string_reverse_view_t str_view;
+    nipc_cgroups_resp_view_t snap_view;
+    uint64_t inc_value = 0;
+
+    handlers.snapshot_max_items = 0; /* force the default estimate path */
+
+    cleanup_all(svc);
+    start_typed_server_with_handlers(&sctx, svc, 2, RESPONSE_BUF_SIZE,
+                                     &handlers, &server_tid);
+    check("typed dispatch: server started",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+    nipc_client_refresh(&client);
+    check("typed dispatch: client ready", nipc_client_ready(&client));
+
+    if (nipc_client_ready(&client)) {
+        nipc_error_t err = nipc_client_call_increment(&client, 9, &inc_value);
+        check("typed dispatch: increment succeeds",
+              err == NIPC_OK && inc_value == 10);
+
+        err = nipc_client_call_string_reverse(&client, "stressed", 8, &str_view);
+        check("typed dispatch: string succeeds",
+              err == NIPC_OK &&
+              str_view.str_len == 8 &&
+              memcmp(str_view.str, "desserts", 8) == 0);
+
+        err = nipc_client_call_cgroups_snapshot(&client, &snap_view);
+        check("typed dispatch: snapshot succeeds",
+              err == NIPC_OK &&
+              snap_view.item_count == 3 &&
+              snap_view.systemd_enabled == 0 &&
+              snap_view.generation == 0);
+    }
+
+    nipc_client_close(&client);
+    stop_server(&sctx, server_tid);
+    cleanup_all(svc);
+}
+
+static void test_typed_server_unknown_method_returns_internal_error(void)
+{
+    printf("--- Typed server maps unknown method codes to INTERNAL_ERROR ---\n");
+
+    const char *svc = "hard_typed_unknown";
+    server_thread_ctx_t sctx;
+    pthread_t server_tid;
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    nipc_header_t req_hdr = {0};
+    nipc_header_t resp_hdr = {0};
+    uint8_t recv_buf[4096];
+    const void *payload = NULL;
+    size_t payload_len = 0;
+
+    cleanup_all(svc);
+    start_typed_server(&sctx, svc, 2, RESPONSE_BUF_SIZE, &server_tid);
+    check("typed unknown: server started",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    memset(&session, 0, sizeof(session));
+    session.fd = -1;
+    check("typed unknown: raw connect",
+          nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session) == NIPC_UDS_OK);
+
+    req_hdr.kind = NIPC_KIND_REQUEST;
+    req_hdr.code = 0x7ff0u;
+    req_hdr.flags = 0;
+    req_hdr.item_count = 1;
+    req_hdr.message_id = 1;
+    req_hdr.transport_status = NIPC_STATUS_OK;
+
+    check("typed unknown: send request",
+          nipc_uds_send(&session, &req_hdr, NULL, 0) == NIPC_UDS_OK);
+    check("typed unknown: receive response",
+          nipc_uds_receive(&session, recv_buf, sizeof(recv_buf),
+                           &resp_hdr, &payload, &payload_len) == NIPC_UDS_OK);
+    check("typed unknown: response kind",
+          resp_hdr.kind == NIPC_KIND_RESPONSE);
+    check("typed unknown: response code preserved",
+          resp_hdr.code == req_hdr.code);
+    check("typed unknown: response status INTERNAL_ERROR",
+          resp_hdr.transport_status == NIPC_STATUS_INTERNAL_ERROR);
+    check("typed unknown: empty payload",
+          payload_len == 0);
+
+    nipc_uds_close_session(&session);
+    stop_server(&sctx, server_tid);
+    cleanup_all(svc);
+}
+
+static void test_typed_server_init_propagates_raw_init_error(void)
+{
+    printf("--- Typed server init propagates raw listen/init errors ---\n");
+
+    nipc_managed_server_t server;
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_error_t err = nipc_server_init_typed(&server,
+                                              "/tmp/nipc_missing_parent_99999",
+                                              "hard_typed_init_fail",
+                                              &scfg, 1, &g_typed_handlers);
+    check("typed init returns raw BAD_LAYOUT on listen failure",
+          err == NIPC_ERR_BAD_LAYOUT);
+}
+
 static void test_internal_session_table_growth(void)
 {
     printf("--- Internal session table growth under forced small capacity ---\n");
@@ -541,6 +753,18 @@ int main(void)
     printf("\n");
 
     test_typed_server_rejects_null_handlers();
+    printf("\n");
+
+    test_typed_server_missing_method_handlers();
+    printf("\n");
+
+    test_typed_server_dispatches_supported_methods();
+    printf("\n");
+
+    test_typed_server_unknown_method_returns_internal_error();
+    printf("\n");
+
+    test_typed_server_init_propagates_raw_init_error();
     printf("\n");
 
     test_internal_session_table_growth();

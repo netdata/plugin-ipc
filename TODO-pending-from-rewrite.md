@@ -17,44 +17,63 @@ Finish the rewrite to a production-ready state with:
 ## Current Focus (2026-03-23)
 
 - Latest authoritative slice:
-  - Linux Rust ordinary coverage
+  - Linux C ordinary service coverage
   - added ordinary tests for:
-    - Linux SHM response `message_id` mismatch on all 3 Rust client call paths:
-      - `call_increment()`
-      - `call_string_reverse()`
-      - `call_increment_batch()`
-    - Linux managed-server SHM-upgrade rejection when `server_create()` is blocked by an on-disk obstruction
-    - direct `poll_fd()` deterministic branches:
-      - EINTR returns timeout
-      - closed descriptor returns error
-    - direct POSIX helper branches:
-      - `detect_packet_size()` fallback on invalid fd
-      - `raw_send()` send-error on closed peer
-    - managed-server worker-capacity rejection in `run()`
-    - Linux SHM malformed batch-request item decode failure returning `INTERNAL_ERROR`
-    - chunked batch-directory invalidation across a real continuation boundary
-- Latest verified Linux Rust result:
-  - `bash tests/run-coverage-rust.sh 80`
-  - tool on this host: `tarpaulin`
-  - total: `90.66%`
+    - client init default-buffer sizing and client string truncation
+    - empty increment-batch fast-path
+    - tiny request-buffer overflow guards for:
+      - increment-batch
+      - string-reverse
+      - SHM increment send path
+    - negotiated SHM obstruction that forces:
+      - server-side SHM create rejection
+      - client-side SHM attach failure after handshake
+    - typed server dispatch with all handlers missing
+    - typed server dispatch with all handlers present
+    - default `snapshot_max_items == 0` typed snapshot path
+    - server worker-count floor and long run_dir truncation
+    - raw SHM malformed response handling on the client side:
+      - forged oversize response length
+      - short response
+      - bad decoded header
+      - wrong kind / code / message_id
+    - raw SHM malformed request handling on the server side:
+      - forged oversize request length
+      - short request
+      - bad header
+    - typed server unknown-method dispatch
+    - typed-init error propagation on listen failure
+    - SHM batch client error propagation:
+      - negotiated-capacity send overflow
+      - malformed raw batch response propagation
+      - response `item_count` mismatch
+- Latest verified Linux C result:
+  - `bash tests/run-coverage-c.sh 82`
+  - total: `92.8%`
   - key files:
-    - `src/service/cgroups.rs`: `686/710`
-    - `src/transport/posix.rs`: `388/401`
-    - `src/transport/shm.rs`: `347/375`
+    - `netipc_protocol.c`: `98.7%`
+    - `netipc_uds.c`: `90.1%`
+    - `netipc_shm.c`: `91.8%`
+    - `netipc_service.c`: `92.1%` (`734/797`)
 - Latest verified Linux validation for this slice:
-  - `cargo test --lib --manifest-path src/crates/netipc/Cargo.toml -- --test-threads=1`: `271/271` passing
-  - `cmake --build build -j4`: passing
+  - `./build/bin/test_service`: `218 passed, 0 failed`
+  - `./build/bin/test_hardening`: `47 passed, 0 failed`
+  - `cmake --build build -j4 --target test_service test_hardening`: passing
   - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
 - Immediate next target:
-  - Rust ordinary coverage is getting close to diminishing returns
-  - the remaining Linux Rust uncovered set is now mostly:
-    - fixed-size encode guards in typed APIs (`189`, `202`, `221`, `252`)
-    - helper timeout / panic lines in the Rust test scaffolding (`1919`, `1922`, `2024`, `2058`, `2116`, `2132-2133`, `2166`, `2170`, `2183`, `2193`, `2210-2211`, `3702`)
-    - `poll_fd()` residual branches (`1594-1598`, `1613`) that would need more signal/event orchestration
-    - POSIX helper / syscall branches in `transport/posix.rs` (`226`, `298`, `398`, `427`, `452-453`, `532`, `550-555`, `577`, `830`)
+  - stop grinding `src/libnetdata/netipc/src/service/netipc_service.c` unless a new deterministic target appears
+  - the remaining uncovered C service lines are now mostly:
+    - fixed-size encode guard territory (`317`, `475`, `614`)
+    - batch builder / size-formula territory (`529`)
+    - signal / `EINTR` territory (`656`)
+    - peer-close send-failure cleanup (`871`, `879`, `881`, `886`)
+    - allocation / thread / session-table failure territory (`738`, `1000`, `1126-1149`, `1174-1176`, and related late cleanup paths)
+  - the next honest work should move back up one level:
+    - raise thresholds where the measured numbers now justify it
+    - keep converting ordinary uncovered lines in the other remaining files before writing more exclusion text
   - recommendation:
-    - do not keep grinding Rust blindly after this slice
-    - switch to threshold raising plus honest exclusions, or move to the next largest remaining ordinary target in another language/module
+    - treat Linux C service ordinary coverage as largely exhausted for now
+    - move next to threshold-raising plus honest exclusions, or to the next file that still has clear deterministic gaps
 - Note:
   - the older slice notes below are historical context
   - they are no longer the authoritative current state
@@ -85,6 +104,72 @@ Finish the rewrite to a production-ready state with:
     - fixed-size encode guards in typed APIs (`189`, `202`, `221`, `252`)
     - test-helper panic / timeout lines (`1919`, `1922`, `2024`, `2058`, `2116`, `2132-2133`)
     - raw socket/listen/accept creation failure branches (`226`, `532`, `550-555`, `577`, `830`)
+- Current execution slice after `e0a0f7d`:
+  - switch from Rust to C
+  - next ordinary target is `src/libnetdata/netipc/src/service/netipc_service.c`
+  - fresh evidence from `bash tests/run-coverage-c.sh 82`:
+    - total: `90.5%`
+    - `netipc_protocol.c`: `98.7%`
+    - `netipc_uds.c`: `89.7%`
+    - `netipc_shm.c`: `91.2%`
+    - `netipc_service.c`: `86.6%`
+  - keep only ordinary deterministic C service targets in scope:
+    - client typed-call branches:
+      - default client buffer sizing (`33`, `41`)
+      - empty batch fast-path (`515`)
+      - request-buffer overflow / truncation for batch and string-reverse (`519`, `608`)
+      - SHM short / malformed response handling (`188`, `191`, `195`, `246`, `248`, `250`, `556-560`, `622`)
+    - Linux SHM negotiation failure branches:
+      - client attach failure after handshake (`121-124`)
+      - server-side SHM create failure on negotiated sessions (`1113-1118`)
+    - typed dispatch ordinary branches:
+      - missing typed handlers for increment / string-reverse / snapshot (`693-716`)
+  - explicit non-goals for this slice:
+    - malloc / calloc / realloc failure paths (`373-381`, `803-805`, `999`, `1125`, `1139`, `1161`)
+    - raw socket / listen / accept / thread-create failures in L1-managed code
+    - any branch that needs fault injection instead of a normal public test
+  - first deterministic implementation subset for this slice:
+    - `tests/fixtures/c/test_service.c`
+      - client init defaults + long-string truncation
+      - empty increment-batch fast-path
+      - tiny request-buffer overflow for increment-batch and string-reverse
+      - negotiated SHM obstruction that forces:
+        - server-side SHM create rejection
+        - client-side SHM attach failure after handshake
+    - `tests/fixtures/c/test_hardening.c`
+      - typed server with partial / missing handler tables so the managed typed dispatch covers:
+        - missing increment handler
+        - missing string-reverse handler
+        - missing snapshot handler
+  - deferred to the next C slice unless this subset leaves them clearly ordinary:
+    - SHM malformed-response envelope coverage for:
+      - short response
+      - bad decoded header
+      - wrong kind / code / message_id / item_count on SHM responses
+  - fresh measured result after the first deterministic C subset:
+    - `bash tests/run-coverage-c.sh 82`
+    - total: `91.7%`
+    - `netipc_service.c`: `89.6%` (`714/797`)
+    - exact wins from the first subset:
+      - client init defaults + truncation now covered
+      - empty increment-batch fast-path now covered
+      - tiny request-buffer overflow guards for batch and string-reverse now covered
+      - typed dispatch missing-handler branches now covered
+      - negotiated SHM obstruction now covers both:
+        - server-side SHM create rejection
+        - client-side SHM attach failure after handshake
+  - next ordinary C subset from the fresh uncovered list:
+    - typed-server success paths in `server_typed_dispatch()`:
+      - increment dispatch call (`696`)
+      - string-reverse dispatch call (`704`)
+      - snapshot dispatch call (`712`)
+      - default `snapshot_max_items == 0` path (`678`)
+    - SHM fixed-size send-buffer overflow on the increment path:
+      - `transport_send()` overflow (`149`)
+      - `do_increment_attempt()` propagating `do_raw_call()` error (`483`)
+    - cheap server-init ordinary guards:
+      - worker_count normalization (`970`)
+      - server run_dir / service_name truncation paths (`976`, `982`)
 
 - Coverage parity and documentation honesty, not emergency benchmark or transport fixes.
 - Current execution slice after `f4fdc10`:
@@ -695,7 +780,7 @@ Verified on `2026-03-23`:
 
 - C:
   - `bash tests/run-coverage-c.sh`
-  - result: `90.5%`
+  - result: `92.8%`
   - current threshold: `82%`
 - Go:
   - `bash tests/run-coverage-go.sh`
