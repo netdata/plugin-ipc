@@ -22,14 +22,14 @@ Verified on `2026-03-23`:
   - current status: script passes, including the Linux-matching per-file `82%` gate
 - `bash tests/run-coverage-go-windows.sh 85`:
   - script prints valid coverage results on `win11`
-  - total coverage result: `95.2%`
+  - total coverage result: `96.3%`
   - package coverage:
     - `service/cgroups`: `96.5%`
-    - `transport/windows`: `92.1%`
+    - `transport/windows`: `94.4%`
   - selected key files:
     - `service/cgroups/client_windows.go`: `96.7%`
     - `service/cgroups/types.go`: `100.0%`
-    - `transport/windows/pipe.go`: `91.4%`
+    - `transport/windows/pipe.go`: `95.5%`
     - `transport/windows/shm.go`: `92.9%`
   - current status:
     - reported above the Linux-matching `85%` target
@@ -37,6 +37,7 @@ Verified on `2026-03-23`:
     - latest WinSHM service tests, direct raw WinSHM L2 tests, batch failure/recovery tests, and the listener shutdown fix materially raised both the weak Windows client paths and the Windows transport package
     - malformed raw WinSHM request tests now also cover the real SHM server-side teardown / reconnect path
     - the latest create / attach edge tests materially raised the remaining ordinary Windows Go transport file
+    - the latest raw I/O, handshake, `Listen()`, and chunked batch tests pushed `pipe.go` into the mid-`90%` range and moved Windows Go total above `96%`
 - `bash tests/run-coverage-rust-windows.sh 80`:
   - script works on `win11`
   - workflow:
@@ -65,8 +66,8 @@ Brutal truth:
 - The remaining Windows Go work is no longer a named-pipe transport coverage problem.
 - The ordinary `client_windows.go` targets are largely exhausted.
 - The remaining Windows Go work is now mostly:
-  - `transport/windows/pipe.go` ordinary error / handshake paths
-  - any still-honest residual `transport/windows/shm.go` gap after the latest create / attach edge tests
+  - the remaining low-level `pipe.go` send / receive / accept branches that are still honestly reachable without Win32 fault injection
+  - any still-honest residual `transport/windows/shm.go` gap after the create / attach edge tests
   - fixed-size encode / defensive server branches in `client_windows.go`
   - the deferred Windows managed-server retry/shutdown behavior
 - Some malformed named-pipe response cases do not reach Go L2 coverage points because the Windows session layer rejects them first.

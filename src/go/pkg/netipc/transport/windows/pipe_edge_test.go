@@ -137,6 +137,29 @@ func validHelloAckPacket(status uint16) []byte {
 	}, payload)
 }
 
+func validHelloPacket() []byte {
+	hello := protocol.Hello{
+		LayoutVersion:           1,
+		Flags:                   0,
+		SupportedProfiles:       protocol.ProfileBaseline,
+		PreferredProfiles:       protocol.ProfileBaseline,
+		MaxRequestPayloadBytes:  protocol.MaxPayloadDefault,
+		MaxRequestBatchItems:    1,
+		MaxResponsePayloadBytes: protocol.MaxPayloadDefault,
+		MaxResponseBatchItems:   1,
+		AuthToken:               testAuthToken,
+		PacketSize:              defaultPacketSize,
+	}
+
+	payload := make([]byte, helloPayloadSize)
+	hello.Encode(payload)
+	return encodePacket(protocol.Header{
+		Kind:      protocol.KindControl,
+		Code:      protocol.CodeHello,
+		ItemCount: 1,
+	}, payload)
+}
+
 func TestPipeConnectRejectsInvalidServiceName(t *testing.T) {
 	if _, err := Connect(testPipeRunDir, "bad/name", defaultClientConfigPtr()); !errors.Is(err, ErrBadParam) {
 		t.Fatalf("Connect(invalid service) = %v, want ErrBadParam", err)
@@ -221,6 +244,17 @@ func TestRawPipeDisconnectErrors(t *testing.T) {
 	}
 }
 
+func TestRawPipeGenericErrors(t *testing.T) {
+	if err := rawWrite(syscall.InvalidHandle, []byte("x")); !errors.Is(err, ErrSend) {
+		t.Fatalf("rawWrite(invalid handle) = %v, want ErrSend", err)
+	}
+
+	buf := make([]byte, 16)
+	if _, err := rawRecv(syscall.InvalidHandle, buf); !errors.Is(err, ErrRecv) {
+		t.Fatalf("rawRecv(invalid handle) = %v, want ErrRecv", err)
+	}
+}
+
 func TestClientHandshakeRejectsMalformedAck(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -228,6 +262,16 @@ func TestClientHandshakeRejectsMalformedAck(t *testing.T) {
 		want     error
 		wantText string
 	}{
+		{
+			name: "bad ack header",
+			packetFn: func() []byte {
+				ack := validHelloAckPacket(protocol.StatusOK)
+				ack[0] = 0
+				return ack
+			},
+			want:     ErrProtocol,
+			wantText: "ack header",
+		},
 		{
 			name: "wrong kind",
 			packetFn: func() []byte {
@@ -346,6 +390,155 @@ func TestClientHandshakeRejectsMalformedAck(t *testing.T) {
 				t.Fatalf("raw server failed: %v", err)
 			}
 		})
+	}
+}
+
+func TestClientHandshakeTransportErrors(t *testing.T) {
+	t.Run("hello send disconnected", func(t *testing.T) {
+		clientHandle, serverHandle := rawPipePair(t)
+
+		if err := syscall.CloseHandle(serverHandle); err != nil {
+			t.Fatalf("CloseHandle(server) failed: %v", err)
+		}
+
+		_, err := clientHandshake(clientHandle, defaultClientConfigPtr())
+		if err == nil {
+			t.Fatal("clientHandshake should fail")
+		}
+		if !errors.Is(err, ErrSend) {
+			t.Fatalf("clientHandshake error = %v, want ErrSend", err)
+		}
+		if !strings.Contains(err.Error(), "hello send") {
+			t.Fatalf("clientHandshake error = %v, want text %q", err, "hello send")
+		}
+	})
+
+	t.Run("hello ack recv disconnected", func(t *testing.T) {
+		clientHandle, serverHandle := rawPipePair(t)
+
+		serverDone := make(chan error, 1)
+		go func() {
+			var helloBuf [128]byte
+			_, err := rawRecv(serverHandle, helloBuf[:])
+			if err == nil {
+				err = syscall.CloseHandle(serverHandle)
+			}
+			serverDone <- err
+		}()
+
+		_, err := clientHandshake(clientHandle, defaultClientConfigPtr())
+		if err == nil {
+			t.Fatal("clientHandshake should fail")
+		}
+		if !errors.Is(err, ErrRecv) {
+			t.Fatalf("clientHandshake error = %v, want ErrRecv", err)
+		}
+		if !strings.Contains(err.Error(), "hello_ack recv") {
+			t.Fatalf("clientHandshake error = %v, want text %q", err, "hello_ack recv")
+		}
+
+		if err := <-serverDone; err != nil {
+			t.Fatalf("raw server failed: %v", err)
+		}
+	})
+}
+
+func TestServerHandshakeRejectsMalformedHello(t *testing.T) {
+	cases := []struct {
+		name     string
+		packetFn func() []byte
+		want     error
+		wantText string
+	}{
+		{
+			name: "bad hello header",
+			packetFn: func() []byte {
+				hello := validHelloPacket()
+				hello[0] = 0
+				return hello
+			},
+			want:     ErrProtocol,
+			wantText: "hello header",
+		},
+		{
+			name: "wrong hello kind",
+			packetFn: func() []byte {
+				payload := make([]byte, helloPayloadSize)
+				return encodePacket(protocol.Header{
+					Kind:      protocol.KindRequest,
+					Code:      protocol.CodeHello,
+					ItemCount: 1,
+				}, payload)
+			},
+			want:     ErrProtocol,
+			wantText: "expected HELLO",
+		},
+		{
+			name: "bad hello payload layout",
+			packetFn: func() []byte {
+				hello := validHelloPacket()
+				binary.NativeEndian.PutUint16(hello[protocol.HeaderSize:protocol.HeaderSize+2], 2)
+				return hello
+			},
+			want:     ErrProtocol,
+			wantText: "hello payload",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clientHandle, serverHandle := rawPipePair(t)
+
+			if err := rawWrite(clientHandle, tc.packetFn()); err != nil {
+				t.Fatalf("rawWrite failed: %v", err)
+			}
+
+			cfg := defaultServerConfig()
+			_, err := serverHandshake(serverHandle, &cfg, 1)
+			if err == nil {
+				t.Fatal("serverHandshake should fail")
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("serverHandshake error = %v, want %v", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("serverHandshake error = %v, want text %q", err, tc.wantText)
+			}
+		})
+	}
+}
+
+func TestServerHandshakeHelloAckSendFailure(t *testing.T) {
+	clientHandle, serverHandle := rawPipePair(t)
+
+	if err := rawWrite(clientHandle, validHelloPacket()); err != nil {
+		t.Fatalf("rawWrite(hello) failed: %v", err)
+	}
+	if err := syscall.CloseHandle(clientHandle); err != nil {
+		t.Fatalf("CloseHandle(client) failed: %v", err)
+	}
+
+	cfg := defaultServerConfig()
+	_, err := serverHandshake(serverHandle, &cfg, 7)
+	if err == nil {
+		t.Fatal("serverHandshake should fail")
+	}
+	if !errors.Is(err, ErrSend) {
+		t.Fatalf("serverHandshake error = %v, want ErrSend", err)
+	}
+	if !strings.Contains(err.Error(), "hello_ack send") {
+		t.Fatalf("serverHandshake error = %v, want text %q", err, "hello_ack send")
+	}
+}
+
+func TestPipeListenRejectsBadServiceNames(t *testing.T) {
+	if _, err := Listen(testPipeRunDir, "bad/name", defaultServerConfig()); !errors.Is(err, ErrBadParam) {
+		t.Fatalf("Listen(invalid service) = %v, want ErrBadParam", err)
+	}
+
+	service := strings.Repeat("a", maxPipeNameChars)
+	if _, err := Listen(testPipeRunDir, service, defaultServerConfig()); !errors.Is(err, ErrPipeName) {
+		t.Fatalf("Listen(long service) = %v, want ErrPipeName", err)
 	}
 }
 
@@ -506,6 +699,25 @@ func TestSessionReceiveRejectsMalformedChunks(t *testing.T) {
 		want     error
 		wantText string
 	}{
+		{
+			name: "bad chunk header",
+			spec: chunkSpec{
+				totalPayloadLen: 20,
+				firstPayload:    []byte("0123456789"),
+				chunkHeader: protocol.ChunkHeader{
+					Magic:           0,
+					Version:         protocol.Version,
+					MessageID:       7,
+					TotalMessageLen: uint32(protocol.HeaderSize + 20),
+					ChunkIndex:      1,
+					ChunkCount:      2,
+					ChunkPayloadLen: 10,
+				},
+				chunkPayload: []byte("abcdefghij"),
+			},
+			want:     ErrChunk,
+			wantText: "chunk header",
+		},
 		{
 			name: "continuation recv disconnect",
 			spec: chunkSpec{
@@ -685,6 +897,98 @@ func TestSessionReceiveRejectsMalformedChunks(t *testing.T) {
 			}
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("Receive error = %v, want %v", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("Receive error = %v, want text %q", err, tc.wantText)
+			}
+		})
+	}
+}
+
+func TestSessionReceiveRejectsMalformedChunkedBatchMessages(t *testing.T) {
+	type batchCase struct {
+		name         string
+		totalPayload uint32
+		firstPayload []byte
+		restPayload  []byte
+		wantText     string
+	}
+
+	cases := []batchCase{
+		{
+			name:         "batch dir exceeds payload after chunking",
+			totalPayload: 12,
+			firstPayload: []byte("abcd"),
+			restPayload:  []byte("efghijkl"),
+			wantText:     "batch dir exceeds payload",
+		},
+		{
+			name:         "invalid batch dir after chunking",
+			totalPayload: 24,
+			firstPayload: func() []byte {
+				payload := make([]byte, 24)
+				binary.NativeEndian.PutUint32(payload[0:4], 1)
+				binary.NativeEndian.PutUint32(payload[4:8], 4)
+				binary.NativeEndian.PutUint32(payload[8:12], 0)
+				binary.NativeEndian.PutUint32(payload[12:16], 4)
+				copy(payload[16:], []byte("payload!!"))
+				return payload[:8]
+			}(),
+			restPayload: func() []byte {
+				payload := make([]byte, 24)
+				binary.NativeEndian.PutUint32(payload[0:4], 1)
+				binary.NativeEndian.PutUint32(payload[4:8], 4)
+				binary.NativeEndian.PutUint32(payload[8:12], 0)
+				binary.NativeEndian.PutUint32(payload[12:16], 4)
+				copy(payload[16:], []byte("payload!!"))
+				return payload[8:]
+			}(),
+			wantText: "batch dir",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, server := sessionPair(t, defaultServerConfig(), defaultClientConfig())
+
+			first := encodePacket(protocol.Header{
+				Kind:      protocol.KindRequest,
+				Code:      protocol.MethodIncrement,
+				Flags:     protocol.FlagBatch,
+				ItemCount: 2,
+				MessageID: 7,
+			}, tc.firstPayload)
+			hdr, err := protocol.DecodeHeader(first[:protocol.HeaderSize])
+			if err != nil {
+				t.Fatalf("DecodeHeader failed: %v", err)
+			}
+			hdr.PayloadLen = tc.totalPayload
+			hdr.Encode(first[:protocol.HeaderSize])
+
+			chunk := encodeChunkPacket(protocol.ChunkHeader{
+				Magic:           protocol.MagicChunk,
+				Version:         protocol.Version,
+				MessageID:       7,
+				TotalMessageLen: uint32(protocol.HeaderSize) + tc.totalPayload,
+				ChunkIndex:      1,
+				ChunkCount:      2,
+				ChunkPayloadLen: uint32(len(tc.restPayload)),
+			}, tc.restPayload)
+
+			if err := rawWrite(client.handle, first); err != nil {
+				t.Fatalf("rawWrite(first) failed: %v", err)
+			}
+			if err := rawWrite(client.handle, chunk); err != nil {
+				t.Fatalf("rawWrite(chunk) failed: %v", err)
+			}
+
+			buf := make([]byte, 4096)
+			_, _, err = server.Receive(buf)
+			if err == nil {
+				t.Fatal("Receive should fail")
+			}
+			if !errors.Is(err, ErrProtocol) {
+				t.Fatalf("Receive error = %v, want ErrProtocol", err)
 			}
 			if !strings.Contains(err.Error(), tc.wantText) {
 				t.Fatalf("Receive error = %v, want text %q", err, tc.wantText)
