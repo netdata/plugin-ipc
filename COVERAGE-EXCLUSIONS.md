@@ -31,24 +31,24 @@ Verified on `2026-03-23`:
 Verified on `2026-03-23`:
 
 - C:
-  - script: `tests/run-coverage-c-windows.sh 80`
-  - result: `83.7%`
+  - script: `tests/run-coverage-c-windows.sh 82`
+  - result: `83.9%`
   - per-file:
-    - `netipc_service_win.c`: `82.5%`
+    - `netipc_service_win.c`: `83.1%`
     - `netipc_named_pipe.c`: `85.8%`
     - `netipc_win_shm.c`: `83.2%`
-  - status: passes the current per-file and total `80%` gates
+  - status: passes the Linux-matching per-file and total `82%` gates
 
 - Go:
-  - script: `tests/run-coverage-go-windows.sh 80`
-  - result: `85.8%`
+  - script: `tests/run-coverage-go-windows.sh 85`
+  - result: `89.8%`
   - selected key files:
-    - `service/cgroups/client_windows.go`: `72.9%`
+    - `service/cgroups/client_windows.go`: `90.1%`
     - `service/cgroups/types.go`: `100.0%`
     - `transport/windows/pipe.go`: `83.3%`
     - `transport/windows/shm.go`: `84.5%`
   - status:
-    - reported above target
+    - reported above the Linux-matching `85%` target
     - the script exits cleanly in noninteractive `ssh`
     - first-class Windows Go service/cache tests now also run under `ctest`
 
@@ -137,7 +137,7 @@ hard exclusions yet.
 
 Current evidence:
 
-- `netipc_service_win.c` is now `82.5%`
+- `netipc_service_win.c` is now `83.1%`
 - `netipc_named_pipe.c` is `85.8%`
 - `netipc_win_shm.c` is `83.2%`
 
@@ -151,16 +151,17 @@ Brutal truth:
 
 Current evidence:
 
-- Windows Go total is now `85.8%`
-- `service/cgroups/client_windows.go` still has weak spots in reconnect / transport helper paths
+- Windows Go total is now `89.8%`
+- `service/cgroups/client_windows.go` is now `90.1%`
 - `transport/windows/pipe.go` is now above `80%`
 - `transport/windows/shm.go` is now above `80%`, but it still has ordinary uncovered attach / edge-case branches
+- some malformed named-pipe response cases are filtered by the Windows session layer before they can reach L2 validation branches
 
 Brutal truth:
 
-- Windows Go is no longer the red gate for the draft `80%` target
+- Windows Go is no longer the red gate for the Linux-matching `85%` target
 - but it is still not honest to call it coverage-complete
-- the remaining low-coverage helpers are still ordinary test-work candidates, not hard exclusions
+- the remaining low-coverage transport helpers are still ordinary test-work candidates, not hard exclusions
 
 ### Windows Rust coverage gaps
 
@@ -194,8 +195,8 @@ disconnect tests.
   - coverage improved meaningfully, especially C
 - Windows:
   - coverage measurement now exists and is validated
-  - Windows C now passes its draft gate
-  - Windows Go is above the draft target, the script reliability issue is fixed, and Windows Go service/cache tests are now part of `ctest`
+  - Windows C now passes the Linux-matching `82%` gate
+  - Windows Go is above the Linux-matching `85%` target, the script reliability issue is fixed, and Windows Go service/cache tests are now part of `ctest`
   - Windows Rust coverage now has a real threshold-enforced entrypoint
   - more ordinary test work is required before any “coverage parity” claim is honest
 

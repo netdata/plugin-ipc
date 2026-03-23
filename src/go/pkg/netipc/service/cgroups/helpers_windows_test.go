@@ -19,6 +19,34 @@ func uniqueWinService(prefix string) string {
 	return fmt.Sprintf("%s_%d_%d", prefix, os.Getpid(), winServiceCounter.Add(1))
 }
 
+func testWinShmServerConfig() windows.ServerConfig {
+	cfg := testWinServerConfig()
+	cfg.SupportedProfiles = protocol.ProfileBaseline | protocol.ProfileSHMHybrid
+	cfg.PreferredProfiles = protocol.ProfileSHMHybrid
+	return cfg
+}
+
+func testWinShmClientConfig() windows.ClientConfig {
+	cfg := testWinClientConfig()
+	cfg.SupportedProfiles = protocol.ProfileBaseline | protocol.ProfileSHMHybrid
+	cfg.PreferredProfiles = protocol.ProfileSHMHybrid
+	return cfg
+}
+
+func waitWinClientReady(t *testing.T, client *Client) {
+	t.Helper()
+
+	for i := 0; i < 100; i++ {
+		client.Refresh()
+		if client.Ready() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("client not ready, final state=%d", client.state)
+}
+
 func startTestServerWinWithConfig(service string, cfg windows.ServerConfig, handlers Handlers) *winTestServer {
 	s := NewServer(winTestRunDir, service, cfg, handlers)
 	doneCh := make(chan struct{})
@@ -40,6 +68,11 @@ type winRawSessionServer struct {
 
 func startRawWinSessionServer(t *testing.T, service string, cfg windows.ServerConfig,
 	handler func(*windows.Session, protocol.Header, []byte) error) *winRawSessionServer {
+	return startRawWinSessionServerN(t, service, cfg, 1, handler)
+}
+
+func startRawWinSessionServerN(t *testing.T, service string, cfg windows.ServerConfig, accepts int,
+	handler func(*windows.Session, protocol.Header, []byte) error) *winRawSessionServer {
 	t.Helper()
 
 	listener, err := windows.Listen(winTestRunDir, service, cfg)
@@ -56,21 +89,31 @@ func startRawWinSessionServer(t *testing.T, service string, cfg windows.ServerCo
 		defer close(srv.doneCh)
 		defer listener.Close()
 
-		session, err := listener.Accept()
-		if err != nil {
-			srv.doneCh <- err
-			return
-		}
-		defer session.Close()
+		for i := 0; i < accepts; i++ {
+			session, err := listener.Accept()
+			if err != nil {
+				srv.doneCh <- err
+				return
+			}
 
-		recvBuf := make([]byte, protocol.HeaderSize+int(cfg.MaxRequestPayloadBytes))
-		hdr, payload, err := session.Receive(recvBuf)
-		if err != nil {
-			srv.doneCh <- err
-			return
+			recvBuf := make([]byte, protocol.HeaderSize+int(cfg.MaxRequestPayloadBytes))
+			hdr, payload, err := session.Receive(recvBuf)
+			if err != nil {
+				session.Close()
+				srv.doneCh <- err
+				return
+			}
+
+			if err := handler(session, hdr, payload); err != nil {
+				session.Close()
+				srv.doneCh <- err
+				return
+			}
+
+			session.Close()
 		}
 
-		srv.doneCh <- handler(session, hdr, payload)
+		srv.doneCh <- nil
 	}()
 
 	time.Sleep(200 * time.Millisecond)

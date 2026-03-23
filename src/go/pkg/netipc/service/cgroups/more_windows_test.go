@@ -922,6 +922,40 @@ func TestWinCallIncrementRejectsMalformedPayload(t *testing.T) {
 	srv.wait(t)
 }
 
+func TestWinCallSnapshotRejectsMalformedPayload(t *testing.T) {
+	svc := uniqueWinService("go_win_bad_snapshot_payload")
+	srv := startRawWinSessionServer(t, svc, testWinServerConfig(),
+		func(session *windows.Session, hdr protocol.Header, payload []byte) error {
+			if hdr.Kind != protocol.KindRequest || hdr.Code != protocol.MethodCgroupsSnapshot {
+				return fmt.Errorf("unexpected request header: %+v", hdr)
+			}
+
+			respHdr := protocol.Header{
+				Kind:            protocol.KindResponse,
+				Code:            protocol.MethodCgroupsSnapshot,
+				ItemCount:       1,
+				MessageID:       hdr.MessageID,
+				TransportStatus: protocol.StatusOK,
+			}
+			return session.Send(&respHdr, []byte{1, 2, 3, 4})
+		})
+
+	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	defer client.Close()
+
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatal("client not ready")
+	}
+
+	_, err := client.CallSnapshot()
+	if !errors.Is(err, protocol.ErrTruncated) {
+		t.Fatalf("CallSnapshot error = %v, want %v", err, protocol.ErrTruncated)
+	}
+
+	srv.wait(t)
+}
+
 func TestWinCallStringReverseRejectsMalformedPayload(t *testing.T) {
 	svc := uniqueWinService("go_win_bad_str_payload")
 	srv := startRawWinSessionServer(t, svc, testWinServerConfig(),
@@ -1030,4 +1064,99 @@ func TestWinCallIncrementBatchRejectsMalformedResponseEnvelope(t *testing.T) {
 			srv.wait(t)
 		})
 	}
+}
+
+func TestWinCallIncrementBatchRejectsMalformedPayload(t *testing.T) {
+	t.Run("truncated batch item", func(t *testing.T) {
+		cfg := testWinServerConfig()
+		cfg.MaxRequestBatchItems = 16
+		cfg.MaxResponseBatchItems = 16
+
+		svc := uniqueWinService("go_win_bad_batch_payload")
+		srv := startRawWinSessionServerN(t, svc, cfg, 2,
+			func(session *windows.Session, hdr protocol.Header, payload []byte) error {
+				if hdr.Kind != protocol.KindRequest || hdr.Code != protocol.MethodIncrement {
+					return fmt.Errorf("unexpected request header: %+v", hdr)
+				}
+
+				respBuf := make([]byte, 64)
+				bb := protocol.NewBatchBuilder(respBuf, 1)
+				if err := bb.Add([]byte{1, 2, 3, 4}); err != nil {
+					return err
+				}
+				n, _ := bb.Finish()
+
+				respHdr := protocol.Header{
+					Kind:            protocol.KindResponse,
+					Code:            protocol.MethodIncrement,
+					Flags:           protocol.FlagBatch,
+					ItemCount:       1,
+					MessageID:       hdr.MessageID,
+					TransportStatus: protocol.StatusOK,
+				}
+				return session.Send(&respHdr, respBuf[:n])
+			})
+
+		ccfg := testWinClientConfig()
+		ccfg.MaxRequestBatchItems = 16
+		ccfg.MaxResponseBatchItems = 16
+
+		client := NewClient(winTestRunDir, svc, ccfg)
+		defer client.Close()
+
+		client.Refresh()
+		if !client.Ready() {
+			t.Fatal("client not ready")
+		}
+
+		_, err := client.CallIncrementBatch([]uint64{1})
+		if !errors.Is(err, protocol.ErrTruncated) {
+			t.Fatalf("CallIncrementBatch error = %v, want %v", err, protocol.ErrTruncated)
+		}
+
+		srv.wait(t)
+	})
+
+	t.Run("missing batch body", func(t *testing.T) {
+		cfg := testWinServerConfig()
+		cfg.MaxRequestBatchItems = 16
+		cfg.MaxResponseBatchItems = 16
+
+		svc := uniqueWinService("go_win_bad_batch_body")
+		srv := startRawWinSessionServerN(t, svc, cfg, 2,
+			func(session *windows.Session, hdr protocol.Header, payload []byte) error {
+				if hdr.Kind != protocol.KindRequest || hdr.Code != protocol.MethodIncrement {
+					return fmt.Errorf("unexpected request header: %+v", hdr)
+				}
+
+				respHdr := protocol.Header{
+					Kind:            protocol.KindResponse,
+					Code:            protocol.MethodIncrement,
+					Flags:           protocol.FlagBatch,
+					ItemCount:       hdr.ItemCount,
+					MessageID:       hdr.MessageID,
+					TransportStatus: protocol.StatusOK,
+				}
+				return session.Send(&respHdr, nil)
+			})
+
+		ccfg := testWinClientConfig()
+		ccfg.MaxRequestBatchItems = 16
+		ccfg.MaxResponseBatchItems = 16
+
+		client := NewClient(winTestRunDir, svc, ccfg)
+		defer client.Close()
+
+		client.Refresh()
+		if !client.Ready() {
+			t.Fatal("client not ready")
+		}
+
+		_, err := client.CallIncrementBatch([]uint64{1, 2})
+		if !errors.Is(err, protocol.ErrTruncated) {
+			t.Fatalf("CallIncrementBatch error = %v, want %v", err, protocol.ErrTruncated)
+		}
+
+		srv.wait(t)
+	})
 }

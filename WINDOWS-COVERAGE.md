@@ -11,27 +11,30 @@ It does not claim generic MSVC/CI support that has not been exercised here.
 Verified on `2026-03-23`:
 
 - `ctest --test-dir build --output-on-failure -j4`: `28/28` passing on `win11`
-- `bash tests/run-coverage-c-windows.sh 80`:
+- `bash tests/run-coverage-c-windows.sh 82`:
   - script works
   - coverage-only Windows test subset passes inside the script
-  - total coverage result: `83.7%`
+  - total coverage result: `83.9%`
   - per-file:
-    - `netipc_service_win.c`: `82.5%`
+    - `netipc_service_win.c`: `83.1%`
     - `netipc_named_pipe.c`: `85.8%`
     - `netipc_win_shm.c`: `83.2%`
-  - current status: script passes, including the per-file `80%` gate
-- `bash tests/run-coverage-go-windows.sh 80`:
+  - current status: script passes, including the Linux-matching per-file `82%` gate
+- `bash tests/run-coverage-go-windows.sh 85`:
   - script prints valid coverage results on `win11`
-  - total coverage result: `85.8%`
+  - total coverage result: `89.8%`
+  - package coverage:
+    - `service/cgroups`: `90.6%`
+    - `transport/windows`: `83.9%`
   - selected key files:
-    - `service/cgroups/client_windows.go`: `72.9%`
+    - `service/cgroups/client_windows.go`: `90.1%`
     - `service/cgroups/types.go`: `100.0%`
     - `transport/windows/pipe.go`: `83.3%`
     - `transport/windows/shm.go`: `84.5%`
   - current status:
-    - reported above the draft `80%` target
+    - reported above the Linux-matching `85%` target
     - Windows Go service/cache tests are now also wired into `ctest`
-    - latest malformed-response and SHM corruption/timeout tests materially raised the weak Windows client/SHM paths
+    - latest WinSHM service tests and malformed snapshot/batch tests materially raised the weak Windows client paths
 - `bash tests/run-coverage-rust-windows.sh`:
   - script works on `win11`
   - workflow:
@@ -57,7 +60,8 @@ Brutal truth:
 - The recent Rust Windows coverage work materially raised `service/cgroups.rs` and `win_shm.rs`.
 - The recent Windows named-pipe transport tests materially raised `transport/windows.rs`.
 - The current weakest Windows Rust file is now `service/cgroups.rs`, but it is above the current `80%` threshold.
-- The remaining Windows Go work is now concentrated in `client_windows.go`, plus the deferred Windows managed-server retry/shutdown behavior.
+- The remaining Windows Go work is now concentrated in `transport/windows/pipe.go`, `transport/windows/shm.go`, and the deferred Windows managed-server retry/shutdown behavior.
+- Some malformed named-pipe response cases do not reach Go L2 coverage points because the Windows session layer rejects them first.
 - One transient `test_protocol_rust` failure was observed once under parallel `ctest`, but it did not reproduce on immediate isolated or full reruns. This is not a confirmed active blocker.
 
 ## Scope
@@ -142,13 +146,13 @@ Expected shape:
 ### C coverage
 
 ```bash
-bash tests/run-coverage-c-windows.sh 80
+bash tests/run-coverage-c-windows.sh 82
 ```
 
 ### Go coverage
 
 ```bash
-bash tests/run-coverage-go-windows.sh 80
+bash tests/run-coverage-go-windows.sh 85
 ```
 
 ### Rust coverage

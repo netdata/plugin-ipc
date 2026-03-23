@@ -95,10 +95,7 @@ func TestWinIncrementPingPong(t *testing.T) {
 	defer ts.stop()
 
 	client := NewClient(winTestRunDir, svc, testWinClientConfig())
-	client.Refresh()
-	if !client.Ready() {
-		t.Fatal("client not ready")
-	}
+	waitWinClientReady(t, client)
 
 	// 10 rounds: send 0 -> get 1 -> send 1 -> get 2 -> ... -> value == 10
 	var val uint64
@@ -141,10 +138,7 @@ func TestWinStringReversePingPong(t *testing.T) {
 	defer ts.stop()
 
 	client := NewClient(winTestRunDir, svc, testWinClientConfig())
-	client.Refresh()
-	if !client.Ready() {
-		t.Fatal("client not ready")
-	}
+	waitWinClientReady(t, client)
 
 	original := "abcdefghijklmnopqrstuvwxyz"
 
@@ -193,10 +187,7 @@ func TestWinMixedMethods(t *testing.T) {
 	defer ts.stop()
 
 	client := NewClient(winTestRunDir, svc, testWinClientConfig())
-	client.Refresh()
-	if !client.Ready() {
-		t.Fatal("client not ready")
-	}
+	waitWinClientReady(t, client)
 
 	// increment(100) -> 101
 	val, err := client.CallIncrement(100)
