@@ -19,37 +19,72 @@ Finish the rewrite to a production-ready state with:
 - Latest authoritative slice:
   - Linux Rust ordinary coverage
   - added ordinary tests for:
+    - Linux SHM response `message_id` mismatch on all 3 Rust client call paths:
+      - `call_increment()`
+      - `call_string_reverse()`
+      - `call_increment_batch()`
+    - Linux managed-server SHM-upgrade rejection when `server_create()` is blocked by an on-disk obstruction
+    - direct `poll_fd()` deterministic branches:
+      - EINTR returns timeout
+      - closed descriptor returns error
+    - direct POSIX helper branches:
+      - `detect_packet_size()` fallback on invalid fd
+      - `raw_send()` send-error on closed peer
     - managed-server worker-capacity rejection in `run()`
     - Linux SHM malformed batch-request item decode failure returning `INTERNAL_ERROR`
     - chunked batch-directory invalidation across a real continuation boundary
-    - retry-once success and retry-second-failure on typed string-reverse and increment-batch calls
-    - Linux SHM attach failure in `try_connect()`
-    - Linux SHM short-response rejection in `transport_receive()`
-    - managed-server batch builder overflow
-    - UDS continuation-too-short, chunk-count-mismatch, and chunk-exceeds-payload validation
 - Latest verified Linux Rust result:
   - `bash tests/run-coverage-rust.sh 80`
   - tool on this host: `tarpaulin`
-  - total: `90.35%`
+  - total: `90.66%`
   - key files:
-    - `src/service/cgroups.rs`: `641/664`
-    - `src/transport/posix.rs`: `386/401`
-    - `src/transport/shm.rs`: `346/375`
+    - `src/service/cgroups.rs`: `686/710`
+    - `src/transport/posix.rs`: `388/401`
+    - `src/transport/shm.rs`: `347/375`
 - Latest verified Linux validation for this slice:
-  - `cargo test --lib --manifest-path src/crates/netipc/Cargo.toml -- --test-threads=1`: `263/263` passing
+  - `cargo test --lib --manifest-path src/crates/netipc/Cargo.toml -- --test-threads=1`: `271/271` passing
   - `cmake --build build -j4`: passing
   - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
 - Immediate next target:
-  - keep only deterministic Linux Rust branches in scope:
-    - `src/service/cgroups.rs`: `1090`, `1230`, `1594-1598`, `1613`, `1919`, `1922`, `1946`, `2024`, `2058`, `2116`, `2132-2133`
-    - `src/transport/posix.rs`: `398`, `427`, `486-488`, `532`, `550-555`, `577`, `671`, `742`, `830` if a concrete malformed packet can still reach them
-  - if the next rerun yields only marginal gains, stop grinding Rust and switch to threshold raising plus honest exclusions
+  - Rust ordinary coverage is getting close to diminishing returns
+  - the remaining Linux Rust uncovered set is now mostly:
+    - fixed-size encode guards in typed APIs (`189`, `202`, `221`, `252`)
+    - helper timeout / panic lines in the Rust test scaffolding (`1919`, `1922`, `2024`, `2058`, `2116`, `2132-2133`, `2166`, `2170`, `2183`, `2193`, `2210-2211`, `3702`)
+    - `poll_fd()` residual branches (`1594-1598`, `1613`) that would need more signal/event orchestration
+    - POSIX helper / syscall branches in `transport/posix.rs` (`226`, `298`, `398`, `427`, `452-453`, `532`, `550-555`, `577`, `830`)
+  - recommendation:
+    - do not keep grinding Rust blindly after this slice
+    - switch to threshold raising plus honest exclusions, or move to the next largest remaining ordinary target in another language/module
 - Note:
   - the older slice notes below are historical context
   - they are no longer the authoritative current state
   - one new layering fact is now explicit:
     - malformed batch directories on POSIX UDS are rejected by L1 before the managed Rust L2 loop can return `INTERNAL_ERROR`
     - the honest ordinary coverage path for that branch is Linux SHM, not UDS
+- Current execution slice after `a36cf6e`:
+  - stay on Linux Rust only
+  - keep only ordinary deterministic targets in scope:
+    - `src/service/cgroups.rs`
+      - raw response-envelope mismatch guards in the typed request-buffer paths:
+        - `550`
+        - `587`
+        - `626`
+      - Linux managed-server SHM-upgrade rejection:
+        - `1090`
+        - `1230`
+      - direct helper branches that are still deterministic:
+        - `1594-1598`
+        - `1613`
+    - `src/transport/posix.rs`
+      - chunk-index mismatch formatting path:
+        - `452-453`
+      - direct helper / fallback branches that can be hit without syscall fault injection:
+        - `671`
+        - `742` only if peer-close produces a deterministic send failure
+  - explicit non-goals for this slice:
+    - fixed-size encode guards in typed APIs (`189`, `202`, `221`, `252`)
+    - test-helper panic / timeout lines (`1919`, `1922`, `2024`, `2058`, `2116`, `2132-2133`)
+    - raw socket/listen/accept creation failure branches (`226`, `532`, `550-555`, `577`, `830`)
 
 - Coverage parity and documentation honesty, not emergency benchmark or transport fixes.
 - Current execution slice after `f4fdc10`:
@@ -356,11 +391,11 @@ Finish the rewrite to a production-ready state with:
   - fresh Linux Rust coverage measurement from the current machine:
     - `bash tests/run-coverage-rust.sh 80`
     - current tool on this host: `tarpaulin`
-    - current result: `90.35%`
+    - current result: `90.66%`
     - current largest uncovered Rust files from the report:
-      - `src/service/cgroups.rs`: `641/664`
-      - `src/transport/posix.rs`: `386/401`
-      - `src/transport/shm.rs`: `346/375`
+      - `src/service/cgroups.rs`: `686/710`
+      - `src/transport/posix.rs`: `388/401`
+      - `src/transport/shm.rs`: `347/375`
     - implication:
       - Linux Rust is now the next biggest ordinary coverage target, not Linux Go
   - direct uncovered-line extraction from `src/crates/netipc/cobertura.xml` confirms a mixed picture:
@@ -668,7 +703,7 @@ Verified on `2026-03-23`:
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
-  - result: `90.35%`
+  - result: `90.66%`
   - current threshold: `80%`
 
 Important fact:

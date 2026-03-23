@@ -2660,7 +2660,10 @@ mod tests {
 
         let mut buf = [0u8; 64];
         let err = session.receive(&mut buf).expect_err("chunk index mismatch");
-        assert!(matches!(err, UdsError::Chunk(_)));
+        assert!(matches!(
+            err,
+            UdsError::Chunk(ref msg) if msg == "chunk_index mismatch: expected 1, got 2"
+        ));
 
         unsafe { libc::close(fd1) };
     }
@@ -3439,5 +3442,25 @@ mod tests {
     fn test_apply_default() {
         assert_eq!(apply_default(0, 42), 42);
         assert_eq!(apply_default(10, 42), 10);
+    }
+
+    #[test]
+    fn test_detect_packet_size_invalid_fd_returns_fallback() {
+        assert_eq!(detect_packet_size(-1), DEFAULT_PACKET_SIZE_FALLBACK);
+    }
+
+    #[test]
+    fn test_raw_send_closed_peer_returns_send_error() {
+        let (fd0, fd1) = socketpair_seqpacket();
+        unsafe {
+            libc::close(fd1);
+        }
+
+        let err = raw_send(fd0, &[1, 2, 3]).expect_err("closed peer should fail send");
+        assert!(matches!(err, UdsError::Send(_)));
+
+        unsafe {
+            libc::close(fd0);
+        }
     }
 }

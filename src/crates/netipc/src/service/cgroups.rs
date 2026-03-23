@@ -2136,6 +2136,94 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    struct RawShmSessionServer {
+        thread: Option<thread::JoinHandle<Result<(), String>>>,
+    }
+
+    #[cfg(target_os = "linux")]
+    fn start_raw_shm_session_server<F>(
+        service: &str,
+        cfg: ServerConfig,
+        handler: F,
+    ) -> RawShmSessionServer
+    where
+        F: FnOnce(&mut ShmContext, Header, &[u8]) -> Result<(), String> + Send + 'static,
+    {
+        ensure_run_dir();
+        cleanup_all(service);
+
+        let svc = service.to_string();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready.clone();
+
+        let thread = thread::spawn(move || {
+            let listener =
+                UdsListener::bind(TEST_RUN_DIR, &svc, cfg).map_err(|e| format!("bind: {e}"))?;
+            ready_clone.store(true, Ordering::Release);
+            let session = listener.accept().map_err(|e| format!("accept: {e}"))?;
+            if session.selected_profile != PROFILE_SHM_FUTEX {
+                return Err(format!("unexpected profile {}", session.selected_profile));
+            }
+
+            let mut shm = ShmContext::server_create(
+                TEST_RUN_DIR,
+                &svc,
+                session.session_id,
+                session.max_request_payload_bytes + HEADER_SIZE as u32,
+                session.max_response_payload_bytes + HEADER_SIZE as u32,
+            )
+            .map_err(|e| format!("server_create: {e}"))?;
+
+            let mut recv_buf = vec![0u8; session.max_request_payload_bytes as usize + HEADER_SIZE];
+            let mlen = shm
+                .receive(&mut recv_buf, 5000)
+                .map_err(|e| format!("shm receive: {e}"))?;
+            if mlen < HEADER_SIZE {
+                return Err(format!("request too short: {mlen}"));
+            }
+
+            let hdr = Header::decode(&recv_buf[..mlen]).map_err(|e| format!("decode: {e:?}"))?;
+            let payload = recv_buf[HEADER_SIZE..mlen].to_vec();
+            handler(&mut shm, hdr, &payload)
+        });
+
+        for _ in 0..2000 {
+            if ready.load(Ordering::Acquire) {
+                break;
+            }
+            thread::sleep(Duration::from_micros(500));
+        }
+        thread::sleep(Duration::from_millis(50));
+
+        RawShmSessionServer {
+            thread: Some(thread),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl RawShmSessionServer {
+        fn wait(&mut self) {
+            if let Some(thread) = self.thread.take() {
+                match thread.join() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => panic!("raw shm session server failed: {err}"),
+                    Err(_) => panic!("raw shm session server panicked"),
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn encode_raw_message(hdr: &Header, payload: &[u8]) -> Vec<u8> {
+        let mut msg = vec![0u8; HEADER_SIZE + payload.len()];
+        hdr.encode(&mut msg[..HEADER_SIZE]);
+        if !payload.is_empty() {
+            msg[HEADER_SIZE..].copy_from_slice(payload);
+        }
+        msg
+    }
+
     #[test]
     fn test_client_lifecycle() {
         let svc = "rs_svc_lifecycle";
@@ -2333,6 +2421,30 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn test_server_rejects_session_when_linux_shm_upgrade_create_fails() {
+        let svc = "rs_svc_shm_upgrade_fail";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let shm_path = format!("{TEST_RUN_DIR}/{svc}-{:016x}.ipcshm", 1u64);
+        let _ = std::fs::remove_dir_all(&shm_path);
+        std::fs::create_dir(&shm_path).expect("create SHM obstruction directory");
+
+        let mut server = TestServer::start_with(svc, shm_server_config(), pingpong_handlers(), 8);
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, shm_client_config());
+
+        client.refresh();
+        assert!(!client.ready(), "client should not become READY");
+        assert_eq!(client.state, ClientState::Disconnected);
+
+        client.close();
+        server.stop();
+        let _ = std::fs::remove_dir_all(&shm_path);
+        cleanup_all(svc);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn test_call_increment_shm_short_response_truncated() {
         let svc = "rs_svc_shm_short_resp";
         ensure_run_dir();
@@ -2392,6 +2504,149 @@ mod tests {
             Ok(Err(err)) => panic!("raw shm server failed: {err}"),
             Err(_) => panic!("raw shm server panicked"),
         }
+        cleanup_all(svc);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_call_increment_shm_rejects_bad_message_id() {
+        let svc = "rs_svc_shm_inc_bad_mid";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = start_raw_shm_session_server(svc, shm_server_config(), move |shm, req_hdr, _| {
+            let mut payload = [0u8; INCREMENT_PAYLOAD_SIZE];
+            let n = increment_encode(43, &mut payload);
+            if n != INCREMENT_PAYLOAD_SIZE {
+                return Err(format!("increment_encode returned {n}"));
+            }
+
+            let resp_hdr = Header {
+                magic: MAGIC_MSG,
+                version: VERSION,
+                header_len: protocol::HEADER_LEN,
+                kind: KIND_RESPONSE,
+                code: METHOD_INCREMENT,
+                flags: 0,
+                payload_len: n as u32,
+                item_count: 1,
+                message_id: req_hdr.message_id + 1,
+                transport_status: STATUS_OK,
+            };
+            let msg = encode_raw_message(&resp_hdr, &payload[..n]);
+            shm.send(&msg).map_err(|e| format!("shm send: {e}"))
+        });
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, shm_client_config());
+        connect_ready(&mut client);
+        assert!(client.shm.is_some(), "expected SHM to be negotiated");
+
+        let err = client.call_increment(42).expect_err("bad SHM response message_id");
+        assert_eq!(err, NipcError::BadLayout);
+
+        client.close();
+        server.wait();
+        cleanup_all(svc);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_call_string_reverse_shm_rejects_bad_message_id() {
+        let svc = "rs_svc_shm_str_bad_mid";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = start_raw_shm_session_server(svc, shm_server_config(), move |shm, req_hdr, _| {
+            let mut payload = [0u8; 128];
+            let n = string_reverse_encode(b"olleh", &mut payload);
+            if n == 0 {
+                return Err("string_reverse_encode returned 0".into());
+            }
+
+            let resp_hdr = Header {
+                magic: MAGIC_MSG,
+                version: VERSION,
+                header_len: protocol::HEADER_LEN,
+                kind: KIND_RESPONSE,
+                code: METHOD_STRING_REVERSE,
+                flags: 0,
+                payload_len: n as u32,
+                item_count: 1,
+                message_id: req_hdr.message_id + 1,
+                transport_status: STATUS_OK,
+            };
+            let msg = encode_raw_message(&resp_hdr, &payload[..n]);
+            shm.send(&msg).map_err(|e| format!("shm send: {e}"))
+        });
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, shm_client_config());
+        connect_ready(&mut client);
+        assert!(client.shm.is_some(), "expected SHM to be negotiated");
+
+        let err = client
+            .call_string_reverse("hello")
+            .expect_err("bad SHM response message_id");
+        assert_eq!(err, NipcError::BadLayout);
+
+        client.close();
+        server.wait();
+        cleanup_all(svc);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_call_increment_batch_shm_rejects_bad_message_id() {
+        let svc = "rs_svc_shm_batch_bad_mid";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = start_raw_shm_session_server(
+            svc,
+            shm_server_config(),
+            move |shm, req_hdr, _| {
+                let mut encoded = [0u8; INCREMENT_PAYLOAD_SIZE];
+                let n = increment_encode(11, &mut encoded);
+                if n != INCREMENT_PAYLOAD_SIZE {
+                    return Err(format!("increment_encode returned {n}"));
+                }
+
+                let mut response_buf = vec![0u8; 128];
+                let resp_len = {
+                    let mut batch = BatchBuilder::new(&mut response_buf, 2);
+                    batch.add(&encoded).map_err(|e| format!("batch add 1: {e:?}"))?;
+                    batch.add(&encoded).map_err(|e| format!("batch add 2: {e:?}"))?;
+                    let (len, _count) = batch.finish();
+                    len
+                };
+
+                let resp_hdr = Header {
+                    magic: MAGIC_MSG,
+                    version: VERSION,
+                    header_len: protocol::HEADER_LEN,
+                    kind: KIND_RESPONSE,
+                    code: METHOD_INCREMENT,
+                    flags: FLAG_BATCH,
+                    payload_len: resp_len as u32,
+                    item_count: 2,
+                    message_id: req_hdr.message_id + 1,
+                    transport_status: STATUS_OK,
+                };
+                let msg = encode_raw_message(&resp_hdr, &response_buf[..resp_len]);
+                shm.send(&msg).map_err(|e| format!("shm send: {e}"))
+            },
+        );
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, shm_client_config());
+        connect_ready(&mut client);
+        assert!(client.shm.is_some(), "expected SHM to be negotiated");
+
+        let err = client
+            .call_increment_batch(&[10, 20])
+            .expect_err("bad SHM batch response message_id");
+        assert_eq!(err, NipcError::BadLayout);
+
+        client.close();
+        server.wait();
         cleanup_all(svc);
     }
 
@@ -2761,6 +3016,54 @@ mod tests {
 
         server.stop();
         cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_poll_fd_invalid_fd_returns_error() {
+        let mut fds = [0; 2];
+        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(rc, 0, "pipe failed");
+
+        let read_fd = fds[0];
+        let write_fd = fds[1];
+        unsafe {
+            libc::close(read_fd);
+        }
+
+        let rc = poll_fd(read_fd, 0);
+        unsafe {
+            libc::close(write_fd);
+        }
+
+        assert_eq!(rc, -1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_poll_fd_eintr_returns_timeout() {
+        unsafe extern "C" fn noop_signal_handler(_: libc::c_int) {}
+
+        let mut fds = [0; 2];
+        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(rc, 0, "pipe failed");
+
+        let read_fd = fds[0];
+        let write_fd = fds[1];
+        let old = unsafe { libc::signal(libc::SIGALRM, noop_signal_handler as libc::sighandler_t) };
+        assert_ne!(old, libc::SIG_ERR);
+
+        unsafe {
+            libc::alarm(1);
+        }
+        let rc = poll_fd(read_fd, 5000);
+        unsafe {
+            libc::alarm(0);
+            libc::signal(libc::SIGALRM, old);
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+
+        assert_eq!(rc, 0);
     }
 
     #[test]
