@@ -18,11 +18,12 @@ Finish the rewrite to a production-ready state with:
 
 - Coverage parity and documentation honesty, not emergency benchmark or transport fixes.
 - Current execution slice after the Windows Go parity expansion:
-  - revalidated full `win11` `ctest` after the Windows Go coverage additions
+  - completed the next Windows Go transport coverage pass on `win11`
+  - validated the new Windows-only Go transport edge tests directly with native `go test`
   - synced the TODO and coverage docs to the latest Windows Go numbers
   - fixed the exact-head Windows Rust state-test startup race under parallel `ctest`
   - fixed the matching service-interop client readiness race across the C, Rust, and Go service interop fixtures on both POSIX and Windows
-  - reviewed the real `win11` Go coverage profile for `service/cgroups`
+  - reviewed the real `win11` Go coverage profiles for both `service/cgroups` and `transport/windows`
   - next target:
     - keep raising the relaxed coverage gates toward `100%`
     - current result:
@@ -30,31 +31,29 @@ Finish the rewrite to a production-ready state with:
       - WinSHM edge-case tests raised `transport/win_shm.rs`
       - Windows named-pipe transport tests raised `transport/windows.rs` into the mid-`90%` range
       - WinSHM service tests and stricter malformed batch/snapshot tests raised Go `service/cgroups/client_windows.go` above `90%`
-      - the next honest low-coverage Windows Go files are now:
-        - `transport/windows/pipe.go`
-        - `transport/windows/shm.go`
+      - the latest Windows Go transport edge tests raised:
+        - `transport/windows/pipe.go` to `90.7%`
+        - `transport/windows/shm.go` to `86.1%`
+        - `transport/windows` package total to `88.7%`
+      - Windows Go no longer has a weak transport package
       - exact uncovered Go functions on `win11` are now known:
         - `doRawCall` (`86.7%`)
-        - `CallSnapshot` (`88.2%`)
+        - `CallSnapshot` (`94.1%`)
         - `CallStringReverse` (`87.5%`)
-        - `CallIncrementBatch` (`77.3%`)
-        - `disconnect` (`66.7%`)
-        - `tryConnect` (`52.6%`)
-        - `transportSend` (`28.6%`)
-        - `transportReceive` (`41.2%`)
-        - `Run` (`70.8%`)
-        - `handleSession` (`56.2%`)
+        - `CallIncrementBatch` (`81.8%`)
+        - `transportReceive` (`82.4%`)
+        - `Run` (`87.5%`)
+        - `handleSession` (`83.8%`)
       - facts from the uncovered blocks:
-        - most remaining gaps are in the WinSHM success/error path and in the managed server accept/session loop
-        - baseline named-pipe request/response coverage is already strong
-        - the first honest coverage gains therefore came from Go WinSHM service tests, not more baseline pipe tests
+        - most remaining Go gaps are now ordinary L2 service paths and the deferred managed-server retry/shutdown area
+        - Windows named-pipe transport edge handling is now broadly covered
+        - the recent honest coverage gains came from real malformed transport tests and WinSHM edge tests, not from exclusions
         - some malformed named-pipe response cases never reach L2 validation because the Windows session layer rejects them first
       - split of remaining Go gaps:
         - ordinary testable now:
-          - malformed snapshot payload
-          - WinSHM client send/receive roundtrip
-          - WinSHM managed-server session loop and stop path
-          - batch payload validation
+          - remaining `client_windows.go` L2 call and session-loop branches
+          - more WinSHM managed-server session/stop coverage
+          - more batch and string-reverse error-path coverage
         - likely requires special orchestration later:
           - transport-level malformed response `MessageID` and some response-envelope corruptions that are rejected below L2 on named pipes
           - rare managed-server retry/shutdown races already tracked separately
@@ -67,20 +66,20 @@ Finish the rewrite to a production-ready state with:
     - total: `83.9%`
     - status: the script now passes the Linux-matching per-file `82%` gate
   - Go:
-    - total: `89.8%`
+    - total: `92.0%`
     - package coverage:
       - `service/cgroups`: `90.6%`
-      - `transport/windows`: `83.9%`
+      - `transport/windows`: `88.7%`
     - key files:
       - `service/cgroups/client_windows.go`: `90.1%`
       - `service/cgroups/types.go`: `100.0%`
-      - `transport/windows/pipe.go`: `83.3%`
-      - `transport/windows/shm.go`: `84.5%`
+      - `transport/windows/pipe.go`: `90.7%`
+      - `transport/windows/shm.go`: `86.1%`
     - status:
       - passes the Linux-matching `85%` target
       - the noninteractive exit problem is fixed
       - first-class Windows Go CTest targets now exist for service/cache coverage parity
-      - latest added WinSHM service tests and malformed-response tests increased `client_windows.go` materially
+      - latest added WinSHM service tests, malformed-response tests, and transport edge tests increased both `client_windows.go` and the Windows transport package materially
   - Rust:
     - validated workflow: `cargo-llvm-cov` + `rustup component add llvm-tools-preview`
     - measured with Windows-native unit tests + Rust interop ctests, with Rust bin / benchmark noise excluded from the report:
@@ -269,16 +268,17 @@ Current measured results:
 
 - Go:
   - `bash tests/run-coverage-go-windows.sh 85`
-  - coverage result: `89.8%`
+  - coverage result: `92.0%`
   - package coverage:
     - `protocol`: `99.5%`
     - `service/cgroups`: `90.6%`
-    - `transport/windows`: `83.9%`
+    - `transport/windows`: `88.7%`
   - status:
     - reported above the Linux-matching `85%` target
     - focused helper tests raised:
-      - `transport/windows/pipe.go` to `83.3%`
-      - `transport/windows/shm.go` to `84.5%`
+      - `transport/windows/pipe.go` to `90.7%`
+      - `transport/windows/shm.go` to `86.1%`
+      - `transport/windows` package total to `88.7%`
       - `service/cgroups/types.go` to `100.0%`
       - `service/cgroups/client_windows.go` to `90.1%`
     - first-class Windows Go CTest targets are now real and passing on `win11`
@@ -437,7 +437,7 @@ Current expected result:
 - `bash tests/run-coverage-c-windows.sh 82`
   - passes with all tracked Windows C files above `82%`
 - `bash tests/run-coverage-go-windows.sh 85`
-  - currently reports `89.8%`
+  - currently reports `92.0%`
 - `bash tests/run-coverage-rust-windows.sh`
   - currently reports `93.59%`
   - should now enforce the same `80%` total threshold used by Linux Rust
@@ -483,7 +483,7 @@ Facts:
 - Windows C coverage currently passes:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
-- Windows Go coverage currently reports `89.8%`.
+- Windows Go coverage currently reports `92.0%`.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
@@ -491,16 +491,16 @@ Required next work:
 1. Keep the deferred Windows retry/shutdown investigation separate from the normal coverage gate
 2. Start raising the relaxed coverage thresholds toward `100%`
 3. Immediate next pass:
-   - continue raising Windows Go coverage in the real remaining weak files:
-     - `transport/windows/pipe.go`
-     - `transport/windows/shm.go`
+   - continue raising Windows Go coverage in the real remaining weak areas:
+     - `service/cgroups/client_windows.go`
+     - managed-server shutdown / retry behavior, handled separately from ordinary coverage
    - keep Windows Go CTest parity honest:
      - `test_named_pipe_go`
      - `test_service_win_go`
      - `test_cache_win_go`
 4. Current execution slice (`2026-03-23`):
-   - inspect the remaining weak Windows Go transport paths function-by-function
-   - add tests only for real uncovered logic in `pipe.go` and `shm.go`
+   - inspect the remaining weak Windows Go and Rust service paths function-by-function on `win11`
+   - add tests only for real ordinary uncovered logic, not for branches that already require orchestration or fault injection
    - re-measure on `win11` before deciding whether to continue on Go or switch to the next parity gap
 
 ### 2. Cross-platform validation parity is only partial

@@ -102,6 +102,20 @@ func TestWinShmCreateAttachAndCloseValidation(t *testing.T) {
 	}
 }
 
+func TestWinShmCreateAttachRejectsLongObjectName(t *testing.T) {
+	runDir := t.TempDir()
+	service := strings.Repeat("a", 220)
+	const authToken uint64 = 0x9988
+	const sessionID uint64 = 23
+
+	if _, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileHybrid, 4096, 4096); !errors.Is(err, ErrWinShmBadParam) {
+		t.Fatalf("WinShmServerCreate(long name) = %v, want ErrWinShmBadParam", err)
+	}
+	if _, err := WinShmClientAttach(runDir, service, authToken, sessionID, WinShmProfileHybrid); !errors.Is(err, ErrWinShmBadParam) {
+		t.Fatalf("WinShmClientAttach(long name) = %v, want ErrWinShmBadParam", err)
+	}
+}
+
 func TestWinShmClientAttachRejectsCorruptHeader(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -289,6 +303,51 @@ func TestWinShmReceiveTimeoutBusywait(t *testing.T) {
 	buf := make([]byte, 128)
 	if _, err := server.WinShmReceive(buf, 10); !errors.Is(err, ErrWinShmTimeout) {
 		t.Fatalf("WinShmReceive busywait timeout = %v, want %v", err, ErrWinShmTimeout)
+	}
+}
+
+func TestWinShmReceiveBusywaitDetectsPeerClosed(t *testing.T) {
+	runDir := t.TempDir()
+	service := "busywait-peer-closed"
+	const authToken uint64 = 0x8914
+	const sessionID uint64 = 21
+
+	server, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileBusywait, 4096, 4096)
+	if err != nil {
+		t.Fatalf("WinShmServerCreate failed: %v", err)
+	}
+	defer server.WinShmDestroy()
+
+	client, err := WinShmClientAttach(runDir, service, authToken, sessionID, WinShmProfileBusywait)
+	if err != nil {
+		t.Fatalf("WinShmClientAttach failed: %v", err)
+	}
+
+	results := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 128)
+		_, err := server.WinShmReceive(buf, 1000)
+		results <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	client.WinShmClose()
+
+	select {
+	case err := <-results:
+		if !errors.Is(err, ErrWinShmDisconnected) {
+			t.Fatalf("WinShmReceive busywait after peer close = %v, want ErrWinShmDisconnected", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WinShmReceive busywait did not observe peer close")
+	}
+}
+
+func TestWinShmReceiveNullContext(t *testing.T) {
+	var ctx WinShmContext
+	buf := make([]byte, 16)
+	if _, err := ctx.WinShmReceive(buf, 1); !errors.Is(err, ErrWinShmBadParam) {
+		t.Fatalf("WinShmReceive on null context = %v, want ErrWinShmBadParam", err)
 	}
 }
 

@@ -22,19 +22,19 @@ Verified on `2026-03-23`:
   - current status: script passes, including the Linux-matching per-file `82%` gate
 - `bash tests/run-coverage-go-windows.sh 85`:
   - script prints valid coverage results on `win11`
-  - total coverage result: `89.8%`
+  - total coverage result: `92.0%`
   - package coverage:
     - `service/cgroups`: `90.6%`
-    - `transport/windows`: `83.9%`
+    - `transport/windows`: `88.7%`
   - selected key files:
     - `service/cgroups/client_windows.go`: `90.1%`
     - `service/cgroups/types.go`: `100.0%`
-    - `transport/windows/pipe.go`: `83.3%`
-    - `transport/windows/shm.go`: `84.5%`
+    - `transport/windows/pipe.go`: `90.7%`
+    - `transport/windows/shm.go`: `86.1%`
   - current status:
     - reported above the Linux-matching `85%` target
     - Windows Go service/cache tests are now also wired into `ctest`
-    - latest WinSHM service tests and malformed snapshot/batch tests materially raised the weak Windows client paths
+    - latest WinSHM service tests, malformed snapshot/batch tests, and transport edge tests materially raised both the weak Windows client paths and the Windows transport package
 - `bash tests/run-coverage-rust-windows.sh`:
   - script works on `win11`
   - workflow:
@@ -60,7 +60,8 @@ Brutal truth:
 - The recent Rust Windows coverage work materially raised `service/cgroups.rs` and `win_shm.rs`.
 - The recent Windows named-pipe transport tests materially raised `transport/windows.rs`.
 - The current weakest Windows Rust file is now `service/cgroups.rs`, but it is above the current `80%` threshold.
-- The remaining Windows Go work is now concentrated in `transport/windows/pipe.go`, `transport/windows/shm.go`, and the deferred Windows managed-server retry/shutdown behavior.
+- The remaining Windows Go work is no longer the transport package.
+- The remaining Windows Go work is now concentrated in `service/cgroups/client_windows.go` session/error branches and the deferred Windows managed-server retry/shutdown behavior.
 - Some malformed named-pipe response cases do not reach Go L2 coverage points because the Windows session layer rejects them first.
 - One transient `test_protocol_rust` failure was observed once under parallel `ctest`, but it did not reproduce on immediate isolated or full reruns. This is not a confirmed active blocker.
 

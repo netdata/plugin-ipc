@@ -4,6 +4,7 @@ package windows
 
 import (
 	"errors"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -201,5 +202,19 @@ func TestBuildPipeNameInvalidService(t *testing.T) {
 	_, err = BuildPipeName("/var/run", ".")
 	if err == nil {
 		t.Error("expected error for '.'")
+	}
+}
+
+func TestBuildPipeNameTooLong(t *testing.T) {
+	service := strings.Repeat("a", maxPipeNameChars)
+	if _, err := BuildPipeName("/var/run", service); !errors.Is(err, ErrPipeName) {
+		t.Fatalf("BuildPipeName(long) = %v, want ErrPipeName", err)
+	}
+}
+
+func TestSetNamedPipeHandleStateInvalidHandle(t *testing.T) {
+	mode := uint32(_PIPE_READMODE_MESSAGE)
+	if err := setNamedPipeHandleState(syscall.InvalidHandle, &mode); err == nil {
+		t.Fatal("setNamedPipeHandleState on invalid handle should fail")
 	}
 }
