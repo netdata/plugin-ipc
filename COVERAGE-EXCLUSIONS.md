@@ -19,7 +19,7 @@ Verified on `2026-03-23`:
   - threshold: `82%`
 - Go:
   - script: `tests/run-coverage-go.sh`
-  - result: `94.4%`
+  - result: `95.0%`
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
@@ -246,6 +246,15 @@ Concrete evidence from the latest Linux Go SHM transport slice:
   - `checkShmStale()` non-empty directory path (open succeeds, `Mmap` fails)
   - `ShmServerCreate()` retry-create failure when stale recovery cannot remove
     the obstructing path
+- one existing SHM transport test-harness race was also real and is now fixed:
+  - the direct SHM roundtrip tests were using fixed service names plus blind
+    `50ms` sleeps before `ShmClientAttach()`
+  - under coverage slowdown this produced both:
+    - attach-before-create failures (`ErrShmOpen`)
+    - and later server-side futex-wait timeouts
+  - the fix was:
+    - unique SHM service names per test
+    - attach-ready waiting instead of blind sleeps
 - result:
   - `transport/posix/shm_linux.go` is now `91.4%`
   - `ShmServerCreate()` moved to `79.2%`
@@ -254,6 +263,26 @@ Concrete evidence from the latest Linux Go SHM transport slice:
   - the remaining `shm_linux.go` gaps are now even more concentrated in true OS
     failure paths such as `Ftruncate`, `Mmap`, `Dup`, `f.Stat`, and atomic-load
     bounds failures after a successful `Mmap`
+
+Concrete evidence from the latest Linux Go UDS transport slice:
+
+- the remaining ordinary UDS batch-directory and first-request state paths were
+  still available and are now covered:
+  - client `Send()` with `inflightIDs == nil`
+  - non-chunked batch-directory underflow validation
+  - chunked batch-directory validation after successful reassembly
+  - `detectPacketSize()` fallback / success helper behavior
+- result:
+  - `transport/posix/uds.go` is now `94.5%`
+  - `Send()` is now `100.0%`
+  - `Receive()` moved to `97.8%`
+  - `detectPacketSize()` is now `100.0%`
+- implication:
+  - the remaining weak `uds.go` lines are now much more concentrated in raw
+    syscall-failure and short-write territory:
+    - `Listen()` raw socket / bind / listen failures
+    - `rawSendMsg()` short writes
+    - handshake send / receive syscall failures
 
 ## Practical Reading Of The Current State
 

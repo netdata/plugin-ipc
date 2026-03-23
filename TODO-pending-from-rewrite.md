@@ -17,6 +17,60 @@ Finish the rewrite to a production-ready state with:
 ## Current Focus (2026-03-23)
 
 - Coverage parity and documentation honesty, not emergency benchmark or transport fixes.
+- Current execution slice after the latest POSIX Go UDS / SHM stability pass:
+  - revalidated the exact current Linux / POSIX Go transport package coverage from the real module root
+  - current package result:
+    - `transport/posix` total: `92.9%`
+    - `transport/posix/shm_linux.go`: `91.4%`
+    - `transport/posix/uds.go`: `94.5%`
+  - current verified weak POSIX UDS functions:
+    - `Receive()`: `97.8%`
+    - `Listen()`: `71.4%`
+    - `detectPacketSize()`: `100.0%`
+    - `rawSendMsg()`: `83.3%`
+    - `connectAndHandshake()`: `90.9%`
+    - `serverHandshake()`: `93.8%`
+  - completed the next ordinary POSIX UDS coverage slice
+  - validated ordinary raw UDS tests for:
+    - client `Send()` initialization of the first in-flight request set
+    - non-chunked batch-directory underflow rejection
+    - chunked batch-directory validation after full payload reassembly
+    - `detectPacketSize()` fallback and live-fd success behavior
+  - discovered one real POSIX SHM transport test-harness race while rerunning the package under coverage:
+    - `TestShmDirectRoundtrip` and related tests still used fixed service names plus blind `50ms` sleeps before `ShmClientAttach()`
+    - under coverage slowdown this caused both:
+      - attach-before-create failures (`SHM open failed: ... no such file or directory`)
+      - and later server-side futex-wait timeouts
+  - fixed the SHM transport package race honestly:
+    - replaced blind sleeps with attach-ready waiting
+    - moved the live SHM roundtrip tests to unique per-test service names
+    - verified the package with `go test -count=5 ./pkg/netipc/transport/posix`
+  - reviewed the remaining `uds.go` uncovered blocks against the real code and the existing raw UDS edge-test helpers
+  - checked the official Linux manual pages for `recvmsg()` / `MSG_TRUNC` on AF_UNIX sequenced-packet sockets:
+    - verified that record boundaries and truncation behavior are explicit for AF_UNIX datagram / sequenced-packet sockets
+    - implication:
+      - the next honest ordinary coverage should come from malformed packet sequences and real protocol states
+      - not from pretending POSIX UDS behaves like a byte-stream transport
+  - current split of remaining POSIX UDS gaps:
+    - ordinary testable now:
+      - non-chunked batch directory underflow / invalidation in `Receive()`
+      - chunked final batch-directory validation in `Receive()`
+      - client-side `Send()` branch where `inflightIDs` starts `nil`
+      - possibly one small `detectPacketSize()` fallback helper case if it can be driven without fault injection
+    - likely special-infrastructure later:
+      - `Connect()` / `Listen()` raw socket, bind, and listen syscall failures
+      - short writes in `rawSendMsg()` and handshake send paths
+      - zero-length or syscall-failure handshake receive paths
+      - most `ShmServerCreate()` / `ShmClientAttach()` remaining `Ftruncate`, `Mmap`, `Dup`, and `Stat` failures
+  - next target:
+    - review whether any remaining low-level POSIX transport gaps are still ordinary:
+      - `rawSendMsg()`
+      - `Listen()`
+      - `connectAndHandshake()`
+      - `serverHandshake()`
+    - classify the remainder honestly into:
+      - still ordinary
+      - or special-infrastructure / syscall-failure territory
 - Current execution slice after the Windows Go parity expansion:
   - completed the next Linux / POSIX Go SHM service follow-up slice
   - validated ordinary POSIX SHM service tests for:
@@ -272,7 +326,7 @@ Verified on `2026-03-23`:
   - current threshold: `82%`
 - Go:
   - `bash tests/run-coverage-go.sh`
-  - result: `94.4%`
+  - result: `95.0%`
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
@@ -575,7 +629,7 @@ Facts:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
 - Windows Go coverage currently reports `96.7%`.
-- Linux Go coverage currently reports `94.4%` with the remaining ordinary gaps now reduced to a smaller POSIX transport/service residue.
+- Linux Go coverage currently reports `95.0%` with the remaining ordinary gaps now reduced to a smaller POSIX low-level transport/service residue.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
@@ -651,19 +705,21 @@ Required next work:
      - `transport/posix/uds.go`
        - result of the latest ordinary UDS slice:
          - file moved from `83.7%` to `92.0%`
+       - result of the latest focused UDS follow-up slice:
+         - file moved from `92.0%` to `94.5%`
        - `Connect`: `90.9%`
-       - `Send`: `94.1%`
+       - `Send`: `100.0%`
        - `sendInner`: `94.3%`
-       - `Receive`: `89.9%`
+       - `Receive`: `97.8%`
        - `Listen`: `71.4%`
        - `Accept`: `100.0%`
-       - `detectPacketSize`: `75.0%`
+       - `detectPacketSize`: `100.0%`
        - `rawSendMsg`: `83.3%`
        - `rawRecv`: `100.0%`
        - `connectAndHandshake`: `90.9%`
        - `serverHandshake`: `93.8%`
      - implication:
-       - the next honest ordinary target is still Linux Go, but no longer `transport/posix/uds.go` or `service/cgroups/types.go`
+       - the next honest ordinary target is still Linux Go, but no longer the ordinary `Receive()` / `Send()` / helper work in `transport/posix/uds.go`
    - next ordinary target:
      - start with the remaining low-risk Linux Go service gaps:
        - `service/cgroups/types.go` is now done (`100.0%`)

@@ -36,6 +36,39 @@ func cleanupShmFiles(t *testing.T, service string) {
 	}
 }
 
+func uniqueShmService(t *testing.T, prefix string) string {
+	t.Helper()
+	return fmt.Sprintf("%s_%s", prefix, uniqueService(t))
+}
+
+func waitShmClientAttach(t *testing.T, runDir, service string, sessionID uint64) *ShmContext {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		ctx, err := ShmClientAttach(runDir, service, sessionID)
+		if err == nil {
+			return ctx
+		}
+		lastErr = err
+
+		if !errors.Is(err, ErrShmOpen) &&
+			!errors.Is(err, ErrShmNotReady) &&
+			!errors.Is(err, ErrShmBadMagic) &&
+			!errors.Is(err, ErrShmBadVersion) &&
+			!errors.Is(err, ErrShmBadHeader) &&
+			!errors.Is(err, ErrShmBadSize) {
+			t.Fatalf("attach should not fail with non-transient error while waiting for readiness: %v", err)
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for SHM region readiness: %v", lastErr)
+	return nil
+}
+
 // buildShmMessage creates a complete wire message (32-byte header + payload).
 func buildShmMessage(kind, code uint16, messageID uint64, payload []byte) []byte {
 	hdr := protocol.Header{
@@ -56,7 +89,7 @@ func buildShmMessage(kind, code uint16, messageID uint64, payload []byte) []byte
 
 func TestShmDirectRoundtrip(t *testing.T) {
 	ensureShmRunDir(t)
-	svc := "go_shm_rt"
+	svc := uniqueShmService(t, "go_shm_rt")
 	cleanupShmFiles(t, svc)
 	defer cleanupShmFiles(t, svc)
 
@@ -99,13 +132,7 @@ func TestShmDirectRoundtrip(t *testing.T) {
 		}
 	}()
 
-	// Wait for server to create region
-	time.Sleep(50 * time.Millisecond)
-
-	client, err := ShmClientAttach(testShmRunDir, svc, 1)
-	if err != nil {
-		t.Fatalf("client attach: %v", err)
-	}
+	client := waitShmClientAttach(t, testShmRunDir, svc, 1)
 	defer client.ShmClose()
 
 	payload := []byte{0xCA, 0xFE, 0xBA, 0xBE}
@@ -147,7 +174,7 @@ func TestShmDirectRoundtrip(t *testing.T) {
 
 func TestShmMultipleRoundtrips(t *testing.T) {
 	ensureShmRunDir(t)
-	svc := "go_shm_multi"
+	svc := uniqueShmService(t, "go_shm_multi")
 	cleanupShmFiles(t, svc)
 	defer cleanupShmFiles(t, svc)
 
@@ -186,11 +213,7 @@ func TestShmMultipleRoundtrips(t *testing.T) {
 		}
 	}()
 
-	time.Sleep(50 * time.Millisecond)
-	client, err := ShmClientAttach(testShmRunDir, svc, 2)
-	if err != nil {
-		t.Fatalf("client attach: %v", err)
-	}
+	client := waitShmClientAttach(t, testShmRunDir, svc, 2)
 	defer client.ShmClose()
 
 	respBuf := make([]byte, 65536)
@@ -229,7 +252,7 @@ func TestShmMultipleRoundtrips(t *testing.T) {
 
 func TestShmStaleRecovery(t *testing.T) {
 	ensureShmRunDir(t)
-	svc := "go_shm_stale"
+	svc := uniqueShmService(t, "go_shm_stale")
 	cleanupShmFiles(t, svc)
 	defer cleanupShmFiles(t, svc)
 
@@ -259,7 +282,7 @@ func TestShmStaleRecovery(t *testing.T) {
 
 func TestShmClientAttachPartialHeaderNotReady(t *testing.T) {
 	ensureShmRunDir(t)
-	svc := "go_shm_partial"
+	svc := uniqueShmService(t, "go_shm_partial")
 	cleanupShmFiles(t, svc)
 	defer cleanupShmFiles(t, svc)
 
@@ -292,7 +315,7 @@ func TestShmClientAttachPartialHeaderNotReady(t *testing.T) {
 
 func TestShmLargeMessage(t *testing.T) {
 	ensureShmRunDir(t)
-	svc := "go_shm_large"
+	svc := uniqueShmService(t, "go_shm_large")
 	cleanupShmFiles(t, svc)
 	defer cleanupShmFiles(t, svc)
 
@@ -329,11 +352,7 @@ func TestShmLargeMessage(t *testing.T) {
 		}
 	}()
 
-	time.Sleep(50 * time.Millisecond)
-	client, err := ShmClientAttach(testShmRunDir, svc, 4)
-	if err != nil {
-		t.Fatalf("client attach: %v", err)
-	}
+	client := waitShmClientAttach(t, testShmRunDir, svc, 4)
 	defer client.ShmClose()
 
 	// 60000 bytes of payload
@@ -369,7 +388,7 @@ func TestShmLargeMessage(t *testing.T) {
 
 func TestShmChaosForgedLength(t *testing.T) {
 	ensureShmRunDir(t)
-	svc := "go_shm_forged"
+	svc := uniqueShmService(t, "go_shm_forged")
 	cleanupShmFiles(t, svc)
 	defer cleanupShmFiles(t, svc)
 
@@ -480,7 +499,7 @@ func TestShmChaosForgedLength(t *testing.T) {
 
 func TestShmMultiClient(t *testing.T) {
 	ensureShmRunDir(t)
-	svc := "go_shm_mcli"
+	svc := uniqueShmService(t, "go_shm_mcli")
 	cleanupShmFiles(t, svc)
 	defer cleanupShmFiles(t, svc)
 
@@ -537,18 +556,12 @@ func TestShmMultiClient(t *testing.T) {
 		}()
 	}
 
-	// Wait for regions to be ready
-	time.Sleep(50 * time.Millisecond)
-
 	// Attach clients and send unique messages
 	clients := make([]*ShmContext, numClients)
 	payloads := make([][]byte, numClients)
 	for i := 0; i < numClients; i++ {
 		sessionID := uint64(i + 1)
-		c, err := ShmClientAttach(testShmRunDir, svc, sessionID)
-		if err != nil {
-			t.Fatalf("client attach session %d: %v", sessionID, err)
-		}
+		c := waitShmClientAttach(t, testShmRunDir, svc, sessionID)
 		defer c.ShmClose()
 		clients[i] = c
 

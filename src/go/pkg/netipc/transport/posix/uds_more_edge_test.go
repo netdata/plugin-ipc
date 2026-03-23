@@ -217,6 +217,41 @@ func TestUdsSessionSendRejectsTooSmallPacketSize(t *testing.T) {
 	}
 }
 
+func TestUdsSendInitializesInflightSetOnFirstRequest(t *testing.T) {
+	client, server := udsSessionPair(t, defaultServerConfig(), defaultClientConfig())
+
+	client.inflightIDs = nil
+	payload := []byte("ping")
+	hdr := protocol.Header{
+		Kind:      protocol.KindRequest,
+		Code:      protocol.MethodIncrement,
+		ItemCount: 1,
+		MessageID: 55,
+	}
+
+	if err := client.Send(&hdr, payload); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+	if client.inflightIDs == nil {
+		t.Fatal("Send should initialize inflightIDs for the first client request")
+	}
+	if _, ok := client.inflightIDs[55]; !ok {
+		t.Fatal("Send should track the in-flight message_id")
+	}
+
+	buf := make([]byte, 4096)
+	rHdr, rPayload, err := server.Receive(buf)
+	if err != nil {
+		t.Fatalf("server Receive failed: %v", err)
+	}
+	if rHdr.MessageID != 55 {
+		t.Fatalf("server received message_id=%d, want 55", rHdr.MessageID)
+	}
+	if string(rPayload) != string(payload) {
+		t.Fatalf("server received payload=%q, want %q", rPayload, payload)
+	}
+}
+
 func TestUdsReceiveRejectsMalformedFirstPacket(t *testing.T) {
 	cases := []struct {
 		name string
@@ -300,6 +335,73 @@ func TestUdsReceiveRejectsMalformedBatchPayload(t *testing.T) {
 	_, _, err := client.Receive(buf)
 	if !errors.Is(err, ErrProtocol) {
 		t.Fatalf("Receive error = %v, want ErrProtocol", err)
+	}
+}
+
+func TestUdsReceiveRejectsMalformedChunkedBatchPayload(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload []byte
+		first   int
+	}{
+		{
+			name:    "batch dir exceeds payload",
+			payload: make([]byte, 8),
+			first:   4,
+		},
+		{
+			name: "batch dir invalid after reassembly",
+			payload: func() []byte {
+				payload := make([]byte, 24)
+				binary.NativeEndian.PutUint32(payload[0:4], 1)
+				binary.NativeEndian.PutUint32(payload[4:8], 4)
+				binary.NativeEndian.PutUint32(payload[8:12], 0)
+				binary.NativeEndian.PutUint32(payload[12:16], 4)
+				copy(payload[16:], []byte("payload!!"))
+				return payload
+			}(),
+			first: 8,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, server := udsSessionPair(t, defaultServerConfig(), defaultClientConfig())
+
+			client.inflightIDs[42] = struct{}{}
+			firstPkt := encodePartialPacket(protocol.Header{
+				Kind:      protocol.KindResponse,
+				Code:      protocol.MethodIncrement,
+				Flags:     protocol.FlagBatch,
+				ItemCount: 2,
+				MessageID: 42,
+			}, uint32(len(tc.payload)), tc.payload[:tc.first])
+			if err := rawSendPacket(server.fd, firstPkt); err != nil {
+				t.Fatalf("rawSendPacket(first) failed: %v", err)
+			}
+
+			second := tc.payload[tc.first:]
+			if len(second) > 0 {
+				secondPkt := encodeChunkPacket(protocol.ChunkHeader{
+					Magic:           protocol.MagicChunk,
+					Version:         protocol.Version,
+					MessageID:       42,
+					TotalMessageLen: uint32(protocol.HeaderSize + len(tc.payload)),
+					ChunkIndex:      1,
+					ChunkCount:      2,
+					ChunkPayloadLen: uint32(len(second)),
+				}, second)
+				if err := rawSendPacket(server.fd, secondPkt); err != nil {
+					t.Fatalf("rawSendPacket(second) failed: %v", err)
+				}
+			}
+
+			buf := make([]byte, 4096)
+			_, _, err := client.Receive(buf)
+			if !errors.Is(err, ErrProtocol) {
+				t.Fatalf("Receive error = %v, want ErrProtocol", err)
+			}
+		})
 	}
 }
 
@@ -639,4 +741,15 @@ func defaultServerConfigPtr() *ServerConfig {
 
 func containsErrText(err error, want string) bool {
 	return err != nil && want != "" && strings.Contains(err.Error(), want)
+}
+
+func TestDetectPacketSizeFallbackAndSuccess(t *testing.T) {
+	if got := detectPacketSize(-1); got != defaultPacketSizeFallback {
+		t.Fatalf("detectPacketSize(-1) = %d, want fallback %d", got, defaultPacketSizeFallback)
+	}
+
+	client, _ := udsSessionPair(t, defaultServerConfig(), defaultClientConfig())
+	if got := detectPacketSize(client.fd); got == 0 {
+		t.Fatal("detectPacketSize(valid fd) returned 0")
+	}
 }
