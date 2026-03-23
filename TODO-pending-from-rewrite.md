@@ -28,12 +28,19 @@ Finish the rewrite to a production-ready state with:
   - reason:
     - `cargo-llvm-cov` counts inline `#[cfg(test)]` code inside the production file
     - that made valid new tests lower the reported runtime coverage of `src/service/cgroups.rs`
+  - latest ordinary Unix Rust service slice added deterministic coverage for:
+    - managed-server recovery after malformed short UDS request
+    - managed-server recovery after malformed UDS header
+    - managed-server recovery after peer-close during UDS response send
+    - managed-server recovery after malformed short SHM request
+    - managed-server recovery after malformed SHM header
+    - `poll_fd()` readable and deterministic EINTR handling
 - Latest verified Linux Rust result:
   - `bash tests/run-coverage-rust.sh 80`
   - tool on this host: `cargo-llvm-cov`
-  - total: `98.54%` (`6544/6641` executed, `97` missed)
+  - total: `98.61%` (`6549/6641` executed, `92` missed)
   - key files:
-    - `service/cgroups.rs`: `97.67%` (`797/816`)
+    - `service/cgroups.rs`: `98.28%` (`802/816`)
     - `transport/posix.rs`: `99.00%`
     - `transport/shm.rs`: `96.40%`
 - Latest verified Linux C result:
@@ -64,21 +71,76 @@ Finish the rewrite to a production-ready state with:
   - old `tarpaulin` baseline is historical only and should not be treated as the active Linux Rust total anymore
   - Linux-side ordinary candidates still visible in the report:
     - `src/service/cgroups.rs`
-      - helper / deterministic branches around:
-        - `1594-1598`
-        - `1613`
-        - `2166`
-        - `2170`
-        - `2183`
-        - `2193`
-        - `2210-2211`
+      - remaining likely special or low-value branches:
+        - fixed-size encode guards:
+          - `189`
+          - `202`
+          - `221`
+          - `252`
+        - listener loop / teardown edges:
+          - `1050`
+          - `1062`
+        - remaining transport break paths:
+          - `1431`
+          - `1445`
+          - `1552`
+          - `1563`
+        - `poll_fd()` residual lines after the new readable / EINTR tests:
+          - `1597`
+          - `1598`
+          - `1611`
+          - `1613`
     - `src/transport/posix.rs`
-      - helper / deterministic branches around:
-        - `398`
-        - `452-453`
+      - remaining gaps are now mostly:
+        - syscall / listener creation failures:
+          - `226`
+          - `532`
+          - `550-555`
+          - `577`
+          - `830`
+        - structurally unreachable zero-arm math:
+          - `298`
+          - `427`
+        - test-only panic lines in Rust transport tests:
+          - `2485`
+          - `3016`
+          - `3173`
+          - `3234`
+          - `3288`
+          - `3346`
     - `src/transport/shm.rs`
-      - stale / validation / guard branches around:
-        - `755`
+      - remaining gaps are now mostly:
+        - raw OS failure branches:
+          - `245-250`
+          - `264-269`
+          - `335-336`
+          - `356-357`
+          - `946-947`
+          - `963-964`
+        - stale / cleanup corner cases:
+          - `706`
+          - `712`
+          - `716`
+          - `722`
+          - `755-756`
+          - `983`
+          - `986-987`
+        - remaining test-only assert / panic lines:
+          - `1258`
+          - `1262`
+          - `1266`
+          - `1306`
+          - `1310`
+          - `1314`
+          - `1406`
+          - `1414`
+          - `1421`
+          - `1847`
+          - `1895`
+          - `1915`
+          - `1919`
+          - `2065`
+          - `2072`
   - explicit non-goals for the next Rust slice:
     - fixed-size encode guards:
       - `src/service/cgroups.rs`: `189`, `202`, `221`, `252`
@@ -194,8 +256,8 @@ Finish the rewrite to a production-ready state with:
   - `service/cgroups.rs` no longer contains the Unix test module inline
   - the Unix tests now live in `src/service/cgroups_unix_tests.rs`
   - the exact verified Linux Rust rerun after the split is:
-    - total: `98.54%`
-    - `service/cgroups.rs`: `97.67%`
+    - total: `98.61%`
+    - `service/cgroups.rs`: `98.28%`
     - `transport/posix.rs`: `99.00%`
     - `transport/shm.rs`: `96.40%`
   - exact verified Linux regressions after the split:

@@ -80,7 +80,7 @@ Verified on `2026-03-23`:
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
-  - result: `98.54%`
+  - result: `98.61%`
   - threshold: `80%`
   - note:
     - Linux now uses `cargo-llvm-cov`, matching the Windows Rust workflow
@@ -93,7 +93,7 @@ Verified on `2026-03-23`:
     - implication:
       - adding new Unix Rust tests no longer inflates the denominator of `src/service/cgroups.rs`
     - current Linux file totals from the verified `llvm-cov` run:
-      - `service/cgroups.rs`: `97.67%` (`797/816`)
+      - `service/cgroups.rs`: `98.28%` (`802/816`)
       - `transport/posix.rs`: `99.00%` (`2508/2533`)
       - `transport/shm.rs`: `96.40%` (`1363/1412`)
     - implication:
@@ -102,6 +102,13 @@ Verified on `2026-03-23`:
         - on POSIX baseline, a bad response `message_id` is rejected by L1 before the L2 typed wrappers can map it to `BadLayout`
         - malformed batch directories on POSIX UDS are rejected by L1 before the Rust managed-service loop can map them to `INTERNAL_ERROR`
         - the honest ordinary coverage path for that branch is Linux SHM
+      - latest ordinary Unix Rust service slice covered:
+        - managed-server recovery after malformed short UDS request
+        - managed-server recovery after malformed UDS header
+        - managed-server recovery after peer-close during UDS response send
+        - managed-server recovery after malformed short SHM request
+        - managed-server recovery after malformed SHM header
+        - `poll_fd()` readable and deterministic EINTR paths
 
 Latest Linux Go notes from the current ordinary POSIX slice:
 

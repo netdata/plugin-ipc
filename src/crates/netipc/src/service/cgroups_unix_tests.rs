@@ -1,4 +1,3 @@
-
 use super::*;
 #[cfg(target_os = "linux")]
 use crate::protocol::PROFILE_SHM_FUTEX;
@@ -148,6 +147,54 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
             Err(_) => "<non-string panic>".to_string(),
         },
     }
+}
+
+fn send_raw_packet(fd: i32, data: &[u8]) {
+    let sent = unsafe { libc::send(fd, data.as_ptr() as *const libc::c_void, data.len(), 0) };
+    assert_eq!(
+        sent,
+        data.len() as isize,
+        "raw send failed: {:?}",
+        std::io::Error::last_os_error()
+    );
+}
+
+fn build_increment_request_message(message_id: u64, value: u64) -> Vec<u8> {
+    let mut payload = [0u8; INCREMENT_PAYLOAD_SIZE];
+    let payload_len = increment_encode(value, &mut payload);
+    assert_eq!(
+        payload_len, INCREMENT_PAYLOAD_SIZE,
+        "increment_encode should fit the fixed-size request buffer"
+    );
+
+    let hdr = Header {
+        magic: MAGIC_MSG,
+        version: VERSION,
+        header_len: protocol::HEADER_LEN,
+        kind: KIND_REQUEST,
+        code: METHOD_INCREMENT,
+        flags: 0,
+        payload_len: payload_len as u32,
+        item_count: 1,
+        message_id,
+        transport_status: STATUS_OK,
+    };
+
+    let mut msg = vec![0u8; HEADER_SIZE + payload_len];
+    hdr.encode(&mut msg[..HEADER_SIZE]);
+    msg[HEADER_SIZE..].copy_from_slice(&payload[..payload_len]);
+    msg
+}
+
+fn verify_increment_service_ok(service: &str, config: ClientConfig) {
+    let mut verify = CgroupsClient::new(TEST_RUN_DIR, service, config);
+    connect_ready(&mut verify);
+    assert_eq!(
+        verify.call_increment(1).expect("verification call"),
+        2,
+        "server should remain healthy after rejecting the malformed session"
+    );
+    verify.close();
 }
 
 fn test_cgroups_handlers() -> Handlers {
@@ -1430,6 +1477,27 @@ fn test_poll_fd_invalid_fd_returns_error() {
     assert_eq!(rc, -1);
 }
 
+#[test]
+fn test_poll_fd_readable_returns_ready() {
+    let mut fds = [0; 2];
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    assert_eq!(rc, 0, "pipe failed");
+
+    let read_fd = fds[0];
+    let write_fd = fds[1];
+    let wrote = unsafe { libc::write(write_fd, b"x".as_ptr() as *const libc::c_void, 1) };
+    assert_eq!(wrote, 1, "write failed");
+
+    let rc = poll_fd(read_fd, 0);
+
+    unsafe {
+        libc::close(read_fd);
+        libc::close(write_fd);
+    }
+
+    assert_eq!(rc, 1);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn test_poll_fd_eintr_returns_timeout() {
@@ -1441,21 +1509,156 @@ fn test_poll_fd_eintr_returns_timeout() {
 
     let read_fd = fds[0];
     let write_fd = fds[1];
-    let old = unsafe { libc::signal(libc::SIGALRM, noop_signal_handler as libc::sighandler_t) };
-    assert_ne!(old, libc::SIG_ERR);
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    let mut old_action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_flags = 0;
+    action.sa_sigaction = noop_signal_handler as usize;
+    unsafe { libc::sigemptyset(&mut action.sa_mask) };
+    assert_eq!(
+        unsafe { libc::sigaction(libc::SIGUSR1, &action, &mut old_action) },
+        0
+    );
 
-    unsafe {
-        libc::alarm(1);
-    }
+    let tid = unsafe { libc::pthread_self() };
+    let signaler = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(unsafe { libc::pthread_kill(tid, libc::SIGUSR1) }, 0);
+    });
+
     let rc = poll_fd(read_fd, 5000);
+    signaler.join().expect("signaler join");
     unsafe {
-        libc::alarm(0);
-        libc::signal(libc::SIGALRM, old);
+        libc::sigaction(libc::SIGUSR1, &old_action, std::ptr::null_mut());
         libc::close(read_fd);
         libc::close(write_fd);
     }
 
     assert_eq!(rc, 0);
+}
+
+#[test]
+fn test_managed_server_recovers_after_short_uds_request() {
+    let svc = "rs_svc_short_uds_req";
+    ensure_run_dir();
+    cleanup_all(svc);
+
+    let mut server = TestServer::start(svc, pingpong_handlers());
+    let session = UdsSession::connect(TEST_RUN_DIR, svc, &client_config()).expect("connect");
+    send_raw_packet(session.fd(), &[0xAB]);
+    drop(session);
+    thread::sleep(Duration::from_millis(50));
+
+    verify_increment_service_ok(svc, client_config());
+
+    server.stop();
+    cleanup_all(svc);
+}
+
+#[test]
+fn test_managed_server_recovers_after_bad_uds_header() {
+    let svc = "rs_svc_bad_uds_hdr";
+    ensure_run_dir();
+    cleanup_all(svc);
+
+    let mut server = TestServer::start(svc, pingpong_handlers());
+    let session = UdsSession::connect(TEST_RUN_DIR, svc, &client_config()).expect("connect");
+    let bad_header = [0u8; HEADER_SIZE];
+    send_raw_packet(session.fd(), &bad_header);
+    drop(session);
+    thread::sleep(Duration::from_millis(50));
+
+    verify_increment_service_ok(svc, client_config());
+
+    server.stop();
+    cleanup_all(svc);
+}
+
+#[test]
+fn test_managed_server_recovers_after_uds_peer_closes_before_response() {
+    let svc = "rs_svc_uds_send_break";
+    ensure_run_dir();
+    cleanup_all(svc);
+
+    let handlers = Handlers {
+        on_increment: Some(Arc::new(|value| {
+            thread::sleep(Duration::from_millis(50));
+            Some(value + 1)
+        })),
+        ..Handlers::default()
+    };
+    let mut server = TestServer::start(svc, handlers);
+    let session = UdsSession::connect(TEST_RUN_DIR, svc, &client_config()).expect("connect");
+    let request = build_increment_request_message(77, 41);
+    send_raw_packet(session.fd(), &request);
+    assert_eq!(unsafe { libc::shutdown(session.fd(), libc::SHUT_RDWR) }, 0);
+    drop(session);
+    thread::sleep(Duration::from_millis(100));
+
+    verify_increment_service_ok(svc, client_config());
+
+    server.stop();
+    cleanup_all(svc);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_managed_server_recovers_after_short_shm_request() {
+    let svc = "rs_svc_short_shm_req";
+    ensure_run_dir();
+    cleanup_all(svc);
+
+    let mut server = TestServer::start_shm(svc, pingpong_handlers());
+    let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, shm_client_config());
+    connect_ready(&mut client);
+    assert!(
+        client.shm.is_some(),
+        "expected SHM transport to be negotiated"
+    );
+
+    client
+        .shm
+        .as_mut()
+        .expect("shm")
+        .send(&[0xAB])
+        .expect("send short SHM request");
+    client.close();
+    thread::sleep(Duration::from_millis(50));
+
+    verify_increment_service_ok(svc, shm_client_config());
+
+    server.stop();
+    cleanup_all(svc);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_managed_server_recovers_after_bad_shm_header() {
+    let svc = "rs_svc_bad_shm_hdr";
+    ensure_run_dir();
+    cleanup_all(svc);
+
+    let mut server = TestServer::start_shm(svc, pingpong_handlers());
+    let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, shm_client_config());
+    connect_ready(&mut client);
+    assert!(
+        client.shm.is_some(),
+        "expected SHM transport to be negotiated"
+    );
+
+    let bad_header = [0u8; HEADER_SIZE];
+    client
+        .shm
+        .as_mut()
+        .expect("shm")
+        .send(&bad_header)
+        .expect("send bad SHM header");
+    client.close();
+    thread::sleep(Duration::from_millis(50));
+
+    verify_increment_service_ok(svc, shm_client_config());
+
+    server.stop();
+    cleanup_all(svc);
 }
 
 #[test]
