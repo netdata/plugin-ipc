@@ -2026,6 +2026,36 @@ mod tests {
     }
 
     #[test]
+    fn test_cleanup_stale_missing_run_dir_is_noop() {
+        cleanup_stale("/tmp/nipc_shm_rust_missing_dir", "rs_shm_missing");
+    }
+
+    #[test]
+    fn test_cleanup_stale_ignores_unrelated_and_non_utf8_entries() {
+        ensure_run_dir();
+        let svc = "rs_shm_cleanup_skip";
+        let unrelated = PathBuf::from(format!("{TEST_RUN_DIR}/not-a-shm-entry.txt"));
+        let invalid_name = OsString::from_vec(vec![
+            b'r', b's', b'_', b's', b'h', b'm', b'_', b'c', b'l', b'e', b'a', b'n', b'u', b'p',
+            b'_', b's', b'k', b'i', b'p', b'-', 0xff, b'.', b'i', b'p', b'c', b's', b'h', b'm',
+        ]);
+        let invalid_path = PathBuf::from(TEST_RUN_DIR).join(invalid_name);
+
+        let _ = std::fs::remove_file(&unrelated);
+        let _ = std::fs::remove_file(&invalid_path);
+        std::fs::write(&unrelated, b"skip").expect("write unrelated file");
+        std::fs::write(&invalid_path, b"skip").expect("write invalid utf8 file");
+
+        cleanup_stale(TEST_RUN_DIR, svc);
+
+        assert!(unrelated.exists(), "unrelated entries should be ignored");
+        assert!(invalid_path.exists(), "non-UTF8 entries should be ignored");
+
+        let _ = std::fs::remove_file(&unrelated);
+        let _ = std::fs::remove_file(&invalid_path);
+    }
+
+    #[test]
     fn test_cleanup_stale_invalid_entries() {
         ensure_run_dir();
         let svc = "rs_shm_cleanup_invalid";
@@ -2103,6 +2133,27 @@ mod tests {
         let path = build_shm_path(TEST_RUN_DIR, svc, sid).expect("path");
         assert!(matches!(check_shm_stale(&path), StaleResult::Invalid));
         assert!(!path.exists(), "bad magic stale file should be removed");
+    }
+
+    #[test]
+    fn test_check_shm_stale_zero_generation_recovers() {
+        ensure_run_dir();
+        let svc = "rs_shm_stale_zero_gen";
+        let sid: u64 = 7051;
+        cleanup_shm(svc, sid);
+
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
+        let hdr = server.base as *mut RegionHeader;
+        unsafe { (*hdr).owner_generation = 0 };
+        server.close();
+
+        let path = build_shm_path(TEST_RUN_DIR, svc, sid).expect("path");
+        assert!(matches!(check_shm_stale(&path), StaleResult::Recovered));
+        assert!(
+            !path.exists(),
+            "zero-generation stale file should be removed"
+        );
     }
 
     #[test]

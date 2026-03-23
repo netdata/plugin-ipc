@@ -35,14 +35,18 @@ Finish the rewrite to a production-ready state with:
     - managed-server recovery after malformed short SHM request
     - managed-server recovery after malformed SHM header
     - `poll_fd()` readable and deterministic EINTR handling
+  - latest ordinary Linux Rust SHM slice added deterministic coverage for:
+    - `cleanup_stale()` on missing run dir
+    - `cleanup_stale()` ignoring unrelated and non-UTF8 entries
+    - `check_shm_stale()` recovering zero-generation stale files
 - Latest verified Linux Rust result:
   - `bash tests/run-coverage-rust.sh 80`
   - tool on this host: `cargo-llvm-cov`
-  - total: `98.61%` (`6549/6641` executed, `92` missed)
+  - total: `98.70%` (`6589/6676` executed, `87` missed)
   - key files:
     - `service/cgroups.rs`: `98.28%` (`802/816`)
     - `transport/posix.rs`: `99.00%`
-    - `transport/shm.rs`: `96.40%`
+    - `transport/shm.rs`: `96.85%` (`1354/1398`)
 - Latest verified Linux C result:
   - `bash tests/run-coverage-c.sh 82`
   - total: `94.1%`
@@ -118,13 +122,8 @@ Finish the rewrite to a production-ready state with:
           - `946-947`
           - `963-964`
         - stale / cleanup corner cases:
-          - `706`
-          - `712`
-          - `716`
           - `722`
           - `755-756`
-          - `983`
-          - `986-987`
         - remaining test-only assert / panic lines:
           - `1258`
           - `1262`
@@ -256,10 +255,10 @@ Finish the rewrite to a production-ready state with:
   - `service/cgroups.rs` no longer contains the Unix test module inline
   - the Unix tests now live in `src/service/cgroups_unix_tests.rs`
   - the exact verified Linux Rust rerun after the split is:
-    - total: `98.61%`
+    - total: `98.70%`
     - `service/cgroups.rs`: `98.28%`
     - `transport/posix.rs`: `99.00%`
-    - `transport/shm.rs`: `96.40%`
+    - `transport/shm.rs`: `96.85%`
   - exact verified Linux regressions after the split:
     - `cargo test --manifest-path src/crates/netipc/Cargo.toml --lib -- --test-threads=1`: `279/279` passing
     - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing

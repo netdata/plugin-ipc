@@ -80,7 +80,7 @@ Verified on `2026-03-23`:
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
-  - result: `98.61%`
+  - result: `98.70%`
   - threshold: `80%`
   - note:
     - Linux now uses `cargo-llvm-cov`, matching the Windows Rust workflow
@@ -95,7 +95,7 @@ Verified on `2026-03-23`:
     - current Linux file totals from the verified `llvm-cov` run:
       - `service/cgroups.rs`: `98.28%` (`802/816`)
       - `transport/posix.rs`: `99.00%` (`2508/2533`)
-      - `transport/shm.rs`: `96.40%` (`1363/1412`)
+      - `transport/shm.rs`: `96.85%` (`1354/1398`)
     - implication:
       - the remaining Linux Rust total is now dominated by helper / fault-injection territory, not by Windows-tagged files or inline test code polluting the Linux baseline
       - one concrete layering fact is now proven:
@@ -109,6 +109,10 @@ Verified on `2026-03-23`:
         - managed-server recovery after malformed short SHM request
         - managed-server recovery after malformed SHM header
         - `poll_fd()` readable and deterministic EINTR paths
+        - SHM stale cleanup / recovery for:
+          - missing run dir
+          - unrelated and non-UTF8 entries
+          - zero-generation stale files
 
 Latest Linux Go notes from the current ordinary POSIX slice:
 
