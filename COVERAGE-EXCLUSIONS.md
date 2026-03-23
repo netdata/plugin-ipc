@@ -41,9 +41,9 @@ Verified on `2026-03-23`:
 
 - Go:
   - script: `tests/run-coverage-go-windows.sh 85`
-  - result: `93.6%`
+  - result: `94.2%`
   - selected key files:
-    - `service/cgroups/client_windows.go`: `94.0%`
+    - `service/cgroups/client_windows.go`: `95.8%`
     - `service/cgroups/types.go`: `100.0%`
     - `transport/windows/pipe.go`: `91.4%`
     - `transport/windows/shm.go`: `88.3%`
@@ -153,19 +153,20 @@ Brutal truth:
 
 Current evidence:
 
-- Windows Go total is now `92.0%`
-- Windows Go total is now `93.6%`
-- `service/cgroups/client_windows.go` is now `94.0%`
+- Windows Go total is now `94.2%`
+- `service/cgroups/client_windows.go` is now `95.8%`
 - `transport/windows/pipe.go` is now `91.4%`
 - `transport/windows/shm.go` is now `88.3%`
 - some malformed named-pipe response cases are filtered by the Windows session layer before they can reach L2 validation branches
 - direct raw WinSHM tests now cover the equivalent Windows-only L2 branches
+- the remaining uncovered `client_windows.go` blocks are now mostly fixed-size encode guards plus defensive server failure paths
 
 Brutal truth:
 
 - Windows Go is no longer the red gate for the Linux-matching `85%` target
 - but it is still not honest to call it coverage-complete
-- the remaining ordinary Windows Go work is now mostly in the still-uncovered `handleSession()` branches plus `transport/windows/shm.go`, not in the named-pipe transport package
+- the remaining ordinary Windows Go work is no longer mainly in `client_windows.go`
+- the next honest review target is whether any `transport/windows/shm.go` create / attach coverage remains reachable without Win32 fault injection
 
 ### Windows Rust coverage gaps
 

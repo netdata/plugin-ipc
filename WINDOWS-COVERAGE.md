@@ -22,19 +22,19 @@ Verified on `2026-03-23`:
   - current status: script passes, including the Linux-matching per-file `82%` gate
 - `bash tests/run-coverage-go-windows.sh 85`:
   - script prints valid coverage results on `win11`
-  - total coverage result: `93.6%`
+  - total coverage result: `94.2%`
   - package coverage:
-    - `service/cgroups`: `94.1%`
+    - `service/cgroups`: `96.5%`
     - `transport/windows`: `90.0%`
   - selected key files:
-    - `service/cgroups/client_windows.go`: `94.0%`
+    - `service/cgroups/client_windows.go`: `95.8%`
     - `service/cgroups/types.go`: `100.0%`
     - `transport/windows/pipe.go`: `91.4%`
     - `transport/windows/shm.go`: `88.3%`
   - current status:
     - reported above the Linux-matching `85%` target
     - Windows Go service/cache tests are now also wired into `ctest`
-    - latest WinSHM service tests, direct raw WinSHM L2 tests, transport edge tests, and the listener shutdown fix materially raised both the weak Windows client paths and the Windows transport package
+    - latest WinSHM service tests, direct raw WinSHM L2 tests, batch failure/recovery tests, and the listener shutdown fix materially raised both the weak Windows client paths and the Windows transport package
     - malformed raw WinSHM request tests now also cover the real SHM server-side teardown / reconnect path
 - `bash tests/run-coverage-rust-windows.sh 80`:
   - script works on `win11`
@@ -62,7 +62,11 @@ Brutal truth:
 - The recent Windows named-pipe transport tests materially raised `transport/windows.rs`.
 - The current weakest Windows Rust file is now `service/cgroups.rs`, but it is above the current `80%` threshold.
 - The remaining Windows Go work is no longer a named-pipe transport coverage problem.
-- The remaining Windows Go work is now concentrated in the still-uncovered `handleSession()` branches, `transport/windows/shm.go` create / attach paths, and the deferred Windows managed-server retry/shutdown behavior.
+- The ordinary `client_windows.go` targets are largely exhausted.
+- The remaining Windows Go work is now mostly:
+  - `transport/windows/shm.go` create / attach paths
+  - fixed-size encode / defensive server branches in `client_windows.go`
+  - the deferred Windows managed-server retry/shutdown behavior
 - Some malformed named-pipe response cases do not reach Go L2 coverage points because the Windows session layer rejects them first.
 - Direct raw WinSHM tests now cover the Windows-only L2 branches that named pipes cannot reach honestly.
 - One transient `test_protocol_rust` failure was observed once under parallel `ctest`, but it did not reproduce on immediate isolated or full reruns. This is not a confirmed active blocker.

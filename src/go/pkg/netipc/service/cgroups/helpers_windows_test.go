@@ -106,6 +106,34 @@ func encodeRawWinMessage(hdr protocol.Header, payload []byte) []byte {
 	return msg
 }
 
+func encodeWinIncrementBatchPayload(t *testing.T, values ...uint64) []byte {
+	t.Helper()
+
+	itemCount := uint32(len(values))
+	if itemCount == 0 {
+		return nil
+	}
+
+	bufSize := protocol.Align8(int(itemCount)*8) +
+		int(itemCount)*protocol.IncrementPayloadSize +
+		int(itemCount)*protocol.Alignment
+	buf := make([]byte, bufSize)
+	bb := protocol.NewBatchBuilder(buf, itemCount)
+
+	for _, v := range values {
+		var item [protocol.IncrementPayloadSize]byte
+		if protocol.IncrementEncode(v, item[:]) == 0 {
+			t.Fatal("IncrementEncode failed")
+		}
+		if err := bb.Add(item[:]); err != nil {
+			t.Fatalf("batch add failed: %v", err)
+		}
+	}
+
+	n, _ := bb.Finish()
+	return buf[:n]
+}
+
 type winRawSessionServer struct {
 	listener *windows.Listener
 	doneCh   chan error

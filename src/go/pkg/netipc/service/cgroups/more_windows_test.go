@@ -395,6 +395,47 @@ func TestWinCallIncrementBatchWinShmRejectsBadMessageID(t *testing.T) {
 	}
 }
 
+func TestWinCallIncrementBatchWinShmRejectsMalformedPayload(t *testing.T) {
+	client, serverShm := newRawWinShmClient(t, windows.WinShmProfileHybrid)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		reqBuf := make([]byte, protocol.HeaderSize+256)
+		n, err := serverShm.WinShmReceive(reqBuf, 1000)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		hdr, err := protocol.DecodeHeader(reqBuf[:n])
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		respHdr := protocol.Header{
+			Kind:            protocol.KindResponse,
+			Code:            protocol.MethodIncrement,
+			Flags:           protocol.FlagBatch,
+			ItemCount:       2,
+			MessageID:       hdr.MessageID,
+			TransportStatus: protocol.StatusOK,
+		}
+		// ItemCount=2 requires a 16-byte aligned directory. An 8-byte payload
+		// makes the client-side BatchItemGet() fail while decoding the response.
+		serverDone <- serverShm.WinShmSend(encodeRawWinMessage(respHdr, make([]byte, 8)))
+	}()
+
+	_, err := client.CallIncrementBatch([]uint64{1, 2})
+	if !errors.Is(err, protocol.ErrTruncated) {
+		t.Fatalf("CallIncrementBatch malformed WinSHM payload = %v, want %v", err, protocol.ErrTruncated)
+	}
+
+	if err := <-serverDone; err != nil {
+		t.Fatalf("raw WinSHM server failed: %v", err)
+	}
+}
+
 func TestWinClientMaxReceiveMessageBytes(t *testing.T) {
 	client := NewClient(winTestRunDir, uniqueWinService("go_win_recvmax"), testWinClientConfig())
 	defer client.Close()
@@ -967,6 +1008,57 @@ func TestWinNonRequestTerminatesSession(t *testing.T) {
 	}
 }
 
+func TestWinPeerDisconnectDuringResponseKeepsServerHealthy(t *testing.T) {
+	svc := uniqueWinService("go_win_send_fail")
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), Handlers{
+		OnIncrement: func(v uint64) (uint64, bool) {
+			time.Sleep(100 * time.Millisecond)
+			return v + 1, true
+		},
+	})
+	defer ts.stop()
+
+	ccfg := testWinClientConfig()
+	session, err := windows.Connect(winTestRunDir, svc, &ccfg)
+	if err != nil {
+		t.Fatalf("raw connect failed: %v", err)
+	}
+
+	reqHdr := &protocol.Header{
+		Kind:            protocol.KindRequest,
+		Code:            protocol.MethodIncrement,
+		ItemCount:       1,
+		MessageID:       1,
+		TransportStatus: protocol.StatusOK,
+	}
+	var reqPayload [protocol.IncrementPayloadSize]byte
+	if protocol.IncrementEncode(41, reqPayload[:]) == 0 {
+		t.Fatal("IncrementEncode failed")
+	}
+	if err := session.Send(reqHdr, reqPayload[:]); err != nil {
+		t.Fatalf("send increment request failed: %v", err)
+	}
+	session.Close()
+
+	time.Sleep(250 * time.Millisecond)
+
+	verify := NewClient(winTestRunDir, svc, testWinClientConfig())
+	defer verify.Close()
+
+	verify.Refresh()
+	if !verify.Ready() {
+		t.Fatal("server should still accept new clients after peer disconnect during response")
+	}
+
+	got, err := verify.CallIncrement(9)
+	if err != nil {
+		t.Fatalf("normal call after peer disconnect failed: %v", err)
+	}
+	if got != 10 {
+		t.Fatalf("increment after peer disconnect = %d, want 10", got)
+	}
+}
+
 func TestWinCallSnapshotWithMalformedTransportState(t *testing.T) {
 	svc := uniqueWinService("go_win_malformed_state")
 	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
@@ -988,6 +1080,46 @@ func TestWinCallSnapshotWithMalformedTransportState(t *testing.T) {
 	}
 	if view.ItemCount != 3 {
 		t.Fatalf("expected recovered snapshot, got %d items", view.ItemCount)
+	}
+}
+
+func TestWinCallIncrementBatchWithMalformedTransportState(t *testing.T) {
+	svc := uniqueWinService("go_win_batch_malformed_state")
+
+	scfg := testWinServerConfig()
+	scfg.MaxRequestBatchItems = 16
+	scfg.MaxResponseBatchItems = 16
+	ccfg := testWinClientConfig()
+	ccfg.MaxRequestBatchItems = 16
+	ccfg.MaxResponseBatchItems = 16
+
+	ts := startTestServerWinWithConfig(svc, scfg, winTestHandlers())
+	defer ts.stop()
+
+	client := NewClient(winTestRunDir, svc, ccfg)
+	defer client.Close()
+
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatal("client not ready")
+	}
+
+	client.session.Close()
+	client.session = nil
+
+	got, err := client.CallIncrementBatch([]uint64{1, 41})
+	if err != nil {
+		t.Fatalf("expected batch reconnect to recover from nil session, got %v", err)
+	}
+
+	want := []uint64{2, 42}
+	if len(got) != len(want) {
+		t.Fatalf("batch result len = %d, want %d", len(got), len(want))
+	}
+	for i, v := range want {
+		if got[i] != v {
+			t.Fatalf("batch[%d] = %d, want %d", i, got[i], v)
+		}
 	}
 }
 

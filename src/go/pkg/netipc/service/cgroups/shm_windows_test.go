@@ -3,6 +3,7 @@
 package cgroups
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -254,5 +255,133 @@ func TestWinShmUnexpectedMessageKindRecovers(t *testing.T) {
 	}
 	if client.Status().ReconnectCount < 1 {
 		t.Fatalf("expected reconnect after unexpected-kind WinSHM request, got status %+v", client.Status())
+	}
+}
+
+func TestWinShmMalformedBatchRequestRecovers(t *testing.T) {
+	svc := uniqueWinService("go_win_shm_bad_batch")
+	ts := startTestServerWinWithConfig(svc, testWinShmServerConfig(), winTestHandlers())
+	defer ts.stop()
+
+	client := NewClient(winTestRunDir, svc, testWinShmClientConfig())
+	defer client.Close()
+
+	waitWinClientReady(t, client)
+
+	if client.shm == nil {
+		t.Fatal("expected WinSHM attachment")
+	}
+
+	reqHdr := protocol.Header{
+		Kind:            protocol.KindRequest,
+		Code:            protocol.MethodIncrement,
+		Flags:           protocol.FlagBatch,
+		ItemCount:       2,
+		MessageID:       1,
+		TransportStatus: protocol.StatusOK,
+	}
+	// ItemCount=2 requires a 16-byte aligned directory. An 8-byte payload
+	// forces BatchItemGet() to fail in the server batch loop.
+	badPayload := encodeWinIncrementBatchPayload(t, 1, 2)[:8]
+	if err := client.shm.WinShmSend(encodeRawWinMessage(reqHdr, badPayload)); err != nil {
+		t.Fatalf("WinShmSend malformed batch request failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	got, err := client.CallIncrement(21)
+	if err != nil {
+		t.Fatalf("CallIncrement after malformed batch WinSHM request failed: %v", err)
+	}
+	if got != 22 {
+		t.Fatalf("CallIncrement after malformed batch WinSHM request = %d, want 22", got)
+	}
+	if !client.Ready() {
+		t.Fatalf("client should stay usable after malformed batch WinSHM request, got status %+v", client.Status())
+	}
+}
+
+func TestWinShmBatchHandlerFailureNeedsRefresh(t *testing.T) {
+	svc := uniqueWinService("go_win_shm_batch_fail")
+	handlers := Handlers{
+		OnIncrement: func(v uint64) (uint64, bool) {
+			if v == 99 {
+				return 0, false
+			}
+			return v + 1, true
+		},
+	}
+	ts := startTestServerWinWithConfig(svc, testWinShmServerConfig(), handlers)
+	defer ts.stop()
+
+	client := NewClient(winTestRunDir, svc, testWinShmClientConfig())
+	defer client.Close()
+
+	waitWinClientReady(t, client)
+
+	_, err := client.CallIncrementBatch([]uint64{99})
+	if !errors.Is(err, protocol.ErrBadLayout) {
+		t.Fatalf("CallIncrementBatch handler failure = %v, want %v", err, protocol.ErrBadLayout)
+	}
+	if client.state != StateBroken {
+		t.Fatalf("client state after batch handler failure = %d, want BROKEN", client.state)
+	}
+
+	changed := client.Refresh()
+	if !changed || !client.Ready() {
+		t.Fatalf("Refresh after batch handler failure = %v, state=%d, want READY", changed, client.state)
+	}
+
+	got, err := client.CallIncrement(5)
+	if err != nil {
+		t.Fatalf("CallIncrement after Refresh failed: %v", err)
+	}
+	if got != 6 {
+		t.Fatalf("CallIncrement after Refresh = %d, want 6", got)
+	}
+}
+
+func TestWinShmBatchResponseOverflowNeedsRefresh(t *testing.T) {
+	svc := uniqueWinService("go_win_shm_batch_overflow")
+
+	scfg := testWinShmServerConfig()
+	scfg.MaxResponsePayloadBytes = 24
+	scfg.MaxResponseBatchItems = 2
+	ccfg := testWinShmClientConfig()
+	ccfg.MaxResponsePayloadBytes = 24
+	ccfg.MaxResponseBatchItems = 2
+	ccfg.MaxRequestBatchItems = 2
+
+	ts := startTestServerWinWithConfig(svc, scfg, Handlers{
+		OnIncrement: func(v uint64) (uint64, bool) {
+			return v + 1, true
+		},
+	})
+	defer ts.stop()
+
+	client := NewClient(winTestRunDir, svc, ccfg)
+	defer client.Close()
+
+	waitWinClientReady(t, client)
+
+	_, err := client.CallIncrementBatch([]uint64{1, 2})
+	if !errors.Is(err, protocol.ErrBadLayout) {
+		t.Fatalf("CallIncrementBatch overflow = %v, want %v", err, protocol.ErrBadLayout)
+	}
+	if client.state != StateBroken {
+		t.Fatalf("client state after batch overflow = %d, want BROKEN", client.state)
+	}
+
+	changed := client.Refresh()
+	if !changed || !client.Ready() {
+		t.Fatalf("Refresh after batch overflow = %v, state=%d, want READY", changed, client.state)
+	}
+
+	got, err := client.CallIncrement(8)
+	if err != nil {
+		t.Fatalf("CallIncrement after overflow Refresh failed: %v", err)
+	}
+	if got != 9 {
+		t.Fatalf("CallIncrement after overflow Refresh = %d, want 9", got)
 	}
 }
