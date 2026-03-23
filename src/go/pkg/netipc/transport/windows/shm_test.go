@@ -116,6 +116,30 @@ func TestWinShmCreateAttachRejectsLongObjectName(t *testing.T) {
 	}
 }
 
+func TestWinShmServerCreateRejectsLateEventNameOverflow(t *testing.T) {
+	runDir := t.TempDir()
+	const authToken uint64 = 0x9989
+	const sessionID uint64 = 24
+
+	t.Run("req_event name overflow", func(t *testing.T) {
+		// 195 characters keeps the mapping name below the Win32 object-name
+		// limit but pushes req_event over it.
+		service := strings.Repeat("b", 195)
+		if _, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileHybrid, 4096, 4096); !errors.Is(err, ErrWinShmBadParam) {
+			t.Fatalf("WinShmServerCreate(req_event overflow) = %v, want ErrWinShmBadParam", err)
+		}
+	})
+
+	t.Run("resp_event name overflow", func(t *testing.T) {
+		// 194 characters still allows req_event creation, but resp_event
+		// crosses the object-name limit and exercises the cleanup path.
+		service := strings.Repeat("c", 194)
+		if _, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileHybrid, 4096, 4096); !errors.Is(err, ErrWinShmBadParam) {
+			t.Fatalf("WinShmServerCreate(resp_event overflow) = %v, want ErrWinShmBadParam", err)
+		}
+	})
+}
+
 func TestWinShmClientAttachRejectsCorruptHeader(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -174,6 +198,52 @@ func TestWinShmClientAttachRejectsCorruptHeader(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWinShmClientAttachFailsWhenEventsAreMissing(t *testing.T) {
+	runDir := t.TempDir()
+	service := "missing-events"
+	const authToken uint64 = 0x556677
+
+	t.Run("req_event missing", func(t *testing.T) {
+		const sessionID uint64 = 31
+
+		server, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileHybrid, 4096, 4096)
+		if err != nil {
+			t.Fatalf("WinShmServerCreate failed: %v", err)
+		}
+		defer server.WinShmDestroy()
+
+		if err := syscall.CloseHandle(server.reqEvent); err != nil {
+			t.Fatalf("CloseHandle(reqEvent) failed: %v", err)
+		}
+		server.reqEvent = syscall.InvalidHandle
+
+		_, err = WinShmClientAttach(runDir, service, authToken, sessionID, WinShmProfileHybrid)
+		if err == nil || !errors.Is(err, ErrWinShmOpenEvent) {
+			t.Fatalf("WinShmClientAttach missing req_event = %v, want ErrWinShmOpenEvent", err)
+		}
+	})
+
+	t.Run("resp_event missing", func(t *testing.T) {
+		const sessionID uint64 = 33
+
+		server, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileHybrid, 4096, 4096)
+		if err != nil {
+			t.Fatalf("WinShmServerCreate failed: %v", err)
+		}
+		defer server.WinShmDestroy()
+
+		if err := syscall.CloseHandle(server.respEvent); err != nil {
+			t.Fatalf("CloseHandle(respEvent) failed: %v", err)
+		}
+		server.respEvent = syscall.InvalidHandle
+
+		_, err = WinShmClientAttach(runDir, service, authToken, sessionID, WinShmProfileHybrid)
+		if err == nil || !errors.Is(err, ErrWinShmOpenEvent) {
+			t.Fatalf("WinShmClientAttach missing resp_event = %v, want ErrWinShmOpenEvent", err)
+		}
+	})
 }
 
 func TestWinShmSendReceiveValidation(t *testing.T) {

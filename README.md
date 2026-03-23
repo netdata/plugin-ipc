@@ -248,7 +248,7 @@ Windows (`win11`):
 - build: passing
 - `ctest`: `28/28` passing
 - C coverage: `83.9%`
-- Go coverage: `94.2%`
+- Go coverage: `95.2%`
 - Rust coverage: `93.59%`
 
 Important honesty point:
