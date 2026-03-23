@@ -270,6 +270,13 @@ func TestUnixDispatchSingleUnsupportedMethods(t *testing.T) {
 	if n, ok := server.dispatchSingle(protocol.MethodCgroupsSnapshot, nil, nil); ok || n != 0 {
 		t.Fatalf("dispatchSingle snapshot with zero response buffer = (%d, %v), want (0, false)", n, ok)
 	}
+
+	server = NewServer(testRunDir, uniqueUnixService("go_unix_snapshot_dispatch_zero"), testServerConfig(), Handlers{
+		OnSnapshot: testCgroupsHandler,
+	})
+	if n, ok := server.dispatchSingle(protocol.MethodCgroupsSnapshot, nil, nil); ok || n != 0 {
+		t.Fatalf("dispatchSingle snapshot with derived zero max items = (%d, %v), want (0, false)", n, ok)
+	}
 }
 
 func TestUnixCallSnapshotWithMalformedTransportState(t *testing.T) {

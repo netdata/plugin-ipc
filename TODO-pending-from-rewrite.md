@@ -31,6 +31,12 @@ Finish the rewrite to a production-ready state with:
     - `ShmSend()` bad-parameter guards
     - `ShmReceive()` bad-parameter and timeout paths
     - `ShmCleanupStale()` missing-directory and unrelated-file branches
+  - completed the next direct POSIX SHM raw-response slice
+  - validated direct raw SHM service tests for:
+    - `doRawCall()` bad `message_id`
+    - batch bad `message_id`
+    - malformed batch payload
+    - snapshot dispatch with derived zero-capacity buffer
   - reclassified raw malformed POSIX SHM request recovery (`short`, `bad header`, `unexpected kind`) out of the ordinary bucket:
     - all three block in `ShmReceive(..., 30000)` today
     - they belong to timeout-behavior / special-infrastructure work unless POSIX SHM timeout control becomes testable
@@ -80,7 +86,7 @@ Finish the rewrite to a production-ready state with:
         - ordinary testable now:
           - Windows Go ordinary coverage is no longer the main gap
           - next honest Go target is Linux / POSIX:
-            - `service/cgroups/client.go` (`92.3%`)
+            - `service/cgroups/client.go` (`93.4%`)
             - `transport/posix/shm_linux.go` (`90.6%`)
             - `transport/posix/uds.go` (`92.0%`)
           - keep the deferred managed-server retry/shutdown investigation separate from ordinary coverage
@@ -252,7 +258,7 @@ Verified on `2026-03-23`:
   - current threshold: `82%`
 - Go:
   - `bash tests/run-coverage-go.sh`
-  - result: `93.7%`
+  - result: `94.0%`
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
@@ -555,7 +561,7 @@ Facts:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
 - Windows Go coverage currently reports `96.7%`.
-- Linux Go coverage currently reports `93.7%` with the remaining ordinary gaps now concentrated in selective server-loop paths plus a smaller POSIX SHM residue.
+- Linux Go coverage currently reports `94.0%` with the remaining ordinary gaps now concentrated in the server loop plus a smaller POSIX transport residue.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
@@ -585,13 +591,13 @@ Required next work:
    - current function-level evidence from `bash tests/run-coverage-go.sh 85`:
      - `service/cgroups/client.go`
        - `Refresh`: `100.0%`
-       - `doRawCall`: `93.3%`
+       - `doRawCall`: `100.0%`
        - `CallSnapshot`: `94.1%`
        - `CallIncrement`: `92.9%`
        - `CallStringReverse`: `93.8%`
-       - `CallIncrementBatch`: `90.9%`
+       - `CallIncrementBatch`: `95.5%`
        - `transportReceive`: `100.0%`
-       - `dispatchSingle`: `92.9%`
+       - `dispatchSingle`: `100.0%`
        - `Run`: `81.6%`
        - `handleSession`: `89.4%`
        - result of the latest Unix raw malformed-response parity slice:
@@ -603,6 +609,11 @@ Required next work:
          - `service/cgroups/client.go` moved from `90.2%` to `92.3%`
          - `tryConnect()` is now `94.7%`
          - `handleSession()` moved to `89.4%`
+       - result of the latest direct POSIX SHM raw-response slice:
+         - `service/cgroups/client.go` moved from `92.3%` to `93.4%`
+         - `doRawCall()` is now `100.0%`
+         - `CallIncrementBatch()` moved to `95.5%`
+         - `dispatchSingle()` is now `100.0%`
      - `transport/posix/shm_linux.go`
        - result of the latest ordinary SHM slice:
          - file moved from `77.5%` to `86.7%`

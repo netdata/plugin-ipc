@@ -162,6 +162,152 @@ func TestUnixShmAttachFailureLeavesClientDisconnected(t *testing.T) {
 	}
 }
 
+func TestUnixDoRawCallShmRejectsBadMessageID(t *testing.T) {
+	client, serverShm := newRawPosixShmClient(t)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		reqBuf := make([]byte, protocol.HeaderSize+32)
+		n, err := serverShm.ShmReceive(reqBuf, 1000)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		hdr, err := protocol.DecodeHeader(reqBuf[:n])
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		var respPayload [protocol.IncrementPayloadSize]byte
+		if protocol.IncrementEncode(42, respPayload[:]) == 0 {
+			serverDone <- errors.New("IncrementEncode failed")
+			return
+		}
+
+		respHdr := protocol.Header{
+			Kind:            protocol.KindResponse,
+			Code:            protocol.MethodIncrement,
+			ItemCount:       1,
+			MessageID:       hdr.MessageID + 1,
+			TransportStatus: protocol.StatusOK,
+		}
+		serverDone <- serverShm.ShmSend(encodeRawUnixMessage(respHdr, respPayload[:]))
+	}()
+
+	var reqPayload [protocol.IncrementPayloadSize]byte
+	if protocol.IncrementEncode(41, reqPayload[:]) == 0 {
+		t.Fatal("IncrementEncode failed")
+	}
+
+	_, _, err := client.doRawCall(protocol.MethodIncrement, reqPayload[:])
+	if !errors.Is(err, protocol.ErrBadLayout) {
+		t.Fatalf("doRawCall bad SHM message_id = %v, want %v", err, protocol.ErrBadLayout)
+	}
+
+	if err := <-serverDone; err != nil {
+		t.Fatalf("raw POSIX SHM server failed: %v", err)
+	}
+}
+
+func TestUnixCallIncrementBatchShmRejectsBadMessageID(t *testing.T) {
+	client, serverShm := newRawPosixShmClient(t)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		reqBuf := make([]byte, protocol.HeaderSize+256)
+		n, err := serverShm.ShmReceive(reqBuf, 1000)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		hdr, err := protocol.DecodeHeader(reqBuf[:n])
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		var itemA [protocol.IncrementPayloadSize]byte
+		var itemB [protocol.IncrementPayloadSize]byte
+		if protocol.IncrementEncode(2, itemA[:]) == 0 || protocol.IncrementEncode(3, itemB[:]) == 0 {
+			serverDone <- errors.New("IncrementEncode failed")
+			return
+		}
+
+		respBuf := make([]byte, 64)
+		bb := protocol.NewBatchBuilder(respBuf, 2)
+		if err := bb.Add(itemA[:]); err != nil {
+			serverDone <- err
+			return
+		}
+		if err := bb.Add(itemB[:]); err != nil {
+			serverDone <- err
+			return
+		}
+		respLen, _ := bb.Finish()
+
+		respHdr := protocol.Header{
+			Kind:            protocol.KindResponse,
+			Code:            protocol.MethodIncrement,
+			Flags:           protocol.FlagBatch,
+			ItemCount:       2,
+			MessageID:       hdr.MessageID + 1,
+			TransportStatus: protocol.StatusOK,
+		}
+		serverDone <- serverShm.ShmSend(encodeRawUnixMessage(respHdr, respBuf[:respLen]))
+	}()
+
+	_, err := client.CallIncrementBatch([]uint64{1, 2})
+	if !errors.Is(err, protocol.ErrBadLayout) {
+		t.Fatalf("CallIncrementBatch bad SHM message_id = %v, want %v", err, protocol.ErrBadLayout)
+	}
+
+	if err := <-serverDone; err != nil {
+		t.Fatalf("raw POSIX SHM server failed: %v", err)
+	}
+}
+
+func TestUnixCallIncrementBatchShmRejectsMalformedPayload(t *testing.T) {
+	client, serverShm := newRawPosixShmClient(t)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		reqBuf := make([]byte, protocol.HeaderSize+256)
+		n, err := serverShm.ShmReceive(reqBuf, 1000)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		hdr, err := protocol.DecodeHeader(reqBuf[:n])
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		respHdr := protocol.Header{
+			Kind:            protocol.KindResponse,
+			Code:            protocol.MethodIncrement,
+			Flags:           protocol.FlagBatch,
+			ItemCount:       2,
+			MessageID:       hdr.MessageID,
+			TransportStatus: protocol.StatusOK,
+		}
+		serverDone <- serverShm.ShmSend(encodeRawUnixMessage(respHdr, make([]byte, 8)))
+	}()
+
+	_, err := client.CallIncrementBatch([]uint64{1, 2})
+	if !errors.Is(err, protocol.ErrTruncated) {
+		t.Fatalf("CallIncrementBatch malformed SHM payload = %v, want %v", err, protocol.ErrTruncated)
+	}
+
+	if err := <-serverDone; err != nil {
+		t.Fatalf("raw POSIX SHM server failed: %v", err)
+	}
+}
+
 func TestUnixShmMalformedBatchRequestRecovers(t *testing.T) {
 	svc := uniqueUnixService("go_unix_shm_bad_batch")
 	ts := startTestServerUnixWithConfig(svc, testUnixShmServerConfig(), pingPongHandlers())
