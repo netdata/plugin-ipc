@@ -123,7 +123,13 @@ func runServer(runDir, service string) int {
 
 func runClient(runDir, service string) int {
 	client := cgroups.NewClient(runDir, service, clientConfig())
-	client.Refresh()
+	for i := 0; i < 200; i++ {
+		client.Refresh()
+		if client.Ready() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	if !client.Ready() {
 		fmt.Fprintf(os.Stderr, "client: not ready\n")

@@ -119,7 +119,13 @@ mod posix_only {
 
     fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
         let mut client = CgroupsClient::new(run_dir, service, client_config());
-        client.refresh();
+        for _ in 0..200 {
+            client.refresh();
+            if client.ready() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         if !client.ready() {
             return Err("client not ready".into());

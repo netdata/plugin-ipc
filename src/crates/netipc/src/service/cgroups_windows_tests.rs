@@ -163,6 +163,18 @@ fn connect_ready(client: &mut CgroupsClient) {
     panic!("client did not reach READY state");
 }
 
+fn wait_for_state(client: &mut CgroupsClient, want: ClientState) {
+    for _ in 0..200 {
+        client.refresh();
+        if client.state == want {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    panic!("client did not reach state {:?}", want);
+}
+
 struct TestServer {
     service: String,
     wake_config: ClientConfig,
@@ -516,7 +528,7 @@ fn test_client_auth_failure_windows() {
     bad_cfg.auth_token = 0xBAD_BAD_BAD;
 
     let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, bad_cfg);
-    client.refresh();
+    wait_for_state(&mut client, ClientState::AuthFailed);
     assert_eq!(client.state, ClientState::AuthFailed);
     assert!(!client.ready());
 
@@ -536,7 +548,7 @@ fn test_client_incompatible_windows() {
     bad_cfg.supported_profiles = 0x80000000;
 
     let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, bad_cfg);
-    client.refresh();
+    wait_for_state(&mut client, ClientState::Incompatible);
     assert_eq!(client.state, ClientState::Incompatible);
     assert!(!client.ready());
 

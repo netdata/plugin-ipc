@@ -20,6 +20,8 @@ Finish the rewrite to a production-ready state with:
 - Current execution slice after the Windows Go parity expansion:
   - revalidated full `win11` `ctest` after the Windows Go coverage additions
   - synced the TODO and coverage docs to the latest Windows Go numbers
+  - fixed the exact-head Windows Rust state-test startup race under parallel `ctest`
+  - fixed the matching service-interop client readiness race across the C, Rust, and Go service interop fixtures on both POSIX and Windows
   - next target:
     - increase Windows Rust coverage with the same style of ordinary edge-case tests already added on the Windows Go side
     - current result:
@@ -133,6 +135,11 @@ Implication:
 
 - `cmake --build build -j4`: passing
 - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
+- `test_service_interop` stabilization:
+  - exact repeated validation with `/usr/bin/ctest --test-dir build --output-on-failure -j1 -R ^test_service_interop$ --repeat until-fail:10`: passing
+  - implication:
+    - the previous `Rust server -> C client` `client: not ready` failure was a real interop-fixture startup race
+    - the service interop clients now wait briefly for readiness instead of assuming one immediate refresh is enough
 - POSIX benchmarks:
   - `201` rows
   - report regenerates successfully
@@ -170,10 +177,16 @@ Verified on `2026-03-23`:
 - `ctest --test-dir build --output-on-failure -j4`:
   - current verified state: `28/28` passing
   - note:
-    - `test_protocol_rust` failed once during one parallel rerun after the latest Windows Go test additions
-    - immediate isolated rerun with `ctest --test-dir build --output-on-failure -j1 -R ^test_protocol_rust$` passed
-    - immediate full rerun with `ctest --test-dir build --output-on-failure -j4` also passed `28/28`
-    - implication: no confirmed active Rust Windows blocker, but the transient should remain in mind if more parallel Windows test expansion lands
+    - exact-head validation after the Windows Rust coverage additions exposed one real Windows test-isolation bug in the Rust state tests
+    - failing case: `service::cgroups::windows_tests::test_client_incompatible_windows`
+    - symptom under full `ctest -j4`: the first immediate `refresh()` could see `Disconnected` instead of the expected terminal state because the spawned server was not always fully listening yet
+    - evidence:
+      - isolated rerun with `ctest --test-dir build --output-on-failure -j1 -R ^test_protocol_rust$` passed
+      - exact same tree under full `ctest --test-dir build --output-on-failure -j4` failed once with `left: Disconnected`, `right: Incompatible`
+    - fix:
+      - the Windows Rust auth-failure and incompatible tests now wait for the target client state instead of assuming one immediate refresh is sufficient
+    - final verification:
+      - exact `win11` rerun after the fix passed `28/28` under full `ctest --test-dir build --output-on-failure -j4`
     - one attempted rerun failed only because `ctest` and `cargo llvm-cov clean --workspace` were mistakenly run in parallel on the same `win11` tree
     - that failure was invalid test orchestration, not a product regression
 
@@ -182,7 +195,12 @@ Important facts:
 - The Go fuzz tests are now serialized in CTest with `RESOURCE_LOCK`.
   - This fixed the previous `go_FuzzDecodeCgroupsResponse` timeout on `win11`.
 - The current exact head was revalidated again after the coverage work.
-  - `ctest --test-dir build --output-on-failure -j4`: `28/28` passing
+  - `ctest --test-dir build --output-on-failure -j4`: `28/28` passing after the Rust Windows state-test startup-race fix
+- `test_service_win_interop` stabilization:
+  - exact repeated validation with `ctest --test-dir build --output-on-failure -j1 -R ^test_service_win_interop$ --repeat until-fail:10`: passing
+  - implication:
+    - the Windows service interop clients had the same one-refresh startup race pattern as POSIX
+    - the fixture behavior is now aligned across C, Rust, and Go
 - `test_win_stress` is now wired and validated.
   - Current default scope is only the validated WinSHM lifecycle repetition.
   - The managed-service stress subcases were intentionally removed from the default Windows `ctest` path because Windows managed-server shutdown under stress still needs a separate investigation.

@@ -10,6 +10,10 @@ use netipc::protocol::{PROFILE_BASELINE, PROFILE_SHM_HYBRID};
 use netipc::service::cgroups::{CgroupsClient, Handlers, ManagedServer};
 #[cfg(windows)]
 use netipc::transport::windows::{ClientConfig, ServerConfig};
+#[cfg(windows)]
+use std::thread;
+#[cfg(windows)]
+use std::time::Duration;
 
 #[cfg(windows)]
 const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;
@@ -109,7 +113,13 @@ fn run_client(run_dir: &str, service: &str) -> i32 {
     };
 
     let mut client = CgroupsClient::new(run_dir, service, config);
-    client.refresh();
+    for _ in 0..200 {
+        client.refresh();
+        if client.ready() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 
     if !client.ready() {
         eprintln!("client: not ready");

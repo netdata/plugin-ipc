@@ -202,7 +202,12 @@ static int run_client(const char *run_dir, const char *service)
 
     nipc_client_ctx_t client;
     nipc_client_init(&client, run_dir, service, &ccfg);
-    nipc_client_refresh(&client);
+    for (int i = 0; i < 200; i++) {
+        nipc_client_refresh(&client);
+        if (nipc_client_ready(&client))
+            break;
+        usleep(10000);
+    }
 
     if (!nipc_client_ready(&client)) {
         fprintf(stderr, "client: not ready\n");
