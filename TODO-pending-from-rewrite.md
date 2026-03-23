@@ -169,13 +169,26 @@ Finish the rewrite to a production-ready state with:
       - `handleSession()`: `92.9%`
       - `tryConnect()`: `100.0%`
     - important finding:
-      - the negotiated SHM create-failure branch in `Run()` did not move, even after a real obstructed first-session attempt
-      - working theory:
-        - either the first accepted session is still not taking the branch we expected, or the test is exercising a different failure path than the uncovered line group
+      - targeted line coverage now confirms the negotiated SHM create-failure branch in `Run()` is covered by the obstructed first-session test
+      - evidence from a direct `-run '^TestUnixShmCreateFailureKeepsServerHealthy$'` cover profile:
+        - `client.go:611-615` executed
       - implication:
-        - do not claim that branch covered yet
+        - remove this branch from the “unresolved” bucket
   - next remaining Linux Go service classification after the fresh rerun:
     - `handleSession()` ordinary SHM malformed-request branches are no longer the main gap
+    - current remaining uncovered line groups from the fresh full-package rerun:
+      - `client.go:189-191`
+      - `client.go:218-220`
+      - `client.go:244-246`
+      - `client.go:284-289`
+      - `client.go:576-577`
+      - `client.go:585-586`
+      - `client.go:665`
+      - `client.go:707-710`
+      - `client.go:765-767`
+      - `client.go:780-786`
+      - `client.go:830`
+      - `client.go:845`
     - likely non-ordinary / invariant-bound:
       - fixed-size encode guards in typed client calls
       - single-dispatch `responseLen > len(respBuf)` guard for the existing typed methods
@@ -183,10 +196,17 @@ Finish the rewrite to a production-ready state with:
       - `ShmReceive()` non-timeout error in the server loop, because the live server-side context keeps the atomic offsets in-bounds
       - listener poll / accept error branches in `Run()`
       - peer-close response send failure on POSIX sequenced-packet sockets unless a deterministic reproduction exists
-    - unresolved branch requiring direct investigation before more tests:
-      - negotiated SHM create failure in `Run()`:
-        - the real obstructed first-session test did not move the uncovered line group
-        - do not assume it is ordinary or covered until line-level evidence says so
+      - `pollFd()` raw syscall-failure / unexpected-revents fallthrough paths
+  - fresh Linux Rust coverage measurement from the current machine:
+    - `bash tests/run-coverage-rust.sh 80`
+    - current tool on this host: `tarpaulin`
+    - current result: `80.85%`
+    - current largest uncovered Rust files from the report:
+      - `src/service/cgroups.rs`: `494/622`
+      - `src/transport/posix.rs`: `355/401`
+      - `src/transport/shm.rs`: `303/375`
+    - implication:
+      - Linux Rust is now the next biggest ordinary coverage target, not Linux Go
 - Current execution slice after the Windows Go parity expansion:
   - completed the next Linux / POSIX Go SHM service follow-up slice
   - validated ordinary POSIX SHM service tests for:
@@ -446,7 +466,7 @@ Verified on `2026-03-23`:
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
-  - result: `81.46%`
+  - result: `80.85%`
   - current threshold: `80%`
 
 Important fact:

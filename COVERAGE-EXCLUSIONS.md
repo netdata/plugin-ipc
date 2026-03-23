@@ -23,8 +23,11 @@ Verified on `2026-03-23`:
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
-  - result: `81.46%`
+  - result: `80.85%`
   - threshold: `80%`
+  - note:
+    - the current Linux script used `tarpaulin` on this machine
+    - the report still includes Windows-tagged Rust files in the total line count
 
 Latest Linux Go notes from the current ordinary POSIX slice:
 
