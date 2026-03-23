@@ -80,28 +80,24 @@ Verified on `2026-03-23`:
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
-  - result: `90.76%`
+  - result: `98.54%`
   - threshold: `80%`
   - note:
-    - the current Linux script used `tarpaulin` on this machine
-    - the report still includes Windows-tagged Rust files in the total line count
-    - latest ordinary Linux Rust slice raised:
-      - `src/service/cgroups.rs` to `686/710`
-      - `src/transport/posix.rs` to `388/401`
-      - `src/transport/shm.rs` to `349/375`
-    - latest slice covered:
-      - Linux SHM response `message_id` mismatch on the 3 Rust client call paths
-      - Linux managed-server SHM-upgrade rejection when `server_create()` is obstructed on disk
-      - direct `poll_fd()` EINTR and closed-descriptor branches
-      - direct POSIX helper fallbacks for `detect_packet_size()` and `raw_send()`
-      - managed-server worker-capacity rejection in the Rust L2 loop
-      - malformed Linux SHM batch-request item decode failure returning `INTERNAL_ERROR`
-      - chunked batch-directory invalidation across a real continuation boundary
-      - direct `check_shm_stale()` helper paths for:
-        - nonexistent file -> `StaleResult::NotExist`
-        - invalid `CString` path -> `StaleResult::NotExist`
+    - Linux now uses `cargo-llvm-cov`, matching the Windows Rust workflow
+    - the Linux report excludes Windows-tagged Rust files:
+      - `src/service/cgroups_windows_tests.rs`
+      - `src/transport/windows.rs`
+      - `src/transport/win_shm.rs`
+    - Unix Rust service tests now live in:
+      - `src/service/cgroups_unix_tests.rs`
     - implication:
-      - the remaining Linux Rust total is now dominated by helper / fault-injection / Windows-tagged territory
+      - adding new Unix Rust tests no longer inflates the denominator of `src/service/cgroups.rs`
+    - current Linux file totals from the verified `llvm-cov` run:
+      - `service/cgroups.rs`: `97.67%` (`797/816`)
+      - `transport/posix.rs`: `99.00%` (`2508/2533`)
+      - `transport/shm.rs`: `96.40%` (`1363/1412`)
+    - implication:
+      - the remaining Linux Rust total is now dominated by helper / fault-injection territory, not by Windows-tagged files or inline test code polluting the Linux baseline
       - one concrete layering fact is now proven:
         - on POSIX baseline, a bad response `message_id` is rejected by L1 before the L2 typed wrappers can map it to `BadLayout`
         - malformed batch directories on POSIX UDS are rejected by L1 before the Rust managed-service loop can map them to `INTERNAL_ERROR`

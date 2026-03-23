@@ -14,13 +14,28 @@ Finish the rewrite to a production-ready state with:
 - The rewrite itself is in good shape. Linux is green, Windows tests are green, and POSIX/Windows benchmark floors are green.
 - The remaining work is not about core correctness regressions. It is about coverage completeness, Windows coverage parity, and one deferred Windows managed-server stress investigation.
 
-## Current Focus (2026-03-23)
+## Current Focus (2026-03-24)
 
 - Latest authoritative slice:
-  - Linux C ordinary UDS guard follow-up
-  - added deterministic `test_uds` coverage for:
-    - chunked send with `packet_size == NIPC_HEADER_LEN` rejecting zero chunk payload budget
-    - explicit `NULL` service-name validation through the public API
+  - Linux Rust coverage collection is now standardized on `cargo-llvm-cov`, matching Windows Rust coverage policy
+  - Linux Rust now excludes Windows-tagged Rust files from the Linux total:
+    - `src/service/cgroups_windows_tests.rs`
+    - `src/transport/windows.rs`
+    - `src/transport/win_shm.rs`
+  - removed the old `tarpaulin`-only Linux drift from the default Linux Rust script
+  - Linux Unix Rust service tests are now split out of `src/service/cgroups.rs` into:
+    - `src/service/cgroups_unix_tests.rs`
+  - reason:
+    - `cargo-llvm-cov` counts inline `#[cfg(test)]` code inside the production file
+    - that made valid new tests lower the reported runtime coverage of `src/service/cgroups.rs`
+- Latest verified Linux Rust result:
+  - `bash tests/run-coverage-rust.sh 80`
+  - tool on this host: `cargo-llvm-cov`
+  - total: `98.54%` (`6544/6641` executed, `97` missed)
+  - key files:
+    - `service/cgroups.rs`: `97.67%` (`797/816`)
+    - `transport/posix.rs`: `99.00%`
+    - `transport/shm.rs`: `96.40%`
 - Latest verified Linux C result:
   - `bash tests/run-coverage-c.sh 82`
   - total: `94.1%`
@@ -30,8 +45,8 @@ Finish the rewrite to a production-ready state with:
     - `netipc_shm.c`: `95.1%` (`346/364`)
     - `netipc_service.c`: `92.1%` (`734/797`)
 - Latest verified test results for this slice:
-  - `cmake --build build -j4 --target test_uds`: passing
-  - `./build/bin/test_uds`: `129 passed, 0 failed`
+  - `bash tests/run-coverage-rust.sh 80`: passing
+  - `cargo test --manifest-path src/crates/netipc/Cargo.toml --lib -- --test-threads=1`: `279/279` passing
   - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
 - Immediate next target:
   - Linux C ordinary deterministic coverage is starting to saturate
@@ -45,17 +60,8 @@ Finish the rewrite to a production-ready state with:
     - switch the next ordinary deterministic slice back to Linux Rust coverage
     - use the current C state as the new baseline when raising thresholds
 - Fresh Linux Rust baseline on the exact current tree:
-  - `bash tests/run-coverage-rust.sh 80`
-  - tool on this host: `tarpaulin`
-  - total: `90.76%` (`1886/2078`)
-  - current largest Linux-side uncovered files from the report:
-    - `src/service/cgroups.rs`: `686/710`
-    - `src/transport/posix.rs`: `388/401`
-    - `src/transport/shm.rs`: `349/375`
-  - latest ordinary Rust gain on this exact tree:
-    - direct `check_shm_stale()` helper paths for:
-      - nonexistent file -> `StaleResult::NotExist`
-      - invalid `CString` path -> `StaleResult::NotExist`
+  - superseded by the new `cargo-llvm-cov` Linux baseline above
+  - old `tarpaulin` baseline is historical only and should not be treated as the active Linux Rust total anymore
   - Linux-side ordinary candidates still visible in the report:
     - `src/service/cgroups.rs`
       - helper / deterministic branches around:
@@ -80,16 +86,152 @@ Finish the rewrite to a production-ready state with:
       - `src/transport/posix.rs`: `298`, `427`
     - raw socket / listen / bind / syscall-failure branches:
       - `src/transport/posix.rs`: `226`, `532`, `550`, `552`, `554-555`, `577`, `830`
-    - Windows-tagged files still counted by `tarpaulin`:
-      - `src/service/cgroups_windows_tests.rs`
-      - `src/transport/windows.rs`
-      - `src/transport/win_shm.rs`
+    - Windows-tagged files are now excluded from the Linux Rust total by the default Linux script
 - Note:
   - the older slice notes below are historical context
   - they are no longer the authoritative current state
   - one new layering fact is now explicit:
     - malformed batch directories on POSIX UDS are rejected by L1 before the managed Rust L2 loop can return `INTERNAL_ERROR`
     - the honest ordinary coverage path for that branch is Linux SHM, not UDS
+
+## Decision Needed (2026-03-24): Linux Rust Coverage Collection
+
+- Status:
+  - implemented
+  - Linux default Rust coverage now uses `cargo-llvm-cov`
+  - Linux default Rust coverage now excludes Windows-tagged Rust files from the Linux total
+  - the historical evidence below explains why this decision was made
+- Background:
+  - Linux Rust coverage is now the next honest bottleneck after the recent C and Go gains.
+  - The current Linux script auto-picks `cargo-llvm-cov` when available, otherwise falls back to `cargo-tarpaulin`:
+    - `tests/run-coverage-rust.sh`
+  - On this machine, only `cargo-tarpaulin` is installed:
+    - `command -v cargo-llvm-cov` -> empty
+    - `command -v cargo-tarpaulin` -> `/home/costa/.cargo/bin/cargo-tarpaulin`
+  - The latest verified Linux Rust result is therefore coming from `tarpaulin`:
+    - `bash tests/run-coverage-rust.sh 80`
+    - total: `90.76%` (`1886/2078`)
+  - Evidence from the current docs and report:
+    - `README.md`
+    - `COVERAGE-EXCLUSIONS.md`
+    - Windows-tagged Rust files are still counted in the Linux total on this host:
+      - `src/service/cgroups_windows_tests.rs`
+      - `src/transport/windows.rs`
+      - `src/transport/win_shm.rs`
+- Official tool facts:
+  - `cargo-llvm-cov` supports:
+    - total gating with `--fail-under-lines`
+    - file filtering with `--ignore-filename-regex`
+    - summary-only reporting
+  - source:
+    - `https://github.com/taiki-e/cargo-llvm-cov`
+  - `tarpaulin` supports file exclusion and code exclusion, but on Linux its default backend is still `ptrace`, and the project documents backend-dependent accuracy differences.
+  - source:
+    - `https://github.com/xd009642/tarpaulin`
+- Open-source examples already reviewed:
+  - `/opt/baddisk/monitoring/openobserve/openobserve/coverage.sh`
+    - uses `cargo llvm-cov`
+    - uses `--ignore-filename-regex`
+  - `/opt/baddisk/monitoring/clickhouse/rust_vendor/aws-lc-rs-1.13.3/Makefile`
+    - uses `cargo llvm-cov`
+    - uses `--fail-under-lines`
+    - uses `--ignore-filename-regex`
+- Facts that matter for the decision:
+  - Linux and Windows Rust coverage policy already uses the same nominal threshold (`80%`), but the collection method is inconsistent.
+  - Windows Rust is already using native `cargo-llvm-cov` in:
+    - `tests/run-coverage-rust-windows.sh`
+  - The remaining Linux Rust total is increasingly polluted by:
+    - Windows-tagged files counted on Linux
+    - helper / test-module lines
+    - fault-injection / syscall-failure paths
+- Decision options:
+  - `1. A`
+    - Keep Linux on `tarpaulin` by default and continue adding ordinary tests only.
+    - Pros:
+      - smallest script change
+      - no new tool install on Linux
+    - Implications:
+      - Linux and Windows Rust measurement stay inconsistent
+      - Linux totals continue to include Windows-tagged files on this machine
+    - Risks:
+      - more time spent chasing non-Linux noise instead of real Linux gaps
+      - harder to compare Linux vs Windows Rust coverage honestly
+  - `1. B`
+    - Keep the current auto-detect script, but add Linux-side excludes so `tarpaulin` stops counting Windows-tagged files.
+    - Pros:
+      - smaller change than a full tool switch
+      - keeps existing local workflow
+    - Implications:
+      - Linux still depends on whichever tool happens to be installed
+      - output semantics still differ between hosts
+    - Risks:
+      - two developers can get different Linux Rust totals from the same tree
+      - the policy remains harder to reason about
+  - `1. C`
+    - Standardize Linux Rust on `cargo-llvm-cov`, matching Windows, and use an explicit ignore regex for Windows-tagged files in the Linux run.
+    - Pros:
+      - same Rust coverage tool family on Linux and Windows
+      - honest Linux totals focused on Linux-relevant Rust code
+      - built-in gating and cleaner summary/report flow
+    - Implications:
+      - Linux script behavior changes
+      - local Linux coverage now requires `cargo-llvm-cov`
+    - Risks:
+      - one-time tool-install cost on Linux
+      - report numbers will shift, so docs and the current baseline must be refreshed
+- Recommendation:
+  - `1. C`
+  - Reason:
+    - it is the cleanest way to make Linux and Windows Rust coverage policy genuinely consistent
+    - it removes the current “same threshold, different measurement semantics” drift
+    - it prevents wasting more effort on Windows-only lines while we are trying to improve Linux coverage
+- Decision made by Costa:
+  - `1. C`
+  - implement Linux Rust coverage with `cargo-llvm-cov`
+  - use an explicit Linux-side ignore regex for Windows-tagged files
+  - refresh the Linux Rust baseline and sync the docs after the switch
+- Result after the follow-up Unix test-file split:
+  - `service/cgroups.rs` no longer contains the Unix test module inline
+  - the Unix tests now live in `src/service/cgroups_unix_tests.rs`
+  - the exact verified Linux Rust rerun after the split is:
+    - total: `98.54%`
+    - `service/cgroups.rs`: `97.67%`
+    - `transport/posix.rs`: `99.00%`
+    - `transport/shm.rs`: `96.40%`
+  - exact verified Linux regressions after the split:
+    - `cargo test --manifest-path src/crates/netipc/Cargo.toml --lib -- --test-threads=1`: `279/279` passing
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
+- Current execution slice after the Linux `cargo-llvm-cov` switch:
+  - keep the next Rust work on Linux only
+  - focus on deterministic `service/cgroups.rs` gaps that still count in the new Linux total:
+    - managed-server loop break paths:
+      - `1050`
+      - `1062`
+      - `1421`
+      - `1425`
+      - `1431`
+      - `1445`
+      - `1552`
+      - `1563`
+    - still-counted inline test/helper branches that are cheap and deterministic:
+      - `1946`
+      - `1957`
+      - `2166`
+      - `2183`
+      - `2463`
+      - `2480`
+  - explicit non-goals for this slice:
+    - fixed-size encode guards in typed APIs
+    - raw syscall / mmap / bind fault-injection paths
+    - `poll_fd()` branches that need unreliable signal timing unless a deterministic reproducer is found
+    - multiline `llvm-cov` line-mapping artifacts like the already-tested `chunk_index mismatch` formatting line in `transport/posix.rs`
+  - new fact discovered during this slice:
+    - adding more inline tests inside `src/service/cgroups.rs` can lower the measured file coverage under `cargo-llvm-cov`, even when the new tests are valid and all pass
+    - this is now fixed by moving the Unix tests into `src/service/cgroups_unix_tests.rs`
+    - the coverage regression from inline test growth no longer applies to the runtime file
+  - decision made by Costa:
+    - move the Linux Rust service tests out of `src/service/cgroups.rs`
+    - mirror the existing split-file test pattern already used by the Windows Rust service tests
 - Current execution slice after `a36cf6e`:
   - stay on Linux Rust only
   - keep only ordinary deterministic targets in scope:
