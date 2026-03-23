@@ -37,7 +37,7 @@ func startTestServerUnixWithConfig(service string, cfg posix.ServerConfig, handl
 		_ = s.Run()
 	}()
 
-	time.Sleep(200 * time.Millisecond)
+	waitUnixServerReady(service)
 	return &testServer{server: s, doneCh: doneCh}
 }
 

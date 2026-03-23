@@ -19,7 +19,7 @@ Verified on `2026-03-23`:
   - threshold: `82%`
 - Go:
   - script: `tests/run-coverage-go.sh`
-  - result: `94.0%`
+  - result: `94.2%`
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
@@ -217,6 +217,27 @@ Concrete evidence from the latest Linux Go SHM slice:
 - implication:
   - these paths should stay out of the ordinary-coverage bucket unless the
     POSIX SHM timeout behavior becomes directly controllable in tests
+
+Concrete evidence from the latest Linux Go service-loop slice:
+
+- ordinary POSIX server-loop cases are still available and are now covered:
+  - worker-capacity rejection
+  - idle peer disconnect
+  - non-request termination
+  - truncated raw request recovery
+- result:
+  - `service/cgroups/client.go` is now `94.3%`
+  - `Run()` moved to `86.8%`
+  - `handleSession()` moved to `90.6%`
+- one real test-harness issue was exposed under coverage slowdown:
+  - the Unix Go server helpers were still using blind sleeps before clients
+    raced `Refresh()`
+  - this is now fixed by waiting for a successful POSIX handshake, not just for
+    the socket path to exist
+- current honest remaining question in the POSIX service loop:
+  - the `session.Send(...)` failure branch after peer close did not reproduce as
+    an ordinary Unix-domain packet case in this slice
+  - treat it as unproven ordinary work until a deterministic reproduction exists
 
 ## Practical Reading Of The Current State
 

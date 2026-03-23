@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"syscall"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -194,6 +195,142 @@ func TestUnixServerRunRejectsInvalidServiceName(t *testing.T) {
 	}
 }
 
+func TestUnixServerRejectsSessionAtWorkerCapacity(t *testing.T) {
+	svc := uniqueUnixService("go_unix_capacity")
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	released := false
+	releaseOnce := func() {
+		if !released {
+			close(release)
+			released = true
+		}
+	}
+	defer releaseOnce()
+
+	var handlerCalls atomic.Int32
+	ts := startServerWithWorkers(svc, Handlers{
+		OnIncrement: func(v uint64) (uint64, bool) {
+			handlerCalls.Add(1)
+			if v == 41 {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				<-release
+			}
+			return v + 1, true
+		},
+	}, 1)
+	defer ts.stop()
+
+	client1 := NewClient(testRunDir, svc, testClientConfig())
+	defer client1.Close()
+	refreshUnixClientReady(t, client1)
+
+	type callResult struct {
+		got uint64
+		err error
+	}
+	callDone := make(chan callResult, 1)
+	go func() {
+		got, err := client1.CallIncrement(41)
+		callDone <- callResult{got: got, err: err}
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first client did not occupy the only worker slot")
+	}
+
+	ccfg := testClientConfig()
+	session2, err := posix.Connect(testRunDir, svc, &ccfg)
+	if err != nil {
+		t.Fatalf("second raw connect failed: %v", err)
+	}
+	defer session2.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	reqHdr := &protocol.Header{
+		Kind:            protocol.KindRequest,
+		Code:            protocol.MethodIncrement,
+		ItemCount:       1,
+		MessageID:       1,
+		TransportStatus: protocol.StatusOK,
+	}
+	var reqPayload [protocol.IncrementPayloadSize]byte
+	if protocol.IncrementEncode(9, reqPayload[:]) == 0 {
+		t.Fatal("IncrementEncode failed")
+	}
+
+	sendErr := session2.Send(reqHdr, reqPayload[:])
+	var recvErr error
+	if sendErr == nil {
+		recvBuf := make([]byte, protocol.HeaderSize+64)
+		_, _, recvErr = session2.Receive(recvBuf)
+	}
+	if sendErr == nil && recvErr == nil {
+		t.Fatal("second session should be rejected while the server is at worker capacity")
+	}
+	if handlerCalls.Load() != 1 {
+		t.Fatalf("handler entered %d times, want 1 while second session is rejected", handlerCalls.Load())
+	}
+	session2.Close()
+
+	releaseOnce()
+	res := <-callDone
+	if res.err != nil {
+		t.Fatalf("first client call failed: %v", res.err)
+	}
+	if res.got != 42 {
+		t.Fatalf("first client result = %d, want 42", res.got)
+	}
+	client1.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	verify := NewClient(testRunDir, svc, testClientConfig())
+	defer verify.Close()
+	refreshUnixClientReady(t, verify)
+
+	got, err := verify.CallIncrement(1)
+	if err != nil {
+		t.Fatalf("verification call after worker-capacity reject failed: %v", err)
+	}
+	if got != 2 {
+		t.Fatalf("verification increment = %d, want 2", got)
+	}
+}
+
+func TestUnixIdlePeerDisconnectKeepsServerHealthy(t *testing.T) {
+	svc := uniqueUnixService("go_unix_idle_disconnect")
+	ts := startTestServer(svc, testHandlers())
+	defer ts.stop()
+
+	ccfg := testClientConfig()
+	session, err := posix.Connect(testRunDir, svc, &ccfg)
+	if err != nil {
+		t.Fatalf("raw connect failed: %v", err)
+	}
+	session.Close()
+
+	time.Sleep(200 * time.Millisecond)
+
+	verify := NewClient(testRunDir, svc, testClientConfig())
+	defer verify.Close()
+	refreshUnixClientReady(t, verify)
+
+	view, err := verify.CallSnapshot()
+	if err != nil {
+		t.Fatalf("normal call after idle disconnect failed: %v", err)
+	}
+	if view.ItemCount != 3 {
+		t.Fatalf("expected 3 items after idle disconnect, got %d", view.ItemCount)
+	}
+}
+
 func TestUnixClientTransportWithoutSession(t *testing.T) {
 	client := NewClient(testRunDir, uniqueUnixService("go_unix_transport"), testClientConfig())
 	defer client.Close()
@@ -276,6 +413,142 @@ func TestUnixDispatchSingleUnsupportedMethods(t *testing.T) {
 	})
 	if n, ok := server.dispatchSingle(protocol.MethodCgroupsSnapshot, nil, nil); ok || n != 0 {
 		t.Fatalf("dispatchSingle snapshot with derived zero max items = (%d, %v), want (0, false)", n, ok)
+	}
+}
+
+func TestUnixNonRequestTerminatesSession(t *testing.T) {
+	svc := uniqueUnixService("go_unix_nonreq")
+	ts := startTestServer(svc, testHandlers())
+	defer ts.stop()
+
+	ccfg := testClientConfig()
+	session, err := posix.Connect(testRunDir, svc, &ccfg)
+	if err != nil {
+		t.Fatalf("raw connect failed: %v", err)
+	}
+
+	badHdr := &protocol.Header{
+		Kind:            protocol.KindResponse,
+		Code:            protocol.MethodCgroupsSnapshot,
+		ItemCount:       0,
+		MessageID:       1,
+		TransportStatus: protocol.StatusOK,
+	}
+	if err := session.Send(badHdr, nil); err != nil {
+		t.Fatalf("send non-request failed: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	req := protocol.CgroupsRequest{LayoutVersion: 1, Flags: 0}
+	var reqBuf [4]byte
+	if req.Encode(reqBuf[:]) == 0 {
+		t.Fatal("request encode failed")
+	}
+	goodHdr := &protocol.Header{
+		Kind:            protocol.KindRequest,
+		Code:            protocol.MethodCgroupsSnapshot,
+		ItemCount:       1,
+		MessageID:       2,
+		TransportStatus: protocol.StatusOK,
+	}
+	_ = session.Send(goodHdr, reqBuf[:])
+
+	recvBuf := make([]byte, 4096)
+	if _, _, err := session.Receive(recvBuf); err == nil {
+		t.Fatal("receive after non-request should fail")
+	}
+	session.Close()
+
+	verify := NewClient(testRunDir, svc, testClientConfig())
+	defer verify.Close()
+	refreshUnixClientReady(t, verify)
+
+	view, err := verify.CallSnapshot()
+	if err != nil {
+		t.Fatalf("normal call after bad session failed: %v", err)
+	}
+	if view.ItemCount != 3 {
+		t.Fatalf("expected 3 items after recovery, got %d", view.ItemCount)
+	}
+}
+
+func TestUnixTruncatedRawRequestKeepsServerHealthy(t *testing.T) {
+	svc := uniqueUnixService("go_unix_short_req")
+	ts := startTestServer(svc, testHandlers())
+	defer ts.stop()
+
+	ccfg := testClientConfig()
+	session, err := posix.Connect(testRunDir, svc, &ccfg)
+	if err != nil {
+		t.Fatalf("raw connect failed: %v", err)
+	}
+	if _, err := syscall.SendmsgN(session.Fd(), []byte{1, 2, 3, 4}, nil, nil, 0); err != nil {
+		session.Close()
+		t.Fatalf("send truncated raw request failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	session.Close()
+
+	time.Sleep(200 * time.Millisecond)
+
+	verify := NewClient(testRunDir, svc, testClientConfig())
+	defer verify.Close()
+	refreshUnixClientReady(t, verify)
+
+	view, err := verify.CallSnapshot()
+	if err != nil {
+		t.Fatalf("normal call after truncated raw request failed: %v", err)
+	}
+	if view.ItemCount != 3 {
+		t.Fatalf("expected 3 items after truncated raw request, got %d", view.ItemCount)
+	}
+}
+
+func TestUnixPeerDisconnectDuringResponseKeepsServerHealthy(t *testing.T) {
+	svc := uniqueUnixService("go_unix_send_fail")
+	ts := startTestServer(svc, Handlers{
+		OnIncrement: func(v uint64) (uint64, bool) {
+			time.Sleep(100 * time.Millisecond)
+			return v + 1, true
+		},
+	})
+	defer ts.stop()
+
+	ccfg := testClientConfig()
+	session, err := posix.Connect(testRunDir, svc, &ccfg)
+	if err != nil {
+		t.Fatalf("raw connect failed: %v", err)
+	}
+
+	reqHdr := &protocol.Header{
+		Kind:            protocol.KindRequest,
+		Code:            protocol.MethodIncrement,
+		ItemCount:       1,
+		MessageID:       1,
+		TransportStatus: protocol.StatusOK,
+	}
+	var reqPayload [protocol.IncrementPayloadSize]byte
+	if protocol.IncrementEncode(41, reqPayload[:]) == 0 {
+		t.Fatal("IncrementEncode failed")
+	}
+	if err := session.Send(reqHdr, reqPayload[:]); err != nil {
+		t.Fatalf("send increment request failed: %v", err)
+	}
+	session.Close()
+
+	time.Sleep(250 * time.Millisecond)
+
+	verify := NewClient(testRunDir, svc, testClientConfig())
+	defer verify.Close()
+	refreshUnixClientReady(t, verify)
+
+	got, err := verify.CallIncrement(9)
+	if err != nil {
+		t.Fatalf("normal call after peer disconnect failed: %v", err)
+	}
+	if got != 10 {
+		t.Fatalf("increment after peer disconnect = %d, want 10", got)
 	}
 }
 

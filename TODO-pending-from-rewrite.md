@@ -37,6 +37,15 @@ Finish the rewrite to a production-ready state with:
     - batch bad `message_id`
     - malformed batch payload
     - snapshot dispatch with derived zero-capacity buffer
+  - completed the next Linux / POSIX Go ordinary server-loop slice
+  - validated ordinary POSIX server-loop tests for:
+    - worker-capacity rejection
+    - idle peer disconnect
+    - non-request termination
+    - truncated raw request recovery
+  - fixed one real Unix Go test-harness issue exposed by coverage slowdown:
+    - baseline / SHM / stress helpers were still using blind sleeps before clients raced `Refresh()`
+    - they now wait for a real successful POSIX handshake instead of just waiting for the socket path to appear
   - reclassified raw malformed POSIX SHM request recovery (`short`, `bad header`, `unexpected kind`) out of the ordinary bucket:
     - all three block in `ShmReceive(..., 30000)` today
     - they belong to timeout-behavior / special-infrastructure work unless POSIX SHM timeout control becomes testable
@@ -86,7 +95,7 @@ Finish the rewrite to a production-ready state with:
         - ordinary testable now:
           - Windows Go ordinary coverage is no longer the main gap
           - next honest Go target is Linux / POSIX:
-            - `service/cgroups/client.go` (`93.4%`)
+            - `service/cgroups/client.go` (`94.3%`)
             - `transport/posix/shm_linux.go` (`90.6%`)
             - `transport/posix/uds.go` (`92.0%`)
           - keep the deferred managed-server retry/shutdown investigation separate from ordinary coverage
@@ -258,7 +267,7 @@ Verified on `2026-03-23`:
   - current threshold: `82%`
 - Go:
   - `bash tests/run-coverage-go.sh`
-  - result: `94.0%`
+  - result: `94.2%`
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
@@ -561,7 +570,7 @@ Facts:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
 - Windows Go coverage currently reports `96.7%`.
-- Linux Go coverage currently reports `94.0%` with the remaining ordinary gaps now concentrated in the server loop plus a smaller POSIX transport residue.
+- Linux Go coverage currently reports `94.2%` with the remaining ordinary gaps now reduced to a smaller POSIX transport/service residue.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
@@ -598,8 +607,8 @@ Required next work:
        - `CallIncrementBatch`: `95.5%`
        - `transportReceive`: `100.0%`
        - `dispatchSingle`: `100.0%`
-       - `Run`: `81.6%`
-       - `handleSession`: `89.4%`
+       - `Run`: `86.8%`
+       - `handleSession`: `90.6%`
        - result of the latest Unix raw malformed-response parity slice:
          - `service/cgroups/client.go` moved from `81.4%` to `88.0%`
        - result of the latest POSIX service follow-up slice:
@@ -614,6 +623,10 @@ Required next work:
          - `doRawCall()` is now `100.0%`
          - `CallIncrementBatch()` moved to `95.5%`
          - `dispatchSingle()` is now `100.0%`
+       - result of the latest Linux / POSIX server-loop slice:
+         - `service/cgroups/client.go` moved from `93.4%` to `94.3%`
+         - `Run()` moved to `86.8%`
+         - `handleSession()` moved to `90.6%`
      - `transport/posix/shm_linux.go`
        - result of the latest ordinary SHM slice:
          - file moved from `77.5%` to `86.7%`
@@ -650,11 +663,25 @@ Required next work:
        - review whether the remaining `service/cgroups/client.go` paths are still ordinary:
          - `Run`
          - `handleSession`
+       - current verified `service/cgroups` profile on the latest local slice:
+         - `Run`: `86.8%`
+         - `handleSession`: `90.6%`
+         - `pollFd`: `85.7%`
+       - concrete remaining ordinary branches from the current HTML profile:
+         - `handleSession()`:
+           - response send failure after peer close (`session.Send(...)` error)
+       - branches that still do not look ordinary from the current profile:
+         - `Run()`:
+           - listener poll error / `Accept()` error while still running
+           - negotiated SHM upgrade create failure
+         - `handleSession()`:
+           - SHM short/bad-header receive paths that currently block in `ShmReceive(..., 30000)` without extra timeout control
+           - `len(msgBuf) < msgLen` growth path, because `msgBuf` is already sized from `MaxResponsePayloadBytes`
+           - peer-close send failure on Unix packet sockets, because the ordinary delayed-close reproduction still did not trigger `session.Send(...)` failure in this slice
        - current execution slice:
          - inspect the remaining `client.go` and `shm_linux.go` uncovered blocks line-by-line
          - add only ordinary POSIX tests for:
-           - `Run()` accept-loop branches that do not require kernel fault injection
-           - `handleSession()` server-side protocol / batching branches reachable with normal clients or raw POSIX sessions
+           - `handleSession()` server-side protocol / batching branches still reachable with normal clients or raw POSIX sessions
            - the remaining `ShmServerCreate()` / `ShmClientAttach()` / `checkShmStale()` paths that are still reachable without fault injection
          - do not chase:
            - listener/socket syscall failures

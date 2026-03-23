@@ -26,6 +26,32 @@ func cleanupAll(service string) {
 	os.Remove(testRunDir + "/" + service + ".ipcshm")
 }
 
+func waitUnixSocketReady(service string) {
+	path := testRunDir + "/" + service + ".sock"
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitUnixServerReady(service string) {
+	waitUnixSocketReady(service)
+
+	cfg := testClientConfig()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		session, err := posix.Connect(testRunDir, service, &cfg)
+		if err == nil {
+			session.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func testServerConfig() posix.ServerConfig {
 	return posix.ServerConfig{
 		SupportedProfiles:       protocol.ProfileBaseline,
@@ -111,8 +137,8 @@ func startTestServer(service string, handlers Handlers) *testServer {
 		s.Run()
 	}()
 
-	// Wait for server to be ready (listener to bind)
-	time.Sleep(100 * time.Millisecond)
+	// Wait until the server is actually accepting sessions.
+	waitUnixServerReady(service)
 
 	return &testServer{server: s, doneCh: doneCh}
 }

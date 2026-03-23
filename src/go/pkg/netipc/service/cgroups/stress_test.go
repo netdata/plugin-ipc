@@ -125,7 +125,7 @@ func startLargeServer(service string, handlers Handlers, maxResp uint32) *testSe
 		s.Run()
 	}()
 
-	time.Sleep(100 * time.Millisecond)
+	waitUnixServerReady(service)
 	return &testServer{server: s, doneCh: doneCh}
 }
 
@@ -142,7 +142,7 @@ func startServerWithWorkers(service string, handlers Handlers, workers int) *tes
 		s.Run()
 	}()
 
-	time.Sleep(100 * time.Millisecond)
+	waitUnixServerReady(service)
 	return &testServer{server: s, doneCh: doneCh}
 }
 
@@ -552,7 +552,7 @@ func TestStressMixedTransport(t *testing.T) {
 		defer close(doneCh)
 		s.Run()
 	}()
-	time.Sleep(100 * time.Millisecond)
+	waitUnixServerReady(svc)
 
 	defer func() {
 		s.Stop()
