@@ -39,14 +39,68 @@ Finish the rewrite to a production-ready state with:
     - `cleanup_stale()` on missing run dir
     - `cleanup_stale()` ignoring unrelated and non-UTF8 entries
     - `check_shm_stale()` recovering zero-generation stale files
+  - latest Linux Rust transport follow-up:
+    - Unix transport tests were split out of:
+      - `src/transport/posix.rs`
+      - `src/transport/shm.rs`
+    - into:
+      - `src/transport/posix_tests.rs`
+      - `src/transport/shm_tests.rs`
+    - reason:
+      - same as the earlier Unix service split
+      - keep runtime coverage honest by avoiding inline `#[cfg(test)]` code inside the production transport files
+    - measured effect on the kept transport split:
+      - Linux Rust total moved from `98.70%` to `98.47%`
+      - `src/transport/posix.rs` moved from `99.00%` to `97.35%`
+      - `src/transport/shm.rs` moved from `96.85%` to `95.71%`
+    - next deterministic targets on top of that split:
+      - `check_shm_stale()` open-failure cleanup
+      - `check_shm_stale()` mmap-failure cleanup
+      - `cleanup_stale()` mmap-failure cleanup
+  - result after adding those 3 ordinary SHM stale-cleanup tests:
+    - Rust lib tests: `291/291` passing
+    - Linux Rust total moved from `98.47%` to `98.52%`
+    - `src/transport/shm.rs` moved from `95.71%` to `96.04%`
+  - latest protocol follow-up finding:
+    - `src/protocol/increment.rs`, `src/protocol/string_reverse.rs`, and `src/protocol/cgroups.rs` still had inline `#[cfg(test)]` modules
+    - they were split out experimentally for the same reason as the Unix service split
+    - measured effect on the experimental protocol split:
+      - Rust lib tests stay `291/291` passing
+      - Linux Rust total moved from `98.52%` down to `98.49%`
+      - `src/protocol/increment.rs` now reports `95.83%`
+      - `src/protocol/string_reverse.rs` now reports `97.83%`
+      - `src/protocol/cgroups.rs` now reports `99.64%`
+    - implication:
+      - the protocol split does not currently buy enough honest runtime signal to justify the lower total on its own
+      - this is now a real coverage-accounting decision point, not just an implementation detail
+  - decision made by Costa:
+    - keep the Unix Rust transport split
+    - revert the Rust protocol split
+    - keep the new deterministic SHM stale-cleanup tests
+  - implementation implication of that decision:
+    - restore inline tests in:
+      - `src/protocol/increment.rs`
+      - `src/protocol/string_reverse.rs`
+      - `src/protocol/cgroups.rs`
+    - remove the experimental protocol-only test files:
+      - `src/protocol/increment_tests.rs`
+      - `src/protocol/string_reverse_tests.rs`
+      - `src/protocol/cgroups_tests.rs`
+  - current result after applying Costa's decision:
+    - keep the transport split
+    - keep the new deterministic SHM stale-cleanup tests
+    - revert the protocol split
 - Latest verified Linux Rust result:
   - `bash tests/run-coverage-rust.sh 80`
   - tool on this host: `cargo-llvm-cov`
-  - total: `98.70%` (`6589/6676` executed, `87` missed)
+  - total: `98.52%` (`3996/4056` executed, `60` missed)
   - key files:
     - `service/cgroups.rs`: `98.28%` (`802/816`)
-    - `transport/posix.rs`: `99.00%`
-    - `transport/shm.rs`: `96.85%` (`1354/1398`)
+    - `transport/posix.rs`: `97.35%` (`662/680`)
+    - `transport/shm.rs`: `96.04%` (`582/606`)
+  - exact validated state after the latest Rust slice:
+    - `cargo test --manifest-path src/crates/netipc/Cargo.toml --lib -- --test-threads=1`: `291/291` passing
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
 - Latest verified Linux C result:
   - `bash tests/run-coverage-c.sh 82`
   - total: `94.1%`

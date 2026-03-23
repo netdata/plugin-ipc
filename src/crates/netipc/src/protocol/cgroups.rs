@@ -464,13 +464,12 @@ mod tests {
 
     #[test]
     fn cgroups_item_overlapping_regions() {
-        // Build a valid snapshot then corrupt offsets so name and path overlap
         let mut buf = [0u8; 4096];
         let mut b = CgroupsBuilder::new(&mut buf, 1, 0, 1);
         b.add(1, 0, 1, b"test", b"/test").unwrap();
         let total = b.finish();
 
-        let dir_end = CGROUPS_RESP_HDR_SIZE + 1 * CGROUPS_DIR_ENTRY_SIZE;
+        let dir_end = CGROUPS_RESP_HDR_SIZE + CGROUPS_DIR_ENTRY_SIZE;
         let item_off = u32::from_ne_bytes(
             buf[CGROUPS_RESP_HDR_SIZE..CGROUPS_RESP_HDR_SIZE + 4]
                 .try_into()
@@ -478,11 +477,9 @@ mod tests {
         ) as usize;
         let item_start = dir_end + item_off;
 
-        // Set path_offset = name_offset (fully overlapping)
         let name_off =
             u32::from_ne_bytes(buf[item_start + 16..item_start + 20].try_into().unwrap());
         buf[item_start + 24..item_start + 28].copy_from_slice(&name_off.to_ne_bytes());
-        // Set path_len = name_len
         let name_len =
             u32::from_ne_bytes(buf[item_start + 20..item_start + 24].try_into().unwrap());
         buf[item_start + 28..item_start + 32].copy_from_slice(&name_len.to_ne_bytes());
@@ -492,9 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_cgroups_empty_finish_returns_none() {
-        // dispatch where handler adds no items and finish returns 24
-        // (non-zero), so dispatch returns Some
+    fn dispatch_cgroups_empty_finish_returns_some_header_only() {
         let req = CgroupsRequest {
             layout_version: 1,
             flags: 0,
@@ -503,7 +498,6 @@ mod tests {
         req.encode(&mut req_buf);
         let mut resp = [0u8; 4096];
         let result = dispatch_cgroups_snapshot(&req_buf, &mut resp, 1, |_req, _builder| true);
-        // finish() returns 24 for empty builder (header only), so Some(24)
         assert!(result.is_some());
         assert_eq!(result.unwrap(), CGROUPS_RESP_HDR_SIZE);
     }

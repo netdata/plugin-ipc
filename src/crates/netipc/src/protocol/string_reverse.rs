@@ -89,7 +89,7 @@ mod tests {
     fn encode_empty() {
         let mut buf = [0u8; 64];
         let n = string_reverse_encode(b"", &mut buf);
-        assert_eq!(n, STRING_REVERSE_HDR_SIZE + 1); // header + NUL
+        assert_eq!(n, STRING_REVERSE_HDR_SIZE + 1);
         let view = string_reverse_decode(&buf[..n]).unwrap();
         assert_eq!(view.str_data, b"");
         assert_eq!(view.str_len, 0);
@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn encode_too_small() {
-        let mut buf = [0u8; 4]; // too small
+        let mut buf = [0u8; 4];
         assert_eq!(string_reverse_encode(b"hello", &mut buf), 0);
     }
 
@@ -111,10 +111,9 @@ mod tests {
 
     #[test]
     fn decode_oob() {
-        // str_offset + str_length + 1 > buf.len()
         let mut buf = [0u8; 16];
-        buf[0..4].copy_from_slice(&8u32.to_ne_bytes()); // offset = 8
-        buf[4..8].copy_from_slice(&99u32.to_ne_bytes()); // length = 99 (way too big)
+        buf[0..4].copy_from_slice(&8u32.to_ne_bytes());
+        buf[4..8].copy_from_slice(&99u32.to_ne_bytes());
         assert!(matches!(
             string_reverse_decode(&buf),
             Err(NipcError::OutOfBounds)
@@ -124,12 +123,12 @@ mod tests {
     #[test]
     fn decode_missing_nul() {
         let mut buf = [0u8; 16];
-        buf[0..4].copy_from_slice(&8u32.to_ne_bytes()); // offset = 8
-        buf[4..8].copy_from_slice(&3u32.to_ne_bytes()); // length = 3
+        buf[0..4].copy_from_slice(&8u32.to_ne_bytes());
+        buf[4..8].copy_from_slice(&3u32.to_ne_bytes());
         buf[8] = b'a';
         buf[9] = b'b';
         buf[10] = b'c';
-        buf[11] = b'X'; // should be 0
+        buf[11] = b'X';
         assert!(matches!(
             string_reverse_decode(&buf),
             Err(NipcError::MissingNul)
@@ -138,11 +137,10 @@ mod tests {
 
     #[test]
     fn dispatch_resp_too_small() {
-        // Line 58: response buffer too small -> encode returns 0 -> None
         let s = b"hello";
         let mut req_buf = [0u8; 64];
         string_reverse_encode(s, &mut req_buf);
-        let mut resp = [0u8; 4]; // too small
+        let mut resp = [0u8; 4];
         let result = dispatch_string_reverse(&req_buf, &mut resp, |data| {
             Some(data.iter().rev().copied().collect())
         });
@@ -178,7 +176,6 @@ mod tests {
 
     #[test]
     fn as_str_non_utf8() {
-        // StringReverseView::as_str returns "" for non-UTF8 data
         let view = StringReverseView {
             str_data: &[0xFF, 0xFE],
             str_len: 2,

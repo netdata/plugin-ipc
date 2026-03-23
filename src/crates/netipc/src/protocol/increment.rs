@@ -60,10 +60,9 @@ mod tests {
 
     #[test]
     fn dispatch_resp_too_small() {
-        // Line 27: response buffer too small -> encode returns 0 -> None
         let mut req = [0u8; 8];
         increment_encode(42, &mut req);
-        let mut resp = [0u8; 4]; // too small
+        let mut resp = [0u8; 4];
         assert!(dispatch_increment(&req, &mut resp, |v| Some(v + 1)).is_none());
     }
 

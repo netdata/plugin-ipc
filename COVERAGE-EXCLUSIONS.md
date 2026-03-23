@@ -80,7 +80,7 @@ Verified on `2026-03-23`:
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
-  - result: `98.70%`
+  - result: `98.52%`
   - threshold: `80%`
   - note:
     - Linux now uses `cargo-llvm-cov`, matching the Windows Rust workflow
@@ -90,14 +90,18 @@ Verified on `2026-03-23`:
       - `src/transport/win_shm.rs`
     - Unix Rust service tests now live in:
       - `src/service/cgroups_unix_tests.rs`
+    - Unix Rust transport tests now live in:
+      - `src/transport/posix_tests.rs`
+      - `src/transport/shm_tests.rs`
     - implication:
-      - adding new Unix Rust tests no longer inflates the denominator of `src/service/cgroups.rs`
+      - adding new Unix Rust service and transport tests no longer inflates the denominators of the corresponding runtime files
     - current Linux file totals from the verified `llvm-cov` run:
       - `service/cgroups.rs`: `98.28%` (`802/816`)
-      - `transport/posix.rs`: `99.00%` (`2508/2533`)
-      - `transport/shm.rs`: `96.85%` (`1354/1398`)
+      - `transport/posix.rs`: `97.35%` (`662/680`)
+      - `transport/shm.rs`: `96.04%` (`582/606`)
     - implication:
       - the remaining Linux Rust total is now dominated by helper / fault-injection territory, not by Windows-tagged files or inline test code polluting the Linux baseline
+      - the small protocol files still keep inline tests on purpose for now, because externalizing them reduced the Linux total to `98.49%` without enough runtime-signal gain
       - one concrete layering fact is now proven:
         - on POSIX baseline, a bad response `message_id` is rejected by L1 before the L2 typed wrappers can map it to `BadLayout`
         - malformed batch directories on POSIX UDS are rejected by L1 before the Rust managed-service loop can map them to `INTERNAL_ERROR`
