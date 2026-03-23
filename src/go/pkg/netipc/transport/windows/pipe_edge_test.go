@@ -3,6 +3,7 @@
 package windows
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"strings"
@@ -705,8 +706,8 @@ func TestSessionReceiveRejectsMalformedChunks(t *testing.T) {
 				totalPayloadLen: 20,
 				firstPayload:    []byte("0123456789"),
 				chunkHeader: protocol.ChunkHeader{
-					Magic:           0,
-					Version:         protocol.Version,
+					Magic:           protocol.MagicChunk,
+					Version:         protocol.Version + 1,
 					MessageID:       7,
 					TotalMessageLen: uint32(protocol.HeaderSize + 20),
 					ChunkIndex:      1,
@@ -994,5 +995,141 @@ func TestSessionReceiveRejectsMalformedChunkedBatchMessages(t *testing.T) {
 				t.Fatalf("Receive error = %v, want text %q", err, tc.wantText)
 			}
 		})
+	}
+}
+
+func TestSessionSendClearsInflightOnDisconnect(t *testing.T) {
+	client, server := sessionPair(t, defaultServerConfig(), defaultClientConfig())
+	server.Close()
+
+	hdr := protocol.Header{
+		Kind:      protocol.KindRequest,
+		Code:      protocol.MethodIncrement,
+		ItemCount: 1,
+		MessageID: 77,
+	}
+	err := client.Send(&hdr, []byte("payload"))
+	if err == nil {
+		t.Fatal("Send should fail after peer disconnect")
+	}
+	if !errors.Is(err, ErrDisconnected) {
+		t.Fatalf("Send error = %v, want ErrDisconnected", err)
+	}
+	if _, exists := client.inflightIDs[77]; exists {
+		t.Fatalf("message_id 77 should be removed from inflightIDs after send failure")
+	}
+}
+
+func TestSessionReceiveReportsPeerDisconnect(t *testing.T) {
+	client, server := sessionPair(t, defaultServerConfig(), defaultClientConfig())
+	server.Close()
+
+	buf := make([]byte, 4096)
+	_, _, err := client.Receive(buf)
+	if err == nil {
+		t.Fatal("Receive should fail after peer disconnect")
+	}
+	if !errors.Is(err, ErrDisconnected) {
+		t.Fatalf("Receive error = %v, want ErrDisconnected", err)
+	}
+}
+
+func TestSessionChunkedSendDisconnectPaths(t *testing.T) {
+	t.Run("first chunk send failure", func(t *testing.T) {
+		sCfg := defaultServerConfig()
+		cCfg := defaultClientConfig()
+		sCfg.PacketSize = 96
+		cCfg.PacketSize = 96
+
+		client, server := sessionPair(t, sCfg, cCfg)
+		if err := syscall.CloseHandle(server.handle); err != nil {
+			t.Fatalf("CloseHandle(server) failed: %v", err)
+		}
+		server.handle = syscall.InvalidHandle
+
+		hdr := protocol.Header{
+			Kind:      protocol.KindRequest,
+			Code:      protocol.MethodIncrement,
+			ItemCount: 1,
+			MessageID: 88,
+		}
+		payload := bytes.Repeat([]byte("x"), 256)
+		err := client.Send(&hdr, payload)
+		if err == nil {
+			t.Fatal("Send should fail after peer disconnect")
+		}
+		if !errors.Is(err, ErrDisconnected) {
+			t.Fatalf("Send error = %v, want ErrDisconnected", err)
+		}
+		if _, exists := client.inflightIDs[88]; exists {
+			t.Fatalf("message_id 88 should be removed from inflightIDs after chunked send failure")
+		}
+	})
+
+	t.Run("continuation chunk send failure", func(t *testing.T) {
+		sCfg := defaultServerConfig()
+		cCfg := defaultClientConfig()
+		sCfg.PacketSize = 96
+		cCfg.PacketSize = 96
+
+		client, server := sessionPair(t, sCfg, cCfg)
+
+		closeDone := make(chan error, 1)
+		go func() {
+			buf := make([]byte, 96)
+			_, err := rawRecv(server.handle, buf)
+			if err == nil {
+				err = syscall.CloseHandle(server.handle)
+				server.handle = syscall.InvalidHandle
+			}
+			closeDone <- err
+		}()
+
+		hdr := protocol.Header{
+			Kind:      protocol.KindRequest,
+			Code:      protocol.MethodIncrement,
+			ItemCount: 1,
+			MessageID: 89,
+		}
+		payload := bytes.Repeat([]byte("y"), 4096)
+		err := client.Send(&hdr, payload)
+		if err == nil {
+			t.Fatal("Send should fail during continuation after peer disconnect")
+		}
+		if !errors.Is(err, ErrDisconnected) {
+			t.Fatalf("Send error = %v, want ErrDisconnected", err)
+		}
+		if _, exists := client.inflightIDs[89]; exists {
+			t.Fatalf("message_id 89 should be removed from inflightIDs after continuation send failure")
+		}
+		if err := <-closeDone; err != nil {
+			t.Fatalf("server close goroutine failed: %v", err)
+		}
+	})
+}
+
+func TestSessionSendRejectsTooSmallPacketSize(t *testing.T) {
+	sCfg := defaultServerConfig()
+	cCfg := defaultClientConfig()
+	sCfg.PacketSize = 16
+	cCfg.PacketSize = 16
+
+	client, _ := sessionPair(t, sCfg, cCfg)
+
+	hdr := protocol.Header{
+		Kind:      protocol.KindRequest,
+		Code:      protocol.MethodIncrement,
+		ItemCount: 1,
+		MessageID: 90,
+	}
+	err := client.Send(&hdr, bytes.Repeat([]byte("z"), 64))
+	if err == nil {
+		t.Fatal("Send should fail when negotiated packet_size is too small")
+	}
+	if !errors.Is(err, ErrBadParam) {
+		t.Fatalf("Send error = %v, want ErrBadParam", err)
+	}
+	if !strings.Contains(err.Error(), "packet_size too small") {
+		t.Fatalf("Send error = %v, want text %q", err, "packet_size too small")
 	}
 }
