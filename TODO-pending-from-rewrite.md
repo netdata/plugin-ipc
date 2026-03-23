@@ -50,12 +50,13 @@ Finish the rewrite to a production-ready state with:
         - `CallIncrementBatch` (`90.9%`)
         - `transportReceive` (`100.0%`)
         - `Run` (`91.7%`)
-        - `handleSession` (`83.8%`)
+        - `handleSession` (`86.2%`)
       - facts from the uncovered blocks:
         - most remaining Go gaps are now ordinary L2 service paths and the deferred managed-server retry/shutdown area
         - Windows named-pipe transport edge handling is now broadly covered
         - the recent honest coverage gains came from real malformed transport tests and WinSHM edge tests, not from exclusions
         - some malformed named-pipe response cases never reach L2 validation because the Windows session layer rejects them first
+        - raw malformed WinSHM requests now also cover the real managed-server SHM session teardown and reconnect path
       - split of remaining Go gaps:
         - ordinary testable now:
           - remaining `client_windows.go` `handleSession()` branches
@@ -73,12 +74,12 @@ Finish the rewrite to a production-ready state with:
     - total: `83.9%`
     - status: the script now passes the Linux-matching per-file `82%` gate
   - Go:
-    - total: `93.4%`
+    - total: `93.6%`
     - package coverage:
-      - `service/cgroups`: `93.6%`
+      - `service/cgroups`: `94.1%`
       - `transport/windows`: `90.0%`
     - key files:
-      - `service/cgroups/client_windows.go`: `93.4%`
+      - `service/cgroups/client_windows.go`: `94.0%`
       - `service/cgroups/types.go`: `100.0%`
       - `transport/windows/pipe.go`: `91.4%`
       - `transport/windows/shm.go`: `88.3%`
@@ -277,10 +278,10 @@ Current measured results:
 
 - Go:
   - `bash tests/run-coverage-go-windows.sh 85`
-  - coverage result: `93.4%`
+  - coverage result: `93.6%`
   - package coverage:
     - `protocol`: `99.5%`
-    - `service/cgroups`: `93.6%`
+    - `service/cgroups`: `94.1%`
     - `transport/windows`: `90.0%`
   - status:
     - reported above the Linux-matching `85%` target
@@ -289,10 +290,11 @@ Current measured results:
       - `transport/windows/shm.go` to `88.3%`
       - `transport/windows` package total to `90.0%`
       - `service/cgroups/types.go` to `100.0%`
-      - `service/cgroups/client_windows.go` to `93.4%`
+      - `service/cgroups/client_windows.go` to `94.0%`
     - first-class Windows Go CTest targets are now real and passing on `win11`
     - the idle managed `Server.Stop()` hang is fixed and covered
     - raw WinSHM tests now cover the Windows-only `doRawCall()` / `transportReceive()` branches that named pipes cannot reach honestly
+    - malformed raw WinSHM request tests now also cover the real SHM server-side teardown / reconnect path
 
 Important facts:
 
@@ -448,7 +450,7 @@ Current expected result:
 - `bash tests/run-coverage-c-windows.sh 82`
   - passes with all tracked Windows C files above `82%`
 - `bash tests/run-coverage-go-windows.sh 85`
-  - currently reports `93.4%`
+  - currently reports `93.6%`
 - `bash tests/run-coverage-rust-windows.sh 80`
   - currently reports `93.59%`
   - should now enforce the same `80%` total threshold used by Linux Rust
@@ -494,7 +496,7 @@ Facts:
 - Windows C coverage currently passes:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
-- Windows Go coverage currently reports `93.4%`.
+- Windows Go coverage currently reports `93.6%`.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:

@@ -149,3 +149,110 @@ func TestWinShmAttachFailureLeavesClientDisconnected(t *testing.T) {
 		t.Fatal("expected raw server receive to fail after attach failure disconnect")
 	}
 }
+
+func TestWinShmMalformedShortRequestRecovers(t *testing.T) {
+	svc := uniqueWinService("go_win_shm_short_req")
+	ts := startTestServerWinWithConfig(svc, testWinShmServerConfig(), winTestHandlers())
+	defer ts.stop()
+
+	client := NewClient(winTestRunDir, svc, testWinShmClientConfig())
+	defer client.Close()
+
+	waitWinClientReady(t, client)
+
+	if client.shm == nil {
+		t.Fatal("expected WinSHM attachment")
+	}
+	if err := client.shm.WinShmSend([]byte{1, 2, 3, 4}); err != nil {
+		t.Fatalf("WinShmSend malformed short request failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	got, err := client.CallIncrement(9)
+	if err != nil {
+		t.Fatalf("CallIncrement after malformed short WinSHM request failed: %v", err)
+	}
+	if got != 10 {
+		t.Fatalf("CallIncrement after malformed short WinSHM request = %d, want 10", got)
+	}
+	if client.Status().ReconnectCount < 1 {
+		t.Fatalf("expected reconnect after malformed short WinSHM request, got status %+v", client.Status())
+	}
+}
+
+func TestWinShmMalformedHeaderRequestRecovers(t *testing.T) {
+	svc := uniqueWinService("go_win_shm_bad_hdr")
+	ts := startTestServerWinWithConfig(svc, testWinShmServerConfig(), winTestHandlers())
+	defer ts.stop()
+
+	client := NewClient(winTestRunDir, svc, testWinShmClientConfig())
+	defer client.Close()
+
+	waitWinClientReady(t, client)
+
+	if client.shm == nil {
+		t.Fatal("expected WinSHM attachment")
+	}
+	msg := make([]byte, protocol.HeaderSize)
+	if err := client.shm.WinShmSend(msg); err != nil {
+		t.Fatalf("WinShmSend malformed header request failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	got, err := client.CallIncrement(11)
+	if err != nil {
+		t.Fatalf("CallIncrement after malformed header WinSHM request failed: %v", err)
+	}
+	if got != 12 {
+		t.Fatalf("CallIncrement after malformed header WinSHM request = %d, want 12", got)
+	}
+	if client.Status().ReconnectCount < 1 {
+		t.Fatalf("expected reconnect after malformed header WinSHM request, got status %+v", client.Status())
+	}
+}
+
+func TestWinShmUnexpectedMessageKindRecovers(t *testing.T) {
+	svc := uniqueWinService("go_win_shm_bad_kind")
+	ts := startTestServerWinWithConfig(svc, testWinShmServerConfig(), winTestHandlers())
+	defer ts.stop()
+
+	client := NewClient(winTestRunDir, svc, testWinShmClientConfig())
+	defer client.Close()
+
+	waitWinClientReady(t, client)
+
+	if client.shm == nil {
+		t.Fatal("expected WinSHM attachment")
+	}
+
+	reqHdr := protocol.Header{
+		Kind:            protocol.KindResponse,
+		Code:            protocol.MethodIncrement,
+		ItemCount:       1,
+		MessageID:       1,
+		TransportStatus: protocol.StatusOK,
+	}
+	var reqPayload [protocol.IncrementPayloadSize]byte
+	if protocol.IncrementEncode(9, reqPayload[:]) == 0 {
+		t.Fatal("IncrementEncode failed")
+	}
+
+	if err := client.shm.WinShmSend(encodeRawWinMessage(reqHdr, reqPayload[:])); err != nil {
+		t.Fatalf("WinShmSend unexpected-kind request failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	got, err := client.CallIncrement(13)
+	if err != nil {
+		t.Fatalf("CallIncrement after unexpected-kind WinSHM request failed: %v", err)
+	}
+	if got != 14 {
+		t.Fatalf("CallIncrement after unexpected-kind WinSHM request = %d, want 14", got)
+	}
+	if client.Status().ReconnectCount < 1 {
+		t.Fatalf("expected reconnect after unexpected-kind WinSHM request, got status %+v", client.Status())
+	}
+}
