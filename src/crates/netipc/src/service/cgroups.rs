@@ -3817,6 +3817,14 @@ mod tests {
         );
         assert_eq!((n, ok), (0, false));
 
+        let (n, ok) = dispatch_single(
+            &Handlers::default(),
+            METHOD_CGROUPS_SNAPSHOT,
+            &[1, 0, 0, 0],
+            &mut response_buf,
+        );
+        assert_eq!((n, ok), (0, false));
+
         let snapshot_handlers = Handlers {
             on_snapshot: Some(Arc::new(|_, _| true)),
             snapshot_max_items: 0,
@@ -3827,6 +3835,33 @@ mod tests {
             METHOD_CGROUPS_SNAPSHOT,
             &[1, 0, 0, 0],
             &mut [],
+        );
+        assert_eq!((n, ok), (0, false));
+
+        let reverse_handlers = Handlers {
+            on_string_reverse: Some(Arc::new(|s| Some(s.chars().rev().collect()))),
+            ..Handlers::default()
+        };
+        let mut invalid_utf8_req = [0u8; 16];
+        let invalid_len = string_reverse_encode(&[0xff], &mut invalid_utf8_req);
+        let (n, ok) = dispatch_single(
+            &reverse_handlers,
+            METHOD_STRING_REVERSE,
+            &invalid_utf8_req[..invalid_len],
+            &mut response_buf,
+        );
+        assert_eq!((n, ok), (0, false));
+
+        let snapshot_fail_handlers = Handlers {
+            on_snapshot: Some(Arc::new(|_, _| false)),
+            snapshot_max_items: 1,
+            ..Handlers::default()
+        };
+        let (n, ok) = dispatch_single(
+            &snapshot_fail_handlers,
+            METHOD_CGROUPS_SNAPSHOT,
+            &[1, 0, 0, 0],
+            &mut response_buf,
         );
         assert_eq!((n, ok), (0, false));
 
@@ -3864,6 +3899,7 @@ mod tests {
             kind: u16,
             code: u16,
             status: u16,
+            message_id_delta: u64,
             want: NipcError,
         }
 
@@ -3873,6 +3909,7 @@ mod tests {
                 kind: KIND_REQUEST,
                 code: METHOD_INCREMENT,
                 status: STATUS_OK,
+                message_id_delta: 0,
                 want: NipcError::BadKind,
             },
             Case {
@@ -3880,6 +3917,7 @@ mod tests {
                 kind: KIND_RESPONSE,
                 code: METHOD_STRING_REVERSE,
                 status: STATUS_OK,
+                message_id_delta: 0,
                 want: NipcError::BadLayout,
             },
             Case {
@@ -3887,7 +3925,16 @@ mod tests {
                 kind: KIND_RESPONSE,
                 code: METHOD_INCREMENT,
                 status: STATUS_INTERNAL_ERROR,
+                message_id_delta: 0,
                 want: NipcError::BadLayout,
+            },
+            Case {
+                name: "bad message id",
+                kind: KIND_RESPONSE,
+                code: METHOD_INCREMENT,
+                status: STATUS_OK,
+                message_id_delta: 1,
+                want: NipcError::Truncated,
             },
         ];
 
@@ -3906,7 +3953,7 @@ mod tests {
                         code: tc.code,
                         flags: 0,
                         item_count: 1,
-                        message_id: req_hdr.message_id,
+                        message_id: req_hdr.message_id + tc.message_id_delta,
                         transport_status: tc.status,
                         ..Header::default()
                     };
@@ -3919,6 +3966,88 @@ mod tests {
             connect_ready(&mut client);
 
             let err = client.call_increment(42).expect_err(tc.name);
+            assert_eq!(err, tc.want, "{}", tc.name);
+
+            client.close();
+            server.wait();
+            cleanup_all(&svc);
+        }
+    }
+
+    #[test]
+    fn test_call_string_reverse_rejects_malformed_response_envelope_unix() {
+        struct Case {
+            name: &'static str,
+            kind: u16,
+            code: u16,
+            status: u16,
+            message_id_delta: u64,
+            want: NipcError,
+        }
+
+        let cases = [
+            Case {
+                name: "bad kind",
+                kind: KIND_REQUEST,
+                code: METHOD_STRING_REVERSE,
+                status: STATUS_OK,
+                message_id_delta: 0,
+                want: NipcError::BadKind,
+            },
+            Case {
+                name: "bad code",
+                kind: KIND_RESPONSE,
+                code: METHOD_INCREMENT,
+                status: STATUS_OK,
+                message_id_delta: 0,
+                want: NipcError::BadLayout,
+            },
+            Case {
+                name: "bad status",
+                kind: KIND_RESPONSE,
+                code: METHOD_STRING_REVERSE,
+                status: STATUS_INTERNAL_ERROR,
+                message_id_delta: 0,
+                want: NipcError::BadLayout,
+            },
+            Case {
+                name: "bad message id",
+                kind: KIND_RESPONSE,
+                code: METHOD_STRING_REVERSE,
+                status: STATUS_OK,
+                message_id_delta: 1,
+                want: NipcError::Truncated,
+            },
+        ];
+
+        for tc in cases {
+            let svc = format!("rs_unix_str_env_{}", tc.name.replace(' ', "_"));
+            let mut server =
+                start_raw_session_server(&svc, server_config(), move |session, req_hdr, _| {
+                    let mut payload = [0u8; 128];
+                    let n = string_reverse_encode(b"olleh", &mut payload);
+                    if n == 0 {
+                        return Err("string_reverse_encode returned 0".into());
+                    }
+
+                    let mut resp_hdr = Header {
+                        kind: tc.kind,
+                        code: tc.code,
+                        flags: 0,
+                        item_count: 1,
+                        message_id: req_hdr.message_id + tc.message_id_delta,
+                        transport_status: tc.status,
+                        ..Header::default()
+                    };
+                    session
+                        .send(&mut resp_hdr, &payload[..n])
+                        .map_err(|e| format!("send: {e}"))
+                });
+
+            let mut client = CgroupsClient::new(TEST_RUN_DIR, &svc, client_config());
+            connect_ready(&mut client);
+
+            let err = client.call_string_reverse("hello").expect_err(tc.name);
             assert_eq!(err, tc.want, "{}", tc.name);
 
             client.close();
@@ -3978,6 +4107,140 @@ mod tests {
 
         client.close();
         server.wait();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_call_increment_batch_rejects_malformed_response_envelope_unix() {
+        struct Case {
+            name: &'static str,
+            kind: u16,
+            code: u16,
+            status: u16,
+            message_id_delta: u64,
+            want: NipcError,
+        }
+
+        let cases = [
+            Case {
+                name: "bad kind",
+                kind: KIND_REQUEST,
+                code: METHOD_INCREMENT,
+                status: STATUS_OK,
+                message_id_delta: 0,
+                want: NipcError::BadKind,
+            },
+            Case {
+                name: "bad code",
+                kind: KIND_RESPONSE,
+                code: METHOD_STRING_REVERSE,
+                status: STATUS_OK,
+                message_id_delta: 0,
+                want: NipcError::BadLayout,
+            },
+            Case {
+                name: "bad status",
+                kind: KIND_RESPONSE,
+                code: METHOD_INCREMENT,
+                status: STATUS_INTERNAL_ERROR,
+                message_id_delta: 0,
+                want: NipcError::BadLayout,
+            },
+            Case {
+                name: "bad message id",
+                kind: KIND_RESPONSE,
+                code: METHOD_INCREMENT,
+                status: STATUS_OK,
+                message_id_delta: 1,
+                want: NipcError::Truncated,
+            },
+        ];
+
+        for tc in cases {
+            let svc = format!("rs_unix_batch_env_{}", tc.name.replace(' ', "_"));
+            let mut server =
+                start_raw_session_server(&svc, batch_server_config(), move |session, req_hdr, _| {
+                    let mut encoded = [0u8; INCREMENT_PAYLOAD_SIZE];
+                    let n = increment_encode(11, &mut encoded);
+                    if n != INCREMENT_PAYLOAD_SIZE {
+                        return Err(format!("increment_encode returned {n}"));
+                    }
+
+                    let mut response_buf = vec![0u8; 128];
+                    let resp_len = {
+                        let mut batch = BatchBuilder::new(&mut response_buf, 2);
+                        batch
+                            .add(&encoded)
+                            .map_err(|e| format!("batch add 1: {e:?}"))?;
+                        batch
+                            .add(&encoded)
+                            .map_err(|e| format!("batch add 2: {e:?}"))?;
+                        let (len, _count) = batch.finish();
+                        len
+                    };
+
+                    let mut resp_hdr = Header {
+                        kind: tc.kind,
+                        code: tc.code,
+                        flags: FLAG_BATCH,
+                        item_count: 2,
+                        message_id: req_hdr.message_id + tc.message_id_delta,
+                        transport_status: tc.status,
+                        ..Header::default()
+                    };
+                    session
+                        .send(&mut resp_hdr, &response_buf[..resp_len])
+                        .map_err(|e| format!("send: {e}"))
+                });
+
+            let mut client = CgroupsClient::new(TEST_RUN_DIR, &svc, batch_client_config());
+            connect_ready(&mut client);
+
+            let err = client
+                .call_increment_batch(&[10, 20])
+                .expect_err(tc.name);
+            assert_eq!(err, tc.want, "{}", tc.name);
+
+            client.close();
+            server.wait();
+            cleanup_all(&svc);
+        }
+    }
+
+    #[test]
+    fn test_call_string_reverse_chunked_response_unix() {
+        let svc = "rs_unix_chunked_reverse";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let long_input = "abcdefghi".repeat(16);
+        let expected: String = long_input.chars().rev().collect();
+        let handlers = Handlers {
+            on_string_reverse: Some(Arc::new(|s| Some(s.chars().rev().collect()))),
+            ..Handlers::default()
+        };
+        let scfg = ServerConfig {
+            packet_size: 64,
+            max_response_payload_bytes: 4096,
+            ..server_config()
+        };
+        let ccfg = ClientConfig {
+            packet_size: 64,
+            max_response_payload_bytes: 4096,
+            ..client_config()
+        };
+
+        let mut server = TestServer::start_with(svc, scfg, handlers, 8);
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, ccfg);
+        connect_ready(&mut client);
+
+        let result = client
+            .call_string_reverse(&long_input)
+            .expect("chunked reverse");
+        assert_eq!(result.as_str(), expected);
+
+        client.close();
+        server.stop();
         cleanup_all(svc);
     }
 

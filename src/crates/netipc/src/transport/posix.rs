@@ -1202,6 +1202,16 @@ mod tests {
         }
     }
 
+    fn raw_listener_fd(service: &str) -> RawFd {
+        let path = build_socket_path(TEST_RUN_DIR, service).expect("socket path");
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+        assert!(fd >= 0, "socket failed: {}", errno());
+        bind_unix(fd, &path).expect("bind raw listener");
+        let rc = unsafe { libc::listen(fd, DEFAULT_BACKLOG) };
+        assert_eq!(rc, 0, "listen failed: {}", errno());
+        fd
+    }
+
     // -----------------------------------------------------------------------
     //  Test 1: Single client ping-pong
     // -----------------------------------------------------------------------
@@ -2599,6 +2609,100 @@ mod tests {
     }
 
     #[test]
+    fn test_receive_chunk_index_mismatch() {
+        let (fd0, fd1) = socketpair_seqpacket();
+        let mut session = test_session(fd0, Role::Server, (HEADER_SIZE + 10) as u32);
+
+        let first_payload = [1u8; 10];
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION,
+            header_len: protocol::HEADER_LEN,
+            kind: KIND_REQUEST,
+            code: 1,
+            flags: 0,
+            transport_status: protocol::STATUS_OK,
+            payload_len: 20,
+            item_count: 1,
+            message_id: 11,
+        };
+        let mut first_pkt = [0u8; HEADER_SIZE + 10];
+        hdr.encode(&mut first_pkt[..HEADER_SIZE]);
+        first_pkt[HEADER_SIZE..].copy_from_slice(&first_payload);
+        raw_send(fd1, &first_pkt).expect("send first chunk");
+
+        let second_payload = [2u8; 10];
+        let chk = ChunkHeader {
+            magic: MAGIC_CHUNK,
+            version: VERSION,
+            flags: 0,
+            message_id: 11,
+            total_message_len: (HEADER_SIZE + 20) as u32,
+            chunk_index: 2,
+            chunk_count: 2,
+            chunk_payload_len: second_payload.len() as u32,
+        };
+        let mut second_pkt = [0u8; HEADER_SIZE + 10];
+        chk.encode(&mut second_pkt[..HEADER_SIZE]);
+        second_pkt[HEADER_SIZE..].copy_from_slice(&second_payload);
+        raw_send(fd1, &second_pkt).expect("send mismatched continuation");
+
+        let mut buf = [0u8; 64];
+        let err = session.receive(&mut buf).expect_err("chunk index mismatch");
+        assert!(matches!(err, UdsError::Chunk(_)));
+
+        unsafe { libc::close(fd1) };
+    }
+
+    #[test]
+    fn test_receive_chunked_batch_directory_too_short() {
+        let (fd0, fd1) = socketpair_seqpacket();
+        let mut session = test_session(fd0, Role::Server, (HEADER_SIZE + 8) as u32);
+
+        let first_payload = [0u8; 8];
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION,
+            header_len: protocol::HEADER_LEN,
+            kind: KIND_REQUEST,
+            code: 1,
+            flags: FLAG_BATCH,
+            transport_status: protocol::STATUS_OK,
+            payload_len: 12,
+            item_count: 2,
+            message_id: 21,
+        };
+        let mut first_pkt = [0u8; HEADER_SIZE + 8];
+        hdr.encode(&mut first_pkt[..HEADER_SIZE]);
+        first_pkt[HEADER_SIZE..].copy_from_slice(&first_payload);
+        raw_send(fd1, &first_pkt).expect("send first chunk");
+
+        let second_payload = [0u8; 4];
+        let chk = ChunkHeader {
+            magic: MAGIC_CHUNK,
+            version: VERSION,
+            flags: 0,
+            message_id: 21,
+            total_message_len: (HEADER_SIZE + 12) as u32,
+            chunk_index: 1,
+            chunk_count: 2,
+            chunk_payload_len: second_payload.len() as u32,
+        };
+        let mut second_pkt = [0u8; HEADER_SIZE + 4];
+        chk.encode(&mut second_pkt[..HEADER_SIZE]);
+        second_pkt[HEADER_SIZE..].copy_from_slice(&second_payload);
+        raw_send(fd1, &second_pkt).expect("send continuation");
+
+        let mut buf = [0u8; 64];
+        let err = session
+            .receive(&mut buf)
+            .expect_err("chunked batch directory too short");
+        assert!(matches!(err, UdsError::Protocol(_)));
+
+        unsafe { libc::close(fd1) };
+    }
+
+    #[test]
     fn test_bind_rejects_live_server_addr_in_use() {
         ensure_run_dir();
         let svc = unique_service("rs_live_bind");
@@ -2611,6 +2715,17 @@ mod tests {
 
         drop(listener);
         cleanup_socket(&svc);
+    }
+
+    #[test]
+    fn test_bind_missing_run_dir_fails() {
+        let svc = unique_service("rs_missing_bind");
+        let bad_run_dir = "/tmp/nipc_rust_missing_parent/does/not/exist";
+        let err = match UdsListener::bind(bad_run_dir, &svc, default_server_config()) {
+            Ok(_) => panic!("missing parent bind should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, UdsError::Socket(_)));
     }
 
     #[test]
@@ -2649,6 +2764,242 @@ mod tests {
 
         drop(session);
         server_thread.join().expect("server join");
+        cleanup_socket(&svc);
+    }
+
+    #[test]
+    fn test_connect_rejects_bad_hello_ack_kind() {
+        ensure_run_dir();
+        let svc = unique_service("rs_bad_ack_kind");
+        cleanup_socket(&svc);
+
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready.clone();
+        let svc_clone = svc.clone();
+        let server = thread::spawn(move || {
+            let fd = raw_listener_fd(&svc_clone);
+            ready_clone.store(true, Ordering::Release);
+            let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+            assert!(client_fd >= 0, "accept failed: {}", errno());
+
+            let mut hello = [0u8; 128];
+            let n = raw_recv(client_fd, &mut hello).expect("recv hello");
+            assert!(n >= HEADER_SIZE + HELLO_PAYLOAD_SIZE);
+
+            let ack = HelloAck {
+                layout_version: 1,
+                ..HelloAck::default()
+            };
+            let mut ack_buf = [0u8; HELLO_ACK_PAYLOAD_SIZE];
+            ack.encode(&mut ack_buf);
+            let hdr = Header {
+                magic: MAGIC_MSG,
+                version: VERSION,
+                header_len: protocol::HEADER_LEN,
+                kind: KIND_RESPONSE,
+                flags: 0,
+                code: protocol::CODE_HELLO_ACK,
+                transport_status: protocol::STATUS_OK,
+                payload_len: HELLO_ACK_PAYLOAD_SIZE as u32,
+                item_count: 1,
+                message_id: 0,
+            };
+            let mut pkt = [0u8; HEADER_SIZE + HELLO_ACK_PAYLOAD_SIZE];
+            hdr.encode(&mut pkt[..HEADER_SIZE]);
+            pkt[HEADER_SIZE..].copy_from_slice(&ack_buf);
+            raw_send(client_fd, &pkt).expect("send malformed ack");
+
+            unsafe {
+                libc::close(client_fd);
+                libc::close(fd);
+            }
+        });
+
+        while !ready.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
+            Ok(_) => panic!("bad hello ack kind should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, UdsError::Protocol(_)));
+
+        server.join().expect("server join");
+        cleanup_socket(&svc);
+    }
+
+    #[test]
+    fn test_connect_rejects_bad_hello_ack_status() {
+        ensure_run_dir();
+        let svc = unique_service("rs_bad_ack_status");
+        cleanup_socket(&svc);
+
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready.clone();
+        let svc_clone = svc.clone();
+        let server = thread::spawn(move || {
+            let fd = raw_listener_fd(&svc_clone);
+            ready_clone.store(true, Ordering::Release);
+            let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+            assert!(client_fd >= 0, "accept failed: {}", errno());
+
+            let mut hello = [0u8; 128];
+            let _ = raw_recv(client_fd, &mut hello).expect("recv hello");
+
+            let ack = HelloAck {
+                layout_version: 1,
+                ..HelloAck::default()
+            };
+            let mut ack_buf = [0u8; HELLO_ACK_PAYLOAD_SIZE];
+            ack.encode(&mut ack_buf);
+            let hdr = Header {
+                magic: MAGIC_MSG,
+                version: VERSION,
+                header_len: protocol::HEADER_LEN,
+                kind: protocol::KIND_CONTROL,
+                flags: 0,
+                code: protocol::CODE_HELLO_ACK,
+                transport_status: 0x7777,
+                payload_len: HELLO_ACK_PAYLOAD_SIZE as u32,
+                item_count: 1,
+                message_id: 0,
+            };
+            let mut pkt = [0u8; HEADER_SIZE + HELLO_ACK_PAYLOAD_SIZE];
+            hdr.encode(&mut pkt[..HEADER_SIZE]);
+            pkt[HEADER_SIZE..].copy_from_slice(&ack_buf);
+            raw_send(client_fd, &pkt).expect("send malformed ack");
+
+            unsafe {
+                libc::close(client_fd);
+                libc::close(fd);
+            }
+        });
+
+        while !ready.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
+            Ok(_) => panic!("bad hello ack status should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, UdsError::Handshake(_)));
+
+        server.join().expect("server join");
+        cleanup_socket(&svc);
+    }
+
+    #[test]
+    fn test_connect_rejects_truncated_hello_ack() {
+        ensure_run_dir();
+        let svc = unique_service("rs_bad_ack_trunc");
+        cleanup_socket(&svc);
+
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready.clone();
+        let svc_clone = svc.clone();
+        let server = thread::spawn(move || {
+            let fd = raw_listener_fd(&svc_clone);
+            ready_clone.store(true, Ordering::Release);
+            let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+            assert!(client_fd >= 0, "accept failed: {}", errno());
+
+            let mut hello = [0u8; 128];
+            let _ = raw_recv(client_fd, &mut hello).expect("recv hello");
+
+            let hdr = Header {
+                magic: MAGIC_MSG,
+                version: VERSION,
+                header_len: protocol::HEADER_LEN,
+                kind: protocol::KIND_CONTROL,
+                flags: 0,
+                code: protocol::CODE_HELLO_ACK,
+                transport_status: protocol::STATUS_OK,
+                payload_len: HELLO_ACK_PAYLOAD_SIZE as u32,
+                item_count: 1,
+                message_id: 0,
+            };
+            let mut pkt = [0u8; HEADER_SIZE];
+            hdr.encode(&mut pkt);
+            raw_send(client_fd, &pkt).expect("send truncated ack");
+
+            unsafe {
+                libc::close(client_fd);
+                libc::close(fd);
+            }
+        });
+
+        while !ready.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
+            Ok(_) => panic!("truncated hello ack should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, UdsError::Protocol(_)));
+
+        server.join().expect("server join");
+        cleanup_socket(&svc);
+    }
+
+    #[test]
+    fn test_accept_rejects_bad_hello_kind() {
+        ensure_run_dir();
+        let svc = unique_service("rs_bad_hello_kind");
+        cleanup_socket(&svc);
+
+        let listener =
+            UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("bind listener");
+
+        let svc_clone = svc.clone();
+        let client = thread::spawn(move || {
+            let path = build_socket_path(TEST_RUN_DIR, &svc_clone).expect("socket path");
+            let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+            assert!(fd >= 0, "socket failed: {}", errno());
+            connect_unix(fd, &path).expect("connect");
+
+            let hdr = Header {
+                magic: MAGIC_MSG,
+                version: VERSION,
+                header_len: protocol::HEADER_LEN,
+                kind: KIND_REQUEST,
+                flags: 0,
+                code: protocol::CODE_HELLO,
+                transport_status: protocol::STATUS_OK,
+                payload_len: HELLO_PAYLOAD_SIZE as u32,
+                item_count: 1,
+                message_id: 0,
+            };
+            let mut payload = [0u8; HELLO_PAYLOAD_SIZE];
+            let hello = Hello {
+                layout_version: 1,
+                supported_profiles: PROFILE_BASELINE,
+                max_request_payload_bytes: 4096,
+                max_request_batch_items: 16,
+                max_response_payload_bytes: 4096,
+                max_response_batch_items: 16,
+                auth_token: AUTH_TOKEN,
+                packet_size: DEFAULT_PACKET_SIZE_FALLBACK,
+                ..Hello::default()
+            };
+            hello.encode(&mut payload);
+            let mut pkt = [0u8; HEADER_SIZE + HELLO_PAYLOAD_SIZE];
+            hdr.encode(&mut pkt[..HEADER_SIZE]);
+            pkt[HEADER_SIZE..].copy_from_slice(&payload);
+            raw_send(fd, &pkt).expect("send malformed hello");
+            unsafe { libc::close(fd) };
+        });
+
+        let err = match listener.accept() {
+            Ok(_) => panic!("bad hello kind should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, UdsError::Protocol(_)));
+
+        client.join().expect("client join");
+        drop(listener);
         cleanup_socket(&svc);
     }
 

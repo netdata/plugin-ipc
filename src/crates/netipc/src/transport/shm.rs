@@ -1851,6 +1851,24 @@ mod tests {
     }
 
     #[test]
+    fn test_server_create_recovers_invalid_stale_file() {
+        ensure_run_dir();
+        let svc = "rs_shm_invalid_stale_retry";
+        let sid: u64 = 6311;
+        cleanup_shm(svc, sid);
+
+        let path = build_shm_path(TEST_RUN_DIR, svc, sid).expect("path");
+        std::fs::write(&path, [0u8; 8]).expect("write stale short file");
+
+        let mut server = ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024)
+            .expect("server create should recover invalid stale file");
+        assert_eq!(server.role, ShmRole::Server);
+
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    #[test]
     fn test_client_attach_short_file_not_ready() {
         ensure_run_dir();
         let svc = "rs_shm_short";
@@ -2031,5 +2049,54 @@ mod tests {
             !unreadable_path.exists(),
             "unreadable invalid entry should be removed"
         );
+    }
+
+    #[test]
+    fn test_check_shm_stale_short_file_invalid() {
+        ensure_run_dir();
+        let svc = "rs_shm_stale_short_direct";
+        let sid: u64 = 704;
+        cleanup_shm(svc, sid);
+
+        let path = build_shm_path(TEST_RUN_DIR, svc, sid).expect("path");
+        std::fs::write(&path, [0u8; 8]).expect("write short file");
+
+        assert!(matches!(check_shm_stale(&path), StaleResult::Invalid));
+        assert!(!path.exists(), "short stale file should be removed");
+    }
+
+    #[test]
+    fn test_check_shm_stale_bad_magic_invalid() {
+        ensure_run_dir();
+        let svc = "rs_shm_stale_magic_direct";
+        let sid: u64 = 705;
+        cleanup_shm(svc, sid);
+
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
+        let hdr = server.base as *mut RegionHeader;
+        unsafe { (*hdr).magic = 0xDEADBEEF };
+        server.close();
+
+        let path = build_shm_path(TEST_RUN_DIR, svc, sid).expect("path");
+        assert!(matches!(check_shm_stale(&path), StaleResult::Invalid));
+        assert!(!path.exists(), "bad magic stale file should be removed");
+    }
+
+    #[test]
+    fn test_cleanup_stale_unlinks_dangling_symlink() {
+        ensure_run_dir();
+        let svc = "rs_shm_cleanup_symlink";
+        let sid: u64 = 706;
+        cleanup_shm(svc, sid);
+
+        let path = build_shm_path(TEST_RUN_DIR, svc, sid).expect("path");
+        let target = path.with_extension("missing-target");
+        let _ = std::fs::remove_file(&target);
+        std::os::unix::fs::symlink(&target, &path).expect("create dangling symlink");
+
+        cleanup_stale(TEST_RUN_DIR, svc);
+
+        assert!(!path.exists(), "dangling symlink entry should be removed");
     }
 }

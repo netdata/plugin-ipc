@@ -36,13 +36,13 @@ Finish the rewrite to a production-ready state with:
   - exact current Linux Rust result from the verified rerun:
     - `bash tests/run-coverage-rust.sh 80`
     - current tool on this host: `tarpaulin`
-    - current total: `87.06%`
+    - current total: `88.73%`
     - key files:
-      - `src/service/cgroups.rs`: `607/664`
-      - `src/transport/posix.rs`: `362/401`
-      - `src/transport/shm.rs`: `338/375`
+      - `src/service/cgroups.rs`: `621/664`
+      - `src/transport/posix.rs`: `374/401`
+      - `src/transport/shm.rs`: `346/375`
   - final validation for this slice:
-    - `cargo test --lib -- --test-threads=1`: `229/229` passing
+    - `cargo test --lib -- --test-threads=1`: `243/243` passing
     - `cmake --build build -j4`: passing
     - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
   - implication:
@@ -51,6 +51,42 @@ Finish the rewrite to a production-ready state with:
       - still-ordinary helper / validation branches
       - Windows-tagged lines still counted by `tarpaulin`
       - and real syscall / timeout / race territory
+    - one exact layering fact is now proven:
+      - on POSIX baseline, bad response `message_id` does not reach the L2 envelope checks
+      - `UdsSession::receive()` rejects it first as `UnknownMsgId`, and `transport_receive()` maps that to `NipcError::Truncated`
+  - next exact Linux Rust ordinary targets from the fresh rerun:
+    - `src/service/cgroups.rs`
+      - retry-once second-failure paths still missing in:
+        - `raw_call_with_retry_request_buf()`
+        - `raw_batch_call_with_retry_request_buf()`
+      - remaining ordinary service branches:
+        - negotiated SHM attach failure in `try_connect()` on Linux
+        - SHM short-message rejection in `transport_receive()`
+        - baseline batch response `message_id` mismatch is not a remaining L2 target, because L1 rejects it first
+      - remaining ordinary server-loop branches:
+        - malformed batch request item
+        - batch builder add failure
+        - SHM response send failure
+      - remaining ordinary cache branch:
+        - malformed snapshot item preserves old cache
+    - `src/transport/posix.rs`
+      - remaining ordinary malformed receive branches:
+        - payload limit exceeded
+        - non-final / final chunk payload-length and total-length mismatches
+        - chunked batch-directory packed-area validation failure
+      - remaining ordinary handshake / helper branches:
+        - default supported-profile baseline branches
+        - listener `accept()` cleanup on handshake failure is now covered
+        - stale-recovery live-server probe path is still worth one direct test if it can be driven without races
+      - remaining ordinary listener / helper branches:
+        - `listen(2)` failure after successful bind is not ordinary
+        - raw socket creation and short-write failures remain special-infrastructure
+    - `src/transport/shm.rs`
+      - remaining ordinary stale / recovery utility branches:
+        - `cleanup_stale()` mmap-failure / bad-open cleanup if they can be reproduced with ordinary filesystem objects
+        - `check_shm_stale()` open-failure cleanup if it can be driven without fault injection
+      - not the next target:
+        - `ftruncate`, `mmap`, `fstat`, and arch-specific `cpu_relax()` branches still look like special-infrastructure territory
 - Current execution slice after the latest POSIX Go UDS / SHM stability pass:
   - revalidated the exact current Linux / POSIX Go transport package coverage from the real module root
   - current package result:
@@ -234,11 +270,11 @@ Finish the rewrite to a production-ready state with:
   - fresh Linux Rust coverage measurement from the current machine:
     - `bash tests/run-coverage-rust.sh 80`
     - current tool on this host: `tarpaulin`
-    - current result: `87.06%`
+    - current result: `88.73%`
     - current largest uncovered Rust files from the report:
-      - `src/service/cgroups.rs`: `607/664`
-      - `src/transport/posix.rs`: `362/401`
-      - `src/transport/shm.rs`: `338/375`
+      - `src/service/cgroups.rs`: `621/664`
+      - `src/transport/posix.rs`: `374/401`
+      - `src/transport/shm.rs`: `346/375`
     - implication:
       - Linux Rust is now the next biggest ordinary coverage target, not Linux Go
   - direct uncovered-line extraction from `src/crates/netipc/cobertura.xml` confirms a mixed picture:
@@ -546,7 +582,7 @@ Verified on `2026-03-23`:
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
-  - result: `87.06%`
+  - result: `88.73%`
   - current threshold: `80%`
 
 Important fact:
