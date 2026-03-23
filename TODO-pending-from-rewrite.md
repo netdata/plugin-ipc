@@ -539,7 +539,7 @@ Facts:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
 - Windows Go coverage currently reports `96.7%`.
-- Linux Go coverage currently reports `87.5%` with the real weak files now in POSIX Go transport paths.
+- Linux Go coverage currently reports `89.4%` with the real weak files now in POSIX Go transport paths.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
@@ -557,7 +557,7 @@ Required next work:
    - inspect the remaining weak Linux Go and Rust service paths function-by-function
    - add tests only for real ordinary uncovered logic, not for branches that already require orchestration or fault injection
    - re-measure on the active platform before deciding whether to continue on Go or switch to the next parity gap
-   - immediate implementation focus:
+   - immediate implementation focus for the just-finished UDS slice:
      - bring Linux Go service tests closer to the existing Windows raw malformed-response coverage
      - add ordinary UDS-based L2 tests for:
        - malformed response envelopes
@@ -578,6 +578,9 @@ Required next work:
        - `dispatchSingle`: `92.9%`
        - `Run`: `78.9%`
        - `handleSession`: `82.4%`
+       - result of the latest Unix raw malformed-response parity slice:
+         - `service/cgroups/client.go` moved from `81.4%` to `88.0%`
+         - the main ordinary Go gap is no longer the L2 service client
      - `transport/posix/shm_linux.go`
        - `OwnerAlive`: `70.0%`
        - `ShmServerCreate`: `66.7%`
@@ -587,24 +590,37 @@ Required next work:
        - `ShmCleanupStale`: `75.0%`
        - `checkShmStale`: `59.3%`
      - `transport/posix/uds.go`
+       - result of the latest ordinary UDS slice:
+         - file moved from `83.7%` to `92.0%`
        - `Connect`: `90.9%`
-       - `Send`: `88.2%`
-       - `sendInner`: `91.4%`
-       - `Receive`: `70.8%`
+       - `Send`: `94.1%`
+       - `sendInner`: `94.3%`
+       - `Receive`: `89.9%`
        - `Listen`: `71.4%`
-       - `Accept`: `88.9%`
+       - `Accept`: `100.0%`
        - `detectPacketSize`: `75.0%`
-       - `rawSendMsg`: `66.7%`
-       - `rawRecv`: `83.3%`
-       - `connectAndHandshake`: `79.5%`
-       - `serverHandshake`: `89.1%`
+       - `rawSendMsg`: `83.3%`
+       - `rawRecv`: `100.0%`
+       - `connectAndHandshake`: `90.9%`
+       - `serverHandshake`: `93.8%`
      - implication:
-       - the next honest ordinary target is still Linux Go, but no longer `service/cgroups/client.go`
+       - the next honest ordinary target is still Linux Go, but no longer `service/cgroups/client.go` or `transport/posix/uds.go`
    - next ordinary target:
-     - start with Linux Go `transport/posix/uds.go`
-     - then move to Linux Go `transport/posix/shm_linux.go`
+     - start with Linux Go `transport/posix/shm_linux.go`
+     - then decide whether the remaining low-level POSIX service / transport gaps are still ordinary or already special-infrastructure territory
      - keep Windows Go low-level branches documented, but no longer treat them as the first ordinary target
      - do not treat low-level OS failure or fault-injection branches as ordinary test targets
+     - remaining `uds.go` likely non-ordinary / special-infrastructure territory:
+       - short-write `SendmsgN`
+       - socket / bind / listen syscall failures
+       - hello / hello-ack short writes
+       - next-level kernel timing races around disconnect during send
+     - current `shm_linux.go` ordinary candidates from the merged profile:
+       - `OwnerAlive`
+       - `ShmServerCreate`
+       - `ShmClientAttach`
+       - `ShmCleanupStale`
+       - `checkShmStale`
 
 ### 2. Cross-platform validation parity is only partial
 

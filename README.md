@@ -240,7 +240,7 @@ Linux / POSIX:
 - build: passing
 - `ctest`: `37/37` passing
 - C coverage: `90.5%`
-- Go coverage: `87.5%`
+- Go coverage: `89.4%`
 - Rust coverage: `81.46%`
 
 Windows (`win11`):
