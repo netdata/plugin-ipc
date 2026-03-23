@@ -349,6 +349,69 @@ func TestUnixShmMalformedBatchRequestRecovers(t *testing.T) {
 	}
 }
 
+func TestUnixShmShortRequestKeepsServerHealthy(t *testing.T) {
+	svc := uniqueUnixService("go_unix_shm_short_req")
+	ts := startTestServerUnixWithConfig(svc, testUnixShmServerConfig(), pingPongHandlers())
+	defer ts.stop()
+
+	client := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	defer client.Close()
+	refreshUnixClientReady(t, client)
+
+	if client.shm == nil {
+		t.Fatal("expected SHM attachment")
+	}
+	if err := client.shm.ShmSend([]byte{1, 2, 3, 4}); err != nil {
+		t.Fatalf("ShmSend short request failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	verify := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	defer verify.Close()
+	refreshUnixClientReady(t, verify)
+
+	got, err := verify.CallIncrement(21)
+	if err != nil {
+		t.Fatalf("CallIncrement after short SHM request failed: %v", err)
+	}
+	if got != 22 {
+		t.Fatalf("CallIncrement after short SHM request = %d, want 22", got)
+	}
+}
+
+func TestUnixShmBadHeaderKeepsServerHealthy(t *testing.T) {
+	svc := uniqueUnixService("go_unix_shm_bad_header")
+	ts := startTestServerUnixWithConfig(svc, testUnixShmServerConfig(), pingPongHandlers())
+	defer ts.stop()
+
+	client := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	defer client.Close()
+	refreshUnixClientReady(t, client)
+
+	if client.shm == nil {
+		t.Fatal("expected SHM attachment")
+	}
+	badMsg := make([]byte, protocol.HeaderSize)
+	if err := client.shm.ShmSend(badMsg); err != nil {
+		t.Fatalf("ShmSend bad header request failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	verify := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	defer verify.Close()
+	refreshUnixClientReady(t, verify)
+
+	got, err := verify.CallIncrement(9)
+	if err != nil {
+		t.Fatalf("CallIncrement after bad SHM header failed: %v", err)
+	}
+	if got != 10 {
+		t.Fatalf("CallIncrement after bad SHM header = %d, want 10", got)
+	}
+}
+
 func TestUnixShmBatchHandlerFailureNeedsRefresh(t *testing.T) {
 	svc := uniqueUnixService("go_unix_shm_batch_fail")
 	handlers := Handlers{

@@ -132,6 +132,61 @@ Finish the rewrite to a production-ready state with:
       - `ShmReceive()`: `96.2%`
     - implication:
       - the remaining `shm_linux.go` gaps are even more concentrated in syscall-failure, impossible ordering, or timeout-orchestration territory
+  - next ordinary Linux Go service slice selected from the fresh `service/cgroups` cover profile:
+    - verified current uncovered targets in `service/cgroups/client.go`
+    - do not chase the fixed-size encode guard branches first:
+      - `CallSnapshot()` request encode
+      - `CallIncrement()` request encode
+      - `CallStringReverse()` encode
+      - `CallIncrementBatch()` fixed-size item encode
+      - these are effectively impossible with the current exact-size caller buffers
+    - current ordinary targets selected for the next pass:
+      - `tryConnect()` default `StateDisconnected` path for non-classified connect errors
+      - `pollFd()` invalid-fd / hangup handling
+      - single-item response overflow in `handleSession()`
+      - negotiated SHM create failure in `Run()` while keeping the server healthy for later sessions
+    - evidence:
+      - current uncovered line groups are at:
+        - `client.go:381-382`
+        - `client.go:576-577`
+        - `client.go:611-615`
+        - `client.go:707-710`
+        - `client.go:830`
+      - local `poll(2)` documentation check confirms:
+        - `POLLHUP` reports peer hangup
+        - `POLLNVAL` reports invalid fd
+      - implication:
+        - direct `pollFd()` tests are honest ordinary coverage, not synthetic protocol cheating
+  - completed the next Linux Go ordinary service slice:
+    - covered `tryConnect()` default `StateDisconnected` mapping with an invalid service name
+    - covered direct `pollFd()` hangup / invalid-fd handling with real Unix pipe descriptors
+    - covered single-item response overflow and client recovery
+    - covered short SHM request termination and bad SHM header termination while proving the server remains healthy for later sessions
+    - verified the new tests with `go test -count=20`
+    - current result after the slice:
+      - `service/cgroups/client.go`: `95.9%`
+      - `Run()`: `94.7%`
+      - `handleSession()`: `92.9%`
+      - `tryConnect()`: `100.0%`
+    - important finding:
+      - the negotiated SHM create-failure branch in `Run()` did not move, even after a real obstructed first-session attempt
+      - working theory:
+        - either the first accepted session is still not taking the branch we expected, or the test is exercising a different failure path than the uncovered line group
+      - implication:
+        - do not claim that branch covered yet
+  - next remaining Linux Go service classification after the fresh rerun:
+    - `handleSession()` ordinary SHM malformed-request branches are no longer the main gap
+    - likely non-ordinary / invariant-bound:
+      - fixed-size encode guards in typed client calls
+      - single-dispatch `responseLen > len(respBuf)` guard for the existing typed methods
+      - `msgBuf` growth path, because it is already pre-sized from `MaxResponsePayloadBytes + HeaderSize`
+      - `ShmReceive()` non-timeout error in the server loop, because the live server-side context keeps the atomic offsets in-bounds
+      - listener poll / accept error branches in `Run()`
+      - peer-close response send failure on POSIX sequenced-packet sockets unless a deterministic reproduction exists
+    - unresolved branch requiring direct investigation before more tests:
+      - negotiated SHM create failure in `Run()`:
+        - the real obstructed first-session test did not move the uncovered line group
+        - do not assume it is ordinary or covered until line-level evidence says so
 - Current execution slice after the Windows Go parity expansion:
   - completed the next Linux / POSIX Go SHM service follow-up slice
   - validated ordinary POSIX SHM service tests for:
@@ -387,7 +442,7 @@ Verified on `2026-03-23`:
   - current threshold: `82%`
 - Go:
   - `bash tests/run-coverage-go.sh`
-  - result: `95.4%`
+  - result: `95.8%`
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
@@ -690,7 +745,7 @@ Facts:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
 - Windows Go coverage currently reports `96.7%`.
-- Linux Go coverage currently reports `95.4%` with the remaining ordinary gaps now reduced to a smaller POSIX low-level transport/service residue.
+- Linux Go coverage currently reports `95.8%` with the remaining ordinary gaps now reduced to a much smaller POSIX transport/service residue.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:

@@ -19,7 +19,7 @@ Verified on `2026-03-23`:
   - threshold: `82%`
 - Go:
   - script: `tests/run-coverage-go.sh`
-  - result: `95.4%`
+  - result: `95.8%`
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
@@ -28,7 +28,7 @@ Verified on `2026-03-23`:
 
 Latest Linux Go notes from the current ordinary POSIX slice:
 
-- `service/cgroups/client.go`: `94.3%`
+- `service/cgroups/client.go`: `95.9%`
 - `transport/posix/shm_linux.go`: `91.9%`
 - `transport/posix/uds.go`: `95.6%`
 - the latest rerun also exposed two real Unix Go harness bugs, not library regressions:
@@ -37,6 +37,10 @@ Latest Linux Go notes from the current ordinary POSIX slice:
 - the latest direct SHM guard slice raised:
   - `ShmSend()` to `96.6%`
   - `ShmReceive()` to `96.2%`
+- the latest Linux Go service slice raised:
+  - `Run()` to `94.7%`
+  - `handleSession()` to `92.9%`
+  - Linux Go total to `95.8%`
 
 ### Windows (`win11`)
 

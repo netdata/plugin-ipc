@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"syscall"
 	"sync/atomic"
 	"testing"
@@ -154,6 +156,26 @@ func startServerWithWorkersSocketReady(service string, handlers Handlers, worker
 	return &testServer{server: s, doneCh: doneCh}
 }
 
+func startServerWithConfigSocketReady(service string, cfg posix.ServerConfig, handlers Handlers) *testServer {
+	ensureRunDir()
+	cleanupAll(service)
+
+	s := NewServer(testRunDir, service, cfg, handlers)
+	doneCh := make(chan struct{})
+
+	go func() {
+		defer close(doneCh)
+		s.Run()
+	}()
+
+	waitUnixSocketReady(service)
+	return &testServer{server: s, doneCh: doneCh}
+}
+
+func unixShmSessionPath(service string, sessionID uint64) string {
+	return filepath.Join(testRunDir, fmt.Sprintf("%s-%016x.ipcshm", service, sessionID))
+}
+
 func TestUnixServerStopWhileIdle(t *testing.T) {
 	svc := uniqueUnixService("go_unix_stop_idle")
 	cleanupAll(svc)
@@ -179,6 +201,44 @@ func TestUnixServerStopWhileIdle(t *testing.T) {
 	cleanupAll(svc)
 }
 
+func TestUnixTryConnectInvalidServiceReturnsDisconnected(t *testing.T) {
+	client := NewClient(testRunDir, "bad/service", testClientConfig())
+	defer client.Close()
+
+	if state := client.tryConnect(); state != StateDisconnected {
+		t.Fatalf("tryConnect invalid service = %d, want %d", state, StateDisconnected)
+	}
+}
+
+func TestUnixPollFdRejectsInvalidFdAndHangup(t *testing.T) {
+	fds := []int{0, 0}
+	if err := syscall.Pipe(fds); err != nil {
+		t.Fatalf("Pipe failed: %v", err)
+	}
+	defer syscall.Close(fds[0])
+
+	if err := syscall.Close(fds[1]); err != nil {
+		t.Fatalf("close writer failed: %v", err)
+	}
+
+	if got := pollFd(fds[0], 50); got != -1 {
+		t.Fatalf("pollFd(read end with closed writer) = %d, want -1", got)
+	}
+
+	closedFDs := []int{0, 0}
+	if err := syscall.Pipe(closedFDs); err != nil {
+		t.Fatalf("Pipe for POLLNVAL failed: %v", err)
+	}
+	if err := syscall.Close(closedFDs[0]); err != nil {
+		t.Fatalf("close reader failed: %v", err)
+	}
+	defer syscall.Close(closedFDs[1])
+
+	if got := pollFd(closedFDs[0], 50); got != -1 {
+		t.Fatalf("pollFd(closed reader) = %d, want -1", got)
+	}
+}
+
 func TestUnixRefreshFromBrokenReconnects(t *testing.T) {
 	svc := uniqueUnixService("go_unix_refresh_broken")
 	ts := startTestServer(svc, testHandlers())
@@ -201,6 +261,103 @@ func TestUnixRefreshFromBrokenReconnects(t *testing.T) {
 	}
 	if client.reconnectCount < 1 {
 		t.Fatalf("expected reconnect_count >= 1, got %d", client.reconnectCount)
+	}
+}
+
+func TestUnixSingleResponseOverflowReturnsInternalErrorAndRecovers(t *testing.T) {
+	svc := uniqueUnixService("go_unix_single_overflow")
+
+	scfg := testServerConfig()
+	scfg.MaxResponsePayloadBytes = 16
+	ts := startTestServerUnixWithConfig(svc, scfg, Handlers{
+		OnIncrement: func(v uint64) (uint64, bool) {
+			return v + 1, true
+		},
+		OnSnapshot:       testCgroupsHandler,
+		SnapshotMaxItems: 3,
+	})
+	defer ts.stop()
+
+	client := NewClient(testRunDir, svc, testClientConfig())
+	defer client.Close()
+	refreshUnixClientReady(t, client)
+
+	if _, err := client.CallSnapshot(); !errors.Is(err, protocol.ErrBadLayout) {
+		t.Fatalf("CallSnapshot overflow = %v, want %v", err, protocol.ErrBadLayout)
+	}
+	if client.state != StateBroken {
+		t.Fatalf("client state after single-response overflow = %d, want BROKEN", client.state)
+	}
+
+	changed := client.Refresh()
+	if !changed || client.state != StateReady {
+		t.Fatalf("Refresh after single-response overflow = %v, state=%d, want READY", changed, client.state)
+	}
+
+	got, err := client.CallIncrement(8)
+	if err != nil {
+		t.Fatalf("CallIncrement after overflow Refresh failed: %v", err)
+	}
+	if got != 9 {
+		t.Fatalf("CallIncrement after overflow Refresh = %d, want 9", got)
+	}
+}
+
+func TestUnixShmCreateFailureKeepsServerHealthy(t *testing.T) {
+	svc := uniqueUnixService("go_unix_shm_create_fail")
+	obstruction := unixShmSessionPath(svc, 1)
+
+	scfg := testUnixShmServerConfig()
+	ts := startServerWithConfigSocketReady(svc, scfg, Handlers{
+		OnIncrement: func(v uint64) (uint64, bool) {
+			return v + 1, true
+		},
+	})
+	defer func() {
+		ts.stop()
+		_ = os.RemoveAll(obstruction)
+	}()
+
+	if err := os.MkdirAll(filepath.Join(obstruction, "keep"), 0700); err != nil {
+		t.Fatalf("mkdir SHM obstruction failed: %v", err)
+	}
+
+	badClient := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	defer badClient.Close()
+
+	if changed := badClient.Refresh(); changed {
+		t.Fatal("Refresh should stay DISCONNECTED when SHM create fails on the server")
+	}
+	if badClient.Ready() {
+		t.Fatal("client should not be ready after server SHM create failure")
+	}
+	if badClient.state != StateDisconnected {
+		t.Fatalf("client state after SHM create failure = %d, want DISCONNECTED", badClient.state)
+	}
+	if badClient.shm != nil || badClient.session != nil {
+		t.Fatal("client should not retain transport state after SHM create failure")
+	}
+
+	if _, err := os.Stat(obstruction); err != nil {
+		t.Fatalf("SHM obstruction should still exist after failed create, stat err = %v", err)
+	}
+	if err := os.RemoveAll(obstruction); err != nil {
+		t.Fatalf("remove SHM obstruction failed: %v", err)
+	}
+
+	goodClient := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	defer goodClient.Close()
+	refreshUnixClientReady(t, goodClient)
+
+	if goodClient.shm == nil {
+		t.Fatal("expected SHM attachment after obstruction removal")
+	}
+	got, err := goodClient.CallIncrement(4)
+	if err != nil {
+		t.Fatalf("CallIncrement after SHM create recovery failed: %v", err)
+	}
+	if got != 5 {
+		t.Fatalf("CallIncrement after SHM create recovery = %d, want 5", got)
 	}
 }
 
