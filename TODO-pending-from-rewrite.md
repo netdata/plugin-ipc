@@ -18,6 +18,16 @@ Finish the rewrite to a production-ready state with:
 
 - Coverage parity and documentation honesty, not emergency benchmark or transport fixes.
 - Current execution slice after the Windows Go parity expansion:
+  - completed the next Linux / POSIX Go SHM service follow-up slice
+  - validated ordinary POSIX SHM service tests for:
+    - attach failure
+    - normal SHM roundtrip
+    - malformed batch request recovery
+    - batch handler failure -> refresh
+    - batch response overflow -> refresh
+  - reclassified raw malformed POSIX SHM request recovery (`short`, `bad header`, `unexpected kind`) out of the ordinary bucket:
+    - all three block in `ShmReceive(..., 30000)` today
+    - they belong to timeout-behavior / special-infrastructure work unless POSIX SHM timeout control becomes testable
   - completed the next Windows Go ordinary-coverage pass on `win11`
   - validated the new Windows-only Go transport edge tests directly with native `go test`
   - synced the TODO and coverage docs to the latest Windows Go numbers
@@ -64,8 +74,8 @@ Finish the rewrite to a production-ready state with:
         - ordinary testable now:
           - Windows Go ordinary coverage is no longer the main gap
           - next honest Go target is Linux / POSIX:
-            - `service/cgroups/client.go` (`90.2%`)
-            - `transport/posix/shm_linux.go` (`86.7%`)
+            - `service/cgroups/client.go` (`92.3%`)
+            - `transport/posix/shm_linux.go` (`87.5%`)
             - `transport/posix/uds.go` (`92.0%`)
           - keep the deferred managed-server retry/shutdown investigation separate from ordinary coverage
         - likely requires special orchestration later:
@@ -236,7 +246,7 @@ Verified on `2026-03-23`:
   - current threshold: `82%`
 - Go:
   - `bash tests/run-coverage-go.sh`
-  - result: `86.1%`
+  - result: `93.0%`
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
@@ -539,7 +549,7 @@ Facts:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
 - Windows Go coverage currently reports `96.7%`.
-- Linux Go coverage currently reports `92.3%` with the real weak files now in selective POSIX Go service / transport paths.
+- Linux Go coverage currently reports `93.0%` with the real weak files now concentrated in selective POSIX SHM and server-loop paths.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
@@ -577,20 +587,26 @@ Required next work:
        - `transportReceive`: `100.0%`
        - `dispatchSingle`: `92.9%`
        - `Run`: `81.6%`
-       - `handleSession`: `82.4%`
+       - `handleSession`: `89.4%`
        - result of the latest Unix raw malformed-response parity slice:
          - `service/cgroups/client.go` moved from `81.4%` to `88.0%`
        - result of the latest POSIX service follow-up slice:
          - `service/cgroups/client.go` moved from `87.7%` to `90.2%`
          - `Refresh()` and `transportReceive()` are now fully covered
+       - result of the latest POSIX SHM service follow-up slice:
+         - `service/cgroups/client.go` moved from `90.2%` to `92.3%`
+         - `tryConnect()` is now `94.7%`
+         - `handleSession()` moved to `89.4%`
      - `transport/posix/shm_linux.go`
        - result of the latest ordinary SHM slice:
          - file moved from `77.5%` to `86.7%`
+       - result of the latest POSIX SHM service follow-up slice:
+         - file moved from `86.7%` to `87.5%`
        - `OwnerAlive`: `100.0%`
        - `ShmServerCreate`: `75.0%`
        - `ShmClientAttach`: `81.3%`
        - `ShmSend`: `86.2%`
-       - `ShmReceive`: `86.1%`
+       - `ShmReceive`: `88.6%`
        - `ShmCleanupStale`: `87.5%`
        - `checkShmStale`: `85.2%`
      - `transport/posix/uds.go`
@@ -613,9 +629,18 @@ Required next work:
      - start with the remaining low-risk Linux Go service gaps:
        - `service/cgroups/types.go` is now done (`100.0%`)
        - review whether the remaining `service/cgroups/client.go` paths are still ordinary:
-         - `tryConnect`
          - `Run`
          - `handleSession`
+       - current execution slice:
+         - inspect the remaining `client.go` and `shm_linux.go` uncovered blocks line-by-line
+         - add only ordinary POSIX tests for:
+           - `Run()` accept-loop branches that do not require kernel fault injection
+           - `handleSession()` server-side protocol / batching branches reachable with normal clients or raw POSIX sessions
+           - `ShmServerCreate()` / `ShmClientAttach()` / stale-cleanup paths reachable without fault injection
+         - do not chase:
+           - listener/socket syscall failures
+           - forced short writes
+           - rare kernel timing races that already look like special orchestration territory
      - then decide whether the remaining low-level POSIX SHM / UDS gaps are still ordinary or already special-infrastructure territory
      - keep Windows Go low-level branches documented, but no longer treat them as the first ordinary target
      - do not treat low-level OS failure or fault-injection branches as ordinary test targets
@@ -644,6 +669,23 @@ Required next work:
          - short message -> `ErrTruncated`
          - bad header -> decode error
          - status: completed
+       - latest POSIX SHM service follow-up:
+         - port the existing Windows SHM service recovery/error tests to POSIX SHM where the transport semantics match:
+           - malformed batch request
+           - batch handler failure -> refresh
+           - batch response overflow -> refresh
+         - status:
+           - completed for:
+             - malformed batch request
+             - batch handler failure -> refresh
+             - batch response overflow -> refresh
+           - not ordinary today for:
+             - malformed short request
+             - malformed header request
+             - unexpected request kind
+         - evidence:
+           - all three non-ordinary cases block in `ShmReceive(..., 30000)` inside `service/cgroups/client.go`
+           - they are therefore timeout-behavior / special-infrastructure cases, not cheap ordinary unit tests
        - possible server capacity test if one session can be held open deterministically without introducing timing flake
 
 ### 2. Cross-platform validation parity is only partial

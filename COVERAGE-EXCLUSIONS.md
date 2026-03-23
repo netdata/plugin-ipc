@@ -19,7 +19,7 @@ Verified on `2026-03-23`:
   - threshold: `82%`
 - Go:
   - script: `tests/run-coverage-go.sh`
-  - result: `92.3%`
+  - result: `93.0%`
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
@@ -193,6 +193,23 @@ Brutal truth:
 Even on POSIX, not every remaining uncovered line should be assumed
 unreachable. Some are likely still coverable with better malformed-input or
 disconnect tests.
+
+Concrete evidence from the latest Linux Go SHM slice:
+
+- typed SHM recovery cases such as batch-handler failure and batch-response
+  overflow are ordinary and are now covered
+- raw malformed SHM requests on POSIX are not currently ordinary unit-test
+  targets:
+  - malformed short request
+  - malformed header request
+  - unexpected message kind
+- reason:
+  - they currently block in `ShmReceive(..., 30000)` inside
+    `service/cgroups/client.go`, so ordinary tests spend the full SHM receive
+    timeout instead of getting a cheap reconnect signal
+- implication:
+  - these paths should stay out of the ordinary-coverage bucket unless the
+    POSIX SHM timeout behavior becomes directly controllable in tests
 
 ## Practical Reading Of The Current State
 

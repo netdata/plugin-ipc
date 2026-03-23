@@ -1,0 +1,289 @@
+//go:build unix
+
+package cgroups
+
+import (
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
+)
+
+func testUnixShmServerConfig() posix.ServerConfig {
+	cfg := testServerConfig()
+	cfg.SupportedProfiles = protocol.ProfileBaseline | protocol.ProfileSHMHybrid
+	cfg.PreferredProfiles = protocol.ProfileSHMHybrid
+	return cfg
+}
+
+func testUnixShmClientConfig() posix.ClientConfig {
+	cfg := testClientConfig()
+	cfg.SupportedProfiles = protocol.ProfileBaseline | protocol.ProfileSHMHybrid
+	cfg.PreferredProfiles = protocol.ProfileSHMHybrid
+	return cfg
+}
+
+func startTestServerUnixWithConfig(service string, cfg posix.ServerConfig, handlers Handlers) *testServer {
+	ensureRunDir()
+	cleanupAll(service)
+
+	s := NewServer(testRunDir, service, cfg, handlers)
+	doneCh := make(chan struct{})
+
+	go func() {
+		defer close(doneCh)
+		_ = s.Run()
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	return &testServer{server: s, doneCh: doneCh}
+}
+
+func encodeRawUnixMessage(hdr protocol.Header, payload []byte) []byte {
+	hdr.Magic = protocol.MagicMsg
+	hdr.Version = protocol.Version
+	hdr.HeaderLen = protocol.HeaderLen
+	hdr.PayloadLen = uint32(len(payload))
+
+	msg := make([]byte, protocol.HeaderSize+len(payload))
+	hdr.Encode(msg[:protocol.HeaderSize])
+	copy(msg[protocol.HeaderSize:], payload)
+	return msg
+}
+
+func encodeUnixIncrementBatchPayload(t *testing.T, values ...uint64) []byte {
+	t.Helper()
+
+	itemCount := uint32(len(values))
+	if itemCount == 0 {
+		return nil
+	}
+
+	bufSize := protocol.Align8(int(itemCount)*8) +
+		int(itemCount)*protocol.IncrementPayloadSize +
+		int(itemCount)*protocol.Alignment
+	buf := make([]byte, bufSize)
+	entries := make([]protocol.BatchEntry, len(values))
+
+	offset := protocol.Align8(int(itemCount) * 8)
+	for i, v := range values {
+		itemOff := offset
+		itemLen := protocol.IncrementPayloadSize
+		entries[i] = protocol.BatchEntry{Offset: uint32(itemOff), Length: uint32(itemLen)}
+		if protocol.IncrementEncode(v, buf[itemOff:itemOff+itemLen]) == 0 {
+			t.Fatalf("IncrementEncode(%d) failed", v)
+		}
+		offset += protocol.Align8(itemLen)
+	}
+
+	if n := protocol.BatchDirEncode(entries, buf[:int(itemCount)*8]); n != int(itemCount)*8 {
+		t.Fatalf("BatchDirEncode returned %d, want %d", n, int(itemCount)*8)
+	}
+
+	return buf[:offset]
+}
+
+func TestUnixShmRoundTrip(t *testing.T) {
+	svc := uniqueUnixService("go_unix_shm_roundtrip")
+	ts := startTestServerUnixWithConfig(svc, testUnixShmServerConfig(), pingPongHandlers())
+	defer ts.stop()
+
+	client := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	defer client.Close()
+
+	refreshUnixClientReady(t, client)
+
+	if client.session == nil {
+		t.Fatal("expected negotiated session")
+	}
+	if client.shm == nil {
+		t.Fatal("expected SHM attachment")
+	}
+	if client.session.SelectedProfile != protocol.ProfileSHMHybrid {
+		t.Fatalf("selected profile = %d, want %d", client.session.SelectedProfile, protocol.ProfileSHMHybrid)
+	}
+
+	got, err := client.CallIncrement(41)
+	if err != nil {
+		t.Fatalf("CallIncrement failed: %v", err)
+	}
+	if got != 42 {
+		t.Fatalf("CallIncrement = %d, want 42", got)
+	}
+}
+
+func TestUnixShmAttachFailureLeavesClientDisconnected(t *testing.T) {
+	svc := uniqueUnixService("go_unix_shm_attach_fail")
+	cfg := testUnixShmServerConfig()
+
+	listener, err := posix.Listen(testRunDir, svc, cfg)
+	if err != nil {
+		t.Fatalf("posix.Listen failed: %v", err)
+	}
+	defer listener.Close()
+
+	doneCh := make(chan error, 1)
+	go func() {
+		session, err := listener.Accept()
+		if err != nil {
+			doneCh <- err
+			return
+		}
+		defer session.Close()
+
+		recvBuf := make([]byte, protocol.HeaderSize+int(cfg.MaxRequestPayloadBytes))
+		_, _, err = session.Receive(recvBuf)
+		doneCh <- err
+	}()
+
+	client := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	defer client.Close()
+
+	if changed := client.Refresh(); changed {
+		t.Fatal("refresh should end back in DISCONNECTED when SHM attach never becomes available")
+	}
+	if client.Ready() {
+		t.Fatal("client should not be ready after attach failure")
+	}
+	if client.state != StateDisconnected {
+		t.Fatalf("client state = %d, want DISCONNECTED", client.state)
+	}
+	if client.shm != nil {
+		t.Fatal("expected no SHM attachment after attach failure")
+	}
+	if client.session != nil {
+		t.Fatal("expected no live session after attach failure")
+	}
+
+	if err := <-doneCh; err == nil {
+		t.Fatal("expected raw server receive to fail after attach failure disconnect")
+	}
+}
+
+func TestUnixShmMalformedBatchRequestRecovers(t *testing.T) {
+	svc := uniqueUnixService("go_unix_shm_bad_batch")
+	ts := startTestServerUnixWithConfig(svc, testUnixShmServerConfig(), pingPongHandlers())
+	defer ts.stop()
+
+	client := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	defer client.Close()
+
+	refreshUnixClientReady(t, client)
+
+	if client.shm == nil {
+		t.Fatal("expected SHM attachment")
+	}
+
+	reqHdr := protocol.Header{
+		Kind:            protocol.KindRequest,
+		Code:            protocol.MethodIncrement,
+		Flags:           protocol.FlagBatch,
+		ItemCount:       2,
+		MessageID:       1,
+		TransportStatus: protocol.StatusOK,
+	}
+	badPayload := encodeUnixIncrementBatchPayload(t, 1, 2)[:8]
+	if err := client.shm.ShmSend(encodeRawUnixMessage(reqHdr, badPayload)); err != nil {
+		t.Fatalf("ShmSend malformed batch request failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	got, err := client.CallIncrement(21)
+	if err != nil {
+		t.Fatalf("CallIncrement after malformed batch SHM request failed: %v", err)
+	}
+	if got != 22 {
+		t.Fatalf("CallIncrement after malformed batch SHM request = %d, want 22", got)
+	}
+	if !client.Ready() {
+		t.Fatalf("client should stay usable after malformed batch SHM request, got status %+v", client.Status())
+	}
+}
+
+func TestUnixShmBatchHandlerFailureNeedsRefresh(t *testing.T) {
+	svc := uniqueUnixService("go_unix_shm_batch_fail")
+	handlers := Handlers{
+		OnIncrement: func(v uint64) (uint64, bool) {
+			if v == 99 {
+				return 0, false
+			}
+			return v + 1, true
+		},
+	}
+	ts := startTestServerUnixWithConfig(svc, testUnixShmServerConfig(), handlers)
+	defer ts.stop()
+
+	client := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	defer client.Close()
+
+	refreshUnixClientReady(t, client)
+
+	_, err := client.CallIncrementBatch([]uint64{99})
+	if !errors.Is(err, protocol.ErrBadLayout) {
+		t.Fatalf("CallIncrementBatch handler failure = %v, want %v", err, protocol.ErrBadLayout)
+	}
+	if client.state != StateBroken {
+		t.Fatalf("client state after batch handler failure = %d, want BROKEN", client.state)
+	}
+
+	changed := client.Refresh()
+	if !changed || !client.Ready() {
+		t.Fatalf("Refresh after batch handler failure = %v, state=%d, want READY", changed, client.state)
+	}
+
+	got, err := client.CallIncrement(5)
+	if err != nil {
+		t.Fatalf("CallIncrement after Refresh failed: %v", err)
+	}
+	if got != 6 {
+		t.Fatalf("CallIncrement after Refresh = %d, want 6", got)
+	}
+}
+
+func TestUnixShmBatchResponseOverflowNeedsRefresh(t *testing.T) {
+	svc := uniqueUnixService("go_unix_shm_batch_overflow")
+
+	scfg := testUnixShmServerConfig()
+	scfg.MaxResponsePayloadBytes = 24
+	scfg.MaxResponseBatchItems = 2
+	ccfg := testUnixShmClientConfig()
+	ccfg.MaxResponsePayloadBytes = 24
+	ccfg.MaxResponseBatchItems = 2
+	ccfg.MaxRequestBatchItems = 2
+
+	ts := startTestServerUnixWithConfig(svc, scfg, Handlers{
+		OnIncrement: func(v uint64) (uint64, bool) {
+			return v + 1, true
+		},
+	})
+	defer ts.stop()
+
+	client := NewClient(testRunDir, svc, ccfg)
+	defer client.Close()
+
+	refreshUnixClientReady(t, client)
+
+	_, err := client.CallIncrementBatch([]uint64{1, 2})
+	if !errors.Is(err, protocol.ErrBadLayout) {
+		t.Fatalf("CallIncrementBatch overflow = %v, want %v", err, protocol.ErrBadLayout)
+	}
+	if client.state != StateBroken {
+		t.Fatalf("client state after batch overflow = %d, want BROKEN", client.state)
+	}
+
+	changed := client.Refresh()
+	if !changed || !client.Ready() {
+		t.Fatalf("Refresh after batch overflow = %v, state=%d, want READY", changed, client.state)
+	}
+
+	got, err := client.CallIncrement(8)
+	if err != nil {
+		t.Fatalf("CallIncrement after overflow Refresh failed: %v", err)
+	}
+	if got != 9 {
+		t.Fatalf("CallIncrement after overflow Refresh = %d, want 9", got)
+	}
+}
