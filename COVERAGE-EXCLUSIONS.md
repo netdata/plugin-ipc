@@ -15,12 +15,13 @@ Verified on `2026-03-23`:
 
 - C:
   - script: `tests/run-coverage-c.sh`
-  - result: `94.0%`
+  - result: `94.1%`
   - threshold: `82%`
   - latest ordinary C slices raised:
     - `netipc_uds.c` to `92.5%` (`432/467`)
     - `netipc_service.c` to `92.1%` (`734/797`)
     - `netipc_shm.c` to `95.1%` (`346/364`)
+    - then a follow-up UDS guard slice to `92.9%` (`434/467`)
   - latest ordinary C additions covered:
     - malformed client `HELLO_ACK` handling:
       - short packet
@@ -41,6 +42,9 @@ Verified on `2026-03-23`:
       - declared region larger than the file
       - direct `nipc_shm_owner_alive(NULL)` false path
       - `cleanup_stale()` ignoring non-matching directory entries
+    - direct UDS guard paths:
+      - chunked send with `packet_size == NIPC_HEADER_LEN` rejecting zero chunk payload budget
+      - explicit `NULL` service-name validation tests through the public API
     - plus the earlier Linux C service coverage gains:
       - client init default-buffer sizing and truncation
       - empty increment-batch fast-path
@@ -66,6 +70,10 @@ Verified on `2026-03-23`:
     - the SHM slice briefly exposed a parallel-only `ctest` collision between
       `test_uds_rust` and `test_shm_rust`
     - the fix was CMake-side isolation with a shared `RESOURCE_LOCK`, not a Rust SHM code change
+    - some remaining Linux C lines still report as uncovered even though direct
+      public tests already exercise the corresponding bad-param / bad-kind paths
+    - treat those as candidates for gcov line-mapping noise or architecture-only
+      guards before adding more duplicate tests
 - Go:
   - script: `tests/run-coverage-go.sh`
   - result: `95.8%`

@@ -17,65 +17,33 @@ Finish the rewrite to a production-ready state with:
 ## Current Focus (2026-03-23)
 
 - Latest authoritative slice:
-  - Linux C ordinary SHM transport coverage
-  - added deterministic `test_shm` coverage for:
-    - bad on-disk `header_len` on client attach
-    - invalid aligned-region metadata / overlap on client attach
-    - declared region larger than the file on client attach
-    - direct `nipc_shm_owner_alive(NULL)` false path
-    - `cleanup_stale()` ignoring non-matching directory entries
+  - Linux C ordinary UDS guard follow-up
+  - added deterministic `test_uds` coverage for:
+    - chunked send with `packet_size == NIPC_HEADER_LEN` rejecting zero chunk payload budget
+    - explicit `NULL` service-name validation through the public API
 - Latest verified Linux C result:
   - `bash tests/run-coverage-c.sh 82`
-  - total: `94.0%`
+  - total: `94.1%`
   - key files:
     - `netipc_protocol.c`: `98.7%`
-    - `netipc_uds.c`: `92.5%` (`432/467`)
+    - `netipc_uds.c`: `92.9%` (`434/467`)
     - `netipc_shm.c`: `95.1%` (`346/364`)
     - `netipc_service.c`: `92.1%` (`734/797`)
 - Latest verified test results for this slice:
-  - `cmake --build build -j4 --target test_shm`: passing
-  - `./build/bin/test_shm`: `100 passed, 0 failed`
-- Latest verified full Linux validation after this slice:
+  - `cmake --build build -j4 --target test_uds`: passing
+  - `./build/bin/test_uds`: `129 passed, 0 failed`
   - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
-- Resolved blocker during this slice:
-  - full parallel `ctest` initially failed on:
-    - `test_uds_rust`
-    - `test_shm_rust`
-  - the actual failing Rust test reported by both wrappers was:
-    - `transport::shm::tests::test_shm_multi_client`
-  - observed failure signatures:
-    - `client attach sid=1: Open(2)`
-    - `client attach sid=2: Open(2)`
-    - `client attach sid=3: Open(2)`
-    - and, in another overlapping run:
-      - `server receive sid=1: Timeout`
-      - `server receive sid=2: Timeout`
-      - `server receive sid=3: Timeout`
-- Verified facts behind the fix:
-  - serial rerun passes:
-    - `/usr/bin/ctest --test-dir build --output-on-failure -j1 -R '^test_uds_rust$|^test_shm_rust$'`
-    - result: `2/2` passing
-  - `CMakeLists.txt` had defined:
-    - `test_uds_rust` with only `TIMEOUT 30`
-    - `test_shm_rust` with only `TIMEOUT 30`
-  - the repo already uses `RESOURCE_LOCK` / `RUN_SERIAL` for other parallel-sensitive test groups
-  - the Rust SHM tests share the same crate test binary and shared SHM test run directory:
-    - `src/crates/netipc/src/transport/shm.rs`
-    - `const TEST_RUN_DIR: &str = "/tmp/nipc_shm_rust_test";`
-  - fix applied:
-    - shared CMake `RESOURCE_LOCK rust_posix_transport_tests` on:
-      - `test_uds_rust`
-      - `test_shm_rust`
 - Immediate next target:
-  - finish and commit the SHM slice:
-    - `tests/fixtures/c/test_shm.c`
-    - `CMakeLists.txt`
-    - docs/TODO sync
-  - then re-review the remaining Linux C uncovered lines to decide the next honest deterministic target
-  - current recommendation from the fresh uncovered list:
-    - pause `netipc_shm.c` unless a new clearly ordinary target appears
-    - treat the remaining `netipc_uds.c` holes as mostly helper-fallback, allocation, send-failure rollback, or socket/open/accept territory
-    - prefer a fresh review of `netipc_service.c` before starting another C slice
+  - Linux C ordinary deterministic coverage is starting to saturate
+  - fresh review and the latest gcov output say:
+    - `netipc_shm.c` remaining lines are mostly OS-failure / timeout / path-length territory
+    - the remaining `netipc_protocol.c` `BAD_ITEM_COUNT` lines are `size_t` overflow guards and are not reachable on this 64-bit host from a `uint32_t item_count`
+    - some remaining `netipc_uds.c` and `netipc_protocol.c` lines still report uncovered even though direct public tests already exercise the corresponding bad-param / bad-kind paths
+    - the remaining `netipc_service.c` holes are now mostly encode-guard, allocation, signal, peer-close timing, or session-allocation / thread-creation territory
+  - recommendation:
+    - stop grinding Linux C for now
+    - switch the next ordinary deterministic slice back to Linux Rust coverage
+    - use the current C state as the new baseline when raising thresholds
 - Note:
   - the older slice notes below are historical context
   - they are no longer the authoritative current state

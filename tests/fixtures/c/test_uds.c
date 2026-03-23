@@ -1165,6 +1165,10 @@ static void test_invalid_service_name(void)
           nipc_uds_listen(TEST_RUN_DIR, "foo/bar", &scfg, &listener)
           == NIPC_UDS_ERR_BAD_PARAM);
 
+    check("reject NULL name",
+          nipc_uds_listen(TEST_RUN_DIR, NULL, &scfg, &listener)
+          == NIPC_UDS_ERR_BAD_PARAM);
+
     check("reject name with ..",
           nipc_uds_listen(TEST_RUN_DIR, "..", &scfg, &listener)
           == NIPC_UDS_ERR_BAD_PARAM);
@@ -1184,6 +1188,9 @@ static void test_invalid_service_name(void)
     /* Connect should also reject */
     nipc_uds_client_config_t ccfg = default_client_config();
     nipc_uds_session_t session;
+    check("connect reject NULL name",
+          nipc_uds_connect(TEST_RUN_DIR, NULL, &ccfg, &session)
+          == NIPC_UDS_ERR_BAD_PARAM);
     check("connect reject bad name",
           nipc_uds_connect(TEST_RUN_DIR, "../etc", &ccfg, &session)
           == NIPC_UDS_ERR_BAD_PARAM);
@@ -1232,6 +1239,34 @@ static void test_send_recv_validation(void)
           nipc_uds_receive(&bad_session, buf, sizeof(buf),
                            &hdr_out, &payload, &payload_len)
               == NIPC_UDS_ERR_BAD_PARAM);
+
+    int sv[2] = {-1, -1};
+    check("socketpair for zero chunk budget", socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) == 0);
+    if (sv[0] >= 0 && sv[1] >= 0) {
+        nipc_uds_session_t tiny_packet_session;
+        memset(&tiny_packet_session, 0, sizeof(tiny_packet_session));
+        tiny_packet_session.fd = sv[0];
+        tiny_packet_session.packet_size = NIPC_HEADER_LEN;
+        tiny_packet_session.role = NIPC_UDS_ROLE_SERVER;
+
+        nipc_header_t chunk_hdr = {0};
+        chunk_hdr.kind = NIPC_KIND_REQUEST;
+        chunk_hdr.code = 1;
+        chunk_hdr.message_id = 1;
+        chunk_hdr.item_count = 1;
+        uint8_t chunk_payload[] = {0xAA};
+
+        check("send rejects zero chunk payload budget",
+              nipc_uds_send(&tiny_packet_session, &chunk_hdr,
+                            chunk_payload, sizeof(chunk_payload))
+                  == NIPC_UDS_ERR_BAD_PARAM);
+
+        close(sv[0]);
+        close(sv[1]);
+    } else {
+        if (sv[0] >= 0) close(sv[0]);
+        if (sv[1] >= 0) close(sv[1]);
+    }
 }
 
 /* ------------------------------------------------------------------ */
