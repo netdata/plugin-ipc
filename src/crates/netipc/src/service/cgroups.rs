@@ -2830,6 +2830,89 @@ mod tests {
         cleanup_all(svc);
     }
 
+    #[test]
+    fn test_cache_refresh_preserves_old_cache_on_malformed_snapshot_item() {
+        let svc = "rs_cache_preserve_bad_item";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start(svc, test_cgroups_handlers());
+        let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, client_config());
+
+        assert!(cache.refresh(), "initial refresh should succeed");
+        let old_status = cache.status();
+        let old_item = cache
+            .lookup(1001, "docker-abc123")
+            .expect("existing cache item")
+            .clone();
+
+        server.stop();
+        cleanup_all(svc);
+
+        let mut raw_server = start_raw_session_server(svc, server_config(), move |session, req_hdr, payload| {
+            let req = crate::protocol::CgroupsRequest::decode(payload)
+                .map_err(|e| format!("decode request: {e:?}"))?;
+            if req.layout_version != 1 || req.flags != 0 {
+                return Err("unexpected snapshot request".into());
+            }
+
+            let mut response_payload = [0u8; 512];
+            let response_len = {
+                let mut builder = CgroupsBuilder::new(&mut response_payload, 1, 1, 99);
+                builder
+                    .add(9999, 0, 1, b"new-item", b"/new/path")
+                    .map_err(|e| format!("builder add: {e:?}"))?;
+                builder.finish()
+            };
+
+            let dir_end = 24 + 8;
+            let item_off = u32::from_ne_bytes(response_payload[24..28].try_into().unwrap()) as usize;
+            let item_start = dir_end + item_off;
+            response_payload[item_start..item_start + 2].copy_from_slice(&99u16.to_ne_bytes());
+
+            let mut resp_hdr = Header {
+                kind: KIND_RESPONSE,
+                code: METHOD_CGROUPS_SNAPSHOT,
+                flags: 0,
+                item_count: 1,
+                message_id: req_hdr.message_id,
+                transport_status: STATUS_OK,
+                ..Header::default()
+            };
+            session
+                .send(&mut resp_hdr, &response_payload[..response_len])
+                .map_err(|e| format!("send: {e}"))
+        });
+
+        assert!(
+            !cache.refresh(),
+            "malformed snapshot item should preserve the old cache"
+        );
+
+        let status = cache.status();
+        assert!(cache.ready(), "cache should stay populated");
+        assert_eq!(status.item_count, old_status.item_count);
+        assert_eq!(status.generation, old_status.generation);
+        assert_eq!(status.refresh_success_count, old_status.refresh_success_count);
+        assert_eq!(
+            status.refresh_failure_count,
+            old_status.refresh_failure_count + 1
+        );
+        let preserved = cache
+            .lookup(1001, "docker-abc123")
+            .expect("old cache item should remain");
+        assert_eq!(preserved.hash, old_item.hash);
+        assert_eq!(preserved.path, old_item.path);
+        assert!(
+            cache.lookup(9999, "new-item").is_none(),
+            "bad refresh must not replace the old cache"
+        );
+
+        cache.close();
+        raw_server.wait();
+        cleanup_all(svc);
+    }
+
     // ---------------------------------------------------------------
     //  Stress tests (Phase H4)
     // ---------------------------------------------------------------

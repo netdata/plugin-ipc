@@ -2350,63 +2350,34 @@ mod tests {
 
     #[test]
     fn test_receive_payload_exceeds_limit() {
-        ensure_run_dir();
-        let svc = unique_service("rs_paymax");
-        cleanup_socket(&svc);
+        let (fd0, fd1) = socketpair_seqpacket();
+        let mut session = test_session(fd0, Role::Client, 4096);
+        session.max_response_payload_bytes = 16;
+        session.inflight_ids.insert(99);
 
-        let svc_clone = svc.clone();
-        let ready = Arc::new(AtomicBool::new(false));
-        let ready_clone = ready.clone();
-
-        let server_thread = thread::spawn(move || {
-            // Server with large limits
-            let scfg = ServerConfig {
-                max_request_payload_bytes: 4096,
-                max_response_payload_bytes: 65536,
-                ..default_server_config()
-            };
-            let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
-            ready_clone.store(true, Ordering::Release);
-
-            let mut session = listener.accept().expect("accept");
-            let mut buf = [0u8; 8192];
-            let (hdr, payload) = session.receive(&mut buf).expect("recv");
-            let payload = payload.to_vec();
-            // Send a large response that exceeds client's negotiated limit
-            let mut resp = hdr;
-            resp.kind = protocol::KIND_RESPONSE;
-            resp.transport_status = protocol::STATUS_OK;
-            // payload_len will be what client sent, which is within limits
-            session.send(&mut resp, &payload).expect("send");
-        });
-
-        while !ready.load(Ordering::Acquire) {
-            thread::sleep(Duration::from_millis(1));
-        }
-
-        // Client with very small response limit
-        let ccfg = ClientConfig {
-            max_response_payload_bytes: 4096,
-            ..default_client_config()
-        };
-        let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
-
-        let mut hdr = Header {
-            kind: protocol::KIND_REQUEST,
+        let payload = [0xAB; 32];
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION,
+            header_len: protocol::HEADER_LEN,
+            kind: KIND_RESPONSE,
             code: 1,
+            flags: 0,
+            transport_status: protocol::STATUS_OK,
+            payload_len: payload.len() as u32,
             item_count: 1,
-            message_id: 1,
-            ..Header::default()
+            message_id: 99,
         };
-        session.send(&mut hdr, &[1]).expect("send");
+        let mut pkt = [0u8; HEADER_SIZE + 32];
+        hdr.encode(&mut pkt[..HEADER_SIZE]);
+        pkt[HEADER_SIZE..].copy_from_slice(&payload);
+        raw_send(fd1, &pkt).expect("send oversized payload");
 
-        // Receive should succeed since the server sends back a small payload
-        let mut rbuf = [0u8; 8192];
-        let _result = session.receive(&mut rbuf);
+        let mut buf = [0u8; 64];
+        let err = session.receive(&mut buf).expect_err("payload exceeds limit");
+        assert!(matches!(err, UdsError::LimitExceeded));
 
-        drop(session);
-        server_thread.join().expect("server join");
-        cleanup_socket(&svc);
+        unsafe { libc::close(fd1) };
     }
 
     // -----------------------------------------------------------------------
@@ -2563,6 +2534,44 @@ mod tests {
     }
 
     #[test]
+    fn test_receive_batch_directory_invalid_nonchunked() {
+        let (fd0, fd1) = socketpair_seqpacket();
+        let mut session = test_session(fd0, Role::Server, 4096);
+
+        let mut payload = [0u8; 16];
+        payload[0..4].copy_from_slice(&0u32.to_ne_bytes());
+        payload[4..8].copy_from_slice(&32u32.to_ne_bytes());
+        payload[8..12].copy_from_slice(&0u32.to_ne_bytes());
+        payload[12..16].copy_from_slice(&32u32.to_ne_bytes());
+
+        let mut pkt = [0u8; HEADER_SIZE + 16];
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION,
+            header_len: protocol::HEADER_LEN,
+            kind: KIND_REQUEST,
+            code: 1,
+            flags: FLAG_BATCH,
+            transport_status: protocol::STATUS_OK,
+            payload_len: payload.len() as u32,
+            item_count: 2,
+            message_id: 2,
+        };
+        hdr.encode(&mut pkt[..HEADER_SIZE]);
+        pkt[HEADER_SIZE..].copy_from_slice(&payload);
+
+        raw_send(fd1, &pkt).expect("send invalid batch packet");
+
+        let mut buf = [0u8; 128];
+        let err = session
+            .receive(&mut buf)
+            .expect_err("batch directory validation should fail");
+        assert!(matches!(err, UdsError::Protocol(_)));
+
+        unsafe { libc::close(fd1) };
+    }
+
+    #[test]
     fn test_receive_chunk_message_id_mismatch() {
         let (fd0, fd1) = socketpair_seqpacket();
         let mut session = test_session(fd0, Role::Server, (HEADER_SIZE + 10) as u32);
@@ -2698,6 +2707,102 @@ mod tests {
             .receive(&mut buf)
             .expect_err("chunked batch directory too short");
         assert!(matches!(err, UdsError::Protocol(_)));
+
+        unsafe { libc::close(fd1) };
+    }
+
+    #[test]
+    fn test_receive_chunk_total_message_len_mismatch() {
+        let (fd0, fd1) = socketpair_seqpacket();
+        let mut session = test_session(fd0, Role::Server, (HEADER_SIZE + 10) as u32);
+
+        let first_payload = [1u8; 10];
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION,
+            header_len: protocol::HEADER_LEN,
+            kind: KIND_REQUEST,
+            code: 1,
+            flags: 0,
+            transport_status: protocol::STATUS_OK,
+            payload_len: 20,
+            item_count: 1,
+            message_id: 41,
+        };
+        let mut first_pkt = [0u8; HEADER_SIZE + 10];
+        hdr.encode(&mut first_pkt[..HEADER_SIZE]);
+        first_pkt[HEADER_SIZE..].copy_from_slice(&first_payload);
+        raw_send(fd1, &first_pkt).expect("send first chunk");
+
+        let second_payload = [2u8; 10];
+        let chk = ChunkHeader {
+            magic: MAGIC_CHUNK,
+            version: VERSION,
+            flags: 0,
+            message_id: 41,
+            total_message_len: (HEADER_SIZE + 21) as u32,
+            chunk_index: 1,
+            chunk_count: 2,
+            chunk_payload_len: second_payload.len() as u32,
+        };
+        let mut second_pkt = [0u8; HEADER_SIZE + 10];
+        chk.encode(&mut second_pkt[..HEADER_SIZE]);
+        second_pkt[HEADER_SIZE..].copy_from_slice(&second_payload);
+        raw_send(fd1, &second_pkt).expect("send bad total_message_len");
+
+        let mut buf = [0u8; 64];
+        let err = session
+            .receive(&mut buf)
+            .expect_err("total_message_len mismatch");
+        assert!(matches!(err, UdsError::Chunk(_)));
+
+        unsafe { libc::close(fd1) };
+    }
+
+    #[test]
+    fn test_receive_chunk_payload_len_mismatch() {
+        let (fd0, fd1) = socketpair_seqpacket();
+        let mut session = test_session(fd0, Role::Server, (HEADER_SIZE + 10) as u32);
+
+        let first_payload = [1u8; 10];
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION,
+            header_len: protocol::HEADER_LEN,
+            kind: KIND_REQUEST,
+            code: 1,
+            flags: 0,
+            transport_status: protocol::STATUS_OK,
+            payload_len: 20,
+            item_count: 1,
+            message_id: 42,
+        };
+        let mut first_pkt = [0u8; HEADER_SIZE + 10];
+        hdr.encode(&mut first_pkt[..HEADER_SIZE]);
+        first_pkt[HEADER_SIZE..].copy_from_slice(&first_payload);
+        raw_send(fd1, &first_pkt).expect("send first chunk");
+
+        let second_payload = [2u8; 10];
+        let chk = ChunkHeader {
+            magic: MAGIC_CHUNK,
+            version: VERSION,
+            flags: 0,
+            message_id: 42,
+            total_message_len: (HEADER_SIZE + 20) as u32,
+            chunk_index: 1,
+            chunk_count: 2,
+            chunk_payload_len: 9,
+        };
+        let mut second_pkt = [0u8; HEADER_SIZE + 10];
+        chk.encode(&mut second_pkt[..HEADER_SIZE]);
+        second_pkt[HEADER_SIZE..].copy_from_slice(&second_payload);
+        raw_send(fd1, &second_pkt).expect("send bad chunk length");
+
+        let mut buf = [0u8; 64];
+        let err = session
+            .receive(&mut buf)
+            .expect_err("chunk_payload_len mismatch");
+        assert!(matches!(err, UdsError::Chunk(_)));
 
         unsafe { libc::close(fd1) };
     }

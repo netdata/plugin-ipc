@@ -17,6 +17,40 @@ Finish the rewrite to a production-ready state with:
 ## Current Focus (2026-03-23)
 
 - Coverage parity and documentation honesty, not emergency benchmark or transport fixes.
+- Current execution slice after the latest Linux Rust ordinary follow-up:
+  - completed the next ordinary Rust transport / cache slice and revalidated Linux end-to-end
+  - latest ordinary Rust additions:
+    - `src/transport/posix.rs`
+      - real payload-limit rejection
+      - non-chunked invalid batch-directory validation
+      - chunk `total_message_len` mismatch
+      - chunk `chunk_payload_len` mismatch
+    - `src/service/cgroups.rs`
+      - cache malformed-item refresh preserves the old snapshot cache
+    - `tests/test_service_interop.sh`
+      - fixed the real POSIX service-interop readiness bug by waiting for the socket path after `READY`
+  - exact current Linux Rust result from the verified rerun:
+    - `bash tests/run-coverage-rust.sh 80`
+    - current tool on this host: `tarpaulin`
+    - current total: `88.98%`
+    - key files:
+      - `src/service/cgroups.rs`: `623/664`
+      - `src/transport/posix.rs`: `377/401`
+      - `src/transport/shm.rs`: `346/375`
+  - final validation for this slice:
+    - `cargo test --lib -- --test-threads=1`: `247/247` passing
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j1 -R ^test_service_interop$ --repeat until-fail:10`: passing
+    - `cmake --build build -j4`: passing
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
+  - current implication:
+    - Linux Rust is still improving, but the ordinary gains are now smaller
+    - the remaining Linux Rust total is increasingly concentrated in:
+      - retry-second-failure paths
+      - Linux negotiated SHM attach failure
+      - SHM short-message rejection
+      - a few managed-server batch failure branches
+      - Windows-tagged lines still counted by `tarpaulin`
+      - and real syscall / timeout / race territory
 - Current execution slice after the latest Linux Rust ordinary-coverage pass:
   - completed the first direct Linux Rust follow-up after the POSIX Go transport/service cleanup
   - added ordinary Rust L2 SHM service coverage for:
@@ -36,13 +70,13 @@ Finish the rewrite to a production-ready state with:
   - exact current Linux Rust result from the verified rerun:
     - `bash tests/run-coverage-rust.sh 80`
     - current tool on this host: `tarpaulin`
-    - current total: `88.73%`
+    - current total: `88.98%`
     - key files:
-      - `src/service/cgroups.rs`: `621/664`
-      - `src/transport/posix.rs`: `374/401`
+      - `src/service/cgroups.rs`: `623/664`
+      - `src/transport/posix.rs`: `377/401`
       - `src/transport/shm.rs`: `346/375`
   - final validation for this slice:
-    - `cargo test --lib -- --test-threads=1`: `243/243` passing
+    - `cargo test --lib -- --test-threads=1`: `247/247` passing
     - `cmake --build build -j4`: passing
     - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
   - implication:
@@ -270,10 +304,10 @@ Finish the rewrite to a production-ready state with:
   - fresh Linux Rust coverage measurement from the current machine:
     - `bash tests/run-coverage-rust.sh 80`
     - current tool on this host: `tarpaulin`
-    - current result: `88.73%`
+    - current result: `88.98%`
     - current largest uncovered Rust files from the report:
-      - `src/service/cgroups.rs`: `621/664`
-      - `src/transport/posix.rs`: `374/401`
+      - `src/service/cgroups.rs`: `623/664`
+      - `src/transport/posix.rs`: `377/401`
       - `src/transport/shm.rs`: `346/375`
     - implication:
       - Linux Rust is now the next biggest ordinary coverage target, not Linux Go
@@ -562,7 +596,7 @@ Status:
   - exact repeated validation with `/usr/bin/ctest --test-dir build --output-on-failure -j1 -R ^test_service_interop$ --repeat until-fail:10`: passing
   - implication:
     - the previous `Rust server -> C client` `client: not ready` failure was a real interop-fixture startup race
-    - the service interop clients now wait briefly for readiness instead of assuming one immediate refresh is enough
+    - the POSIX service interop harness now also waits for the socket path after `READY`, because the Go and Rust fixtures emit `READY` just before entering `server.Run()`
 - POSIX benchmarks:
   - `201` rows
   - report regenerates successfully
@@ -582,7 +616,7 @@ Verified on `2026-03-23`:
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
-  - result: `88.73%`
+  - result: `88.98%`
   - current threshold: `80%`
 
 Important fact:

@@ -23,19 +23,20 @@ Verified on `2026-03-23`:
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
-  - result: `88.73%`
+  - result: `88.98%`
   - threshold: `80%`
   - note:
     - the current Linux script used `tarpaulin` on this machine
     - the report still includes Windows-tagged Rust files in the total line count
     - latest ordinary Linux Rust slice raised:
-      - `src/service/cgroups.rs` to `621/664`
-      - `src/transport/posix.rs` to `374/401`
+      - `src/service/cgroups.rs` to `623/664`
+      - `src/transport/posix.rs` to `377/401`
       - `src/transport/shm.rs` to `346/375`
     - latest slice covered:
       - typed SHM L2 snapshot / increment / string-reverse / batch flows
-      - malformed UDS packet / chunk / handshake / listener paths
+      - malformed UDS packet / batch directory / chunk / handshake / listener paths
       - SHM stale-region / invalid-stale / short-file / undersized-region / cleanup edge cases
+      - cache preservation on malformed snapshot items
     - implication:
       - the remaining Linux Rust total is now a mix of real special-infrastructure branches and Windows-tagged Rust lines still counted by `tarpaulin`
       - one concrete layering fact is now proven:

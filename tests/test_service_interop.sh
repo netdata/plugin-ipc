@@ -127,6 +127,33 @@ run_test() {
         return
     fi
 
+    # READY alone is not enough for the Go/Rust fixtures: they emit READY
+    # just before entering server.Run(), so the socket may not exist yet.
+    waited=0
+    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
+        if ! kill -0 "$server_pid" 2>/dev/null; then
+            echo -e "${RED}FAIL${NC} (server exited before socket bind)"
+            cat /tmp/nipc_svc_server_out_$$ >&2 2>/dev/null || true
+            FAIL=$((FAIL + 1))
+            rm -f /tmp/nipc_svc_server_out_$$
+            return
+        fi
+        if [[ -S "${RUN_DIR}/${service}.sock" ]]; then
+            break
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+
+    if [[ $waited -ge $((TIMEOUT * 10)) ]]; then
+        echo -e "${RED}FAIL${NC} (socket not ready after ${TIMEOUT}s)"
+        kill "$server_pid" 2>/dev/null || true
+        wait "$server_pid" 2>/dev/null || true
+        FAIL=$((FAIL + 1))
+        rm -f /tmp/nipc_svc_server_out_$$
+        return
+    fi
+
     # Run client
     local client_out
     if client_out=$(env NIPC_PROFILE="${NIPC_PROFILE:-}" "$client_bin" client "$RUN_DIR" "$service" 2>&1); then

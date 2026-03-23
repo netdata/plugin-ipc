@@ -241,7 +241,7 @@ Linux / POSIX:
 - `ctest`: `37/37` passing
 - C coverage: `90.5%`
 - Go coverage: `95.8%`
-- Rust coverage: `88.73%`
+- Rust coverage: `88.98%`
   - measured with `tarpaulin` on this host
   - current total still includes some Windows-tagged lines in shared Rust files
 
