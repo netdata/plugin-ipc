@@ -23,11 +23,21 @@ Verified on `2026-03-23`:
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
-  - result: `80.85%`
+  - result: `87.06%`
   - threshold: `80%`
   - note:
     - the current Linux script used `tarpaulin` on this machine
     - the report still includes Windows-tagged Rust files in the total line count
+    - latest ordinary Linux Rust slice raised:
+      - `src/service/cgroups.rs` to `607/664`
+      - `src/transport/posix.rs` to `362/401`
+      - `src/transport/shm.rs` to `338/375`
+    - latest slice covered:
+      - typed SHM L2 snapshot / increment / string-reverse / batch flows
+      - malformed UDS packet / chunk / handshake paths
+      - SHM stale-region / short-file / undersized-region / cleanup edge cases
+    - implication:
+      - the remaining Linux Rust total is now a mix of real special-infrastructure branches and Windows-tagged Rust lines still counted by `tarpaulin`
 
 Latest Linux Go notes from the current ordinary POSIX slice:
 
@@ -223,7 +233,7 @@ Concrete evidence from the latest Linux Go SHM slice:
   - `ShmReceive()` bad-parameter and timeout paths
   - `ShmCleanupStale()` missing-directory / unrelated-file branches
 - result:
-  - `transport/posix/shm_linux.go` is now `90.6%`
+  - `transport/posix/shm_linux.go` is now `91.9%`
 - raw malformed SHM requests on POSIX are not currently ordinary unit-test
   targets:
   - malformed short request

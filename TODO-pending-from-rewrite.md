@@ -17,6 +17,40 @@ Finish the rewrite to a production-ready state with:
 ## Current Focus (2026-03-23)
 
 - Coverage parity and documentation honesty, not emergency benchmark or transport fixes.
+- Current execution slice after the latest Linux Rust ordinary-coverage pass:
+  - completed the first direct Linux Rust follow-up after the POSIX Go transport/service cleanup
+  - added ordinary Rust L2 SHM service coverage for:
+    - snapshot
+    - increment
+    - string-reverse
+    - increment-batch
+    - malformed response envelopes and helper bounds
+  - added direct Linux Rust transport coverage for:
+    - short UDS packets
+    - non-chunked batch-directory underflow
+    - chunk message-id mismatch
+    - live-server `bind()` rejection
+    - SHM live-region rejection
+    - SHM short-file / undersized-region attach failures
+    - SHM invalid-entry cleanup and no-deadline receive behavior
+  - exact current Linux Rust result from the verified rerun:
+    - `bash tests/run-coverage-rust.sh 80`
+    - current tool on this host: `tarpaulin`
+    - current total: `87.06%`
+    - key files:
+      - `src/service/cgroups.rs`: `607/664`
+      - `src/transport/posix.rs`: `362/401`
+      - `src/transport/shm.rs`: `338/375`
+  - final validation for this slice:
+    - `cargo test --lib -- --test-threads=1`: `229/229` passing
+    - `cmake --build build -j4`: passing
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
+  - implication:
+    - Linux Rust is no longer sitting at the old `80.85%` floor
+    - the remaining Rust total is now a mix of:
+      - still-ordinary helper / validation branches
+      - Windows-tagged lines still counted by `tarpaulin`
+      - and real syscall / timeout / race territory
 - Current execution slice after the latest POSIX Go UDS / SHM stability pass:
   - revalidated the exact current Linux / POSIX Go transport package coverage from the real module root
   - current package result:
@@ -200,13 +234,59 @@ Finish the rewrite to a production-ready state with:
   - fresh Linux Rust coverage measurement from the current machine:
     - `bash tests/run-coverage-rust.sh 80`
     - current tool on this host: `tarpaulin`
-    - current result: `80.85%`
+    - current result: `87.06%`
     - current largest uncovered Rust files from the report:
-      - `src/service/cgroups.rs`: `494/622`
-      - `src/transport/posix.rs`: `355/401`
-      - `src/transport/shm.rs`: `303/375`
+      - `src/service/cgroups.rs`: `607/664`
+      - `src/transport/posix.rs`: `362/401`
+      - `src/transport/shm.rs`: `338/375`
     - implication:
       - Linux Rust is now the next biggest ordinary coverage target, not Linux Go
+  - direct uncovered-line extraction from `src/crates/netipc/cobertura.xml` confirms a mixed picture:
+    - a real part of the missing `service/cgroups.rs` coverage is Linux-ordinary
+    - another real part is Windows-only code counted inside the shared file by `tarpaulin`
+    - concrete evidence:
+      - Linux-ordinary gaps in `service/cgroups.rs`:
+        - SHM L2 client send/receive paths: `645-658`, `695-709`, `749-758`
+        - SHM-managed server request/response paths: `1418-1428`, `1538-1551`, `1571`
+        - response envelope checks for typed calls / batch calls: `544`, `547`, `550`, `581`, `584`, `587`, `590`, `620`, `623`, `626`, `632`
+        - `dispatch_single()` missing-handler and derived-zero-capacity paths: `912`, `921`, `937`, `946`, `949`
+        - `poll_fd()` EINTR / unexpected-revents fallthrough: `1594-1596`, `1598`, `1613`
+        - cache lossy-conversion / malformed-item preservation: `1711`, `1716`, `1728-1729`
+      - Windows-only or Linux-non-testable groups inside the same file:
+        - Windows `try_connect()` / WinSHM path: `364-407`, `665-730`, `1123-1253`, `1260-1396`
+        - fixed-size encode guards in typed calls: `189`, `202`, `221`, `252`
+        - helper overflow guards and readiness wait-loop sleeps: `1876`, `1945`, `1979`, `2663`
+    - `transport/posix.rs` still has ordinary Linux gaps:
+      - `packet_size too small`: `289`
+      - short packet / negotiated-limit checks: `347`, `361`, `392`
+      - chunk-header mismatch checks: `440`, `448`, `457`, `460`, `465`, `468`
+      - live-server stale detection / listener conflict: `526`, `836`
+      - handshake rejection/truncation branches: `930`, `941`, `949`, `1004`, `1057`
+    - `transport/shm.rs` still has ordinary Linux gaps:
+      - live-server stale-region rejection in `server_create()`: `227-229`
+      - short-file / undersized-region attach failures: `341-342`, `428-431`
+      - zero-timeout deadline branch in `receive()`: `581`, `601`, `609`
+      - `cleanup_stale()` invalid-entry cleanup branches: `729`, `736-737`, `763-764`
+    - working theory:
+      - the next honest Linux Rust gains should come first from real Linux SHM service coverage and direct malformed transport tests
+      - after that, the remaining Linux total will need a tooling review, because `tarpaulin` is still counting Windows-tagged lines in the shared Rust library total
+  - next execution slice for Linux Rust:
+    - add real L2 SHM service tests in `service/cgroups.rs`
+      - snapshot / increment / string-reverse / batch over SHM
+      - bad-kind / bad-code / bad-message-id / bad-item-count response validation on the SHM path
+      - direct `dispatch_single()` and `snapshot_max_items()` tests for the remaining ordinary helper branches
+    - add direct POSIX UDS malformed transport tests in `transport/posix.rs`
+      - packet too short
+      - limit exceeded
+      - batch-directory overflow
+      - chunk-header mismatch
+      - live-server stale detection
+      - handshake rejection / truncation branches
+    - add direct POSIX SHM stale / attach / timeout tests in `transport/shm.rs`
+      - live-server stale recovery rejection
+      - undersized file / undersized mapping rejection
+      - zero-timeout receive branch
+      - invalid-entry cleanup paths
 - Current execution slice after the Windows Go parity expansion:
   - completed the next Linux / POSIX Go SHM service follow-up slice
   - validated ordinary POSIX SHM service tests for:
@@ -466,7 +546,7 @@ Verified on `2026-03-23`:
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
-  - result: `80.85%`
+  - result: `87.06%`
   - current threshold: `80%`
 
 Important fact:

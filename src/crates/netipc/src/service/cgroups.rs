@@ -1810,7 +1810,9 @@ impl Drop for CgroupsCache {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::protocol::{CgroupsBuilder, PROFILE_BASELINE};
+    #[cfg(target_os = "linux")]
+    use crate::protocol::PROFILE_SHM_FUTEX;
+    use crate::protocol::{increment_encode, BatchBuilder, CgroupsBuilder, PROFILE_BASELINE};
     use std::thread;
     use std::time::Duration;
 
@@ -1825,6 +1827,8 @@ mod tests {
     fn cleanup_all(service: &str) {
         let _ = std::fs::remove_file(format!("{TEST_RUN_DIR}/{service}.sock"));
         let _ = std::fs::remove_file(format!("{TEST_RUN_DIR}/{service}.ipcshm"));
+        #[cfg(target_os = "linux")]
+        crate::transport::shm::cleanup_stale(TEST_RUN_DIR, service);
     }
 
     fn server_config() -> ServerConfig {
@@ -1850,6 +1854,72 @@ mod tests {
             auth_token: AUTH_TOKEN,
             ..ClientConfig::default()
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn shm_server_config() -> ServerConfig {
+        ServerConfig {
+            supported_profiles: PROFILE_BASELINE | PROFILE_SHM_FUTEX,
+            preferred_profiles: PROFILE_SHM_FUTEX,
+            max_request_payload_bytes: 4096,
+            max_request_batch_items: 16,
+            max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
+            max_response_batch_items: 16,
+            auth_token: AUTH_TOKEN,
+            backlog: 4,
+            ..ServerConfig::default()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn shm_client_config() -> ClientConfig {
+        ClientConfig {
+            supported_profiles: PROFILE_BASELINE | PROFILE_SHM_FUTEX,
+            preferred_profiles: PROFILE_SHM_FUTEX,
+            max_request_payload_bytes: 4096,
+            max_request_batch_items: 16,
+            max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
+            max_response_batch_items: 16,
+            auth_token: AUTH_TOKEN,
+            ..ClientConfig::default()
+        }
+    }
+
+    fn batch_server_config() -> ServerConfig {
+        ServerConfig {
+            supported_profiles: PROFILE_BASELINE,
+            max_request_payload_bytes: 4096,
+            max_request_batch_items: 16,
+            max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
+            max_response_batch_items: 16,
+            auth_token: AUTH_TOKEN,
+            backlog: 4,
+            ..ServerConfig::default()
+        }
+    }
+
+    fn batch_client_config() -> ClientConfig {
+        ClientConfig {
+            supported_profiles: PROFILE_BASELINE,
+            max_request_payload_bytes: 4096,
+            max_request_batch_items: 16,
+            max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
+            max_response_batch_items: 16,
+            auth_token: AUTH_TOKEN,
+            ..ClientConfig::default()
+        }
+    }
+
+    fn connect_ready(client: &mut CgroupsClient) {
+        for _ in 0..200 {
+            client.refresh();
+            if client.ready() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!("client did not reach READY state");
     }
 
     fn fill_test_cgroups_snapshot(builder: &mut CgroupsBuilder<'_>) -> bool {
@@ -1909,10 +1979,24 @@ mod tests {
 
     impl TestServer {
         fn start(service: &str, handlers: Handlers) -> Self {
-            Self::start_with_workers(service, handlers, 8)
+            Self::start_with(service, server_config(), handlers, 8)
+        }
+
+        #[cfg(target_os = "linux")]
+        fn start_shm(service: &str, handlers: Handlers) -> Self {
+            Self::start_with(service, shm_server_config(), handlers, 8)
         }
 
         fn start_with_workers(service: &str, handlers: Handlers, worker_count: usize) -> Self {
+            Self::start_with(service, server_config(), handlers, worker_count)
+        }
+
+        fn start_with(
+            service: &str,
+            config: ServerConfig,
+            handlers: Handlers,
+            worker_count: usize,
+        ) -> Self {
             ensure_run_dir();
             cleanup_all(service);
 
@@ -1920,13 +2004,8 @@ mod tests {
             let ready_flag = Arc::new(AtomicBool::new(false));
             let ready_clone = ready_flag.clone();
 
-            let mut server = ManagedServer::with_workers(
-                TEST_RUN_DIR,
-                &svc,
-                server_config(),
-                handlers,
-                worker_count,
-            );
+            let mut server =
+                ManagedServer::with_workers(TEST_RUN_DIR, &svc, config, handlers, worker_count);
             let stop_flag = server.running_flag();
 
             let thread = thread::spawn(move || {
@@ -1997,6 +2076,63 @@ mod tests {
     impl Drop for TestServer {
         fn drop(&mut self) {
             self.stop();
+        }
+    }
+
+    struct RawSessionServer {
+        thread: Option<thread::JoinHandle<Result<(), String>>>,
+    }
+
+    fn start_raw_session_server<F>(service: &str, cfg: ServerConfig, handler: F) -> RawSessionServer
+    where
+        F: FnOnce(&mut UdsSession, Header, &[u8]) -> Result<(), String> + Send + 'static,
+    {
+        ensure_run_dir();
+        cleanup_all(service);
+
+        let svc = service.to_string();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready.clone();
+
+        let thread = thread::spawn(move || {
+            let listener =
+                UdsListener::bind(TEST_RUN_DIR, &svc, cfg).map_err(|e| format!("bind: {e}"))?;
+            ready_clone.store(true, Ordering::Release);
+            let mut session = listener.accept().map_err(|e| format!("accept: {e}"))?;
+
+            let (hdr, payload) = {
+                let mut recv_buf = vec![0u8; RESPONSE_BUF_SIZE];
+                let (hdr, payload) = session
+                    .receive(&mut recv_buf)
+                    .map_err(|e| format!("receive: {e}"))?;
+                (hdr, payload.to_vec())
+            };
+
+            handler(&mut session, hdr, &payload)
+        });
+
+        for _ in 0..2000 {
+            if ready.load(Ordering::Acquire) {
+                break;
+            }
+            thread::sleep(Duration::from_micros(500));
+        }
+        thread::sleep(Duration::from_millis(50));
+
+        RawSessionServer {
+            thread: Some(thread),
+        }
+    }
+
+    impl RawSessionServer {
+        fn wait(&mut self) {
+            if let Some(thread) = self.thread.take() {
+                match thread.join() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => panic!("raw unix session server failed: {err}"),
+                    Err(_) => panic!("raw unix session server panicked"),
+                }
+            }
         }
     }
 
@@ -2074,6 +2210,80 @@ mod tests {
         let status = client.status();
         assert_eq!(status.call_count, 1);
         assert_eq!(status.error_count, 0);
+
+        client.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_cgroups_call_shm() {
+        let svc = "rs_svc_cgroups_shm";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start_shm(svc, test_cgroups_handlers());
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, shm_client_config());
+        connect_ready(&mut client);
+        assert!(client.shm.is_some(), "expected SHM to be negotiated");
+        assert_eq!(
+            client.session.as_ref().map(|s| s.selected_profile),
+            Some(PROFILE_SHM_FUTEX)
+        );
+
+        let view = client.call_snapshot().expect("snapshot over SHM");
+        assert_eq!(view.item_count, 3);
+        assert_eq!(view.generation, 42);
+        assert_eq!(view.item(0).expect("item 0").hash, 1001);
+
+        client.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_client_call_string_reverse_shm_success() {
+        let svc = "rs_svc_strrev_shm";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start_shm(svc, pingpong_handlers());
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, shm_client_config());
+        connect_ready(&mut client);
+        assert!(client.shm.is_some(), "expected SHM to be negotiated");
+
+        let result = client
+            .call_string_reverse("hello")
+            .expect("string reverse over SHM");
+        assert_eq!(result.as_str(), "olleh");
+
+        client.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_increment_batch_shm() {
+        let svc = "rs_pp_batch_shm";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server = TestServer::start_shm(svc, pingpong_handlers());
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, shm_client_config());
+        connect_ready(&mut client);
+        assert!(client.shm.is_some(), "expected SHM to be negotiated");
+
+        let values = vec![10u64, 20, 30, 40];
+        let results = client
+            .call_increment_batch(&values)
+            .expect("batch over SHM");
+        assert_eq!(results, vec![11, 21, 31, 41]);
 
         client.close();
         server.stop();
@@ -2582,6 +2792,38 @@ mod tests {
             let expected_path = format!("/sys/fs/cgroup/test/{i}");
             assert_eq!(item.path, expected_path);
         }
+
+        cache.close();
+        server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_cache_refresh_lossy_utf8() {
+        let svc = "rs_cache_lossy";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let handlers = Handlers {
+            on_snapshot: Some(Arc::new(|_, builder| {
+                builder.set_header(1, 7);
+                builder
+                    .add(1001, 0, 1, b"bad-\xFF-name", b"/bad/\xFF/path")
+                    .is_ok()
+            })),
+            snapshot_max_items: 1,
+            ..Handlers::default()
+        };
+
+        let mut server = TestServer::start(svc, handlers);
+        let mut cache = CgroupsCache::new(TEST_RUN_DIR, svc, client_config());
+
+        assert!(cache.refresh(), "cache refresh should succeed");
+        let item = cache
+            .lookup(1001, "bad-\u{FFFD}-name")
+            .expect("lossy lookup");
+        assert_eq!(item.name, "bad-\u{FFFD}-name");
+        assert_eq!(item.path, "/bad/\u{FFFD}/path");
 
         cache.close();
         server.stop();
@@ -3552,6 +3794,190 @@ mod tests {
 
         client.close();
         server.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_dispatch_single_helper_paths() {
+        let mut response_buf = [0u8; 128];
+
+        let (n, ok) = dispatch_single(
+            &Handlers::default(),
+            METHOD_INCREMENT,
+            &[0; 8],
+            &mut response_buf,
+        );
+        assert_eq!((n, ok), (0, false));
+
+        let (n, ok) = dispatch_single(
+            &Handlers::default(),
+            METHOD_STRING_REVERSE,
+            &[0; 8],
+            &mut response_buf,
+        );
+        assert_eq!((n, ok), (0, false));
+
+        let snapshot_handlers = Handlers {
+            on_snapshot: Some(Arc::new(|_, _| true)),
+            snapshot_max_items: 0,
+            ..Handlers::default()
+        };
+        let (n, ok) = dispatch_single(
+            &snapshot_handlers,
+            METHOD_CGROUPS_SNAPSHOT,
+            &[1, 0, 0, 0],
+            &mut [],
+        );
+        assert_eq!((n, ok), (0, false));
+
+        let (n, ok) = dispatch_single(&Handlers::default(), 0xFFFF, &[], &mut response_buf);
+        assert_eq!((n, ok), (0, false));
+
+        assert!(
+            Handlers {
+                snapshot_max_items: 0,
+                ..Handlers::default()
+            }
+            .snapshot_max_items(4096)
+                > 0,
+            "default snapshot item estimate should be positive for a non-empty buffer"
+        );
+    }
+
+    #[test]
+    fn test_response_payload_transport_buf_bounds() {
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, "rs_payload_bounds", client_config());
+        client.transport_buf.resize(HEADER_SIZE + 8, 0);
+
+        let response = ClientResponseRef {
+            source: ClientResponseSource::TransportBuf,
+            len: 16,
+        };
+
+        assert_eq!(client.response_payload(response), Err(NipcError::Truncated));
+    }
+
+    #[test]
+    fn test_call_increment_rejects_malformed_response_envelope_unix() {
+        struct Case {
+            name: &'static str,
+            kind: u16,
+            code: u16,
+            status: u16,
+            want: NipcError,
+        }
+
+        let cases = [
+            Case {
+                name: "bad kind",
+                kind: KIND_REQUEST,
+                code: METHOD_INCREMENT,
+                status: STATUS_OK,
+                want: NipcError::BadKind,
+            },
+            Case {
+                name: "bad code",
+                kind: KIND_RESPONSE,
+                code: METHOD_STRING_REVERSE,
+                status: STATUS_OK,
+                want: NipcError::BadLayout,
+            },
+            Case {
+                name: "bad status",
+                kind: KIND_RESPONSE,
+                code: METHOD_INCREMENT,
+                status: STATUS_INTERNAL_ERROR,
+                want: NipcError::BadLayout,
+            },
+        ];
+
+        for tc in cases {
+            let svc = format!("rs_unix_inc_env_{}", tc.name.replace(' ', "_"));
+            let mut server =
+                start_raw_session_server(&svc, server_config(), move |session, req_hdr, _| {
+                    let mut payload = [0u8; INCREMENT_PAYLOAD_SIZE];
+                    let n = increment_encode(43, &mut payload);
+                    if n != INCREMENT_PAYLOAD_SIZE {
+                        return Err(format!("increment_encode returned {n}"));
+                    }
+
+                    let mut resp_hdr = Header {
+                        kind: tc.kind,
+                        code: tc.code,
+                        flags: 0,
+                        item_count: 1,
+                        message_id: req_hdr.message_id,
+                        transport_status: tc.status,
+                        ..Header::default()
+                    };
+                    session
+                        .send(&mut resp_hdr, &payload)
+                        .map_err(|e| format!("send: {e}"))
+                });
+
+            let mut client = CgroupsClient::new(TEST_RUN_DIR, &svc, client_config());
+            connect_ready(&mut client);
+
+            let err = client.call_increment(42).expect_err(tc.name);
+            assert_eq!(err, tc.want, "{}", tc.name);
+
+            client.close();
+            server.wait();
+            cleanup_all(&svc);
+        }
+    }
+
+    #[test]
+    fn test_call_increment_batch_rejects_wrong_item_count_unix() {
+        let svc = "rs_unix_batch_count";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server =
+            start_raw_session_server(svc, batch_server_config(), move |session, req_hdr, _| {
+                let mut encoded = [0u8; INCREMENT_PAYLOAD_SIZE];
+                let n = increment_encode(11, &mut encoded);
+                if n != INCREMENT_PAYLOAD_SIZE {
+                    return Err(format!("increment_encode returned {n}"));
+                }
+
+                let mut response_buf = vec![0u8; 128];
+                let resp_len = {
+                    let mut batch = BatchBuilder::new(&mut response_buf, 2);
+                    batch
+                        .add(&encoded)
+                        .map_err(|e| format!("batch add 1: {e:?}"))?;
+                    batch
+                        .add(&encoded)
+                        .map_err(|e| format!("batch add 2: {e:?}"))?;
+                    let (len, _count) = batch.finish();
+                    len
+                };
+
+                let mut resp_hdr = Header {
+                    kind: KIND_RESPONSE,
+                    code: METHOD_INCREMENT,
+                    flags: FLAG_BATCH,
+                    item_count: 1,
+                    message_id: req_hdr.message_id,
+                    transport_status: STATUS_OK,
+                    ..Header::default()
+                };
+                session
+                    .send(&mut resp_hdr, &response_buf[..resp_len])
+                    .map_err(|e| format!("send: {e}"))
+            });
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, batch_client_config());
+        connect_ready(&mut client);
+
+        let err = client
+            .call_increment_batch(&[10, 20])
+            .expect_err("wrong batch item_count");
+        assert_eq!(err, NipcError::BadItemCount);
+
+        client.close();
+        server.wait();
         cleanup_all(svc);
     }
 

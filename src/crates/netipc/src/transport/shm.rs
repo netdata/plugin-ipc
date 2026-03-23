@@ -1689,6 +1689,39 @@ mod tests {
         cleanup_shm(svc, sid);
     }
 
+    #[test]
+    fn test_receive_without_deadline_waits_for_message() {
+        ensure_run_dir();
+        let svc = "rs_shm_wait_forever";
+        let sid: u64 = 580;
+        cleanup_shm(svc, sid);
+
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
+        let mut client = ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
+
+        let sender = thread::spawn({
+            let svc_name = svc.to_string();
+            move || {
+                thread::sleep(std::time::Duration::from_millis(50));
+                let mut ctx =
+                    ShmContext::client_attach(TEST_RUN_DIR, &svc_name, sid).expect("attach sender");
+                let msg = build_message(protocol::KIND_REQUEST, 1, 9, &[0xAA, 0xBB]);
+                ctx.send(&msg).expect("send");
+                ctx.close();
+            }
+        });
+
+        let mut buf = [0u8; 128];
+        let n = server.receive(&mut buf, 0).expect("receive with timeout 0");
+        assert_eq!(n, protocol::HEADER_SIZE + 2);
+
+        sender.join().unwrap();
+        client.close();
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
     // -----------------------------------------------------------------------
     //  Client attach: bad magic, bad version, bad header_len (lines 366-385)
     // -----------------------------------------------------------------------
@@ -1799,6 +1832,79 @@ mod tests {
     }
 
     #[test]
+    fn test_server_create_rejects_live_region() {
+        ensure_run_dir();
+        let svc = "rs_shm_live_region";
+        let sid: u64 = 631;
+        cleanup_shm(svc, sid);
+
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
+        let err = match ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024) {
+            Ok(_) => panic!("live region should reject second create"),
+            Err(err) => err,
+        };
+        assert_eq!(err, ShmError::AddrInUse);
+
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    #[test]
+    fn test_client_attach_short_file_not_ready() {
+        ensure_run_dir();
+        let svc = "rs_shm_short";
+        let sid: u64 = 632;
+        cleanup_shm(svc, sid);
+
+        let path = build_shm_path(TEST_RUN_DIR, svc, sid).expect("path");
+        let c_path = path_to_cstring(&path).expect("cstring");
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+                0o600,
+            )
+        };
+        assert!(fd >= 0, "open failed: {}", errno());
+        assert_eq!(unsafe { libc::ftruncate(fd, 8) }, 0, "ftruncate failed");
+        unsafe { libc::close(fd) };
+
+        let err = match ShmContext::client_attach(TEST_RUN_DIR, svc, sid) {
+            Ok(_) => panic!("short file should not attach"),
+            Err(err) => err,
+        };
+        assert_eq!(err, ShmError::NotReady);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_client_attach_region_smaller_than_declared_capacity() {
+        ensure_run_dir();
+        let svc = "rs_shm_truncated_region";
+        let sid: u64 = 633;
+        cleanup_shm(svc, sid);
+
+        let mut server =
+            ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
+        assert_eq!(
+            unsafe { libc::ftruncate(server.fd, HEADER_LEN as libc::off_t) },
+            0,
+            "truncate region"
+        );
+
+        let err = match ShmContext::client_attach(TEST_RUN_DIR, svc, sid) {
+            Ok(_) => panic!("truncated region should not attach"),
+            Err(err) => err,
+        };
+        assert_eq!(err, ShmError::BadSize);
+
+        server.destroy();
+        cleanup_shm(svc, sid);
+    }
+
+    #[test]
     fn test_client_attach_bad_size() {
         ensure_run_dir();
         let svc = "rs_shm_badsz";
@@ -1877,5 +1983,53 @@ mod tests {
         ensure_run_dir();
         let result = ShmContext::client_attach(TEST_RUN_DIR, "rs_shm_nofile", 99999);
         assert!(matches!(result, Err(ShmError::Open(_))));
+    }
+
+    #[test]
+    fn test_cleanup_stale_invalid_entries() {
+        ensure_run_dir();
+        let svc = "rs_shm_cleanup_invalid";
+        let short_sid: u64 = 701;
+        let magic_sid: u64 = 702;
+        let unreadable_sid: u64 = 703;
+
+        for sid in [short_sid, magic_sid, unreadable_sid] {
+            cleanup_shm(svc, sid);
+        }
+
+        let short_path = build_shm_path(TEST_RUN_DIR, svc, short_sid).expect("short path");
+        std::fs::write(&short_path, [0u8; 8]).expect("write short file");
+
+        let mut bad_magic = ShmContext::server_create(TEST_RUN_DIR, svc, magic_sid, 1024, 1024)
+            .expect("server create");
+        let hdr = bad_magic.base as *mut RegionHeader;
+        unsafe { (*hdr).magic = 0xDEADBEEF };
+        bad_magic.close();
+
+        let unreadable_path = build_shm_path(TEST_RUN_DIR, svc, unreadable_sid).expect("path");
+        let unreadable_c = path_to_cstring(&unreadable_path).expect("cstring");
+        let unreadable_fd = unsafe {
+            libc::open(
+                unreadable_c.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+                0o000,
+            )
+        };
+        assert!(unreadable_fd >= 0, "open unreadable");
+        unsafe { libc::close(unreadable_fd) };
+
+        cleanup_stale(TEST_RUN_DIR, svc);
+
+        assert!(
+            !short_path.exists(),
+            "short invalid entry should be removed"
+        );
+        assert!(!build_shm_path(TEST_RUN_DIR, svc, magic_sid)
+            .unwrap()
+            .exists());
+        assert!(
+            !unreadable_path.exists(),
+            "unreadable invalid entry should be removed"
+        );
     }
 }
