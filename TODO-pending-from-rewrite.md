@@ -161,6 +161,30 @@ User direction (`2026-03-23`):
 - Proceed with the ordinary testable Windows Go coverage targets first.
 - Do not jump to special-infrastructure branches before the ordinary remaining branches are exhausted.
 
+### 4. README summary refresh
+
+User direction (`2026-03-23`):
+
+- Replace the old `README.md` with a concise, trustworthy summary for team handoff.
+- The README must explain:
+  - design and architecture
+  - the specs and where they live
+  - API levels
+  - language interoperability
+  - performance
+  - testing, coverage, and validation scope
+- The README should be something the team can reasonably trust about features, performance, reliability, and robustness.
+
+Implementation consequence:
+
+- The README must be based on the current measured repo state, not on stale claims.
+- Any claim about performance, reliability, robustness, interoperability, or validation must be traceable to checked-in docs, benchmark artifacts, or current test / coverage workflows.
+
+Status:
+
+- Completed.
+- `README.md` now summarizes the current design, specifications, API levels, interoperability model, checked-in benchmark results, and validated test / coverage state for team handoff.
+
 ## Summary Of Work Done
 
 - Normalized the public specifications so Level 2 is clearly typed-only and transport/buffer details remain internal.
@@ -178,6 +202,7 @@ User direction (`2026-03-23`):
   - wiring Windows stress into `ctest`
   - fixing the broken coverage script error handling
   - validating the Windows coverage scripts on `win11`
+- Replaced the stale top-level `README.md` with a factual repository summary for team handoff, based on the current checked-in specs, benchmark reports, and validated Linux / Windows test and coverage results.
 
 ## Current Verified State
 
