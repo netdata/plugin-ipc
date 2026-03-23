@@ -64,9 +64,9 @@ Finish the rewrite to a production-ready state with:
         - ordinary testable now:
           - Windows Go ordinary coverage is no longer the main gap
           - next honest Go target is Linux / POSIX:
-            - `service/cgroups/client.go` (`88.0%`)
-            - `transport/posix/shm_linux.go` (`77.5%`)
-            - `transport/posix/uds.go` (`83.7%`)
+            - `service/cgroups/client.go` (`87.7%`)
+            - `transport/posix/shm_linux.go` (`86.7%`)
+            - `transport/posix/uds.go` (`92.0%`)
           - keep the deferred managed-server retry/shutdown investigation separate from ordinary coverage
         - likely requires special orchestration later:
           - fixed-size encode / builder overflow guards in `client_windows.go` that the current scratch sizing makes unreachable in normal calls
@@ -539,7 +539,7 @@ Facts:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
 - Windows Go coverage currently reports `96.7%`.
-- Linux Go coverage currently reports `89.4%` with the real weak files now in POSIX Go transport paths.
+- Linux Go coverage currently reports `91.7%` with the real weak files now in selective POSIX Go service / transport paths.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
@@ -582,13 +582,15 @@ Required next work:
          - `service/cgroups/client.go` moved from `81.4%` to `88.0%`
          - the main ordinary Go gap is no longer the L2 service client
      - `transport/posix/shm_linux.go`
-       - `OwnerAlive`: `70.0%`
-       - `ShmServerCreate`: `66.7%`
-       - `ShmClientAttach`: `58.7%`
+       - result of the latest ordinary SHM slice:
+         - file moved from `77.5%` to `86.7%`
+       - `OwnerAlive`: `100.0%`
+       - `ShmServerCreate`: `75.0%`
+       - `ShmClientAttach`: `81.3%`
        - `ShmSend`: `86.2%`
        - `ShmReceive`: `86.1%`
-       - `ShmCleanupStale`: `75.0%`
-       - `checkShmStale`: `59.3%`
+       - `ShmCleanupStale`: `87.5%`
+       - `checkShmStale`: `85.2%`
      - `transport/posix/uds.go`
        - result of the latest ordinary UDS slice:
          - file moved from `83.7%` to `92.0%`
@@ -604,10 +606,17 @@ Required next work:
        - `connectAndHandshake`: `90.9%`
        - `serverHandshake`: `93.8%`
      - implication:
-       - the next honest ordinary target is still Linux Go, but no longer `service/cgroups/client.go` or `transport/posix/uds.go`
+       - the next honest ordinary target is still Linux Go, but no longer `transport/posix/uds.go`
    - next ordinary target:
-     - start with Linux Go `transport/posix/shm_linux.go`
-     - then decide whether the remaining low-level POSIX service / transport gaps are still ordinary or already special-infrastructure territory
+     - start with the remaining low-risk Linux Go service gaps:
+       - `service/cgroups/types.go` is now done (`100.0%`)
+       - review whether the remaining `service/cgroups/client.go` paths are still ordinary:
+         - `Refresh`
+         - `tryConnect`
+         - `transportReceive`
+         - `Run`
+         - `handleSession`
+     - then decide whether the remaining low-level POSIX SHM / UDS gaps are still ordinary or already special-infrastructure territory
      - keep Windows Go low-level branches documented, but no longer treat them as the first ordinary target
      - do not treat low-level OS failure or fault-injection branches as ordinary test targets
      - remaining `uds.go` likely non-ordinary / special-infrastructure territory:
@@ -616,11 +625,15 @@ Required next work:
        - hello / hello-ack short writes
        - next-level kernel timing races around disconnect during send
      - current `shm_linux.go` ordinary candidates from the merged profile:
-       - `OwnerAlive`
        - `ShmServerCreate`
        - `ShmClientAttach`
        - `ShmCleanupStale`
        - `checkShmStale`
+     - immediate follow-up after the SHM slice:
+       - move the tiny `Handlers.snapshotMaxItems()` coverage from the Windows-only test file into a shared Go test file so Linux covers `service/cgroups/types.go` too
+       - status:
+         - completed
+         - `service/cgroups/types.go` is now `100.0%`
 
 ### 2. Cross-platform validation parity is only partial
 
