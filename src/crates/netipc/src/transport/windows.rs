@@ -1171,6 +1171,58 @@ fn server_handshake(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use std::sync::atomic::{AtomicU64, Ordering};
+    #[cfg(windows)]
+    use std::thread;
+
+    #[cfg(windows)]
+    const TEST_RUN_DIR: &str = r"C:\Temp\nipc_transport_rust_test";
+    #[cfg(windows)]
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(windows)]
+    fn ensure_run_dir() {
+        let _ = std::fs::create_dir_all(TEST_RUN_DIR);
+    }
+
+    #[cfg(windows)]
+    fn unique_service(prefix: &str) -> String {
+        format!(
+            "{}_{}_{}",
+            prefix,
+            std::process::id(),
+            TEST_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+        )
+    }
+
+    #[cfg(windows)]
+    fn default_client_config() -> ClientConfig {
+        ClientConfig {
+            supported_profiles: PROFILE_BASELINE,
+            preferred_profiles: 0,
+            max_request_payload_bytes: 4096,
+            max_request_batch_items: 16,
+            max_response_payload_bytes: 4096,
+            max_response_batch_items: 16,
+            auth_token: 0xDEADBEEFCAFEBABE,
+            packet_size: 0,
+        }
+    }
+
+    #[cfg(windows)]
+    fn default_server_config() -> ServerConfig {
+        ServerConfig {
+            supported_profiles: PROFILE_BASELINE,
+            preferred_profiles: 0,
+            max_request_payload_bytes: 4096,
+            max_request_batch_items: 16,
+            max_response_payload_bytes: 4096,
+            max_response_batch_items: 16,
+            auth_token: 0xDEADBEEFCAFEBABE,
+            packet_size: 0,
+        }
+    }
 
     #[test]
     fn test_fnv1a_64_empty() {
@@ -1259,5 +1311,333 @@ mod tests {
         let n1 = build_pipe_name("/var/run/netdata", "svc").unwrap();
         let n2 = build_pipe_name("/tmp/netdata", "svc").unwrap();
         assert_ne!(n1, n2);
+    }
+
+    #[test]
+    fn test_np_error_display() {
+        let cases = [
+            (NpError::PipeName("bad".into()), "pipe name error: bad"),
+            (NpError::CreatePipe(5), "CreateNamedPipeW failed: 5"),
+            (NpError::Connect(231), "connect failed: 231"),
+            (NpError::Accept(24), "accept failed: 24"),
+            (NpError::Send(32), "send failed: 32"),
+            (NpError::Recv(0), "recv failed: 0"),
+            (NpError::Handshake("test".into()), "handshake error: test"),
+            (NpError::AuthFailed, "authentication token rejected"),
+            (NpError::NoProfile, "no common transport profile"),
+            (NpError::Protocol("bad".into()), "protocol violation: bad"),
+            (
+                NpError::AddrInUse,
+                "pipe name already in use by live server",
+            ),
+            (NpError::Chunk("mismatch".into()), "chunk error: mismatch"),
+            (NpError::Alloc, "memory allocation failed"),
+            (NpError::LimitExceeded, "negotiated limit exceeded"),
+            (NpError::BadParam("foo".into()), "bad parameter: foo"),
+            (NpError::DuplicateMsgId(42), "duplicate message_id: 42"),
+            (NpError::UnknownMsgId(99), "unknown response message_id: 99"),
+            (NpError::Disconnected, "peer disconnected"),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(format!("{err}"), expected);
+        }
+
+        let e: &dyn std::error::Error = &NpError::Disconnected;
+        let _ = format!("{e}");
+    }
+
+    #[test]
+    fn test_highest_bit() {
+        assert_eq!(highest_bit(0), 0);
+        assert_eq!(highest_bit(1), 1);
+        assert_eq!(highest_bit(0b0101), 4);
+        assert_eq!(highest_bit(0b1000), 8);
+        assert_eq!(highest_bit(0xFF), 128);
+    }
+
+    #[test]
+    fn test_build_pipe_name_too_long() {
+        let long_name = "a".repeat(300);
+        let result = build_pipe_name("/var/run", &long_name);
+        assert!(matches!(result, Err(NpError::PipeName(_))));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_connect_nonexistent() {
+        ensure_run_dir();
+        let svc = unique_service("rs_noexist");
+        let result = NpSession::connect(TEST_RUN_DIR, &svc, &default_client_config());
+        assert!(matches!(result, Err(NpError::Connect(_))));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_send_receive_on_closed_session() {
+        let mut session = NpSession {
+            handle: ffi::INVALID_HANDLE_VALUE,
+            role: Role::Client,
+            max_request_payload_bytes: 4096,
+            max_request_batch_items: 16,
+            max_response_payload_bytes: 4096,
+            max_response_batch_items: 16,
+            packet_size: DEFAULT_PACKET_SIZE,
+            selected_profile: PROFILE_BASELINE,
+            session_id: 1,
+            recv_buf: Vec::new(),
+            pkt_buf: Vec::new(),
+            inflight_ids: HashSet::new(),
+        };
+
+        let mut hdr = Header {
+            kind: protocol::KIND_REQUEST,
+            code: protocol::METHOD_INCREMENT,
+            item_count: 1,
+            message_id: 1,
+            ..Header::default()
+        };
+        assert!(matches!(
+            session.send(&mut hdr, &[1, 2, 3]),
+            Err(NpError::BadParam(_))
+        ));
+
+        let mut buf = [0u8; 64];
+        assert!(matches!(
+            session.receive(&mut buf),
+            Err(NpError::BadParam(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_roundtrip_and_accessors() {
+        ensure_run_dir();
+        let svc = unique_service("rs_roundtrip");
+
+        let mut listener =
+            NpListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("bind");
+        assert_ne!(listener.handle(), ffi::INVALID_HANDLE_VALUE);
+        assert_ne!(listener.handle(), 0);
+
+        let server = thread::spawn(move || {
+            let mut session = listener.accept().expect("accept");
+            assert_eq!(session.role(), Role::Server);
+            assert_ne!(session.handle(), ffi::INVALID_HANDLE_VALUE);
+            let mut buf = [0u8; 256];
+            let (hdr, payload) = session.receive(&mut buf).expect("recv");
+            let payload = payload.to_vec();
+            let mut resp = hdr;
+            resp.kind = KIND_RESPONSE;
+            resp.transport_status = protocol::STATUS_OK;
+            session.send(&mut resp, &payload).expect("send");
+            session.close();
+        });
+
+        let mut session =
+            NpSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
+        assert_eq!(session.role(), Role::Client);
+        assert_ne!(session.handle(), ffi::INVALID_HANDLE_VALUE);
+        assert_eq!(session.selected_profile, PROFILE_BASELINE);
+
+        let payload = [1u8, 2, 3, 4];
+        let mut hdr = Header {
+            kind: KIND_REQUEST,
+            code: protocol::METHOD_INCREMENT,
+            flags: 0,
+            item_count: 1,
+            message_id: 42,
+            ..Header::default()
+        };
+        session.send(&mut hdr, &payload).expect("send");
+
+        let mut rbuf = [0u8; 256];
+        let (rhdr, rpayload) = session.receive(&mut rbuf).expect("recv");
+        assert_eq!(rhdr.kind, KIND_RESPONSE);
+        assert_eq!(rhdr.message_id, 42);
+        assert_eq!(rpayload, payload);
+
+        session.close();
+        server.join().expect("server join");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_chunking_and_received_payload() {
+        ensure_run_dir();
+        let svc = unique_service("rs_chunk");
+
+        let scfg = ServerConfig {
+            packet_size: 128,
+            max_request_payload_bytes: 65536,
+            max_response_payload_bytes: 65536,
+            ..default_server_config()
+        };
+        let mut listener = NpListener::bind(TEST_RUN_DIR, &svc, scfg).expect("bind");
+
+        let server = thread::spawn(move || {
+            let mut session = listener.accept().expect("accept");
+            let mut buf = [0u8; 256];
+            let (hdr, payload) = session.receive(&mut buf).expect("recv");
+            let payload = payload.to_vec();
+            let mut resp = hdr;
+            resp.kind = KIND_RESPONSE;
+            resp.transport_status = protocol::STATUS_OK;
+            session.send(&mut resp, &payload).expect("send");
+            session.close();
+        });
+
+        let ccfg = ClientConfig {
+            packet_size: 128,
+            max_request_payload_bytes: 65536,
+            max_response_payload_bytes: 65536,
+            ..default_client_config()
+        };
+        let mut session = NpSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
+        assert_eq!(session.packet_size, 128);
+
+        let big: Vec<u8> = (0..500).map(|i| (i & 0xff) as u8).collect();
+        let mut hdr = Header {
+            kind: KIND_REQUEST,
+            code: protocol::METHOD_INCREMENT,
+            item_count: 1,
+            message_id: 7,
+            ..Header::default()
+        };
+        session.send(&mut hdr, &big).expect("send chunked");
+
+        let mut rbuf = [0u8; 256];
+        let (rhdr, received_len) = {
+            let (rhdr, rpayload) = session.receive(&mut rbuf).expect("recv chunked");
+            assert_eq!(rpayload, big);
+            (rhdr, rpayload.len())
+        };
+        assert_eq!(rhdr.message_id, 7);
+        assert_eq!(session.received_payload(received_len), big.as_slice());
+
+        session.close();
+        server.join().expect("server join");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_duplicate_message_id() {
+        ensure_run_dir();
+        let svc = unique_service("rs_dupmsg");
+        let mut listener =
+            NpListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("bind");
+
+        let server = thread::spawn(move || {
+            let mut session = listener.accept().expect("accept");
+            let mut buf = [0u8; 256];
+            let _ = session.receive(&mut buf).expect("recv");
+            session.close();
+        });
+
+        let mut session =
+            NpSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
+
+        let mut hdr1 = Header {
+            kind: KIND_REQUEST,
+            code: protocol::METHOD_INCREMENT,
+            item_count: 1,
+            message_id: 42,
+            ..Header::default()
+        };
+        session.send(&mut hdr1, &[1]).expect("first send");
+
+        let mut hdr2 = Header {
+            kind: KIND_REQUEST,
+            code: protocol::METHOD_INCREMENT,
+            item_count: 1,
+            message_id: 42,
+            ..Header::default()
+        };
+        assert!(matches!(
+            session.send(&mut hdr2, &[2]),
+            Err(NpError::DuplicateMsgId(42))
+        ));
+
+        session.close();
+        server.join().expect("server join");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_unknown_response_msg_id() {
+        ensure_run_dir();
+        let svc = unique_service("rs_unkmsg");
+        let mut listener =
+            NpListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("bind");
+
+        let server = thread::spawn(move || {
+            let mut session = listener.accept().expect("accept");
+            let mut buf = [0u8; 256];
+            let (hdr, payload) = session.receive(&mut buf).expect("recv");
+            let payload = payload.to_vec();
+
+            let mut resp = Header {
+                kind: KIND_RESPONSE,
+                code: hdr.code,
+                message_id: hdr.message_id + 999,
+                item_count: 1,
+                transport_status: protocol::STATUS_OK,
+                ..Header::default()
+            };
+            session.send(&mut resp, &payload).expect("send");
+            session.close();
+        });
+
+        let mut session =
+            NpSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
+
+        let mut hdr = Header {
+            kind: KIND_REQUEST,
+            code: protocol::METHOD_INCREMENT,
+            item_count: 1,
+            message_id: 50,
+            ..Header::default()
+        };
+        session.send(&mut hdr, &[1]).expect("send");
+
+        let mut rbuf = [0u8; 256];
+        assert!(matches!(
+            session.receive(&mut rbuf),
+            Err(NpError::UnknownMsgId(_))
+        ));
+
+        session.close();
+        server.join().expect("server join");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_preferred_profile_selected() {
+        ensure_run_dir();
+        let svc = unique_service("rs_pref");
+        let preferred = crate::protocol::PROFILE_SHM_HYBRID;
+
+        let scfg = ServerConfig {
+            supported_profiles: PROFILE_BASELINE | preferred,
+            preferred_profiles: preferred,
+            ..default_server_config()
+        };
+        let mut listener = NpListener::bind(TEST_RUN_DIR, &svc, scfg).expect("bind");
+
+        let server = thread::spawn(move || {
+            let mut session = listener.accept().expect("accept");
+            assert_eq!(session.selected_profile, preferred);
+            session.close();
+        });
+
+        let ccfg = ClientConfig {
+            supported_profiles: PROFILE_BASELINE | preferred,
+            preferred_profiles: preferred,
+            ..default_client_config()
+        };
+        let mut session = NpSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
+        assert_eq!(session.selected_profile, preferred);
+        session.close();
+        server.join().expect("server join");
     }
 }
