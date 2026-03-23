@@ -2290,6 +2290,111 @@ mod tests {
         cleanup_all(svc);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_refresh_shm_attach_failure_returns_disconnected() {
+        let svc = "rs_svc_shm_attach_fail";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready.clone();
+        let svc_clone = svc.to_string();
+
+        let server_thread = thread::spawn(move || {
+            let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, shm_server_config())
+                .expect("bind shm listener");
+            ready_clone.store(true, Ordering::Release);
+            let _session = listener.accept().expect("accept negotiated shm session");
+            thread::sleep(Duration::from_millis(1200));
+        });
+
+        while !ready.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, shm_client_config());
+        client.refresh();
+        assert_eq!(client.state, ClientState::Disconnected);
+        assert!(!client.ready());
+        assert!(
+            client.session.is_none(),
+            "failed SHM attach should drop the UDS session"
+        );
+        assert!(
+            client.shm.is_none(),
+            "failed SHM attach must not retain SHM state"
+        );
+
+        client.close();
+        server_thread.join().expect("server join");
+        cleanup_all(svc);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_call_increment_shm_short_response_truncated() {
+        let svc = "rs_svc_shm_short_resp";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready.clone();
+        let svc_clone = svc.to_string();
+
+        let server_thread = thread::spawn(move || -> Result<(), String> {
+            let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, shm_server_config())
+                .map_err(|e| format!("bind: {e}"))?;
+            ready_clone.store(true, Ordering::Release);
+            let session = listener.accept().map_err(|e| format!("accept: {e}"))?;
+            if session.selected_profile != PROFILE_SHM_FUTEX {
+                return Err(format!("unexpected profile {}", session.selected_profile));
+            }
+
+            let mut shm = ShmContext::server_create(
+                TEST_RUN_DIR,
+                &svc_clone,
+                session.session_id,
+                session.max_request_payload_bytes + HEADER_SIZE as u32,
+                session.max_response_payload_bytes + HEADER_SIZE as u32,
+            )
+            .map_err(|e| format!("server_create: {e}"))?;
+
+            let mut req_buf = vec![0u8; session.max_request_payload_bytes as usize + HEADER_SIZE];
+            let mlen = shm
+                .receive(&mut req_buf, 5000)
+                .map_err(|e| format!("shm receive: {e}"))?;
+            if mlen < HEADER_SIZE {
+                return Err(format!("request too short: {mlen}"));
+            }
+
+            shm.send(&[0xAB])
+                .map_err(|e| format!("shm send short response: {e}"))?;
+            Ok(())
+        });
+
+        while !ready.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, shm_client_config());
+        connect_ready(&mut client);
+        assert!(client.shm.is_some(), "expected SHM to be negotiated");
+
+        let err = client
+            .call_increment(41)
+            .expect_err("short SHM response should be truncated");
+        assert_eq!(err, NipcError::Truncated);
+
+        client.close();
+        match server_thread.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => panic!("raw shm server failed: {err}"),
+            Err(_) => panic!("raw shm server panicked"),
+        }
+        cleanup_all(svc);
+    }
+
     #[test]
     fn test_retry_on_failure() {
         let svc = "rs_svc_retry";
@@ -2324,6 +2429,205 @@ mod tests {
 
         client.close();
         server2.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_string_reverse_retry_on_failure() {
+        let svc = "rs_svc_retry_str";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server1 = TestServer::start(svc, pingpong_handlers());
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
+        client.refresh();
+        assert!(client.ready());
+        assert_eq!(
+            client
+                .call_string_reverse("hello")
+                .expect("first reverse")
+                .as_str(),
+            "olleh"
+        );
+
+        server1.stop();
+        cleanup_all(svc);
+        thread::sleep(Duration::from_millis(50));
+
+        let mut server2 = TestServer::start(svc, pingpong_handlers());
+
+        let result = client.call_string_reverse("hello").expect("retry reverse");
+        assert_eq!(result.as_str(), "olleh");
+
+        let status = client.status();
+        assert!(status.reconnect_count >= 1);
+
+        client.close();
+        server2.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_increment_batch_retry_on_failure() {
+        let svc = "rs_svc_retry_batch";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server1 =
+            TestServer::start_with(svc, batch_server_config(), pingpong_handlers(), 8);
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, batch_client_config());
+        client.refresh();
+        assert!(client.ready());
+        assert_eq!(
+            client.call_increment_batch(&[10, 20]).expect("first batch"),
+            vec![11, 21]
+        );
+
+        server1.stop();
+        cleanup_all(svc);
+        thread::sleep(Duration::from_millis(50));
+
+        let mut server2 =
+            TestServer::start_with(svc, batch_server_config(), pingpong_handlers(), 8);
+
+        let result = client.call_increment_batch(&[10, 20]).expect("retry batch");
+        assert_eq!(result, vec![11, 21]);
+
+        let status = client.status();
+        assert!(status.reconnect_count >= 1);
+
+        client.close();
+        server2.stop();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_string_reverse_retry_second_failure() {
+        let svc = "rs_svc_retry_str_second_fail";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server1 =
+            TestServer::start_with(svc, batch_server_config(), pingpong_handlers(), 8);
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, client_config());
+        client.refresh();
+        assert!(client.ready());
+        assert_eq!(
+            client
+                .call_string_reverse("hello")
+                .expect("initial reverse")
+                .as_str(),
+            "olleh"
+        );
+
+        server1.stop();
+        cleanup_all(svc);
+        thread::sleep(Duration::from_millis(50));
+
+        let mut server2 =
+            start_raw_session_server(svc, server_config(), move |session, req_hdr, payload| {
+                let decoded =
+                    string_reverse_decode(payload).map_err(|e| format!("decode request: {e:?}"))?;
+                if decoded.as_str() != "hello" {
+                    return Err("unexpected request payload".into());
+                }
+
+                let mut resp_hdr = Header {
+                    kind: KIND_REQUEST,
+                    code: METHOD_STRING_REVERSE,
+                    flags: 0,
+                    item_count: 1,
+                    message_id: req_hdr.message_id,
+                    transport_status: STATUS_OK,
+                    ..Header::default()
+                };
+                session
+                    .send(&mut resp_hdr, payload)
+                    .map_err(|e| format!("send: {e}"))
+            });
+
+        let err = client
+            .call_string_reverse("hello")
+            .expect_err("retry should fail on malformed second response");
+        assert_eq!(err, NipcError::BadKind);
+
+        let status = client.status();
+        assert_eq!(status.state, ClientState::Broken);
+        assert!(status.reconnect_count >= 1);
+        assert!(status.error_count >= 1);
+
+        client.close();
+        server2.wait();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_increment_batch_retry_second_failure() {
+        let svc = "rs_svc_retry_batch_second_fail";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut server1 =
+            TestServer::start_with(svc, batch_server_config(), pingpong_handlers(), 8);
+
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, batch_client_config());
+        client.refresh();
+        assert!(client.ready());
+        assert_eq!(
+            client
+                .call_increment_batch(&[10, 20])
+                .expect("initial batch"),
+            vec![11, 21]
+        );
+
+        server1.stop();
+        cleanup_all(svc);
+        thread::sleep(Duration::from_millis(50));
+
+        let mut server2 = start_raw_session_server(
+            svc,
+            batch_server_config(),
+            move |session, req_hdr, payload| {
+                let (item0, _) = batch_item_get(payload, 2, 0)
+                    .map_err(|e| format!("decode batch item 0: {e:?}"))?;
+                let (item1, _) = batch_item_get(payload, 2, 1)
+                    .map_err(|e| format!("decode batch item 1: {e:?}"))?;
+                let v0 = increment_decode(item0).map_err(|e| format!("decode inc0: {e:?}"))?;
+                let v1 = increment_decode(item1).map_err(|e| format!("decode inc1: {e:?}"))?;
+                if v0 != 10 || v1 != 20 {
+                    return Err("unexpected batch payload".into());
+                }
+
+                let mut resp_hdr = Header {
+                    kind: KIND_REQUEST,
+                    code: METHOD_INCREMENT,
+                    flags: 0,
+                    item_count: 1,
+                    message_id: req_hdr.message_id,
+                    transport_status: STATUS_OK,
+                    ..Header::default()
+                };
+                session
+                    .send(&mut resp_hdr, &[])
+                    .map_err(|e| format!("send: {e}"))
+            },
+        );
+
+        let err = client
+            .call_increment_batch(&[10, 20])
+            .expect_err("retry should fail on malformed second batch response");
+        assert_eq!(err, NipcError::BadKind);
+
+        let status = client.status();
+        assert_eq!(status.state, ClientState::Broken);
+        assert!(status.reconnect_count >= 1);
+        assert!(status.error_count >= 1);
+
+        client.close();
+        server2.wait();
         cleanup_all(svc);
     }
 
@@ -2849,40 +3153,42 @@ mod tests {
         server.stop();
         cleanup_all(svc);
 
-        let mut raw_server = start_raw_session_server(svc, server_config(), move |session, req_hdr, payload| {
-            let req = crate::protocol::CgroupsRequest::decode(payload)
-                .map_err(|e| format!("decode request: {e:?}"))?;
-            if req.layout_version != 1 || req.flags != 0 {
-                return Err("unexpected snapshot request".into());
-            }
+        let mut raw_server =
+            start_raw_session_server(svc, server_config(), move |session, req_hdr, payload| {
+                let req = crate::protocol::CgroupsRequest::decode(payload)
+                    .map_err(|e| format!("decode request: {e:?}"))?;
+                if req.layout_version != 1 || req.flags != 0 {
+                    return Err("unexpected snapshot request".into());
+                }
 
-            let mut response_payload = [0u8; 512];
-            let response_len = {
-                let mut builder = CgroupsBuilder::new(&mut response_payload, 1, 1, 99);
-                builder
-                    .add(9999, 0, 1, b"new-item", b"/new/path")
-                    .map_err(|e| format!("builder add: {e:?}"))?;
-                builder.finish()
-            };
+                let mut response_payload = [0u8; 512];
+                let response_len = {
+                    let mut builder = CgroupsBuilder::new(&mut response_payload, 1, 1, 99);
+                    builder
+                        .add(9999, 0, 1, b"new-item", b"/new/path")
+                        .map_err(|e| format!("builder add: {e:?}"))?;
+                    builder.finish()
+                };
 
-            let dir_end = 24 + 8;
-            let item_off = u32::from_ne_bytes(response_payload[24..28].try_into().unwrap()) as usize;
-            let item_start = dir_end + item_off;
-            response_payload[item_start..item_start + 2].copy_from_slice(&99u16.to_ne_bytes());
+                let dir_end = 24 + 8;
+                let item_off =
+                    u32::from_ne_bytes(response_payload[24..28].try_into().unwrap()) as usize;
+                let item_start = dir_end + item_off;
+                response_payload[item_start..item_start + 2].copy_from_slice(&99u16.to_ne_bytes());
 
-            let mut resp_hdr = Header {
-                kind: KIND_RESPONSE,
-                code: METHOD_CGROUPS_SNAPSHOT,
-                flags: 0,
-                item_count: 1,
-                message_id: req_hdr.message_id,
-                transport_status: STATUS_OK,
-                ..Header::default()
-            };
-            session
-                .send(&mut resp_hdr, &response_payload[..response_len])
-                .map_err(|e| format!("send: {e}"))
-        });
+                let mut resp_hdr = Header {
+                    kind: KIND_RESPONSE,
+                    code: METHOD_CGROUPS_SNAPSHOT,
+                    flags: 0,
+                    item_count: 1,
+                    message_id: req_hdr.message_id,
+                    transport_status: STATUS_OK,
+                    ..Header::default()
+                };
+                session
+                    .send(&mut resp_hdr, &response_payload[..response_len])
+                    .map_err(|e| format!("send: {e}"))
+            });
 
         assert!(
             !cache.refresh(),
@@ -2893,7 +3199,10 @@ mod tests {
         assert!(cache.ready(), "cache should stay populated");
         assert_eq!(status.item_count, old_status.item_count);
         assert_eq!(status.generation, old_status.generation);
-        assert_eq!(status.refresh_success_count, old_status.refresh_success_count);
+        assert_eq!(
+            status.refresh_success_count,
+            old_status.refresh_success_count
+        );
         assert_eq!(
             status.refresh_failure_count,
             old_status.refresh_failure_count + 1
@@ -3695,8 +4004,23 @@ mod tests {
         let result = client.call_string_reverse("test");
         assert!(result.is_err());
 
+        // Batch increment when not ready
+        let result = client.call_increment_batch(&[1, 2]);
+        assert!(result.is_err());
+
         client.close();
         cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_client_invalid_service_name_maps_to_disconnected() {
+        let bad_service = "x".repeat(400);
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, &bad_service, client_config());
+
+        client.refresh();
+
+        assert_eq!(client.state, ClientState::Disconnected);
+        assert!(!client.ready());
     }
 
     // ---------------------------------------------------------------
@@ -4241,8 +4565,10 @@ mod tests {
 
         for tc in cases {
             let svc = format!("rs_unix_batch_env_{}", tc.name.replace(' ', "_"));
-            let mut server =
-                start_raw_session_server(&svc, batch_server_config(), move |session, req_hdr, _| {
+            let mut server = start_raw_session_server(
+                &svc,
+                batch_server_config(),
+                move |session, req_hdr, _| {
                     let mut encoded = [0u8; INCREMENT_PAYLOAD_SIZE];
                     let n = increment_encode(11, &mut encoded);
                     if n != INCREMENT_PAYLOAD_SIZE {
@@ -4274,14 +4600,13 @@ mod tests {
                     session
                         .send(&mut resp_hdr, &response_buf[..resp_len])
                         .map_err(|e| format!("send: {e}"))
-                });
+                },
+            );
 
             let mut client = CgroupsClient::new(TEST_RUN_DIR, &svc, batch_client_config());
             connect_ready(&mut client);
 
-            let err = client
-                .call_increment_batch(&[10, 20])
-                .expect_err(tc.name);
+            let err = client.call_increment_batch(&[10, 20]).expect_err(tc.name);
             assert_eq!(err, tc.want, "{}", tc.name);
 
             client.close();
@@ -4416,6 +4741,29 @@ mod tests {
         client.close();
         stop_flag.store(false, Ordering::Release);
         let _ = thread_handle.join();
+        cleanup_all(svc);
+    }
+
+    #[test]
+    fn test_batch_dispatch_builder_overflow_returns_internal_error() {
+        let svc = "rs_svc_batch_overflow";
+        ensure_run_dir();
+        cleanup_all(svc);
+
+        let mut scfg = batch_server_config();
+        scfg.max_response_payload_bytes = 8;
+
+        let mut server = TestServer::start_with(svc, scfg, pingpong_handlers(), 8);
+        let mut client = CgroupsClient::new(TEST_RUN_DIR, svc, batch_client_config());
+        connect_ready(&mut client);
+
+        let err = client
+            .call_increment_batch(&[10, 20])
+            .expect_err("batch builder overflow should fail");
+        assert_eq!(err, NipcError::BadLayout);
+
+        client.close();
+        server.stop();
         cleanup_all(svc);
     }
 }
