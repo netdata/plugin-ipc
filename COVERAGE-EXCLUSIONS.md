@@ -15,32 +15,47 @@ Verified on `2026-03-23`:
 
 - C:
   - script: `tests/run-coverage-c.sh`
-  - result: `92.8%`
+  - result: `93.4%`
   - threshold: `82%`
-  - latest ordinary C service slices raised:
+  - latest ordinary C slices raised:
+    - `netipc_uds.c` to `92.7%` (`433/467`)
     - `netipc_service.c` to `92.1%` (`734/797`)
     - `netipc_shm.c` to `91.8%`
   - latest ordinary C additions covered:
-    - client init default-buffer sizing and truncation
-    - empty increment-batch fast-path
-    - tiny request-buffer overflow guards for batch, string-reverse, and SHM increment send
-    - negotiated SHM obstruction covering both server create rejection and client attach failure
-    - typed server missing-handler and success-dispatch paths
-    - server worker-count floor and long run_dir truncation
-    - raw SHM malformed response handling on the client side:
-      - forged oversize response length
-      - short response
-      - bad decoded header
-      - wrong kind / code / message_id
-    - raw SHM malformed request handling on the server side:
-      - forged oversize request length
-      - short request
-      - bad header
-    - typed server unknown-method dispatch and typed-init error propagation
-    - SHM batch client error propagation:
-      - negotiated-capacity send overflow
-      - malformed raw batch response propagation
-      - response `item_count` mismatch
+    - malformed client `HELLO_ACK` handling:
+      - short packet
+      - wrong kind
+      - unexpected transport status
+      - truncated payload
+    - malformed client `HELLO` payload on server accept
+    - malformed UDS response receive paths:
+      - short packet
+      - too-short batch directory
+      - short continuation packet
+      - response `item_count` over limit
+      - bad continuation header
+      - missing continuation packet after a valid first chunk
+    - plus the earlier Linux C service coverage gains:
+      - client init default-buffer sizing and truncation
+      - empty increment-batch fast-path
+      - tiny request-buffer overflow guards for batch, string-reverse, and SHM increment send
+      - negotiated SHM obstruction covering both server create rejection and client attach failure
+      - typed server missing-handler and success-dispatch paths
+      - server worker-count floor and long run_dir truncation
+      - raw SHM malformed response handling on the client side:
+        - forged oversize response length
+        - short response
+        - bad decoded header
+        - wrong kind / code / message_id
+      - raw SHM malformed request handling on the server side:
+        - forged oversize request length
+        - short request
+        - bad header
+      - typed server unknown-method dispatch and typed-init error propagation
+      - SHM batch client error propagation:
+        - negotiated-capacity send overflow
+        - malformed raw batch response propagation
+        - response `item_count` mismatch
 - Go:
   - script: `tests/run-coverage-go.sh`
   - result: `95.8%`

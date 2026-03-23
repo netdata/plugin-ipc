@@ -17,63 +17,46 @@ Finish the rewrite to a production-ready state with:
 ## Current Focus (2026-03-23)
 
 - Latest authoritative slice:
-  - Linux C ordinary service coverage
-  - added ordinary tests for:
-    - client init default-buffer sizing and client string truncation
-    - empty increment-batch fast-path
-    - tiny request-buffer overflow guards for:
-      - increment-batch
-      - string-reverse
-      - SHM increment send path
-    - negotiated SHM obstruction that forces:
-      - server-side SHM create rejection
-      - client-side SHM attach failure after handshake
-    - typed server dispatch with all handlers missing
-    - typed server dispatch with all handlers present
-    - default `snapshot_max_items == 0` typed snapshot path
-    - server worker-count floor and long run_dir truncation
-    - raw SHM malformed response handling on the client side:
-      - forged oversize response length
-      - short response
-      - bad decoded header
-      - wrong kind / code / message_id
-    - raw SHM malformed request handling on the server side:
-      - forged oversize request length
-      - short request
-      - bad header
-    - typed server unknown-method dispatch
-    - typed-init error propagation on listen failure
-    - SHM batch client error propagation:
-      - negotiated-capacity send overflow
-      - malformed raw batch response propagation
-      - response `item_count` mismatch
+  - Linux C ordinary UDS transport coverage
+  - added deterministic `test_uds` coverage for:
+    - malformed client `HELLO_ACK` handling:
+      - short packet
+      - wrong kind
+      - unexpected transport status
+      - truncated payload
+    - malformed client `HELLO` payload on server accept
+    - malformed response receive paths:
+      - short packet
+      - too-short batch directory
+      - short continuation packet
+      - response `item_count` over limit
+      - bad continuation header
+      - missing continuation packet after a valid first chunk
 - Latest verified Linux C result:
   - `bash tests/run-coverage-c.sh 82`
-  - total: `92.8%`
+  - total: `93.4%`
   - key files:
     - `netipc_protocol.c`: `98.7%`
-    - `netipc_uds.c`: `90.1%`
+    - `netipc_uds.c`: `92.7%` (`433/467`)
     - `netipc_shm.c`: `91.8%`
     - `netipc_service.c`: `92.1%` (`734/797`)
 - Latest verified Linux validation for this slice:
-  - `./build/bin/test_service`: `218 passed, 0 failed`
-  - `./build/bin/test_hardening`: `47 passed, 0 failed`
-  - `cmake --build build -j4 --target test_service test_hardening`: passing
+  - `./build/bin/test_uds`: `129 passed, 0 failed`
+  - `cmake --build build -j4 --target test_uds`: passing
   - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
 - Immediate next target:
-  - stop grinding `src/libnetdata/netipc/src/service/netipc_service.c` unless a new deterministic target appears
-  - the remaining uncovered C service lines are now mostly:
-    - fixed-size encode guard territory (`317`, `475`, `614`)
-    - batch builder / size-formula territory (`529`)
-    - signal / `EINTR` territory (`656`)
-    - peer-close send-failure cleanup (`871`, `879`, `881`, `886`)
-    - allocation / thread / session-table failure territory (`738`, `1000`, `1126-1149`, `1174-1176`, and related late cleanup paths)
-  - the next honest work should move back up one level:
-    - raise thresholds where the measured numbers now justify it
-    - keep converting ordinary uncovered lines in the other remaining files before writing more exclusion text
+  - pause `netipc_uds.c` unless a new clearly ordinary target appears
+  - fresh evidence from the current uncovered list:
+    - the remaining `netipc_uds.c` holes are now mostly:
+      - helper fallbacks / probe defaults (`73`, `78`, `86`, `431`)
+      - raw send / sendmsg failure paths (`113`, `143`, `209`, `399`, `733-737`, `766-770`)
+      - listen / accept / socket failures (`480`, `494-496`, `520`, `556`)
+      - allocation failure paths (`634`, `793`, `908`)
+      - lower-level chunk validation / cleanup paths that still need more crafted corruption (`934-946`, `961`)
+      - direct invalid-session guards that are not hit cleanly in gcov despite parameter tests (`667`, `707`)
   - recommendation:
-    - treat Linux C service ordinary coverage as largely exhausted for now
-    - move next to threshold-raising plus honest exclusions, or to the next file that still has clear deterministic gaps
+    - treat POSIX UDS ordinary deterministic coverage as largely exhausted for now
+    - move next either to threshold-raising / honest exclusions, or to the next file with clearer deterministic wins after review
 - Note:
   - the older slice notes below are historical context
   - they are no longer the authoritative current state

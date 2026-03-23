@@ -55,6 +55,11 @@ static void cleanup_socket(const char *service)
     unlink(path);
 }
 
+static void build_socket_path(char *path, size_t path_len, const char *service)
+{
+    snprintf(path, path_len, "%s/%s.sock", TEST_RUN_DIR, service);
+}
+
 /* Default server config */
 static nipc_uds_server_config_t default_server_config(void)
 {
@@ -98,6 +103,45 @@ typedef struct {
     int                      ready;        /* set to 1 when listening */
     int                      done;         /* set to 1 when finished */
 } server_ctx_t;
+
+typedef enum {
+    MALFORMED_ACK_SHORT = 1,
+    MALFORMED_ACK_WRONG_KIND,
+    MALFORMED_ACK_BAD_STATUS,
+    MALFORMED_ACK_BAD_PAYLOAD,
+} malformed_ack_mode_t;
+
+typedef struct {
+    const char *service;
+    malformed_ack_mode_t mode;
+    int ready;
+    int done;
+} malformed_ack_server_ctx_t;
+
+typedef struct {
+    const char *service;
+    nipc_uds_server_config_t config;
+    nipc_uds_error_t accept_err;
+    int ready;
+    int done;
+} accept_result_server_ctx_t;
+
+typedef enum {
+    RAW_RESP_SHORT_PACKET = 1,
+    RAW_RESP_BAD_BATCH_DIR_SHORT,
+    RAW_RESP_SHORT_CONTINUATION,
+    RAW_RESP_BATCH_COUNT_EXCEEDED,
+    RAW_RESP_BAD_CONTINUATION_HEADER,
+    RAW_RESP_MISSING_CONTINUATION,
+} raw_response_mode_t;
+
+typedef struct {
+    const char *service;
+    nipc_uds_server_config_t config;
+    raw_response_mode_t mode;
+    int ready;
+    int done;
+} raw_response_server_ctx_t;
 
 /* Simple echo server: accepts clients, for each one reads echo_count
  * messages and sends them back with kind=RESPONSE. */
@@ -145,6 +189,297 @@ static void *echo_server_thread(void *arg)
                 break;
         }
 
+        nipc_uds_close_session(&session);
+    }
+
+    nipc_uds_close_listener(&listener);
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void *malformed_ack_server_thread(void *arg)
+{
+    malformed_ack_server_ctx_t *ctx = (malformed_ack_server_ctx_t *)arg;
+    char path[256];
+    int lfd = -1;
+    int cfd = -1;
+
+    build_socket_path(path, sizeof(path), ctx->service);
+    unlink(path);
+
+    lfd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    if (lfd < 0) {
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+        listen(lfd, 4) != 0) {
+        close(lfd);
+        unlink(path);
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+
+    cfd = accept(lfd, NULL, NULL);
+    if (cfd >= 0) {
+        uint8_t buf[128];
+        ssize_t n = recv(cfd, buf, sizeof(buf), 0);
+        if (n > 0) {
+            switch (ctx->mode) {
+            case MALFORMED_ACK_SHORT: {
+                uint8_t short_buf[8] = {0};
+                send(cfd, short_buf, sizeof(short_buf), MSG_NOSIGNAL);
+                break;
+            }
+            case MALFORMED_ACK_WRONG_KIND: {
+                nipc_hello_ack_t ack = { .layout_version = 1 };
+                uint8_t ack_buf[48];
+                uint8_t pkt[NIPC_HEADER_LEN + sizeof(ack_buf)];
+                nipc_header_t hdr = {
+                    .magic = NIPC_MAGIC_MSG,
+                    .version = NIPC_VERSION,
+                    .header_len = NIPC_HEADER_LEN,
+                    .kind = NIPC_KIND_RESPONSE,
+                    .code = NIPC_CODE_HELLO_ACK,
+                    .transport_status = NIPC_STATUS_OK,
+                    .payload_len = sizeof(ack_buf),
+                    .item_count = 1,
+                };
+                nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
+                nipc_header_encode(&hdr, pkt, sizeof(pkt));
+                memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
+                send(cfd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+                break;
+            }
+            case MALFORMED_ACK_BAD_STATUS: {
+                nipc_hello_ack_t ack = { .layout_version = 1 };
+                uint8_t ack_buf[48];
+                uint8_t pkt[NIPC_HEADER_LEN + sizeof(ack_buf)];
+                nipc_header_t hdr = {
+                    .magic = NIPC_MAGIC_MSG,
+                    .version = NIPC_VERSION,
+                    .header_len = NIPC_HEADER_LEN,
+                    .kind = NIPC_KIND_CONTROL,
+                    .code = NIPC_CODE_HELLO_ACK,
+                    .transport_status = NIPC_STATUS_INTERNAL_ERROR,
+                    .payload_len = sizeof(ack_buf),
+                    .item_count = 1,
+                };
+                nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
+                nipc_header_encode(&hdr, pkt, sizeof(pkt));
+                memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
+                send(cfd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+                break;
+            }
+            case MALFORMED_ACK_BAD_PAYLOAD: {
+                uint8_t pkt[NIPC_HEADER_LEN + 4] = {0};
+                nipc_header_t hdr = {
+                    .magic = NIPC_MAGIC_MSG,
+                    .version = NIPC_VERSION,
+                    .header_len = NIPC_HEADER_LEN,
+                    .kind = NIPC_KIND_CONTROL,
+                    .code = NIPC_CODE_HELLO_ACK,
+                    .transport_status = NIPC_STATUS_OK,
+                    .item_count = 1,
+                    .payload_len = 4,
+                };
+                nipc_header_encode(&hdr, pkt, sizeof(pkt));
+                send(cfd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+                break;
+            }
+            }
+        }
+        close(cfd);
+    }
+
+    close(lfd);
+    unlink(path);
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void *accept_result_server_thread(void *arg)
+{
+    accept_result_server_ctx_t *ctx = (accept_result_server_ctx_t *)arg;
+    nipc_uds_listener_t listener;
+
+    ctx->accept_err = NIPC_UDS_OK;
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
+                                           &ctx->config, &listener);
+    if (err != NIPC_UDS_OK) {
+        ctx->accept_err = err;
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+
+    nipc_uds_session_t session;
+    ctx->accept_err = nipc_uds_accept(&listener, 1, &session);
+    if (ctx->accept_err == NIPC_UDS_OK)
+        nipc_uds_close_session(&session);
+
+    nipc_uds_close_listener(&listener);
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void *raw_response_server_thread(void *arg)
+{
+    raw_response_server_ctx_t *ctx = (raw_response_server_ctx_t *)arg;
+    nipc_uds_listener_t listener;
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
+                                           &ctx->config, &listener);
+    if (err != NIPC_UDS_OK) {
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+
+    nipc_uds_session_t session;
+    err = nipc_uds_accept(&listener, 1, &session);
+    if (err == NIPC_UDS_OK) {
+        uint8_t buf[65536];
+        nipc_header_t hdr;
+        const void *payload;
+        size_t payload_len;
+        nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                 &hdr, &payload, &payload_len);
+        if (rerr == NIPC_UDS_OK) {
+            switch (ctx->mode) {
+            case RAW_RESP_SHORT_PACKET: {
+                uint8_t short_buf[8] = {0};
+                send(session.fd, short_buf, sizeof(short_buf), MSG_NOSIGNAL);
+                break;
+            }
+            case RAW_RESP_BAD_BATCH_DIR_SHORT: {
+                uint8_t pkt[NIPC_HEADER_LEN + 8] = {0};
+                nipc_header_t resp = {
+                    .magic = NIPC_MAGIC_MSG,
+                    .version = NIPC_VERSION,
+                    .header_len = NIPC_HEADER_LEN,
+                    .kind = NIPC_KIND_RESPONSE,
+                    .code = hdr.code,
+                    .flags = NIPC_FLAG_BATCH,
+                    .item_count = 3,
+                    .message_id = hdr.message_id,
+                    .transport_status = NIPC_STATUS_OK,
+                    .payload_len = 8,
+                };
+                nipc_header_encode(&resp, pkt, sizeof(pkt));
+                send(session.fd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+                break;
+            }
+            case RAW_RESP_SHORT_CONTINUATION: {
+                uint8_t payload_buf[160];
+                memset(payload_buf, 0xAB, sizeof(payload_buf));
+                size_t first_payload = (size_t)session.packet_size - NIPC_HEADER_LEN;
+                if (first_payload > sizeof(payload_buf))
+                    first_payload = sizeof(payload_buf);
+                uint8_t hdr_buf[NIPC_HEADER_LEN];
+                nipc_header_t resp = {
+                    .magic = NIPC_MAGIC_MSG,
+                    .version = NIPC_VERSION,
+                    .header_len = NIPC_HEADER_LEN,
+                    .kind = NIPC_KIND_RESPONSE,
+                    .code = hdr.code,
+                    .message_id = hdr.message_id,
+                    .item_count = 1,
+                    .transport_status = NIPC_STATUS_OK,
+                    .payload_len = sizeof(payload_buf),
+                };
+                nipc_header_encode(&resp, hdr_buf, sizeof(hdr_buf));
+
+                struct iovec iov[2];
+                struct msghdr msg;
+                memset(&msg, 0, sizeof(msg));
+                iov[0].iov_base = hdr_buf;
+                iov[0].iov_len = sizeof(hdr_buf);
+                iov[1].iov_base = payload_buf;
+                iov[1].iov_len = first_payload;
+                msg.msg_iov = iov;
+                msg.msg_iovlen = 2;
+                sendmsg(session.fd, &msg, MSG_NOSIGNAL);
+
+                uint8_t short_chunk[8] = {0};
+                send(session.fd, short_chunk, sizeof(short_chunk), MSG_NOSIGNAL);
+                break;
+            }
+            case RAW_RESP_BATCH_COUNT_EXCEEDED: {
+                uint8_t pkt[NIPC_HEADER_LEN + 1] = {0};
+                nipc_header_t resp = {
+                    .magic = NIPC_MAGIC_MSG,
+                    .version = NIPC_VERSION,
+                    .header_len = NIPC_HEADER_LEN,
+                    .kind = NIPC_KIND_RESPONSE,
+                    .code = hdr.code,
+                    .item_count = session.max_response_batch_items + 1,
+                    .message_id = hdr.message_id,
+                    .transport_status = NIPC_STATUS_OK,
+                    .payload_len = 1,
+                };
+                pkt[NIPC_HEADER_LEN] = 0xAD;
+                nipc_header_encode(&resp, pkt, sizeof(pkt));
+                send(session.fd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+                break;
+            }
+            case RAW_RESP_BAD_CONTINUATION_HEADER:
+            case RAW_RESP_MISSING_CONTINUATION: {
+                uint8_t payload_buf[160];
+                memset(payload_buf, 0xBC, sizeof(payload_buf));
+                size_t first_payload = (size_t)session.packet_size - NIPC_HEADER_LEN;
+                if (first_payload > sizeof(payload_buf))
+                    first_payload = sizeof(payload_buf);
+                uint8_t hdr_buf[NIPC_HEADER_LEN];
+                nipc_header_t resp = {
+                    .magic = NIPC_MAGIC_MSG,
+                    .version = NIPC_VERSION,
+                    .header_len = NIPC_HEADER_LEN,
+                    .kind = NIPC_KIND_RESPONSE,
+                    .code = hdr.code,
+                    .message_id = hdr.message_id,
+                    .item_count = 1,
+                    .transport_status = NIPC_STATUS_OK,
+                    .payload_len = sizeof(payload_buf),
+                };
+                nipc_header_encode(&resp, hdr_buf, sizeof(hdr_buf));
+
+                struct iovec iov[2];
+                struct msghdr msg;
+                memset(&msg, 0, sizeof(msg));
+                iov[0].iov_base = hdr_buf;
+                iov[0].iov_len = sizeof(hdr_buf);
+                iov[1].iov_base = payload_buf;
+                iov[1].iov_len = first_payload;
+                msg.msg_iov = iov;
+                msg.msg_iovlen = 2;
+                sendmsg(session.fd, &msg, MSG_NOSIGNAL);
+
+                if (ctx->mode == RAW_RESP_BAD_CONTINUATION_HEADER) {
+                    uint8_t chunk_buf[NIPC_HEADER_LEN] = {0};
+                    nipc_chunk_header_t chk = {
+                        .magic = NIPC_MAGIC_MSG,
+                        .version = NIPC_VERSION,
+                        .flags = 0,
+                        .message_id = hdr.message_id,
+                        .total_message_len = (uint32_t)(NIPC_HEADER_LEN + sizeof(payload_buf)),
+                        .chunk_index = 1,
+                        .chunk_count = 2,
+                        .chunk_payload_len = 64,
+                    };
+                    nipc_chunk_header_encode(&chk, chunk_buf, sizeof(chunk_buf));
+                    send(session.fd, chunk_buf, sizeof(chunk_buf), MSG_NOSIGNAL);
+                }
+                break;
+            }
+            }
+        }
         nipc_uds_close_session(&session);
     }
 
@@ -1830,6 +2165,498 @@ static void test_batch_corrupt_dir(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Coverage: malformed client HELLO_ACK handling                       */
+/* ------------------------------------------------------------------ */
+
+static void test_connect_malformed_hello_ack(void)
+{
+    printf("Test: Connect with malformed HELLO_ACK variants\n");
+
+    typedef struct {
+        const char *service;
+        malformed_ack_mode_t mode;
+        nipc_uds_error_t expected_err;
+        const char *label;
+    } malformed_ack_case_t;
+
+    const malformed_ack_case_t cases[] = {
+        { "test_ack_short", MALFORMED_ACK_SHORT, NIPC_UDS_ERR_PROTOCOL,
+          "short HELLO_ACK rejected" },
+        { "test_ack_kind", MALFORMED_ACK_WRONG_KIND, NIPC_UDS_ERR_PROTOCOL,
+          "wrong-kind HELLO_ACK rejected" },
+        { "test_ack_status", MALFORMED_ACK_BAD_STATUS, NIPC_UDS_ERR_HANDSHAKE,
+          "bad-status HELLO_ACK rejected" },
+        { "test_ack_payload", MALFORMED_ACK_BAD_PAYLOAD, NIPC_UDS_ERR_PROTOCOL,
+          "truncated HELLO_ACK payload rejected" },
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const malformed_ack_case_t *tc = &cases[i];
+        cleanup_socket(tc->service);
+
+        malformed_ack_server_ctx_t sctx = {
+            .service = tc->service,
+            .mode = tc->mode,
+            .ready = 0,
+            .done = 0,
+        };
+
+        pthread_t tid;
+        pthread_create(&tid, NULL, malformed_ack_server_thread, &sctx);
+
+        for (int j = 0; j < 2000
+             && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+             && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); j++)
+            usleep(500);
+        check("malformed-ack server ready",
+              __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+        nipc_uds_client_config_t ccfg = default_client_config();
+        nipc_uds_session_t session;
+        nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, tc->service, &ccfg, &session);
+        check(tc->label, err == tc->expected_err);
+        if (err == NIPC_UDS_OK)
+            nipc_uds_close_session(&session);
+
+        pthread_join(tid, NULL);
+        cleanup_socket(tc->service);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: malformed client HELLO payload on server accept          */
+/* ------------------------------------------------------------------ */
+
+static void test_accept_malformed_hello_payload(void)
+{
+    printf("Test: Accept rejects malformed HELLO payload\n");
+    const char *svc = "test_bad_hello_payload";
+    cleanup_socket(svc);
+
+    accept_result_server_ctx_t sctx = {
+        .service = svc,
+        .config = default_server_config(),
+        .accept_err = NIPC_UDS_OK,
+        .ready = 0,
+        .done = 0,
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, accept_result_server_thread, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("accept-result server ready",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    char path[256];
+    build_socket_path(path, sizeof(path), svc);
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    check("raw client socket created", fd >= 0);
+
+    if (fd >= 0) {
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+        int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+        check("raw client connect", rc == 0);
+
+        if (rc == 0) {
+            uint8_t pkt[NIPC_HEADER_LEN + 4] = {0};
+            nipc_header_t hdr = {
+                .magic = NIPC_MAGIC_MSG,
+                .version = NIPC_VERSION,
+                .header_len = NIPC_HEADER_LEN,
+                .kind = NIPC_KIND_CONTROL,
+                .code = NIPC_CODE_HELLO,
+                .payload_len = 4,
+                .item_count = 1,
+            };
+            nipc_header_encode(&hdr, pkt, sizeof(pkt));
+            send(fd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+        }
+        close(fd);
+    }
+
+    pthread_join(tid, NULL);
+    check("malformed HELLO payload rejected",
+          sctx.accept_err == NIPC_UDS_ERR_PROTOCOL);
+    cleanup_socket(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coverage: receive protocol validation from malformed responses     */
+/* ------------------------------------------------------------------ */
+
+static void test_receive_short_packet_protocol(void)
+{
+    printf("Test: Receive rejects short response packet\n");
+    const char *svc = "test_short_resp";
+    cleanup_socket(svc);
+
+    raw_response_server_ctx_t sctx = {
+        .service = svc,
+        .config = default_server_config(),
+        .mode = RAW_RESP_SHORT_PACKET,
+        .ready = 0,
+        .done = 0,
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("raw-response server ready",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = 1,
+            .item_count = 1,
+            .message_id = 7001,
+        };
+        uint8_t payload[] = { 0xAA };
+        nipc_uds_error_t serr = nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+        check("send request ok", serr == NIPC_UDS_OK);
+
+        if (serr == NIPC_UDS_OK) {
+            uint8_t buf[4096];
+            nipc_header_t resp_hdr;
+            const void *resp_payload;
+            size_t resp_payload_len;
+            nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                     &resp_hdr, &resp_payload, &resp_payload_len);
+            check("short response packet rejected", rerr == NIPC_UDS_ERR_PROTOCOL);
+        }
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+static void test_receive_batch_dir_too_short(void)
+{
+    printf("Test: Receive rejects too-short batch directory\n");
+    const char *svc = "test_batch_dir_short";
+    cleanup_socket(svc);
+
+    raw_response_server_ctx_t sctx = {
+        .service = svc,
+        .config = default_server_config(),
+        .mode = RAW_RESP_BAD_BATCH_DIR_SHORT,
+        .ready = 0,
+        .done = 0,
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("raw-response server ready",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = 7002,
+        };
+        uint8_t payload[] = { 0xAB };
+        nipc_uds_error_t serr = nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+        check("send request ok", serr == NIPC_UDS_OK);
+
+        if (serr == NIPC_UDS_OK) {
+            uint8_t buf[4096];
+            nipc_header_t resp_hdr;
+            const void *resp_payload;
+            size_t resp_payload_len;
+            nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                     &resp_hdr, &resp_payload, &resp_payload_len);
+            check("short batch directory rejected", rerr == NIPC_UDS_ERR_PROTOCOL);
+        }
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+static void test_receive_short_continuation_packet(void)
+{
+    printf("Test: Receive rejects short continuation packet\n");
+    const char *svc = "test_short_chunk";
+    cleanup_socket(svc);
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    scfg.packet_size = 128;
+    scfg.max_response_payload_bytes = 4096;
+
+    raw_response_server_ctx_t sctx = {
+        .service = svc,
+        .config = scfg,
+        .mode = RAW_RESP_SHORT_CONTINUATION,
+        .ready = 0,
+        .done = 0,
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("raw-response server ready",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    ccfg.packet_size = 128;
+    ccfg.max_response_payload_bytes = 4096;
+
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        check("negotiated packet_size is 128", session.packet_size == 128);
+
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = 7003,
+        };
+        uint8_t payload[] = { 0xAC };
+        nipc_uds_error_t serr = nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+        check("send request ok", serr == NIPC_UDS_OK);
+
+        if (serr == NIPC_UDS_OK) {
+            uint8_t buf[128];
+            nipc_header_t resp_hdr;
+            const void *resp_payload;
+            size_t resp_payload_len;
+            nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                     &resp_hdr, &resp_payload, &resp_payload_len);
+            check("short continuation rejected", rerr == NIPC_UDS_ERR_CHUNK);
+        }
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+static void test_receive_item_count_exceeds_limit(void)
+{
+    printf("Test: Receive rejects response item_count over limit\n");
+    const char *svc = "test_resp_count_limit";
+    cleanup_socket(svc);
+
+    raw_response_server_ctx_t sctx = {
+        .service = svc,
+        .config = default_server_config(),
+        .mode = RAW_RESP_BATCH_COUNT_EXCEEDED,
+        .ready = 0,
+        .done = 0,
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("raw-response server ready",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = 7004,
+        };
+        uint8_t payload[] = { 0xAD };
+        nipc_uds_error_t serr = nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+        check("send request ok", serr == NIPC_UDS_OK);
+
+        if (serr == NIPC_UDS_OK) {
+            uint8_t buf[4096];
+            nipc_header_t resp_hdr;
+            const void *resp_payload;
+            size_t resp_payload_len;
+            nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                     &resp_hdr, &resp_payload, &resp_payload_len);
+            check("response item_count over limit rejected", rerr == NIPC_UDS_ERR_LIMIT_EXCEEDED);
+        }
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+static void test_receive_bad_continuation_header(void)
+{
+    printf("Test: Receive rejects bad continuation header\n");
+    const char *svc = "test_bad_chunk_hdr";
+    cleanup_socket(svc);
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    scfg.packet_size = 128;
+    scfg.max_response_payload_bytes = 4096;
+
+    raw_response_server_ctx_t sctx = {
+        .service = svc,
+        .config = scfg,
+        .mode = RAW_RESP_BAD_CONTINUATION_HEADER,
+        .ready = 0,
+        .done = 0,
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("raw-response server ready",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    ccfg.packet_size = 128;
+    ccfg.max_response_payload_bytes = 4096;
+
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = 7005,
+        };
+        uint8_t payload[] = { 0xAE };
+        nipc_uds_error_t serr = nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+        check("send request ok", serr == NIPC_UDS_OK);
+
+        if (serr == NIPC_UDS_OK) {
+            uint8_t buf[128];
+            nipc_header_t resp_hdr;
+            const void *resp_payload;
+            size_t resp_payload_len;
+            nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                     &resp_hdr, &resp_payload, &resp_payload_len);
+            check("bad continuation header rejected", rerr == NIPC_UDS_ERR_CHUNK);
+        }
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+static void test_receive_missing_continuation(void)
+{
+    printf("Test: Receive rejects missing continuation packet\n");
+    const char *svc = "test_missing_chunk";
+    cleanup_socket(svc);
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    scfg.packet_size = 128;
+    scfg.max_response_payload_bytes = 4096;
+
+    raw_response_server_ctx_t sctx = {
+        .service = svc,
+        .config = scfg,
+        .mode = RAW_RESP_MISSING_CONTINUATION,
+        .ready = 0,
+        .done = 0,
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("raw-response server ready",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    ccfg.packet_size = 128;
+    ccfg.max_response_payload_bytes = 4096;
+
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = 7006,
+        };
+        uint8_t payload[] = { 0xAF };
+        nipc_uds_error_t serr = nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+        check("send request ok", serr == NIPC_UDS_OK);
+
+        if (serr == NIPC_UDS_OK) {
+            uint8_t buf[128];
+            nipc_header_t resp_hdr;
+            const void *resp_payload;
+            size_t resp_payload_len;
+            nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                     &resp_hdr, &resp_payload, &resp_payload_len);
+            check("missing continuation rejected", rerr == NIPC_UDS_ERR_RECV);
+        }
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Coverage: close_session(NULL)                                       */
 /* ------------------------------------------------------------------ */
 
@@ -1884,6 +2711,14 @@ int main(void)
     test_stale_live_server();      printf("\n");
     test_listen_bind_failure();    printf("\n");
     test_batch_corrupt_dir();      printf("\n");
+    test_connect_malformed_hello_ack(); printf("\n");
+    test_accept_malformed_hello_payload(); printf("\n");
+    test_receive_short_packet_protocol(); printf("\n");
+    test_receive_batch_dir_too_short(); printf("\n");
+    test_receive_short_continuation_packet(); printf("\n");
+    test_receive_item_count_exceeds_limit(); printf("\n");
+    test_receive_bad_continuation_header(); printf("\n");
+    test_receive_missing_continuation(); printf("\n");
     test_close_session_null();     printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
