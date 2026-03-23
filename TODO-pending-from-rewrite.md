@@ -64,7 +64,7 @@ Finish the rewrite to a production-ready state with:
         - ordinary testable now:
           - Windows Go ordinary coverage is no longer the main gap
           - next honest Go target is Linux / POSIX:
-            - `service/cgroups/client.go` (`87.7%`)
+            - `service/cgroups/client.go` (`90.2%`)
             - `transport/posix/shm_linux.go` (`86.7%`)
             - `transport/posix/uds.go` (`92.0%`)
           - keep the deferred managed-server retry/shutdown investigation separate from ordinary coverage
@@ -539,7 +539,7 @@ Facts:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
 - Windows Go coverage currently reports `96.7%`.
-- Linux Go coverage currently reports `91.7%` with the real weak files now in selective POSIX Go service / transport paths.
+- Linux Go coverage currently reports `92.3%` with the real weak files now in selective POSIX Go service / transport paths.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
@@ -568,19 +568,21 @@ Required next work:
      - use the real POSIX listener/session transport for these tests, not synthetic mocks
    - current function-level evidence from `bash tests/run-coverage-go.sh 85`:
      - `service/cgroups/client.go`
-       - `Refresh`: `58.3%`
+       - `Refresh`: `100.0%`
        - `doRawCall`: `93.3%`
        - `CallSnapshot`: `94.1%`
        - `CallIncrement`: `92.9%`
        - `CallStringReverse`: `93.8%`
        - `CallIncrementBatch`: `90.9%`
-       - `transportReceive`: `82.4%`
+       - `transportReceive`: `100.0%`
        - `dispatchSingle`: `92.9%`
-       - `Run`: `78.9%`
+       - `Run`: `81.6%`
        - `handleSession`: `82.4%`
        - result of the latest Unix raw malformed-response parity slice:
          - `service/cgroups/client.go` moved from `81.4%` to `88.0%`
-         - the main ordinary Go gap is no longer the L2 service client
+       - result of the latest POSIX service follow-up slice:
+         - `service/cgroups/client.go` moved from `87.7%` to `90.2%`
+         - `Refresh()` and `transportReceive()` are now fully covered
      - `transport/posix/shm_linux.go`
        - result of the latest ordinary SHM slice:
          - file moved from `77.5%` to `86.7%`
@@ -606,14 +608,12 @@ Required next work:
        - `connectAndHandshake`: `90.9%`
        - `serverHandshake`: `93.8%`
      - implication:
-       - the next honest ordinary target is still Linux Go, but no longer `transport/posix/uds.go`
+       - the next honest ordinary target is still Linux Go, but no longer `transport/posix/uds.go` or `service/cgroups/types.go`
    - next ordinary target:
      - start with the remaining low-risk Linux Go service gaps:
        - `service/cgroups/types.go` is now done (`100.0%`)
        - review whether the remaining `service/cgroups/client.go` paths are still ordinary:
-         - `Refresh`
          - `tryConnect`
-         - `transportReceive`
          - `Run`
          - `handleSession`
      - then decide whether the remaining low-level POSIX SHM / UDS gaps are still ordinary or already special-infrastructure territory
@@ -634,6 +634,17 @@ Required next work:
        - status:
          - completed
          - `service/cgroups/types.go` is now `100.0%`
+     - concrete next ordinary POSIX service cases:
+       - `Refresh()` from `StateBroken` with a successful reconnect
+         - status: completed
+       - `Run()` invalid service name returning the listener error directly
+         - status: completed
+       - SHM-side `transportReceive()`:
+         - receive error -> `ErrTruncated`
+         - short message -> `ErrTruncated`
+         - bad header -> decode error
+         - status: completed
+       - possible server capacity test if one session can be held open deterministically without introducing timing flake
 
 ### 2. Cross-platform validation parity is only partial
 

@@ -105,6 +105,38 @@ func refreshUnixClientReady(t *testing.T, client *Client) {
 	t.Fatalf("client not ready, state=%d", client.state)
 }
 
+func newRawPosixShmClient(t *testing.T) (*Client, *posix.ShmContext) {
+	t.Helper()
+
+	runDir := t.TempDir()
+	service := uniqueUnixService("go_unix_raw_shm")
+	sessionID := unixServiceCounter.Add(1)
+	reqCap := uint32(protocol.HeaderSize + 4096)
+	respCap := uint32(protocol.HeaderSize + responseBufSize)
+
+	server, err := posix.ShmServerCreate(runDir, service, sessionID, reqCap, respCap)
+	if err != nil {
+		t.Fatalf("ShmServerCreate failed: %v", err)
+	}
+
+	clientShm, err := posix.ShmClientAttach(runDir, service, sessionID)
+	if err != nil {
+		server.ShmDestroy()
+		t.Fatalf("ShmClientAttach failed: %v", err)
+	}
+
+	client := NewClient(runDir, service, testClientConfig())
+	client.state = StateReady
+	client.shm = clientShm
+
+	t.Cleanup(func() {
+		client.Close()
+		server.ShmDestroy()
+	})
+
+	return client, server
+}
+
 func TestUnixServerStopWhileIdle(t *testing.T) {
 	svc := uniqueUnixService("go_unix_stop_idle")
 	cleanupAll(svc)
@@ -130,6 +162,38 @@ func TestUnixServerStopWhileIdle(t *testing.T) {
 	cleanupAll(svc)
 }
 
+func TestUnixRefreshFromBrokenReconnects(t *testing.T) {
+	svc := uniqueUnixService("go_unix_refresh_broken")
+	ts := startTestServer(svc, testHandlers())
+	defer ts.stop()
+
+	client := NewClient(testRunDir, svc, testClientConfig())
+	defer client.Close()
+
+	refreshUnixClientReady(t, client)
+
+	client.session.Close()
+	client.state = StateBroken
+
+	changed := client.Refresh()
+	if !changed {
+		t.Fatal("refresh from BROKEN should change state")
+	}
+	if client.state != StateReady {
+		t.Fatalf("expected READY after reconnect, got %d", client.state)
+	}
+	if client.reconnectCount < 1 {
+		t.Fatalf("expected reconnect_count >= 1, got %d", client.reconnectCount)
+	}
+}
+
+func TestUnixServerRunRejectsInvalidServiceName(t *testing.T) {
+	server := NewServer(testRunDir, "bad/service", testServerConfig(), testHandlers())
+	if err := server.Run(); !errors.Is(err, posix.ErrBadParam) {
+		t.Fatalf("Run() invalid service name = %v, want %v", err, posix.ErrBadParam)
+	}
+}
+
 func TestUnixClientTransportWithoutSession(t *testing.T) {
 	client := NewClient(testRunDir, uniqueUnixService("go_unix_transport"), testClientConfig())
 	defer client.Close()
@@ -147,6 +211,43 @@ func TestUnixClientTransportWithoutSession(t *testing.T) {
 	}
 	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTruncated) {
 		t.Fatalf("transportReceive without session = %v, want ErrTruncated", err)
+	}
+}
+
+func TestUnixClientTransportReceiveShmError(t *testing.T) {
+	client := NewClient(testRunDir, uniqueUnixService("go_unix_transport_shm_err"), testClientConfig())
+	defer client.Close()
+
+	client.state = StateReady
+	client.shm = &posix.ShmContext{}
+
+	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTruncated) {
+		t.Fatalf("transportReceive with invalid SHM context = %v, want %v", err, protocol.ErrTruncated)
+	}
+}
+
+func TestUnixClientTransportReceiveShmRejectsShortMessage(t *testing.T) {
+	client, serverShm := newRawPosixShmClient(t)
+
+	if err := serverShm.ShmSend([]byte{1, 2, 3, 4}); err != nil {
+		t.Fatalf("ShmSend failed: %v", err)
+	}
+
+	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTruncated) {
+		t.Fatalf("transportReceive short SHM message = %v, want %v", err, protocol.ErrTruncated)
+	}
+}
+
+func TestUnixClientTransportReceiveShmRejectsBadHeader(t *testing.T) {
+	client, serverShm := newRawPosixShmClient(t)
+
+	msg := make([]byte, protocol.HeaderSize)
+	if err := serverShm.ShmSend(msg); err != nil {
+		t.Fatalf("ShmSend failed: %v", err)
+	}
+
+	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrBadMagic) {
+		t.Fatalf("transportReceive bad SHM header = %v, want %v", err, protocol.ErrBadMagic)
 	}
 }
 
