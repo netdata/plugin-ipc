@@ -46,6 +46,11 @@ Finish the rewrite to a production-ready state with:
   - fixed one real Unix Go test-harness issue exposed by coverage slowdown:
     - baseline / SHM / stress helpers were still using blind sleeps before clients raced `Refresh()`
     - they now wait for a real successful POSIX handshake instead of just waiting for the socket path to appear
+  - completed the next Linux / POSIX Go SHM transport obstruction slice
+  - validated ordinary POSIX SHM filesystem-obstruction tests for:
+    - unreadable stale-file recovery in `checkShmStale()`
+    - non-empty directory stale entry in `checkShmStale()`
+    - `ShmServerCreate()` retry-create failure when stale recovery cannot remove the target obstruction
   - reclassified raw malformed POSIX SHM request recovery (`short`, `bad header`, `unexpected kind`) out of the ordinary bucket:
     - all three block in `ShmReceive(..., 30000)` today
     - they belong to timeout-behavior / special-infrastructure work unless POSIX SHM timeout control becomes testable
@@ -267,7 +272,7 @@ Verified on `2026-03-23`:
   - current threshold: `82%`
 - Go:
   - `bash tests/run-coverage-go.sh`
-  - result: `94.2%`
+  - result: `94.4%`
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
@@ -570,7 +575,7 @@ Facts:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
 - Windows Go coverage currently reports `96.7%`.
-- Linux Go coverage currently reports `94.2%` with the remaining ordinary gaps now reduced to a smaller POSIX transport/service residue.
+- Linux Go coverage currently reports `94.4%` with the remaining ordinary gaps now reduced to a smaller POSIX transport/service residue.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
@@ -634,13 +639,15 @@ Required next work:
          - file moved from `86.7%` to `87.5%`
        - result of the latest direct POSIX SHM transport slice:
          - file moved from `87.5%` to `90.6%`
+       - result of the latest POSIX SHM obstruction slice:
+         - file moved from `90.6%` to `91.4%`
        - `OwnerAlive`: `100.0%`
-       - `ShmServerCreate`: `75.0%`
+       - `ShmServerCreate`: `79.2%`
        - `ShmClientAttach`: `82.7%`
        - `ShmSend`: `93.1%`
        - `ShmReceive`: `94.9%`
        - `ShmCleanupStale`: `100.0%`
-       - `checkShmStale`: `85.2%`
+       - `checkShmStale`: `92.6%`
      - `transport/posix/uds.go`
        - result of the latest ordinary UDS slice:
          - file moved from `83.7%` to `92.0%`
@@ -695,11 +702,20 @@ Required next work:
        - socket / bind / listen syscall failures
        - hello / hello-ack short writes
        - next-level kernel timing races around disconnect during send
-     - current `shm_linux.go` ordinary candidates from the merged profile:
-       - `ShmServerCreate`
-       - `ShmClientAttach`
-       - `ShmCleanupStale`
-       - `checkShmStale`
+       - current `shm_linux.go` ordinary candidates from the merged profile:
+         - `ShmServerCreate`
+         - `ShmClientAttach`
+         - `ShmCleanupStale`
+         - `checkShmStale`
+       - latest line-by-line fact check in `shm_linux.go`:
+         - completed in the latest obstruction slice:
+           - `checkShmStale()` invalid-file open failure (filesystem obstruction / unreadable stale entry)
+           - `checkShmStale()` directory-entry `Mmap` failure
+           - `ShmServerCreate()` retry-create final failure after stale recovery when the target path is still obstructed by a non-file entry
+         - likely already special-infrastructure:
+           - `Ftruncate`, `Mmap`, `Dup`, and `f.Stat()` failures
+           - atomic-load bounds failures after a successful `Mmap`
+           - `ShmClientAttach()` `Dup` / `Mmap` / `Stat` failure branches
      - immediate follow-up after the SHM slice:
        - move the tiny `Handlers.snapshotMaxItems()` coverage from the Windows-only test file into a shared Go test file so Linux covers `service/cgroups/types.go` too
        - status:

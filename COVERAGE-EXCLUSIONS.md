@@ -19,7 +19,7 @@ Verified on `2026-03-23`:
   - threshold: `82%`
 - Go:
   - script: `tests/run-coverage-go.sh`
-  - result: `94.2%`
+  - result: `94.4%`
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
@@ -238,6 +238,22 @@ Concrete evidence from the latest Linux Go service-loop slice:
   - the `session.Send(...)` failure branch after peer close did not reproduce as
     an ordinary Unix-domain packet case in this slice
   - treat it as unproven ordinary work until a deterministic reproduction exists
+
+Concrete evidence from the latest Linux Go SHM transport slice:
+
+- ordinary filesystem-obstruction cases were still available and are now covered:
+  - `checkShmStale()` unreadable stale file
+  - `checkShmStale()` non-empty directory path (open succeeds, `Mmap` fails)
+  - `ShmServerCreate()` retry-create failure when stale recovery cannot remove
+    the obstructing path
+- result:
+  - `transport/posix/shm_linux.go` is now `91.4%`
+  - `ShmServerCreate()` moved to `79.2%`
+  - `checkShmStale()` moved to `92.6%`
+- implication:
+  - the remaining `shm_linux.go` gaps are now even more concentrated in true OS
+    failure paths such as `Ftruncate`, `Mmap`, `Dup`, `f.Stat`, and atomic-load
+    bounds failures after a successful `Mmap`
 
 ## Practical Reading Of The Current State
 

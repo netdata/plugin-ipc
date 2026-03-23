@@ -359,6 +359,53 @@ func TestCheckShmStaleVariants(t *testing.T) {
 	if _, err := os.Stat(legacyPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("legacy stale file should be removed, stat err = %v", err)
 	}
+
+	unreadablePath := writeRawShmRegionFile(t, runDir, "go_shm_check_unreadable", 5, validSize, func(data []byte) {
+		fillShmHeader(data, int32(os.Getpid()), 1, reqOff, reqCap, respOff, respCap)
+	})
+	if err := os.Chmod(unreadablePath, 0); err != nil {
+		t.Fatalf("chmod unreadable stale file: %v", err)
+	}
+	if got := checkShmStale(unreadablePath); got != shmStaleInvalid {
+		t.Fatalf("unreadable path result = %v, want %v", got, shmStaleInvalid)
+	}
+	if _, err := os.Stat(unreadablePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unreadable stale file should be removed, stat err = %v", err)
+	}
+
+	dirPath, err := buildShmPath(runDir, "go_shm_check_dir", 6)
+	if err != nil {
+		t.Fatalf("build dir path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dirPath, "keep"), 0700); err != nil {
+		t.Fatalf("mkdir stale dir: %v", err)
+	}
+	if got := checkShmStale(dirPath); got != shmStaleInvalid {
+		t.Fatalf("directory path result = %v, want %v", got, shmStaleInvalid)
+	}
+	if info, err := os.Stat(dirPath); err != nil || !info.IsDir() {
+		t.Fatalf("non-empty stale directory should remain, stat err = %v", err)
+	}
+}
+
+func TestShmServerCreateFailsWhenObstructionSurvivesRecovery(t *testing.T) {
+	runDir := t.TempDir()
+	svc := "go_shm_create_blocked"
+	path, err := buildShmPath(runDir, svc, 7)
+	if err != nil {
+		t.Fatalf("build path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, "keep"), 0700); err != nil {
+		t.Fatalf("mkdir obstructing directory: %v", err)
+	}
+
+	_, err = ShmServerCreate(runDir, svc, 7, 1024, 1024)
+	if !errors.Is(err, ErrShmOpen) {
+		t.Fatalf("ShmServerCreate blocked path error = %v, want %v", err, ErrShmOpen)
+	}
+	if info, statErr := os.Stat(path); statErr != nil || !info.IsDir() {
+		t.Fatalf("obstructing directory should remain after failed recovery, stat err = %v", statErr)
+	}
 }
 
 func TestShmCleanupStaleMixedEntries(t *testing.T) {
