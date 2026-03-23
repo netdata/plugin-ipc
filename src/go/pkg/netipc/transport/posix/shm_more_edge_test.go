@@ -250,6 +250,15 @@ func TestShmSendBadParamGuards(t *testing.T) {
 	if err := addSeqCtx.ShmSend([]byte{1}); !errors.Is(err, ErrShmBadParam) {
 		t.Fatalf("ShmSend short backing slice for seq add = %v, want %v", err, ErrShmBadParam)
 	}
+
+	addSignalCtx := &ShmContext{
+		role:            ShmRoleClient,
+		data:            make([]byte, 56),
+		requestCapacity: 64,
+	}
+	if err := addSignalCtx.ShmSend([]byte{1}); !errors.Is(err, ErrShmBadParam) {
+		t.Fatalf("ShmSend short backing slice for signal add = %v, want %v", err, ErrShmBadParam)
+	}
 }
 
 func TestShmReceiveBadParamAndTimeoutPaths(t *testing.T) {
@@ -269,6 +278,20 @@ func TestShmReceiveBadParamAndTimeoutPaths(t *testing.T) {
 	}
 	if _, err := spinLoadSeqCtx.ShmReceive(make([]byte, 8), 1); !errors.Is(err, ErrShmBadParam) {
 		t.Fatalf("ShmReceive spin-phase seq load = %v, want %v", err, ErrShmBadParam)
+	}
+
+	spinLoadLenCtx := &ShmContext{
+		role:             ShmRoleClient,
+		data:             make([]byte, 48),
+		responseCapacity: 64,
+		SpinTries:        1,
+	}
+	binary.NativeEndian.PutUint64(
+		spinLoadLenCtx.data[shmHeaderRespSeqOff:shmHeaderRespSeqOff+8],
+		1,
+	)
+	if _, err := spinLoadLenCtx.ShmReceive(make([]byte, 8), 1); !errors.Is(err, ErrShmBadParam) {
+		t.Fatalf("ShmReceive spin-phase msg_len load = %v, want %v", err, ErrShmBadParam)
 	}
 
 	futexLoadSignalCtx := &ShmContext{

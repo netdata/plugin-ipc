@@ -20,8 +20,8 @@ Finish the rewrite to a production-ready state with:
 - Current execution slice after the latest POSIX Go UDS / SHM stability pass:
   - revalidated the exact current Linux / POSIX Go transport package coverage from the real module root
   - current package result:
-    - `transport/posix` total: `93.5%`
-    - `transport/posix/shm_linux.go`: `91.4%`
+    - `transport/posix` total: `93.8%`
+    - `transport/posix/shm_linux.go`: `91.9%`
     - `transport/posix/uds.go`: `95.6%`
   - current verified weak POSIX UDS functions:
     - `Receive()`: `97.8%`
@@ -104,6 +104,34 @@ Finish the rewrite to a production-ready state with:
     - `go test -count=20 -run '^TestNonRequestTerminatesSession$' ./pkg/netipc/service/cgroups`: passing
     - `bash tests/run-coverage-go.sh 85`: passing
     - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
+  - next exact low-level transport classification from the fresh cover profile:
+    - `transport/posix/uds.go`
+      - remaining uncovered ordinary-looking paths are effectively exhausted
+      - current uncovered lines are concentrated in:
+        - raw socket creation failure in `Connect()` / `Listen()`
+        - short writes in `rawSendMsg()`
+        - handshake send / recv syscall failures and short writes
+        - forced `listen(2)` failure after successful bind
+      - implication:
+        - `uds.go` is now mostly special-infrastructure territory
+    - `transport/posix/shm_linux.go`
+      - remaining possibly ordinary/testable:
+        - `ShmReceive()` deadline-expired timeout branch with no publisher
+        - `ShmClientAttach()` malformed-file follow-ups only if they can be driven with ordinary files instead of syscall fault injection
+      - likely special-infrastructure later:
+        - `Ftruncate`, `Mmap`, and `Dup` failures in `ShmServerCreate()`
+        - `Stat`, `Mmap`, and `Dup` failures in `ShmClientAttach()` when they need syscall fault injection
+  - completed the next direct POSIX SHM guard slice:
+    - added the missing `ShmSend()` signal-add guard
+    - added the missing spin-phase `ShmReceive()` `msg_len` load guard
+    - revalidated the transport package with `go test -count=20 ./pkg/netipc/transport/posix`
+    - current result after the slice:
+      - `transport/posix` total: `93.8%`
+      - `transport/posix/shm_linux.go`: `91.9%`
+      - `ShmSend()`: `96.6%`
+      - `ShmReceive()`: `96.2%`
+    - implication:
+      - the remaining `shm_linux.go` gaps are even more concentrated in syscall-failure, impossible ordering, or timeout-orchestration territory
 - Current execution slice after the Windows Go parity expansion:
   - completed the next Linux / POSIX Go SHM service follow-up slice
   - validated ordinary POSIX SHM service tests for:
@@ -359,7 +387,7 @@ Verified on `2026-03-23`:
   - current threshold: `82%`
 - Go:
   - `bash tests/run-coverage-go.sh`
-  - result: `95.2%`
+  - result: `95.4%`
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
@@ -662,7 +690,7 @@ Facts:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
 - Windows Go coverage currently reports `96.7%`.
-- Linux Go coverage currently reports `95.2%` with the remaining ordinary gaps now reduced to a smaller POSIX low-level transport/service residue.
+- Linux Go coverage currently reports `95.4%` with the remaining ordinary gaps now reduced to a smaller POSIX low-level transport/service residue.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
@@ -728,6 +756,10 @@ Required next work:
          - file moved from `87.5%` to `90.6%`
        - result of the latest POSIX SHM obstruction slice:
          - file moved from `90.6%` to `91.4%`
+       - result of the latest direct POSIX SHM guard slice:
+         - file moved from `91.4%` to `91.9%`
+         - `ShmSend()` moved to `96.6%`
+         - `ShmReceive()` moved to `96.2%`
        - `OwnerAlive`: `100.0%`
        - `ShmServerCreate`: `79.2%`
        - `ShmClientAttach`: `82.7%`
