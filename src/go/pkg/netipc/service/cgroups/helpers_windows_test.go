@@ -61,6 +61,51 @@ func startTestServerWinWithConfig(service string, cfg windows.ServerConfig, hand
 	return &winTestServer{server: s, doneCh: doneCh}
 }
 
+func newRawWinShmClient(t *testing.T, profile uint32) (*Client, *windows.WinShmContext) {
+	t.Helper()
+
+	runDir := t.TempDir()
+	service := uniqueWinService("go_win_raw_shm")
+	sessionID := winServiceCounter.Add(1)
+	reqCap := uint32(protocol.HeaderSize + 4096)
+	respCap := uint32(protocol.HeaderSize + winResponseBufSize)
+
+	server, err := windows.WinShmServerCreate(runDir, service, winAuthToken, sessionID, profile, reqCap, respCap)
+	if err != nil {
+		t.Fatalf("WinShmServerCreate failed: %v", err)
+	}
+
+	clientShm, err := windows.WinShmClientAttach(runDir, service, winAuthToken, sessionID, profile)
+	if err != nil {
+		server.WinShmDestroy()
+		t.Fatalf("WinShmClientAttach failed: %v", err)
+	}
+
+	cfg := testWinShmClientConfig()
+	client := NewClient(runDir, service, cfg)
+	client.state = StateReady
+	client.shm = clientShm
+
+	t.Cleanup(func() {
+		client.Close()
+		server.WinShmDestroy()
+	})
+
+	return client, server
+}
+
+func encodeRawWinMessage(hdr protocol.Header, payload []byte) []byte {
+	hdr.Magic = protocol.MagicMsg
+	hdr.Version = protocol.Version
+	hdr.HeaderLen = protocol.HeaderLen
+	hdr.PayloadLen = uint32(len(payload))
+
+	msg := make([]byte, protocol.HeaderSize+len(payload))
+	hdr.Encode(msg[:protocol.HeaderSize])
+	copy(msg[protocol.HeaderSize:], payload)
+	return msg
+}
+
 type winRawSessionServer struct {
 	listener *windows.Listener
 	doneCh   chan error

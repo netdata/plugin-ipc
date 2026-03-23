@@ -306,6 +306,76 @@ func TestWinShmReceiveTimeoutBusywait(t *testing.T) {
 	}
 }
 
+func TestWinShmReceiveHybridImmediateReadyAfterSpinSkipped(t *testing.T) {
+	runDir := t.TempDir()
+	service := "hybrid-immediate-ready"
+	const authToken uint64 = 0x8915
+	const sessionID uint64 = 25
+
+	server, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileHybrid, 4096, 4096)
+	if err != nil {
+		t.Fatalf("WinShmServerCreate failed: %v", err)
+	}
+	defer server.WinShmDestroy()
+
+	client, err := WinShmClientAttach(runDir, service, authToken, sessionID, WinShmProfileHybrid)
+	if err != nil {
+		t.Fatalf("WinShmClientAttach failed: %v", err)
+	}
+	defer client.WinShmClose()
+
+	client.SpinTries = 0
+
+	msg := []byte("hybrid-ready")
+	if err := server.WinShmSend(msg); err != nil {
+		t.Fatalf("WinShmSend failed: %v", err)
+	}
+
+	buf := make([]byte, 8192)
+	n, err := client.WinShmReceive(buf, 1000)
+	if err != nil {
+		t.Fatalf("WinShmReceive failed: %v", err)
+	}
+	if got := string(buf[:n]); got != string(msg) {
+		t.Fatalf("payload = %q, want %q", got, string(msg))
+	}
+}
+
+func TestWinShmReceiveBusywaitImmediateReadyAfterSpinSkipped(t *testing.T) {
+	runDir := t.TempDir()
+	service := "busywait-immediate-ready"
+	const authToken uint64 = 0x8916
+	const sessionID uint64 = 27
+
+	server, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileBusywait, 4096, 4096)
+	if err != nil {
+		t.Fatalf("WinShmServerCreate failed: %v", err)
+	}
+	defer server.WinShmDestroy()
+
+	client, err := WinShmClientAttach(runDir, service, authToken, sessionID, WinShmProfileBusywait)
+	if err != nil {
+		t.Fatalf("WinShmClientAttach failed: %v", err)
+	}
+	defer client.WinShmClose()
+
+	client.SpinTries = 0
+
+	msg := []byte("busywait-ready")
+	if err := server.WinShmSend(msg); err != nil {
+		t.Fatalf("WinShmSend failed: %v", err)
+	}
+
+	buf := make([]byte, 8192)
+	n, err := client.WinShmReceive(buf, 1000)
+	if err != nil {
+		t.Fatalf("WinShmReceive failed: %v", err)
+	}
+	if got := string(buf[:n]); got != string(msg) {
+		t.Fatalf("payload = %q, want %q", got, string(msg))
+	}
+}
+
 func TestWinShmReceiveBusywaitDetectsPeerClosed(t *testing.T) {
 	runDir := t.TempDir()
 	service := "busywait-peer-closed"

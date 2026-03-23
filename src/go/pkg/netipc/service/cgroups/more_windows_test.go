@@ -251,6 +251,150 @@ func TestWinClientTransportWithoutSession(t *testing.T) {
 	}
 }
 
+func TestWinClientTransportReceiveWinShmError(t *testing.T) {
+	client := NewClient(winTestRunDir, uniqueWinService("go_win_transport_shm_err"), testWinShmClientConfig())
+	defer client.Close()
+
+	client.state = StateReady
+	client.shm = &windows.WinShmContext{}
+
+	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTruncated) {
+		t.Fatalf("transportReceive with invalid WinSHM context = %v, want %v", err, protocol.ErrTruncated)
+	}
+}
+
+func TestWinClientTransportReceiveWinShmRejectsShortMessage(t *testing.T) {
+	client, serverShm := newRawWinShmClient(t, windows.WinShmProfileHybrid)
+
+	if err := serverShm.WinShmSend([]byte{1, 2, 3, 4}); err != nil {
+		t.Fatalf("WinShmSend failed: %v", err)
+	}
+
+	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTruncated) {
+		t.Fatalf("transportReceive short WinSHM message = %v, want %v", err, protocol.ErrTruncated)
+	}
+}
+
+func TestWinClientTransportReceiveWinShmRejectsBadHeader(t *testing.T) {
+	client, serverShm := newRawWinShmClient(t, windows.WinShmProfileHybrid)
+
+	msg := make([]byte, protocol.HeaderSize)
+	if err := serverShm.WinShmSend(msg); err != nil {
+		t.Fatalf("WinShmSend failed: %v", err)
+	}
+
+	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrBadMagic) {
+		t.Fatalf("transportReceive bad WinSHM header = %v, want %v", err, protocol.ErrBadMagic)
+	}
+}
+
+func TestWinDoRawCallWinShmRejectsBadMessageID(t *testing.T) {
+	client, serverShm := newRawWinShmClient(t, windows.WinShmProfileHybrid)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		reqBuf := make([]byte, protocol.HeaderSize+32)
+		n, err := serverShm.WinShmReceive(reqBuf, 1000)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		hdr, err := protocol.DecodeHeader(reqBuf[:n])
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		var respPayload [protocol.IncrementPayloadSize]byte
+		if protocol.IncrementEncode(42, respPayload[:]) == 0 {
+			serverDone <- fmt.Errorf("IncrementEncode failed")
+			return
+		}
+
+		respHdr := protocol.Header{
+			Kind:            protocol.KindResponse,
+			Code:            protocol.MethodIncrement,
+			ItemCount:       1,
+			MessageID:       hdr.MessageID + 1,
+			TransportStatus: protocol.StatusOK,
+		}
+		serverDone <- serverShm.WinShmSend(encodeRawWinMessage(respHdr, respPayload[:]))
+	}()
+
+	var reqPayload [protocol.IncrementPayloadSize]byte
+	if protocol.IncrementEncode(41, reqPayload[:]) == 0 {
+		t.Fatal("IncrementEncode failed")
+	}
+
+	_, _, err := client.doRawCall(protocol.MethodIncrement, reqPayload[:])
+	if !errors.Is(err, protocol.ErrBadLayout) {
+		t.Fatalf("doRawCall bad WinSHM message_id = %v, want %v", err, protocol.ErrBadLayout)
+	}
+
+	if err := <-serverDone; err != nil {
+		t.Fatalf("raw WinSHM server failed: %v", err)
+	}
+}
+
+func TestWinCallIncrementBatchWinShmRejectsBadMessageID(t *testing.T) {
+	client, serverShm := newRawWinShmClient(t, windows.WinShmProfileHybrid)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		reqBuf := make([]byte, protocol.HeaderSize+256)
+		n, err := serverShm.WinShmReceive(reqBuf, 1000)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		hdr, err := protocol.DecodeHeader(reqBuf[:n])
+		if err != nil {
+			serverDone <- err
+			return
+		}
+
+		var itemA [protocol.IncrementPayloadSize]byte
+		var itemB [protocol.IncrementPayloadSize]byte
+		if protocol.IncrementEncode(2, itemA[:]) == 0 || protocol.IncrementEncode(3, itemB[:]) == 0 {
+			serverDone <- fmt.Errorf("IncrementEncode failed")
+			return
+		}
+
+		respBuf := make([]byte, 64)
+		bb := protocol.NewBatchBuilder(respBuf, 2)
+		if err := bb.Add(itemA[:]); err != nil {
+			serverDone <- err
+			return
+		}
+		if err := bb.Add(itemB[:]); err != nil {
+			serverDone <- err
+			return
+		}
+		respLen, _ := bb.Finish()
+
+		respHdr := protocol.Header{
+			Kind:            protocol.KindResponse,
+			Code:            protocol.MethodIncrement,
+			Flags:           protocol.FlagBatch,
+			ItemCount:       2,
+			MessageID:       hdr.MessageID + 1,
+			TransportStatus: protocol.StatusOK,
+		}
+		serverDone <- serverShm.WinShmSend(encodeRawWinMessage(respHdr, respBuf[:respLen]))
+	}()
+
+	_, err := client.CallIncrementBatch([]uint64{1, 2})
+	if !errors.Is(err, protocol.ErrBadLayout) {
+		t.Fatalf("CallIncrementBatch bad WinSHM message_id = %v, want %v", err, protocol.ErrBadLayout)
+	}
+
+	if err := <-serverDone; err != nil {
+		t.Fatalf("raw WinSHM server failed: %v", err)
+	}
+}
+
 func TestWinClientMaxReceiveMessageBytes(t *testing.T) {
 	client := NewClient(winTestRunDir, uniqueWinService("go_win_recvmax"), testWinClientConfig())
 	defer client.Close()
