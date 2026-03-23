@@ -21,9 +21,16 @@ Finish the rewrite to a production-ready state with:
   - completed the next Windows Go transport coverage pass on `win11`
   - validated the new Windows-only Go transport edge tests directly with native `go test`
   - synced the TODO and coverage docs to the latest Windows Go numbers
+  - discovered one real Go Windows shutdown bug during the next service-coverage pass:
+    - idle `Server.Stop()` can hang because `windows.Listener.Close()` does not wake a blocked `Accept()` with no client connected yet
+    - the C Windows transport already solves this with a loopback wake-connect on the pipe name before closing the listener handle
   - fixed the exact-head Windows Rust state-test startup race under parallel `ctest`
   - fixed the matching service-interop client readiness race across the C, Rust, and Go service interop fixtures on both POSIX and Windows
   - reviewed the real `win11` Go coverage profiles for both `service/cgroups` and `transport/windows`
+  - fixed the real Go Windows listener shutdown bug:
+    - `windows.Listener.Close()` now mirrors the C transport and performs a loopback wake-connect before closing the listener handle
+    - this unblocks a blocked `Accept()` reliably, so idle managed `Server.Stop()` no longer hangs
+  - validated the new Windows Go idle-stop and malformed-response tests directly with native `go test`
   - next target:
     - keep raising the relaxed coverage gates toward `100%`
     - current result:
@@ -31,18 +38,18 @@ Finish the rewrite to a production-ready state with:
       - WinSHM edge-case tests raised `transport/win_shm.rs`
       - Windows named-pipe transport tests raised `transport/windows.rs` into the mid-`90%` range
       - WinSHM service tests and stricter malformed batch/snapshot tests raised Go `service/cgroups/client_windows.go` above `90%`
-      - the latest Windows Go transport edge tests raised:
-        - `transport/windows/pipe.go` to `90.7%`
+      - the latest Windows Go transport edge tests plus the listener shutdown fix raised:
+        - `transport/windows/pipe.go` to `91.4%`
         - `transport/windows/shm.go` to `86.1%`
-        - `transport/windows` package total to `88.7%`
+        - `transport/windows` package total to `89.0%`
       - Windows Go no longer has a weak transport package
       - exact uncovered Go functions on `win11` are now known:
-        - `doRawCall` (`86.7%`)
+        - `doRawCall` (`93.3%`)
         - `CallSnapshot` (`94.1%`)
-        - `CallStringReverse` (`87.5%`)
-        - `CallIncrementBatch` (`81.8%`)
+        - `CallStringReverse` (`93.8%`)
+        - `CallIncrementBatch` (`88.6%`)
         - `transportReceive` (`82.4%`)
-        - `Run` (`87.5%`)
+        - `Run` (`91.7%`)
         - `handleSession` (`83.8%`)
       - facts from the uncovered blocks:
         - most remaining Go gaps are now ordinary L2 service paths and the deferred managed-server retry/shutdown area
@@ -51,9 +58,9 @@ Finish the rewrite to a production-ready state with:
         - some malformed named-pipe response cases never reach L2 validation because the Windows session layer rejects them first
       - split of remaining Go gaps:
         - ordinary testable now:
-          - remaining `client_windows.go` L2 call and session-loop branches
-          - more WinSHM managed-server session/stop coverage
-          - more batch and string-reverse error-path coverage
+          - remaining `client_windows.go` `transportReceive()` and `handleSession()` branches
+          - more WinSHM managed-server session / stop coverage
+          - more `transport/windows/shm.go` create / attach error-path coverage
         - likely requires special orchestration later:
           - transport-level malformed response `MessageID` and some response-envelope corruptions that are rejected below L2 on named pipes
           - rare managed-server retry/shutdown races already tracked separately
@@ -66,20 +73,21 @@ Finish the rewrite to a production-ready state with:
     - total: `83.9%`
     - status: the script now passes the Linux-matching per-file `82%` gate
   - Go:
-    - total: `92.0%`
+    - total: `92.6%`
     - package coverage:
-      - `service/cgroups`: `90.6%`
-      - `transport/windows`: `88.7%`
+      - `service/cgroups`: `92.2%`
+      - `transport/windows`: `89.0%`
     - key files:
-      - `service/cgroups/client_windows.go`: `90.1%`
+      - `service/cgroups/client_windows.go`: `91.9%`
       - `service/cgroups/types.go`: `100.0%`
-      - `transport/windows/pipe.go`: `90.7%`
+      - `transport/windows/pipe.go`: `91.4%`
       - `transport/windows/shm.go`: `86.1%`
     - status:
       - passes the Linux-matching `85%` target
       - the noninteractive exit problem is fixed
       - first-class Windows Go CTest targets now exist for service/cache coverage parity
       - latest added WinSHM service tests, malformed-response tests, and transport edge tests increased both `client_windows.go` and the Windows transport package materially
+      - the idle managed `Server.Stop()` hang on Windows is fixed and covered
   - Rust:
     - validated workflow: `cargo-llvm-cov` + `rustup component add llvm-tools-preview`
     - measured with Windows-native unit tests + Rust interop ctests, with Rust bin / benchmark noise excluded from the report:
@@ -268,20 +276,21 @@ Current measured results:
 
 - Go:
   - `bash tests/run-coverage-go-windows.sh 85`
-  - coverage result: `92.0%`
+  - coverage result: `92.6%`
   - package coverage:
     - `protocol`: `99.5%`
-    - `service/cgroups`: `90.6%`
-    - `transport/windows`: `88.7%`
+    - `service/cgroups`: `92.2%`
+    - `transport/windows`: `89.0%`
   - status:
     - reported above the Linux-matching `85%` target
-    - focused helper tests raised:
-      - `transport/windows/pipe.go` to `90.7%`
+    - focused helper tests plus the listener shutdown fix raised:
+      - `transport/windows/pipe.go` to `91.4%`
       - `transport/windows/shm.go` to `86.1%`
-      - `transport/windows` package total to `88.7%`
+      - `transport/windows` package total to `89.0%`
       - `service/cgroups/types.go` to `100.0%`
-      - `service/cgroups/client_windows.go` to `90.1%`
+      - `service/cgroups/client_windows.go` to `91.9%`
     - first-class Windows Go CTest targets are now real and passing on `win11`
+    - the idle managed `Server.Stop()` hang is fixed and covered
 
 Important facts:
 
@@ -429,7 +438,7 @@ Current expected result:
 ```bash
 bash tests/run-coverage-c-windows.sh 82
 bash tests/run-coverage-go-windows.sh 85
-bash tests/run-coverage-rust-windows.sh
+bash tests/run-coverage-rust-windows.sh 80
 ```
 
 Current expected result:
@@ -437,8 +446,8 @@ Current expected result:
 - `bash tests/run-coverage-c-windows.sh 82`
   - passes with all tracked Windows C files above `82%`
 - `bash tests/run-coverage-go-windows.sh 85`
-  - currently reports `92.0%`
-- `bash tests/run-coverage-rust-windows.sh`
+  - currently reports `92.6%`
+- `bash tests/run-coverage-rust-windows.sh 80`
   - currently reports `93.59%`
   - should now enforce the same `80%` total threshold used by Linux Rust
   - key remaining gap is no longer missing service coverage; it is raising coverage further and finishing the separate retry/shutdown investigation
@@ -483,7 +492,7 @@ Facts:
 - Windows C coverage currently passes:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
-- Windows Go coverage currently reports `92.0%`.
+- Windows Go coverage currently reports `92.6%`.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
@@ -492,7 +501,8 @@ Required next work:
 2. Start raising the relaxed coverage thresholds toward `100%`
 3. Immediate next pass:
    - continue raising Windows Go coverage in the real remaining weak areas:
-     - `service/cgroups/client_windows.go`
+     - `service/cgroups/client_windows.go` `transportReceive()` and `handleSession()`
+     - `transport/windows/shm.go`
      - managed-server shutdown / retry behavior, handled separately from ordinary coverage
    - keep Windows Go CTest parity honest:
      - `test_named_pipe_go`

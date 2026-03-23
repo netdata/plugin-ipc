@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 )
@@ -146,6 +147,27 @@ func TestPipeConnectRejectsPipeNameTooLong(t *testing.T) {
 	service := strings.Repeat("a", maxPipeNameChars)
 	if _, err := Connect(testPipeRunDir, service, defaultClientConfigPtr()); !errors.Is(err, ErrPipeName) {
 		t.Fatalf("Connect(long service) = %v, want ErrPipeName", err)
+	}
+}
+
+func TestPipeAcceptUnblocksWhenListenerClosed(t *testing.T) {
+	service := uniquePipeService(t)
+	listener := startListener(t, testPipeRunDir, service, defaultServerConfig())
+
+	acceptCh := acceptAsync(listener)
+	time.Sleep(50 * time.Millisecond)
+	listener.Close()
+
+	select {
+	case sr := <-acceptCh:
+		if sr.err == nil {
+			if sr.session != nil {
+				sr.session.Close()
+			}
+			t.Fatal("Accept after listener close should fail")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Accept did not unblock after listener close")
 	}
 }
 

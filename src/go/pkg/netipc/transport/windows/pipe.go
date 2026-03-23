@@ -25,12 +25,12 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	defaultBatchItems  uint32 = 1
-	defaultPacketSize  uint32 = 65536
-	defaultPipeBufSize uint32 = 65536
-	helloPayloadSize          = 44
-	helloAckPayloadSize       = 48
-	maxPipeNameChars          = 256
+	defaultBatchItems   uint32 = 1
+	defaultPacketSize   uint32 = 65536
+	defaultPipeBufSize  uint32 = 65536
+	helloPayloadSize           = 44
+	helloAckPayloadSize        = 48
+	maxPipeNameChars           = 256
 
 	// FNV-1a 64-bit constants
 	fnv1aOffsetBasis uint64 = 0xcbf29ce484222325
@@ -768,6 +768,22 @@ func (l *Listener) Accept() (*Session, error) {
 // Close closes the listener.
 func (l *Listener) Close() {
 	if l.handle != syscall.InvalidHandle {
+		// A loopback connect reliably wakes a blocking ConnectNamedPipe()
+		// so Accept() can observe shutdown and exit.
+		if len(l.pipeName) > 0 && l.pipeName[0] != 0 {
+			wake, err := syscall.CreateFile(
+				&l.pipeName[0],
+				_GENERIC_READ|_GENERIC_WRITE,
+				0,
+				nil,
+				_OPEN_EXISTING,
+				0,
+				0,
+			)
+			if err == nil && wake != syscall.InvalidHandle && wake != 0 {
+				syscall.CloseHandle(wake)
+			}
+		}
 		syscall.CloseHandle(l.handle)
 		l.handle = syscall.InvalidHandle
 	}
