@@ -19,7 +19,7 @@ Verified on `2026-03-23`:
   - threshold: `82%`
 - Go:
   - script: `tests/run-coverage-go.sh`
-  - result: `93.0%`
+  - result: `93.7%`
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
@@ -198,6 +198,13 @@ Concrete evidence from the latest Linux Go SHM slice:
 
 - typed SHM recovery cases such as batch-handler failure and batch-response
   overflow are ordinary and are now covered
+- direct SHM transport guard and timeout paths are ordinary too:
+  - invalid service-name entry guards
+  - `ShmSend()` bad-parameter guards
+  - `ShmReceive()` bad-parameter and timeout paths
+  - `ShmCleanupStale()` missing-directory / unrelated-file branches
+- result:
+  - `transport/posix/shm_linux.go` is now `90.6%`
 - raw malformed SHM requests on POSIX are not currently ordinary unit-test
   targets:
   - malformed short request

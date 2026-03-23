@@ -25,6 +25,12 @@ Finish the rewrite to a production-ready state with:
     - malformed batch request recovery
     - batch handler failure -> refresh
     - batch response overflow -> refresh
+  - completed the next direct POSIX SHM transport guard slice
+  - validated direct transport tests for:
+    - invalid service-name entry guards
+    - `ShmSend()` bad-parameter guards
+    - `ShmReceive()` bad-parameter and timeout paths
+    - `ShmCleanupStale()` missing-directory and unrelated-file branches
   - reclassified raw malformed POSIX SHM request recovery (`short`, `bad header`, `unexpected kind`) out of the ordinary bucket:
     - all three block in `ShmReceive(..., 30000)` today
     - they belong to timeout-behavior / special-infrastructure work unless POSIX SHM timeout control becomes testable
@@ -75,7 +81,7 @@ Finish the rewrite to a production-ready state with:
           - Windows Go ordinary coverage is no longer the main gap
           - next honest Go target is Linux / POSIX:
             - `service/cgroups/client.go` (`92.3%`)
-            - `transport/posix/shm_linux.go` (`87.5%`)
+            - `transport/posix/shm_linux.go` (`90.6%`)
             - `transport/posix/uds.go` (`92.0%`)
           - keep the deferred managed-server retry/shutdown investigation separate from ordinary coverage
         - likely requires special orchestration later:
@@ -246,7 +252,7 @@ Verified on `2026-03-23`:
   - current threshold: `82%`
 - Go:
   - `bash tests/run-coverage-go.sh`
-  - result: `93.0%`
+  - result: `93.7%`
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
@@ -549,7 +555,7 @@ Facts:
   - total: `83.9%`
   - `netipc_service_win.c`: `83.1%`
 - Windows Go coverage currently reports `96.7%`.
-- Linux Go coverage currently reports `93.0%` with the real weak files now concentrated in selective POSIX SHM and server-loop paths.
+- Linux Go coverage currently reports `93.7%` with the remaining ordinary gaps now concentrated in selective server-loop paths plus a smaller POSIX SHM residue.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.
 
 Required next work:
@@ -602,12 +608,14 @@ Required next work:
          - file moved from `77.5%` to `86.7%`
        - result of the latest POSIX SHM service follow-up slice:
          - file moved from `86.7%` to `87.5%`
+       - result of the latest direct POSIX SHM transport slice:
+         - file moved from `87.5%` to `90.6%`
        - `OwnerAlive`: `100.0%`
        - `ShmServerCreate`: `75.0%`
-       - `ShmClientAttach`: `81.3%`
-       - `ShmSend`: `86.2%`
-       - `ShmReceive`: `88.6%`
-       - `ShmCleanupStale`: `87.5%`
+       - `ShmClientAttach`: `82.7%`
+       - `ShmSend`: `93.1%`
+       - `ShmReceive`: `94.9%`
+       - `ShmCleanupStale`: `100.0%`
        - `checkShmStale`: `85.2%`
      - `transport/posix/uds.go`
        - result of the latest ordinary UDS slice:
@@ -636,7 +644,7 @@ Required next work:
          - add only ordinary POSIX tests for:
            - `Run()` accept-loop branches that do not require kernel fault injection
            - `handleSession()` server-side protocol / batching branches reachable with normal clients or raw POSIX sessions
-           - `ShmServerCreate()` / `ShmClientAttach()` / stale-cleanup paths reachable without fault injection
+           - the remaining `ShmServerCreate()` / `ShmClientAttach()` / `checkShmStale()` paths that are still reachable without fault injection
          - do not chase:
            - listener/socket syscall failures
            - forced short writes
@@ -686,6 +694,17 @@ Required next work:
          - evidence:
            - all three non-ordinary cases block in `ShmReceive(..., 30000)` inside `service/cgroups/client.go`
            - they are therefore timeout-behavior / special-infrastructure cases, not cheap ordinary unit tests
+       - latest direct POSIX SHM ordinary target:
+         - add transport-level tests for:
+           - invalid service-name guards in `ShmServerCreate()` / `ShmClientAttach()`
+           - `ShmSend()` / `ShmReceive()` bad-parameter guards
+           - short-backing-slice defensive errors
+           - cheap timeout paths with millisecond waits
+           - `ShmCleanupStale()` non-existent-directory and unrelated-file branches
+         - status:
+           - completed
+         - result:
+           - `transport/posix/shm_linux.go` moved from `87.5%` to `90.6%`
        - possible server capacity test if one session can be held open deterministically without introducing timing flake
 
 ### 2. Cross-platform validation parity is only partial

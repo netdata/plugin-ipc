@@ -217,6 +217,103 @@ func TestShmClientAttachRejectsMalformedHeaders(t *testing.T) {
 	}
 }
 
+func TestShmCreateAndAttachRejectInvalidServiceName(t *testing.T) {
+	runDir := t.TempDir()
+
+	if _, err := ShmServerCreate(runDir, "bad/name", 1, 1024, 1024); !errors.Is(err, ErrShmBadParam) {
+		t.Fatalf("ShmServerCreate invalid service name = %v, want %v", err, ErrShmBadParam)
+	}
+	if _, err := ShmClientAttach(runDir, "bad/name", 1); !errors.Is(err, ErrShmBadParam) {
+		t.Fatalf("ShmClientAttach invalid service name = %v, want %v", err, ErrShmBadParam)
+	}
+}
+
+func TestShmSendBadParamGuards(t *testing.T) {
+	if err := (&ShmContext{}).ShmSend([]byte{1}); !errors.Is(err, ErrShmBadParam) {
+		t.Fatalf("ShmSend nil context = %v, want %v", err, ErrShmBadParam)
+	}
+
+	storeLenCtx := &ShmContext{
+		role:            ShmRoleClient,
+		data:            make([]byte, 39),
+		requestCapacity: 64,
+	}
+	if err := storeLenCtx.ShmSend([]byte{1}); !errors.Is(err, ErrShmBadParam) {
+		t.Fatalf("ShmSend short backing slice for len store = %v, want %v", err, ErrShmBadParam)
+	}
+
+	addSeqCtx := &ShmContext{
+		role:            ShmRoleClient,
+		data:            make([]byte, 48),
+		requestCapacity: 64,
+	}
+	if err := addSeqCtx.ShmSend([]byte{1}); !errors.Is(err, ErrShmBadParam) {
+		t.Fatalf("ShmSend short backing slice for seq add = %v, want %v", err, ErrShmBadParam)
+	}
+}
+
+func TestShmReceiveBadParamAndTimeoutPaths(t *testing.T) {
+	if _, err := (&ShmContext{}).ShmReceive(make([]byte, 8), 1); !errors.Is(err, ErrShmBadParam) {
+		t.Fatalf("ShmReceive nil context = %v, want %v", err, ErrShmBadParam)
+	}
+
+	if _, err := (&ShmContext{data: make([]byte, 8)}).ShmReceive(nil, 1); !errors.Is(err, ErrShmBadParam) {
+		t.Fatalf("ShmReceive empty buffer = %v, want %v", err, ErrShmBadParam)
+	}
+
+	spinLoadSeqCtx := &ShmContext{
+		role:             ShmRoleClient,
+		data:             make([]byte, 8),
+		responseCapacity: 64,
+		SpinTries:        1,
+	}
+	if _, err := spinLoadSeqCtx.ShmReceive(make([]byte, 8), 1); !errors.Is(err, ErrShmBadParam) {
+		t.Fatalf("ShmReceive spin-phase seq load = %v, want %v", err, ErrShmBadParam)
+	}
+
+	futexLoadSignalCtx := &ShmContext{
+		role:             ShmRoleClient,
+		data:             make([]byte, 8),
+		responseCapacity: 64,
+		SpinTries:        0,
+	}
+	if _, err := futexLoadSignalCtx.ShmReceive(make([]byte, 8), 1); !errors.Is(err, ErrShmBadParam) {
+		t.Fatalf("ShmReceive futex-phase signal load = %v, want %v", err, ErrShmBadParam)
+	}
+
+	futexLoadSeqCtx := &ShmContext{
+		role:             ShmRoleClient,
+		data:             make([]byte, 48),
+		responseCapacity: 64,
+		SpinTries:        0,
+	}
+	if _, err := futexLoadSeqCtx.ShmReceive(make([]byte, 8), 1); !errors.Is(err, ErrShmBadParam) {
+		t.Fatalf("ShmReceive futex-phase seq load = %v, want %v", err, ErrShmBadParam)
+	}
+
+	runDir := t.TempDir()
+	svc := "go_shm_timeout"
+	srv, err := ShmServerCreate(runDir, svc, 11, 1024, 1024)
+	if err != nil {
+		t.Fatalf("ShmServerCreate timeout fixture failed: %v", err)
+	}
+	defer srv.ShmDestroy()
+
+	client, err := ShmClientAttach(runDir, svc, 11)
+	if err != nil {
+		t.Fatalf("ShmClientAttach timeout fixture failed: %v", err)
+	}
+	defer client.ShmClose()
+
+	buf := make([]byte, 64)
+	if _, err := srv.ShmReceive(buf, 1); !errors.Is(err, ErrShmTimeout) {
+		t.Fatalf("server ShmReceive timeout = %v, want %v", err, ErrShmTimeout)
+	}
+	if _, err := client.ShmReceive(buf, 1); !errors.Is(err, ErrShmTimeout) {
+		t.Fatalf("client ShmReceive timeout = %v, want %v", err, ErrShmTimeout)
+	}
+}
+
 func TestCheckShmStaleVariants(t *testing.T) {
 	runDir := t.TempDir()
 	reqOff, reqCap, respOff, respCap := defaultShmLayout()
@@ -305,5 +402,22 @@ func TestShmCleanupStaleMixedEntries(t *testing.T) {
 	}
 	if info, err := os.Stat(matchingDir); err != nil || !info.IsDir() {
 		t.Fatalf("matching directory should remain, stat err = %v", err)
+	}
+}
+
+func TestShmCleanupStaleMissingDirAndUnrelatedFile(t *testing.T) {
+	missingDir := filepath.Join(t.TempDir(), "missing")
+	ShmCleanupStale(missingDir, "go_shm_missing")
+
+	runDir := t.TempDir()
+	unrelatedPath := filepath.Join(runDir, "go_shm_other-note.txt")
+	if err := os.WriteFile(unrelatedPath, []byte("x"), 0600); err != nil {
+		t.Fatalf("write unrelated file: %v", err)
+	}
+
+	ShmCleanupStale(runDir, "go_shm_other")
+
+	if _, err := os.Stat(unrelatedPath); err != nil {
+		t.Fatalf("unrelated file should remain after cleanup, stat err = %v", err)
 	}
 }
