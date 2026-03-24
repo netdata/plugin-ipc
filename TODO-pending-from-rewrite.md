@@ -16,6 +16,232 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
+- benchmark investigation before Netdata integration:
+    - purpose:
+      - explain the largest remaining interop throughput asymmetries before we integrate this into Netdata
+      - use this to decide whether there are still hidden robustness or transport-state risks in the cross-language hot paths
+    - scope for this pass:
+      - Windows `snapshot-shm`
+      - Windows `shm-batch-ping-pong`
+      - Windows `np-pipeline-batch-d16`
+      - compare them against the matching POSIX scenarios to separate Windows-specific issues from generic language/runtime differences
+    - expected output:
+      - facts from the checked-in benchmark artifacts
+      - exact code paths involved in each slow pair
+      - working theories for the throughput gaps
+      - recommendation on whether to fix now or proceed with guarded Netdata integration
+    - facts established from the checked-in Windows benchmark artifacts:
+      - each benchmark row is one server process paired with one client process:
+        - `tests/run-windows-bench.sh:231`
+        - `tests/run-windows-bench.sh:415`
+        - `tests/run-windows-bench.sh:454`
+        - `tests/run-windows-bench.sh:480`
+        - `tests/run-windows-bench.sh:617`
+      - this means worker-count defaults are not the primary explanation for the max-throughput rows, because these are not multi-client saturation tests
+      - the largest bad spreads are Windows-specific and cluster by server implementation, especially Rust servers:
+        - `snapshot-shm`:
+          - slowest `go->rust`: `246709`
+          - fastest `c->go`: `1036379`
+          - spread: `4.20x`
+        - `shm-batch-ping-pong`:
+          - slowest `go->rust`: `12959829`
+          - fastest `c->c`: `56949157`
+          - spread: `4.39x`
+        - `np-pipeline-batch-d16`:
+          - slowest `rust->rust`: `14153205`
+          - fastest `c->c`: `38068732`
+          - spread: `2.69x`
+      - the matching POSIX spreads are much smaller:
+        - `snapshot-shm`: `1.69x`
+        - `shm-batch-ping-pong`: `1.80x`
+        - `uds-pipeline-batch-d16`: `1.96x`
+      - simple Windows scenarios do not show the same Rust-server collapse:
+        - `shm-ping-pong` stays fairly tight:
+          - slowest `go->go`: `1737335`
+          - fastest `c->go`: `2551798`
+        - `snapshot-baseline` also stays tight:
+          - slowest `go->c`: `15944`
+          - fastest `c->go`: `17907`
+      - implication:
+        - this does not look like a generic Rust implementation problem
+        - it also does not look like a raw WinSHM transport problem by itself
+        - it appears when the Windows server is doing larger response assembly / batch handling, and especially when the Rust server is also on the Named Pipe send hot path
+    - exact code-path differences already confirmed:
+      - Rust Windows Named Pipe send allocates a fresh `Vec` for every message:
+        - `src/crates/netipc/src/transport/windows.rs:401`
+      - Go Windows Named Pipe send reuses a session scratch buffer:
+        - `src/go/pkg/netipc/transport/windows/pipe.go:458`
+      - C Windows Named Pipe send uses stack storage for small messages and heap only when needed:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:188`
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:723`
+      - Rust batch benchmark server leaves `max_response_payload_bytes` at `BENCH_BATCH_BUF_SIZE`:
+        - `bench/drivers/rust/src/bench_windows.rs:254`
+      - Go batch benchmark server explicitly doubles the response payload limit:
+        - `bench/drivers/go/main_windows.go:207`
+        - `bench/drivers/go/main_windows.go:327`
+      - C batch benchmark server also gives the server a doubled response buffer:
+        - `bench/drivers/c/bench_windows.c:330`
+        - `bench/drivers/c/bench_windows.c:346`
+      - Rust managed server defaults to `8` workers:
+        - `src/crates/netipc/src/service/cgroups.rs:998`
+        - `src/crates/netipc/src/service/cgroups.rs:1004`
+      - Go Windows managed server runs a single accept loop and handles the accepted session directly:
+        - `src/go/pkg/netipc/service/cgroups/client_windows.go:500`
+        - `src/go/pkg/netipc/service/cgroups/client_windows.go:539`
+        - `src/go/pkg/netipc/service/cgroups/client_windows.go:596`
+      - C Windows benchmark servers pass explicit worker counts at init:
+        - single-request server path: `bench/drivers/c/bench_windows.c:286`
+        - batch server path: `bench/drivers/c/bench_windows.c:349`
+    - working theories:
+      - theory 1:
+        - Rust Windows Named Pipe send-side allocation is a real hot-path cost and is the strongest code-level explanation for the poor `np-pipeline-batch-d16` Rust-server rows
+      - theory 2:
+        - the bad `snapshot-shm` and `shm-batch-ping-pong` Rust-server rows are not explained by raw WinSHM alone, because `shm-ping-pong` is fine
+        - the more likely area is Windows-specific cost in larger response assembly / batch handling / copy behavior on the Rust server side
+      - theory 3:
+        - worker-count differences are real implementation differences, but they are unlikely to be the main cause of the current max-throughput interop rows because each measurement is still one server process paired with one client process
+    - current recommendation before Netdata integration:
+      - do one focused Rust-on-Windows performance pass before broad integration
+      - first target:
+        - remove the per-message allocation from `src/crates/netipc/src/transport/windows.rs:401`
+      - second target:
+        - re-check the Windows Rust snapshot and batch response hot paths after that change
+      - only after those reruns decide whether the remaining Windows interop gaps are acceptable for guarded integration or still need another optimization pass
+    - first optimization pass completed:
+      - implemented:
+        - `src/crates/netipc/src/transport/windows.rs`
+        - `raw_send_msg()` now reuses a per-session scratch buffer instead of allocating a fresh `Vec` for every Windows Named Pipe send
+        - `NpSession` now owns `send_buf`
+      - local safety validation:
+        - `cargo test --manifest-path src/crates/netipc/Cargo.toml --lib -- --test-threads=1`
+        - result: `294/294` passing
+      - clean Windows validation environment used:
+        - a fresh temp clone on `win11`: `/tmp/plugin-ipc-investigate`
+        - correct native toolchain environment:
+          - `PATH=/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH`
+          - `MSYSTEM=MINGW64`
+          - `CC=/mingw64/bin/gcc`
+          - `CXX=/mingw64/bin/g++`
+      - important evidence from the clean `win11` rerun:
+        - the temporary CSV at `/tmp/plugin-ipc-investigate/bench-hotpath.csv` ended up with interleaved duplicate rows from more than one benchmark writer
+        - evidence:
+          - total rows: `384`
+          - expected full 3x3 matrix: `201`
+          - duplicate keys existed for many `(scenario, client, server, target_rps)` combinations
+        - implication:
+          - the raw CSV cannot be consumed as-is
+          - the safe interpretation for this investigation is to keep the last row per `(scenario, client, server, target_rps)` key
+          - this matches the live stream from the final completed run in the reused SSH session
+      - measured impact on the three target scenarios, comparing the checked-in Windows CSV against the clean `win11` rerun after deduping by keep-last:
+        - `snapshot-shm`:
+          - before:
+            - fastest `c->go`: `1036379`
+            - slowest `go->rust`: `246709`
+            - spread: `4.20x`
+          - after:
+            - fastest `c->rust`: `1192436`
+            - slowest `go->c`: `466278`
+            - spread: `2.56x`
+        - `shm-batch-ping-pong`:
+          - before:
+            - fastest `c->c`: `56949157`
+            - slowest `go->rust`: `12959829`
+            - spread: `4.39x`
+          - after:
+            - fastest `c->rust`: `55907488`
+            - slowest `go->go`: `37762867`
+            - spread: `1.48x`
+        - `np-pipeline-batch-d16`:
+          - before:
+            - fastest `c->c`: `38068732`
+            - slowest `rust->rust`: `14153205`
+            - spread: `2.69x`
+          - after:
+            - fastest `c->rust`: `42592457`
+            - slowest `rust->go`: `32392057`
+            - spread: `1.31x`
+      - extra controls from the same clean rerun:
+        - `np-pipeline-d16` stayed tight:
+          - before: `1.18x`
+          - after: `1.13x`
+        - `snapshot-baseline` stayed tight:
+          - before: `1.12x`
+          - after: `1.15x`
+        - `np-batch-ping-pong` also tightened:
+          - before: `1.44x`
+          - after: `1.14x`
+      - strongest conclusion from the evidence:
+        - the Rust Windows Named Pipe per-message allocation was a real hot-path cost
+        - it was a major contributor to the suspicious Windows Rust interop collapse
+        - after the fix, the worst Windows interop spreads are no longer clustered around Rust servers
+        - `snapshot-shm` still shows moderate variation, but it is no longer the same pathology as the old Rust-server collapse
+      - practical implication for Netdata integration:
+        - this first performance fix explains and removes most of the previously suspicious Windows Rust interop asymmetry
+        - before broad integration, the official checked-in Windows benchmark artifacts should be rerun from a clean non-overlapping `win11` workspace so the repo records the fixed numbers directly
+
+## Pending User Decision
+
+### 1. Netdata integration timing after the benchmark investigation
+
+Evidence:
+
+- checked-in benchmarks and validation are already strong:
+  - Linux is green
+  - Windows tests are green
+  - POSIX and Windows benchmark floors are green
+- the remaining meaningful performance caveat is now narrow:
+  - large Windows interop throughput asymmetries cluster around Rust servers in:
+    - `snapshot-shm`
+    - `shm-batch-ping-pong`
+    - `np-pipeline-batch-d16`
+- one concrete Rust Windows hot-path cost is already confirmed:
+  - per-message allocation in `src/crates/netipc/src/transport/windows.rs:401`
+
+Options:
+
+- `A`
+  - start guarded Netdata integration now, behind a feature flag, and keep the Windows performance work in parallel
+  - pros:
+    - fastest path to real integration feedback
+    - low risk if rollout is Linux-first or explicitly guarded
+  - implications:
+    - Windows interop performance caveat remains open during early integration
+  - risks:
+    - a slow Rust Windows server path may survive into the first integrated rollout
+
+- `B`
+  - do one focused Rust-on-Windows optimization pass first, then integrate
+  - pros:
+    - highest confidence with limited extra work
+    - directly targets the remaining unexplained asymmetry before integration
+  - implications:
+    - integration waits for one short benchmark / optimization cycle
+  - risks:
+    - if the first fix is not enough, one more investigation slice may still be needed
+
+- `C`
+  - stop integration work until Linux/Windows parity is much closer in chaos, hardening, and stress
+  - pros:
+    - strongest validation story before rollout
+  - implications:
+    - much slower path to integration
+  - risks:
+    - delays real Netdata integration feedback for issues that may not affect the first guarded rollout
+
+Recommendation:
+
+- `1. B`
+  - reason:
+    - the remaining concern is now specific and actionable, not broad and unknown
+    - one focused Windows Rust hot-path pass is the best trade-off before integrating this into Netdata
+
+Decision made by user:
+
+- before Netdata integration, explain the remaining interop performance variation and fix it where the evidence is strong enough
+- implication:
+  - Netdata integration is intentionally blocked on this focused performance/robustness pass
+  - the next engineering work should optimize the measured hot paths first, then rerun the affected benchmark scenarios on Windows
+
 - current verified Windows C state after the latest clean `win11` rerun:
     - the real `bash tests/run-coverage-c-windows.sh 90` flow now completes end to end again on clean `win11`
     - exact measured Windows C result from the real script:
@@ -33,29 +259,25 @@ Finish the rewrite to a production-ready state with:
       - measured Windows C is still honestly above the shared `90%` gate on current `main`
       - the aggregate Windows C script is trustworthy again on the validated `win11` workflow
 - next honest ordinary Windows C target:
-    - fresh clean `win11` direct `gcov` on `netipc_service_win.c` now shows:
-      - typed batch and string-reverse success paths are already covered
-      - examples:
-        - `do_increment_batch_attempt()` is called and covered through the normal success path
-        - `do_string_reverse_attempt()` is called and covered through the normal success path
-      - the remaining service-file misses around those functions are failure-only branches:
-        - batch builder add failure at `src/libnetdata/netipc/src/service/netipc_service_win.c:517`
-        - batch send / receive failure at `src/libnetdata/netipc/src/service/netipc_service_win.c:534` and `:543`
-        - string encode / raw-call failure at `src/libnetdata/netipc/src/service/netipc_service_win.c:603` and `:611`
-    - the first candidate after that was the session-array growth path:
-      - `src/libnetdata/netipc/src/service/netipc_service_win.c:1097-1110`
-    - but source review shows it is not an honest ordinary target:
-      - the server rejects clients earlier at `src/libnetdata/netipc/src/service/netipc_service_win.c:1045-1049`
-      - `server->session_capacity` is initialized at `worker_count * 2`, with a minimum of `16`
-      - therefore `session_capacity` is always `>= worker_count`
-      - implication:
-        - a normal session can never reach `session_count >= session_capacity` without already hitting the earlier worker-limit rejection
-    - decision from the evidence:
-      - stop treating `1097-1110` as an ordinary coverage target
-      - treat the grow-array path as dead code under the current server-limit design unless the implementation changes
-    - next ordinary branch family instead:
-      - WinSHM client send/receive guard paths in:
-        - `src/libnetdata/netipc/src/service/netipc_service_win.c:147`
+    - I tested the next most plausible service-side ordinary branch directly:
+      - added a HYBRID idle-before-first-request test in `tests/fixtures/c/test_win_service_guards.c`
+      - rebuilt the clean `win11` coverage tree
+      - reran `test_win_service_guards.exe`
+      - checked `gcov` on `src/libnetdata/netipc/src/service/netipc_service_win.c`
+    - hard evidence:
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c:661` executed
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c:662` remained uncovered
+      - direct `gcov` excerpt:
+        - `661`: `36*`
+        - `662`: `#####`
+        - `663`: `36`
+    - implication:
+      - the naive HYBRID idle-timeout idea is not enough to hit the `continue` branch honestly
+      - the remaining easy ordinary Windows C targets are now sparse
+      - the remaining Windows C misses are increasingly:
+        - allocation-only paths
+        - handshake send-failure paths that were already shown to be unstable or non-deterministic on real `win11`
+        - deeper timing-sensitive paths that need more than a simple fixture tweak
         - `src/libnetdata/netipc/src/service/netipc_service_win.c:179`
       - these are still normal state-validation branches, not allocation-failure-only paths
     - exact clean `win11` validation on the extended guard tree:

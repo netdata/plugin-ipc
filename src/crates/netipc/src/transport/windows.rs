@@ -398,11 +398,19 @@ fn raw_write(handle: ffi::HANDLE, data: &[u8]) -> Result<(), NpError> {
 
 /// Send header + payload as one pipe message.
 #[cfg(windows)]
-fn raw_send_msg(handle: ffi::HANDLE, hdr: &[u8], payload: &[u8]) -> Result<(), NpError> {
-    let mut buf = Vec::with_capacity(hdr.len() + payload.len());
-    buf.extend_from_slice(hdr);
-    buf.extend_from_slice(payload);
-    raw_write(handle, &buf)
+fn raw_send_msg(
+    handle: ffi::HANDLE,
+    scratch: &mut Vec<u8>,
+    hdr: &[u8],
+    payload: &[u8],
+) -> Result<(), NpError> {
+    let total = hdr.len() + payload.len();
+    if scratch.len() < total {
+        scratch.resize(total, 0);
+    }
+    scratch[..hdr.len()].copy_from_slice(hdr);
+    scratch[hdr.len()..total].copy_from_slice(payload);
+    raw_write(handle, &scratch[..total])
 }
 
 /// Read one pipe message. Returns number of bytes read.
@@ -462,6 +470,7 @@ pub struct NpSession {
     // Internal receive buffer for chunked reassembly
     recv_buf: Vec<u8>,
     pkt_buf: Vec<u8>,
+    send_buf: Vec<u8>,
 
     // In-flight message_id set (client-side only)
     inflight_ids: HashSet<u64>,
@@ -566,7 +575,7 @@ impl NpSession {
         if total_msg <= self.packet_size as usize {
             let mut hdr_buf = [0u8; HEADER_SIZE];
             hdr.encode(&mut hdr_buf);
-            return raw_send_msg(self.handle, &hdr_buf, payload);
+            return raw_send_msg(self.handle, &mut self.send_buf, &hdr_buf, payload);
         }
 
         // Chunked send
@@ -588,7 +597,12 @@ impl NpSession {
         // First chunk
         let mut hdr_buf = [0u8; HEADER_SIZE];
         hdr.encode(&mut hdr_buf);
-        raw_send_msg(self.handle, &hdr_buf, &payload[..first_chunk_payload])?;
+        raw_send_msg(
+            self.handle,
+            &mut self.send_buf,
+            &hdr_buf,
+            &payload[..first_chunk_payload],
+        )?;
 
         // Continuation chunks
         let mut offset = first_chunk_payload;
@@ -609,7 +623,12 @@ impl NpSession {
 
             let mut chk_buf = [0u8; HEADER_SIZE];
             chk.encode(&mut chk_buf);
-            raw_send_msg(self.handle, &chk_buf, &payload[offset..offset + this_chunk])?;
+            raw_send_msg(
+                self.handle,
+                &mut self.send_buf,
+                &chk_buf,
+                &payload[offset..offset + this_chunk],
+            )?;
 
             offset += this_chunk;
         }
@@ -1016,6 +1035,7 @@ fn client_handshake(handle: ffi::HANDLE, config: &ClientConfig) -> Result<NpSess
         session_id: ack.session_id,
         recv_buf: Vec::new(),
         pkt_buf: Vec::new(),
+        send_buf: Vec::new(),
         inflight_ids: HashSet::new(),
     })
 }
@@ -1160,6 +1180,7 @@ fn server_handshake(
         session_id,
         recv_buf: Vec::new(),
         pkt_buf: Vec::new(),
+        send_buf: Vec::new(),
         inflight_ids: HashSet::new(),
     })
 }
@@ -1387,6 +1408,7 @@ mod tests {
             session_id: 1,
             recv_buf: Vec::new(),
             pkt_buf: Vec::new(),
+            send_buf: Vec::new(),
             inflight_ids: HashSet::new(),
         };
 
