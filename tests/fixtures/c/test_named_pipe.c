@@ -82,6 +82,7 @@ typedef enum {
     FAKE_ACK_GOOD_THEN_LIMITED_RESPONSE,
     FAKE_ACK_GOOD_THEN_TOO_MANY_ITEMS,
     FAKE_ACK_GOOD_THEN_BAD_BATCH_DIR,
+    FAKE_ACK_GOOD_THEN_BAD_CHUNKED_BATCH_DIR,
     FAKE_ACK_GOOD_THEN_SHORT_RESPONSE,
     FAKE_ACK_GOOD_THEN_BAD_RESPONSE_HEADER,
     FAKE_ACK_GOOD_THEN_ZERO_MESSAGE,
@@ -383,6 +384,7 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
         ctx->mode == FAKE_ACK_GOOD_THEN_LIMITED_RESPONSE ||
         ctx->mode == FAKE_ACK_GOOD_THEN_TOO_MANY_ITEMS ||
         ctx->mode == FAKE_ACK_GOOD_THEN_BAD_BATCH_DIR ||
+        ctx->mode == FAKE_ACK_GOOD_THEN_BAD_CHUNKED_BATCH_DIR ||
         ctx->mode == FAKE_ACK_GOOD_THEN_SHORT_RESPONSE ||
         ctx->mode == FAKE_ACK_GOOD_THEN_BAD_RESPONSE_HEADER) {
         if (!raw_pipe_read(pipe, buf, sizeof(buf), &bytes_read)) {
@@ -477,6 +479,52 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
                 req_hdr.code, NIPC_FLAG_BATCH, 2, req_hdr.message_id,
                 NIPC_STATUS_OK, bad_payload, sizeof(bad_payload));
             if (!raw_pipe_write(pipe, first_pkt, (DWORD)first_len)) {
+                CloseHandle(pipe);
+                return 1;
+            }
+        } else if (ctx->mode == FAKE_ACK_GOOD_THEN_BAD_CHUNKED_BATCH_DIR) {
+            enum { BAD_BATCH_TOTAL = 8, BAD_BATCH_FIRST = 4 };
+            uint8_t bad_payload[BAD_BATCH_TOTAL];
+            memset(bad_payload, 0, sizeof(bad_payload));
+
+            nipc_header_t resp_hdr = {
+                .magic = NIPC_MAGIC_MSG,
+                .version = NIPC_VERSION,
+                .header_len = NIPC_HEADER_LEN,
+                .kind = NIPC_KIND_RESPONSE,
+                .code = req_hdr.code,
+                .flags = NIPC_FLAG_BATCH,
+                .item_count = 2,
+                .message_id = req_hdr.message_id,
+                .payload_len = sizeof(bad_payload),
+                .transport_status = NIPC_STATUS_OK,
+            };
+
+            uint8_t first_pkt[NIPC_HEADER_LEN + BAD_BATCH_FIRST];
+            nipc_header_encode(&resp_hdr, first_pkt, NIPC_HEADER_LEN);
+            memcpy(first_pkt + NIPC_HEADER_LEN, bad_payload, BAD_BATCH_FIRST);
+            if (!raw_pipe_write(pipe, first_pkt, sizeof(first_pkt))) {
+                CloseHandle(pipe);
+                return 1;
+            }
+
+            nipc_chunk_header_t chk = {
+                .magic = NIPC_MAGIC_CHUNK,
+                .version = NIPC_VERSION,
+                .flags = 0,
+                .message_id = req_hdr.message_id,
+                .total_message_len = NIPC_HEADER_LEN + sizeof(bad_payload),
+                .chunk_index = 1,
+                .chunk_count = 2,
+                .chunk_payload_len = sizeof(bad_payload) - BAD_BATCH_FIRST,
+            };
+
+            uint8_t chunk_pkt[NIPC_HEADER_LEN + sizeof(bad_payload) - BAD_BATCH_FIRST];
+            nipc_chunk_header_encode(&chk, chunk_pkt, NIPC_HEADER_LEN);
+            memcpy(chunk_pkt + NIPC_HEADER_LEN,
+                   bad_payload + BAD_BATCH_FIRST,
+                   sizeof(bad_payload) - BAD_BATCH_FIRST);
+            if (!raw_pipe_write(pipe, chunk_pkt, sizeof(chunk_pkt))) {
                 CloseHandle(pipe);
                 return 1;
             }
@@ -1592,6 +1640,7 @@ static void test_response_limit_validation(void)
         { "response payload limit rejected", FAKE_ACK_GOOD_THEN_LIMITED_RESPONSE, NIPC_NP_ERR_LIMIT_EXCEEDED },
         { "response batch item_count limit rejected", FAKE_ACK_GOOD_THEN_TOO_MANY_ITEMS, NIPC_NP_ERR_LIMIT_EXCEEDED },
         { "response batch directory rejected", FAKE_ACK_GOOD_THEN_BAD_BATCH_DIR, NIPC_NP_ERR_PROTOCOL },
+        { "chunked response batch directory rejected", FAKE_ACK_GOOD_THEN_BAD_CHUNKED_BATCH_DIR, NIPC_NP_ERR_PROTOCOL },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -1644,6 +1693,8 @@ static void test_response_limit_validation(void)
                 size_t rpayload_len;
                 err = nipc_np_receive(&session, rbuf, sizeof(rbuf),
                                       &rhdr, &rpayload, &rpayload_len);
+                if (err != cases[i].expected)
+                    printf("    note: %s returned %d\n", cases[i].name, (int)err);
                 check(cases[i].name, err == cases[i].expected);
             }
 

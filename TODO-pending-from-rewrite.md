@@ -16,6 +16,33 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
+- next ordinary Windows Named Pipe chunked-batch validation follow-up:
+    - fresh clean `win11` direct `gcov` after the latest connect-validation slice still reports the chunked completion path uncovered:
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:1005`: reached only when a chunked payload fully assembles
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:1007`: still not covered
+    - implication:
+      - the remaining ordinary miss is not basic request/response validation anymore
+      - it is the post-assembly `validate_batch()` rejection for a malformed chunked batch payload
+    - planned deterministic test:
+      - fake server sends a chunked batch response with `item_count = 2`, a payload larger than one pipe packet, and an invalid batch directory
+      - client should assemble all chunks and return `NIPC_NP_ERR_PROTOCOL`
+    - exact clean `win11` validation on the modified tree:
+      - targeted build + `ctest --test-dir build --output-on-failure -R "^test_named_pipe$"`: pass
+      - direct coverage-build `test_named_pipe.exe` + `gcov` on `netipc_named_pipe.c`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:1005`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:1007`: covered
+    - nuance:
+      - this malformed chunked payload still fails inside `validate_batch()` at the short-directory guard:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:858`
+      - it does **not** reach the deeper packed-area path yet:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:860-864`
+    - implication:
+      - the post-assembly `validate_batch()` rejection path is now covered honestly
+      - any remaining `860-864` work needs a different malformed payload, not more of the same short-directory case
+    - non-goals for this follow-up:
+      - allocation-failure-only chunk buffer paths
+      - handshake send timing tricks
+      - in-flight growth failure paths
 - next ordinary Windows Named Pipe connect validation follow-up:
     - client-handshake send recheck outcome:
       - the attempted fake-server `"closes before HELLO"` follow-up did not produce a stable direct `raw_send()` failure on clean `win11`
