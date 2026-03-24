@@ -71,6 +71,338 @@ static nipc_np_client_config_t default_client_config(void)
     };
 }
 
+typedef enum {
+    FAKE_ACK_BAD_HEADER = 1,
+    FAKE_ACK_WRONG_KIND,
+    FAKE_ACK_BAD_STATUS,
+    FAKE_ACK_BAD_PAYLOAD,
+    FAKE_ACK_GOOD_THEN_CLOSE,
+    FAKE_ACK_GOOD_THEN_BAD_CHUNK,
+} fake_ack_mode_t;
+
+typedef enum {
+    FAKE_HELLO_BAD_HEADER = 1,
+    FAKE_HELLO_WRONG_KIND,
+    FAKE_HELLO_BAD_PAYLOAD,
+} fake_hello_mode_t;
+
+typedef struct {
+    const char *service;
+    HANDLE ready_event;
+    int result;
+    fake_ack_mode_t mode;
+    uint32_t packet_size;
+} fake_server_thread_ctx_t;
+
+typedef struct {
+    const char *service;
+    HANDLE ready_event;
+    int result;
+    fake_hello_mode_t mode;
+} fake_client_thread_ctx_t;
+
+static int raw_pipe_write(HANDLE pipe, const void *buf, DWORD len)
+{
+    DWORD written = 0;
+    return WriteFile(pipe, buf, len, &written, NULL) && written == len;
+}
+
+static int raw_pipe_read(HANDLE pipe, void *buf, DWORD cap, DWORD *bytes_read)
+{
+    DWORD n = 0;
+    BOOL ok = ReadFile(pipe, buf, cap, &n, NULL);
+    if (!ok)
+        return 0;
+    *bytes_read = n;
+    return 1;
+}
+
+static HANDLE create_raw_pipe(const char *service, uint32_t buf_size, wchar_t *pipe_name)
+{
+    if (nipc_np_build_pipe_name(pipe_name, NIPC_NP_MAX_PIPE_NAME,
+                                TEST_RUN_DIR, service) < 0)
+        return INVALID_HANDLE_VALUE;
+
+    return CreateNamedPipeW(
+        pipe_name,
+        PIPE_ACCESS_DUPLEX,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+        1,
+        buf_size,
+        buf_size,
+        0,
+        NULL);
+}
+
+static HANDLE connect_raw_pipe(const wchar_t *pipe_name)
+{
+    for (int i = 0; i < 100; i++) {
+        HANDLE h = CreateFileW(
+            pipe_name,
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            NULL,
+            OPEN_EXISTING,
+            0,
+            NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            DWORD mode = PIPE_READMODE_MESSAGE;
+            if (!SetNamedPipeHandleState(h, &mode, NULL, NULL)) {
+                CloseHandle(h);
+                return INVALID_HANDLE_VALUE;
+            }
+            return h;
+        }
+        Sleep(10);
+    }
+    return INVALID_HANDLE_VALUE;
+}
+
+static int connect_named_pipe_server(HANDLE pipe)
+{
+    if (ConnectNamedPipe(pipe, NULL))
+        return 1;
+    return GetLastError() == ERROR_PIPE_CONNECTED;
+}
+
+static size_t build_control_packet(uint8_t *dst, size_t dst_size,
+                                   uint16_t kind, uint16_t code,
+                                   uint32_t transport_status,
+                                   const void *payload, size_t payload_len)
+{
+    if (dst_size < NIPC_HEADER_LEN + payload_len)
+        return 0;
+
+    nipc_header_t hdr = {
+        .magic = NIPC_MAGIC_MSG,
+        .version = NIPC_VERSION,
+        .header_len = NIPC_HEADER_LEN,
+        .kind = kind,
+        .code = code,
+        .flags = 0,
+        .item_count = 1,
+        .message_id = 0,
+        .payload_len = (uint32_t)payload_len,
+        .transport_status = transport_status,
+    };
+
+    nipc_header_encode(&hdr, dst, NIPC_HEADER_LEN);
+    if (payload_len > 0)
+        memcpy(dst + NIPC_HEADER_LEN, payload, payload_len);
+    return NIPC_HEADER_LEN + payload_len;
+}
+
+static size_t build_valid_hello_payload(uint8_t *dst, size_t dst_size, uint32_t packet_size)
+{
+    nipc_hello_t hello = {
+        .layout_version = 1,
+        .flags = 0,
+        .supported_profiles = NIPC_PROFILE_BASELINE,
+        .preferred_profiles = 0,
+        .max_request_payload_bytes = 4096,
+        .max_request_batch_items = 16,
+        .max_response_payload_bytes = 4096,
+        .max_response_batch_items = 16,
+        .auth_token = AUTH_TOKEN,
+        .packet_size = packet_size,
+    };
+    nipc_hello_encode(&hello, dst, dst_size);
+    return 44;
+}
+
+static size_t build_valid_hello_ack_payload(uint8_t *dst, size_t dst_size,
+                                            uint32_t packet_size, uint64_t session_id)
+{
+    nipc_hello_ack_t ack = {
+        .layout_version = 1,
+        .flags = 0,
+        .server_supported_profiles = NIPC_PROFILE_BASELINE,
+        .intersection_profiles = NIPC_PROFILE_BASELINE,
+        .selected_profile = NIPC_PROFILE_BASELINE,
+        .agreed_max_request_payload_bytes = 65536,
+        .agreed_max_request_batch_items = 16,
+        .agreed_max_response_payload_bytes = 65536,
+        .agreed_max_response_batch_items = 16,
+        .agreed_packet_size = packet_size,
+        .session_id = session_id,
+    };
+    nipc_hello_ack_encode(&ack, dst, dst_size);
+    return 48;
+}
+
+static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
+{
+    fake_server_thread_ctx_t *ctx = (fake_server_thread_ctx_t *)arg;
+    ctx->result = 0;
+
+    uint32_t packet_size = ctx->packet_size ? ctx->packet_size : NIPC_NP_DEFAULT_PACKET_SIZE;
+    wchar_t pipe_name[NIPC_NP_MAX_PIPE_NAME];
+    HANDLE pipe = create_raw_pipe(ctx->service, packet_size, pipe_name);
+    if (pipe == INVALID_HANDLE_VALUE) {
+        SetEvent(ctx->ready_event);
+        return 1;
+    }
+
+    SetEvent(ctx->ready_event);
+    if (!connect_named_pipe_server(pipe)) {
+        CloseHandle(pipe);
+        return 1;
+    }
+
+    uint8_t buf[4096];
+    DWORD bytes_read = 0;
+    if (!raw_pipe_read(pipe, buf, sizeof(buf), &bytes_read)) {
+        CloseHandle(pipe);
+        return 1;
+    }
+
+    uint8_t payload[64];
+    uint8_t msg[4096];
+    size_t msg_len = 0;
+
+    if (ctx->mode == FAKE_ACK_BAD_HEADER) {
+        memset(msg, 0, 16);
+        msg_len = 16;
+    } else if (ctx->mode == FAKE_ACK_WRONG_KIND) {
+        size_t payload_len = build_valid_hello_ack_payload(payload, sizeof(payload),
+                                                           packet_size, 1);
+        msg_len = build_control_packet(msg, sizeof(msg),
+                                       NIPC_KIND_RESPONSE, NIPC_CODE_HELLO_ACK,
+                                       NIPC_STATUS_OK, payload, payload_len);
+    } else if (ctx->mode == FAKE_ACK_BAD_STATUS) {
+        size_t payload_len = build_valid_hello_ack_payload(payload, sizeof(payload),
+                                                           packet_size, 1);
+        msg_len = build_control_packet(msg, sizeof(msg),
+                                       NIPC_KIND_CONTROL, NIPC_CODE_HELLO_ACK,
+                                       NIPC_STATUS_INTERNAL_ERROR, payload, payload_len);
+    } else {
+        size_t payload_len = build_valid_hello_ack_payload(payload, sizeof(payload),
+                                                           packet_size, 1);
+        if (ctx->mode == FAKE_ACK_BAD_PAYLOAD)
+            payload_len = 8;
+        msg_len = build_control_packet(msg, sizeof(msg),
+                                       NIPC_KIND_CONTROL, NIPC_CODE_HELLO_ACK,
+                                       NIPC_STATUS_OK, payload, payload_len);
+    }
+
+    if (!raw_pipe_write(pipe, msg, (DWORD)msg_len)) {
+        CloseHandle(pipe);
+        return 1;
+    }
+
+    if (ctx->mode == FAKE_ACK_GOOD_THEN_CLOSE) {
+        CloseHandle(pipe);
+        ctx->result = 1;
+        return 0;
+    }
+
+    if (ctx->mode == FAKE_ACK_GOOD_THEN_BAD_CHUNK) {
+        if (!raw_pipe_read(pipe, buf, sizeof(buf), &bytes_read)) {
+            CloseHandle(pipe);
+            return 1;
+        }
+
+        nipc_header_t req_hdr;
+        if (nipc_header_decode(buf, (size_t)bytes_read, &req_hdr) != NIPC_OK) {
+            CloseHandle(pipe);
+            return 1;
+        }
+
+        uint8_t payload_bytes[200];
+        memset(payload_bytes, 0xAB, sizeof(payload_bytes));
+
+        nipc_header_t resp_hdr = {
+            .magic = NIPC_MAGIC_MSG,
+            .version = NIPC_VERSION,
+            .header_len = NIPC_HEADER_LEN,
+            .kind = NIPC_KIND_RESPONSE,
+            .code = req_hdr.code,
+            .flags = 0,
+            .item_count = 1,
+            .message_id = req_hdr.message_id,
+            .payload_len = sizeof(payload_bytes),
+            .transport_status = NIPC_STATUS_OK,
+        };
+
+        uint8_t first_pkt[128];
+        nipc_header_encode(&resp_hdr, first_pkt, NIPC_HEADER_LEN);
+        memcpy(first_pkt + NIPC_HEADER_LEN, payload_bytes, 96);
+        if (!raw_pipe_write(pipe, first_pkt, NIPC_HEADER_LEN + 96)) {
+            CloseHandle(pipe);
+            return 1;
+        }
+
+        nipc_chunk_header_t chk = {
+            .magic = NIPC_MAGIC_CHUNK,
+            .version = NIPC_VERSION,
+            .flags = 0,
+            .message_id = req_hdr.message_id,
+            .total_message_len = NIPC_HEADER_LEN + sizeof(payload_bytes),
+            .chunk_index = 2, /* intentionally wrong: should be 1 */
+            .chunk_count = 3,
+            .chunk_payload_len = 96,
+        };
+
+        uint8_t chunk_pkt[128];
+        nipc_chunk_header_encode(&chk, chunk_pkt, NIPC_HEADER_LEN);
+        memcpy(chunk_pkt + NIPC_HEADER_LEN, payload_bytes + 96, 96);
+        if (!raw_pipe_write(pipe, chunk_pkt, NIPC_HEADER_LEN + 96)) {
+            CloseHandle(pipe);
+            return 1;
+        }
+    }
+
+    CloseHandle(pipe);
+    ctx->result = 1;
+    return 0;
+}
+
+static DWORD WINAPI fake_hello_client_thread(LPVOID arg)
+{
+    fake_client_thread_ctx_t *ctx = (fake_client_thread_ctx_t *)arg;
+    ctx->result = 0;
+
+    wchar_t pipe_name[NIPC_NP_MAX_PIPE_NAME];
+    if (nipc_np_build_pipe_name(pipe_name, NIPC_NP_MAX_PIPE_NAME,
+                                TEST_RUN_DIR, ctx->service) < 0) {
+        SetEvent(ctx->ready_event);
+        return 1;
+    }
+
+    SetEvent(ctx->ready_event);
+    HANDLE pipe = connect_raw_pipe(pipe_name);
+    if (pipe == INVALID_HANDLE_VALUE)
+        return 1;
+
+    uint8_t payload[64];
+    uint8_t msg[256];
+    size_t msg_len = 0;
+
+    if (ctx->mode == FAKE_HELLO_BAD_HEADER) {
+        memset(msg, 0, 16);
+        msg_len = 16;
+    } else if (ctx->mode == FAKE_HELLO_WRONG_KIND) {
+        size_t payload_len = build_valid_hello_payload(payload, sizeof(payload),
+                                                       NIPC_NP_DEFAULT_PACKET_SIZE);
+        msg_len = build_control_packet(msg, sizeof(msg),
+                                       NIPC_KIND_RESPONSE, NIPC_CODE_HELLO,
+                                       NIPC_STATUS_OK, payload, payload_len);
+    } else {
+        size_t payload_len = build_valid_hello_payload(payload, sizeof(payload),
+                                                       NIPC_NP_DEFAULT_PACKET_SIZE);
+        payload_len = 8;
+        msg_len = build_control_packet(msg, sizeof(msg),
+                                       NIPC_KIND_CONTROL, NIPC_CODE_HELLO,
+                                       NIPC_STATUS_OK, payload, payload_len);
+    }
+
+    ctx->result = raw_pipe_write(pipe, msg, (DWORD)msg_len);
+    if (ctx->result)
+        Sleep(50);
+    CloseHandle(pipe);
+    return ctx->result ? 0 : 1;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Test: FNV-1a hash                                                  */
 /* ------------------------------------------------------------------ */
@@ -613,6 +945,227 @@ static void test_unknown_response_message_id(void)
     check("unknown-id server ok", ctx.server_ok);
 }
 
+static void test_client_handshake_rejections(void)
+{
+    printf("--- Client handshake protocol rejections ---\n");
+
+    struct {
+        const char *name;
+        fake_ack_mode_t mode;
+        nipc_np_error_t expected;
+        uint32_t packet_size;
+    } cases[] = {
+        { "bad HELLO_ACK header", FAKE_ACK_BAD_HEADER, NIPC_NP_ERR_PROTOCOL, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "wrong HELLO_ACK kind", FAKE_ACK_WRONG_KIND, NIPC_NP_ERR_PROTOCOL, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "bad HELLO_ACK status", FAKE_ACK_BAD_STATUS, NIPC_NP_ERR_HANDSHAKE, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "bad HELLO_ACK payload", FAKE_ACK_BAD_PAYLOAD, NIPC_NP_ERR_PROTOCOL, NIPC_NP_DEFAULT_PACKET_SIZE },
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char service[64];
+        unique_service(service, sizeof(service));
+
+        HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+        fake_server_thread_ctx_t ctx = {
+            .service = service,
+            .ready_event = ready_event,
+            .result = 0,
+            .mode = cases[i].mode,
+            .packet_size = cases[i].packet_size,
+        };
+
+        HANDLE thread = CreateThread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
+        check("fake ack server thread created", thread != NULL);
+        if (!thread) {
+            CloseHandle(ready_event);
+            continue;
+        }
+
+        WaitForSingleObject(ready_event, 5000);
+        CloseHandle(ready_event);
+
+        nipc_np_client_config_t ccfg = default_client_config();
+        ccfg.packet_size = cases[i].packet_size;
+        nipc_np_session_t session;
+        nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+        check(cases[i].name, err == cases[i].expected);
+        if (err == NIPC_NP_OK)
+            nipc_np_close_session(&session);
+
+        WaitForSingleObject(thread, 5000);
+        CloseHandle(thread);
+        check("fake ack server completed", ctx.result == 1);
+    }
+}
+
+static void test_server_handshake_rejections(void)
+{
+    printf("--- Server handshake protocol rejections ---\n");
+
+    struct {
+        const char *name;
+        fake_hello_mode_t mode;
+    } cases[] = {
+        { "bad HELLO header", FAKE_HELLO_BAD_HEADER },
+        { "wrong HELLO kind", FAKE_HELLO_WRONG_KIND },
+        { "bad HELLO payload", FAKE_HELLO_BAD_PAYLOAD },
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char service[64];
+        unique_service(service, sizeof(service));
+
+        nipc_np_server_config_t scfg = default_server_config();
+        nipc_np_listener_t listener;
+        nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, service, &scfg, &listener);
+        check("server listen for fake hello", err == NIPC_NP_OK);
+        if (err != NIPC_NP_OK)
+            continue;
+
+        HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+        fake_client_thread_ctx_t ctx = {
+            .service = service,
+            .ready_event = ready_event,
+            .result = 0,
+            .mode = cases[i].mode,
+        };
+
+        HANDLE thread = CreateThread(NULL, 0, fake_hello_client_thread, &ctx, 0, NULL);
+        check("fake hello client thread created", thread != NULL);
+        if (!thread) {
+            CloseHandle(ready_event);
+            nipc_np_close_listener(&listener);
+            continue;
+        }
+
+        WaitForSingleObject(ready_event, 5000);
+        CloseHandle(ready_event);
+
+        nipc_np_session_t session;
+        err = nipc_np_accept(&listener, 1, &session);
+        if (err != NIPC_NP_ERR_PROTOCOL)
+            printf("    note: %s returned %d\n", cases[i].name, (int)err);
+        check(cases[i].name, err == NIPC_NP_ERR_PROTOCOL);
+        if (err == NIPC_NP_OK)
+            nipc_np_close_session(&session);
+
+        WaitForSingleObject(thread, 5000);
+        CloseHandle(thread);
+        check("fake hello client completed", ctx.result == 1);
+        nipc_np_close_listener(&listener);
+    }
+}
+
+static void test_receive_after_peer_disconnect(void)
+{
+    printf("--- Receive after peer disconnect ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    fake_server_thread_ctx_t ctx = {
+        .service = service,
+        .ready_event = ready_event,
+        .result = 0,
+        .mode = FAKE_ACK_GOOD_THEN_CLOSE,
+        .packet_size = NIPC_NP_DEFAULT_PACKET_SIZE,
+    };
+
+    HANDLE thread = CreateThread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
+    check("disconnect fake server thread created", thread != NULL);
+    if (!thread) {
+        CloseHandle(ready_event);
+        return;
+    }
+
+    WaitForSingleObject(ready_event, 5000);
+    CloseHandle(ready_event);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_np_session_t session;
+    nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("disconnect test connect", err == NIPC_NP_OK);
+
+    if (err == NIPC_NP_OK) {
+        uint8_t buf[128];
+        nipc_header_t hdr;
+        const void *payload;
+        size_t payload_len;
+        err = nipc_np_receive(&session, buf, sizeof(buf), &hdr, &payload, &payload_len);
+        check("receive sees peer disconnect", err == NIPC_NP_ERR_RECV);
+        nipc_np_close_session(&session);
+    }
+
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    check("disconnect fake server completed", ctx.result == 1);
+}
+
+static void test_chunk_validation_error(void)
+{
+    printf("--- Chunk validation error ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    fake_server_thread_ctx_t ctx = {
+        .service = service,
+        .ready_event = ready_event,
+        .result = 0,
+        .mode = FAKE_ACK_GOOD_THEN_BAD_CHUNK,
+        .packet_size = 128,
+    };
+
+    HANDLE thread = CreateThread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
+    check("chunk fake server thread created", thread != NULL);
+    if (!thread) {
+        CloseHandle(ready_event);
+        return;
+    }
+
+    WaitForSingleObject(ready_event, 5000);
+    CloseHandle(ready_event);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    ccfg.packet_size = 128;
+    ccfg.max_request_payload_bytes = 65536;
+    ccfg.max_response_payload_bytes = 65536;
+    nipc_np_session_t session;
+    nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("chunk test connect", err == NIPC_NP_OK);
+
+    if (err == NIPC_NP_OK) {
+        uint8_t payload[1] = { 0x55 };
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = 77,
+        };
+
+        err = nipc_np_send(&session, &hdr, payload, sizeof(payload));
+        check("chunk test request send", err == NIPC_NP_OK);
+
+        if (err == NIPC_NP_OK) {
+            uint8_t rbuf[256];
+            nipc_header_t rhdr;
+            const void *rpayload;
+            size_t rpayload_len;
+            err = nipc_np_receive(&session, rbuf, sizeof(rbuf),
+                                  &rhdr, &rpayload, &rpayload_len);
+            check("chunk mismatch rejected", err == NIPC_NP_ERR_CHUNK);
+        }
+
+        nipc_np_close_session(&session);
+    }
+
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    check("chunk fake server completed", ctx.result == 1);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Test: listener conflicts / bad params / noop close                 */
 /* ------------------------------------------------------------------ */
@@ -742,6 +1295,10 @@ int main(void)
     test_auth_failure();
     test_duplicate_message_id();
     test_unknown_response_message_id();
+    test_client_handshake_rejections();
+    test_server_handshake_rejections();
+    test_receive_after_peer_disconnect();
+    test_chunk_validation_error();
     test_addr_in_use();
     test_bad_params_and_noop_close();
 

@@ -16,17 +16,22 @@ Verified on `2026-03-24`:
   - coverage-only Windows test subset passes inside the script
   - the script also runs a dedicated Windows C coverage-only guard executable:
     - `build-windows-coverage-c/bin/test_win_service_guards.exe`
-  - total coverage result: `86.9%`
+  - total coverage result: `88.5%`
   - per-file:
     - `netipc_service_win.c`: `86.9%`
-    - `netipc_named_pipe.c`: `87.3%`
-    - `netipc_win_shm.c`: `86.5%`
+    - `netipc_named_pipe.c`: `89.9%`
+    - `netipc_win_shm.c`: `90.3%`
   - current status: script passes, including the Linux-matching per-file `85%` gate
   - latest ordinary Windows C service gains came from:
     - negotiated SHM attach failure coverage
     - malformed SHM response handling on the L2 client side
     - malformed SHM request handling on the managed server side
     - the typed snapshot default `snapshot_max_items == 0` path
+  - latest Windows Named Pipe follow-up gains came from:
+    - fake HELLO_ACK protocol rejection
+    - fake HELLO protocol rejection
+    - receive-after-disconnect coverage
+    - chunk-index validation failure coverage
 - `bash tests/run-coverage-go-windows.sh 90`:
   - script prints valid coverage results on `win11`
   - total coverage result: `96.7%`

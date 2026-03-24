@@ -19,28 +19,30 @@ Finish the rewrite to a production-ready state with:
 - Latest authoritative slice:
   - latest C threshold verification:
     - Linux C was re-run locally and remains safely above the next shared threshold step
-    - Windows C was re-run on `win11` at an explicit `84%` gate and then pushed significantly higher with new ordinary SHM service tests
+    - Windows C was re-run on `win11` at an explicit `85%` gate and then pushed further with ordinary Windows transport tests
     - measured result:
       - Linux C total: `94.1%`
-      - Windows C total: `86.9%`
+      - Windows C total: `88.5%`
       - Windows C file breakdown:
         - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `86.9%`
-        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `87.3%`
-        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `86.5%`
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `89.9%`
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `90.3%`
     - implication:
       - the shared Linux/Windows C gate can now move to `85%`
-      - the dedicated Windows C coverage-only harness is the correct place for these ordinary SHM service tests
+      - the dedicated Windows C coverage-only harness is the correct place for the extra Windows service-guard tests
   - next ordinary C target after the `85%` gate raise:
     - Windows C is no longer blocked by `netipc_service_win.c`
     - the next weakest tracked Windows C files are now:
-      - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c` (`86.5%`)
-      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c` (`87.3%`)
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c` (`86.9%`)
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c` (`89.9%`)
     - implication:
-      - the next honest ordinary C gains should come from L1 Windows transport tests
+      - the next honest ordinary C gains should come from either:
+        - remaining deterministic Windows Named Pipe branches
+        - or ordinary Windows service retry / teardown paths
       - target files:
-        - `tests/fixtures/c/test_win_shm.c`
         - `tests/fixtures/c/test_named_pipe.c`
-      - do not grind the service layer further unless fresh gcov shows a new ordinary cluster there
+        - `tests/fixtures/c/test_win_service_guards.c`
+      - do not spend time on Win32 fault-injection-only branches yet
   - current in-progress slice:
     - add only deterministic L1 Windows transport tests that match fresh gcov gaps
     - focus areas:
@@ -73,28 +75,31 @@ Finish the rewrite to a production-ready state with:
         - long service-name object-name overflow validation
         - HYBRID-only event-name overflow validation
         - direct public `nipc_win_shm_send()` / `nipc_win_shm_receive()` bad-parameter checks
-    - measured result on the real modified `win11` coverage build:
-      - direct `gcov` on the generated `.gcno` files reports:
-        - `netipc_service_win.c`: `86.91%` (`677/779`)
-        - `netipc_named_pipe.c`: `88.37%` (`418/473`)
-        - `netipc_win_shm.c`: `90.54%` (`335/370`)
+  - measured result on the real modified `win11` coverage build:
+    - direct `gcov` on the generated `.gcno` files reports:
+        - `netipc_service_win.c`: `86.9%` (`677/779`)
+        - `netipc_named_pipe.c`: `89.9%` (`425/473`)
+        - `netipc_win_shm.c`: `90.3%` (`334/370`)
       - implied combined total across the 3 tracked C Windows files:
-        - `88.16%` (`1430/1622`)
+        - `88.5%` (`1436/1622`)
     - implication:
       - the ordinary Windows C transport tests did materially raise the two transport files
       - the remaining ordinary Windows C gaps are now much more concentrated in:
-        - Named Pipe handshake / disconnect / chunk-error branches
+        - Named Pipe disconnect / send / limit / chunk-error branches
         - true Win32 failure paths
-    - current uncertainty:
-      - the full interactive `ssh ... bash tests/run-coverage-c-windows.sh 85` path did not exit cleanly during this slice
+    - latest handshake / disconnect follow-up:
+      - added fake-peer Windows Named Pipe tests for:
+        - client HELLO_ACK protocol rejection
+        - server HELLO protocol rejection
+        - receive after peer disconnect
+        - chunk-index validation failure
       - facts:
-        - the coverage-build ctest subset passed
+        - `test_named_pipe` passes on `win11`
+        - the full `bash tests/run-coverage-c-windows.sh 85` run now completes cleanly on `win11`
         - direct `test_win_service_guards.exe` runs complete with `91/91`
-        - direct per-file `gcov` runs complete and produce the numbers above
-      - working theory:
-        - the problem is in the interactive wrapper path around the full script, not in the underlying coverage data
-      - action:
-        - do not claim the full interactive script exit path is fixed until it is reproduced cleanly
+      - implication:
+        - the earlier timeout seen during one intermediate rerun did not reproduce cleanly
+        - the Windows C coverage script is currently trustworthy again on the real modified tree
   - follow-up from the first Windows C service fix attempt:
     - adding the new client guard tests directly into `tests/fixtures/c/test_win_service_extra.c` did raise Windows C coverage in the coverage build
     - but that same edit introduced a real side effect in the normal `win11` build:
