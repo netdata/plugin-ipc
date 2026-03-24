@@ -483,9 +483,14 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
                 return 1;
             }
         } else if (ctx->mode == FAKE_ACK_GOOD_THEN_BAD_CHUNKED_BATCH_DIR) {
-            enum { BAD_BATCH_TOTAL = 8, BAD_BATCH_FIRST = 4 };
+            enum { BAD_BATCH_TOTAL = 24, BAD_BATCH_FIRST = 8 };
             uint8_t bad_payload[BAD_BATCH_TOTAL];
             memset(bad_payload, 0, sizeof(bad_payload));
+            uint32_t bad_dir[4] = {
+                4, 4, /* first item intentionally misaligned */
+                0, 0,
+            };
+            memcpy(bad_payload, bad_dir, sizeof(bad_dir));
 
             nipc_header_t resp_hdr = {
                 .magic = NIPC_MAGIC_MSG,

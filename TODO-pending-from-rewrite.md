@@ -16,6 +16,36 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
+- next ordinary Windows Named Pipe deep batch-validation follow-up:
+    - fresh clean `win11` direct `gcov` after the latest chunked-batch slice reports:
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:1005`: covered
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:1007`: covered
+      - but inside `validate_batch()` the deeper packed-area path is still not reached:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:860-864`
+    - implication:
+      - the current malformed chunked batch only proves post-assembly rejection
+      - it still fails at the earlier short-directory guard, not inside the real directory validator
+    - planned deterministic work:
+      - inspect `nipc_batch_dir_validate()` and craft a chunked batch payload with:
+        - `payload_len >= dir_aligned`
+        - invalid directory offsets/lengths inside the aligned directory
+      - keep the first packet small enough to force the chunked receive path
+    - exact clean `win11` validation on the modified tree:
+      - targeted build + `ctest --test-dir build --output-on-failure -R "^test_named_pipe$"`: pass
+      - direct coverage-build `test_named_pipe.exe` + `gcov` on `netipc_named_pipe.c`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:860`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:861`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:864`: covered
+    - nuance:
+      - the crafted payload also still exercises the earlier protocol-return site:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:858`
+      - but now the packed-area validator path is proven too, so the deeper branch is no longer a gap
+    - implication:
+      - the chunked post-assembly batch-validation path is now covered honestly end-to-end
+    - non-goals for this follow-up:
+      - allocation-failure-only chunk buffer paths
+      - handshake timing tricks
+      - in-flight growth failure paths
 - next ordinary Windows Named Pipe chunked-batch validation follow-up:
     - fresh clean `win11` direct `gcov` after the latest connect-validation slice still reports the chunked completion path uncovered:
       - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:1005`: reached only when a chunked payload fully assembles
