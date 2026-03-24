@@ -23,17 +23,18 @@ Verified on `2026-03-24`:
     - `test_win_service_guards_extra.exe`: `33 passed, 0 failed`
     - `test_win_service_extra.exe`: `81 passed, 0 failed`
   - the remaining Windows C subset then runs one-by-one with `ctest --timeout 60`
-  - total coverage result: `92.1%`
+  - total coverage result: `92.2%`
   - per-file:
-    - `netipc_service_win.c`: `91.4%`
-    - `netipc_named_pipe.c`: `92.2%`
-    - `netipc_win_shm.c`: `93.5%`
+    - `netipc_service_win.c`: `91.3%`
+    - `netipc_named_pipe.c`: `92.4%`
+    - `netipc_win_shm.c`: `94.1%`
   - current status: script passes, including the Linux-matching per-file `90%` gate
   - latest ordinary Windows C transport gains came from:
     - dedicated coverage-only service-guard tests staying split into smaller executables
     - manual HYBRID mapping setup to reach the client-attach event-name overflow branch honestly
     - deterministic HYBRID and BUSYWAIT receive timeout / disconnect tests
     - client-side oversized-response `MSG_TOO_LARGE` coverage for WinSHM
+    - second chunked round-trip coverage proving client receive-buffer reuse on the same session
   - script detail:
     - `test_win_service_guards.exe`, `test_win_service_guards_extra.exe`, and `test_win_service_extra.exe` now run under `timeout 120`
     - the generic Windows C subset no longer relies on `test_win_service_extra` inside the unordered `ctest` loop

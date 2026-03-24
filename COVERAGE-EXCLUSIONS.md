@@ -149,11 +149,11 @@ Verified on `2026-03-24`:
 
 - C:
   - script: `tests/run-coverage-c-windows.sh 90`
-  - result: `92.1%`
+  - result: `92.2%`
   - per-file:
-    - `netipc_service_win.c`: `91.4%`
-    - `netipc_named_pipe.c`: `92.2%`
-    - `netipc_win_shm.c`: `93.5%`
+    - `netipc_service_win.c`: `91.3%`
+    - `netipc_named_pipe.c`: `92.4%`
+    - `netipc_win_shm.c`: `94.1%`
   - status:
     - passes the Linux-matching per-file and total `90%` gates
     - the script now runs three bounded direct executables before the generic `ctest` loop:
@@ -166,9 +166,10 @@ Verified on `2026-03-24`:
       - `test_win_service_extra.exe`: `81 passed, 0 failed`
     - the remaining Windows C subset then runs one-by-one under `ctest --timeout 60`
     - the latest ordinary Windows SHM follow-up raised:
-      - `netipc_service_win.c` remained `91.4%`
-      - `netipc_named_pipe.c` to `92.2%`
-      - `netipc_win_shm.c` from `90.5%` to `93.5%`
+      - `netipc_service_win.c` remained around `91%`
+      - `netipc_named_pipe.c` to `92.4%`
+      - `netipc_win_shm.c` from `90.5%` to `94.1%`
+      - the new second chunked round-trip test now covers the client receive-buffer reuse fast path in `ensure_recv_buf()`
 
 - Go:
   - script: `tests/run-coverage-go-windows.sh 90`

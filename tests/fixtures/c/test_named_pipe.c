@@ -780,6 +780,7 @@ typedef struct {
     const char *run_dir;
     const char *service;
     int         server_ok;
+    int         round_trips;
     HANDLE      ready_event;
 } chunked_server_ctx_t;
 
@@ -812,13 +813,19 @@ static DWORD WINAPI chunked_server_thread(LPVOID arg)
     nipc_header_t hdr;
     const void *payload;
     size_t payload_len;
+    int round_trips = (ctx->round_trips > 0) ? ctx->round_trips : 1;
 
-    err = nipc_np_receive(&session, buf, sizeof(buf), &hdr, &payload, &payload_len);
-    if (err == NIPC_NP_OK) {
+    for (int i = 0; i < round_trips; i++) {
+        err = nipc_np_receive(&session, buf, sizeof(buf), &hdr, &payload, &payload_len);
+        if (err != NIPC_NP_OK)
+            break;
+
         nipc_header_t resp = hdr;
         resp.kind = NIPC_KIND_RESPONSE;
         resp.transport_status = NIPC_STATUS_OK;
         err = nipc_np_send(&session, &resp, payload, payload_len);
+        if (err != NIPC_NP_OK)
+            break;
     }
 
     ctx->server_ok = (err == NIPC_NP_OK);
@@ -839,6 +846,7 @@ static void test_chunked_ping_pong(void)
         .run_dir = TEST_RUN_DIR,
         .service = service,
         .server_ok = 0,
+        .round_trips = 1,
         .ready_event = ready_event,
     };
 
@@ -900,6 +908,106 @@ static void test_chunked_ping_pong(void)
     WaitForSingleObject(thread, 5000);
     CloseHandle(thread);
     check("chunked server ok", ctx.server_ok);
+}
+
+static void test_chunked_receive_reuses_buffer(void)
+{
+    printf("--- Chunked receive reuses session buffer ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    chunked_server_ctx_t ctx = {
+        .run_dir = TEST_RUN_DIR,
+        .service = service,
+        .server_ok = 0,
+        .round_trips = 2,
+        .ready_event = ready_event,
+    };
+
+    HANDLE thread = CreateThread(NULL, 0, chunked_server_thread, &ctx, 0, NULL);
+    WaitForSingleObject(ready_event, 5000);
+    CloseHandle(ready_event);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    ccfg.packet_size = 128;
+    ccfg.max_request_payload_bytes = 65536;
+    ccfg.max_response_payload_bytes = 65536;
+
+    nipc_np_session_t session;
+    nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("chunked reuse connect", err == NIPC_NP_OK);
+
+    if (err == NIPC_NP_OK) {
+        size_t big_len = 500;
+        uint8_t *first = (uint8_t *)malloc(big_len);
+        uint8_t *second = (uint8_t *)malloc(big_len);
+        check("chunked reuse payload alloc", first != NULL && second != NULL);
+
+        if (first && second) {
+            for (size_t i = 0; i < big_len; i++) {
+                first[i] = (uint8_t)(i & 0xFF);
+                second[i] = (uint8_t)((i + 17) & 0xFF);
+            }
+
+            uint8_t rbuf[256];
+            nipc_header_t rhdr;
+            const void *rpayload;
+            size_t rpayload_len;
+            void *first_recv_buf = NULL;
+            size_t first_recv_cap = 0;
+
+            for (int round = 0; round < 2; round++) {
+                uint8_t *payload = (round == 0) ? first : second;
+                uint64_t message_id = (uint64_t)(17 + round);
+                nipc_header_t hdr = {
+                    .kind = NIPC_KIND_REQUEST,
+                    .code = NIPC_METHOD_INCREMENT,
+                    .item_count = 1,
+                    .message_id = message_id,
+                };
+
+                err = nipc_np_send(&session, &hdr, payload, big_len);
+                check(round == 0 ? "chunked reuse first send" : "chunked reuse second send",
+                      err == NIPC_NP_OK);
+
+                if (err != NIPC_NP_OK)
+                    break;
+
+                err = nipc_np_receive(&session, rbuf, sizeof(rbuf),
+                                      &rhdr, &rpayload, &rpayload_len);
+                check(round == 0 ? "chunked reuse first receive" : "chunked reuse second receive",
+                      err == NIPC_NP_OK);
+                check(round == 0 ? "chunked reuse first response id" : "chunked reuse second response id",
+                      err == NIPC_NP_OK && rhdr.message_id == message_id);
+                check(round == 0 ? "chunked reuse first response len" : "chunked reuse second response len",
+                      err == NIPC_NP_OK && rpayload_len == big_len);
+                check(round == 0 ? "chunked reuse first response payload" : "chunked reuse second response payload",
+                      err == NIPC_NP_OK && rpayload_len == big_len && memcmp(rpayload, payload, big_len) == 0);
+
+                if (round == 0 && err == NIPC_NP_OK) {
+                    first_recv_buf = session.recv_buf;
+                    first_recv_cap = session.recv_buf_size;
+                    check("chunked reuse first receive grows buffer",
+                          first_recv_buf != NULL && first_recv_cap >= big_len);
+                } else if (round == 1 && err == NIPC_NP_OK) {
+                    check("chunked reuse keeps recv buffer pointer",
+                          session.recv_buf == first_recv_buf);
+                    check("chunked reuse keeps recv buffer capacity",
+                          session.recv_buf_size == first_recv_cap);
+                }
+            }
+        }
+
+        free(first);
+        free(second);
+        nipc_np_close_session(&session);
+    }
+
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    check("chunked reuse server ok", ctx.server_ok);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1596,6 +1704,7 @@ int main(void)
     test_service_validation();
     test_ping_pong();
     test_chunked_ping_pong();
+    test_chunked_receive_reuses_buffer();
     test_auth_failure();
     test_duplicate_message_id();
     test_unknown_response_message_id();

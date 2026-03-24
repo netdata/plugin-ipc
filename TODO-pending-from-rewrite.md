@@ -17,6 +17,20 @@ Finish the rewrite to a production-ready state with:
 ## Current Focus (2026-03-24)
 
 - Latest authoritative slice:
+    - latest Windows Named Pipe chunked-reuse slice:
+      - deterministic test added:
+        - a second large chunked round-trip on the same client session now proves the client reuses the already-grown receive buffer instead of reallocating it again
+      - exact `win11` validation on the modified tree:
+        - `bash tests/run-coverage-c-windows.sh 90`: pass
+        - `test_named_pipe` inside the clean coverage build: pass
+      - current measured Windows C result:
+        - total: `92.2%`
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `91.3%`
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `92.4%`
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `94.1%`
+      - implication:
+        - the client chunked receive-buffer reuse fast-path in `ensure_recv_buf()` is now covered honestly
+        - the remaining cheap Named Pipe ordinary targets are getting sparse
     - latest Windows C guard + protocol stabilization slice:
       - root-cause fixes applied:
         - the hybrid attach mismatch fake server now creates the wrong SHM profile from the start instead of mutating the region after creation
@@ -40,11 +54,11 @@ Finish the rewrite to a production-ready state with:
       - Windows C was re-run on `win11` at the shared `90%` gate after the guard-harness stabilization slice
       - measured result:
         - Linux C total: `94.1%`
-        - Windows C total: `92.1%`
+        - Windows C total: `92.2%`
         - Windows C file breakdown:
-          - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `91.4%`
-          - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `92.2%`
-          - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `93.5%`
+          - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `91.3%`
+          - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `92.4%`
+          - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `94.1%`
       - implication:
         - the shared Linux/Windows C gate can now move from `85%` to `90%`
         - the dedicated Windows C coverage-only harness is the correct place for the extra Windows service-guard tests
@@ -68,7 +82,7 @@ Finish the rewrite to a production-ready state with:
       - `netipc_win_shm.c` raised from `90.5%` to `93.5%`
       - one transient `test_win_service_guards.exe` timeout was seen on the first post-threshold rerun, but it did not reproduce on an isolated rerun or on the next full script rerun
   - next C threshold step:
-    - with Linux C at `94.1%` and Windows C at `92.1%`, plus every tracked Windows C file above `90%`, the next honest shared gate is `90%`
+    - with Linux C at `94.1%` and Windows C at `92.2%`, plus every tracked Windows C file above `90%`, the next honest shared gate is `90%`
     - non-goals for this threshold step:
       - Win32 fault-injection-only paths
       - service-layer `malloc` / `realloc` / `_beginthreadex` failures
@@ -273,6 +287,22 @@ Finish the rewrite to a production-ready state with:
       - move the missing-string internal-error case into `test_win_service_guards.c`
       - remove it from `test_win_service_guards_extra.c`
       - keep the extra executable focused on the worker-limit / destroy / send-failure cases that already complete reliably under gcov
+  - next ordinary Windows Named Pipe target after the guard-harness stabilization:
+    - fresh `win11` gcov after the fixed `90%` coverage rerun reports:
+      - `netipc_named_pipe.c`: `92.2%` (`436/473`)
+    - important correction:
+      - the `nipc_np_send()` `NIPC_NP_ERR_LIMIT_EXCEEDED` branch at `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:738`
+        is not an ordinary in-flight-limit policy branch here
+      - code evidence:
+        - `inflight_add()` returns `-2` only on `realloc()` failure
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:251-255`
+      - implication:
+        - do not waste time pretending this is a normal deterministic coverage target
+    - next honest deterministic targets:
+      - client chunked receive-buffer reuse fast-path in `ensure_recv_buf()`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:835-836`
+      - if deterministic on `win11`, successful zero-byte disconnect handling in `raw_recv()`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:233-235`
   - next ordinary Windows C target after the stabilized service slice:
     - fresh post-fix `gcov` evidence from `netipc_service_win.c` shows the remaining ordinary branches are now concentrated in:
       - worker-limit rejection in `server_run()`:
