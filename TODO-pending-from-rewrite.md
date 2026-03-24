@@ -12,12 +12,15 @@ Finish the rewrite to a production-ready state with:
 ## TL;DR
 
 - The rewrite itself is in good shape. Linux is green, Windows tests are green, and POSIX/Windows benchmark floors are green.
-- The remaining work is not about core correctness regressions. It is about coverage completeness, coverage-threshold raising, Windows validation parity, and one deferred Windows managed-server stress investigation.
+- The Windows benchmark blocker is now explained and fixed with concrete evidence. The remaining work is not about core correctness regressions. It is about coverage completeness, coverage-threshold raising, Windows validation parity, and one deferred Windows managed-server stress investigation.
 
 ## Current Focus (2026-03-24)
 
 - user decision:
     - the remaining Windows benchmark variation and full-suite flake must be explained, and fixed where possible, before Netdata integration
+    - Costa explicitly decided that this is a hard blocker:
+      - we must find the root cause of the remaining Windows full-suite benchmark instability
+      - no exceptions, no integration before it is explained
     - rationale from the user:
       - the benchmark smoke may hide a production breakdown risk
       - we must not accept unexplained variation or call it noise
@@ -27,6 +30,17 @@ Finish the rewrite to a production-ready state with:
       - the next work is:
         - root-cause analysis of the `c->rust np-pipeline-d16` full-suite failure in the larger suite context
         - root-cause analysis of the remaining `snapshot-shm` variation after the Rust Named Pipe hot-path fix
+        - repeated clean official Windows full-suite reruns with unique CSV paths after the fixes, to verify that the benchmark harness is now stable enough to trust
+    - current status:
+      - blocker satisfied on `2026-03-24`
+      - the two concrete causes were:
+        - overflow-prone `QueryPerformanceCounter` conversion in the Windows C and Go benchmark drivers
+        - heavy WMI process scanning in the Windows benchmark runner CPU fallback
+      - both were fixed
+      - the checked-in Windows benchmark artifacts were refreshed only after two clean official full reruns completed with:
+        - `201` rows
+        - `0` duplicate keys
+        - `0` zero-throughput rows
 
 - next benchmark task after the first Windows Rust hot-path fix:
     - purpose:
@@ -380,10 +394,226 @@ Finish the rewrite to a production-ready state with:
           - the repository no longer shows the old cross-language Rust-server collapse pattern on Windows
           - the earlier one-off `c->rust np-pipeline-d16` full-suite failure remains unreproduced after extensive bounded reruns and one clean official rerun
           - the best current explanation for that one event is a transient host-level stall or suite-level transient, not a deterministic transport/protocol bug
+      - clean full-suite soak rerun after the fix:
+        - reran the full official Windows suite from a fresh clean `win11` clone at commit `2aa62b7`
+        - the first soak run failed again, but with a different and more useful symptom:
+          - runner warning:
+            - `Invalid zero throughput from go client for shm-batch-ping-pong`
+          - exact missing row in the partial CSV:
+            - `shm-batch-ping-pong,go,go,1000`
+          - partial CSV facts:
+            - total rows: `200`
+            - only missing `shm-batch-ping-pong` row:
+              - `go->go @ 1000`
+        - implication:
+          - there is still a real Windows benchmark instability after the snapshot fix
+          - it is no longer centered on `np-pipeline-d16`
+          - the current best target is now:
+            - Go client to Go server
+            - WinSHM batch ping-pong
+            - `1000 req/s`
+      - bounded reproduction after the first soak failure:
+        - reran blocks `5..6` only from the same clean clone with the debug runner
+        - outcome:
+          - passed cleanly with `72` measurements
+          - the previously missing row was present:
+            - `shm-batch-ping-pong,go,go,1000`
+        - implication:
+          - block `5` (`np-batch-ping-pong`) is not sufficient to trigger the failure
+          - the contaminating prefix, if real, is earlier in the suite:
+            - blocks `1..4`
+            - or a larger accumulated prefix that includes them
+      - bounded reproduction with a longer prefix:
+        - reran blocks `3..6` from the same clean clone with the debug runner
+        - outcome:
+          - failed again, but with a different concrete symptom
+          - warning:
+            - `c client failed for shm-batch-ping-pong (exit 124)`
+          - exact failing row:
+            - `shm-batch-ping-pong`
+            - client `c`
+            - server `go`
+            - `10000 req/s`
+          - preserved run dir:
+            - `/tmp/netipc-bench-170103`
+          - preserved files showed:
+            - client stderr empty
+            - Go server stdout contained `READY` and later `SERVER_CPU_SEC=0.015625`
+        - implication:
+          - the benchmark flake is not just a reporting issue
+          - there is a real live-suite Windows SHM batch instability involving the Go server
+          - the server largely sat idle and auto-stopped, which is consistent with:
+            - no request being observed on the server side
+            - or client/server ending up on different SHM state
+          - simple stale leftover objects are not sufficient to explain it:
+            - rerunning the exact same row afterward with the same `RUN_DIR` and same service name passed immediately
+      - bounded reproduction with the same longer prefix, second rerun:
+        - reran blocks `3..6` again from the same clean clone with the improved debug runner
+        - outcome:
+          - passed cleanly with `108` measurements
+          - no missing rows
+          - the previously failing row was present:
+            - `shm-batch-ping-pong c->go @ 10000`: `4983532`
+          - the previously missing row was present:
+            - `shm-batch-ping-pong go->go @ 1000`: `497521`
+        - important performance facts from that same successful run:
+          - `shm-batch-ping-pong` with Go server at max rate was still materially slower than the surrounding rows:
+            - `c->go @ max`: `43048873`
+            - `rust->go @ max`: `13817950`
+            - `go->go @ max`: `26847702`
+          - same-scenario controls in the same run were much higher:
+            - `c->c @ max`: `51187534`
+            - `c->rust @ max`: `51850988`
+            - `rust->c @ max`: `49334739`
+            - `rust->rust @ max`: `45365604`
+        - implication:
+          - the remaining Windows benchmark problem is not yet a deterministic timeout reproducer
+          - but there is now stronger evidence of a real live-suite performance collapse centered on the Go Windows SHM batch server path
+          - working theory:
+            - the occasional timeout / zero-throughput failures are the extreme tail of the same degradation, not a separate phenomenon
+      - isolated row checks after the second `3..6` rerun:
+        - isolated `c->go` WinSHM batch max-rate reruns were stable:
+          - `41626243`
+          - `40759709`
+          - `39025091`
+          - `38260019`
+          - `42359213`
+        - isolated `rust->go` WinSHM batch max-rate reruns were also stable:
+          - `36652632`
+          - `37585653`
+          - `37291592`
+          - `37543755`
+          - `39968087`
+        - isolated `go->go` WinSHM batch max-rate reruns showed a new concrete failure mode:
+          - first 4 runs were normal:
+            - `34735352`
+            - `33976434`
+            - `34603041`
+            - `34953529`
+          - fifth run printed a bogus success line:
+            - `shm-batch-ping-pong,go,go,0,15.700,40.700,115.900,0.0,0.0,0.0`
+            - return code was still `0`
+            - paired Go server CPU from the same run was `4.531250 sec`
+        - implication:
+          - there is now a direct isolated reproducer of the zero-throughput symptom
+          - the strongest current target is the Go Windows benchmark client timing/accounting path, not the transport alone
+          - working theory:
+            - `nowNS()` in `bench/drivers/go/main_windows.go` is vulnerable to bad wall-time conversion because it computes `counter * 1e9 / qpcFreq` in 64-bit arithmetic
+            - that can corrupt throughput and CPU percentages without necessarily corrupting short per-request latency samples the same way
+      - Windows benchmark timing fix and bounded rerun:
+        - applied an overflow-safe `QueryPerformanceCounter` conversion in:
+          - `bench/drivers/go/main_windows.go`
+          - `bench/drivers/c/bench_windows.c`
+        - direct isolated `go->go` WinSHM batch max reruns after the fix:
+          - no more bogus `throughput=0` success rows in `10` reruns
+          - measured range: `15161017` to `35283655`
+        - reran bounded blocks `3..6` after the fix:
+          - outcome:
+            - passed cleanly with `108` measurements
+            - no zero-throughput abort
+            - no timeout
+          - important positive result:
+            - the old WinSHM batch collapses were gone in this rerun:
+              - `shm-batch-ping-pong rust->go @ max`: `39542183`
+              - `shm-batch-ping-pong go->go @ max`: `38745288`
+              - `shm-batch-ping-pong c->go @ max`: `44211168`
+          - remaining concrete issue:
+            - one real NP batch max-rate outlier remains:
+              - `np-batch-ping-pong c->go @ max`: `3143676`
+              - surrounding same-block controls were all around `7.5M..8.1M`
+        - implication:
+          - the broken wall-time conversion was a real benchmark bug and explains at least part of the original blocker
+          - it does not explain everything
+          - the next honest target is now the remaining `np-batch-ping-pong c->go @ max` outlier under suite conditions
+      - no-WMI bounded control after the timing fix:
+        - reran blocks `3..5` from the same clean clone with:
+          - `NIPC_SKIP_SERVER_CPU_FALLBACK=1`
+        - outcome:
+          - passed cleanly with `72` measurements
+          - the previous suite-only Named Pipe batch outlier disappeared
+          - exact max-rate rows were all in the expected band:
+            - `np-batch-ping-pong c->c @ max`: `8390004`
+            - `np-batch-ping-pong rust->c @ max`: `8179574`
+            - `np-batch-ping-pong go->c @ max`: `7959801`
+            - `np-batch-ping-pong c->rust @ max`: `8522949`
+            - `np-batch-ping-pong rust->rust @ max`: `8112289`
+            - `np-batch-ping-pong go->rust @ max`: `7675526`
+            - `np-batch-ping-pong c->go @ max`: `7501699`
+            - `np-batch-ping-pong rust->go @ max`: `6929177`
+            - `np-batch-ping-pong go->go @ max`: `7217936`
+        - implication:
+          - the remaining suite-only throughput collapse is strongly tied to the benchmark runner's Windows CPU fallback, not the transport path itself
+          - the specific suspect is `server_cpu_seconds()` in `tests/run-windows-bench.sh`
+          - that helper currently does an expensive PowerShell / WMI scan of all `bench_windows*` processes by command line, even though the runner already knows the exact server PID
+          - the next honest fix is:
+            - keep the real timing fix in the C and Go benchmark clients
+            - replace the WMI process scan with a direct per-PID CPU query, or otherwise remove the heavy fallback from the normal suite path
+      - PID-only fallback attempt and MSYS PID mapping:
+        - replaced the heavy WMI scan locally with a direct `Get-Process -Id $pid` fallback
+        - reran bounded blocks `3..5`
+        - outcome:
+          - throughput stayed healthy
+          - but server CPU columns became `0.000`
+        - direct evidence from the bounded CSV:
+          - `np-batch-ping-pong c->go @ max` stayed healthy at `7705810`
+          - but `server_cpu_pct` was `0.000`
+        - root cause:
+          - the Bash background PID is an MSYS PID, not the real Windows PID
+          - direct probe on `win11` showed:
+            - shell PID `191671`
+            - mapped `WINPID` `21056` from `ps -W`
+        - implication:
+          - we can remove the heavy WMI process scan without losing server CPU data
+          - but the runner must first translate the MSYS shell PID to the real Windows PID
 
-## Pending User Decision
+      - final runner fix and official reruns:
+        - replaced the heavy WMI scan with a direct per-process CPU query after translating the MSYS shell PID to the real Windows PID via `ps -W`
+        - bounded rerun of blocks `3..5` after the WINPID fix:
+          - passed cleanly
+          - non-lookup `server_cpu_pct` columns were populated again
+          - example:
+            - `snapshot-baseline c->go @ max`
+            - `client_cpu_pct=22.2`
+            - `server_cpu_pct=26.250`
+            - `total_cpu_pct=48.450`
+        - first clean official full rerun after both fixes:
+          - CSV: `/tmp/plugin-ipc-soak-results-2aa62b7/full-runner-fix.csv`
+          - facts:
+            - `201` rows
+            - `0` duplicate keys
+            - `0` zero-throughput rows
+          - remaining anomaly:
+            - one isolated low row:
+              - `np-batch-ping-pong rust->go @ 10000 = 2823793`
+        - focused replay of blocks `1..5`:
+          - CSV: `/tmp/plugin-ipc-soak-results-2aa62b7/blocks1-5-rerun.csv`
+          - facts:
+            - `144` rows
+            - the low row did not reproduce
+            - `np-batch-ping-pong rust->go @ 10000 = 4992606`
+        - second clean official full rerun after both fixes:
+          - CSV: `/tmp/plugin-ipc-soak-results-2aa62b7/full-runner-fix-2.csv`
+          - facts:
+            - `201` rows
+            - `0` duplicate keys
+            - `0` zero-throughput rows
+            - the earlier low row did not reproduce
+            - `np-batch-ping-pong rust->go @ 10000 = 4992690`
+          - max-throughput spread summary from the final checked-in CSV:
+            - `snapshot-shm`: `1.49x`
+            - `shm-batch-ping-pong`: `1.57x`
+            - `np-pipeline-batch-d16`: `1.33x`
+        - implication:
+          - the benchmark smoke was real
+          - we found and fixed concrete causes instead of masking them
+          - current evidence does not support a remaining live full-suite benchmark breakdown
+          - benchmark generation and reporting are trustworthy again for the checked-in Windows matrix
+
+## Resolved User Decision
 
 ### 1. Netdata integration timing after the benchmark investigation
+
+Historical decision context before the final benchmark fixes:
 
 Evidence:
 
@@ -443,6 +673,10 @@ Decision made by user:
 - implication:
   - Netdata integration is intentionally blocked on this focused performance/robustness pass
   - the next engineering work should optimize the measured hot paths first, then rerun the affected benchmark scenarios on Windows
+- resolution status:
+  - satisfied for the benchmark blocker
+  - the earlier Windows benchmark variation and full-suite flake are now explained and fixed
+  - the remaining integration caveats are now the separate validation-parity and deferred Windows managed-server stress items, not unexplained benchmark instability
 
 - current verified Windows C state after the latest clean `win11` rerun:
     - the real `bash tests/run-coverage-c-windows.sh 90` flow now completes end to end again on clean `win11`

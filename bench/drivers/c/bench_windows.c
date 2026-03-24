@@ -69,7 +69,15 @@ static inline uint64_t now_ns(void)
 {
     LARGE_INTEGER counter;
     QueryPerformanceCounter(&counter);
-    return (uint64_t)(counter.QuadPart * 1000000000ULL / qpc_freq.QuadPart);
+    if (qpc_freq.QuadPart <= 0 || counter.QuadPart <= 0)
+        return 0;
+
+    uint64_t c = (uint64_t)counter.QuadPart;
+    uint64_t f = (uint64_t)qpc_freq.QuadPart;
+    uint64_t secs = c / f;
+    uint64_t rem  = c % f;
+
+    return secs * 1000000000ULL + (rem * 1000000000ULL) / f;
 }
 
 static inline uint64_t cpu_ns(void)

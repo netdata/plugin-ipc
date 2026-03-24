@@ -43,6 +43,8 @@ OUTPUT_CSV="${1:-${ROOT_DIR}/benchmarks-windows.csv}"
 DURATION="${2:-5}"
 RUN_DIR="${TEMP:-/tmp}/netipc-bench-$$"
 POWERSHELL_EXE="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+BLOCK_FIRST="${NIPC_BENCH_FIRST_BLOCK:-1}"
+BLOCK_LAST="${NIPC_BENCH_LAST_BLOCK:-9}"
 
 # Binary locations
 BENCH_C="${BUILD_DIR}/bin/bench_windows_c.exe"
@@ -54,7 +56,11 @@ BENCH_GO="${BUILD_DIR}/bin/bench_windows_go.exe"
 # ---------------------------------------------------------------------------
 
 cleanup() {
-    rm -rf "$RUN_DIR"
+    if [ "${NIPC_KEEP_RUN_DIR:-0}" = "1" ]; then
+        warn "Preserving RUN_DIR: $RUN_DIR"
+    else
+        rm -rf "$RUN_DIR"
+    fi
     for pid in "${SERVER_PIDS[@]:-}"; do
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
@@ -126,18 +132,18 @@ start_server() {
 
 server_cpu_seconds() {
     local pid="$1"
-    local svc="$2"
+    local winpid=""
     local cpu=""
-    local svc_ps="${svc//\'/\'\'}"
+
+    winpid=$(ps -W | awk -v p="$pid" '$1 == p { print $4; exit }' 2>/dev/null || true)
 
     if [ -x "$POWERSHELL_EXE" ]; then
+        # The shell job PID is an MSYS PID. Resolve it once to a real Windows
+        # PID and query that directly instead of scanning all processes by
+        # command line via WMI.
         cpu=$("$POWERSHELL_EXE" -NoProfile -Command \
-            "\$svc = '${svc_ps}'; \
-             \$p = Get-CimInstance Win32_Process | Where-Object { \
-                 \$_.CommandLine -and \$_.CommandLine -like ('*' + \$svc + '*') -and \$_.Name -like 'bench_windows*' \
-             } | Select-Object -First 1; \
-             if (-not \$p) { \$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if (\$p) { [Console]::Out.Write('{0:F6}' -f \$p.TotalProcessorTime.TotalSeconds) } } \
-             elseif (\$p) { [Console]::Out.Write('{0:F6}' -f ((([double]\$p.KernelModeTime) + ([double]\$p.UserModeTime)) / 10000000.0)) }" \
+            "\$p = Get-Process -Id ${winpid:-0} -ErrorAction SilentlyContinue; \
+             if (\$p) { [Console]::Out.Write('{0:F6}' -f \$p.TotalProcessorTime.TotalSeconds) }" \
             2>/dev/null | tr -d '\r')
     fi
 
@@ -157,7 +163,7 @@ stop_server() {
     server_cpu=$(server_cpu_from_output "$server_out")
 
     if [ -z "$server_cpu" ]; then
-        server_cpu=$(server_cpu_seconds "$pid" "$svc")
+        server_cpu=$(server_cpu_seconds "$pid")
     fi
 
     if kill -0 "$pid" 2>/dev/null; then
@@ -173,7 +179,7 @@ stop_server() {
         fi
     fi
 
-    echo "$server_cpu"
+    echo "${server_cpu:-0.0}"
 }
 
 write_csv_row() {
@@ -196,6 +202,11 @@ write_csv_row() {
 
 throughput_is_positive() {
     awk -v value="$1" 'BEGIN { exit ((value + 0) > 0 ? 0 : 1) }'
+}
+
+run_block() {
+    local idx="$1"
+    [ "$idx" -ge "$BLOCK_FIRST" ] && [ "$idx" -le "$BLOCK_LAST" ]
 }
 
 server_cpu_from_output() {
@@ -225,6 +236,35 @@ dump_client_error() {
     local err_file="$1"
     if [ -s "$err_file" ]; then
         cat "$err_file" >&2
+    fi
+}
+
+dump_client_output() {
+    local output="$1"
+    if [ -n "$output" ]; then
+        warn "  Raw client output follows:"
+        while IFS= read -r line; do
+            warn "    ${line}"
+        done <<< "$output"
+    fi
+}
+
+dump_server_output() {
+    local server_out="$1"
+    if [ -f "$server_out" ]; then
+        warn "  Server output follows:"
+        while IFS= read -r line; do
+            warn "    ${line}"
+        done < "$server_out"
+    fi
+}
+
+dump_bench_processes() {
+    if [ -x "$POWERSHELL_EXE" ]; then
+        warn "  Live bench_windows processes:"
+        "$POWERSHELL_EXE" -NoProfile -Command \
+            "Get-CimInstance Win32_Process | Where-Object { \$_.Name -like 'bench_windows*' } | Select-Object ProcessId,Name,CommandLine | Format-Table -AutoSize" \
+            2>/dev/null | tr -d '\r' >&2 || true
     fi
 }
 
@@ -298,24 +338,36 @@ run_pair() {
     client_status=$?
     set -e
 
-    local server_cpu_sec
-    server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$svc_name")
-
-    local new_pids=()
-    for p in "${SERVER_PIDS[@]:-}"; do
-        [ "$p" != "$server_pid" ] && new_pids+=("$p")
-    done
-    SERVER_PIDS=("${new_pids[@]:-}")
-
     if [ "$client_status" -ne 0 ]; then
         warn "  ${client_lang} client failed for ${scenario} (exit ${client_status})"
         dump_client_error "$client_err"
+        dump_client_output "$client_output"
+        dump_server_output "$server_out"
+        dump_bench_processes
+        export NIPC_KEEP_RUN_DIR=1
+        local server_cpu_sec
+        server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$svc_name")
+        local new_pids=()
+        for p in "${SERVER_PIDS[@]:-}"; do
+            [ "$p" != "$server_pid" ] && new_pids+=("$p")
+        done
+        SERVER_PIDS=("${new_pids[@]:-}")
         return 1
     fi
 
     if [ -z "$client_output" ]; then
         warn "  No output from ${client_lang} client for ${scenario}"
         dump_client_error "$client_err"
+        dump_server_output "$server_out"
+        dump_bench_processes
+        export NIPC_KEEP_RUN_DIR=1
+        local server_cpu_sec
+        server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$svc_name")
+        local new_pids=()
+        for p in "${SERVER_PIDS[@]:-}"; do
+            [ "$p" != "$server_pid" ] && new_pids+=("$p")
+        done
+        SERVER_PIDS=("${new_pids[@]:-}")
         return 1
     fi
 
@@ -325,6 +377,17 @@ run_pair() {
     if [ -z "$line" ]; then
         warn "  Could not parse output from ${client_lang} client"
         dump_client_error "$client_err"
+        dump_client_output "$client_output"
+        dump_server_output "$server_out"
+        dump_bench_processes
+        export NIPC_KEEP_RUN_DIR=1
+        local server_cpu_sec
+        server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$svc_name")
+        local new_pids=()
+        for p in "${SERVER_PIDS[@]:-}"; do
+            [ "$p" != "$server_pid" ] && new_pids+=("$p")
+        done
+        SERVER_PIDS=("${new_pids[@]:-}")
         return 1
     fi
 
@@ -338,8 +401,28 @@ run_pair() {
     if ! throughput_is_positive "$throughput"; then
         warn "  Invalid zero throughput from ${client_lang} client for ${scenario}"
         dump_client_error "$client_err"
+        dump_client_output "$client_output"
+        dump_server_output "$server_out"
+        dump_bench_processes
+        export NIPC_KEEP_RUN_DIR=1
+        local server_cpu_sec
+        server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$svc_name")
+        local new_pids=()
+        for p in "${SERVER_PIDS[@]:-}"; do
+            [ "$p" != "$server_pid" ] && new_pids+=("$p")
+        done
+        SERVER_PIDS=("${new_pids[@]:-}")
         return 1
     fi
+
+    local server_cpu_sec
+    server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$svc_name")
+
+    local new_pids=()
+    for p in "${SERVER_PIDS[@]:-}"; do
+        [ "$p" != "$server_pid" ] && new_pids+=("$p")
+    done
+    SERVER_PIDS=("${new_pids[@]:-}")
 
     local server_cpu_pct total_cpu_pct
     server_cpu_pct=$(cpu_pct_for_duration "$server_cpu_sec" "$duration")
@@ -410,130 +493,145 @@ main() {
     local PIPELINE_DEPTH=16
 
     # 1. Named Pipe ping-pong: N pairs x 4 rates
-    log "=== Named Pipe Ping-Pong ==="
-    for rate in "${RATES_PING_PONG[@]}"; do
-        for server_lang in "${LANGS[@]}"; do
-            for client_lang in "${LANGS[@]}"; do
-                if ! run_pair "np-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
-                    RUN_FAILED=1
-                fi
-                sleep 0.5
+    if run_block 1; then
+        log "=== Named Pipe Ping-Pong ==="
+        for rate in "${RATES_PING_PONG[@]}"; do
+            for server_lang in "${LANGS[@]}"; do
+                for client_lang in "${LANGS[@]}"; do
+                    if ! run_pair "np-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
+                        RUN_FAILED=1
+                    fi
+                    sleep 0.5
+                done
             done
         done
-    done
+    fi
 
     # 2. Win SHM ping-pong: 4 pairs x 4 rates
-    log "=== Win SHM Ping-Pong ==="
-    for rate in "${RATES_PING_PONG[@]}"; do
-        for server_lang in "${LANGS[@]}"; do
-            for client_lang in "${LANGS[@]}"; do
-                if ! run_pair "shm-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
-                    RUN_FAILED=1
-                fi
-                sleep 0.5
+    if run_block 2; then
+        log "=== Win SHM Ping-Pong ==="
+        for rate in "${RATES_PING_PONG[@]}"; do
+            for server_lang in "${LANGS[@]}"; do
+                for client_lang in "${LANGS[@]}"; do
+                    if ! run_pair "shm-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
+                        RUN_FAILED=1
+                    fi
+                    sleep 0.5
+                done
             done
         done
-    done
+    fi
 
     # 3. Snapshot Named Pipe refresh: 4 pairs x 2 rates
-    log "=== Snapshot Named Pipe ==="
-    for rate in "${RATES_SNAPSHOT[@]}"; do
-        for server_lang in "${LANGS[@]}"; do
-            for client_lang in "${LANGS[@]}"; do
-                if ! run_pair "snapshot-baseline" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
-                    RUN_FAILED=1
-                fi
-                sleep 0.5
+    if run_block 3; then
+        log "=== Snapshot Named Pipe ==="
+        for rate in "${RATES_SNAPSHOT[@]}"; do
+            for server_lang in "${LANGS[@]}"; do
+                for client_lang in "${LANGS[@]}"; do
+                    if ! run_pair "snapshot-baseline" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
+                        RUN_FAILED=1
+                    fi
+                    sleep 0.5
+                done
             done
         done
-    done
+    fi
 
     # 4. Snapshot Win SHM refresh: 4 pairs x 2 rates
-    log "=== Snapshot Win SHM ==="
-    for rate in "${RATES_SNAPSHOT[@]}"; do
-        for server_lang in "${LANGS[@]}"; do
-            for client_lang in "${LANGS[@]}"; do
-                if ! run_pair "snapshot-shm" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
-                    RUN_FAILED=1
-                fi
-                sleep 0.5
+    if run_block 4; then
+        log "=== Snapshot Win SHM ==="
+        for rate in "${RATES_SNAPSHOT[@]}"; do
+            for server_lang in "${LANGS[@]}"; do
+                for client_lang in "${LANGS[@]}"; do
+                    if ! run_pair "snapshot-shm" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
+                        RUN_FAILED=1
+                    fi
+                    sleep 0.5
+                done
             done
         done
-    done
+    fi
 
     # 5. NP batch ping-pong: N pairs x 4 rates
-    log "=== NP Batch Ping-Pong ==="
-    for rate in "${RATES_PING_PONG[@]}"; do
-        for server_lang in "${LANGS[@]}"; do
-            for client_lang in "${LANGS[@]}"; do
-                if ! run_pair "np-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
-                    RUN_FAILED=1
-                fi
-                sleep 0.5
+    if run_block 5; then
+        log "=== NP Batch Ping-Pong ==="
+        for rate in "${RATES_PING_PONG[@]}"; do
+            for server_lang in "${LANGS[@]}"; do
+                for client_lang in "${LANGS[@]}"; do
+                    if ! run_pair "np-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
+                        RUN_FAILED=1
+                    fi
+                    sleep 0.5
+                done
             done
         done
-    done
+    fi
 
     # 6. Win SHM batch ping-pong: N pairs x 4 rates
-    log "=== Win SHM Batch Ping-Pong ==="
-    for rate in "${RATES_PING_PONG[@]}"; do
-        for server_lang in "${LANGS[@]}"; do
-            for client_lang in "${LANGS[@]}"; do
-                if ! run_pair "shm-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
-                    RUN_FAILED=1
-                fi
-                sleep 0.5
+    if run_block 6; then
+        log "=== Win SHM Batch Ping-Pong ==="
+        for rate in "${RATES_PING_PONG[@]}"; do
+            for server_lang in "${LANGS[@]}"; do
+                for client_lang in "${LANGS[@]}"; do
+                    if ! run_pair "shm-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
+                        RUN_FAILED=1
+                    fi
+                    sleep 0.5
+                done
             done
         done
-    done
+    fi
 
     # 7. Local cache lookup
-    log "=== Local Cache Lookup ==="
-    for lang in "${LANGS[@]}"; do
-        local bin
-        bin="$(bench_bin "$lang")"
-        log "  lookup: ${lang}"
-        local line
-        local lookup_status
-        local lookup_err="${RUN_DIR}/lookup-${lang}.err"
-        set +e
-        line=$("$bin" lookup-bench "$DURATION" 2>"$lookup_err" | grep "^lookup," | head -1)
-        lookup_status=$?
-        set -e
-        if [ "$lookup_status" -ne 0 ]; then
-            warn "  ${lang} lookup benchmark failed"
-            dump_client_error "$lookup_err"
-            RUN_FAILED=1
-            continue
-        fi
-        if [ -n "$line" ]; then
-            local throughput p50 p95 p99 client_cpu server_cpu_pct total_cpu_pct
-            throughput=$(echo "$line" | cut -d',' -f4)
-            p50=$(echo "$line" | cut -d',' -f5)
-            p95=$(echo "$line" | cut -d',' -f6)
-            p99=$(echo "$line" | cut -d',' -f7)
-            client_cpu=$(echo "$line" | cut -d',' -f8)
-            server_cpu_pct=$(echo "$line" | cut -d',' -f9)
-            total_cpu_pct=$(echo "$line" | cut -d',' -f10)
-            if ! throughput_is_positive "$throughput"; then
-                warn "  Invalid zero throughput from ${lang} lookup benchmark"
+    if run_block 7; then
+        log "=== Local Cache Lookup ==="
+        for lang in "${LANGS[@]}"; do
+            local bin
+            bin="$(bench_bin "$lang")"
+            log "  lookup: ${lang}"
+            local line
+            local lookup_status
+            local lookup_err="${RUN_DIR}/lookup-${lang}.err"
+            set +e
+            line=$("$bin" lookup-bench "$DURATION" 2>"$lookup_err" | grep "^lookup," | head -1)
+            lookup_status=$?
+            set -e
+            if [ "$lookup_status" -ne 0 ]; then
+                warn "  ${lang} lookup benchmark failed"
                 dump_client_error "$lookup_err"
                 RUN_FAILED=1
                 continue
             fi
-            write_csv_row "lookup" "$lang" "$lang" "0" \
-                "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
-        else
-            warn "  No output from ${lang} lookup benchmark"
-            dump_client_error "$lookup_err"
-            RUN_FAILED=1
-        fi
-    done
+            if [ -n "$line" ]; then
+                local throughput p50 p95 p99 client_cpu server_cpu_pct total_cpu_pct
+                throughput=$(echo "$line" | cut -d',' -f4)
+                p50=$(echo "$line" | cut -d',' -f5)
+                p95=$(echo "$line" | cut -d',' -f6)
+                p99=$(echo "$line" | cut -d',' -f7)
+                client_cpu=$(echo "$line" | cut -d',' -f8)
+                server_cpu_pct=$(echo "$line" | cut -d',' -f9)
+                total_cpu_pct=$(echo "$line" | cut -d',' -f10)
+                if ! throughput_is_positive "$throughput"; then
+                    warn "  Invalid zero throughput from ${lang} lookup benchmark"
+                    dump_client_error "$lookup_err"
+                    RUN_FAILED=1
+                    continue
+                fi
+                write_csv_row "lookup" "$lang" "$lang" "0" \
+                    "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
+            else
+                warn "  No output from ${lang} lookup benchmark"
+                dump_client_error "$lookup_err"
+                RUN_FAILED=1
+            fi
+        done
+    fi
 
     # 8. NP pipeline: N pairs x 1 rate (max), depth=16
-    log "=== NP Pipeline (depth=${PIPELINE_DEPTH}) ==="
-    for server_lang in "${LANGS[@]}"; do
-        for client_lang in "${LANGS[@]}"; do
+    if run_block 8; then
+        log "=== NP Pipeline (depth=${PIPELINE_DEPTH}) ==="
+        for server_lang in "${LANGS[@]}"; do
+            for client_lang in "${LANGS[@]}"; do
             local pipe_svc="pipeline-${server_lang}-${client_lang}"
 
             log "  np-pipeline: ${client_lang}->${server_lang} depth=${PIPELINE_DEPTH}"
@@ -584,6 +682,11 @@ main() {
 
                     if ! throughput_is_positive "$throughput"; then
                         warn "  Invalid zero throughput from ${client_lang} pipeline client for ${server_lang} server"
+                        warn "  Raw pipeline line: ${line:-<none>}"
+                        warn "  Raw client output follows:"
+                        printf '%s\n' "$client_output" >&2
+                        warn "  Preserving RUN_DIR for investigation: ${RUN_DIR}"
+                        export NIPC_KEEP_RUN_DIR=1
                         dump_client_error "$client_err"
                         RUN_FAILED=1
                         sleep 0.5
@@ -599,23 +702,31 @@ main() {
                     log "    throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us"
                 else
                     warn "  Could not parse pipeline output from ${client_lang} client for ${server_lang} server"
+                    warn "  Raw client output follows:"
+                    printf '%s\n' "$client_output" >&2
+                    warn "  Preserving RUN_DIR for investigation: ${RUN_DIR}"
+                    export NIPC_KEEP_RUN_DIR=1
                     dump_client_error "$client_err"
                     RUN_FAILED=1
                 fi
             else
                 warn "  No output from ${client_lang} pipeline client for ${server_lang} server"
+                warn "  Preserving RUN_DIR for investigation: ${RUN_DIR}"
+                export NIPC_KEEP_RUN_DIR=1
                 dump_client_error "$client_err"
                 RUN_FAILED=1
             fi
 
             sleep 0.5
+            done
         done
-    done
+    fi
 
     # 9. NP pipeline+batch: N pairs x 1 rate (max), depth=16
-    log "=== NP Pipeline+Batch (depth=${PIPELINE_DEPTH}) ==="
-    for server_lang in "${LANGS[@]}"; do
-        for client_lang in "${LANGS[@]}"; do
+    if run_block 9; then
+        log "=== NP Pipeline+Batch (depth=${PIPELINE_DEPTH}) ==="
+        for server_lang in "${LANGS[@]}"; do
+            for client_lang in "${LANGS[@]}"; do
             local pb_svc="pipe-batch-${server_lang}-${client_lang}"
 
             log "  np-pipeline-batch: ${client_lang}->${server_lang} depth=${PIPELINE_DEPTH}"
@@ -691,8 +802,9 @@ main() {
             fi
 
             sleep 0.5
+            done
         done
-    done
+    fi
 
     if [ "$RUN_FAILED" -ne 0 ]; then
         err "One or more Windows benchmark scenarios failed; CSV is incomplete or invalid"

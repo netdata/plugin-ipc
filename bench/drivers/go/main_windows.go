@@ -67,7 +67,14 @@ var (
 func nowNS() uint64 {
 	var counter int64
 	syscall.Syscall(procQueryPerformanceCounter.Addr(), 1, uintptr(unsafe.Pointer(&counter)), 0, 0)
-	return uint64(counter) * 1_000_000_000 / uint64(qpcFreq)
+	if qpcFreq <= 0 || counter <= 0 {
+		return 0
+	}
+	c := uint64(counter)
+	f := uint64(qpcFreq)
+	secs := c / f
+	rem := c % f
+	return secs*1_000_000_000 + (rem*1_000_000_000)/f
 }
 
 func cpuNSWin() uint64 {

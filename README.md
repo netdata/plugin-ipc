@@ -196,20 +196,20 @@ Headline numbers from the current checked-in reports:
   - Rust: `198.75M` req/s
 
 - **Windows Named Pipe ping-pong**
-  - `18.9k` to `21.3k` req/s
+  - `19.1k` to `21.5k` req/s
 - **Windows SHM ping-pong**
-  - `2.02M` to `2.69M` req/s
+  - `2.04M` to `2.75M` req/s
 - **Windows Named Pipe batch ping-pong**
-  - `7.37M` to `8.58M` req/s
+  - `7.26M` to `8.44M` req/s
 - **Windows SHM batch ping-pong**
-  - `38.59M` to `56.33M` req/s
+  - `38.25M` to `60.13M` req/s
 - **Windows snapshot refresh**
-  - Named Pipe: `18.8k` to `20.9k` req/s
-  - SHM: `860.6k` to `1.29M` req/s
+  - Named Pipe: `19.2k` to `21.0k` req/s
+  - SHM: `862.5k` to `1.29M` req/s
 - **Windows local cache lookup**
-  - C: `128.71M` req/s
-  - Go: `106.74M` req/s
-  - Rust: `175.85M` req/s
+  - C: `125.06M` req/s
+  - Go: `116.71M` req/s
+  - Rust: `175.15M` req/s
 
 The full reports include:
 
