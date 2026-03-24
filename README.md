@@ -173,7 +173,7 @@ fail-closed matrices:
   - machine: `costa-desktop`
   - complete matrix rows: `201`
 - Windows report: [benchmarks-windows.md](benchmarks-windows.md)
-  - generated `2026-03-17`
+  - generated `2026-03-24`
   - machine: `win11`
   - complete matrix rows: `201`
 
@@ -196,20 +196,20 @@ Headline numbers from the current checked-in reports:
   - Rust: `198.75M` req/s
 
 - **Windows Named Pipe ping-pong**
-  - `15.6k` to `18.5k` req/s
+  - `18.9k` to `21.3k` req/s
 - **Windows SHM ping-pong**
-  - `1.74M` to `2.55M` req/s
+  - `2.02M` to `2.69M` req/s
 - **Windows Named Pipe batch ping-pong**
-  - `5.39M` to `7.77M` req/s
+  - `7.37M` to `8.58M` req/s
 - **Windows SHM batch ping-pong**
-  - `12.96M` to `56.95M` req/s
+  - `38.59M` to `56.33M` req/s
 - **Windows snapshot refresh**
-  - Named Pipe: `15.9k` to `17.9k` req/s
-  - SHM: `246.7k` to `1.04M` req/s
+  - Named Pipe: `18.8k` to `20.9k` req/s
+  - SHM: `860.6k` to `1.29M` req/s
 - **Windows local cache lookup**
-  - C: `123.71M` req/s
-  - Go: `107.37M` req/s
-  - Rust: `155.79M` req/s
+  - C: `128.71M` req/s
+  - Go: `106.74M` req/s
+  - Rust: `175.85M` req/s
 
 The full reports include:
 

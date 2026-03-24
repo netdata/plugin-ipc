@@ -16,6 +16,67 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
+- user decision:
+    - the remaining Windows benchmark variation and full-suite flake must be explained, and fixed where possible, before Netdata integration
+    - rationale from the user:
+      - the benchmark smoke may hide a production breakdown risk
+      - we must not accept unexplained variation or call it noise
+    - implication:
+      - do not add bounded retries as a workaround
+      - do not refresh the checked-in Windows benchmark artifacts until the root cause is identified
+      - the next work is:
+        - root-cause analysis of the `c->rust np-pipeline-d16` full-suite failure in the larger suite context
+        - root-cause analysis of the remaining `snapshot-shm` variation after the Rust Named Pipe hot-path fix
+
+- next benchmark task after the first Windows Rust hot-path fix:
+    - purpose:
+      - remove the remaining blocker to refreshing the checked-in Windows benchmark artifacts
+      - determine whether the `c->rust np-pipeline-d16` full-suite failure is:
+        - a benchmark-runner orchestration bug
+        - a flaky startup/readiness race
+        - or a real transport/protocol issue
+    - facts already established:
+      - the full official-style Windows rerun into `/tmp/plugin-ipc-investigate/bench-427907b.csv` wrote `200` rows with `0` duplicate keys and `0` zero-throughput rows recorded in the CSV
+      - that rerun still failed before completion because the suite printed:
+        - `Invalid zero throughput from c pipeline client for rust server`
+      - the suspected failing pair did not reproduce in `5/5` direct reruns:
+        - `c` pipeline client against the Rust Named Pipe server succeeded every time
+        - measured throughputs:
+          - `241869`
+          - `243570`
+          - `249819`
+          - `249393`
+          - `243381`
+      - implication:
+        - the current evidence points to a full-suite flake or orchestration issue
+        - it does not currently point to a deterministic regression from the Windows Rust send-buffer optimization
+    - facts now established from the root-cause work:
+      - the full debug rerun of the official Windows suite completed cleanly with `201` measurements
+      - the old `c->rust np-pipeline-d16` failure did not reproduce in that full rerun
+      - bounded official-runner replay of blocks `1..4` also completed cleanly and produced a healthy `snapshot-shm rust->c` max-throughput row:
+        - `550336`
+      - isolated `snapshot-shm rust->c` reruns are consistently much faster than the single bad row:
+        - `484608` to `553481`
+      - implication:
+        - the single `178078` `snapshot-shm rust->c` row is not a stable property of the pair or of the official suite prefix up to block `4`
+        - the best current explanation is a transient host-level stall during that particular run, not a deterministic transport/protocol bug
+    - concrete remaining code-backed target from this investigation:
+      - Windows C benchmark snapshot server still rebuilds the 16 cgroup names and paths on every request in:
+        - `bench/drivers/c/bench_windows.c`
+      - this is inconsistent with:
+        - POSIX C:
+          - `bench/drivers/c/bench_posix.c`
+        - Windows Go:
+          - `bench/drivers/go/main_windows.go`
+        - Windows Rust:
+          - `bench/drivers/rust/src/bench_windows.rs`
+      - implication:
+        - the remaining stable `snapshot-shm` spread against the C server is at least partly benchmark-driver overhead, not library behavior
+    - plan for this pass:
+      - mirror the existing POSIX C snapshot-template precompute in the Windows C benchmark driver
+      - rerun the official Windows benchmark blocks that include `snapshot-shm`
+      - compare the rows against C server before deciding whether there is still a deeper runtime/library issue
+
 - benchmark investigation before Netdata integration:
     - purpose:
       - explain the largest remaining interop throughput asymmetries before we integrate this into Netdata
@@ -205,6 +266,120 @@ Finish the rewrite to a production-ready state with:
           - the full-suite `c->rust np-pipeline-d16` failure is currently a flake, not a reproduced deterministic regression from the send-buffer optimization
           - the hot-path performance explanation still stands
           - the benchmark artifact refresh is blocked only by this remaining Windows full-suite flake, not by the interop throughput issue that motivated the investigation
+      - additional bounded reproduction after the failed artifact rerun:
+        - reran just the full `NP pipeline` block logic in isolation, with:
+          - the same shared `RUN_DIR` model as the full suite
+          - the same fixed service-name pattern:
+            - `pipeline-${server_lang}-${client_lang}`
+          - the same `0.2s` post-ready sleep
+          - the same `0.5s` inter-pair sleep
+        - results:
+          - `2/2` whole pipeline-block rounds passed
+          - `c->rust` specifically passed in both rounds:
+            - round 1: `254199`
+            - round 2: `237909`
+        - implication:
+          - the flake does not reproduce from the pipeline block alone
+          - it appears only in the larger full-suite context, after the earlier benchmark groups
+          - the remaining blocker is therefore most likely a suite-level orchestration flake, not a deterministic C-vs-Rust pipeline incompatibility
+      - full debug rerun with preserved raw-output instrumentation:
+        - reran the full official Windows suite again from the same validated temp workspace, using the debug runner that:
+          - prints raw pipeline output on parse/throughput failure
+          - preserves `RUN_DIR` on failure
+        - outcome:
+          - completed cleanly with `201` measurements
+          - did not reproduce the earlier `c->rust np-pipeline-d16` failure
+        - updated clean max-throughput spreads from that completed run:
+          - `snapshot-shm`:
+            - slowest `rust->c`: `178078`
+            - fastest `c->rust`: `1236344`
+            - spread: `6.94x`
+          - `shm-batch-ping-pong`:
+            - slowest `go->rust`: `20859299`
+            - fastest `c->c`: `58418230`
+            - spread: `2.80x`
+          - `np-pipeline-d16`:
+            - slowest `rust->go`: `231500`
+            - fastest `go->rust`: `265755`
+            - spread: `1.15x`
+          - `np-pipeline-batch-d16`:
+            - slowest `rust->c`: `22814639`
+            - fastest `c->rust`: `42047527`
+            - spread: `1.84x`
+        - implication:
+          - the old broad Rust-server Named Pipe collapse is gone after the send-buffer fix
+          - the largest remaining anomaly is now `snapshot-shm rust->c`, not `np-pipeline-d16`
+      - isolated follow-up on the new `snapshot-shm rust->c` outlier:
+        - isolated `snapshot-shm` reruns show the pair is not inherently slow:
+          - `rust->c` isolated, unique `run_dir` per run:
+            - `543392`
+            - `535990`
+            - `524335`
+          - `rust->c` isolated, shared `RUN_DIR` immediately after `c->c`:
+            - `553481`
+            - `548110`
+            - `528533`
+            - `550328`
+            - `484608`
+          - controls from the same isolated runs:
+            - `c->rust`: `1209183` to `1296249`
+            - `rust->rust`: `1041573` to `1308501`
+            - `go->c`: `454735` to `490505`
+        - implication:
+          - the `178078` full-suite `rust->c` result is not a stable property of the pair itself
+          - simple shared-`RUN_DIR` reuse and the immediately preceding `c->c` row are not enough to reproduce it
+      - bounded prefix reproductions that did not reproduce the `snapshot-shm rust->c` slowdown:
+        - after the full `snapshot-baseline` block, `snapshot-shm rust->c` still measured `540849`
+        - after the full `shm-ping-pong` block, `snapshot-shm rust->c` still measured `543552`
+        - implication:
+          - the remaining contamination is not explained by:
+            - service-name reuse alone
+            - shared `RUN_DIR` alone
+            - the preceding `snapshot-baseline` block alone
+            - the preceding `shm-ping-pong` block alone
+          - the next honest root-cause target is the larger combined prefix of the official suite, not an isolated transport pair
+      - concrete Windows C benchmark-driver fix:
+        - mirrored the existing POSIX C snapshot-template precompute in:
+          - `bench/drivers/c/bench_windows.c`
+        - the Windows C snapshot server no longer rebuilds the same 16 cgroup names and paths on every request
+        - it now precomputes them once with:
+          - `InitOnceExecuteOnce()`
+        - implication:
+          - this removes benchmark-driver overhead that was unique to the Windows C snapshot server
+      - exact official rerun after the Windows C snapshot fix:
+        - reran the full official Windows suite to:
+          - `/tmp/plugin-ipc-investigate/bench-full-after-c-snapshot-fix.csv`
+        - outcome:
+          - completed cleanly with `201` measurements
+          - no zero-throughput rows
+          - no duplicate keys
+          - the earlier `c->rust np-pipeline-d16` failure did not reproduce
+        - updated max-throughput spreads from the clean full rerun:
+          - `snapshot-shm`:
+            - slowest `go->go`: `860567`
+            - fastest `rust->rust`: `1290354`
+            - spread: `1.50x`
+          - `shm-batch-ping-pong`:
+            - slowest `go->go`: `38594327`
+            - fastest `c->c`: `56333291`
+            - spread: `1.46x`
+          - `np-pipeline-d16`:
+            - slowest `go->go`: `229507`
+            - fastest `rust->rust`: `270223`
+            - spread: `1.18x`
+          - `np-pipeline-batch-d16`:
+            - slowest `rust->go`: `32250435`
+            - fastest `c->rust`: `41361971`
+            - spread: `1.28x`
+        - before/after comparison against the checked-in pre-fix Windows artifact:
+          - `snapshot-shm` improved from `4.20x` spread to `1.50x`
+          - `shm-batch-ping-pong` improved from `4.39x` to `1.46x`
+          - `np-pipeline-batch-d16` improved from `2.69x` to `1.28x`
+        - implication:
+          - the meaningful stable Windows interop variation is now explained and largely fixed
+          - the repository no longer shows the old cross-language Rust-server collapse pattern on Windows
+          - the earlier one-off `c->rust np-pipeline-d16` full-suite failure remains unreproduced after extensive bounded reruns and one clean official rerun
+          - the best current explanation for that one event is a transient host-level stall or suite-level transient, not a deterministic transport/protocol bug
 
 ## Pending User Decision
 

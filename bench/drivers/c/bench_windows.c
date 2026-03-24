@@ -199,6 +199,40 @@ static bool ping_pong_handler(void *user,
 /*  Snapshot handler (16 cgroup items)                                  */
 /* ------------------------------------------------------------------ */
 
+typedef struct {
+    uint32_t hash;
+    uint32_t options;
+    uint32_t enabled;
+    uint32_t name_len;
+    uint32_t path_len;
+    char name[32];
+    char path[96];
+} snapshot_template_item_t;
+
+static snapshot_template_item_t g_snapshot_template[16];
+static INIT_ONCE g_snapshot_template_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK snapshot_template_init(PINIT_ONCE init_once, PVOID parameter, PVOID *context)
+{
+    (void)init_once;
+    (void)parameter;
+    (void)context;
+
+    for (int i = 0; i < 16; i++) {
+        snapshot_template_item_t *item = &g_snapshot_template[i];
+
+        item->hash = (uint32_t)(1000 + i);
+        item->options = 0;
+        item->enabled = (uint32_t)(i % 2);
+        item->name_len = (uint32_t)snprintf(
+            item->name, sizeof(item->name), "cgroup-%d", i);
+        item->path_len = (uint32_t)snprintf(
+            item->path, sizeof(item->path), "/sys/fs/cgroup/bench/cg-%d", i);
+    }
+
+    return TRUE;
+}
+
 static bool snapshot_handler(void *user,
                               uint16_t method_code,
                               const uint8_t *request_payload,
@@ -216,6 +250,10 @@ static bool snapshot_handler(void *user,
     if (nipc_cgroups_req_decode(request_payload, request_len, &req) != NIPC_OK)
         return false;
 
+    if (!InitOnceExecuteOnce(&g_snapshot_template_once,
+                             snapshot_template_init, NULL, NULL))
+        return false;
+
     static uint64_t gen = 0;
     gen++;
 
@@ -224,17 +262,15 @@ static bool snapshot_handler(void *user,
                                16, 1, gen);
 
     for (int i = 0; i < 16; i++) {
-        char name[64], path[128];
-        snprintf(name, sizeof(name), "cgroup-%d", i);
-        snprintf(path, sizeof(path), "/sys/fs/cgroup/bench/cg-%d", i);
+        const snapshot_template_item_t *item = &g_snapshot_template[i];
 
         nipc_error_t err = nipc_cgroups_builder_add(
             &builder,
-            (uint32_t)(1000 + i),
-            0,
-            (uint32_t)(i % 2),
-            name, (uint32_t)strlen(name),
-            path, (uint32_t)strlen(path));
+            item->hash,
+            item->options,
+            item->enabled,
+            item->name, item->name_len,
+            item->path, item->path_len);
 
         if (err != NIPC_OK)
             return false;
