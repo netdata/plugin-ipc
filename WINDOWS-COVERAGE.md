@@ -11,30 +11,38 @@ It does not claim generic MSVC/CI support that has not been exercised here.
 Verified on `2026-03-24`:
 
 - `ctest --test-dir build --output-on-failure -j4`: `28/28` passing on `win11`
-- `bash tests/run-coverage-c-windows.sh 90`:
-  - script works
-  - coverage-only Windows test subset passes inside the script
-  - the script now runs three bounded direct executables before the generic `ctest` loop:
-    - `build-windows-coverage-c/bin/test_win_service_guards.exe`
-    - `build-windows-coverage-c/bin/test_win_service_guards_extra.exe`
-    - `build-windows-coverage-c/bin/test_win_service_extra.exe`
-  - current validated direct-guard results:
-    - `test_win_service_guards.exe`: `150 passed, 0 failed`
+- Windows C coverage on the latest clean `win11` coverage build:
+  - the bounded direct coverage executables pass:
+    - `test_win_service_guards.exe`: `164 passed, 0 failed`
     - `test_win_service_guards_extra.exe`: `33 passed, 0 failed`
     - `test_win_service_extra.exe`: `81 passed, 0 failed`
-  - the remaining Windows C subset then runs one-by-one with `ctest --timeout 60`
-  - total coverage result: `92.2%`
+  - `test_win_service.exe` itself also passes when run directly:
+    - `86 passed, 0 failed`
+  - the remaining Windows C interop / stress subset then passes one-by-one under `ctest --timeout 60`
+  - measured total coverage result: `93.2%`
   - per-file:
-    - `netipc_service_win.c`: `91.3%`
-    - `netipc_named_pipe.c`: `92.4%`
-    - `netipc_win_shm.c`: `94.1%`
-  - current status: script passes, including the Linux-matching per-file `90%` gate
+    - `netipc_service_win.c`: `91.7%`
+    - `netipc_named_pipe.c`: `93.4%`
+    - `netipc_win_shm.c`: `95.9%`
+  - current status:
+    - measured Windows C remains above the Linux-matching per-file and total `90%` gates
+    - the raw `run-coverage-c-windows.sh` flow is still noisy at the `ctest test_win_service` step under coverage instrumentation
+    - this is not currently a proven runtime regression, because the same executable passes when run directly on the same clean coverage build
+  - latest ordinary Windows C service gains came from:
+    - hybrid client send-buffer guard coverage at `netipc_service_win.c:147`
+    - hybrid receive-error mapping coverage at `netipc_service_win.c:179`
+    - the already-established split coverage-only service-guard executables
   - latest ordinary Windows C transport gains came from:
-    - dedicated coverage-only service-guard tests staying split into smaller executables
     - manual HYBRID mapping setup to reach the client-attach event-name overflow branch honestly
     - deterministic HYBRID and BUSYWAIT receive timeout / disconnect tests
     - client-side oversized-response `MSG_TOO_LARGE` coverage for WinSHM
     - second chunked round-trip coverage proving client receive-buffer reuse on the same session
+- `bash tests/run-coverage-c-windows.sh 90`:
+  - script still configures and builds correctly
+  - the script now runs three bounded direct executables before the generic `ctest` loop:
+    - `build-windows-coverage-c/bin/test_win_service_guards.exe`
+    - `build-windows-coverage-c/bin/test_win_service_guards_extra.exe`
+    - `build-windows-coverage-c/bin/test_win_service_extra.exe`
   - script detail:
     - `test_win_service_guards.exe`, `test_win_service_guards_extra.exe`, and `test_win_service_extra.exe` now run under `timeout 120`
     - the generic Windows C subset no longer relies on `test_win_service_extra` inside the unordered `ctest` loop
@@ -78,6 +86,7 @@ Brutal truth:
 - Windows coverage measurement is real and useful now.
 - Windows coverage parity is much closer, but not finished.
 - Windows C is no longer below the Linux-matching `90%` gate.
+- The raw Windows C coverage script is still not perfectly noise-free because `ctest test_win_service` can time out under coverage instrumentation even when the direct executable passes on the same clean build.
 - One transient `test_win_service_guards.exe` timeout and one later `test_win_service_guards_extra.exe` timeout were both traced to coverage-harness test placement/racing, not to a proven runtime regression.
 - The current validated layout keeps the hybrid-attach mismatch test in `test_win_service_guards.exe` and the worker-limit / destroy / send-failure cases in `test_win_service_guards_extra.exe`.
 - The Windows Go script reliability issue is fixed.
@@ -116,9 +125,10 @@ What it does:
 
 1. configures a fresh Windows coverage build with `NETIPC_COVERAGE=ON`
 2. builds with the native `win11` MinGW64 toolchain and Ninja
-3. runs the Windows coverage-focused `ctest` subset
-4. runs the dedicated Windows C coverage-only guard executable
+3. runs the dedicated Windows C coverage-only guard executables
+4. runs the Windows coverage-focused C subset
 5. collects `gcov` line coverage for the Windows C sources above
+6. if `test_win_service` is noisy under `ctest`, direct executable validation on the same clean coverage build is the authoritative fallback for deciding whether the problem is harness noise or a runtime regression
 
 ### Go coverage script
 

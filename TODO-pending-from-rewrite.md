@@ -16,6 +16,56 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
+- current verified Windows C state after the latest clean `win11` rerun:
+    - the clean `win11` coverage build remains authoritative, but the raw script path is noisy again at `ctest test_win_service`
+    - exact measured Windows C result after completing the same clean coverage build with direct `test_win_service.exe` plus the remaining interop/stress `ctest` items:
+      - total: `93.2%`
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `91.7%`
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `93.4%`
+      - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `95.9%`
+    - evidence:
+      - `test_win_service_guards.exe`: `164 passed, 0 failed`
+      - `test_win_service_guards_extra.exe`: `33 passed, 0 failed`
+      - `test_win_service_extra.exe`: `81 passed, 0 failed`
+      - direct `test_win_service.exe` on the same clean coverage build: `86 passed, 0 failed`
+      - the raw `ctest --test-dir build-windows-coverage-c -R "^test_win_service$"` step still timed out under coverage instrumentation
+    - implication:
+      - measured Windows C is still honestly above the shared `90%` gate on current `main`
+      - the active docs are now stale on the exact Windows C numbers and need sync
+- next honest ordinary Windows C target:
+    - fresh clean `win11` direct `gcov` on `netipc_service_win.c` now shows:
+      - typed batch and string-reverse success paths are already covered
+      - examples:
+        - `do_increment_batch_attempt()` is called and covered through the normal success path
+        - `do_string_reverse_attempt()` is called and covered through the normal success path
+      - the remaining service-file misses around those functions are failure-only branches:
+        - batch builder add failure at `src/libnetdata/netipc/src/service/netipc_service_win.c:517`
+        - batch send / receive failure at `src/libnetdata/netipc/src/service/netipc_service_win.c:534` and `:543`
+        - string encode / raw-call failure at `src/libnetdata/netipc/src/service/netipc_service_win.c:603` and `:611`
+    - the first candidate after that was the session-array growth path:
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c:1097-1110`
+    - but source review shows it is not an honest ordinary target:
+      - the server rejects clients earlier at `src/libnetdata/netipc/src/service/netipc_service_win.c:1045-1049`
+      - `server->session_capacity` is initialized at `worker_count * 2`, with a minimum of `16`
+      - therefore `session_capacity` is always `>= worker_count`
+      - implication:
+        - a normal session can never reach `session_count >= session_capacity` without already hitting the earlier worker-limit rejection
+    - decision from the evidence:
+      - stop treating `1097-1110` as an ordinary coverage target
+      - treat the grow-array path as dead code under the current server-limit design unless the implementation changes
+    - next ordinary branch family instead:
+      - WinSHM client send/receive guard paths in:
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c:147`
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c:179`
+      - these are still normal state-validation branches, not allocation-failure-only paths
+    - exact clean `win11` validation on the extended guard tree:
+      - `test_win_service_guards.exe`: `164 passed, 0 failed`
+      - direct `gcov` on `netipc_service_win.c` proved:
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c:147`: covered
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c:179`: covered
+    - implication after this slice:
+      - the WinSHM client send/receive guard paths are no longer missing ordinary service coverage
+      - the remaining `netipc_service_win.c` misses are increasingly failure-only branches, fixed-size encode guards, or low-level allocation paths
 - next ordinary Windows WinSHM timeout-loop follow-up:
     - the previous Named Pipe chunk-receive follow-up is no longer considered an honest ordinary target with the current fake-server harness
     - concrete clean `win11` evidence:
@@ -1848,15 +1898,18 @@ The scripts are now real and validated on `win11`.
 Current measured results:
 
 - C:
-  - `bash tests/run-coverage-c-windows.sh 90`
-  - coverage result: `92.0%`
+  - latest clean `win11` coverage build:
+    - the raw script still times out at `ctest test_win_service` under coverage instrumentation
+    - the equivalent clean coverage run completed with direct `test_win_service.exe` plus the remaining interop/stress `ctest` items
+  - coverage result: `93.2%`
   - per-file:
-    - `netipc_service_win.c`: `91.4%`
-    - `netipc_named_pipe.c`: `91.8%`
-    - `netipc_win_shm.c`: `93.5%`
+    - `netipc_service_win.c`: `91.7%`
+    - `netipc_named_pipe.c`: `93.4%`
+    - `netipc_win_shm.c`: `95.9%`
   - status:
     - passes the Linux-matching `90%` target, including the per-file gate
-    - the script now runs the normal `test_win_service.exe` subset plus the dedicated coverage-only guard executables under bounded `timeout 120`, so the ordinary `ctest` path stays stable and the extra deterministic service and SHM guard branches still contribute coverage
+    - the dedicated coverage-only guard executables remain stable under bounded `timeout 120`
+    - the ordinary Windows C service executable is still noisy when driven through `ctest` under coverage instrumentation, even though the same executable passes directly on the same clean build
 
 - Go:
   - `bash tests/run-coverage-go-windows.sh 90`
@@ -2029,8 +2082,9 @@ bash tests/run-coverage-rust-windows.sh 90
 Current expected result:
 
 - `bash tests/run-coverage-c-windows.sh`
-  - currently reports `92.0%`
-  - passes with all tracked Windows C files above `90%`
+  - current clean-coverage measurement is `93.2%`
+  - all tracked Windows C files are above `90%`
+  - caveat: the raw script can still time out at `ctest test_win_service` under coverage instrumentation, even though direct `test_win_service.exe` passes on the same clean build
 - `bash tests/run-coverage-go-windows.sh 90`
   - currently reports `96.7%`
 - `bash tests/run-coverage-rust-windows.sh 90`
@@ -2076,10 +2130,10 @@ Facts:
 - Linux coverage scripts are working and pass their current lowered thresholds.
 - Windows coverage docs now match the measured numbers from `2026-03-24`.
 - Windows C coverage currently passes:
-  - total: `92.0%`
-  - `netipc_service_win.c`: `91.4%`
-  - `netipc_named_pipe.c`: `91.8%`
-  - `netipc_win_shm.c`: `93.5%`
+  - total: `93.2%`
+  - `netipc_service_win.c`: `91.7%`
+  - `netipc_named_pipe.c`: `93.4%`
+  - `netipc_win_shm.c`: `95.9%`
 - Windows Go coverage currently reports `96.7%`.
 - Linux Go coverage currently reports `95.8%` with the remaining ordinary gaps now reduced to a much smaller POSIX transport/service residue.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.

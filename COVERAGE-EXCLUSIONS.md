@@ -148,12 +148,11 @@ Latest Linux Go notes from the current ordinary POSIX slice:
 Verified on `2026-03-24`:
 
 - C:
-  - script: `tests/run-coverage-c-windows.sh 90`
-  - result: `92.2%`
+  - latest clean `win11` coverage measurement: `93.2%`
   - per-file:
-    - `netipc_service_win.c`: `91.3%`
-    - `netipc_named_pipe.c`: `92.4%`
-    - `netipc_win_shm.c`: `94.1%`
+    - `netipc_service_win.c`: `91.7%`
+    - `netipc_named_pipe.c`: `93.4%`
+    - `netipc_win_shm.c`: `95.9%`
   - status:
     - passes the Linux-matching per-file and total `90%` gates
     - the script now runs three bounded direct executables before the generic `ctest` loop:
@@ -161,15 +160,20 @@ Verified on `2026-03-24`:
       - `test_win_service_guards_extra.exe`
       - `test_win_service_extra.exe`
     - latest validated direct-guard results:
-      - `test_win_service_guards.exe`: `150 passed, 0 failed`
+      - `test_win_service_guards.exe`: `164 passed, 0 failed`
       - `test_win_service_guards_extra.exe`: `33 passed, 0 failed`
       - `test_win_service_extra.exe`: `81 passed, 0 failed`
     - the remaining Windows C subset then runs one-by-one under `ctest --timeout 60`
+    - `test_win_service.exe` also passes directly on the same clean coverage build with `86 passed, 0 failed`
+    - the raw `ctest test_win_service` step is still noisy under coverage instrumentation, so the latest measured totals come from the equivalent clean coverage build completed with direct `test_win_service.exe` plus the remaining bounded interop/stress `ctest` items
     - the latest ordinary Windows SHM follow-up raised:
-      - `netipc_service_win.c` remained around `91%`
-      - `netipc_named_pipe.c` to `92.4%`
-      - `netipc_win_shm.c` from `90.5%` to `94.1%`
+      - `netipc_service_win.c` to `91.7%`
+      - `netipc_named_pipe.c` to `93.4%`
+      - `netipc_win_shm.c` to `95.9%`
       - the new second chunked round-trip test now covers the client receive-buffer reuse fast path in `ensure_recv_buf()`
+      - the latest Windows service guard follow-up now also covers:
+        - `netipc_service_win.c:147`
+        - `netipc_service_win.c:179`
 
 - Go:
   - script: `tests/run-coverage-go-windows.sh 90`
@@ -273,9 +277,9 @@ hard exclusions yet.
 
 Current evidence:
 
-- `netipc_service_win.c` is now `91.4%`
-- `netipc_named_pipe.c` is `91.8%`
-- `netipc_win_shm.c` is `93.5%`
+- `netipc_service_win.c` is now `91.7%`
+- `netipc_named_pipe.c` is `93.4%`
+- `netipc_win_shm.c` is `95.9%`
 
 Brutal truth:
 

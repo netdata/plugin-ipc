@@ -299,6 +299,7 @@ typedef enum {
     FAKE_HYBRID_RESP_BAD_KIND,
     FAKE_HYBRID_RESP_BAD_CODE,
     FAKE_HYBRID_RESP_BAD_MESSAGE_ID,
+    FAKE_HYBRID_RESP_DISCONNECT,
 } fake_hybrid_mode_t;
 
 typedef struct {
@@ -573,6 +574,8 @@ static DWORD WINAPI fake_hybrid_server_thread(LPVOID arg)
             (void)nipc_win_shm_send(&shm, msg, msg_len);
             break;
         }
+        case FAKE_HYBRID_RESP_DISCONNECT:
+            goto out;
         default:
             break;
         }
@@ -738,6 +741,7 @@ static void test_hybrid_client_rejects_malformed_responses(void)
         { FAKE_HYBRID_RESP_BAD_KIND, "wrong SHM response kind", NIPC_ERR_BAD_KIND },
         { FAKE_HYBRID_RESP_BAD_CODE, "wrong SHM response code", NIPC_ERR_BAD_LAYOUT },
         { FAKE_HYBRID_RESP_BAD_MESSAGE_ID, "wrong SHM response message_id", NIPC_ERR_BAD_LAYOUT },
+        { FAKE_HYBRID_RESP_DISCONNECT, "missing SHM response after request", NIPC_ERR_TRUNCATED },
     };
 
     printf("--- Hybrid client rejects malformed SHM responses ---\n");
@@ -770,6 +774,40 @@ static void test_hybrid_client_rejects_malformed_responses(void)
               WaitForSingleObject(server_thread, 10000) == WAIT_OBJECT_0);
         CloseHandle(server_thread);
     }
+}
+
+static void test_hybrid_client_send_buffer_guard(void)
+{
+    printf("--- Hybrid client send buffer guard ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_hybrid_send_guard");
+
+    server_thread_ctx_t sctx;
+    nipc_np_server_config_t scfg = default_hybrid_server_config();
+    HANDLE server_thread = start_server_named(
+        &sctx, service, 4, &scfg, &guard_handlers);
+    if (!server_thread)
+        return;
+
+    nipc_client_ctx_t client;
+    nipc_np_client_config_t ccfg = default_hybrid_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    check("hybrid send-guard client ready",
+          refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+
+    if (nipc_client_ready(&client) && client.shm != NULL) {
+        uint64_t value_out = 0;
+        size_t saved_send_buf_size = client.send_buf_size;
+
+        client.send_buf_size = NIPC_HEADER_LEN + NIPC_INCREMENT_PAYLOAD_SIZE - 1;
+        check("hybrid send buffer overflow returns NIPC_ERR_OVERFLOW",
+              nipc_client_call_increment(&client, 41, &value_out) == NIPC_ERR_OVERFLOW);
+        client.send_buf_size = saved_send_buf_size;
+    }
+
+    nipc_client_close(&client);
+    stop_server_drain(&sctx, server_thread);
 }
 
 static void test_hybrid_server_rejects_malformed_requests(void)
@@ -1194,6 +1232,7 @@ int main(void)
     test_client_batch_and_string_guards();
     test_hybrid_attach_failure_disconnects();
     test_hybrid_client_rejects_malformed_responses();
+    test_hybrid_client_send_buffer_guard();
     test_hybrid_server_rejects_malformed_requests();
     test_snapshot_default_max_items();
     test_string_dispatch_missing_handlers_and_unknown_method();
