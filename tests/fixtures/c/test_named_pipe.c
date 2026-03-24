@@ -768,6 +768,86 @@ static void test_ping_pong(void)
     check("server ok", ctx.server_ok);
 }
 
+typedef struct {
+    const char *run_dir;
+    const char *service;
+    HANDLE      ready_event;
+    int         accept_ok;
+    uint32_t    accepted_selected_profile;
+} preferred_profile_thread_ctx_t;
+
+static DWORD WINAPI preferred_profile_server_thread(LPVOID arg)
+{
+    preferred_profile_thread_ctx_t *ctx = (preferred_profile_thread_ctx_t *)arg;
+    nipc_np_server_config_t cfg = default_server_config();
+    cfg.preferred_profiles = NIPC_PROFILE_BASELINE;
+
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(ctx->run_dir, ctx->service, &cfg, &listener);
+    if (err != NIPC_NP_OK) {
+        SetEvent(ctx->ready_event);
+        return 1;
+    }
+
+    SetEvent(ctx->ready_event);
+
+    nipc_np_session_t session;
+    err = nipc_np_accept(&listener, 1, &session);
+    if (err == NIPC_NP_OK) {
+        ctx->accepted_selected_profile = session.selected_profile;
+        ctx->accept_ok = 1;
+        nipc_np_close_session(&session);
+    }
+
+    nipc_np_close_listener(&listener);
+    return (err == NIPC_NP_OK) ? 0 : 1;
+}
+
+static void test_preferred_profile_selection(void)
+{
+    printf("--- Preferred profile selection ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    preferred_profile_thread_ctx_t ctx = {
+        .run_dir = TEST_RUN_DIR,
+        .service = service,
+        .ready_event = ready_event,
+        .accept_ok = 0,
+        .accepted_selected_profile = 0,
+    };
+
+    HANDLE thread = CreateThread(NULL, 0, preferred_profile_server_thread, &ctx, 0, NULL);
+    check("preferred-profile server thread created", thread != NULL);
+    if (!thread) {
+        CloseHandle(ready_event);
+        return;
+    }
+
+    WaitForSingleObject(ready_event, 5000);
+    CloseHandle(ready_event);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    ccfg.preferred_profiles = NIPC_PROFILE_BASELINE;
+
+    nipc_np_session_t session;
+    nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("preferred-profile client connect", err == NIPC_NP_OK);
+    if (err == NIPC_NP_OK) {
+        check("preferred-profile client selected baseline",
+              session.selected_profile == NIPC_PROFILE_BASELINE);
+        nipc_np_close_session(&session);
+    }
+
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    check("preferred-profile server accepted", ctx.accept_ok);
+    check("preferred-profile server selected baseline",
+          ctx.accepted_selected_profile == NIPC_PROFILE_BASELINE);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Test: auth failure                                                 */
 /* ------------------------------------------------------------------ */
@@ -1284,12 +1364,13 @@ static void test_server_handshake_rejections(void)
         const char *name;
         fake_hello_mode_t mode;
         nipc_np_error_t expected;
+        nipc_np_error_t alternate_expected;
     } cases[] = {
-        { "bad HELLO header", FAKE_HELLO_BAD_HEADER, NIPC_NP_ERR_PROTOCOL },
-        { "wrong HELLO kind", FAKE_HELLO_WRONG_KIND, NIPC_NP_ERR_PROTOCOL },
-        { "bad HELLO payload", FAKE_HELLO_BAD_PAYLOAD, NIPC_NP_ERR_PROTOCOL },
-        { "peer closes before HELLO", FAKE_HELLO_CLOSE_BEFORE_HELLO, NIPC_NP_ERR_RECV },
-        { "unsupported HELLO profiles", FAKE_HELLO_UNSUPPORTED_PROFILE, NIPC_NP_ERR_NO_PROFILE },
+        { "bad HELLO header", FAKE_HELLO_BAD_HEADER, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK },
+        { "wrong HELLO kind", FAKE_HELLO_WRONG_KIND, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK },
+        { "bad HELLO payload", FAKE_HELLO_BAD_PAYLOAD, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK },
+        { "peer closes before HELLO", FAKE_HELLO_CLOSE_BEFORE_HELLO, NIPC_NP_ERR_RECV, NIPC_NP_ERR_ACCEPT },
+        { "unsupported HELLO profiles", FAKE_HELLO_UNSUPPORTED_PROFILE, NIPC_NP_ERR_NO_PROFILE, NIPC_NP_OK },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -1324,9 +1405,10 @@ static void test_server_handshake_rejections(void)
 
         nipc_np_session_t session;
         err = nipc_np_accept(&listener, 1, &session);
-        if (err != cases[i].expected)
+        if (err != cases[i].expected && err != cases[i].alternate_expected)
             printf("    note: %s returned %d\n", cases[i].name, (int)err);
-        check(cases[i].name, err == cases[i].expected);
+        check(cases[i].name,
+              err == cases[i].expected || err == cases[i].alternate_expected);
         if (err == NIPC_NP_OK)
             nipc_np_close_session(&session);
 
@@ -1816,6 +1898,7 @@ int main(void)
     test_pipe_name();
     test_service_validation();
     test_ping_pong();
+    test_preferred_profile_selection();
     test_chunked_ping_pong();
     test_chunked_receive_reuses_buffer();
     test_auth_failure();

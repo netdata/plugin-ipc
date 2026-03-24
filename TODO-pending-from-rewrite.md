@@ -16,6 +16,30 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
+- next ordinary Windows Named Pipe preferred-profile follow-up:
+    - next cheap deterministic success-path miss:
+      - preferred-profile selection when `preferred_intersection != 0`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:452`
+    - planned deterministic test:
+      - real client/server handshake with both peers setting `preferred_profiles = NIPC_PROFILE_BASELINE`
+      - assert both accepted sessions select `NIPC_PROFILE_BASELINE`
+    - new evidence from clean `win11` coverage-build validation:
+      - the pre-existing `"peer closes before HELLO"` test can return either:
+        - `NIPC_NP_ERR_RECV`
+        - or `NIPC_NP_ERR_ACCEPT`
+      - reason:
+        - under slower coverage instrumentation, the fake client can disconnect early enough for `ConnectNamedPipe()` to fail before `server_handshake()` reaches its receive path
+      - implication:
+        - that table-driven test should accept both valid disconnect outcomes instead of treating `ACCEPT` as a regression
+    - exact clean `win11` validation on the modified tree:
+      - targeted build + `ctest --test-dir build --output-on-failure -R "^test_named_pipe$"`: pass
+      - direct coverage-build `test_named_pipe.exe` + `gcov` on `netipc_named_pipe.c`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:452`: covered
+    - implication:
+      - the preferred-profile success-path selection branch is now covered honestly
+    - non-goals for this follow-up:
+      - handshake send failure at `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:498-500`
+      - allocation-failure-only paths
 - latest Windows Named Pipe negotiation follow-up:
     - deterministic table-driven cases added in:
       - `tests/fixtures/c/test_named_pipe.c`
