@@ -16,7 +16,39 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
-- Latest authoritative slice:
+- latest deterministic Windows SHM receive slice:
+    - deterministic tests added in:
+      - `tests/fixtures/c/test_win_shm.c`
+        - HYBRID client `timeout_ms = 0` receive with a delayed real server sender
+        - BUSYWAIT server receive after client close, asserting `local_req_seq` advances
+    - exact clean `win11` validation on the modified tree:
+      - targeted build + `ctest --test-dir build --output-on-failure -R "^test_win_shm$"`: pass
+      - isolated `ctest --test-dir build --output-on-failure -j1 --timeout 60 -R "^test_win_service$"`: pass
+      - direct coverage-build `test_win_shm.exe` + `gcov` on `netipc_win_shm.c`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:680`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:744`: covered
+        - file-specific `gcov` result after the targeted run:
+          - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `92.70%`
+    - important honesty note:
+      - the clean full parallel `win11` `ctest --test-dir build --output-on-failure -j4` still hit the old noisy `test_win_service` timeout tail in the handler-failure block
+      - the clean full Windows C coverage script still timed out later in `test_win_service_extra.exe`
+      - neither timeout is in the modified `test_win_shm` slice, so the authoritative signal for this slice is the targeted `test_win_shm` pass plus direct `gcov` on `netipc_win_shm.c`
+- current deterministic Windows SHM receive slice:
+    - purpose:
+      - cover the remaining ordinary `nipc_win_shm_receive()` branches without fake fault injection
+    - exact target lines from fresh clean `win11` gcov:
+      - HYBRID client receive infinite-wait path:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:680`
+      - BUSYWAIT server-role disconnect sequence advance:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:744`
+    - planned deterministic tests:
+      - HYBRID client `timeout_ms=0` receive with a delayed real server sender
+      - BUSYWAIT server receive after client close, asserting `local_req_seq` advances
+    - non-goals for this slice:
+      - Win32 create/open-event fault injection
+      - spurious-wake deadline-expiry tricks around `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:685`
+      - allocation-failure-only branches
+  - Latest authoritative slice:
     - latest Windows Named Pipe chunked-reuse slice:
       - deterministic test added:
         - a second large chunked round-trip on the same client session now proves the client reuses the already-grown receive buffer instead of reallocating it again
@@ -303,6 +335,20 @@ Finish the rewrite to a production-ready state with:
         - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:835-836`
       - if deterministic on `win11`, successful zero-byte disconnect handling in `raw_recv()`:
         - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:233-235`
+  - next ordinary Windows SHM receive target:
+    - fresh `win11` gcov after the latest Named Pipe slice still reports ordinary wait / disconnect misses in:
+      - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:666-685`
+      - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:744`
+    - chosen deterministic targets for the next slice:
+      - HYBRID client receive with `timeout_ms = 0` and a delayed real server sender
+        - purpose:
+          - cover the infinite-wait path (`wait_ms = INFINITE`) without using fake fault injection
+      - BUSYWAIT server-side receive after client close
+        - purpose:
+          - cover the server-role disconnect branch that advances `local_req_seq`
+    - non-goals for this slice:
+      - Win32 create/open-event fault injection
+      - spurious-wake deadline-expiry tricks unless they prove deterministic on `win11`
   - next ordinary Windows C target after the stabilized service slice:
     - fresh post-fix `gcov` evidence from `netipc_service_win.c` shows the remaining ordinary branches are now concentrated in:
       - worker-limit rejection in `server_run()`:

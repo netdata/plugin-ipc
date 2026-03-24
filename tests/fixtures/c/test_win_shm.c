@@ -957,6 +957,100 @@ static void test_hybrid_receive_timeout_and_disconnect(void)
     nipc_win_shm_close(&client);
 }
 
+typedef struct {
+    nipc_win_shm_ctx_t *ctx;
+    DWORD delay_ms;
+    uint16_t code;
+    uint64_t message_id;
+    uint8_t payload[16];
+    size_t payload_len;
+    int result;
+} delayed_send_args_t;
+
+static DWORD WINAPI delayed_send_thread(LPVOID arg)
+{
+    delayed_send_args_t *sa = (delayed_send_args_t *)arg;
+    sa->result = 1;
+
+    Sleep(sa->delay_ms);
+
+    uint8_t msg[128];
+    size_t msg_len = build_message(msg, sizeof(msg),
+                                   NIPC_KIND_RESPONSE, sa->code,
+                                   sa->message_id,
+                                   sa->payload, sa->payload_len);
+    nipc_win_shm_error_t err = nipc_win_shm_send(sa->ctx, msg, msg_len);
+    sa->result = (err == NIPC_WIN_SHM_OK) ? 0 : 1;
+    return (err == NIPC_WIN_SHM_OK) ? 0 : 1;
+}
+
+static void test_hybrid_receive_zero_timeout_waits_for_data(void)
+{
+    printf("--- HYBRID receive zero-timeout waits for data ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_win_shm_ctx_t server;
+    nipc_win_shm_error_t err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, service, AUTH_TOKEN, 16,
+        NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &server);
+    check("hybrid zero-timeout server create", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK)
+        return;
+
+    nipc_win_shm_ctx_t client;
+    err = attach_client_retry(service, 16, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+    check("hybrid zero-timeout client attach", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK) {
+        nipc_win_shm_destroy(&server);
+        return;
+    }
+
+    client.spin_tries = 0;
+
+    delayed_send_args_t sa = {
+        .ctx = &server,
+        .delay_ms = 25,
+        .code = NIPC_METHOD_INCREMENT,
+        .message_id = 777,
+        .payload = { 0x11, 0x22, 0x33, 0x44 },
+        .payload_len = 4,
+        .result = 1,
+    };
+    HANDLE thread = CreateThread(NULL, 0, delayed_send_thread, &sa, 0, NULL);
+    check("hybrid zero-timeout sender thread created", thread != NULL);
+    if (!thread) {
+        nipc_win_shm_close(&client);
+        nipc_win_shm_destroy(&server);
+        return;
+    }
+
+    uint8_t buf[64];
+    size_t msg_len = 0;
+    err = nipc_win_shm_receive(&client, buf, sizeof(buf), &msg_len, 0);
+    check("hybrid zero-timeout receive returns data", err == NIPC_WIN_SHM_OK);
+    check("hybrid zero-timeout advances resp seq", client.local_resp_seq == 1);
+
+    if (err == NIPC_WIN_SHM_OK) {
+        nipc_header_t hdr;
+        nipc_header_decode(buf, msg_len, &hdr);
+        check("hybrid zero-timeout response kind", hdr.kind == NIPC_KIND_RESPONSE);
+        check("hybrid zero-timeout response code", hdr.code == NIPC_METHOD_INCREMENT);
+        check("hybrid zero-timeout response message_id", hdr.message_id == 777);
+        check("hybrid zero-timeout payload echo",
+              msg_len == NIPC_HEADER_LEN + sa.payload_len &&
+              memcmp(buf + NIPC_HEADER_LEN, sa.payload, sa.payload_len) == 0);
+    }
+
+    WaitForSingleObject(thread, 10000);
+    CloseHandle(thread);
+    check("hybrid zero-timeout sender completed", sa.result == 0);
+
+    nipc_win_shm_close(&client);
+    nipc_win_shm_destroy(&server);
+}
+
 static void test_busywait_receive_timeout_and_disconnect(void)
 {
     printf("--- BUSYWAIT receive timeout / disconnect ---\n");
@@ -996,6 +1090,43 @@ static void test_busywait_receive_timeout_and_disconnect(void)
     check("busywait disconnect advances resp seq", client.local_resp_seq == 1);
 
     nipc_win_shm_close(&client);
+}
+
+static void test_busywait_server_receive_disconnect_advances_req_seq(void)
+{
+    printf("--- BUSYWAIT server receive disconnect advances req seq ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_win_shm_ctx_t server;
+    nipc_win_shm_error_t err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, service, AUTH_TOKEN, 17,
+        NIPC_WIN_SHM_PROFILE_BUSYWAIT, 4096, 4096, &server);
+    check("busywait server-disconnect server create", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK)
+        return;
+
+    nipc_win_shm_ctx_t client;
+    err = attach_client_retry(service, 17, NIPC_WIN_SHM_PROFILE_BUSYWAIT, &client);
+    check("busywait server-disconnect client attach", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK) {
+        nipc_win_shm_destroy(&server);
+        return;
+    }
+
+    server.spin_tries = 0;
+
+    nipc_win_shm_close(&client);
+
+    uint8_t buf[64];
+    size_t msg_len = 0;
+    err = nipc_win_shm_receive(&server, buf, sizeof(buf), &msg_len, 1000);
+    check("busywait server receive disconnected after client close",
+          err == NIPC_WIN_SHM_ERR_DISCONNECTED);
+    check("busywait server disconnect advances req seq", server.local_req_seq == 1);
+
+    nipc_win_shm_destroy(&server);
 }
 
 static void test_client_receive_msg_too_large_response(void)
@@ -1076,7 +1207,9 @@ int main(void)
     test_service_name_validation();
     test_client_attach_validation();
     test_hybrid_receive_timeout_and_disconnect();
+    test_hybrid_receive_zero_timeout_waits_for_data();
     test_busywait_receive_timeout_and_disconnect();
+    test_busywait_server_receive_disconnect_advances_req_seq();
     test_basic_roundtrip();
     test_multiple_roundtrips();
     test_busywait_roundtrip();
