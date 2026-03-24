@@ -588,6 +588,86 @@ static void test_service_name_validation(void)
           == NIPC_WIN_SHM_ERR_BAD_PARAM);
 }
 
+static void test_client_attach_validation(void)
+{
+    printf("--- Client attach validation / header rejection ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    check("server create null ctx rejected",
+          nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 5,
+              NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, NULL)
+          == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    check("client attach null ctx rejected",
+          nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 5,
+              NIPC_WIN_SHM_PROFILE_HYBRID, NULL)
+          == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    nipc_win_shm_ctx_t server;
+    nipc_win_shm_error_t err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, service, AUTH_TOKEN, 5,
+        NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &server);
+    check("validation server create", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK)
+        return;
+
+    nipc_win_shm_region_header_t *hdr =
+        (nipc_win_shm_region_header_t *)server.base;
+    const uint32_t saved_magic = hdr->magic;
+    const uint16_t saved_version = hdr->version;
+    const uint16_t saved_header_len = hdr->header_len;
+    const uint32_t saved_profile = hdr->profile;
+
+    hdr->magic = 0;
+    MemoryBarrier();
+    {
+        nipc_win_shm_ctx_t client;
+        err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 5,
+                                          NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+        check("client attach rejects bad magic",
+              err == NIPC_WIN_SHM_ERR_BAD_MAGIC);
+    }
+
+    hdr->magic = saved_magic;
+    hdr->version = 0;
+    MemoryBarrier();
+    {
+        nipc_win_shm_ctx_t client;
+        err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 5,
+                                          NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+        check("client attach rejects bad version",
+              err == NIPC_WIN_SHM_ERR_BAD_VERSION);
+    }
+
+    hdr->version = saved_version;
+    hdr->header_len = 0;
+    MemoryBarrier();
+    {
+        nipc_win_shm_ctx_t client;
+        err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 5,
+                                          NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+        check("client attach rejects bad header len",
+              err == NIPC_WIN_SHM_ERR_BAD_HEADER);
+    }
+
+    hdr->header_len = saved_header_len;
+    hdr->profile = NIPC_WIN_SHM_PROFILE_BUSYWAIT;
+    MemoryBarrier();
+    {
+        nipc_win_shm_ctx_t client;
+        err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 5,
+                                          NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+        check("client attach rejects mismatched profile",
+              err == NIPC_WIN_SHM_ERR_BAD_PROFILE);
+    }
+
+    hdr->profile = saved_profile;
+    MemoryBarrier();
+    nipc_win_shm_destroy(&server);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
@@ -601,6 +681,7 @@ int main(void)
 
     test_header_layout();
     test_service_name_validation();
+    test_client_attach_validation();
     test_basic_roundtrip();
     test_multiple_roundtrips();
     test_busywait_roundtrip();
