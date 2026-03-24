@@ -116,6 +116,39 @@ Finish the rewrite to a production-ready state with:
     - next honest Windows C work after this:
       - stop grinding `netipc_service_win.c` as if it still had cheap ordinary misses
       - move to the remaining transport-file ordinary branches or raise the C gate only after a fresh full clean rerun
+    - fresh next transport target from the current clean `win11` coverage build:
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`
+      - fresh uncovered-line scan still shows an ordinary chunked receive cluster at:
+        - `959-972`
+        - `986-992`
+      - why this is still honest ordinary work:
+        - these are protocol-validation and peer-behavior branches in `nipc_np_receive()`
+        - they can be driven by deterministic fake-server continuation packets
+        - they do not require Win32 fault injection
+      - non-goals for the next slice:
+        - `malloc` / `realloc` / `CreateNamedPipeW` / `CreateFileW` failure paths
+        - handshake send-failure races at `324` and `500`
+        - `SetNamedPipeHandleState()` failure at `649-650`
+    - exact clean `win11` targeted validation on the extended Named Pipe tree:
+      - `test_named_pipe.exe`: `195 passed, 0 failed`
+      - direct `gcov` on `netipc_named_pipe.c` proved:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:959-960`
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:964-965`
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:971-972`
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:986-987`
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:991-992`
+      - same targeted `gcov` summary on the clean coverage build:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `95.35%` of `473`
+    - implication after this slice:
+      - the ordinary Named Pipe chunked receive error cluster is no longer missing coverage
+      - the remaining `netipc_named_pipe.c` misses are now mostly:
+        - allocation-only paths
+        - Win32 API failure paths
+        - handshake send-failure races already shown to be non-deterministic as ordinary tests
+      - the next honest Windows C step is no longer “add another easy Named Pipe protocol test”
+      - the next honest Windows C step is:
+        - rerun the full clean Windows C coverage flow to refresh the aggregate numbers
+        - then decide whether the C gate should move above `90%`
 - next ordinary Windows WinSHM timeout-loop follow-up:
     - the previous Named Pipe chunk-receive follow-up is no longer considered an honest ordinary target with the current fake-server harness
     - concrete clean `win11` evidence:

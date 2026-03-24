@@ -52,6 +52,20 @@ Verified on `2026-03-24`:
     - deterministic HYBRID and BUSYWAIT receive timeout / disconnect tests
     - client-side oversized-response `MSG_TOO_LARGE` coverage for WinSHM
     - second chunked round-trip coverage proving client receive-buffer reuse on the same session
+    - deterministic fake-server continuation-packet tests now covering the chunked receive error cluster in `netipc_named_pipe.c`
+  - latest targeted clean `win11` Named Pipe follow-up on the same coverage flow:
+    - `test_named_pipe.exe`: `195 passed, 0 failed`
+    - direct `gcov` on `netipc_named_pipe.c` proved:
+      - `netipc_named_pipe.c:959-960`
+      - `netipc_named_pipe.c:964-965`
+      - `netipc_named_pipe.c:971-972`
+      - `netipc_named_pipe.c:986-987`
+      - `netipc_named_pipe.c:991-992`
+    - targeted transport-file summary:
+      - `netipc_named_pipe.c`: `95.35%` of `473`
+    - honesty note:
+      - this is a narrower targeted proof than the last full clean aggregate Windows C measurement above
+      - it improves the transport-file evidence without claiming a fresh full aggregate rerun
 - `bash tests/run-coverage-c-windows.sh 90`:
   - script still configures and builds correctly
   - the script now runs three bounded direct executables before the generic `ctest` loop:

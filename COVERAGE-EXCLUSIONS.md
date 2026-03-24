@@ -182,6 +182,16 @@ Verified on `2026-03-24`:
       - `test_win_service_guards.exe`: `194 passed, 0 failed`
       - direct `gcov` on `netipc_service_win.c`: `92.04%` of `779`
       - this is narrower than the last full aggregate Windows C measurement above, so the aggregate `93.2%` figure remains the last fully measured total until the entire clean flow is rerun
+    - latest targeted Named Pipe proof on the same clean coverage flow:
+      - `test_named_pipe.exe`: `195 passed, 0 failed`
+      - direct `gcov` on `netipc_named_pipe.c`: `95.35%` of `473`
+      - newly covered ordinary chunked receive error paths:
+        - `netipc_named_pipe.c:959-960`
+        - `netipc_named_pipe.c:964-965`
+        - `netipc_named_pipe.c:971-972`
+        - `netipc_named_pipe.c:986-987`
+        - `netipc_named_pipe.c:991-992`
+      - this is also narrower than the last full aggregate Windows C measurement above, so it improves the file-level evidence without claiming a fresh aggregate rerun
 
 - Go:
   - script: `tests/run-coverage-go-windows.sh 90`
