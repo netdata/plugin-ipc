@@ -78,6 +78,9 @@ typedef enum {
     FAKE_ACK_BAD_PAYLOAD,
     FAKE_ACK_GOOD_THEN_CLOSE,
     FAKE_ACK_GOOD_THEN_BAD_CHUNK,
+    FAKE_ACK_GOOD_THEN_LIMITED_RESPONSE,
+    FAKE_ACK_GOOD_THEN_TOO_MANY_ITEMS,
+    FAKE_ACK_GOOD_THEN_BAD_BATCH_DIR,
 } fake_ack_mode_t;
 
 typedef enum {
@@ -192,6 +195,35 @@ static size_t build_control_packet(uint8_t *dst, size_t dst_size,
     return NIPC_HEADER_LEN + payload_len;
 }
 
+static size_t build_response_packet(uint8_t *dst, size_t dst_size,
+                                    uint16_t code, uint16_t flags,
+                                    uint32_t item_count,
+                                    uint64_t message_id,
+                                    uint32_t transport_status,
+                                    const void *payload, size_t payload_len)
+{
+    if (dst_size < NIPC_HEADER_LEN + payload_len)
+        return 0;
+
+    nipc_header_t hdr = {
+        .magic = NIPC_MAGIC_MSG,
+        .version = NIPC_VERSION,
+        .header_len = NIPC_HEADER_LEN,
+        .kind = NIPC_KIND_RESPONSE,
+        .code = code,
+        .flags = flags,
+        .item_count = item_count,
+        .message_id = message_id,
+        .payload_len = (uint32_t)payload_len,
+        .transport_status = transport_status,
+    };
+
+    nipc_header_encode(&hdr, dst, NIPC_HEADER_LEN);
+    if (payload_len > 0)
+        memcpy(dst + NIPC_HEADER_LEN, payload, payload_len);
+    return NIPC_HEADER_LEN + payload_len;
+}
+
 static size_t build_valid_hello_payload(uint8_t *dst, size_t dst_size, uint32_t packet_size)
 {
     nipc_hello_t hello = {
@@ -296,7 +328,10 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
         return 0;
     }
 
-    if (ctx->mode == FAKE_ACK_GOOD_THEN_BAD_CHUNK) {
+    if (ctx->mode == FAKE_ACK_GOOD_THEN_BAD_CHUNK ||
+        ctx->mode == FAKE_ACK_GOOD_THEN_LIMITED_RESPONSE ||
+        ctx->mode == FAKE_ACK_GOOD_THEN_TOO_MANY_ITEMS ||
+        ctx->mode == FAKE_ACK_GOOD_THEN_BAD_BATCH_DIR) {
         if (!raw_pipe_read(pipe, buf, sizeof(buf), &bytes_read)) {
             CloseHandle(pipe);
             return 1;
@@ -308,47 +343,90 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
             return 1;
         }
 
-        uint8_t payload_bytes[200];
-        memset(payload_bytes, 0xAB, sizeof(payload_bytes));
+        if (ctx->mode == FAKE_ACK_GOOD_THEN_BAD_CHUNK) {
+            uint8_t payload_bytes[200];
+            memset(payload_bytes, 0xAB, sizeof(payload_bytes));
 
-        nipc_header_t resp_hdr = {
-            .magic = NIPC_MAGIC_MSG,
-            .version = NIPC_VERSION,
-            .header_len = NIPC_HEADER_LEN,
-            .kind = NIPC_KIND_RESPONSE,
-            .code = req_hdr.code,
-            .flags = 0,
-            .item_count = 1,
-            .message_id = req_hdr.message_id,
-            .payload_len = sizeof(payload_bytes),
-            .transport_status = NIPC_STATUS_OK,
-        };
+            nipc_header_t resp_hdr = {
+                .magic = NIPC_MAGIC_MSG,
+                .version = NIPC_VERSION,
+                .header_len = NIPC_HEADER_LEN,
+                .kind = NIPC_KIND_RESPONSE,
+                .code = req_hdr.code,
+                .flags = 0,
+                .item_count = 1,
+                .message_id = req_hdr.message_id,
+                .payload_len = sizeof(payload_bytes),
+                .transport_status = NIPC_STATUS_OK,
+            };
 
-        uint8_t first_pkt[128];
-        nipc_header_encode(&resp_hdr, first_pkt, NIPC_HEADER_LEN);
-        memcpy(first_pkt + NIPC_HEADER_LEN, payload_bytes, 96);
-        if (!raw_pipe_write(pipe, first_pkt, NIPC_HEADER_LEN + 96)) {
-            CloseHandle(pipe);
-            return 1;
-        }
+            uint8_t first_pkt[128];
+            nipc_header_encode(&resp_hdr, first_pkt, NIPC_HEADER_LEN);
+            memcpy(first_pkt + NIPC_HEADER_LEN, payload_bytes, 96);
+            if (!raw_pipe_write(pipe, first_pkt, NIPC_HEADER_LEN + 96)) {
+                CloseHandle(pipe);
+                return 1;
+            }
 
-        nipc_chunk_header_t chk = {
-            .magic = NIPC_MAGIC_CHUNK,
-            .version = NIPC_VERSION,
-            .flags = 0,
-            .message_id = req_hdr.message_id,
-            .total_message_len = NIPC_HEADER_LEN + sizeof(payload_bytes),
-            .chunk_index = 2, /* intentionally wrong: should be 1 */
-            .chunk_count = 3,
-            .chunk_payload_len = 96,
-        };
+            nipc_chunk_header_t chk = {
+                .magic = NIPC_MAGIC_CHUNK,
+                .version = NIPC_VERSION,
+                .flags = 0,
+                .message_id = req_hdr.message_id,
+                .total_message_len = NIPC_HEADER_LEN + sizeof(payload_bytes),
+                .chunk_index = 2, /* intentionally wrong: should be 1 */
+                .chunk_count = 3,
+                .chunk_payload_len = 96,
+            };
 
-        uint8_t chunk_pkt[128];
-        nipc_chunk_header_encode(&chk, chunk_pkt, NIPC_HEADER_LEN);
-        memcpy(chunk_pkt + NIPC_HEADER_LEN, payload_bytes + 96, 96);
-        if (!raw_pipe_write(pipe, chunk_pkt, NIPC_HEADER_LEN + 96)) {
-            CloseHandle(pipe);
-            return 1;
+            uint8_t chunk_pkt[128];
+            nipc_chunk_header_encode(&chk, chunk_pkt, NIPC_HEADER_LEN);
+            memcpy(chunk_pkt + NIPC_HEADER_LEN, payload_bytes + 96, 96);
+            if (!raw_pipe_write(pipe, chunk_pkt, NIPC_HEADER_LEN + 96)) {
+                CloseHandle(pipe);
+                return 1;
+            }
+        } else if (ctx->mode == FAKE_ACK_GOOD_THEN_LIMITED_RESPONSE) {
+            uint8_t first_pkt[NIPC_HEADER_LEN];
+            nipc_header_t resp_hdr = {
+                .magic = NIPC_MAGIC_MSG,
+                .version = NIPC_VERSION,
+                .header_len = NIPC_HEADER_LEN,
+                .kind = NIPC_KIND_RESPONSE,
+                .code = req_hdr.code,
+                .flags = 0,
+                .item_count = 1,
+                .message_id = req_hdr.message_id,
+                .payload_len = 70000,
+                .transport_status = NIPC_STATUS_OK,
+            };
+            nipc_header_encode(&resp_hdr, first_pkt, sizeof(first_pkt));
+            size_t first_len = sizeof(first_pkt);
+            if (!raw_pipe_write(pipe, first_pkt, (DWORD)first_len)) {
+                CloseHandle(pipe);
+                return 1;
+            }
+        } else if (ctx->mode == FAKE_ACK_GOOD_THEN_TOO_MANY_ITEMS) {
+            uint8_t first_pkt[NIPC_HEADER_LEN];
+            size_t first_len = build_response_packet(
+                first_pkt, sizeof(first_pkt),
+                req_hdr.code, NIPC_FLAG_BATCH, 17, req_hdr.message_id,
+                NIPC_STATUS_OK, NULL, 0);
+            if (!raw_pipe_write(pipe, first_pkt, (DWORD)first_len)) {
+                CloseHandle(pipe);
+                return 1;
+            }
+        } else if (ctx->mode == FAKE_ACK_GOOD_THEN_BAD_BATCH_DIR) {
+            uint8_t bad_payload[8] = {0};
+            uint8_t first_pkt[NIPC_HEADER_LEN + sizeof(bad_payload)];
+            size_t first_len = build_response_packet(
+                first_pkt, sizeof(first_pkt),
+                req_hdr.code, NIPC_FLAG_BATCH, 2, req_hdr.message_id,
+                NIPC_STATUS_OK, bad_payload, sizeof(bad_payload));
+            if (!raw_pipe_write(pipe, first_pkt, (DWORD)first_len)) {
+                CloseHandle(pipe);
+                return 1;
+            }
         }
     }
 
@@ -1166,6 +1244,133 @@ static void test_chunk_validation_error(void)
     check("chunk fake server completed", ctx.result == 1);
 }
 
+static void test_response_limit_validation(void)
+{
+    printf("--- Response limit validation ---\n");
+
+    struct {
+        const char *name;
+        fake_ack_mode_t mode;
+        nipc_np_error_t expected;
+    } cases[] = {
+        { "response payload limit rejected", FAKE_ACK_GOOD_THEN_LIMITED_RESPONSE, NIPC_NP_ERR_LIMIT_EXCEEDED },
+        { "response batch item_count limit rejected", FAKE_ACK_GOOD_THEN_TOO_MANY_ITEMS, NIPC_NP_ERR_LIMIT_EXCEEDED },
+        { "response batch directory rejected", FAKE_ACK_GOOD_THEN_BAD_BATCH_DIR, NIPC_NP_ERR_PROTOCOL },
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char service[64];
+        unique_service(service, sizeof(service));
+
+        HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+        fake_server_thread_ctx_t ctx = {
+            .service = service,
+            .ready_event = ready_event,
+            .result = 0,
+            .mode = cases[i].mode,
+            .packet_size = NIPC_NP_DEFAULT_PACKET_SIZE,
+        };
+
+        HANDLE thread = CreateThread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
+        check("limit fake server thread created", thread != NULL);
+        if (!thread) {
+            CloseHandle(ready_event);
+            continue;
+        }
+
+        WaitForSingleObject(ready_event, 5000);
+        CloseHandle(ready_event);
+
+        nipc_np_client_config_t ccfg = default_client_config();
+        ccfg.max_response_payload_bytes = 65536;
+        ccfg.max_response_batch_items = 16;
+
+        nipc_np_session_t session;
+        nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+        check("limit test connect", err == NIPC_NP_OK);
+
+        if (err == NIPC_NP_OK) {
+            uint8_t payload[1] = { 0x11 };
+            nipc_header_t hdr = {
+                .kind = NIPC_KIND_REQUEST,
+                .code = NIPC_METHOD_INCREMENT,
+                .item_count = 1,
+                .message_id = 123,
+            };
+
+            err = nipc_np_send(&session, &hdr, payload, sizeof(payload));
+            check("limit test request send", err == NIPC_NP_OK);
+
+            if (err == NIPC_NP_OK) {
+                uint8_t rbuf[256];
+                nipc_header_t rhdr;
+                const void *rpayload;
+                size_t rpayload_len;
+                err = nipc_np_receive(&session, rbuf, sizeof(rbuf),
+                                      &rhdr, &rpayload, &rpayload_len);
+                check(cases[i].name, err == cases[i].expected);
+            }
+
+            nipc_np_close_session(&session);
+        }
+
+        WaitForSingleObject(thread, 5000);
+        CloseHandle(thread);
+        check("limit fake server completed", ctx.result == 1);
+    }
+}
+
+static void test_zero_chunk_budget_rejected(void)
+{
+    printf("--- Zero chunk budget rejected ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    fake_server_thread_ctx_t ctx = {
+        .service = service,
+        .ready_event = ready_event,
+        .result = 0,
+        .mode = FAKE_ACK_GOOD_THEN_CLOSE,
+        .packet_size = NIPC_HEADER_LEN,
+    };
+
+    HANDLE thread = CreateThread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
+    check("zero-budget fake server thread created", thread != NULL);
+    if (!thread) {
+        CloseHandle(ready_event);
+        return;
+    }
+
+    WaitForSingleObject(ready_event, 5000);
+    CloseHandle(ready_event);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    ccfg.packet_size = NIPC_HEADER_LEN;
+    nipc_np_session_t session;
+    nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("zero-budget connect", err == NIPC_NP_OK);
+
+    if (err == NIPC_NP_OK) {
+        uint8_t payload[1] = { 0x22 };
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = 321,
+        };
+
+        err = nipc_np_send(&session, &hdr, payload, sizeof(payload));
+        check("zero chunk budget rejected", err == NIPC_NP_ERR_BAD_PARAM);
+        nipc_np_close_session(&session);
+    }
+
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    check("zero-budget fake server completed", ctx.result == 1);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Test: listener conflicts / bad params / noop close                 */
 /* ------------------------------------------------------------------ */
@@ -1299,6 +1504,8 @@ int main(void)
     test_server_handshake_rejections();
     test_receive_after_peer_disconnect();
     test_chunk_validation_error();
+    test_response_limit_validation();
+    test_zero_chunk_budget_rejected();
     test_addr_in_use();
     test_bad_params_and_noop_close();
 
