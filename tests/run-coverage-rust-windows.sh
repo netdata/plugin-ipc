@@ -19,7 +19,7 @@ BUILD_DIR="$ROOT_DIR/build-windows-coverage-rust"
 REPORT_LOG="$BUILD_DIR/rust-coverage-summary.txt"
 INTEROP_REGEX='^(test_named_pipe_interop|test_win_shm_interop|test_service_win_interop|test_service_win_shm_interop|test_cache_win_interop|test_cache_win_shm_interop)$'
 IGNORE_REGEX='(src[\\/]+bin[\\/]|tests[\\/]+fixtures[\\/]+rust[\\/]+src[\\/]+bin[\\/]|bench[\\/]+drivers[\\/]+rust[\\/]+src[\\/])'
-THRESHOLD=${1:-80}
+THRESHOLD=${1:-90}
 
 run() {
     printf >&2 "${GRAY}$(pwd) >${NC} "

@@ -81,7 +81,7 @@ Verified on `2026-03-23`:
 - Rust:
   - script: `tests/run-coverage-rust.sh`
   - result: `98.57%`
-  - threshold: `80%`
+  - threshold: `90%`
   - note:
     - Linux now uses `cargo-llvm-cov`, matching the Windows Rust workflow
     - the Linux report excludes Windows-tagged Rust files:
@@ -174,13 +174,13 @@ Verified on `2026-03-23`:
     - the latest raw I/O, handshake, `Listen()`, chunked batch, and disconnect tests pushed `pipe.go` above `97%` and Windows Go total to `96.7%`
 
 - Rust:
-  - script: `tests/run-coverage-rust-windows.sh 80`
-  - result: `93.59%` line coverage after excluding Rust bin / benchmark noise from the report
+  - script: `tests/run-coverage-rust-windows.sh 90`
+  - result: `93.68%` line coverage after excluding Rust bin / benchmark noise from the report
   - key files:
     - `service/cgroups.rs`: `83.83%` line coverage
     - `transport/windows.rs`: `94.43%` line coverage
-    - `transport/win_shm.rs`: `87.74%` line coverage
-  - status: validated workflow with the same total `80%` threshold policy as Linux Rust coverage
+    - `transport/win_shm.rs`: `88.27%` line coverage
+  - status: validated workflow with the same total `90%` threshold policy as Linux Rust coverage
   - caveat: `test_retry_on_failure_windows` is intentionally ignored because the Windows managed-server shutdown/reconnect behavior is still a separate investigation
 
 ## What Is Actually Excluded
@@ -294,14 +294,14 @@ Current evidence:
 - Windows Rust now has a validated threshold-enforced workflow
 - `service/cgroups.rs` is now `83.83%` line coverage
 - `transport/windows.rs` is `94.43%` line coverage
-- `transport/win_shm.rs` is `87.74%` line coverage
+- `transport/win_shm.rs` is `88.27%` line coverage
 - one retry/shutdown test is intentionally ignored for now
 
 Brutal truth:
 
 - Windows Rust is no longer a tooling gap
 - it is no longer blocked on `service/cgroups.rs` being `0.00%`
-- it is now threshold-enforced at the same total `80%` policy as Linux Rust coverage
+- it is now threshold-enforced at the same total `90%` policy as Linux Rust coverage
 - `transport/windows.rs` is no longer the remaining weak Windows Rust file
 - it still needs more ordinary coverage work, and the retry/shutdown investigation stays outside the normal coverage path
 

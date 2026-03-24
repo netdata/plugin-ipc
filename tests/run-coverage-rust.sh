@@ -14,7 +14,7 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CRATE_DIR="$ROOT_DIR/src/crates/netipc"
-THRESHOLD=${1:-80}
+THRESHOLD=${1:-90}
 IGNORE_REGEX='(src[\\/]+service[\\/]+cgroups_windows_tests\.rs|src[\\/]+transport[\\/]+windows\.rs|src[\\/]+transport[\\/]+win_shm\.rs)'
 
 run() {

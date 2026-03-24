@@ -12,11 +12,21 @@ Finish the rewrite to a production-ready state with:
 ## TL;DR
 
 - The rewrite itself is in good shape. Linux is green, Windows tests are green, and POSIX/Windows benchmark floors are green.
-- The remaining work is not about core correctness regressions. It is about coverage completeness, Windows coverage parity, and one deferred Windows managed-server stress investigation.
+- The remaining work is not about core correctness regressions. It is about coverage completeness, coverage-threshold raising, Windows validation parity, and one deferred Windows managed-server stress investigation.
 
 ## Current Focus (2026-03-24)
 
 - Latest authoritative slice:
+  - decision made by Costa:
+    - raise the Rust coverage gate from `80%` to `90%`
+    - keep the Rust coverage gate policy identical on Linux and Windows
+  - implementation implication of that decision:
+    - update:
+      - `tests/run-coverage-rust.sh`
+      - `tests/run-coverage-rust-windows.sh`
+    - refresh the active coverage docs to reflect the new enforced Rust threshold
+    - revalidate Linux locally
+    - fresh `win11` rerun now verifies Windows Rust coverage at `93.68%`
   - latest narrow ordinary deterministic Rust follow-up is complete:
     - completed targets:
       - direct `UdsListener::accept()` failure on a closed listener fd
@@ -936,8 +946,8 @@ Finish the rewrite to a production-ready state with:
     - measured with Windows-native unit tests + Rust interop ctests, with Rust bin / benchmark noise excluded from the report:
       - `src/service/cgroups.rs`: `83.83%` line coverage
       - `src/transport/windows.rs`: `94.43%` line coverage
-      - `src/transport/win_shm.rs`: `87.74%` line coverage
-      - total line coverage: `93.59%`
+      - `src/transport/win_shm.rs`: `88.27%` line coverage
+      - total line coverage: `93.68%`
     - implication: Windows Rust coverage is now real and useful, but one retry/shutdown test is still intentionally ignored pending the separate managed-server investigation
 - Approved next sequence:
   - document the new Windows Go numbers honestly in the TODO and coverage docs
@@ -955,10 +965,10 @@ Finish the rewrite to a production-ready state with:
 Facts:
 
 - The validated Windows Rust workflow now reports:
-  - total line coverage: `93.59%`
+  - total line coverage: `93.68%`
   - `src/service/cgroups.rs`: `83.83%`
   - `src/transport/windows.rs`: `94.43%`
-  - `src/transport/win_shm.rs`: `87.74%`
+  - `src/transport/win_shm.rs`: `88.27%`
 - `cargo-llvm-cov` has a built-in total-line gate via `--fail-under-lines`, but not a built-in per-file gate.
 - The current Windows C script enforces per-file gates on the exact Windows C files it cares about.
 - The current Windows Go script enforces only a total-package threshold.
@@ -972,7 +982,7 @@ User decision (`2026-03-23`):
 Implementation consequence:
 
 - The Linux and Windows Rust coverage scripts must enforce the same total-threshold policy.
-- First shared Rust threshold remains the current script default of `80%` until the later threshold-raising phase.
+- Costa later raised the shared Rust threshold to `90%` on both Linux and Windows.
 
 ### 2. Cross-platform test-framework parity expectation
 
@@ -1071,8 +1081,8 @@ Verified on `2026-03-23`:
   - current threshold: `85%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
-  - result: `90.66%`
-  - current threshold: `80%`
+  - result: `98.57%`
+  - current threshold: `90%`
 
 Important fact:
 
@@ -1194,12 +1204,12 @@ Important facts:
   - current measured report from `win11` with Windows-native Rust L2/L3 unit tests + Rust interop ctests, after excluding Rust bin / benchmark noise from the report:
     - `service/cgroups.rs`: `83.83%` line coverage
     - `transport/windows.rs`: `94.43%` line coverage
-    - `transport/win_shm.rs`: `87.74%` line coverage
-    - total: `93.59%` line coverage
+    - `transport/win_shm.rs`: `88.27%` line coverage
+    - total: `93.68%` line coverage
   - status:
     - the workflow is real and scripted
     - the report is now meaningful for the Windows Rust service path too
-    - the script should enforce the same `80%` total threshold policy as Linux Rust
+    - the script should enforce the same `90%` total threshold policy as Linux Rust
     - the named-pipe transport file is no longer the weak Windows Rust target
     - the remaining Rust work is broader coverage raising plus the deferred shutdown/retry investigation
     - one Windows retry/shutdown test is intentionally ignored because it belongs to the separate managed-server shutdown investigation
@@ -1315,7 +1325,7 @@ Current expected result:
 ```bash
 bash tests/run-coverage-c-windows.sh 82
 bash tests/run-coverage-go-windows.sh 85
-bash tests/run-coverage-rust-windows.sh 80
+bash tests/run-coverage-rust-windows.sh 90
 ```
 
 Current expected result:
@@ -1324,9 +1334,9 @@ Current expected result:
   - passes with all tracked Windows C files above `82%`
 - `bash tests/run-coverage-go-windows.sh 85`
   - currently reports `96.7%`
-- `bash tests/run-coverage-rust-windows.sh 80`
-  - currently reports `93.59%`
-  - should now enforce the same `80%` total threshold used by Linux Rust
+- `bash tests/run-coverage-rust-windows.sh 90`
+  - currently reports `93.68%`
+  - should now enforce the same `90%` total threshold used by Linux Rust
   - key remaining gap is no longer missing service coverage; it is raising coverage further and finishing the separate retry/shutdown investigation
 
 ### Copy benchmark artifacts back to the local repo

@@ -38,19 +38,19 @@ Verified on `2026-03-23`:
     - malformed raw WinSHM request tests now also cover the real SHM server-side teardown / reconnect path
     - the latest create / attach edge tests materially raised the remaining ordinary Windows Go transport file
     - the latest raw I/O, handshake, `Listen()`, chunked batch, and disconnect tests pushed `pipe.go` above `97%` and Windows Go total to `96.7%`
-- `bash tests/run-coverage-rust-windows.sh 80`:
+- `bash tests/run-coverage-rust-windows.sh 90`:
   - script works on `win11`
   - workflow:
     - `cargo-llvm-cov`
     - `rustup component add llvm-tools-preview`
     - Windows-native Rust L2/L3 unit tests
     - Windows Rust interop ctests
-  - current threshold policy: same total `80%` gate as Linux Rust coverage
+  - current threshold policy: same total `90%` gate as Linux Rust coverage
   - current measured result after excluding Rust bin / benchmark noise from the report:
     - `service/cgroups.rs`: `83.83%` line coverage
     - `transport/windows.rs`: `94.43%` line coverage
-    - `transport/win_shm.rs`: `87.74%` line coverage
-    - total line coverage: `93.59%`
+    - `transport/win_shm.rs`: `88.27%` line coverage
+    - total line coverage: `93.68%`
   - current caveat:
     - `test_retry_on_failure_windows` is intentionally ignored because Windows managed-server shutdown/reconnect still needs a dedicated investigation
 
@@ -62,7 +62,7 @@ Brutal truth:
 - The Windows Go script reliability issue is fixed.
 - The recent Rust Windows coverage work materially raised `service/cgroups.rs` and `win_shm.rs`.
 - The recent Windows named-pipe transport tests materially raised `transport/windows.rs`.
-- The current weakest Windows Rust file is now `service/cgroups.rs`, but it is above the current `80%` threshold.
+- The current weakest Windows Rust file is now `service/cgroups.rs`, but it is above the current `90%` threshold.
 - The remaining Windows Go work is no longer a named-pipe transport coverage problem.
 - The ordinary `client_windows.go` targets are largely exhausted.
 - The remaining Windows Go work is now mostly:
@@ -126,7 +126,7 @@ Facts:
 - `src/crates/netipc/src/transport/win_shm.rs`
 - `src/crates/netipc/src/service/cgroups.rs`
 - Linux coverage runs do not execute these Windows modules.
-- The current validated Windows Rust workflow enforces the same total `80%` threshold policy as Linux Rust coverage.
+- The current validated Windows Rust workflow enforces the same total `90%` threshold policy as Linux Rust coverage.
 - It now produces meaningful Windows Rust service coverage on `win11`.
 - It now also produces strong Windows named-pipe transport coverage on `win11`.
 - The remaining Windows Rust caveat is the ignored retry/shutdown test that belongs to the separate managed-server investigation.
@@ -173,7 +173,7 @@ bash tests/run-coverage-go-windows.sh 85
 ### Rust coverage
 
 ```bash
-bash tests/run-coverage-rust-windows.sh 80
+bash tests/run-coverage-rust-windows.sh 90
 ```
 
 ## Current limitations
