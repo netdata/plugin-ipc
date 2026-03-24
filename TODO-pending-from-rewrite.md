@@ -16,6 +16,29 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
+- next ordinary Windows Named Pipe connect validation follow-up:
+    - client-handshake send recheck outcome:
+      - the attempted fake-server `"closes before HELLO"` follow-up did not produce a stable direct `raw_send()` failure on clean `win11`
+      - observed outcome during targeted reruns:
+        - `NIPC_NP_ERR_RECV`
+      - implication:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:324` is not an honest deterministic target with the current fake-ACK harness
+        - do not keep grinding that branch as if it were ordinary
+    - next cheap deterministic miss from source review:
+      - nonexistent service connect rejection in `nipc_np_connect()`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:644`
+    - planned deterministic test:
+      - call `nipc_np_connect()` on a unique service name with no listener and assert `NIPC_NP_ERR_CONNECT`
+    - exact clean `win11` validation on the modified tree:
+      - targeted build + `ctest --test-dir build --output-on-failure -R "^test_named_pipe$"`: pass
+      - direct coverage-build `test_named_pipe.exe` + `gcov` on `netipc_named_pipe.c`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:644`: covered
+    - implication:
+      - the direct no-listener connect rejection is now covered honestly
+    - non-goals for this follow-up:
+      - server-side ACK send timing tricks
+      - allocation-failure-only paths
+      - in-flight growth failure paths
 - next ordinary Windows Named Pipe validation follow-up:
     - handshake-send recheck outcome:
       - the attempted `"close after HELLO"` follow-up did not produce a stable `raw_send()` failure on clean `win11`
