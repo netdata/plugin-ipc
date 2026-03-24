@@ -13,21 +13,20 @@ Verified on `2026-03-24`:
 - `ctest --test-dir build --output-on-failure -j4`: `28/28` passing on `win11`
 - Windows C coverage on the latest clean `win11` coverage build:
   - the bounded direct coverage executables pass:
-    - `test_win_service_guards.exe`: `164 passed, 0 failed`
-    - `test_win_service_guards_extra.exe`: `33 passed, 0 failed`
+    - `test_win_service_guards.exe`: `134 passed, 0 failed`
+    - `test_win_service_guards_extra.exe`: `93 passed, 0 failed`
     - `test_win_service_extra.exe`: `81 passed, 0 failed`
-  - `test_win_service.exe` itself also passes when run directly:
-    - `86 passed, 0 failed`
   - the remaining Windows C interop / stress subset then passes one-by-one under `ctest --timeout 60`
-  - measured total coverage result: `93.2%`
+  - the raw `bash tests/run-coverage-c-windows.sh 90` flow completed end to end
+  - measured total coverage result: `93.9%`
   - per-file:
-    - `netipc_service_win.c`: `91.8%`
-    - `netipc_named_pipe.c`: `93.4%`
+    - `netipc_service_win.c`: `92.0%`
+    - `netipc_named_pipe.c`: `95.3%`
     - `netipc_win_shm.c`: `95.9%`
   - current status:
     - measured Windows C remains above the Linux-matching per-file and total `90%` gates
-    - the raw `run-coverage-c-windows.sh` flow is still noisy at the `ctest test_win_service` step under coverage instrumentation
-    - this is not currently a proven runtime regression, because the same executable passes when run directly on the same clean coverage build
+    - the previous first-run coverage instability in `test_win_service_guards.exe` is fixed by splitting the late dispatch / cache / drain cases into `test_win_service_guards_extra.exe`
+    - the aggregate Windows C script is trustworthy again on the validated `win11` flow
   - latest ordinary Windows C service gains came from:
     - hybrid client send-buffer guard coverage at `netipc_service_win.c:147`
     - hybrid receive-error mapping coverage at `netipc_service_win.c:179`
@@ -115,9 +114,9 @@ Brutal truth:
 - Windows coverage measurement is real and useful now.
 - Windows coverage parity is much closer, but not finished.
 - Windows C is no longer below the Linux-matching `90%` gate.
-- The raw Windows C coverage script is still not perfectly noise-free because `ctest test_win_service` can time out under coverage instrumentation even when the direct executable passes on the same clean build.
-- One transient `test_win_service_guards.exe` timeout and one later `test_win_service_guards_extra.exe` timeout were both traced to coverage-harness test placement/racing, not to a proven runtime regression.
-- The current validated layout keeps the hybrid-attach mismatch test in `test_win_service_guards.exe` and the worker-limit / destroy / send-failure cases in `test_win_service_guards_extra.exe`.
+- The old Windows C coverage-script instability was real.
+- The current validated layout fixes it by keeping the early HYBRID / malformed-request guards in `test_win_service_guards.exe` and the late dispatch / cache / drain / worker-limit cases in `test_win_service_guards_extra.exe`.
+- That means the current trustworthy Windows C baseline is the full script result above: `93.9%` total, with every tracked file above `90%`.
 - The Windows Go script reliability issue is fixed.
 - The recent Rust Windows coverage work materially raised `service/cgroups.rs` and `win_shm.rs`.
 - The recent Windows named-pipe transport tests materially raised `transport/windows.rs`.

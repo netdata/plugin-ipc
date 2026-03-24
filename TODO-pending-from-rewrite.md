@@ -17,23 +17,21 @@ Finish the rewrite to a production-ready state with:
 ## Current Focus (2026-03-24)
 
 - current verified Windows C state after the latest clean `win11` rerun:
-    - the clean `win11` coverage build remains authoritative, but the raw script path is noisy again at `ctest test_win_service`
-    - exact measured Windows C result after completing the same clean coverage build with direct `test_win_service.exe` plus the remaining interop/stress `ctest` items:
-      - total: `93.2%`
-      - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `91.8%`
-      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `93.4%`
+    - the real `bash tests/run-coverage-c-windows.sh 90` flow now completes end to end again on clean `win11`
+    - exact measured Windows C result from the real script:
+      - total: `93.9%`
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `92.0%`
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `95.3%`
       - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `95.9%`
     - evidence:
-      - `test_win_service_guards.exe`: `164 passed, 0 failed`
-      - `test_win_service_guards_extra.exe`: `33 passed, 0 failed`
+      - `test_win_service_guards.exe`: `134 passed, 0 failed`
+      - `test_win_service_guards_extra.exe`: `93 passed, 0 failed`
       - `test_win_service_extra.exe`: `81 passed, 0 failed`
-      - direct `test_win_service.exe` on the same clean coverage build: `86 passed, 0 failed`
-      - the raw `ctest --test-dir build-windows-coverage-c -R "^test_win_service$"` step still timed out under coverage instrumentation
+      - the remaining Windows C subset then passed one-by-one under `ctest --timeout 60`
+      - the final script summary reported `93.9%` total and all tracked files above `90%`
     - implication:
       - measured Windows C is still honestly above the shared `90%` gate on current `main`
-      - the active docs need to distinguish between:
-        - the last fully measured clean aggregate Windows C totals
-        - the newer targeted service-file `gcov` proofs on the same clean flow
+      - the aggregate Windows C script is trustworthy again on the validated `win11` workflow
 - next honest ordinary Windows C target:
     - fresh clean `win11` direct `gcov` on `netipc_service_win.c` now shows:
       - typed batch and string-reverse success paths are already covered
@@ -149,6 +147,27 @@ Finish the rewrite to a production-ready state with:
       - the next honest Windows C step is:
         - rerun the full clean Windows C coverage flow to refresh the aggregate numbers
         - then decide whether the C gate should move above `90%`
+    - latest blocker from the attempted fresh aggregate rerun:
+      - the repo's own `tests/run-coverage-c-windows.sh 90` still times out on the first direct run of `test_win_service_guards.exe`
+      - exact clean `win11` evidence:
+        - the script exits with `124` inside `test_win_service_guards.exe`
+        - the log reaches the typed-dispatch section and stops after:
+          - `missing-string raw send ok`
+      - critical counter-evidence on the same coverage build:
+        - an immediate direct rerun on the later non-coverage debug build had passed with:
+          - `194 passed, 0 failed`
+        - but the same measurement on the real coverage build did not finish within `180s`
+        - the timed direct coverage-build log stopped much earlier, at:
+          - `raw unknown-method send ok`
+      - implication:
+        - the current blocker is not just a too-tight `120s` script timeout
+        - the coverage-built `test_win_service_guards.exe` itself is too large / unstable for a single bounded direct run
+      - next implementation step:
+        - split the late dispatch / cache / drain portion of `test_win_service_guards.exe` into another bounded coverage-only executable
+        - keep the new executable in the direct-run section of `tests/run-coverage-c-windows.sh`
+      - non-goals for this stabilization slice:
+        - retry-only or timeout-only fixes without reducing the coverage-built executable's scope
+        - claiming a fresh aggregate Windows C number before the stabilized flow passes
 - next ordinary Windows WinSHM timeout-loop follow-up:
     - the previous Named Pipe chunk-receive follow-up is no longer considered an honest ordinary target with the current fake-server harness
     - concrete clean `win11` evidence:
@@ -1982,17 +2001,16 @@ Current measured results:
 
 - C:
   - latest clean `win11` coverage build:
-    - the raw script still times out at `ctest test_win_service` under coverage instrumentation
-    - the equivalent clean coverage run completed with direct `test_win_service.exe` plus the remaining interop/stress `ctest` items
-  - coverage result: `93.2%`
+    - the raw `bash tests/run-coverage-c-windows.sh 90` path completed end to end
+  - coverage result: `93.9%`
   - per-file:
-    - `netipc_service_win.c`: `91.7%`
-    - `netipc_named_pipe.c`: `93.4%`
+    - `netipc_service_win.c`: `92.0%`
+    - `netipc_named_pipe.c`: `95.3%`
     - `netipc_win_shm.c`: `95.9%`
   - status:
     - passes the Linux-matching `90%` target, including the per-file gate
     - the dedicated coverage-only guard executables remain stable under bounded `timeout 120`
-    - the ordinary Windows C service executable is still noisy when driven through `ctest` under coverage instrumentation, even though the same executable passes directly on the same clean build
+    - the old first-run coverage instability is fixed by the `test_win_service_guards.exe` / `test_win_service_guards_extra.exe` split
 
 - Go:
   - `bash tests/run-coverage-go-windows.sh 90`
@@ -2165,9 +2183,9 @@ bash tests/run-coverage-rust-windows.sh 90
 Current expected result:
 
 - `bash tests/run-coverage-c-windows.sh`
-  - current clean-coverage measurement is `93.2%`
+  - current clean-coverage measurement is `93.9%`
   - all tracked Windows C files are above `90%`
-  - caveat: the raw script can still time out at `ctest test_win_service` under coverage instrumentation, even though direct `test_win_service.exe` passes on the same clean build
+  - the full raw script now completes end to end on the validated `win11` workflow
 - `bash tests/run-coverage-go-windows.sh 90`
   - currently reports `96.7%`
 - `bash tests/run-coverage-rust-windows.sh 90`
@@ -2213,9 +2231,9 @@ Facts:
 - Linux coverage scripts are working and pass their current lowered thresholds.
 - Windows coverage docs now match the measured numbers from `2026-03-24`.
 - Windows C coverage currently passes:
-  - total: `93.2%`
-  - `netipc_service_win.c`: `91.8%`
-  - `netipc_named_pipe.c`: `93.4%`
+  - total: `93.9%`
+  - `netipc_service_win.c`: `92.0%`
+  - `netipc_named_pipe.c`: `95.3%`
   - `netipc_win_shm.c`: `95.9%`
 - Windows Go coverage currently reports `96.7%`.
 - Linux Go coverage currently reports `95.8%` with the remaining ordinary gaps now reduced to a much smaller POSIX transport/service residue.

@@ -148,10 +148,10 @@ Latest Linux Go notes from the current ordinary POSIX slice:
 Verified on `2026-03-24`:
 
 - C:
-  - latest clean `win11` coverage measurement: `93.2%`
+  - latest clean `win11` coverage measurement: `93.9%`
   - per-file:
-    - `netipc_service_win.c`: `91.8%`
-    - `netipc_named_pipe.c`: `93.4%`
+    - `netipc_service_win.c`: `92.0%`
+    - `netipc_named_pipe.c`: `95.3%`
     - `netipc_win_shm.c`: `95.9%`
   - status:
     - passes the Linux-matching per-file and total `90%` gates
@@ -160,15 +160,14 @@ Verified on `2026-03-24`:
       - `test_win_service_guards_extra.exe`
       - `test_win_service_extra.exe`
     - latest validated direct-guard results:
-      - `test_win_service_guards.exe`: `164 passed, 0 failed`
-      - `test_win_service_guards_extra.exe`: `33 passed, 0 failed`
+      - `test_win_service_guards.exe`: `134 passed, 0 failed`
+      - `test_win_service_guards_extra.exe`: `93 passed, 0 failed`
       - `test_win_service_extra.exe`: `81 passed, 0 failed`
     - the remaining Windows C subset then runs one-by-one under `ctest --timeout 60`
-    - `test_win_service.exe` also passes directly on the same clean coverage build with `86 passed, 0 failed`
-    - the raw `ctest test_win_service` step is still noisy under coverage instrumentation, so the latest measured totals come from the equivalent clean coverage build completed with direct `test_win_service.exe` plus the remaining bounded interop/stress `ctest` items
+    - the full `bash tests/run-coverage-c-windows.sh 90` flow now completes cleanly on the validated `win11` path
     - the latest ordinary Windows SHM follow-up raised:
-      - `netipc_service_win.c` to `91.8%`
-      - `netipc_named_pipe.c` to `93.4%`
+      - `netipc_service_win.c` to `92.0%`
+      - `netipc_named_pipe.c` to `95.3%`
       - `netipc_win_shm.c` to `95.9%`
       - the new second chunked round-trip test now covers the client receive-buffer reuse fast path in `ensure_recv_buf()`
       - the latest Windows service guard follow-up now also covers:
@@ -181,7 +180,7 @@ Verified on `2026-03-24`:
     - latest targeted service-file proof on the same clean coverage flow:
       - `test_win_service_guards.exe`: `194 passed, 0 failed`
       - direct `gcov` on `netipc_service_win.c`: `92.04%` of `779`
-      - this is narrower than the last full aggregate Windows C measurement above, so the aggregate `93.2%` figure remains the last fully measured total until the entire clean flow is rerun
+      - this is narrower than the last full aggregate Windows C measurement above, so the aggregate `93.9%` figure remains the authoritative total
     - latest targeted Named Pipe proof on the same clean coverage flow:
       - `test_named_pipe.exe`: `195 passed, 0 failed`
       - direct `gcov` on `netipc_named_pipe.c`: `95.35%` of `473`
@@ -191,7 +190,7 @@ Verified on `2026-03-24`:
         - `netipc_named_pipe.c:971-972`
         - `netipc_named_pipe.c:986-987`
         - `netipc_named_pipe.c:991-992`
-      - this is also narrower than the last full aggregate Windows C measurement above, so it improves the file-level evidence without claiming a fresh aggregate rerun
+      - this is also narrower than the last full aggregate Windows C measurement above, so it improves the file-level evidence without replacing the authoritative `93.9%` aggregate
 
 - Go:
   - script: `tests/run-coverage-go-windows.sh 90`
@@ -295,8 +294,8 @@ hard exclusions yet.
 
 Current evidence:
 
-- `netipc_service_win.c` is now `91.8%`
-- `netipc_named_pipe.c` is `93.4%`
+- `netipc_service_win.c` is now `92.0%`
+- `netipc_named_pipe.c` is `95.3%`
 - `netipc_win_shm.c` is `95.9%`
 
 Brutal truth:

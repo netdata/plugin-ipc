@@ -1378,11 +1378,6 @@ int main(void)
     test_hybrid_string_raw_call_failure();
     test_hybrid_server_rejects_malformed_requests();
     test_snapshot_default_max_items();
-    test_string_dispatch_missing_handlers_and_unknown_method();
-    test_server_init_truncation_and_typed_error_propagation();
-    test_cache_collision_lookup_and_rehash();
-    test_drain_timeout_on_blocked_handler();
-
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
