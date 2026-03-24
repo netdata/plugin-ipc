@@ -16,6 +16,62 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
+- next ordinary Windows WinSHM timeout-loop follow-up:
+    - the previous Named Pipe chunk-receive follow-up is no longer considered an honest ordinary target with the current fake-server harness
+    - concrete clean `win11` evidence:
+      - direct `gcov` after the deep batch-validation slice showed:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:960`: already covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:965`: uncovered
+      - the first short-chunk attempt returned:
+        - `nipc_np_send()` -> `NIPC_NP_ERR_DISCONNECTED`
+      - two deeper malformed-chunk variants also failed at the same stage:
+        - bad chunk header variant
+        - bad chunk payload-length variant
+      - implication:
+        - the current fake server closes early enough that the client is measuring a send/close race
+        - this does not honestly prove the receive-loop branch in `957-965`
+    - decision from the evidence:
+      - stop grinding this Named Pipe path as an ordinary deterministic target
+      - keep the already-pushed deep batch-validation coverage and move to a cleaner target
+    - next deterministic target:
+      - inspect the existing WinSHM timeout/zero-timeout tests against:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:666-685`
+      - verify on a clean `win11` clone which of these lines are still actually uncovered under gcov
+      - only add tests if the current timeout harness truly misses them
+    - exact clean `win11` validation on the modified tree:
+      - a new deterministic test pre-populates the hybrid response slot and sets `client.spin_tries = 0`
+      - targeted `ctest --test-dir build-windows-coverage-c --output-on-failure -R "^test_win_shm$"`: pass
+      - direct `gcov` on `netipc_win_shm.c` proved:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:674`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:685`: still uncovered
+    - conclusion from this slice:
+      - `674` was a real ordinary branch and is now covered honestly
+      - `685` is not a good ordinary target with the current API surface
+      - it requires the timeout budget to expire before the first `WaitForSingleObject()` call even starts, which is a timing-only condition rather than a normal protocol or transport behavior
+    - next honest ordinary WinSHM targets after this:
+      - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:374`
+        - `client_attach()` to a nonexistent service should deterministically return `NIPC_WIN_SHM_ERR_OPEN_MAPPING`
+      - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:452`
+        - manual HYBRID mapping with no events should deterministically fail the first `OpenEventW()`
+      - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:460`
+        - manual HYBRID mapping with only the request event should deterministically fail the second `OpenEventW()`
+      - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:781-787`
+        - `nipc_win_shm_cleanup_stale()` is a public no-op and should simply be executed once
+    - exact clean `win11` validation on the extended tree:
+      - targeted `ctest --test-dir build-windows-coverage-c --output-on-failure -R "^test_win_shm$"`: pass
+      - direct `gcov` on `netipc_win_shm.c` proved:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:374`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:452`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:460`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:674`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:781-787`: covered
+    - implication after this slice:
+      - the remaining visible `netipc_win_shm.c` misses are now dominated by create/map/event fault paths and one likely unreachable name-buffer guard
+      - WinSHM ordinary deterministic coverage is close to exhausted
+    - non-goals for this follow-up:
+      - more Named Pipe handshake timing tricks
+      - allocation-only paths
+      - fault-injection-only paths
 - next ordinary Windows Named Pipe deep batch-validation follow-up:
     - fresh clean `win11` direct `gcov` after the latest chunked-batch slice reports:
       - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:1005`: covered

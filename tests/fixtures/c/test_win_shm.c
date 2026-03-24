@@ -149,6 +149,77 @@ static int build_object_name_for_test(wchar_t *dst, size_t dst_chars,
     return 0;
 }
 
+static int setup_manual_hybrid_mapping_for_test(const char *service_name,
+                                                uint64_t session_id,
+                                                HANDLE *mapping_out,
+                                                void **base_out,
+                                                wchar_t *req_event_name,
+                                                size_t req_event_chars,
+                                                wchar_t *resp_event_name,
+                                                size_t resp_event_chars)
+{
+    const size_t region_size = 128u + 4096u + 4096u;
+    uint64_t hash = compute_shm_hash_for_test(TEST_RUN_DIR, service_name);
+    wchar_t mapping_name[NIPC_WIN_SHM_MAX_NAME];
+    HANDLE mapping = NULL;
+    void *base = NULL;
+    int ok = hash != 0 &&
+        build_object_name_for_test(mapping_name, NIPC_WIN_SHM_MAX_NAME,
+                                   hash, service_name,
+                                   NIPC_WIN_SHM_PROFILE_HYBRID,
+                                   session_id, "mapping") == 0 &&
+        build_object_name_for_test(req_event_name, req_event_chars,
+                                   hash, service_name,
+                                   NIPC_WIN_SHM_PROFILE_HYBRID,
+                                   session_id, "req_event") == 0 &&
+        build_object_name_for_test(resp_event_name, resp_event_chars,
+                                   hash, service_name,
+                                   NIPC_WIN_SHM_PROFILE_HYBRID,
+                                   session_id, "resp_event") == 0;
+
+    if (ok) {
+        mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL,
+                                     PAGE_READWRITE,
+                                     (DWORD)(region_size >> 32),
+                                     (DWORD)(region_size & 0xFFFFFFFF),
+                                     mapping_name);
+        ok = mapping != NULL;
+    }
+
+    if (ok) {
+        base = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, region_size);
+        ok = base != NULL;
+    }
+
+    if (ok) {
+        nipc_win_shm_region_header_t *hdr =
+            (nipc_win_shm_region_header_t *)base;
+        memset(base, 0, region_size);
+        hdr->magic = NIPC_WIN_SHM_MAGIC;
+        hdr->version = NIPC_WIN_SHM_VERSION;
+        hdr->header_len = NIPC_WIN_SHM_HEADER_LEN;
+        hdr->profile = NIPC_WIN_SHM_PROFILE_HYBRID;
+        hdr->request_offset = 128;
+        hdr->request_capacity = 4096;
+        hdr->response_offset = 128 + 4096;
+        hdr->response_capacity = 4096;
+        hdr->spin_tries = NIPC_WIN_SHM_DEFAULT_SPIN;
+        MemoryBarrier();
+    }
+
+    if (!ok) {
+        if (base)
+            UnmapViewOfFile(base);
+        if (mapping)
+            CloseHandle(mapping);
+        return 0;
+    }
+
+    *mapping_out = mapping;
+    *base_out = base;
+    return 1;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Test: header layout assertions                                     */
 /* ------------------------------------------------------------------ */
@@ -668,6 +739,14 @@ static void test_null_close_destroy(void)
     check("NULL close/destroy no-op", 1);
 }
 
+static void test_cleanup_stale_noop(void)
+{
+    printf("--- cleanup_stale() no-op ---\n");
+    nipc_win_shm_cleanup_stale(TEST_RUN_DIR, "noop-service");
+    nipc_win_shm_cleanup_stale(NULL, NULL);
+    check("cleanup_stale no-op", 1);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Test: service name validation                                      */
 /* ------------------------------------------------------------------ */
@@ -748,12 +827,14 @@ static void test_client_attach_validation(void)
     printf("--- Client attach validation / header rejection ---\n");
 
     char service[64];
+    char missing_service[64];
     char long_run_dir[520];
     char long_service[208];
     char hybrid_event_overflow_service[202];
     nipc_win_shm_ctx_t temp_ctx;
     const uint64_t overflow_session_id = 55;
     unique_service(service, sizeof(service));
+    unique_service(missing_service, sizeof(missing_service));
     fill_long_run_dir(long_run_dir, sizeof(long_run_dir));
     fill_service_name(long_service, sizeof(long_service), 200);
     fill_service_name(hybrid_event_overflow_service,
@@ -798,6 +879,11 @@ static void test_client_attach_validation(void)
           nipc_win_shm_client_attach(TEST_RUN_DIR, long_service, AUTH_TOKEN, 5,
               NIPC_WIN_SHM_PROFILE_HYBRID, &temp_ctx)
           == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    check("client attach missing mapping rejected",
+          nipc_win_shm_client_attach(TEST_RUN_DIR, missing_service, AUTH_TOKEN, 5,
+              NIPC_WIN_SHM_PROFILE_HYBRID, &temp_ctx)
+          == NIPC_WIN_SHM_ERR_OPEN_MAPPING);
 
     {
         uint64_t hash = compute_shm_hash_for_test(TEST_RUN_DIR,
@@ -849,6 +935,46 @@ static void test_client_attach_validation(void)
                       &temp_ctx) == NIPC_WIN_SHM_ERR_BAD_PARAM);
         }
 
+        if (base)
+            UnmapViewOfFile(base);
+        if (mapping)
+            CloseHandle(mapping);
+    }
+
+    {
+        char eventless_service[64];
+        wchar_t req_event_name[NIPC_WIN_SHM_MAX_NAME];
+        wchar_t resp_event_name[NIPC_WIN_SHM_MAX_NAME];
+        HANDLE mapping = NULL;
+        void *base = NULL;
+        HANDLE req_event = NULL;
+        const uint64_t session_id = 56;
+
+        unique_service(eventless_service, sizeof(eventless_service));
+        check("manual hybrid mapping setup without events",
+              setup_manual_hybrid_mapping_for_test(eventless_service, session_id,
+                  &mapping, &base,
+                  req_event_name, NIPC_WIN_SHM_MAX_NAME,
+                  resp_event_name, NIPC_WIN_SHM_MAX_NAME));
+
+        if (mapping && base) {
+            check("client attach rejects missing hybrid request event",
+                  nipc_win_shm_client_attach(TEST_RUN_DIR, eventless_service,
+                      AUTH_TOKEN, session_id, NIPC_WIN_SHM_PROFILE_HYBRID,
+                      &temp_ctx) == NIPC_WIN_SHM_ERR_OPEN_EVENT);
+
+            req_event = CreateEventW(NULL, FALSE, FALSE, req_event_name);
+            check("manual hybrid request event created", req_event != NULL);
+            if (req_event) {
+                check("client attach rejects missing hybrid response event",
+                      nipc_win_shm_client_attach(TEST_RUN_DIR, eventless_service,
+                          AUTH_TOKEN, session_id, NIPC_WIN_SHM_PROFILE_HYBRID,
+                          &temp_ctx) == NIPC_WIN_SHM_ERR_OPEN_EVENT);
+            }
+        }
+
+        if (req_event)
+            CloseHandle(req_event);
         if (base)
             UnmapViewOfFile(base);
         if (mapping)
@@ -1051,6 +1177,67 @@ static void test_hybrid_receive_zero_timeout_waits_for_data(void)
     nipc_win_shm_destroy(&server);
 }
 
+static void test_hybrid_receive_recheck_observes_ready_data(void)
+{
+    printf("--- HYBRID receive recheck sees ready data ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_win_shm_ctx_t server;
+    nipc_win_shm_error_t err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, service, AUTH_TOKEN, 17,
+        NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &server);
+    check("hybrid recheck server create", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK)
+        return;
+
+    nipc_win_shm_ctx_t client;
+    err = attach_client_retry(service, 17, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+    check("hybrid recheck client attach", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK) {
+        nipc_win_shm_destroy(&server);
+        return;
+    }
+
+    client.spin_tries = 0;
+
+    nipc_win_shm_region_header_t *hdr =
+        (nipc_win_shm_region_header_t *)client.base;
+    uint8_t *resp_area = (uint8_t *)client.base + client.response_offset;
+    uint8_t msg[128];
+    uint8_t payload[4] = { 0x51, 0x52, 0x53, 0x54 };
+    size_t wire_len = build_message(msg, sizeof(msg),
+                                    NIPC_KIND_RESPONSE, NIPC_METHOD_INCREMENT,
+                                    778, payload, sizeof(payload));
+
+    memcpy(resp_area, msg, wire_len);
+    InterlockedExchange(&hdr->resp_len, (LONG)wire_len);
+    InterlockedExchange64((volatile LONG64 *)&hdr->resp_seq, 1);
+    MemoryBarrier();
+
+    uint8_t buf[64];
+    size_t msg_len = 0;
+    err = nipc_win_shm_receive(&client, buf, sizeof(buf), &msg_len, 1000);
+    check("hybrid recheck receive returns data", err == NIPC_WIN_SHM_OK);
+    check("hybrid recheck advances resp seq", client.local_resp_seq == 1);
+    check("hybrid recheck clears waiting flag", hdr->resp_client_waiting == 0);
+
+    if (err == NIPC_WIN_SHM_OK) {
+        nipc_header_t out;
+        nipc_header_decode(buf, msg_len, &out);
+        check("hybrid recheck response kind", out.kind == NIPC_KIND_RESPONSE);
+        check("hybrid recheck response code", out.code == NIPC_METHOD_INCREMENT);
+        check("hybrid recheck response message_id", out.message_id == 778);
+        check("hybrid recheck payload echo",
+              msg_len == NIPC_HEADER_LEN + sizeof(payload) &&
+              memcmp(buf + NIPC_HEADER_LEN, payload, sizeof(payload)) == 0);
+    }
+
+    nipc_win_shm_close(&client);
+    nipc_win_shm_destroy(&server);
+}
+
 static void test_busywait_receive_timeout_and_disconnect(void)
 {
     printf("--- BUSYWAIT receive timeout / disconnect ---\n");
@@ -1245,6 +1432,7 @@ int main(void)
     test_client_attach_validation();
     test_hybrid_receive_timeout_and_disconnect();
     test_hybrid_receive_zero_timeout_waits_for_data();
+    test_hybrid_receive_recheck_observes_ready_data();
     test_hybrid_server_receive_disconnect_advances_req_seq();
     test_busywait_receive_timeout_and_disconnect();
     test_busywait_server_receive_disconnect_advances_req_seq();
@@ -1256,6 +1444,7 @@ int main(void)
     test_send_too_large();
     test_send_receive_validation();
     test_null_close_destroy();
+    test_cleanup_stale_noop();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;
