@@ -64,6 +64,24 @@ static void fill_long_run_dir(char *buf, size_t len)
     buf[len - 1] = '\0';
 }
 
+static nipc_win_shm_error_t attach_client_retry(const char *service,
+                                                uint64_t session_id,
+                                                uint32_t profile,
+                                                nipc_win_shm_ctx_t *ctx)
+{
+    nipc_win_shm_error_t err = NIPC_WIN_SHM_ERR_OPEN_MAPPING;
+
+    for (int i = 0; i < 100; i++) {
+        err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
+                                         session_id, profile, ctx);
+        if (err == NIPC_WIN_SHM_OK)
+            break;
+        Sleep(10);
+    }
+
+    return err;
+}
+
 /* Build a complete message (outer header + payload) for SHM. */
 static size_t build_message(uint8_t *dst, size_t dst_size,
                              uint16_t kind, uint16_t code,
@@ -91,6 +109,44 @@ static size_t build_message(uint8_t *dst, size_t dst_size,
         memcpy(dst + NIPC_HEADER_LEN, payload, payload_len);
 
     return NIPC_HEADER_LEN + payload_len;
+}
+
+static uint64_t compute_shm_hash_for_test(const char *run_dir,
+                                          const char *service_name)
+{
+    char buf[512];
+    int n = snprintf(buf, sizeof(buf), "%s\n%s\n%llu",
+                     run_dir, service_name,
+                     (unsigned long long)AUTH_TOKEN);
+    if (n < 0 || (size_t)n >= sizeof(buf))
+        return 0;
+
+    return nipc_fnv1a_64(buf, (size_t)n);
+}
+
+static int build_object_name_for_test(wchar_t *dst, size_t dst_chars,
+                                      uint64_t hash,
+                                      const char *service_name,
+                                      uint32_t profile,
+                                      uint64_t session_id,
+                                      const char *suffix)
+{
+    char narrow[NIPC_WIN_SHM_MAX_NAME];
+    int n = snprintf(narrow, sizeof(narrow),
+                     "Local\\netipc-%016llx-%s-p%u-s%016llx-%s",
+                     (unsigned long long)hash, service_name,
+                     (unsigned)profile,
+                     (unsigned long long)session_id, suffix);
+    if (n < 0 || (size_t)n >= sizeof(narrow))
+        return -1;
+
+    if ((size_t)(n + 1) > dst_chars)
+        return -1;
+
+    for (int i = 0; i <= n; i++)
+        dst[i] = (wchar_t)(unsigned char)narrow[i];
+
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -694,10 +750,14 @@ static void test_client_attach_validation(void)
     char service[64];
     char long_run_dir[520];
     char long_service[208];
+    char hybrid_event_overflow_service[202];
     nipc_win_shm_ctx_t temp_ctx;
+    const uint64_t overflow_session_id = 55;
     unique_service(service, sizeof(service));
     fill_long_run_dir(long_run_dir, sizeof(long_run_dir));
     fill_service_name(long_service, sizeof(long_service), 200);
+    fill_service_name(hybrid_event_overflow_service,
+                      sizeof(hybrid_event_overflow_service), 195);
 
     check("server create null ctx rejected",
           nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 5,
@@ -738,6 +798,62 @@ static void test_client_attach_validation(void)
           nipc_win_shm_client_attach(TEST_RUN_DIR, long_service, AUTH_TOKEN, 5,
               NIPC_WIN_SHM_PROFILE_HYBRID, &temp_ctx)
           == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    {
+        uint64_t hash = compute_shm_hash_for_test(TEST_RUN_DIR,
+                                                  hybrid_event_overflow_service);
+        wchar_t mapping_name[NIPC_WIN_SHM_MAX_NAME];
+        HANDLE mapping = NULL;
+        void *base = NULL;
+        const size_t region_size = 128u + 4096u + 4096u;
+        int setup_ok = hash != 0 &&
+            build_object_name_for_test(mapping_name, NIPC_WIN_SHM_MAX_NAME,
+                                       hash, hybrid_event_overflow_service,
+                                       NIPC_WIN_SHM_PROFILE_HYBRID,
+                                       overflow_session_id, "mapping") == 0;
+
+        if (setup_ok) {
+            mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL,
+                                         PAGE_READWRITE,
+                                         (DWORD)(region_size >> 32),
+                                         (DWORD)(region_size & 0xFFFFFFFF),
+                                         mapping_name);
+            setup_ok = mapping != NULL;
+        }
+
+        if (setup_ok) {
+            base = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, region_size);
+            setup_ok = base != NULL;
+        }
+
+        check("manual hybrid mapping setup for attach overflow", setup_ok);
+        if (setup_ok) {
+            nipc_win_shm_region_header_t *hdr =
+                (nipc_win_shm_region_header_t *)base;
+            memset(base, 0, region_size);
+            hdr->magic = NIPC_WIN_SHM_MAGIC;
+            hdr->version = NIPC_WIN_SHM_VERSION;
+            hdr->header_len = NIPC_WIN_SHM_HEADER_LEN;
+            hdr->profile = NIPC_WIN_SHM_PROFILE_HYBRID;
+            hdr->request_offset = 128;
+            hdr->request_capacity = 4096;
+            hdr->response_offset = 128 + 4096;
+            hdr->response_capacity = 4096;
+            hdr->spin_tries = NIPC_WIN_SHM_DEFAULT_SPIN;
+            MemoryBarrier();
+
+            check("client attach hybrid event name overflow rejected",
+                  nipc_win_shm_client_attach(TEST_RUN_DIR,
+                      hybrid_event_overflow_service, AUTH_TOKEN,
+                      overflow_session_id, NIPC_WIN_SHM_PROFILE_HYBRID,
+                      &temp_ctx) == NIPC_WIN_SHM_ERR_BAD_PARAM);
+        }
+
+        if (base)
+            UnmapViewOfFile(base);
+        if (mapping)
+            CloseHandle(mapping);
+    }
 
     nipc_win_shm_ctx_t server;
     nipc_win_shm_error_t err = nipc_win_shm_server_create(
@@ -802,6 +918,149 @@ static void test_client_attach_validation(void)
     nipc_win_shm_destroy(&server);
 }
 
+static void test_hybrid_receive_timeout_and_disconnect(void)
+{
+    printf("--- HYBRID receive timeout / disconnect ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_win_shm_ctx_t server;
+    nipc_win_shm_error_t err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, service, AUTH_TOKEN, 6,
+        NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &server);
+    check("hybrid timeout server create", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK)
+        return;
+
+    nipc_win_shm_ctx_t client;
+    err = attach_client_retry(service, 6, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+    check("hybrid timeout client attach", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK) {
+        nipc_win_shm_destroy(&server);
+        return;
+    }
+
+    uint8_t buf[64];
+    size_t msg_len = 0;
+    err = nipc_win_shm_receive(&client, buf, sizeof(buf), &msg_len, 1);
+    check("hybrid receive timeout", err == NIPC_WIN_SHM_ERR_TIMEOUT);
+    check("hybrid timeout keeps resp seq", client.local_resp_seq == 0);
+
+    nipc_win_shm_destroy(&server);
+
+    err = nipc_win_shm_receive(&client, buf, sizeof(buf), &msg_len, 1000);
+    check("hybrid receive disconnected after server destroy",
+          err == NIPC_WIN_SHM_ERR_DISCONNECTED);
+    check("hybrid disconnect advances resp seq", client.local_resp_seq == 1);
+
+    nipc_win_shm_close(&client);
+}
+
+static void test_busywait_receive_timeout_and_disconnect(void)
+{
+    printf("--- BUSYWAIT receive timeout / disconnect ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_win_shm_ctx_t server;
+    nipc_win_shm_error_t err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, service, AUTH_TOKEN, 7,
+        NIPC_WIN_SHM_PROFILE_BUSYWAIT, 4096, 4096, &server);
+    check("busywait timeout server create", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK)
+        return;
+
+    nipc_win_shm_ctx_t client;
+    err = attach_client_retry(service, 7, NIPC_WIN_SHM_PROFILE_BUSYWAIT, &client);
+    check("busywait timeout client attach", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK) {
+        nipc_win_shm_destroy(&server);
+        return;
+    }
+
+    client.spin_tries = 0;
+
+    uint8_t buf[64];
+    size_t msg_len = 0;
+    err = nipc_win_shm_receive(&client, buf, sizeof(buf), &msg_len, 1);
+    check("busywait receive timeout", err == NIPC_WIN_SHM_ERR_TIMEOUT);
+    check("busywait timeout keeps resp seq", client.local_resp_seq == 0);
+
+    nipc_win_shm_destroy(&server);
+
+    err = nipc_win_shm_receive(&client, buf, sizeof(buf), &msg_len, 1000);
+    check("busywait receive disconnected after server destroy",
+          err == NIPC_WIN_SHM_ERR_DISCONNECTED);
+    check("busywait disconnect advances resp seq", client.local_resp_seq == 1);
+
+    nipc_win_shm_close(&client);
+}
+
+static void test_client_receive_msg_too_large_response(void)
+{
+    printf("--- Client receive large response -> MSG_TOO_LARGE ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_win_shm_ctx_t server;
+    nipc_win_shm_error_t err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, service, AUTH_TOKEN, 8,
+        NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &server);
+    check("large-response server create", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK)
+        return;
+
+    nipc_win_shm_ctx_t client;
+    err = attach_client_retry(service, 8, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+    check("large-response client attach", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK) {
+        nipc_win_shm_destroy(&server);
+        return;
+    }
+
+    uint8_t req_payload[1] = { 0x42 };
+    uint8_t req_msg[128];
+    size_t req_len = build_message(req_msg, sizeof(req_msg),
+                                   NIPC_KIND_REQUEST, NIPC_METHOD_INCREMENT,
+                                   123, req_payload, sizeof(req_payload));
+    err = nipc_win_shm_send(&client, req_msg, req_len);
+    check("large-response client send", err == NIPC_WIN_SHM_OK);
+
+    uint8_t server_req[128];
+    size_t server_req_len = 0;
+    err = nipc_win_shm_receive(&server, server_req, sizeof(server_req),
+                               &server_req_len, 10000);
+    check("large-response server receive", err == NIPC_WIN_SHM_OK);
+
+    if (err == NIPC_WIN_SHM_OK) {
+        uint8_t resp_payload[256];
+        memset(resp_payload, 0xAB, sizeof(resp_payload));
+        uint8_t resp_msg[512];
+        size_t resp_len = build_message(resp_msg, sizeof(resp_msg),
+                                        NIPC_KIND_RESPONSE, NIPC_METHOD_INCREMENT,
+                                        123, resp_payload, sizeof(resp_payload));
+        err = nipc_win_shm_send(&server, resp_msg, resp_len);
+        check("large-response server send", err == NIPC_WIN_SHM_OK);
+    }
+
+    uint8_t small_resp[32];
+    size_t small_resp_len = 0;
+    err = nipc_win_shm_receive(&client, small_resp, sizeof(small_resp),
+                               &small_resp_len, 10000);
+    check("large-response client gets MSG_TOO_LARGE",
+          err == NIPC_WIN_SHM_ERR_MSG_TOO_LARGE);
+    check("large-response reports actual message len",
+          err == NIPC_WIN_SHM_ERR_MSG_TOO_LARGE &&
+          small_resp_len == NIPC_HEADER_LEN + 256);
+    check("large-response advances client resp seq", client.local_resp_seq == 1);
+
+    nipc_win_shm_close(&client);
+    nipc_win_shm_destroy(&server);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
@@ -816,10 +1075,13 @@ int main(void)
     test_header_layout();
     test_service_name_validation();
     test_client_attach_validation();
+    test_hybrid_receive_timeout_and_disconnect();
+    test_busywait_receive_timeout_and_disconnect();
     test_basic_roundtrip();
     test_multiple_roundtrips();
     test_busywait_roundtrip();
     test_receive_msg_too_large();
+    test_client_receive_msg_too_large_response();
     test_send_too_large();
     test_send_receive_validation();
     test_null_close_destroy();

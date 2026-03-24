@@ -11,7 +11,7 @@ It does not claim generic MSVC/CI support that has not been exercised here.
 Verified on `2026-03-24`:
 
 - `ctest --test-dir build --output-on-failure -j4`: `28/28` passing on `win11`
-- `bash tests/run-coverage-c-windows.sh 85`:
+- `bash tests/run-coverage-c-windows.sh 90`:
   - script works
   - coverage-only Windows test subset passes inside the script
   - the script now runs three bounded direct executables before the generic `ctest` loop:
@@ -19,18 +19,17 @@ Verified on `2026-03-24`:
     - `build-windows-coverage-c/bin/test_win_service_guards_extra.exe`
     - `build-windows-coverage-c/bin/test_win_service_extra.exe`
   - the remaining Windows C subset then runs one-by-one with `ctest --timeout 60`
-  - total coverage result: `91.3%`
+  - total coverage result: `92.0%`
   - per-file:
     - `netipc_service_win.c`: `91.4%`
     - `netipc_named_pipe.c`: `91.8%`
-    - `netipc_win_shm.c`: `90.5%`
-  - current status: script passes, including the Linux-matching per-file `85%` gate
-  - latest ordinary Windows C service gains came from:
-    - dedicated coverage-only service-guard tests being split into smaller executables
-    - worker-limit rejection coverage
-    - active-session join / destroy coverage
-    - named-pipe send-failure recovery coverage
-    - missing-string-handler internal-error coverage moved into the small extra guard executable
+    - `netipc_win_shm.c`: `93.5%`
+  - current status: script passes, including the Linux-matching per-file `90%` gate
+  - latest ordinary Windows C transport gains came from:
+    - dedicated coverage-only service-guard tests staying split into smaller executables
+    - manual HYBRID mapping setup to reach the client-attach event-name overflow branch honestly
+    - deterministic HYBRID and BUSYWAIT receive timeout / disconnect tests
+    - client-side oversized-response `MSG_TOO_LARGE` coverage for WinSHM
   - script detail:
     - `test_win_service_guards.exe`, `test_win_service_guards_extra.exe`, and `test_win_service_extra.exe` now run under `timeout 120`
     - the generic Windows C subset no longer relies on `test_win_service_extra` inside the unordered `ctest` loop
@@ -73,7 +72,8 @@ Brutal truth:
 
 - Windows coverage measurement is real and useful now.
 - Windows coverage parity is much closer, but not finished.
-- Windows C is no longer the red gate.
+- Windows C is no longer below the Linux-matching `90%` gate.
+- One transient `test_win_service_guards.exe` timeout was observed once during the first post-threshold rerun, but it did not reproduce on an isolated rerun or on the next full script rerun.
 - The Windows Go script reliability issue is fixed.
 - The recent Rust Windows coverage work materially raised `service/cgroups.rs` and `win_shm.rs`.
 - The recent Windows named-pipe transport tests materially raised `transport/windows.rs`.
@@ -177,7 +177,7 @@ Expected shape:
 ### C coverage
 
 ```bash
-bash tests/run-coverage-c-windows.sh 85
+bash tests/run-coverage-c-windows.sh
 ```
 
 ### Go coverage
