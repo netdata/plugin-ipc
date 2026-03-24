@@ -25,7 +25,21 @@ LIB_SOURCES=(
 # C coverage is about the C transport/service stack. Running the full Windows
 # suite here adds unrelated Go fuzz tests that do not contribute gcov data for
 # these files and can starve long-running C tests under coverage builds.
-COVERAGE_TEST_REGEX='^(test_protocol|interop_codec|fuzz_protocol_30s|test_named_pipe|test_named_pipe_interop|test_win_shm|test_win_service|test_win_service_extra|test_win_stress|test_win_shm_interop|test_service_win_interop|test_service_win_shm_interop|test_cache_win_interop|test_cache_win_shm_interop)$'
+COVERAGE_TESTS=(
+    test_protocol
+    interop_codec
+    fuzz_protocol_30s
+    test_named_pipe
+    test_named_pipe_interop
+    test_win_shm
+    test_win_service
+    test_win_stress
+    test_win_shm_interop
+    test_service_win_interop
+    test_service_win_shm_interop
+    test_cache_win_interop
+    test_cache_win_shm_interop
+)
 
 THRESHOLD=${1:-85}
 
@@ -78,7 +92,6 @@ echo -e "${YELLOW}Building Windows binaries...${NC}"
 run cmake --build "$BUILD_DIR" -j4
 
 echo -e "${YELLOW}Running Windows test suite...${NC}"
-run ctest --test-dir "$BUILD_DIR" --output-on-failure -j1 -R "$COVERAGE_TEST_REGEX"
 echo -e "${YELLOW}Running Windows C coverage-only guard executable...${NC}"
 GUARD_LOG="$BUILD_DIR/test_win_service_guards.log"
 run rm -f "$GUARD_LOG"
@@ -96,6 +109,41 @@ if [[ $exit_code -ne 0 ]]; then
     exit "$exit_code"
 fi
 cat "$GUARD_LOG"
+EXTRA_GUARD_LOG="$BUILD_DIR/test_win_service_guards_extra.log"
+run rm -f "$EXTRA_GUARD_LOG"
+printf >&2 "${GRAY}$(pwd) >${NC} "
+printf >&2 "${YELLOW}"
+printf >&2 "%q %q %q " timeout 120 "$BUILD_DIR/bin/test_win_service_guards_extra.exe"
+printf >&2 "${NC}\n"
+set +e
+timeout 120 "$BUILD_DIR/bin/test_win_service_guards_extra.exe" >"$EXTRA_GUARD_LOG" 2>&1
+exit_code=$?
+set -e
+if [[ $exit_code -ne 0 ]]; then
+    cat "$EXTRA_GUARD_LOG" || true
+    echo -e >&2 "${RED}[ERROR]${NC} Extra guard executable failed or timed out with exit code ${exit_code}"
+    exit "$exit_code"
+fi
+cat "$EXTRA_GUARD_LOG"
+SERVICE_EXTRA_LOG="$BUILD_DIR/test_win_service_extra.log"
+run rm -f "$SERVICE_EXTRA_LOG"
+printf >&2 "${GRAY}$(pwd) >${NC} "
+printf >&2 "${YELLOW}"
+printf >&2 "%q %q %q " timeout 120 "$BUILD_DIR/bin/test_win_service_extra.exe"
+printf >&2 "${NC}\n"
+set +e
+timeout 120 "$BUILD_DIR/bin/test_win_service_extra.exe" >"$SERVICE_EXTRA_LOG" 2>&1
+exit_code=$?
+set -e
+if [[ $exit_code -ne 0 ]]; then
+    cat "$SERVICE_EXTRA_LOG" || true
+    echo -e >&2 "${RED}[ERROR]${NC} test_win_service_extra executable failed or timed out with exit code ${exit_code}"
+    exit "$exit_code"
+fi
+cat "$SERVICE_EXTRA_LOG"
+for test_name in "${COVERAGE_TESTS[@]}"; do
+    run ctest --test-dir "$BUILD_DIR" --output-on-failure -j1 --timeout 60 -R "^${test_name}$"
+done
 
 echo
 echo -e "${YELLOW}Collecting gcov data for Windows C sources...${NC}"

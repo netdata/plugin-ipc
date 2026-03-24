@@ -149,18 +149,22 @@ Verified on `2026-03-24`:
 
 - C:
   - script: `tests/run-coverage-c-windows.sh 85`
-  - result: `90.9%`
+  - result: `91.3%`
   - per-file:
-    - `netipc_service_win.c`: `90.1%`
+    - `netipc_service_win.c`: `91.4%`
     - `netipc_named_pipe.c`: `91.8%`
-    - `netipc_win_shm.c`: `91.6%`
+    - `netipc_win_shm.c`: `90.5%`
   - status:
     - passes the Linux-matching per-file and total `85%` gates
-    - the script now runs a dedicated Windows C coverage-only guard executable under a bounded timeout so the ordinary `ctest` pass stays stable while the extra service guard branches still contribute coverage
+    - the script now runs three bounded direct executables before the generic `ctest` loop:
+      - `test_win_service_guards.exe`
+      - `test_win_service_guards_extra.exe`
+      - `test_win_service_extra.exe`
+    - the remaining Windows C subset then runs one-by-one under `ctest --timeout 60`
     - the latest ordinary Windows C service follow-up raised:
-      - `netipc_service_win.c` from `87.3%` to `90.1%`
+      - `netipc_service_win.c` from `90.1%` to `91.4%`
       - `netipc_named_pipe.c` remained `91.8%`
-      - `netipc_win_shm.c` from `90.3%` to `91.6%`
+      - `netipc_win_shm.c` from `91.6%` to `90.5%`
 
 - Go:
   - script: `tests/run-coverage-go-windows.sh 90`

@@ -16,20 +16,25 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
-- Latest authoritative slice:
-  - latest C threshold verification:
-    - Linux C was re-run locally and remains safely above the next shared threshold step
-    - Windows C was re-run on `win11` at an explicit `85%` gate and then pushed further with deterministic Windows service coverage
-    - measured result:
-      - Linux C total: `94.1%`
-      - Windows C total: `90.9%`
-      - Windows C file breakdown:
-        - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `90.1%`
-        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `91.8%`
-        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `91.6%`
-    - implication:
-      - the shared Linux/Windows C gate can now move to `85%`
-      - the dedicated Windows C coverage-only harness is the correct place for the extra Windows service-guard tests
+  - Latest authoritative slice:
+    - latest C threshold verification:
+      - Linux C was re-run locally and remains safely above the next shared threshold step
+      - Windows C was re-run on `win11` at an explicit `85%` gate after splitting the unstable service-only coverage cases into smaller bounded executables
+      - measured result:
+        - Linux C total: `94.1%`
+        - Windows C total: `91.3%`
+        - Windows C file breakdown:
+          - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `91.4%`
+          - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `91.8%`
+          - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `90.5%`
+      - implication:
+        - the shared Linux/Windows C gate can now move to `85%`
+        - the dedicated Windows C coverage-only harness is the correct place for the extra Windows service-guard tests
+        - the Windows C script is trustworthy again only when:
+          - `test_win_service_guards.exe`
+          - `test_win_service_guards_extra.exe`
+          - `test_win_service_extra.exe`
+          run as separate bounded direct executables before the generic `ctest` loop
   - next ordinary C target after the `85%` gate raise:
     - Windows C is no longer blocked by `netipc_service_win.c`
     - the next weakest tracked Windows C files are now:
@@ -163,6 +168,33 @@ Finish the rewrite to a production-ready state with:
       - implication:
         - the earlier wedge was a script-launch reliability issue, not a proven library/test correctness issue
         - the coverage script now launches the guard executable under a bounded timeout and fails explicitly if it hangs
+  - next ordinary Windows C target after the stabilized service slice:
+    - fresh post-fix `gcov` evidence from `netipc_service_win.c` shows the remaining ordinary branches are now concentrated in:
+      - worker-limit rejection in `server_run()`:
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c:1045-1049`
+      - active-session join / cleanup in `server_destroy()`:
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c:1225-1230`
+      - cache refresh failure on malformed snapshot rebuild:
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c:1414-1415`
+      - a few service-loop disconnect / send-failure paths:
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c:797-798`
+    - implications:
+      - `netipc_named_pipe.c` and `netipc_win_shm.c` are no longer the best ordinary targets
+      - the next honest Windows C gains should come from more deterministic service-coverage tests in `tests/fixtures/c/test_win_service_guards.c`
+    - non-goals for the next slice:
+      - `malloc` / `calloc` / `realloc` / `_beginthreadex` fault-injection
+      - WinSHM mapping / event creation failures
+      - peer-close timing tricks that only sometimes hit a line
+    - fresh execution-order fact from the new service follow-up:
+      - on `win11`, coverage-build `test_win_service.exe` passes standalone under:
+        - `ctest --test-dir build-windows-coverage-c --output-on-failure -V -j1 -R "^test_win_service$" --timeout 60`
+      - the dedicated guard executable also stops being trustworthy when it is run after the coverage subset
+      - standalone `test_win_service_extra.exe` also passes cleanly, which points to the grouped `ctest -R ...` coverage invocation itself as the unstable layer
+      - the only clean-build guard failures left are the old missing-string-handler assertions inside the mixed client-guard test; the equivalent dedicated missing-increment and missing-snapshot service cases already pass
+      - implication:
+        - this is currently a coverage-order interaction, not a proven correctness bug in `test_win_service.exe` or the guard executable
+        - the Windows C coverage script should run the coverage-relevant Windows C tests one-by-one in an explicit known-good order, instead of relying on grouped `ctest -R ...` invocations
+        - the missing-string-handler raw check should move into the dedicated typed-dispatch test block so it uses its own clean service instance
   - follow-up from the first Windows C service fix attempt:
     - adding the new client guard tests directly into `tests/fixtures/c/test_win_service_extra.c` did raise Windows C coverage in the coverage build
     - but that same edit introduced a real side effect in the normal `win11` build:
@@ -211,6 +243,76 @@ Finish the rewrite to a production-ready state with:
       - `src/transport/shm.rs` moved from `96.04%` to `96.20%`
       - Rust lib tests moved from `291/291` to `294/294`
     - implication:
+  - current Windows C split validation status:
+    - first `win11` rebuild of the split harness fails at compile time in:
+      - `tests/fixtures/c/test_win_service_guards.c:851`
+    - concrete compiler error:
+      - `error: 'service' undeclared (first use in this function)`
+    - code-review fact:
+      - the old missing-string-handler raw check was moved into `test_string_dispatch_missing_handlers_and_unknown_method()`
+      - but that move was only partial: the block now references `service` without its own local service/server setup
+      - this is a test-harness revert bug, not a service-layer regression
+    - implication:
+      - restore the dedicated missing-string service case cleanly before any further `win11` runtime validation
+  - follow-up evidence after restoring the dedicated missing-string service case:
+    - `win11` normal build:
+      - `test_win_service_guards.exe` passes standalone with `149 passed, 0 failed`
+    - `win11` coverage build:
+      - the same executable still wedges only in the dedicated missing-string service case
+      - the stall point is reproducible:
+        - log stops after `PASS: missing-string raw send ok`
+      - the small dedicated `test_win_service_guards_extra.exe` still passes cleanly with `33 passed, 0 failed`
+    - implication:
+      - this is still a coverage-build harness stability issue, not a proven `netipc_service_win.c` missing-string dispatch bug
+      - the next fix should move the missing-string dedicated service case out of the old large guard executable and into the small extra guard executable
+  - current split follow-up:
+    - while removing the missing-string block from `tests/fixtures/c/test_win_service_guards.c`, the old guard file picked up a local brace mismatch
+    - concrete `win11` compiler errors:
+      - `tests/fixtures/c/test_win_service_guards.c:935:5: error: expected identifier or '(' before '{' token`
+      - `tests/fixtures/c/test_win_service_guards.c:981:1: error: expected identifier or '(' before '}' token`
+    - implication:
+      - fix the local syntax regression first, then rerun the guard split validation
+  - fresh clean-build result after fixing the syntax regression and moving missing-string into the extra guard binary:
+    - fresh `win11` coverage build now gets through:
+      - old large guard executable: `140 passed, 0 failed`
+      - new small extra guard executable: `42 passed, 0 failed`
+      - per-test loop through:
+        - `test_protocol`
+        - `interop_codec`
+        - `fuzz_protocol_30s`
+        - `test_named_pipe`
+        - `test_named_pipe_interop`
+        - `test_win_shm`
+        - `test_win_service`
+    - it then stalls when the loop reaches:
+      - `ctest --test-dir build-windows-coverage-c --output-on-failure -j1 -R "^test_win_service_extra$"`
+    - code-review fact:
+      - the per-test loop currently has no explicit `ctest --timeout`
+    - implication:
+      - add an explicit per-test timeout to the Windows C coverage loop
+      - then verify whether `test_win_service_extra` is only a bounded slow/hung test in this position, or whether it needs a separate known-good order
+  - follow-up from the fresh clean-build loop:
+    - `test_win_service_extra` is not just missing a timeout in this order
+    - the fresh clean coverage loop fails it concretely after `72.82 sec`
+    - captured log stops in:
+      - `--- Cache refresh rebuilds / linear lookup ---`
+    - implication:
+      - `test_win_service_extra` should be treated like the guard executables:
+        - run it as a separate bounded direct executable in a known-good position
+        - remove it from the generic per-test `ctest` loop
+      - keep a per-test `ctest --timeout` for the remaining loop entries anyway
+  - final validation fact for this slice:
+    - fresh clean `win11` coverage run now completes successfully with:
+      - `netipc_service_win.c`: `91.4%`
+      - `netipc_named_pipe.c`: `91.8%`
+      - `netipc_win_shm.c`: `90.5%`
+      - total: `91.3%`
+    - a later full parallel `win11` `ctest --test-dir build -j4` run had one noisy slow tail on `test_win_service`
+    - isolated rerun immediately after that:
+      - `ctest --test-dir build --output-on-failure -j1 --timeout 60 -R "^test_win_service$"`
+      - result: pass in `0.28 sec`
+    - implication:
+      - there is no evidence that this coverage-only slice introduced a normal-suite regression
       - the remaining Rust misses are now even more concentrated in non-ordinary territory
       - cheap deterministic gains still exist, but they are now very small
   - next ordinary deterministic Rust review should treat the remaining misses as:
@@ -1551,10 +1653,10 @@ Facts:
 - Linux coverage scripts are working and pass their current lowered thresholds.
 - Windows coverage docs now match the measured numbers from `2026-03-24`.
 - Windows C coverage currently passes:
-  - total: `90.9%`
-  - `netipc_service_win.c`: `90.1%`
+  - total: `91.3%`
+  - `netipc_service_win.c`: `91.4%`
   - `netipc_named_pipe.c`: `91.8%`
-  - `netipc_win_shm.c`: `91.6%`
+  - `netipc_win_shm.c`: `90.5%`
 - Windows Go coverage currently reports `96.7%`.
 - Linux Go coverage currently reports `95.8%` with the remaining ordinary gaps now reduced to a much smaller POSIX transport/service residue.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.

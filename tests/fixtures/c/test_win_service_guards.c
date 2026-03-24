@@ -669,42 +669,6 @@ static void test_client_batch_and_string_guards(void)
         nipc_client_close(&client);
     }
 
-    {
-        nipc_np_client_config_t ccfg = default_client_config();
-        nipc_np_session_t session = { .pipe = INVALID_HANDLE_VALUE };
-
-        check("guard missing-string-handler connect ok",
-              nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session) == NIPC_NP_OK);
-
-        if (session.pipe != INVALID_HANDLE_VALUE) {
-            uint8_t req_buf[128];
-            uint8_t recv_buf[1024];
-            nipc_header_t req = {0};
-            nipc_header_t resp_hdr;
-            const void *payload = NULL;
-            size_t payload_len = 0;
-            size_t req_len = nipc_string_reverse_encode("abc", 3, req_buf, sizeof(req_buf));
-
-            req.kind = NIPC_KIND_REQUEST;
-            req.code = NIPC_METHOD_STRING_REVERSE;
-            req.item_count = 1;
-            req.message_id = 13;
-            req.transport_status = NIPC_STATUS_OK;
-
-            check("guard missing-string-handler send ok",
-                  req_len > 0 && nipc_np_send(&session, &req, req_buf, req_len) == NIPC_NP_OK);
-            check("missing string handler returns internal-error response",
-                  nipc_np_receive(&session, recv_buf, sizeof(recv_buf),
-                                  &resp_hdr, &payload, &payload_len) == NIPC_NP_OK &&
-                  resp_hdr.kind == NIPC_KIND_RESPONSE &&
-                  resp_hdr.code == req.code &&
-                  resp_hdr.message_id == req.message_id &&
-                  resp_hdr.transport_status == NIPC_STATUS_INTERNAL_ERROR &&
-                  payload_len == 0);
-            nipc_np_close_session(&session);
-        }
-    }
-
     stop_server_drain(&sctx, server_thread);
 }
 
@@ -880,6 +844,7 @@ static void test_string_dispatch_missing_handlers_and_unknown_method(void)
     printf("--- Typed dispatch edge paths ---\n");
 
     {
+    {
         char service[64];
         nipc_np_server_config_t scfg = default_server_config();
         server_thread_ctx_t sctx;
@@ -923,7 +888,6 @@ static void test_string_dispatch_missing_handlers_and_unknown_method(void)
         stop_server_drain(&sctx, server_thread);
     }
 
-    {
         char service[64];
         nipc_np_server_config_t scfg = default_server_config();
         server_thread_ctx_t sctx;

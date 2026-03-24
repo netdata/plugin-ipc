@@ -14,23 +14,27 @@ Verified on `2026-03-24`:
 - `bash tests/run-coverage-c-windows.sh 85`:
   - script works
   - coverage-only Windows test subset passes inside the script
-  - the script also runs a dedicated Windows C coverage-only guard executable:
+  - the script now runs three bounded direct executables before the generic `ctest` loop:
     - `build-windows-coverage-c/bin/test_win_service_guards.exe`
-  - total coverage result: `90.9%`
+    - `build-windows-coverage-c/bin/test_win_service_guards_extra.exe`
+    - `build-windows-coverage-c/bin/test_win_service_extra.exe`
+  - the remaining Windows C subset then runs one-by-one with `ctest --timeout 60`
+  - total coverage result: `91.3%`
   - per-file:
-    - `netipc_service_win.c`: `90.1%`
+    - `netipc_service_win.c`: `91.4%`
     - `netipc_named_pipe.c`: `91.8%`
-    - `netipc_win_shm.c`: `91.6%`
+    - `netipc_win_shm.c`: `90.5%`
   - current status: script passes, including the Linux-matching per-file `85%` gate
   - latest ordinary Windows C service gains came from:
-    - typed dispatch coverage for missing handler and unknown-method branches
-    - cache rehash and collision-probe lookup coverage
-    - long `run_dir` / `service_name` truncation coverage
-    - bounded drain-timeout coverage for the forced-close path
+    - dedicated coverage-only service-guard tests being split into smaller executables
+    - worker-limit rejection coverage
+    - active-session join / destroy coverage
+    - named-pipe send-failure recovery coverage
+    - missing-string-handler internal-error coverage moved into the small extra guard executable
   - script detail:
-    - the coverage subset now includes `test_win_service.exe`
-    - the extra deterministic service-only branches still live in `test_win_service_guards.exe`
-    - that guard executable now runs under `timeout 120` so a hang becomes an explicit script failure instead of wedging the whole coverage run
+    - `test_win_service_guards.exe`, `test_win_service_guards_extra.exe`, and `test_win_service_extra.exe` now run under `timeout 120`
+    - the generic Windows C subset no longer relies on `test_win_service_extra` inside the unordered `ctest` loop
+    - every remaining `ctest` item now uses `--timeout 60`
 - `bash tests/run-coverage-go-windows.sh 90`:
   - script prints valid coverage results on `win11`
   - total coverage result: `96.7%`

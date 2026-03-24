@@ -710,6 +710,12 @@ if(NETIPC_WINDOWS_RUNTIME)
     )
     target_compile_definitions(test_win_service_guards PRIVATE NIPC_INTERNAL_TESTING=1)
 
+    add_executable(test_win_service_guards_extra tests/fixtures/c/test_win_service_guards_extra.c)
+    target_link_libraries(test_win_service_guards_extra PRIVATE
+        netipc_service_win netipc_win_shm netipc_named_pipe netipc_protocol
+    )
+    target_compile_definitions(test_win_service_guards_extra PRIVATE NIPC_INTERNAL_TESTING=1)
+
     add_executable(test_win_stress tests/fixtures/c/test_win_stress.c)
     target_link_libraries(test_win_stress PRIVATE
         netipc_service_win netipc_win_shm netipc_named_pipe netipc_protocol
