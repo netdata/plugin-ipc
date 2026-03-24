@@ -21,7 +21,7 @@ Verified on `2026-03-24`:
   - the remaining Windows C interop / stress subset then passes one-by-one under `ctest --timeout 60`
   - measured total coverage result: `93.2%`
   - per-file:
-    - `netipc_service_win.c`: `91.7%`
+    - `netipc_service_win.c`: `91.8%`
     - `netipc_named_pipe.c`: `93.4%`
     - `netipc_win_shm.c`: `95.9%`
   - current status:
@@ -31,6 +31,7 @@ Verified on `2026-03-24`:
   - latest ordinary Windows C service gains came from:
     - hybrid client send-buffer guard coverage at `netipc_service_win.c:147`
     - hybrid receive-error mapping coverage at `netipc_service_win.c:179`
+    - negotiated SHM-capacity overflow coverage at `netipc_service_win.c:159`
     - the already-established split coverage-only service-guard executables
   - latest ordinary Windows C transport gains came from:
     - manual HYBRID mapping setup to reach the client-attach event-name overflow branch honestly

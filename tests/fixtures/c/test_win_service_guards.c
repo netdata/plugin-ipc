@@ -810,6 +810,41 @@ static void test_hybrid_client_send_buffer_guard(void)
     stop_server_drain(&sctx, server_thread);
 }
 
+static void test_hybrid_client_send_capacity_guard(void)
+{
+    printf("--- Hybrid client send capacity guard ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_hybrid_send_cap");
+
+    server_thread_ctx_t sctx;
+    nipc_np_server_config_t scfg = default_hybrid_server_config();
+    scfg.max_request_payload_bytes = 16;
+    HANDLE server_thread = start_server_named(
+        &sctx, service, 4, &scfg, &full_guard_handlers);
+    if (!server_thread)
+        return;
+
+    nipc_client_ctx_t client;
+    nipc_np_client_config_t ccfg = default_hybrid_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    check("hybrid send-capacity client ready",
+          refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+
+    if (nipc_client_ready(&client) && client.shm != NULL) {
+        nipc_string_reverse_view_t view;
+        nipc_error_t err = nipc_client_call_string_reverse(
+            &client, "this request is intentionally too large", 38, &view);
+        check("hybrid SHM send maps MSG_TOO_LARGE to NIPC_ERR_OVERFLOW",
+              err == NIPC_ERR_OVERFLOW);
+        check("hybrid send-capacity overflow leaves client not READY",
+              !nipc_client_ready(&client));
+    }
+
+    nipc_client_close(&client);
+    stop_server_drain(&sctx, server_thread);
+}
+
 static void test_hybrid_server_rejects_malformed_requests(void)
 {
     struct {
@@ -1233,6 +1268,7 @@ int main(void)
     test_hybrid_attach_failure_disconnects();
     test_hybrid_client_rejects_malformed_responses();
     test_hybrid_client_send_buffer_guard();
+    test_hybrid_client_send_capacity_guard();
     test_hybrid_server_rejects_malformed_requests();
     test_snapshot_default_max_items();
     test_string_dispatch_missing_handlers_and_unknown_method();

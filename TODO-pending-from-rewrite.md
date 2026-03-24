@@ -20,7 +20,7 @@ Finish the rewrite to a production-ready state with:
     - the clean `win11` coverage build remains authoritative, but the raw script path is noisy again at `ctest test_win_service`
     - exact measured Windows C result after completing the same clean coverage build with direct `test_win_service.exe` plus the remaining interop/stress `ctest` items:
       - total: `93.2%`
-      - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `91.7%`
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `91.8%`
       - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `93.4%`
       - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `95.9%`
     - evidence:
@@ -66,6 +66,22 @@ Finish the rewrite to a production-ready state with:
     - implication after this slice:
       - the WinSHM client send/receive guard paths are no longer missing ordinary service coverage
       - the remaining `netipc_service_win.c` misses are increasingly failure-only branches, fixed-size encode guards, or low-level allocation paths
+    - next service target after this:
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c:159`
+    - why:
+      - it is still ordinary transport-state mapping, not an allocation-only branch
+      - it only needs a hybrid client call where `nipc_win_shm_send()` returns a non-OK status
+    - non-goals for this follow-up:
+      - `nipc_win_shm_send()` internal allocation / mapping failures
+      - fake low-memory paths
+      - trying to revive the dead session-array growth branch
+    - exact clean `win11` validation on the extended guard tree:
+      - `test_win_service_guards.exe`: `167 passed, 0 failed`
+      - direct `gcov` on `netipc_service_win.c` proved:
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c:159`: covered
+    - implication after this slice:
+      - `transport_send()` SHM path in `netipc_service_win.c` is now fully covered
+      - the remaining ordinary service-file misses are now mostly retry / handler / raw transport failure mappings, not the SHM send/receive wrapper itself
 - next ordinary Windows WinSHM timeout-loop follow-up:
     - the previous Named Pipe chunk-receive follow-up is no longer considered an honest ordinary target with the current fake-server harness
     - concrete clean `win11` evidence:
@@ -2131,7 +2147,7 @@ Facts:
 - Windows coverage docs now match the measured numbers from `2026-03-24`.
 - Windows C coverage currently passes:
   - total: `93.2%`
-  - `netipc_service_win.c`: `91.7%`
+  - `netipc_service_win.c`: `91.8%`
   - `netipc_named_pipe.c`: `93.4%`
   - `netipc_win_shm.c`: `95.9%`
 - Windows Go coverage currently reports `96.7%`.
