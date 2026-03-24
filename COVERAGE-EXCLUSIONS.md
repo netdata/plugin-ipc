@@ -175,6 +175,13 @@ Verified on `2026-03-24`:
         - `netipc_service_win.c:147`
         - `netipc_service_win.c:179`
         - `netipc_service_win.c:159`
+        - `netipc_service_win.c:534`
+        - `netipc_service_win.c:543`
+        - `netipc_service_win.c:611`
+    - latest targeted service-file proof on the same clean coverage flow:
+      - `test_win_service_guards.exe`: `194 passed, 0 failed`
+      - direct `gcov` on `netipc_service_win.c`: `92.04%` of `779`
+      - this is narrower than the last full aggregate Windows C measurement above, so the aggregate `93.2%` figure remains the last fully measured total until the entire clean flow is rerun
 
 - Go:
   - script: `tests/run-coverage-go-windows.sh 90`

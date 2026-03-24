@@ -31,7 +31,9 @@ Finish the rewrite to a production-ready state with:
       - the raw `ctest --test-dir build-windows-coverage-c -R "^test_win_service$"` step still timed out under coverage instrumentation
     - implication:
       - measured Windows C is still honestly above the shared `90%` gate on current `main`
-      - the active docs are now stale on the exact Windows C numbers and need sync
+      - the active docs need to distinguish between:
+        - the last fully measured clean aggregate Windows C totals
+        - the newer targeted service-file `gcov` proofs on the same clean flow
 - next honest ordinary Windows C target:
     - fresh clean `win11` direct `gcov` on `netipc_service_win.c` now shows:
       - typed batch and string-reverse success paths are already covered
@@ -82,6 +84,38 @@ Finish the rewrite to a production-ready state with:
     - implication after this slice:
       - `transport_send()` SHM path in `netipc_service_win.c` is now fully covered
       - the remaining ordinary service-file misses are now mostly retry / handler / raw transport failure mappings, not the SHM send/receive wrapper itself
+    - exact clean `win11` targeted validation on the extended guard tree:
+      - `test_win_service_guards.exe`: `194 passed, 0 failed`
+      - direct `gcov` on `netipc_service_win.c` proved:
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c:534`: covered
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c:543`: covered
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c:611`: covered
+      - same targeted `gcov` summary on the clean coverage build:
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `92.04%` of `779`
+    - implication after this slice:
+      - the ordinary batch send / receive failure mappings are no longer missing service coverage
+      - the ordinary string raw-call failure propagation is no longer missing service coverage
+      - the remaining `netipc_service_win.c` misses are now mostly:
+        - fixed-size or pre-sized encode guards
+        - allocation / low-level failure paths
+        - branches that need a different coverage harness than the current deterministic HYBRID fake server
+    - source-backed classification of the tempting remaining service targets:
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c:517`
+        - not an honest ordinary target for increment batch
+        - evidence:
+          - caller pre-sizes `req_buf_size` as `count * (8 + NIPC_INCREMENT_PAYLOAD_SIZE) + 64`
+          - `NIPC_INCREMENT_PAYLOAD_SIZE` is `8`
+          - `nipc_batch_builder_add()` overflows only when packed batch data exceeds the provided buffer
+          - for this exact call shape, the request buffer has deterministic slack beyond the batch builder's real need
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c:603`
+        - not an honest ordinary target for string reverse
+        - evidence:
+          - caller computes `req_buf_size = NIPC_STRING_REVERSE_HDR_SIZE + request_len + 1`
+          - `nipc_string_reverse_encode()` returns `0` only when `buf_len < NIPC_STRING_REVERSE_HDR_SIZE + request_len + 1`
+          - after the caller's own size guard passes, this encode-failure branch is structurally guarded away
+    - next honest Windows C work after this:
+      - stop grinding `netipc_service_win.c` as if it still had cheap ordinary misses
+      - move to the remaining transport-file ordinary branches or raise the C gate only after a fresh full clean rerun
 - next ordinary Windows WinSHM timeout-loop follow-up:
     - the previous Named Pipe chunk-receive follow-up is no longer considered an honest ordinary target with the current fake-server harness
     - concrete clean `win11` evidence:

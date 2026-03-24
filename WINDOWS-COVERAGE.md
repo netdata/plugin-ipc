@@ -32,7 +32,21 @@ Verified on `2026-03-24`:
     - hybrid client send-buffer guard coverage at `netipc_service_win.c:147`
     - hybrid receive-error mapping coverage at `netipc_service_win.c:179`
     - negotiated SHM-capacity overflow coverage at `netipc_service_win.c:159`
+    - hybrid batch-send failure mapping coverage at `netipc_service_win.c:534`
+    - hybrid batch-receive failure mapping coverage at `netipc_service_win.c:543`
+    - hybrid string raw-call failure propagation at `netipc_service_win.c:611`
     - the already-established split coverage-only service-guard executables
+  - latest targeted clean `win11` service-file follow-up on the same coverage flow:
+    - `test_win_service_guards.exe`: `194 passed, 0 failed`
+    - direct `gcov` on `netipc_service_win.c` proved:
+      - `netipc_service_win.c:534`
+      - `netipc_service_win.c:543`
+      - `netipc_service_win.c:611`
+    - targeted service-file summary:
+      - `netipc_service_win.c`: `92.04%` of `779`
+    - honesty note:
+      - this is a narrower targeted proof than the last full clean aggregate Windows C measurement above
+      - it improves the service-file evidence without claiming a fresh full aggregate rerun
   - latest ordinary Windows C transport gains came from:
     - manual HYBRID mapping setup to reach the client-attach event-name overflow branch honestly
     - deterministic HYBRID and BUSYWAIT receive timeout / disconnect tests
