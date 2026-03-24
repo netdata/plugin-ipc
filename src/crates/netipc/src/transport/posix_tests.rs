@@ -1159,6 +1159,29 @@ fn test_send_on_closed_session() {
     cleanup_socket(&svc);
 }
 
+#[test]
+fn test_accept_on_closed_listener_returns_accept_error() {
+    ensure_run_dir();
+    let svc = unique_service("rs_accept_closed");
+    cleanup_socket(&svc);
+
+    let mut listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("listen");
+    let fd = listener.fd;
+    assert!(fd >= 0, "listener fd should be valid");
+    assert_eq!(unsafe { libc::close(fd) }, 0, "close listener fd");
+
+    let err = match listener.accept() {
+        Ok(_) => panic!("accept on closed listener should fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, UdsError::Accept(_)));
+
+    listener.fd = -1;
+    drop(listener);
+    cleanup_socket(&svc);
+}
+
 // -----------------------------------------------------------------------
 //  Duplicate message_id (line 244)
 // -----------------------------------------------------------------------

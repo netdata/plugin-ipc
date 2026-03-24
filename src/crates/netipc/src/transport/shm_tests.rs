@@ -588,6 +588,29 @@ fn test_owner_alive_generation_mismatch() {
     cleanup_shm(svc, sid);
 }
 
+#[test]
+fn test_owner_alive_legacy_generation_skips_generation_check() {
+    ensure_run_dir();
+    let svc = "rs_shm_gen_legacy";
+    let sid: u64 = 55;
+    cleanup_shm(svc, sid);
+
+    let mut server =
+        ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
+
+    let hdr = server.base as *mut RegionHeader;
+    unsafe { (*hdr).owner_generation = server.owner_generation.wrapping_add(123) };
+    server.owner_generation = 0;
+
+    assert!(
+        server.owner_alive(),
+        "cached generation 0 should skip owner-generation mismatch checks"
+    );
+
+    server.destroy();
+    cleanup_shm(svc, sid);
+}
+
 // -----------------------------------------------------------------------
 //  ShmContext::send() error paths (lines 436-437, 458)
 // -----------------------------------------------------------------------
@@ -720,6 +743,46 @@ fn test_receive_without_deadline_waits_for_message() {
     let mut buf = [0u8; 128];
     let n = server.receive(&mut buf, 0).expect("receive with timeout 0");
     assert_eq!(n, protocol::HEADER_SIZE + 2);
+
+    sender.join().unwrap();
+    client.close();
+    server.destroy();
+    cleanup_shm(svc, sid);
+}
+
+#[test]
+fn test_receive_with_timeout_wakes_for_message() {
+    ensure_run_dir();
+    let svc = "rs_shm_wait_budget";
+    let sid: u64 = 581;
+    cleanup_shm(svc, sid);
+
+    let mut server =
+        ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
+    let mut client = ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
+
+    let sender = thread::spawn({
+        let svc_name = svc.to_string();
+        move || {
+            thread::sleep(std::time::Duration::from_millis(50));
+            let mut ctx =
+                ShmContext::client_attach(TEST_RUN_DIR, &svc_name, sid).expect("attach sender");
+            let msg = build_message(protocol::KIND_REQUEST, 1, 10, &[0xCC, 0xDD, 0xEE]);
+            ctx.send(&msg).expect("send");
+            ctx.close();
+        }
+    });
+
+    let mut buf = [0u8; 128];
+    let n = server
+        .receive(&mut buf, 5000)
+        .expect("receive with finite timeout");
+    assert_eq!(n, protocol::HEADER_SIZE + 3);
+
+    let hdr = protocol::Header::decode(&buf[..protocol::HEADER_SIZE]).expect("decode");
+    assert_eq!(hdr.kind, protocol::KIND_REQUEST);
+    assert_eq!(hdr.message_id, 10);
+    assert_eq!(&buf[protocol::HEADER_SIZE..n], &[0xCC, 0xDD, 0xEE]);
 
     sender.join().unwrap();
     client.close();

@@ -80,7 +80,7 @@ Verified on `2026-03-23`:
   - threshold: `85%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
-  - result: `98.52%`
+  - result: `98.57%`
   - threshold: `80%`
   - note:
     - Linux now uses `cargo-llvm-cov`, matching the Windows Rust workflow
@@ -97,8 +97,8 @@ Verified on `2026-03-23`:
       - adding new Unix Rust service and transport tests no longer inflates the denominators of the corresponding runtime files
     - current Linux file totals from the verified `llvm-cov` run:
       - `service/cgroups.rs`: `98.28%` (`802/816`)
-      - `transport/posix.rs`: `97.35%` (`662/680`)
-      - `transport/shm.rs`: `96.04%` (`582/606`)
+      - `transport/posix.rs`: `97.50%` (`663/680`)
+      - `transport/shm.rs`: `96.20%` (`583/606`)
     - implication:
       - the remaining Linux Rust total is now dominated by helper / fault-injection territory, not by Windows-tagged files or inline test code polluting the Linux baseline
       - the small protocol files still keep inline tests on purpose for now, because externalizing them reduced the Linux total to `98.49%` without enough runtime-signal gain
@@ -117,6 +117,15 @@ Verified on `2026-03-23`:
           - missing run dir
           - unrelated and non-UTF8 entries
           - zero-generation stale files
+      - latest narrow ordinary Rust transport slice additionally covered:
+        - direct `UdsListener::accept()` failure on a closed listener fd
+        - `ShmContext::owner_alive()` with cached generation `0` skipping generation mismatch checks
+        - `ShmContext::receive()` waking successfully under a finite timeout budget
+      - remaining Linux Rust misses are now dominated by:
+        - fixed-size encode guards
+        - raw `socket` / `listen` / `ftruncate` / `mmap` / `fstat` failures
+        - a few send-break / teardown timing edges
+        - one likely unreachable guard in `dispatch_cgroups_snapshot()` where `builder.finish()` would have to return `0`
 
 Latest Linux Go notes from the current ordinary POSIX slice:
 

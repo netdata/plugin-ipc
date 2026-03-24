@@ -241,7 +241,7 @@ Linux / POSIX:
 - `ctest`: `37/37` passing
 - C coverage: `94.1%`
 - Go coverage: `95.8%`
-- Rust coverage: `98.52%`
+- Rust coverage: `98.57%`
   - measured with `cargo-llvm-cov`
   - Linux run now excludes Windows-tagged Rust files from the Linux total
   - Unix Rust service tests now live in a separate `cgroups_unix_tests.rs` file

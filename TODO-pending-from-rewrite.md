@@ -17,6 +17,36 @@ Finish the rewrite to a production-ready state with:
 ## Current Focus (2026-03-24)
 
 - Latest authoritative slice:
+  - latest narrow ordinary deterministic Rust follow-up is complete:
+    - completed targets:
+      - direct `UdsListener::accept()` failure on a closed listener fd
+      - `ShmContext::owner_alive()` with cached generation `0` skipping generation mismatch checks
+      - `ShmContext::receive()` waking successfully with a finite timeout budget
+    - measured result:
+      - Linux Rust total moved from `98.52%` to `98.57%`
+      - `src/transport/posix.rs` moved from `97.35%` to `97.50%`
+      - `src/transport/shm.rs` moved from `96.04%` to `96.20%`
+      - Rust lib tests moved from `291/291` to `294/294`
+    - implication:
+      - the remaining Rust misses are now even more concentrated in non-ordinary territory
+      - cheap deterministic gains still exist, but they are now very small
+  - next ordinary deterministic Rust review should treat the remaining misses as:
+    - `src/service/cgroups.rs`
+      - remaining misses are now mostly fixed-size encode guards, listener teardown edges, send-break timing, or already-tested branches that `llvm-cov` still maps as uncovered
+      - recommendation:
+        - do not grind these blindly
+        - only add tests if they exercise a clearly ordinary deterministic path
+    - `src/transport/posix.rs`
+      - the remaining misses in this file are otherwise mostly:
+        - socket/listen/connect probe syscall failures
+        - structurally unreachable zero-arm math
+    - `src/transport/shm.rs`
+      - one still-possible but low-value ordinary target remains in the receive path:
+        - immediate timeout before any futex wait completes
+      - the remaining misses in this file are otherwise mostly:
+        - `ftruncate` / `mmap` / `fstat` failure branches
+        - impossible `CString` conversion failures for directory entries
+        - cleanup corner cases already exercised but still mapped sparsely
   - Linux Rust coverage collection is now standardized on `cargo-llvm-cov`, matching Windows Rust coverage policy
   - Linux Rust now excludes Windows-tagged Rust files from the Linux total:
     - `src/service/cgroups_windows_tests.rs`
@@ -93,13 +123,13 @@ Finish the rewrite to a production-ready state with:
 - Latest verified Linux Rust result:
   - `bash tests/run-coverage-rust.sh 80`
   - tool on this host: `cargo-llvm-cov`
-  - total: `98.52%` (`3996/4056` executed, `60` missed)
+  - total: `98.57%` (`3998/4056` executed, `58` missed)
   - key files:
     - `service/cgroups.rs`: `98.28%` (`802/816`)
-    - `transport/posix.rs`: `97.35%` (`662/680`)
-    - `transport/shm.rs`: `96.04%` (`582/606`)
+    - `transport/posix.rs`: `97.50%` (`663/680`)
+    - `transport/shm.rs`: `96.20%` (`583/606`)
   - exact validated state after the latest Rust slice:
-    - `cargo test --manifest-path src/crates/netipc/Cargo.toml --lib -- --test-threads=1`: `291/291` passing
+    - `cargo test --manifest-path src/crates/netipc/Cargo.toml --lib -- --test-threads=1`: `294/294` passing
     - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
 - Latest verified Linux C result:
   - `bash tests/run-coverage-c.sh 82`
@@ -111,7 +141,7 @@ Finish the rewrite to a production-ready state with:
     - `netipc_service.c`: `92.1%` (`734/797`)
 - Latest verified test results for this slice:
   - `bash tests/run-coverage-rust.sh 80`: passing
-  - `cargo test --manifest-path src/crates/netipc/Cargo.toml --lib -- --test-threads=1`: `279/279` passing
+  - `cargo test --manifest-path src/crates/netipc/Cargo.toml --lib -- --test-threads=1`: `294/294` passing
   - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
 - Immediate next target:
   - Linux C ordinary deterministic coverage is starting to saturate
@@ -154,7 +184,6 @@ Finish the rewrite to a production-ready state with:
           - `226`
           - `532`
           - `550-555`
-          - `577`
           - `830`
         - structurally unreachable zero-arm math:
           - `298`
@@ -173,27 +202,14 @@ Finish the rewrite to a production-ready state with:
           - `264-269`
           - `335-336`
           - `356-357`
-          - `946-947`
           - `963-964`
+        - deadline-expired receive before futex wait:
+          - `601`
         - stale / cleanup corner cases:
           - `722`
           - `755-756`
-        - remaining test-only assert / panic lines:
-          - `1258`
-          - `1262`
-          - `1266`
-          - `1306`
-          - `1310`
-          - `1314`
-          - `1406`
-          - `1414`
-          - `1421`
-          - `1847`
-          - `1895`
-          - `1915`
-          - `1919`
-          - `2065`
-          - `2072`
+        - sparsely mapped but already-exercised receive/copy path:
+          - `635`
   - explicit non-goals for the next Rust slice:
     - fixed-size encode guards:
       - `src/service/cgroups.rs`: `189`, `202`, `221`, `252`
