@@ -1092,6 +1092,43 @@ static void test_busywait_receive_timeout_and_disconnect(void)
     nipc_win_shm_close(&client);
 }
 
+static void test_hybrid_server_receive_disconnect_advances_req_seq(void)
+{
+    printf("--- HYBRID server receive disconnect advances req seq ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_win_shm_ctx_t server;
+    nipc_win_shm_error_t err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, service, AUTH_TOKEN, 18,
+        NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &server);
+    check("hybrid server-disconnect server create", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK)
+        return;
+
+    nipc_win_shm_ctx_t client;
+    err = attach_client_retry(service, 18, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+    check("hybrid server-disconnect client attach", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK) {
+        nipc_win_shm_destroy(&server);
+        return;
+    }
+
+    server.spin_tries = 0;
+
+    nipc_win_shm_close(&client);
+
+    uint8_t buf[64];
+    size_t msg_len = 0;
+    err = nipc_win_shm_receive(&server, buf, sizeof(buf), &msg_len, 1000);
+    check("hybrid server receive disconnected after client close",
+          err == NIPC_WIN_SHM_ERR_DISCONNECTED);
+    check("hybrid server disconnect advances req seq", server.local_req_seq == 1);
+
+    nipc_win_shm_destroy(&server);
+}
+
 static void test_busywait_server_receive_disconnect_advances_req_seq(void)
 {
     printf("--- BUSYWAIT server receive disconnect advances req seq ---\n");
@@ -1208,6 +1245,7 @@ int main(void)
     test_client_attach_validation();
     test_hybrid_receive_timeout_and_disconnect();
     test_hybrid_receive_zero_timeout_waits_for_data();
+    test_hybrid_server_receive_disconnect_advances_req_seq();
     test_busywait_receive_timeout_and_disconnect();
     test_busywait_server_receive_disconnect_advances_req_seq();
     test_basic_roundtrip();

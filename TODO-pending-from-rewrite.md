@@ -16,6 +16,18 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
+- latest Windows SHM server-disconnect follow-up:
+    - deterministic test added in:
+      - `tests/fixtures/c/test_win_shm.c`
+        - HYBRID server receive after client close, asserting `local_req_seq` advances
+    - exact clean `win11` validation on the modified tree:
+      - targeted build + `ctest --test-dir build --output-on-failure -R "^test_win_shm$"`: pass
+      - direct coverage-build `test_win_shm.exe` + `gcov` on `netipc_win_shm.c`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:701`: covered
+        - file-specific `gcov` result after the targeted run:
+          - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `92.97%`
+    - implication:
+      - the HYBRID server-role disconnect sequence-advance branch is now covered honestly
 - latest deterministic Windows SHM receive slice:
     - deterministic tests added in:
       - `tests/fixtures/c/test_win_shm.c`
