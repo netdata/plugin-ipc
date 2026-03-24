@@ -8,18 +8,20 @@ It does not claim generic MSVC/CI support that has not been exercised here.
 
 ## Current Verified Results
 
-Verified on `2026-03-23`:
+Verified on `2026-03-24`:
 
 - `ctest --test-dir build --output-on-failure -j4`: `28/28` passing on `win11`
-- `bash tests/run-coverage-c-windows.sh 82`:
+- `bash tests/run-coverage-c-windows.sh 83`:
   - script works
   - coverage-only Windows test subset passes inside the script
-  - total coverage result: `83.9%`
+  - the script also runs a dedicated Windows C coverage-only guard executable:
+    - `build-windows-coverage-c/bin/test_win_service_guards.exe`
+  - total coverage result: `84.5%`
   - per-file:
-    - `netipc_service_win.c`: `83.1%`
-    - `netipc_named_pipe.c`: `85.8%`
+    - `netipc_service_win.c`: `84.1%`
+    - `netipc_named_pipe.c`: `86.3%`
     - `netipc_win_shm.c`: `83.2%`
-  - current status: script passes, including the Linux-matching per-file `82%` gate
+  - current status: script passes, including the Linux-matching per-file `83%` gate
 - `bash tests/run-coverage-go-windows.sh 90`:
   - script prints valid coverage results on `win11`
   - total coverage result: `96.7%`
@@ -96,7 +98,8 @@ What it does:
 1. configures a fresh Windows coverage build with `NETIPC_COVERAGE=ON`
 2. builds with the native `win11` MinGW64 toolchain and Ninja
 3. runs the Windows `ctest` suite
-4. collects `gcov` line coverage for the Windows C sources above
+4. runs the dedicated Windows C coverage-only guard executable
+5. collects `gcov` line coverage for the Windows C sources above
 
 ### Go coverage script
 
@@ -161,7 +164,7 @@ Expected shape:
 ### C coverage
 
 ```bash
-bash tests/run-coverage-c-windows.sh 82
+bash tests/run-coverage-c-windows.sh 83
 ```
 
 ### Go coverage

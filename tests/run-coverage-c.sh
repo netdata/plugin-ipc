@@ -31,8 +31,8 @@ LIB_SOURCES=(
 #   - netipc_shm.c: ~91% (all uncovered are exclusions)
 #   - netipc_service.c: ~82% (many exclusions for malloc/OS failures)
 # See COVERAGE-EXCLUSIONS.md for detailed justifications
-# Threshold is set to minimum per-file coverage
-THRESHOLD=${1:-82}
+# Threshold is set to the current cross-platform C gate.
+THRESHOLD=${1:-83}
 
 run() {
     printf >&2 "${GRAY}$(pwd) >${NC} "

@@ -701,6 +701,15 @@ if(NETIPC_WINDOWS_RUNTIME)
         RUN_SERIAL TRUE
     )
 
+    # Coverage-only Windows C guard executable. It exercises deterministic
+    # service-side/client-side guard paths without perturbing the normal
+    # non-coverage ctest timing of test_win_service_extra.
+    add_executable(test_win_service_guards tests/fixtures/c/test_win_service_guards.c)
+    target_link_libraries(test_win_service_guards PRIVATE
+        netipc_service_win netipc_win_shm netipc_named_pipe netipc_protocol
+    )
+    target_compile_definitions(test_win_service_guards PRIVATE NIPC_INTERNAL_TESTING=1)
+
     add_executable(test_win_stress tests/fixtures/c/test_win_stress.c)
     target_link_libraries(test_win_stress PRIVATE
         netipc_service_win netipc_win_shm netipc_named_pipe netipc_protocol

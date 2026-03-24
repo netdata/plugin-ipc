@@ -11,12 +11,12 @@ Purpose:
 
 ### Linux / POSIX
 
-Verified on `2026-03-23`:
+Verified on `2026-03-24`:
 
 - C:
   - script: `tests/run-coverage-c.sh`
   - result: `94.1%`
-  - threshold: `82%`
+  - threshold: `83%`
   - latest ordinary C slices raised:
     - `netipc_uds.c` to `92.5%` (`432/467`)
     - `netipc_service.c` to `92.1%` (`734/797`)
@@ -145,16 +145,18 @@ Latest Linux Go notes from the current ordinary POSIX slice:
 
 ### Windows (`win11`)
 
-Verified on `2026-03-23`:
+Verified on `2026-03-24`:
 
 - C:
-  - script: `tests/run-coverage-c-windows.sh 82`
-  - result: `83.9%`
+  - script: `tests/run-coverage-c-windows.sh 83`
+  - result: `84.5%`
   - per-file:
-    - `netipc_service_win.c`: `83.1%`
-    - `netipc_named_pipe.c`: `85.8%`
+    - `netipc_service_win.c`: `84.1%`
+    - `netipc_named_pipe.c`: `86.3%`
     - `netipc_win_shm.c`: `83.2%`
-  - status: passes the Linux-matching per-file and total `82%` gates
+  - status:
+    - passes the Linux-matching per-file and total `83%` gates
+    - the script now runs a dedicated Windows C coverage-only guard executable so the ordinary `ctest` pass stays stable while the extra service guard branches still contribute coverage
 
 - Go:
   - script: `tests/run-coverage-go-windows.sh 90`
@@ -258,8 +260,8 @@ hard exclusions yet.
 
 Current evidence:
 
-- `netipc_service_win.c` is now `83.1%`
-- `netipc_named_pipe.c` is `85.8%`
+- `netipc_service_win.c` is now `84.1%`
+- `netipc_named_pipe.c` is `86.3%`
 - `netipc_win_shm.c` is `83.2%`
 
 Brutal truth:
@@ -412,7 +414,7 @@ Concrete evidence from the latest Linux Go UDS transport slice:
   - coverage improved meaningfully, especially C
 - Windows:
   - coverage measurement now exists and is validated
-  - Windows C now passes the Linux-matching `82%` gate
+  - Windows C now passes the Linux-matching `83%` gate
   - Windows Go is above the Linux-matching `90%` target, the script reliability issue is fixed, and Windows Go service/cache tests are now part of `ctest`
   - Windows Go transport coverage is now materially stronger too
   - Windows Rust coverage now has a real threshold-enforced entrypoint
