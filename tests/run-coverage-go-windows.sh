@@ -20,7 +20,7 @@ PACKAGES=(
     "./pkg/netipc/transport/windows/"
 )
 
-THRESHOLD=${1:-85}
+THRESHOLD=${1:-90}
 
 run() {
     printf >&2 "${GRAY}$(pwd) >${NC} "

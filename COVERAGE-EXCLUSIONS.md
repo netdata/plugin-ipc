@@ -77,7 +77,7 @@ Verified on `2026-03-23`:
 - Go:
   - script: `tests/run-coverage-go.sh`
   - result: `95.8%`
-  - threshold: `85%`
+  - threshold: `90%`
 - Rust:
   - script: `tests/run-coverage-rust.sh`
   - result: `98.57%`
@@ -157,7 +157,7 @@ Verified on `2026-03-23`:
   - status: passes the Linux-matching per-file and total `82%` gates
 
 - Go:
-  - script: `tests/run-coverage-go-windows.sh 85`
+  - script: `tests/run-coverage-go-windows.sh 90`
   - result: `96.7%`
   - selected key files:
     - `service/cgroups/client_windows.go`: `96.7%`
@@ -165,7 +165,7 @@ Verified on `2026-03-23`:
     - `transport/windows/pipe.go`: `97.1%`
     - `transport/windows/shm.go`: `92.9%`
   - status:
-    - reported above the Linux-matching `85%` target
+    - reported above the Linux-matching `90%` target
     - the script exits cleanly in noninteractive `ssh`
     - first-class Windows Go service/cache tests now also run under `ctest`
     - the latest transport edge tests, raw WinSHM L2 tests, and the listener shutdown fix materially raised both the Windows transport package and the Windows-only service branches that named pipes cannot reach
@@ -282,7 +282,7 @@ Current evidence:
 
 Brutal truth:
 
-- Windows Go is no longer the red gate for the Linux-matching `85%` target
+- Windows Go is no longer the red gate for the Linux-matching `90%` target
 - but it is still not honest to call it coverage-complete
 - the remaining ordinary Windows Go work is no longer mainly in `client_windows.go`
 - the next honest review target is whether any of the tiny remaining low-level `pipe.go` branches are still worth ordinary testing, plus a final check for any still-reachable `transport/windows/shm.go` residual gap
@@ -413,7 +413,7 @@ Concrete evidence from the latest Linux Go UDS transport slice:
 - Windows:
   - coverage measurement now exists and is validated
   - Windows C now passes the Linux-matching `82%` gate
-  - Windows Go is above the Linux-matching `85%` target, the script reliability issue is fixed, and Windows Go service/cache tests are now part of `ctest`
+  - Windows Go is above the Linux-matching `90%` target, the script reliability issue is fixed, and Windows Go service/cache tests are now part of `ctest`
   - Windows Go transport coverage is now materially stronger too
   - Windows Rust coverage now has a real threshold-enforced entrypoint
   - more ordinary test work is required before any “coverage parity” claim is honest

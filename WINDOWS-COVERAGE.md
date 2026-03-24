@@ -20,7 +20,7 @@ Verified on `2026-03-23`:
     - `netipc_named_pipe.c`: `85.8%`
     - `netipc_win_shm.c`: `83.2%`
   - current status: script passes, including the Linux-matching per-file `82%` gate
-- `bash tests/run-coverage-go-windows.sh 85`:
+- `bash tests/run-coverage-go-windows.sh 90`:
   - script prints valid coverage results on `win11`
   - total coverage result: `96.7%`
   - package coverage:
@@ -32,7 +32,7 @@ Verified on `2026-03-23`:
     - `transport/windows/pipe.go`: `97.1%`
     - `transport/windows/shm.go`: `92.9%`
   - current status:
-    - reported above the Linux-matching `85%` target
+    - reported above the Linux-matching `90%` target
     - Windows Go service/cache tests are now also wired into `ctest`
     - latest WinSHM service tests, direct raw WinSHM L2 tests, batch failure/recovery tests, and the listener shutdown fix materially raised both the weak Windows client paths and the Windows transport package
     - malformed raw WinSHM request tests now also cover the real SHM server-side teardown / reconnect path
@@ -167,7 +167,7 @@ bash tests/run-coverage-c-windows.sh 82
 ### Go coverage
 
 ```bash
-bash tests/run-coverage-go-windows.sh 85
+bash tests/run-coverage-go-windows.sh 90
 ```
 
 ### Rust coverage

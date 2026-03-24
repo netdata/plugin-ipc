@@ -152,7 +152,7 @@ echo
 # total already exceeds that. Some remaining branches still need special
 # infrastructure, but ordinary POSIX transport/service gains are still possible.
 # See COVERAGE-EXCLUSIONS.md for the current evidence.
-THRESHOLD=${1:-85}
+THRESHOLD=${1:-90}
 total_pct_int=$(echo "$total_pct" | cut -d. -f1)
 
 if [[ $total_pct_int -ge $THRESHOLD ]]; then

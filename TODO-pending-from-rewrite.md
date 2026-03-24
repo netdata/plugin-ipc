@@ -18,6 +18,20 @@ Finish the rewrite to a production-ready state with:
 
 - Latest authoritative slice:
   - decision made by Costa:
+    - raise the Go coverage gate from `85%` to `90%`
+    - keep the Go coverage gate policy identical on Linux and Windows
+  - implementation implication of that decision:
+    - update:
+      - `tests/run-coverage-go.sh`
+      - `tests/run-coverage-go-windows.sh`
+    - refresh the active coverage docs to reflect the new enforced Go threshold
+    - Linux and `win11` must both pass the new `90%` gate on the exact current tree
+  - verified result after applying the Go gate change:
+    - Linux Go: `95.8%`
+    - Windows Go (`win11`): `96.7%`
+    - implication:
+      - the shared Linux/Windows Go gate can now safely move to `90%`
+  - decision made by Costa:
     - raise the Rust coverage gate from `80%` to `90%`
     - keep the Rust coverage gate policy identical on Linux and Windows
   - implementation implication of that decision:
@@ -671,7 +685,7 @@ Finish the rewrite to a production-ready state with:
   - final validation of the slice:
     - `go test -count=20 -run '^TestUnixServerRejectsSessionAtWorkerCapacity$' ./pkg/netipc/service/cgroups`: passing
     - `go test -count=20 -run '^TestNonRequestTerminatesSession$' ./pkg/netipc/service/cgroups`: passing
-    - `bash tests/run-coverage-go.sh 85`: passing
+  - `bash tests/run-coverage-go.sh 90`: passing
     - `/usr/bin/ctest --test-dir build --output-on-failure -j4`: `37/37` passing
   - next exact low-level transport classification from the fresh cover profile:
     - `transport/posix/uds.go`
@@ -933,7 +947,7 @@ Finish the rewrite to a production-ready state with:
       - `transport/windows/pipe.go`: `97.1%`
       - `transport/windows/shm.go`: `92.9%`
     - status:
-      - passes the Linux-matching `85%` target
+      - passes the Linux-matching `90%` target
       - the noninteractive exit problem is fixed
       - first-class Windows Go CTest targets now exist for service/cache coverage parity
       - latest added WinSHM service tests, malformed-response tests, and transport edge tests increased both `client_windows.go` and the Windows transport package materially
@@ -1078,7 +1092,7 @@ Verified on `2026-03-23`:
 - Go:
   - `bash tests/run-coverage-go.sh`
   - result: `95.8%`
-  - current threshold: `85%`
+  - current threshold: `90%`
 - Rust:
   - `bash tests/run-coverage-rust.sh`
   - result: `98.57%`
@@ -1160,14 +1174,14 @@ Current measured results:
   - status: passes the Linux-matching `82%` target, including the per-file gate
 
 - Go:
-  - `bash tests/run-coverage-go-windows.sh 85`
+  - `bash tests/run-coverage-go-windows.sh 90`
   - coverage result: `96.7%`
   - package coverage:
     - `protocol`: `99.5%`
     - `service/cgroups`: `96.5%`
     - `transport/windows`: `95.2%`
   - status:
-    - reported above the Linux-matching `85%` target
+    - reported above the Linux-matching `90%` target
     - focused helper tests plus the listener shutdown fix raised:
       - `transport/windows/pipe.go` to `97.1%`
       - `transport/windows/shm.go` to `92.9%`
@@ -1324,7 +1338,7 @@ Current expected result:
 
 ```bash
 bash tests/run-coverage-c-windows.sh 82
-bash tests/run-coverage-go-windows.sh 85
+bash tests/run-coverage-go-windows.sh 90
 bash tests/run-coverage-rust-windows.sh 90
 ```
 
@@ -1332,7 +1346,7 @@ Current expected result:
 
 - `bash tests/run-coverage-c-windows.sh 82`
   - passes with all tracked Windows C files above `82%`
-- `bash tests/run-coverage-go-windows.sh 85`
+- `bash tests/run-coverage-go-windows.sh 90`
   - currently reports `96.7%`
 - `bash tests/run-coverage-rust-windows.sh 90`
   - currently reports `93.68%`
@@ -1407,7 +1421,7 @@ Required next work:
        - reconnect after a poisoned nil-session transport state
        - idle stop / unsupported dispatch helpers
      - use the real POSIX listener/session transport for these tests, not synthetic mocks
-   - current function-level evidence from `bash tests/run-coverage-go.sh 85`:
+   - current function-level evidence from `bash tests/run-coverage-go.sh 90`:
      - `service/cgroups/client.go`
        - `Refresh`: `100.0%`
        - `doRawCall`: `100.0%`
