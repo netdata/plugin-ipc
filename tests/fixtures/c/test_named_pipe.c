@@ -83,6 +83,7 @@ typedef enum {
     FAKE_ACK_GOOD_THEN_BAD_BATCH_DIR,
     FAKE_ACK_GOOD_THEN_SHORT_RESPONSE,
     FAKE_ACK_GOOD_THEN_BAD_RESPONSE_HEADER,
+    FAKE_ACK_GOOD_THEN_ZERO_MESSAGE,
 } fake_ack_mode_t;
 
 typedef enum {
@@ -325,6 +326,16 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
     }
 
     if (ctx->mode == FAKE_ACK_GOOD_THEN_CLOSE) {
+        CloseHandle(pipe);
+        ctx->result = 1;
+        return 0;
+    }
+
+    if (ctx->mode == FAKE_ACK_GOOD_THEN_ZERO_MESSAGE) {
+        if (!raw_pipe_write(pipe, "", 0)) {
+            CloseHandle(pipe);
+            return 1;
+        }
         CloseHandle(pipe);
         ctx->result = 1;
         return 0;
@@ -1316,6 +1327,52 @@ static void test_receive_after_peer_disconnect(void)
     check("disconnect fake server completed", ctx.result == 1);
 }
 
+static void test_receive_after_zero_byte_message(void)
+{
+    printf("--- Receive after zero-byte message ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    fake_server_thread_ctx_t ctx = {
+        .service = service,
+        .ready_event = ready_event,
+        .result = 0,
+        .mode = FAKE_ACK_GOOD_THEN_ZERO_MESSAGE,
+        .packet_size = NIPC_NP_DEFAULT_PACKET_SIZE,
+    };
+
+    HANDLE thread = CreateThread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
+    check("zero-message fake server thread created", thread != NULL);
+    if (!thread) {
+        CloseHandle(ready_event);
+        return;
+    }
+
+    WaitForSingleObject(ready_event, 5000);
+    CloseHandle(ready_event);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_np_session_t session;
+    nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("zero-message test connect", err == NIPC_NP_OK);
+
+    if (err == NIPC_NP_OK) {
+        uint8_t buf[128];
+        nipc_header_t hdr;
+        const void *payload;
+        size_t payload_len;
+        err = nipc_np_receive(&session, buf, sizeof(buf), &hdr, &payload, &payload_len);
+        check("receive sees zero-byte message as recv error", err == NIPC_NP_ERR_RECV);
+        nipc_np_close_session(&session);
+    }
+
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    check("zero-message fake server completed", ctx.result == 1);
+}
+
 static void test_chunk_validation_error(void)
 {
     printf("--- Chunk validation error ---\n");
@@ -1711,6 +1768,7 @@ int main(void)
     test_client_handshake_rejections();
     test_server_handshake_rejections();
     test_receive_after_peer_disconnect();
+    test_receive_after_zero_byte_message();
     test_chunk_validation_error();
     test_response_limit_validation();
     test_response_protocol_validation();

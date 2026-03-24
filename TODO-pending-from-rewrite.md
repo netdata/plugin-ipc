@@ -16,6 +16,18 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
+- latest Windows Named Pipe zero-byte follow-up:
+    - deterministic test added in:
+      - `tests/fixtures/c/test_named_pipe.c`
+        - fake server sends a valid `HELLO_ACK`, then a zero-byte pipe message, and the client maps the receive to `NIPC_NP_ERR_RECV`
+    - exact clean `win11` validation on the modified tree:
+      - targeted build + `ctest --test-dir build --output-on-failure -R "^test_named_pipe$"`: pass
+      - direct coverage-build `test_named_pipe.exe` + `gcov` on `netipc_named_pipe.c`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:233`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:234`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:235`: covered
+    - implication:
+      - the `raw_recv()` zero-byte branch is now covered honestly and proven deterministic on `win11`
 - latest Windows SHM server-disconnect follow-up:
     - deterministic test added in:
       - `tests/fixtures/c/test_win_shm.c`
