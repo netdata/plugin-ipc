@@ -11,17 +11,22 @@ It does not claim generic MSVC/CI support that has not been exercised here.
 Verified on `2026-03-24`:
 
 - `ctest --test-dir build --output-on-failure -j4`: `28/28` passing on `win11`
-- `bash tests/run-coverage-c-windows.sh 84`:
+- `bash tests/run-coverage-c-windows.sh 85`:
   - script works
   - coverage-only Windows test subset passes inside the script
   - the script also runs a dedicated Windows C coverage-only guard executable:
     - `build-windows-coverage-c/bin/test_win_service_guards.exe`
-  - total coverage result: `85.5%`
+  - total coverage result: `86.9%`
   - per-file:
-    - `netipc_service_win.c`: `84.3%`
-    - `netipc_named_pipe.c`: `86.9%`
-    - `netipc_win_shm.c`: `86.2%`
-  - current status: script passes, including the Linux-matching per-file `84%` gate
+    - `netipc_service_win.c`: `86.9%`
+    - `netipc_named_pipe.c`: `87.3%`
+    - `netipc_win_shm.c`: `86.5%`
+  - current status: script passes, including the Linux-matching per-file `85%` gate
+  - latest ordinary Windows C service gains came from:
+    - negotiated SHM attach failure coverage
+    - malformed SHM response handling on the L2 client side
+    - malformed SHM request handling on the managed server side
+    - the typed snapshot default `snapshot_max_items == 0` path
 - `bash tests/run-coverage-go-windows.sh 90`:
   - script prints valid coverage results on `win11`
   - total coverage result: `96.7%`
@@ -164,7 +169,7 @@ Expected shape:
 ### C coverage
 
 ```bash
-bash tests/run-coverage-c-windows.sh 84
+bash tests/run-coverage-c-windows.sh 85
 ```
 
 ### Go coverage

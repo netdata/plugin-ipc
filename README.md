@@ -239,7 +239,7 @@ Linux / POSIX:
 
 - build: passing
 - `ctest`: `37/37` passing
-- C coverage: `93.9%`
+- C coverage: `94.1%`
 - Go coverage: `95.8%`
 - Rust coverage: `98.57%`
   - measured with `cargo-llvm-cov`
@@ -252,7 +252,7 @@ Windows (`win11`):
 
 - build: passing
 - `ctest`: `28/28` passing
-- C coverage: `85.5%`
+- C coverage: `86.9%`
 - Go coverage: `96.7%`
 - Rust coverage: `93.68%`
 

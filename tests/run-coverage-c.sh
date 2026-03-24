@@ -32,7 +32,7 @@ LIB_SOURCES=(
 #   - netipc_service.c: ~82% (many exclusions for malloc/OS failures)
 # See COVERAGE-EXCLUSIONS.md for detailed justifications
 # Threshold is set to the current cross-platform C gate.
-THRESHOLD=${1:-84}
+THRESHOLD=${1:-85}
 
 run() {
     printf >&2 "${GRAY}$(pwd) >${NC} "

@@ -15,12 +15,12 @@ Verified on `2026-03-24`:
 
 - C:
   - script: `tests/run-coverage-c.sh`
-  - result: `93.9%`
-  - threshold: `84%`
+  - result: `94.1%`
+  - threshold: `85%`
   - current file totals:
     - `netipc_protocol.c`: `98.7%` (`380/385`)
     - `netipc_uds.c`: `92.9%` (`434/467`)
-    - `netipc_service.c`: `91.7%` (`731/797`)
+    - `netipc_service.c`: `92.1%` (`734/797`)
     - `netipc_shm.c`: `95.1%` (`346/364`)
   - latest ordinary C additions covered:
     - malformed client `HELLO_ACK` handling:
@@ -148,15 +148,19 @@ Latest Linux Go notes from the current ordinary POSIX slice:
 Verified on `2026-03-24`:
 
 - C:
-  - script: `tests/run-coverage-c-windows.sh 84`
-  - result: `85.5%`
+  - script: `tests/run-coverage-c-windows.sh 85`
+  - result: `86.9%`
   - per-file:
-    - `netipc_service_win.c`: `84.3%`
-    - `netipc_named_pipe.c`: `86.9%`
-    - `netipc_win_shm.c`: `86.2%`
+    - `netipc_service_win.c`: `86.9%`
+    - `netipc_named_pipe.c`: `87.3%`
+    - `netipc_win_shm.c`: `86.5%`
   - status:
-    - passes the Linux-matching per-file and total `84%` gates
+    - passes the Linux-matching per-file and total `85%` gates
     - the script now runs a dedicated Windows C coverage-only guard executable so the ordinary `ctest` pass stays stable while the extra service guard branches still contribute coverage
+    - the latest ordinary Windows C service slice raised:
+      - `netipc_service_win.c` from `84.3%` to `86.9%`
+      - `netipc_named_pipe.c` from `86.9%` to `87.3%`
+      - `netipc_win_shm.c` from `86.2%` to `86.5%`
 
 - Go:
   - script: `tests/run-coverage-go-windows.sh 90`
@@ -260,9 +264,9 @@ hard exclusions yet.
 
 Current evidence:
 
-- `netipc_service_win.c` is now `84.3%`
-- `netipc_named_pipe.c` is `86.9%`
-- `netipc_win_shm.c` is `86.2%`
+- `netipc_service_win.c` is now `86.9%`
+- `netipc_named_pipe.c` is `87.3%`
+- `netipc_win_shm.c` is `86.5%`
 
 Brutal truth:
 
@@ -414,7 +418,7 @@ Concrete evidence from the latest Linux Go UDS transport slice:
   - coverage improved meaningfully, especially C
 - Windows:
   - coverage measurement now exists and is validated
-  - Windows C now passes the Linux-matching `84%` gate
+  - Windows C now passes the Linux-matching `85%` gate
   - Windows Go is above the Linux-matching `90%` target, the script reliability issue is fixed, and Windows Go service/cache tests are now part of `ctest`
   - Windows Go transport coverage is now materially stronger too
   - Windows Rust coverage now has a real threshold-enforced entrypoint
