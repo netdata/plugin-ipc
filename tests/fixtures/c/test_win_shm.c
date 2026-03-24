@@ -44,6 +44,26 @@ static void unique_service(char *buf, size_t len)
     snprintf(buf, len, "wshm_%ld_%lu", (long)n, (unsigned long)GetCurrentProcessId());
 }
 
+static void fill_service_name(char *buf, size_t len, size_t count)
+{
+    if (count + 1 > len)
+        count = len - 1;
+    memset(buf, 'a', count);
+    buf[count] = '\0';
+}
+
+static void fill_long_run_dir(char *buf, size_t len)
+{
+    if (len < 3)
+        return;
+
+    buf[0] = 'C';
+    buf[1] = ':';
+    for (size_t i = 2; i + 1 < len; i++)
+        buf[i] = 'x';
+    buf[len - 1] = '\0';
+}
+
 /* Build a complete message (outer header + payload) for SHM. */
 static size_t build_message(uint8_t *dst, size_t dst_size,
                              uint16_t kind, uint16_t code,
@@ -544,6 +564,46 @@ static void test_send_too_large(void)
     }
 }
 
+static void test_send_receive_validation(void)
+{
+    printf("--- Send/receive bad-parameter validation ---\n");
+
+    uint8_t buf[16] = {0};
+    size_t msg_len = 0;
+    nipc_win_shm_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    check("send null ctx rejected",
+          nipc_win_shm_send(NULL, buf, sizeof(buf)) == NIPC_WIN_SHM_ERR_BAD_PARAM);
+    check("send null base rejected",
+          nipc_win_shm_send(&ctx, buf, sizeof(buf)) == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    ctx.base = &ctx;
+    check("send null msg rejected",
+          nipc_win_shm_send(&ctx, NULL, sizeof(buf)) == NIPC_WIN_SHM_ERR_BAD_PARAM);
+    check("send zero len rejected",
+          nipc_win_shm_send(&ctx, buf, 0) == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    ctx.base = NULL;
+    check("receive null ctx rejected",
+          nipc_win_shm_receive(NULL, buf, sizeof(buf), &msg_len, 1)
+              == NIPC_WIN_SHM_ERR_BAD_PARAM);
+    check("receive null base rejected",
+          nipc_win_shm_receive(&ctx, buf, sizeof(buf), &msg_len, 1)
+              == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    ctx.base = &ctx;
+    check("receive null buf rejected",
+          nipc_win_shm_receive(&ctx, NULL, sizeof(buf), &msg_len, 1)
+              == NIPC_WIN_SHM_ERR_BAD_PARAM);
+    check("receive zero buf size rejected",
+          nipc_win_shm_receive(&ctx, buf, 0, &msg_len, 1)
+              == NIPC_WIN_SHM_ERR_BAD_PARAM);
+    check("receive null len out rejected",
+          nipc_win_shm_receive(&ctx, buf, sizeof(buf), NULL, 1)
+              == NIPC_WIN_SHM_ERR_BAD_PARAM);
+}
+
 static void test_null_close_destroy(void)
 {
     printf("--- NULL close/destroy ---\n");
@@ -561,6 +621,24 @@ static void test_service_name_validation(void)
     printf("--- Service name validation ---\n");
 
     nipc_win_shm_ctx_t ctx;
+    char long_run_dir[520];
+    char mapping_overflow_service[208];
+    char hybrid_event_overflow_service[202];
+
+    fill_long_run_dir(long_run_dir, sizeof(long_run_dir));
+    fill_service_name(mapping_overflow_service, sizeof(mapping_overflow_service), 200);
+    fill_service_name(hybrid_event_overflow_service,
+                      sizeof(hybrid_event_overflow_service), 195);
+
+    check("null run dir rejected",
+          nipc_win_shm_server_create(NULL, "good-name", AUTH_TOKEN, 1,
+              NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &ctx)
+          == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    check("null service name rejected",
+          nipc_win_shm_server_create(TEST_RUN_DIR, NULL, AUTH_TOKEN, 1,
+              NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &ctx)
+          == NIPC_WIN_SHM_ERR_BAD_PARAM);
 
     check("empty name rejected",
           nipc_win_shm_server_create(TEST_RUN_DIR, "", AUTH_TOKEN, 1,
@@ -586,6 +664,27 @@ static void test_service_name_validation(void)
           nipc_win_shm_server_create(TEST_RUN_DIR, "good-name", AUTH_TOKEN, 1,
               0xFF, 4096, 4096, &ctx)
           == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    check("run dir overflow rejected",
+          nipc_win_shm_server_create(long_run_dir, "good-name", AUTH_TOKEN, 1,
+              NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &ctx)
+          == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    check("mapping name overflow rejected",
+          nipc_win_shm_server_create(TEST_RUN_DIR, mapping_overflow_service,
+              AUTH_TOKEN, 1, NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &ctx)
+          == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    check("hybrid event name overflow rejected",
+          nipc_win_shm_server_create(TEST_RUN_DIR, hybrid_event_overflow_service,
+              AUTH_TOKEN, 1, NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &ctx)
+          == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    check("busywait long name still accepted",
+          nipc_win_shm_server_create(TEST_RUN_DIR, hybrid_event_overflow_service,
+              AUTH_TOKEN, 1, NIPC_WIN_SHM_PROFILE_BUSYWAIT, 4096, 4096, &ctx)
+          == NIPC_WIN_SHM_OK);
+    nipc_win_shm_destroy(&ctx);
 }
 
 static void test_client_attach_validation(void)
@@ -593,7 +692,12 @@ static void test_client_attach_validation(void)
     printf("--- Client attach validation / header rejection ---\n");
 
     char service[64];
+    char long_run_dir[520];
+    char long_service[208];
+    nipc_win_shm_ctx_t temp_ctx;
     unique_service(service, sizeof(service));
+    fill_long_run_dir(long_run_dir, sizeof(long_run_dir));
+    fill_service_name(long_service, sizeof(long_service), 200);
 
     check("server create null ctx rejected",
           nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 5,
@@ -603,6 +707,36 @@ static void test_client_attach_validation(void)
     check("client attach null ctx rejected",
           nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 5,
               NIPC_WIN_SHM_PROFILE_HYBRID, NULL)
+          == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    check("client attach null run dir rejected",
+          nipc_win_shm_client_attach(NULL, service, AUTH_TOKEN, 5,
+              NIPC_WIN_SHM_PROFILE_HYBRID, &temp_ctx)
+          == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    check("client attach null service rejected",
+          nipc_win_shm_client_attach(TEST_RUN_DIR, NULL, AUTH_TOKEN, 5,
+              NIPC_WIN_SHM_PROFILE_HYBRID, &temp_ctx)
+          == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    check("client attach empty service rejected",
+          nipc_win_shm_client_attach(TEST_RUN_DIR, "", AUTH_TOKEN, 5,
+              NIPC_WIN_SHM_PROFILE_HYBRID, &temp_ctx)
+          == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    check("client attach invalid profile rejected",
+          nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 5,
+              0xFF, &temp_ctx)
+          == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    check("client attach run dir overflow rejected",
+          nipc_win_shm_client_attach(long_run_dir, service, AUTH_TOKEN, 5,
+              NIPC_WIN_SHM_PROFILE_HYBRID, &temp_ctx)
+          == NIPC_WIN_SHM_ERR_BAD_PARAM);
+
+    check("client attach mapping name overflow rejected",
+          nipc_win_shm_client_attach(TEST_RUN_DIR, long_service, AUTH_TOKEN, 5,
+              NIPC_WIN_SHM_PROFILE_HYBRID, &temp_ctx)
           == NIPC_WIN_SHM_ERR_BAD_PARAM);
 
     nipc_win_shm_ctx_t server;
@@ -687,6 +821,7 @@ int main(void)
     test_busywait_roundtrip();
     test_receive_msg_too_large();
     test_send_too_large();
+    test_send_receive_validation();
     test_null_close_destroy();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);

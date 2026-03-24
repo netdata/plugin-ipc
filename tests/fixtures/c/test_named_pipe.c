@@ -648,15 +648,47 @@ static void test_bad_params_and_noop_close(void)
     session.pipe = INVALID_HANDLE_VALUE;
     nipc_np_listener_t listener = {0};
     listener.pipe = INVALID_HANDLE_VALUE;
+    nipc_header_t hdr = {
+        .kind = NIPC_KIND_REQUEST,
+        .code = NIPC_METHOD_INCREMENT,
+        .item_count = 1,
+        .message_id = 1,
+    };
+    uint8_t recv_buf[128];
+    nipc_header_t recv_hdr;
+    const void *payload = NULL;
+    size_t payload_len = 0;
 
     check("connect bad service param",
           nipc_np_connect(TEST_RUN_DIR, NULL, &ccfg, &session) == NIPC_NP_ERR_BAD_PARAM);
+    check("connect bad config param",
+          nipc_np_connect(TEST_RUN_DIR, "svc", NULL, &session) == NIPC_NP_ERR_BAD_PARAM);
+    check("connect bad out param",
+          nipc_np_connect(TEST_RUN_DIR, "svc", &ccfg, NULL) == NIPC_NP_ERR_BAD_PARAM);
+    check("listen bad config param",
+          nipc_np_listen(TEST_RUN_DIR, "svc", NULL, &listener) == NIPC_NP_ERR_BAD_PARAM);
     check("listen bad out param",
           nipc_np_listen(TEST_RUN_DIR, "svc", &scfg, NULL) == NIPC_NP_ERR_BAD_PARAM);
+    check("accept bad listener param",
+          nipc_np_accept(NULL, 1, &session) == NIPC_NP_ERR_BAD_PARAM);
+    check("accept bad out param",
+          nipc_np_accept(&listener, 1, NULL) == NIPC_NP_ERR_BAD_PARAM);
+    check("send null session rejected",
+          nipc_np_send(NULL, &hdr, NULL, 0) == NIPC_NP_ERR_BAD_PARAM);
+    check("send invalid handle rejected",
+          nipc_np_send(&session, &hdr, NULL, 0) == NIPC_NP_ERR_BAD_PARAM);
+    check("receive null session rejected",
+          nipc_np_receive(NULL, recv_buf, sizeof(recv_buf), &recv_hdr, &payload, &payload_len)
+              == NIPC_NP_ERR_BAD_PARAM);
+    check("receive invalid handle rejected",
+          nipc_np_receive(&session, recv_buf, sizeof(recv_buf), &recv_hdr, &payload, &payload_len)
+              == NIPC_NP_ERR_BAD_PARAM);
 
+    nipc_np_close_session(NULL);
+    nipc_np_close_listener(NULL);
     nipc_np_close_session(&session);
     nipc_np_close_listener(&listener);
-    check("noop close on invalid handles", 1);
+    check("noop close on null and invalid handles", 1);
 }
 
 /* ------------------------------------------------------------------ */

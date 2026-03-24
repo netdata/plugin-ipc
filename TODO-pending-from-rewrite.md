@@ -30,6 +30,71 @@ Finish the rewrite to a production-ready state with:
     - implication:
       - the shared Linux/Windows C gate can now move to `85%`
       - the dedicated Windows C coverage-only harness is the correct place for these ordinary SHM service tests
+  - next ordinary C target after the `85%` gate raise:
+    - Windows C is no longer blocked by `netipc_service_win.c`
+    - the next weakest tracked Windows C files are now:
+      - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c` (`86.5%`)
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c` (`87.3%`)
+    - implication:
+      - the next honest ordinary C gains should come from L1 Windows transport tests
+      - target files:
+        - `tests/fixtures/c/test_win_shm.c`
+        - `tests/fixtures/c/test_named_pipe.c`
+      - do not grind the service layer further unless fresh gcov shows a new ordinary cluster there
+  - current in-progress slice:
+    - add only deterministic L1 Windows transport tests that match fresh gcov gaps
+    - focus areas:
+      - `nipc_win_shm_server_create()` / `nipc_win_shm_client_attach()` bad-parameter and validation branches
+      - `nipc_np_accept()` / `nipc_np_connect()` / `nipc_np_receive()` bad-parameter and invalid-handle guards
+      - only attempt handshake/protocol-path additions if the existing test harness already supports them cleanly
+    - non-goals for this slice:
+      - fault-injection-only Win32 failure paths
+      - more service-layer coverage-only tests
+  - latest Windows C L1 transport slice status:
+    - important correction:
+      - the first remote `win11` runs in this slice were against the old remote tree and must be ignored
+      - reason:
+        - the local edits in:
+          - `tests/fixtures/c/test_named_pipe.c`
+          - `tests/fixtures/c/test_win_shm.c`
+        - had not yet been copied to `win11`
+      - after syncing the edited files to `win11`, the targeted validation on the real modified tree is:
+        - `test_named_pipe`: pass
+        - `test_win_shm`: pass
+    - deterministic tests added in this slice:
+      - Named Pipe:
+        - null config / null out checks for `nipc_np_connect()` and `nipc_np_listen()`
+        - null argument checks for `nipc_np_accept()`
+        - null / invalid-handle checks for `nipc_np_send()` and `nipc_np_receive()`
+        - null-pointer no-op close checks
+      - Windows SHM:
+        - null `run_dir` / null `service_name` validation for server create and client attach
+        - long `run_dir` hash-overflow validation
+        - long service-name object-name overflow validation
+        - HYBRID-only event-name overflow validation
+        - direct public `nipc_win_shm_send()` / `nipc_win_shm_receive()` bad-parameter checks
+    - measured result on the real modified `win11` coverage build:
+      - direct `gcov` on the generated `.gcno` files reports:
+        - `netipc_service_win.c`: `86.91%` (`677/779`)
+        - `netipc_named_pipe.c`: `88.37%` (`418/473`)
+        - `netipc_win_shm.c`: `90.54%` (`335/370`)
+      - implied combined total across the 3 tracked C Windows files:
+        - `88.16%` (`1430/1622`)
+    - implication:
+      - the ordinary Windows C transport tests did materially raise the two transport files
+      - the remaining ordinary Windows C gaps are now much more concentrated in:
+        - Named Pipe handshake / disconnect / chunk-error branches
+        - true Win32 failure paths
+    - current uncertainty:
+      - the full interactive `ssh ... bash tests/run-coverage-c-windows.sh 85` path did not exit cleanly during this slice
+      - facts:
+        - the coverage-build ctest subset passed
+        - direct `test_win_service_guards.exe` runs complete with `91/91`
+        - direct per-file `gcov` runs complete and produce the numbers above
+      - working theory:
+        - the problem is in the interactive wrapper path around the full script, not in the underlying coverage data
+      - action:
+        - do not claim the full interactive script exit path is fixed until it is reproduced cleanly
   - follow-up from the first Windows C service fix attempt:
     - adding the new client guard tests directly into `tests/fixtures/c/test_win_service_extra.c` did raise Windows C coverage in the coverage build
     - but that same edit introduced a real side effect in the normal `win11` build:
