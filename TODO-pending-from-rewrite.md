@@ -178,6 +178,33 @@ Finish the rewrite to a production-ready state with:
       - practical implication for Netdata integration:
         - this first performance fix explains and removes most of the previously suspicious Windows Rust interop asymmetry
         - before broad integration, the official checked-in Windows benchmark artifacts should be rerun from a clean non-overlapping `win11` workspace so the repo records the fixed numbers directly
+      - follow-up artifact rerun:
+        - reran the full Windows suite again from the existing validated temp workspace with a unique output path:
+          - `/tmp/plugin-ipc-investigate/bench-427907b.csv`
+        - good facts from that rerun:
+          - rows written: `200`
+          - duplicate keys: `0`
+          - zero-throughput rows recorded in the CSV: `0`
+          - implication:
+            - this rerun did not suffer from the earlier interleaved-writer corruption
+        - one failure still occurred in the full-suite driver:
+          - `c->rust` on `np-pipeline-d16`
+          - the suite printed:
+            - `Invalid zero throughput from c pipeline client for rust server`
+          - that made the CSV incomplete by one row and therefore not suitable to replace the checked-in artifact yet
+        - targeted follow-up on the suspected failing pair:
+          - reran the same logical pairing (`C` pipeline client against the Rust Named Pipe server) `5` times directly in the validated temp workspace
+          - all `5/5` targeted reruns succeeded
+          - measured throughputs:
+            - `241869`
+            - `243570`
+            - `249819`
+            - `249393`
+            - `243381`
+        - conclusion from that evidence:
+          - the full-suite `c->rust np-pipeline-d16` failure is currently a flake, not a reproduced deterministic regression from the send-buffer optimization
+          - the hot-path performance explanation still stands
+          - the benchmark artifact refresh is blocked only by this remaining Windows full-suite flake, not by the interop throughput issue that motivated the investigation
 
 ## Pending User Decision
 
