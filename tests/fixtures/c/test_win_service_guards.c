@@ -226,6 +226,14 @@ static nipc_cgroups_handlers_t missing_snapshot_handlers = {
     .user = NULL,
 };
 
+static nipc_cgroups_handlers_t missing_string_handlers = {
+    .on_increment = on_increment,
+    .on_string_reverse = NULL,
+    .on_cgroups_snapshot = on_snapshot_one,
+    .snapshot_max_items = 1,
+    .user = NULL,
+};
+
 static nipc_cgroups_handlers_t hybrid_snapshot_handlers = {
     .on_increment = on_increment,
     .on_string_reverse = NULL,
@@ -395,6 +403,21 @@ static bool refresh_until_ready(nipc_client_ctx_t *client, int max_tries, DWORD 
     return false;
 }
 
+static bool refresh_until_state(nipc_client_ctx_t *client,
+                                nipc_client_state_t target_state,
+                                int max_tries,
+                                DWORD sleep_ms)
+{
+    for (int i = 0; i < max_tries; i++) {
+        nipc_client_refresh(client);
+        if (client->state == target_state)
+            return true;
+        Sleep(sleep_ms);
+    }
+
+    return client->state == target_state;
+}
+
 static bool wait_for_server_sessions(nipc_managed_server_t *server,
                                      int target_count,
                                      int max_tries,
@@ -461,6 +484,7 @@ static DWORD WINAPI fake_hybrid_server_thread(LPVOID arg)
     nipc_np_session_t session = {0};
     nipc_win_shm_ctx_t shm = {0};
     nipc_np_server_config_t scfg = default_hybrid_server_config();
+    uint16_t shm_profile = NIPC_WIN_SHM_PROFILE_HYBRID;
 
     listener.pipe = INVALID_HANDLE_VALUE;
     session.pipe = INVALID_HANDLE_VALUE;
@@ -480,19 +504,19 @@ static DWORD WINAPI fake_hybrid_server_thread(LPVOID arg)
     if (session.selected_profile != NIPC_WIN_SHM_PROFILE_HYBRID)
         goto out;
 
+    shm_profile = session.selected_profile;
+    if (ctx->mode == FAKE_HYBRID_ATTACH_BAD_PROFILE)
+        shm_profile = NIPC_WIN_SHM_PROFILE_BUSYWAIT;
+
     if (nipc_win_shm_server_create(TEST_RUN_DIR, ctx->service, AUTH_TOKEN,
                                    session.session_id,
-                                   session.selected_profile,
+                                   shm_profile,
                                    session.max_request_payload_bytes + NIPC_HEADER_LEN,
                                    session.max_response_payload_bytes + NIPC_HEADER_LEN,
                                    &shm) != NIPC_WIN_SHM_OK)
         goto out;
 
     if (ctx->mode == FAKE_HYBRID_ATTACH_BAD_PROFILE) {
-        nipc_win_shm_region_header_t *hdr =
-            (nipc_win_shm_region_header_t *)shm.base;
-        hdr->profile = NIPC_WIN_SHM_PROFILE_BUSYWAIT;
-        MemoryBarrier();
         Sleep(1500);
         goto out;
     }
@@ -689,7 +713,8 @@ static void test_hybrid_attach_failure_disconnects(void)
     nipc_np_client_config_t ccfg = default_hybrid_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
 
-    (void)nipc_client_refresh(&client);
+    check("hybrid attach failure eventually reaches DISCONNECTED",
+          refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 5, 10));
     check("hybrid attach failure leaves client not ready",
           !nipc_client_ready(&client));
     check("hybrid attach failure maps to DISCONNECTED",
@@ -970,6 +995,52 @@ static void test_string_dispatch_missing_handlers_and_unknown_method(void)
                   nipc_np_receive(&session, recv_buf, sizeof(recv_buf),
                                   &resp_hdr, &payload, &payload_len) == NIPC_NP_OK);
             check("missing snapshot handler returns internal-error response",
+                  resp_hdr.kind == NIPC_KIND_RESPONSE &&
+                  resp_hdr.code == req.code &&
+                  resp_hdr.message_id == req.message_id &&
+                  resp_hdr.transport_status == NIPC_STATUS_INTERNAL_ERROR &&
+                  payload_len == 0);
+            nipc_np_close_session(&session);
+        }
+        stop_server_drain(&sctx, server_thread);
+    }
+
+    {
+        char service[64];
+        nipc_np_server_config_t scfg = default_server_config();
+        server_thread_ctx_t sctx;
+        nipc_np_client_config_t ccfg = default_client_config();
+        nipc_np_session_t session = { .pipe = INVALID_HANDLE_VALUE };
+
+        unique_service(service, sizeof(service), "svc_missing_str");
+        HANDLE server_thread = start_server_named(
+            &sctx, service, 4, &scfg, &missing_string_handlers);
+        if (!server_thread)
+            return;
+
+        check("missing-string raw connect ok",
+              nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session) == NIPC_NP_OK);
+        if (session.pipe != INVALID_HANDLE_VALUE) {
+            uint8_t req_buf[128];
+            uint8_t recv_buf[1024];
+            nipc_header_t req = {0};
+            nipc_header_t resp_hdr;
+            const void *payload = NULL;
+            size_t payload_len = 0;
+            size_t req_len = nipc_string_reverse_encode("abc", 3, req_buf, sizeof(req_buf));
+
+            req.kind = NIPC_KIND_REQUEST;
+            req.code = NIPC_METHOD_STRING_REVERSE;
+            req.item_count = 1;
+            req.message_id = 93;
+            req.transport_status = NIPC_STATUS_OK;
+
+            check("missing-string raw send ok",
+                  req_len > 0 && nipc_np_send(&session, &req, req_buf, req_len) == NIPC_NP_OK);
+            check("missing-string raw recv ok",
+                  nipc_np_receive(&session, recv_buf, sizeof(recv_buf),
+                                  &resp_hdr, &payload, &payload_len) == NIPC_NP_OK);
+            check("missing string handler returns internal-error response",
                   resp_hdr.kind == NIPC_KIND_RESPONSE &&
                   resp_hdr.code == req.code &&
                   resp_hdr.message_id == req.message_id &&

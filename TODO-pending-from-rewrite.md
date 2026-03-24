@@ -17,15 +17,33 @@ Finish the rewrite to a production-ready state with:
 ## Current Focus (2026-03-24)
 
 - Latest authoritative slice:
+    - latest Windows C guard + protocol stabilization slice:
+      - root-cause fixes applied:
+        - the hybrid attach mismatch fake server now creates the wrong SHM profile from the start instead of mutating the region after creation
+        - the hybrid attach guard now waits for terminal `DISCONNECTED`
+        - the missing-string internal-error coverage case was moved from `test_win_service_guards_extra.exe` into the already-stable `test_win_service_guards.exe`
+      - exact `win11` validation on the modified tree:
+        - `test_win_service_guards.exe`: `150 passed, 0 failed`
+        - `test_win_service_guards_extra.exe`: `33 passed, 0 failed`
+        - `bash tests/run-coverage-c-windows.sh 90`: pass
+        - `ctest --test-dir build --output-on-failure -j4`: `28/28` passing
+      - current measured Windows C result:
+        - total: `92.1%`
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `91.4%`
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `92.2%`
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `93.5%`
+      - implication:
+        - the Windows C `90%` gate remains green after the new deterministic Named Pipe response-protocol tests
+        - the dedicated coverage-only Windows guard harness is trustworthy again on the exact modified tree
     - latest C threshold verification:
       - Linux C was re-run locally and remains safely above the next shared threshold step
-      - Windows C was re-run on `win11` at an explicit `85%` gate after the new deterministic Windows SHM transport slice
+      - Windows C was re-run on `win11` at the shared `90%` gate after the guard-harness stabilization slice
       - measured result:
         - Linux C total: `94.1%`
-        - Windows C total: `92.0%`
+        - Windows C total: `92.1%`
         - Windows C file breakdown:
           - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `91.4%`
-          - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `91.8%`
+          - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `92.2%`
           - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `93.5%`
       - implication:
         - the shared Linux/Windows C gate can now move from `85%` to `90%`
@@ -50,11 +68,33 @@ Finish the rewrite to a production-ready state with:
       - `netipc_win_shm.c` raised from `90.5%` to `93.5%`
       - one transient `test_win_service_guards.exe` timeout was seen on the first post-threshold rerun, but it did not reproduce on an isolated rerun or on the next full script rerun
   - next C threshold step:
-    - with Linux C at `94.1%` and Windows C at `92.0%`, plus every tracked Windows C file above `90%`, the next honest shared gate is `90%`
+    - with Linux C at `94.1%` and Windows C at `92.1%`, plus every tracked Windows C file above `90%`, the next honest shared gate is `90%`
     - non-goals for this threshold step:
       - Win32 fault-injection-only paths
       - service-layer `malloc` / `realloc` / `_beginthreadex` failures
       - impossible fixed-size encode guards like `req_len == 0` in constant-size request paths
+  - next ordinary Windows C target after the `90%` gate raise:
+    - fresh clean `win11` gcov says `netipc_service_win.c` is still the lowest tracked file at `91.4%`, but most of its misses are now:
+      - allocation failure cleanup
+      - fixed-size encode guards
+      - session-array growth failures
+    - the cheaper deterministic ordinary targets are now back in:
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c` (`91.8%`)
+    - strongest ordinary candidates from the current uncovered lines:
+      - zero-byte disconnect handling in `raw_recv()`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:233-235`
+      - fake-server `HELLO_ACK` send failure path:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:498-500`
+      - client in-flight limit rejection in `nipc_np_send()`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:734-738`
+      - short first-packet / bad decoded header protocol rejection in `nipc_np_receive()`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:878-889`
+      - chunked receive path where `ensure_recv_buf()` returns an error:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:929-931`
+    - non-goals for this slice:
+      - `CreateNamedPipeW` / `CreateFileW` / `SetNamedPipeHandleState` fault-injection
+      - chunk-buffer allocation failures
+      - peer-close timing tricks that only sometimes hit a line
   - next ordinary C target after the `85%` gate raise:
     - Windows C is no longer blocked by `netipc_service_win.c`
     - the next weakest tracked Windows C files are now:
@@ -188,6 +228,51 @@ Finish the rewrite to a production-ready state with:
       - implication:
         - the earlier wedge was a script-launch reliability issue, not a proven library/test correctness issue
         - the coverage script now launches the guard executable under a bounded timeout and fails explicitly if it hangs
+  - latest Windows guard-test blocker diagnosis:
+    - fresh `win11` reruns after the deterministic Named Pipe response-protocol slice showed the new Named Pipe test is not the blocker:
+      - targeted `test_named_pipe.exe`: `120 passed, 0 failed`
+    - the real failing point is again:
+      - `tests/fixtures/c/test_win_service_guards.c:test_hybrid_attach_failure_disconnects()`
+    - concrete evidence:
+      - direct `win11` rerun of `test_win_service_guards.exe` failed the two assertions:
+        - `hybrid attach failure leaves client not ready`
+        - `hybrid attach failure maps to DISCONNECTED`
+      - then the executable later timed out
+    - root cause from code review:
+      - the fake server currently creates a HYBRID SHM region and only then mutates its header profile to BUSYWAIT
+      - file/lines:
+        - `tests/fixtures/c/test_win_service_guards.c:483-497`
+      - implication:
+        - the client can sometimes attach successfully before the post-create mutation becomes visible
+      - the assertion is also too eager:
+        - the test assumes a single `nipc_client_refresh()` is enough, while the real Windows client performs bounded SHM attach retries inside `client_try_connect()`
+        - file/lines:
+          - `src/libnetdata/netipc/src/service/netipc_service_win.c:91-127`
+          - `src/libnetdata/netipc/src/service/netipc_service_win.c:376-404`
+    - fix approach for the next slice:
+      - make the fake server create the mismatched BUSYWAIT region from the start for the bad-profile mode
+      - then wait for the client to reach terminal `DISCONNECTED` instead of assuming one refresh call is enough
+  - latest Windows extra-guard blocker diagnosis:
+    - after fixing the hybrid attach race, the full `win11` coverage script still timed out in:
+      - `test_win_service_guards_extra.exe`
+    - concrete evidence:
+      - the executable stalls in `test_missing_string_handler_returns_internal_error()`
+      - the last successful log line is:
+        - `missing-string raw send ok`
+    - code evidence:
+      - the hanging case is implemented in:
+        - `tests/fixtures/c/test_win_service_guards_extra.c:489-538`
+      - the same pattern already exists and runs stably in the main guard executable for:
+        - unknown method
+        - missing increment handler
+        - missing snapshot handler
+        - `tests/fixtures/c/test_win_service_guards.c:860-999`
+    - implication:
+      - this is a harness-placement problem, not evidence that the service branch is fundamentally untestable
+    - fix approach for the next slice:
+      - move the missing-string internal-error case into `test_win_service_guards.c`
+      - remove it from `test_win_service_guards_extra.c`
+      - keep the extra executable focused on the worker-limit / destroy / send-failure cases that already complete reliably under gcov
   - next ordinary Windows C target after the stabilized service slice:
     - fresh post-fix `gcov` evidence from `netipc_service_win.c` shows the remaining ordinary branches are now concentrated in:
       - worker-limit rejection in `server_run()`:

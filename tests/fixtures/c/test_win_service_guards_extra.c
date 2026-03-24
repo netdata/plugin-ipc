@@ -73,33 +73,6 @@ static nipc_np_client_config_t default_client_config(void)
     };
 }
 
-static bool on_increment_simple(void *user, uint64_t request, uint64_t *response)
-{
-    (void)user;
-    *response = request + 1;
-    return true;
-}
-
-static bool on_snapshot_one(void *user,
-                            const nipc_cgroups_req_t *request,
-                            nipc_cgroups_builder_t *builder)
-{
-    (void)user;
-
-    if (request->layout_version != 1 || request->flags != 0)
-        return false;
-
-    return nipc_cgroups_builder_add(builder,
-                                    1001,
-                                    0,
-                                    1,
-                                    "docker-abc123",
-                                    (uint32_t)strlen("docker-abc123"),
-                                    "/sys/fs/cgroup/docker/abc123",
-                                    (uint32_t)strlen("/sys/fs/cgroup/docker/abc123"))
-           == NIPC_OK;
-}
-
 static bool on_increment_blocking(void *user, uint64_t request, uint64_t *response)
 {
     (void)user;
@@ -119,14 +92,6 @@ static nipc_cgroups_handlers_t blocking_increment_handlers = {
     .on_string_reverse = NULL,
     .on_cgroups_snapshot = NULL,
     .snapshot_max_items = 0,
-    .user = NULL,
-};
-
-static nipc_cgroups_handlers_t missing_string_handlers = {
-    .on_increment = on_increment_simple,
-    .on_string_reverse = NULL,
-    .on_cgroups_snapshot = on_snapshot_one,
-    .snapshot_max_items = 1,
     .user = NULL,
 };
 
@@ -486,57 +451,6 @@ static void test_named_pipe_send_failure_recovers(void)
     stop_server_drain(&sctx, server_thread);
 }
 
-static void test_missing_string_handler_returns_internal_error(void)
-{
-    printf("--- Missing string handler returns internal error ---\n");
-
-    char service[64];
-    unique_service(service, sizeof(service), "svc_missing_str");
-
-    server_thread_ctx_t sctx;
-    nipc_np_server_config_t scfg = default_server_config();
-    HANDLE server_thread = start_server_named(
-        &sctx, service, 1, &scfg, &missing_string_handlers);
-    if (!server_thread)
-        return;
-
-    nipc_np_client_config_t ccfg = default_client_config();
-    nipc_np_session_t session = { .pipe = INVALID_HANDLE_VALUE };
-    check("missing-string raw connect ok",
-          nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session) == NIPC_NP_OK);
-
-    if (session.pipe != INVALID_HANDLE_VALUE) {
-        uint8_t req_buf[128];
-        uint8_t recv_buf[1024];
-        nipc_header_t req = {0};
-        nipc_header_t resp_hdr;
-        const void *payload = NULL;
-        size_t payload_len = 0;
-        size_t req_len = nipc_string_reverse_encode("abc", 3, req_buf, sizeof(req_buf));
-
-        req.kind = NIPC_KIND_REQUEST;
-        req.code = NIPC_METHOD_STRING_REVERSE;
-        req.item_count = 1;
-        req.message_id = 13;
-        req.transport_status = NIPC_STATUS_OK;
-
-        check("missing-string raw send ok",
-              req_len > 0 && nipc_np_send(&session, &req, req_buf, req_len) == NIPC_NP_OK);
-        check("missing-string raw recv ok",
-              nipc_np_receive(&session, recv_buf, sizeof(recv_buf),
-                              &resp_hdr, &payload, &payload_len) == NIPC_NP_OK);
-        check("missing string handler returns internal-error response",
-              resp_hdr.kind == NIPC_KIND_RESPONSE &&
-              resp_hdr.code == req.code &&
-              resp_hdr.message_id == req.message_id &&
-              resp_hdr.transport_status == NIPC_STATUS_INTERNAL_ERROR &&
-              payload_len == 0);
-        nipc_np_close_session(&session);
-    }
-
-    stop_server_drain(&sctx, server_thread);
-}
-
 int main(void)
 {
     printf("=== Windows Service Guard Extra Tests ===\n\n");
@@ -545,7 +459,6 @@ int main(void)
     test_worker_limit_rejects_extra_client();
     test_server_destroy_joins_active_session();
     test_named_pipe_send_failure_recovers();
-    test_missing_string_handler_returns_internal_error();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

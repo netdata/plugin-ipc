@@ -18,11 +18,15 @@ Verified on `2026-03-24`:
     - `build-windows-coverage-c/bin/test_win_service_guards.exe`
     - `build-windows-coverage-c/bin/test_win_service_guards_extra.exe`
     - `build-windows-coverage-c/bin/test_win_service_extra.exe`
+  - current validated direct-guard results:
+    - `test_win_service_guards.exe`: `150 passed, 0 failed`
+    - `test_win_service_guards_extra.exe`: `33 passed, 0 failed`
+    - `test_win_service_extra.exe`: `81 passed, 0 failed`
   - the remaining Windows C subset then runs one-by-one with `ctest --timeout 60`
-  - total coverage result: `92.0%`
+  - total coverage result: `92.1%`
   - per-file:
     - `netipc_service_win.c`: `91.4%`
-    - `netipc_named_pipe.c`: `91.8%`
+    - `netipc_named_pipe.c`: `92.2%`
     - `netipc_win_shm.c`: `93.5%`
   - current status: script passes, including the Linux-matching per-file `90%` gate
   - latest ordinary Windows C transport gains came from:
@@ -73,7 +77,8 @@ Brutal truth:
 - Windows coverage measurement is real and useful now.
 - Windows coverage parity is much closer, but not finished.
 - Windows C is no longer below the Linux-matching `90%` gate.
-- One transient `test_win_service_guards.exe` timeout was observed once during the first post-threshold rerun, but it did not reproduce on an isolated rerun or on the next full script rerun.
+- One transient `test_win_service_guards.exe` timeout and one later `test_win_service_guards_extra.exe` timeout were both traced to coverage-harness test placement/racing, not to a proven runtime regression.
+- The current validated layout keeps the hybrid-attach mismatch test in `test_win_service_guards.exe` and the worker-limit / destroy / send-failure cases in `test_win_service_guards_extra.exe`.
 - The Windows Go script reliability issue is fixed.
 - The recent Rust Windows coverage work materially raised `service/cgroups.rs` and `win_shm.rs`.
 - The recent Windows named-pipe transport tests materially raised `transport/windows.rs`.
