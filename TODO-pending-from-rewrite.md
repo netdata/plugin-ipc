@@ -16,6 +16,18 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
+- latest Windows Named Pipe handshake-disconnect follow-up:
+    - deterministic table-driven cases added in:
+      - `tests/fixtures/c/test_named_pipe.c`
+        - fake ACK server accepts `HELLO` and closes before sending any `HELLO_ACK`
+        - fake HELLO client connects and closes before sending any `HELLO`
+    - exact clean `win11` validation on the modified tree:
+      - targeted build + `ctest --test-dir build --output-on-failure -R "^test_named_pipe$"`: pass
+      - direct coverage-build `test_named_pipe.exe` + `gcov` on `netipc_named_pipe.c`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:330`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:396`: covered
+    - implication:
+      - both handshake receive-side disconnect branches are now covered honestly with the existing fake-handshake harness
 - latest Windows Named Pipe zero-byte follow-up:
     - deterministic test added in:
       - `tests/fixtures/c/test_named_pipe.c`

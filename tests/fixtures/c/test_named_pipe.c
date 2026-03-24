@@ -84,12 +84,14 @@ typedef enum {
     FAKE_ACK_GOOD_THEN_SHORT_RESPONSE,
     FAKE_ACK_GOOD_THEN_BAD_RESPONSE_HEADER,
     FAKE_ACK_GOOD_THEN_ZERO_MESSAGE,
+    FAKE_ACK_CLOSE_BEFORE_ACK,
 } fake_ack_mode_t;
 
 typedef enum {
     FAKE_HELLO_BAD_HEADER = 1,
     FAKE_HELLO_WRONG_KIND,
     FAKE_HELLO_BAD_PAYLOAD,
+    FAKE_HELLO_CLOSE_BEFORE_HELLO,
 } fake_hello_mode_t;
 
 typedef struct {
@@ -295,6 +297,12 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
     uint8_t msg[4096];
     size_t msg_len = 0;
 
+    if (ctx->mode == FAKE_ACK_CLOSE_BEFORE_ACK) {
+        CloseHandle(pipe);
+        ctx->result = 1;
+        return 0;
+    }
+
     if (ctx->mode == FAKE_ACK_BAD_HEADER) {
         memset(msg, 0, 16);
         msg_len = 16;
@@ -494,6 +502,12 @@ static DWORD WINAPI fake_hello_client_thread(LPVOID arg)
     uint8_t payload[64];
     uint8_t msg[256];
     size_t msg_len = 0;
+
+    if (ctx->mode == FAKE_HELLO_CLOSE_BEFORE_HELLO) {
+        CloseHandle(pipe);
+        ctx->result = 1;
+        return 0;
+    }
 
     if (ctx->mode == FAKE_HELLO_BAD_HEADER) {
         memset(msg, 0, 16);
@@ -1184,6 +1198,7 @@ static void test_client_handshake_rejections(void)
         { "wrong HELLO_ACK kind", FAKE_ACK_WRONG_KIND, NIPC_NP_ERR_PROTOCOL, NIPC_NP_DEFAULT_PACKET_SIZE },
         { "bad HELLO_ACK status", FAKE_ACK_BAD_STATUS, NIPC_NP_ERR_HANDSHAKE, NIPC_NP_DEFAULT_PACKET_SIZE },
         { "bad HELLO_ACK payload", FAKE_ACK_BAD_PAYLOAD, NIPC_NP_ERR_PROTOCOL, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "peer closes before HELLO_ACK", FAKE_ACK_CLOSE_BEFORE_ACK, NIPC_NP_ERR_RECV, NIPC_NP_DEFAULT_PACKET_SIZE },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -1230,10 +1245,12 @@ static void test_server_handshake_rejections(void)
     struct {
         const char *name;
         fake_hello_mode_t mode;
+        nipc_np_error_t expected;
     } cases[] = {
-        { "bad HELLO header", FAKE_HELLO_BAD_HEADER },
-        { "wrong HELLO kind", FAKE_HELLO_WRONG_KIND },
-        { "bad HELLO payload", FAKE_HELLO_BAD_PAYLOAD },
+        { "bad HELLO header", FAKE_HELLO_BAD_HEADER, NIPC_NP_ERR_PROTOCOL },
+        { "wrong HELLO kind", FAKE_HELLO_WRONG_KIND, NIPC_NP_ERR_PROTOCOL },
+        { "bad HELLO payload", FAKE_HELLO_BAD_PAYLOAD, NIPC_NP_ERR_PROTOCOL },
+        { "peer closes before HELLO", FAKE_HELLO_CLOSE_BEFORE_HELLO, NIPC_NP_ERR_RECV },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -1268,9 +1285,9 @@ static void test_server_handshake_rejections(void)
 
         nipc_np_session_t session;
         err = nipc_np_accept(&listener, 1, &session);
-        if (err != NIPC_NP_ERR_PROTOCOL)
+        if (err != cases[i].expected)
             printf("    note: %s returned %d\n", cases[i].name, (int)err);
-        check(cases[i].name, err == NIPC_NP_ERR_PROTOCOL);
+        check(cases[i].name, err == cases[i].expected);
         if (err == NIPC_NP_OK)
             nipc_np_close_session(&session);
 
