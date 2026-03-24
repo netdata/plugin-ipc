@@ -19,22 +19,22 @@ Finish the rewrite to a production-ready state with:
 - Latest authoritative slice:
   - latest C threshold verification:
     - Linux C was re-run locally and remains safely above the next shared threshold step
-    - Windows C was re-run on `win11` at an explicit `85%` gate and then pushed further with ordinary Windows transport tests
+    - Windows C was re-run on `win11` at an explicit `85%` gate and then pushed further with deterministic Windows service coverage
     - measured result:
       - Linux C total: `94.1%`
-      - Windows C total: `89.3%`
+      - Windows C total: `90.9%`
       - Windows C file breakdown:
-        - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `87.3%`
+        - `src/libnetdata/netipc/src/service/netipc_service_win.c`: `90.1%`
         - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`: `91.8%`
-        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `90.3%`
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: `91.6%`
     - implication:
       - the shared Linux/Windows C gate can now move to `85%`
       - the dedicated Windows C coverage-only harness is the correct place for the extra Windows service-guard tests
   - next ordinary C target after the `85%` gate raise:
     - Windows C is no longer blocked by `netipc_service_win.c`
     - the next weakest tracked Windows C files are now:
-      - `src/libnetdata/netipc/src/service/netipc_service_win.c` (`87.3%`)
-      - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c` (`90.3%`)
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c` (`90.1%`)
+      - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c` (`91.6%`)
     - implication:
       - the next honest ordinary C gains should come from either:
         - remaining deterministic Windows Named Pipe branches
@@ -77,11 +77,11 @@ Finish the rewrite to a production-ready state with:
         - direct public `nipc_win_shm_send()` / `nipc_win_shm_receive()` bad-parameter checks
   - measured result on the real modified `win11` coverage build:
     - direct `gcov` on the generated `.gcno` files reports:
-        - `netipc_service_win.c`: `87.3%` (`680/779`)
+        - `netipc_service_win.c`: `90.1%` (`702/779`)
         - `netipc_named_pipe.c`: `91.8%` (`434/473`)
-        - `netipc_win_shm.c`: `90.3%` (`334/370`)
+        - `netipc_win_shm.c`: `91.6%` (`339/370`)
       - implied combined total across the 3 tracked C Windows files:
-        - `89.3%` (`1448/1622`)
+        - `90.9%` (`1475/1622`)
     - implication:
       - the ordinary Windows C transport tests did materially raise the two transport files
       - the remaining ordinary Windows C gaps are now much more concentrated in:
@@ -96,7 +96,7 @@ Finish the rewrite to a production-ready state with:
       - facts:
         - `test_named_pipe` passes on `win11`
         - the full `bash tests/run-coverage-c-windows.sh 85` run now completes cleanly on `win11`
-        - direct `test_win_service_guards.exe` runs complete with `91/91`
+        - direct `test_win_service_guards.exe` runs complete with `142 passed, 0 failed`
       - implication:
         - the earlier timeout seen during one intermediate rerun did not reproduce cleanly
         - the Windows C coverage script is currently trustworthy again on the real modified tree
@@ -118,16 +118,51 @@ Finish the rewrite to a production-ready state with:
       - short batch-directory rejection
       - zero chunk-budget send rejection
     - measured result on `win11`:
-      - `netipc_service_win.c`: `87.3%` (`680/779`)
+      - `netipc_service_win.c`: `90.1%` (`702/779`)
       - `netipc_named_pipe.c`: `91.8%` (`434/473`)
-      - `netipc_win_shm.c`: `90.3%` (`334/370`)
-      - combined total: `89.3%` (`1448/1622`)
+      - `netipc_win_shm.c`: `91.6%` (`339/370`)
+      - combined total: `90.9%` (`1475/1622`)
     - validation:
       - `test_named_pipe`: pass
       - `bash tests/run-coverage-c-windows.sh 85`: pass
     - implication:
       - `netipc_named_pipe.c` is no longer the gating Windows C file
       - the next honest ordinary Windows C target is now `netipc_service_win.c`
+  - latest deterministic Windows service-coverage slice:
+    - moved from Windows Named Pipe transport follow-up into deterministic `netipc_service_win.c` coverage
+    - evidence from the fresh `win11` `gcov` output:
+      - `server_typed_dispatch()` still misses ordinary branches at:
+        - string-reverse success path (`src/libnetdata/netipc/src/service/netipc_service_win.c:836`)
+        - missing snapshot handler (`src/libnetdata/netipc/src/service/netipc_service_win.c:843`)
+        - default unknown-method rejection (`src/libnetdata/netipc/src/service/netipc_service_win.c:850`)
+      - server init / bookkeeping still misses ordinary paths at:
+        - long `run_dir` truncation (`src/libnetdata/netipc/src/service/netipc_service_win.c:936`)
+        - long `service_name` truncation (`src/libnetdata/netipc/src/service/netipc_service_win.c:943`)
+      - cache / teardown still misses ordinary paths at:
+        - `next_power_of_2()` non-minimum branch (`src/libnetdata/netipc/src/service/netipc_service_win.c:1267`)
+        - hash-table collision probe in lookup (`src/libnetdata/netipc/src/service/netipc_service_win.c:1456`)
+        - drain-timeout forced close path (`src/libnetdata/netipc/src/service/netipc_service_win.c:1173`)
+    - ordinary targets for this slice:
+      - add direct typed-handler coverage-only tests for:
+        - string-reverse success
+        - missing increment/snapshot handler failure
+        - unknown method mapping to internal error
+      - add cache refresh tests with enough items and controlled collisions to hit:
+        - `next_power_of_2()` for `n >= 16`
+        - collision probe during lookup
+      - if stable, add a short-timeout drain test that forces the `CancelIoEx()` branch
+    - non-goals for this slice:
+      - `calloc` / `realloc` / `_beginthreadex` / WinSHM create fault-injection branches
+      - peer-close timing tricks that only sometimes hit the line
+      - any regression to the normal `win11` `ctest` path
+    - validation fact:
+      - `test_win_service_guards.exe` passes on `win11` in:
+        - direct targeted runs
+        - the exact `ctest`-subset + guarded `timeout 120 .../test_win_service_guards.exe` reproduction
+        - the full `bash tests/run-coverage-c-windows.sh 85` path
+      - implication:
+        - the earlier wedge was a script-launch reliability issue, not a proven library/test correctness issue
+        - the coverage script now launches the guard executable under a bounded timeout and fails explicitly if it hangs
   - follow-up from the first Windows C service fix attempt:
     - adding the new client guard tests directly into `tests/fixtures/c/test_win_service_extra.c` did raise Windows C coverage in the coverage build
     - but that same edit introduced a real side effect in the normal `win11` build:
@@ -1055,10 +1090,10 @@ Finish the rewrite to a production-ready state with:
     - keep focusing on ordinary testable branches first, not the deferred managed-server retry/shutdown investigation
 - Verified current Windows coverage state on `2026-03-24`:
   - C:
-    - `src/libnetdata/netipc/src/service/netipc_service_win.c` (`87.3%`)
+    - `src/libnetdata/netipc/src/service/netipc_service_win.c` (`90.1%`)
     - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c` (`91.8%`)
-    - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c` (`90.3%`)
-    - total: `89.3%`
+    - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c` (`91.6%`)
+    - total: `90.9%`
     - status: the script now passes the Linux-matching per-file `85%` gate
   - Go:
     - total: `96.7%`
@@ -1290,14 +1325,14 @@ Current measured results:
 
 - C:
   - `bash tests/run-coverage-c-windows.sh 85`
-  - coverage result: `89.3%`
+  - coverage result: `90.9%`
   - per-file:
-    - `netipc_service_win.c`: `87.3%`
+    - `netipc_service_win.c`: `90.1%`
     - `netipc_named_pipe.c`: `91.8%`
-    - `netipc_win_shm.c`: `90.3%`
+    - `netipc_win_shm.c`: `91.6%`
   - status:
     - passes the Linux-matching `85%` target, including the per-file gate
-    - the script now runs `test_win_service_guards.exe` as a dedicated coverage-only executable so the ordinary `ctest` path stays stable
+    - the script now runs the normal `test_win_service.exe` subset plus `test_win_service_guards.exe` as a dedicated coverage-only executable under `timeout 120`, so the ordinary `ctest` path stays stable and the extra deterministic service guard branches still contribute coverage
 
 - Go:
   - `bash tests/run-coverage-go-windows.sh 90`
@@ -1327,10 +1362,9 @@ Important facts:
 - The Windows C service coverage harness was trimmed to keep `ctest` trustworthy.
   - The broken-session retry and cache subcases need a smaller dedicated Windows-only harness.
   - Keeping them in the monolithic `test_win_service.exe` caused intermittent deadlocks and poisoned full-suite validation.
-- Windows C coverage no longer depends on `test_win_service.exe`.
-  - The coverage script now uses the smaller `test_win_service_extra.exe` plus the Windows interop/stress tests.
-  - Reason: if a large gcov-instrumented process times out, its coverage data is unreliable or lost.
-  - The normal Windows `ctest` suite still validates `test_win_service.exe` separately.
+- Windows C coverage now includes `test_win_service.exe` again, but it no longer relies on that executable alone for the extra deterministic service guard branches.
+  - The coverage script runs the normal C coverage subset, which includes `test_win_service.exe`, and then separately runs `test_win_service_guards.exe` under `timeout 120`.
+  - Reason: the dedicated guard executable isolates the extra service-only branches without risking the ordinary `ctest` inventory.
 - The Windows Go coverage script no longer stalls in noninteractive `ssh`.
   - Root cause was the script's own slow shell post-processing, not MSYS / SSH.
   - The per-file aggregation now uses one `awk` pass and exits cleanly on `win11`.
@@ -1517,10 +1551,10 @@ Facts:
 - Linux coverage scripts are working and pass their current lowered thresholds.
 - Windows coverage docs now match the measured numbers from `2026-03-24`.
 - Windows C coverage currently passes:
-  - total: `89.3%`
-  - `netipc_service_win.c`: `87.3%`
+  - total: `90.9%`
+  - `netipc_service_win.c`: `90.1%`
   - `netipc_named_pipe.c`: `91.8%`
-  - `netipc_win_shm.c`: `90.3%`
+  - `netipc_win_shm.c`: `91.6%`
 - Windows Go coverage currently reports `96.7%`.
 - Linux Go coverage currently reports `95.8%` with the remaining ordinary gaps now reduced to a much smaller POSIX transport/service residue.
 - Rust Windows coverage now has a validated workflow with meaningful service coverage.

@@ -149,18 +149,18 @@ Verified on `2026-03-24`:
 
 - C:
   - script: `tests/run-coverage-c-windows.sh 85`
-  - result: `89.3%`
+  - result: `90.9%`
   - per-file:
-    - `netipc_service_win.c`: `87.3%`
+    - `netipc_service_win.c`: `90.1%`
     - `netipc_named_pipe.c`: `91.8%`
-    - `netipc_win_shm.c`: `90.3%`
+    - `netipc_win_shm.c`: `91.6%`
   - status:
     - passes the Linux-matching per-file and total `85%` gates
-    - the script now runs a dedicated Windows C coverage-only guard executable so the ordinary `ctest` pass stays stable while the extra service guard branches still contribute coverage
-    - the latest ordinary Windows C named-pipe follow-up raised:
-      - `netipc_service_win.c` from `86.9%` to `87.3%`
-      - `netipc_named_pipe.c` from `89.9%` to `91.8%`
-      - `netipc_win_shm.c` remained `90.3%`
+    - the script now runs a dedicated Windows C coverage-only guard executable under a bounded timeout so the ordinary `ctest` pass stays stable while the extra service guard branches still contribute coverage
+    - the latest ordinary Windows C service follow-up raised:
+      - `netipc_service_win.c` from `87.3%` to `90.1%`
+      - `netipc_named_pipe.c` remained `91.8%`
+      - `netipc_win_shm.c` from `90.3%` to `91.6%`
 
 - Go:
   - script: `tests/run-coverage-go-windows.sh 90`
@@ -264,9 +264,9 @@ hard exclusions yet.
 
 Current evidence:
 
-- `netipc_service_win.c` is now `87.3%`
+- `netipc_service_win.c` is now `90.1%`
 - `netipc_named_pipe.c` is `91.8%`
-- `netipc_win_shm.c` is `90.3%`
+- `netipc_win_shm.c` is `91.6%`
 
 Brutal truth:
 

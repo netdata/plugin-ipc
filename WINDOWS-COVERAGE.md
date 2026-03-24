@@ -16,22 +16,21 @@ Verified on `2026-03-24`:
   - coverage-only Windows test subset passes inside the script
   - the script also runs a dedicated Windows C coverage-only guard executable:
     - `build-windows-coverage-c/bin/test_win_service_guards.exe`
-  - total coverage result: `89.3%`
+  - total coverage result: `90.9%`
   - per-file:
-    - `netipc_service_win.c`: `87.3%`
+    - `netipc_service_win.c`: `90.1%`
     - `netipc_named_pipe.c`: `91.8%`
-    - `netipc_win_shm.c`: `90.3%`
+    - `netipc_win_shm.c`: `91.6%`
   - current status: script passes, including the Linux-matching per-file `85%` gate
   - latest ordinary Windows C service gains came from:
-    - negotiated SHM attach failure coverage
-    - malformed SHM response handling on the L2 client side
-    - malformed SHM request handling on the managed server side
-    - the typed snapshot default `snapshot_max_items == 0` path
-  - latest Windows Named Pipe follow-up gains came from:
-    - oversized response-payload rejection
-    - response batch item-count limit rejection
-    - short response batch-directory rejection
-    - zero chunk-budget send rejection
+    - typed dispatch coverage for missing handler and unknown-method branches
+    - cache rehash and collision-probe lookup coverage
+    - long `run_dir` / `service_name` truncation coverage
+    - bounded drain-timeout coverage for the forced-close path
+  - script detail:
+    - the coverage subset now includes `test_win_service.exe`
+    - the extra deterministic service-only branches still live in `test_win_service_guards.exe`
+    - that guard executable now runs under `timeout 120` so a hang becomes an explicit script failure instead of wedging the whole coverage run
 - `bash tests/run-coverage-go-windows.sh 90`:
   - script prints valid coverage results on `win11`
   - total coverage result: `96.7%`
@@ -107,7 +106,7 @@ What it does:
 
 1. configures a fresh Windows coverage build with `NETIPC_COVERAGE=ON`
 2. builds with the native `win11` MinGW64 toolchain and Ninja
-3. runs the Windows `ctest` suite
+3. runs the Windows coverage-focused `ctest` subset
 4. runs the dedicated Windows C coverage-only guard executable
 5. collects `gcov` line coverage for the Windows C sources above
 

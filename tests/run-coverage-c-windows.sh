@@ -25,7 +25,7 @@ LIB_SOURCES=(
 # C coverage is about the C transport/service stack. Running the full Windows
 # suite here adds unrelated Go fuzz tests that do not contribute gcov data for
 # these files and can starve long-running C tests under coverage builds.
-COVERAGE_TEST_REGEX='^(test_protocol|interop_codec|fuzz_protocol_30s|test_named_pipe|test_named_pipe_interop|test_win_shm|test_win_service_extra|test_win_stress|test_win_shm_interop|test_service_win_interop|test_service_win_shm_interop|test_cache_win_interop|test_cache_win_shm_interop)$'
+COVERAGE_TEST_REGEX='^(test_protocol|interop_codec|fuzz_protocol_30s|test_named_pipe|test_named_pipe_interop|test_win_shm|test_win_service|test_win_service_extra|test_win_stress|test_win_shm_interop|test_service_win_interop|test_service_win_shm_interop|test_cache_win_interop|test_cache_win_shm_interop)$'
 
 THRESHOLD=${1:-85}
 
@@ -53,7 +53,7 @@ fi
 
 export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
 export MSYSTEM=MINGW64
-for tool in cmake ninja gcc g++ gcov cygpath; do
+for tool in cmake ninja gcc g++ gcov cygpath timeout; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo -e "${RED}ERROR:${NC} Required tool not found: $tool"
         exit 1
@@ -80,7 +80,22 @@ run cmake --build "$BUILD_DIR" -j4
 echo -e "${YELLOW}Running Windows test suite...${NC}"
 run ctest --test-dir "$BUILD_DIR" --output-on-failure -j1 -R "$COVERAGE_TEST_REGEX"
 echo -e "${YELLOW}Running Windows C coverage-only guard executable...${NC}"
-run "$BUILD_DIR/bin/test_win_service_guards.exe"
+GUARD_LOG="$BUILD_DIR/test_win_service_guards.log"
+run rm -f "$GUARD_LOG"
+printf >&2 "${GRAY}$(pwd) >${NC} "
+printf >&2 "${YELLOW}"
+printf >&2 "%q %q %q " timeout 120 "$BUILD_DIR/bin/test_win_service_guards.exe"
+printf >&2 "${NC}\n"
+set +e
+timeout 120 "$BUILD_DIR/bin/test_win_service_guards.exe" >"$GUARD_LOG" 2>&1
+exit_code=$?
+set -e
+if [[ $exit_code -ne 0 ]]; then
+    cat "$GUARD_LOG" || true
+    echo -e >&2 "${RED}[ERROR]${NC} Guard executable failed or timed out with exit code ${exit_code}"
+    exit "$exit_code"
+fi
+cat "$GUARD_LOG"
 
 echo
 echo -e "${YELLOW}Collecting gcov data for Windows C sources...${NC}"
