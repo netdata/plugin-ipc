@@ -525,6 +525,7 @@ static DWORD WINAPI fake_hello_client_thread(LPVOID arg)
     }
 
     SetEvent(ctx->ready_event);
+
     HANDLE pipe = connect_raw_pipe(pipe_name);
     if (pipe == INVALID_HANDLE_VALUE)
         return 1;
@@ -1818,6 +1819,9 @@ static void test_bad_params_and_noop_close(void)
     nipc_header_t recv_hdr;
     const void *payload = NULL;
     size_t payload_len = 0;
+    char long_service[512];
+    memset(long_service, 'x', sizeof(long_service) - 1);
+    long_service[sizeof(long_service) - 1] = '\0';
 
     check("connect bad service param",
           nipc_np_connect(TEST_RUN_DIR, NULL, &ccfg, &session) == NIPC_NP_ERR_BAD_PARAM);
@@ -1829,10 +1833,14 @@ static void test_bad_params_and_noop_close(void)
           nipc_np_listen(TEST_RUN_DIR, "svc", NULL, &listener) == NIPC_NP_ERR_BAD_PARAM);
     check("listen bad out param",
           nipc_np_listen(TEST_RUN_DIR, "svc", &scfg, NULL) == NIPC_NP_ERR_BAD_PARAM);
+    check("listen overlong service rejected",
+          nipc_np_listen(TEST_RUN_DIR, long_service, &scfg, &listener) == NIPC_NP_ERR_BAD_PARAM);
     check("accept bad listener param",
           nipc_np_accept(NULL, 1, &session) == NIPC_NP_ERR_BAD_PARAM);
     check("accept bad out param",
           nipc_np_accept(&listener, 1, NULL) == NIPC_NP_ERR_BAD_PARAM);
+    check("connect overlong service rejected",
+          nipc_np_connect(TEST_RUN_DIR, long_service, &ccfg, &session) == NIPC_NP_ERR_BAD_PARAM);
     check("send null session rejected",
           nipc_np_send(NULL, &hdr, NULL, 0) == NIPC_NP_ERR_BAD_PARAM);
     check("send invalid handle rejected",
@@ -1849,6 +1857,29 @@ static void test_bad_params_and_noop_close(void)
     nipc_np_close_session(&session);
     nipc_np_close_listener(&listener);
     check("noop close on null and invalid handles", 1);
+}
+
+static void test_accept_on_closed_listener(void)
+{
+    printf("--- Accept on closed listener ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_np_server_config_t cfg = default_server_config();
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, service, &cfg, &listener);
+    check("listen for closed-listener accept", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK)
+        return;
+
+    check("close raw listener handle", CloseHandle(listener.pipe) != 0);
+
+    nipc_np_session_t session;
+    err = nipc_np_accept(&listener, 1, &session);
+    check("closed listener accept rejected", err == NIPC_NP_ERR_ACCEPT);
+
+    listener.pipe = INVALID_HANDLE_VALUE;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1914,6 +1945,7 @@ int main(void)
     test_zero_chunk_budget_rejected();
     test_addr_in_use();
     test_bad_params_and_noop_close();
+    test_accept_on_closed_listener();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

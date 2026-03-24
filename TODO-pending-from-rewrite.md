@@ -16,6 +16,38 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
+- next ordinary Windows Named Pipe validation follow-up:
+    - handshake-send recheck outcome:
+      - the attempted `"close after HELLO"` follow-up did not produce a stable `raw_send()` failure on clean `win11`
+      - observed outcomes during targeted reruns:
+        - `NIPC_NP_ERR_ACCEPT`
+        - `NIPC_NP_ERR_PROTOCOL`
+      - implication:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:500` is not an honest deterministic target with the current fake-handshake harness
+        - do not keep grinding that branch as if it were ordinary
+    - next cheap deterministic misses from source review:
+      - bad derived pipe name in `nipc_np_listen()`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:537`
+      - bad derived pipe name in `nipc_np_connect()`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:630`
+      - `ConnectNamedPipe()` failure on a closed-but-non-null listener handle:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:579`
+    - planned deterministic tests:
+      - overlong service name rejected by `nipc_np_listen()`
+      - overlong service name rejected by `nipc_np_connect()`
+      - close a successfully created listener handle, then call `nipc_np_accept()` and assert `NIPC_NP_ERR_ACCEPT`
+    - exact clean `win11` validation on the modified tree:
+      - targeted build + `ctest --test-dir build --output-on-failure -R "^test_named_pipe$"`: pass
+      - direct coverage-build `test_named_pipe.exe` + `gcov` on `netipc_named_pipe.c`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:537`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:579`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:630`: covered
+    - implication:
+      - the cheap argument/closed-handle validation misses are now covered honestly
+    - non-goals for this follow-up:
+      - handshake send-failure timing tricks
+      - allocation-failure-only paths
+      - in-flight growth failure paths
 - next ordinary Windows Named Pipe preferred-profile follow-up:
     - next cheap deterministic success-path miss:
       - preferred-profile selection when `preferred_intersection != 0`:
