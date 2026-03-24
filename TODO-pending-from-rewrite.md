@@ -16,6 +16,19 @@ Finish the rewrite to a production-ready state with:
 
 ## Current Focus (2026-03-24)
 
+- latest Windows Named Pipe negotiation follow-up:
+    - deterministic table-driven cases added in:
+      - `tests/fixtures/c/test_named_pipe.c`
+        - fake ACK server sends a valid `HELLO_ACK` with `transport_status = NIPC_STATUS_UNSUPPORTED`
+        - fake HELLO client sends a valid `HELLO` with `supported_profiles = 0`
+    - exact clean `win11` validation on the modified tree:
+      - targeted build + `ctest --test-dir build --output-on-failure -R "^test_named_pipe$"`: pass
+      - direct coverage-build `test_named_pipe.exe` + `gcov` on `netipc_named_pipe.c`:
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:345`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:435`: covered
+        - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:436`: covered
+    - implication:
+      - the remaining cheap Windows Named Pipe handshake negotiation rejections are now covered honestly
 - latest Windows Named Pipe handshake-disconnect follow-up:
     - deterministic table-driven cases added in:
       - `tests/fixtures/c/test_named_pipe.c`

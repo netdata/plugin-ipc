@@ -75,6 +75,7 @@ typedef enum {
     FAKE_ACK_BAD_HEADER = 1,
     FAKE_ACK_WRONG_KIND,
     FAKE_ACK_BAD_STATUS,
+    FAKE_ACK_UNSUPPORTED_STATUS,
     FAKE_ACK_BAD_PAYLOAD,
     FAKE_ACK_GOOD_THEN_CLOSE,
     FAKE_ACK_GOOD_THEN_BAD_CHUNK,
@@ -92,6 +93,7 @@ typedef enum {
     FAKE_HELLO_WRONG_KIND,
     FAKE_HELLO_BAD_PAYLOAD,
     FAKE_HELLO_CLOSE_BEFORE_HELLO,
+    FAKE_HELLO_UNSUPPORTED_PROFILE,
 } fake_hello_mode_t;
 
 typedef struct {
@@ -247,6 +249,28 @@ static size_t build_valid_hello_payload(uint8_t *dst, size_t dst_size, uint32_t 
     return 44;
 }
 
+static size_t build_custom_hello_payload(uint8_t *dst, size_t dst_size,
+                                         uint32_t packet_size,
+                                         uint32_t supported_profiles,
+                                         uint32_t preferred_profiles,
+                                         uint64_t auth_token)
+{
+    nipc_hello_t hello = {
+        .layout_version = 1,
+        .flags = 0,
+        .supported_profiles = supported_profiles,
+        .preferred_profiles = preferred_profiles,
+        .max_request_payload_bytes = 4096,
+        .max_request_batch_items = 16,
+        .max_response_payload_bytes = 4096,
+        .max_response_batch_items = 16,
+        .auth_token = auth_token,
+        .packet_size = packet_size,
+    };
+    nipc_hello_encode(&hello, dst, dst_size);
+    return 44;
+}
+
 static size_t build_valid_hello_ack_payload(uint8_t *dst, size_t dst_size,
                                             uint32_t packet_size, uint64_t session_id)
 {
@@ -318,6 +342,12 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
         msg_len = build_control_packet(msg, sizeof(msg),
                                        NIPC_KIND_CONTROL, NIPC_CODE_HELLO_ACK,
                                        NIPC_STATUS_INTERNAL_ERROR, payload, payload_len);
+    } else if (ctx->mode == FAKE_ACK_UNSUPPORTED_STATUS) {
+        size_t payload_len = build_valid_hello_ack_payload(payload, sizeof(payload),
+                                                           packet_size, 1);
+        msg_len = build_control_packet(msg, sizeof(msg),
+                                       NIPC_KIND_CONTROL, NIPC_CODE_HELLO_ACK,
+                                       NIPC_STATUS_UNSUPPORTED, payload, payload_len);
     } else {
         size_t payload_len = build_valid_hello_ack_payload(payload, sizeof(payload),
                                                            packet_size, 1);
@@ -517,6 +547,13 @@ static DWORD WINAPI fake_hello_client_thread(LPVOID arg)
                                                        NIPC_NP_DEFAULT_PACKET_SIZE);
         msg_len = build_control_packet(msg, sizeof(msg),
                                        NIPC_KIND_RESPONSE, NIPC_CODE_HELLO,
+                                       NIPC_STATUS_OK, payload, payload_len);
+    } else if (ctx->mode == FAKE_HELLO_UNSUPPORTED_PROFILE) {
+        size_t payload_len = build_custom_hello_payload(payload, sizeof(payload),
+                                                        NIPC_NP_DEFAULT_PACKET_SIZE,
+                                                        0, 0, AUTH_TOKEN);
+        msg_len = build_control_packet(msg, sizeof(msg),
+                                       NIPC_KIND_CONTROL, NIPC_CODE_HELLO,
                                        NIPC_STATUS_OK, payload, payload_len);
     } else {
         size_t payload_len = build_valid_hello_payload(payload, sizeof(payload),
@@ -1197,6 +1234,7 @@ static void test_client_handshake_rejections(void)
         { "bad HELLO_ACK header", FAKE_ACK_BAD_HEADER, NIPC_NP_ERR_PROTOCOL, NIPC_NP_DEFAULT_PACKET_SIZE },
         { "wrong HELLO_ACK kind", FAKE_ACK_WRONG_KIND, NIPC_NP_ERR_PROTOCOL, NIPC_NP_DEFAULT_PACKET_SIZE },
         { "bad HELLO_ACK status", FAKE_ACK_BAD_STATUS, NIPC_NP_ERR_HANDSHAKE, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "unsupported HELLO_ACK status", FAKE_ACK_UNSUPPORTED_STATUS, NIPC_NP_ERR_NO_PROFILE, NIPC_NP_DEFAULT_PACKET_SIZE },
         { "bad HELLO_ACK payload", FAKE_ACK_BAD_PAYLOAD, NIPC_NP_ERR_PROTOCOL, NIPC_NP_DEFAULT_PACKET_SIZE },
         { "peer closes before HELLO_ACK", FAKE_ACK_CLOSE_BEFORE_ACK, NIPC_NP_ERR_RECV, NIPC_NP_DEFAULT_PACKET_SIZE },
     };
@@ -1251,6 +1289,7 @@ static void test_server_handshake_rejections(void)
         { "wrong HELLO kind", FAKE_HELLO_WRONG_KIND, NIPC_NP_ERR_PROTOCOL },
         { "bad HELLO payload", FAKE_HELLO_BAD_PAYLOAD, NIPC_NP_ERR_PROTOCOL },
         { "peer closes before HELLO", FAKE_HELLO_CLOSE_BEFORE_HELLO, NIPC_NP_ERR_RECV },
+        { "unsupported HELLO profiles", FAKE_HELLO_UNSUPPORTED_PROFILE, NIPC_NP_ERR_NO_PROFILE },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
