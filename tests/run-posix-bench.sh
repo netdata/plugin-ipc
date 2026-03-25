@@ -33,7 +33,8 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUILD_DIR="${ROOT_DIR}/build"
+BUILD_DIR="${NIPC_BENCH_BUILD_DIR:-${ROOT_DIR}/build-bench-posix}"
+BENCH_BUILD_TYPE="${NIPC_BENCH_BUILD_TYPE:-Release}"
 
 OUTPUT_CSV="${1:-${ROOT_DIR}/benchmarks-posix.csv}"
 DURATION="${2:-5}"
@@ -71,6 +72,41 @@ warn() {
 
 err() {
     printf "${RED}[error]${NC} %s\n" "$*" >&2
+}
+
+run() {
+    printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
+    printf >&2 "${YELLOW}"
+    printf >&2 "%q " "$@"
+    printf >&2 "${NC}\n"
+    "$@"
+}
+
+build_jobs() {
+    if command -v getconf >/dev/null 2>&1; then
+        getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4
+    elif command -v nproc >/dev/null 2>&1; then
+        nproc 2>/dev/null || echo 4
+    else
+        echo 4
+    fi
+}
+
+ensure_bench_build() {
+    local cache="${BUILD_DIR}/CMakeCache.txt"
+    local current_type=""
+
+    if [ -f "$cache" ]; then
+        current_type=$(awk -F= '/^CMAKE_BUILD_TYPE:STRING=/{print $2; exit}' "$cache")
+    fi
+
+    if [ ! -f "$cache" ] || [ "$current_type" != "$BENCH_BUILD_TYPE" ]; then
+        log "Configuring benchmark build dir: ${BUILD_DIR} (${BENCH_BUILD_TYPE})"
+        run cmake -S "$ROOT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE="$BENCH_BUILD_TYPE"
+    fi
+
+    log "Building benchmark binaries in ${BUILD_DIR}"
+    run cmake --build "$BUILD_DIR" --target bench_posix_c bench_posix_go -j"$(build_jobs)"
 }
 
 # Get the binary for a language
@@ -324,11 +360,7 @@ run_pair() {
 check_binaries() {
     local ok=0
 
-    if [ ! -x "$BENCH_C" ]; then
-        err "C benchmark binary not found: $BENCH_C"
-        err "Build with: cmake --build build --target bench_posix_c"
-        ok=1
-    fi
+    ensure_bench_build
 
     if [ ! -x "$BENCH_RS" ]; then
         err "Rust benchmark binary not found: $BENCH_RS"
@@ -336,9 +368,13 @@ check_binaries() {
         ok=1
     fi
 
+    if [ ! -x "$BENCH_C" ]; then
+        err "C benchmark binary not found after build: $BENCH_C"
+        ok=1
+    fi
+
     if [ ! -x "$BENCH_GO" ]; then
-        err "Go benchmark binary not found: $BENCH_GO"
-        err "Build with: cmake --build build --target bench_posix_go"
+        err "Go benchmark binary not found after build: $BENCH_GO"
         ok=1
     fi
 

@@ -37,7 +37,8 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUILD_DIR="${ROOT_DIR}/build"
+BUILD_DIR="${NIPC_BENCH_BUILD_DIR:-${ROOT_DIR}/build-bench-windows}"
+BENCH_BUILD_TYPE="${NIPC_BENCH_BUILD_TYPE:-Release}"
 
 OUTPUT_CSV="${1:-${ROOT_DIR}/benchmarks-windows.csv}"
 DURATION="${2:-5}"
@@ -77,6 +78,61 @@ log() {
 
 warn() {
     printf "${YELLOW}[warn]${NC} %s\n" "$*" >&2
+}
+
+setup_windows_toolchain() {
+    export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
+    export MSYSTEM=MINGW64
+
+    for tool in cmake gcc g++ cygpath timeout; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            err "Required tool not found: $tool"
+            exit 1
+        fi
+    done
+
+    CC_BIN=$(cygpath -m "$(command -v gcc)")
+    CXX_BIN=$(cygpath -m "$(command -v g++)")
+}
+
+run() {
+    printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
+    printf >&2 "${YELLOW}"
+    printf >&2 "%q " "$@"
+    printf >&2 "${NC}\n"
+    "$@"
+}
+
+build_jobs() {
+    if command -v getconf >/dev/null 2>&1; then
+        getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4
+    elif command -v nproc >/dev/null 2>&1; then
+        nproc 2>/dev/null || echo 4
+    else
+        echo 4
+    fi
+}
+
+ensure_bench_build() {
+    local cache="${BUILD_DIR}/CMakeCache.txt"
+    local current_type=""
+
+    setup_windows_toolchain
+
+    if [ -f "$cache" ]; then
+        current_type=$(awk -F= '/^CMAKE_BUILD_TYPE:STRING=/{print $2; exit}' "$cache")
+    fi
+
+    if [ ! -f "$cache" ] || [ "$current_type" != "$BENCH_BUILD_TYPE" ]; then
+        log "Configuring benchmark build dir: ${BUILD_DIR} (${BENCH_BUILD_TYPE})"
+        run cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
+            -DCMAKE_BUILD_TYPE="$BENCH_BUILD_TYPE" \
+            -DCMAKE_C_COMPILER="$CC_BIN" \
+            -DCMAKE_CXX_COMPILER="$CXX_BIN"
+    fi
+
+    log "Building benchmark binaries in ${BUILD_DIR}"
+    run cmake --build "$BUILD_DIR" --target bench_windows_c bench_windows_go -j"$(build_jobs)"
 }
 
 err() {
@@ -447,15 +503,15 @@ fi
 check_binaries() {
     local ok=0
 
+    ensure_bench_build
+
     if [ ! -x "$BENCH_C" ]; then
-        err "C benchmark binary not found: $BENCH_C"
-        err "Build with: cmake --build build --target bench_windows_c"
+        err "C benchmark binary not found after build: $BENCH_C"
         ok=1
     fi
 
     if [ ! -x "$BENCH_GO" ]; then
-        err "Go benchmark binary not found: $BENCH_GO"
-        err "Build with: cmake --build build --target bench_windows_go"
+        err "Go benchmark binary not found after build: $BENCH_GO"
         ok=1
     fi
 

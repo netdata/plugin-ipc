@@ -204,44 +204,44 @@ fail-closed matrices:
 Headline numbers from the current checked-in reports:
 
 - **POSIX baseline UDS ping-pong**
-  - `192.5k` to `225.5k` req/s across the 3x3 language matrix
+  - `183.0k` to `231.2k` req/s across the 3x3 language matrix
 - **POSIX SHM ping-pong**
-  - `2.42M` to `3.35M` req/s
+  - `2.46M` to `3.45M` req/s
 - **POSIX UDS batch ping-pong**
-  - `22.39M` to `34.63M` req/s
+  - `27.18M` to `40.24M` req/s
 - **POSIX SHM batch ping-pong**
-  - `25.95M` to `46.99M` req/s
+  - `31.25M` to `64.15M` req/s
 - **POSIX UDS pipeline (depth=16)**
-  - `557.5k` to `720.5k` req/s
+  - `568.4k` to `735.8k` req/s
 - **POSIX UDS pipeline+batch (depth=16)**
-  - `49.51M` to `89.37M` req/s
+  - `51.96M` to `102.95M` req/s
 - **POSIX snapshot refresh**
-  - baseline: `169.5k` to `200.1k` req/s
-  - SHM: `985.8k` to `1.67M` req/s
+  - baseline: `158.9k` to `205.6k` req/s
+  - SHM: `1.01M` to `1.74M` req/s
 - **POSIX local cache lookup**
-  - C: `67.86M` req/s
-  - Go: `112.18M` req/s
-  - Rust: `201.12M` req/s
+  - C: `172.37M` req/s
+  - Go: `114.56M` req/s
+  - Rust: `203.28M` req/s
 
 - **Windows Named Pipe ping-pong**
-  - `15.5k` to `18.7k` req/s
+  - `18.2k` to `21.0k` req/s
 - **Windows SHM ping-pong**
-  - `1.98M` to `2.49M` req/s
+  - `2.10M` to `2.72M` req/s
 - **Windows Named Pipe batch ping-pong**
-  - `6.71M` to `8.01M` req/s
+  - `7.01M` to `8.55M` req/s
 - **Windows SHM batch ping-pong**
-  - `9.28M` to `59.65M` req/s
+  - `36.49M` to `58.77M` req/s
 - **Windows Named Pipe pipeline (depth=16)**
-  - `236.2k` to `269.6k` req/s
+  - `245.4k` to `270.5k` req/s
 - **Windows Named Pipe pipeline+batch (depth=16)**
-  - `29.92M` to `40.52M` req/s
+  - `28.98M` to `41.27M` req/s
 - **Windows snapshot refresh**
-  - Named Pipe: `15.1k` to `18.8k` req/s
-  - SHM: `798.4k` to `1.25M` req/s
+  - Named Pipe: `16.1k` to `21.0k` req/s
+  - SHM: `857.8k` to `1.26M` req/s
 - **Windows local cache lookup**
-  - C: `129.04M` req/s
-  - Go: `106.63M` req/s
-  - Rust: `159.92M` req/s
+  - C: `130.65M` req/s
+  - Go: `107.47M` req/s
+  - Rust: `164.31M` req/s
 
 The full reports include:
 
