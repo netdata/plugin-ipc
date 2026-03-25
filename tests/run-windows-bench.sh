@@ -7,8 +7,8 @@
 #   2. Win SHM ping-pong (N pairs x 4 rates)
 #   3. Snapshot Named Pipe refresh (N pairs x 2 rates)
 #   4. Snapshot Win SHM refresh (N pairs x 2 rates)
-#   5. NP batch ping-pong (N pairs x 4 rates, random 1-1000 items)
-#   6. Win SHM batch ping-pong (N pairs x 4 rates, random 1-1000 items)
+#   5. NP batch ping-pong (N pairs x 4 rates, random 2-1000 items)
+#   6. Win SHM batch ping-pong (N pairs x 4 rates, random 2-1000 items)
 #   7. Local cache lookup (C, Rust, Go)
 #   8. NP pipeline (N pairs x 1 rate, depth=16)
 #   9. NP pipeline+batch (N pairs x 1 rate, depth=16)
@@ -320,6 +320,7 @@ run_pair() {
     log "  ${scenario}: ${client_lang}->${server_lang} @ ${rps_label}"
 
     local server_duration="$duration"
+    local server_out="${RUN_DIR}/server-${server_lang}-${svc_name}.out"
 
     local server_pid
     server_pid=$(start_server "$server_lang" "$server_subcmd" "$svc_name" "$server_duration") || return 1

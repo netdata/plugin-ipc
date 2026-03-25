@@ -14,6 +14,29 @@ same wire contracts and typed APIs. The goal is simple:
 This README is a summary of the current verified state of the repository.
 The authoritative specifications live under [docs/](docs/README.md).
 
+## Service Model
+
+The public contract is service-oriented, not plugin-oriented:
+
+- clients connect to a specific service kind
+- clients do not care which plugin/process serves that service
+- one service endpoint serves exactly one request kind
+- sessions are long-lived and reused for many requests
+
+Examples of service kinds:
+
+- `cgroups-snapshot`
+- `ip-to-asn`
+- `pid-traffic`
+
+Operational implications:
+
+- startup order is not guaranteed
+- a client may start before its provider exists
+- services may disappear and reappear during runtime
+- enrichments are optional by design
+- clients refresh / reconnect from their normal loop and must tolerate service absence
+
 ## What This Repository Implements
 
 - **Level 1 transport**
@@ -119,7 +142,8 @@ Level 2 is the public convenience layer.
 The public contract is:
 
 - clients issue typed calls
-- servers register typed handlers
+- servers export one typed service kind
+- one server endpoint serves one request kind only
 - callers do not manage transport scratch buffers
 - callers do not manipulate raw payload bytes
 
@@ -169,47 +193,55 @@ The repository includes checked-in benchmark reports with complete,
 fail-closed matrices:
 
 - POSIX report: [benchmarks-posix.md](benchmarks-posix.md)
-  - generated `2026-03-22`
+  - generated `2026-03-25`
   - machine: `costa-desktop`
   - complete matrix rows: `201`
 - Windows report: [benchmarks-windows.md](benchmarks-windows.md)
-  - generated `2026-03-24`
+  - generated `2026-03-25`
   - machine: `win11`
   - complete matrix rows: `201`
 
 Headline numbers from the current checked-in reports:
 
 - **POSIX baseline UDS ping-pong**
-  - `166.9k` to `190.5k` req/s across the 3x3 language matrix
+  - `192.5k` to `225.5k` req/s across the 3x3 language matrix
 - **POSIX SHM ping-pong**
-  - `2.41M` to `3.33M` req/s
+  - `2.42M` to `3.35M` req/s
 - **POSIX UDS batch ping-pong**
-  - `19.38M` to `28.65M` req/s
+  - `22.39M` to `34.63M` req/s
 - **POSIX SHM batch ping-pong**
-  - `24.94M` to `44.88M` req/s
+  - `25.95M` to `46.99M` req/s
+- **POSIX UDS pipeline (depth=16)**
+  - `557.5k` to `720.5k` req/s
+- **POSIX UDS pipeline+batch (depth=16)**
+  - `49.51M` to `89.37M` req/s
 - **POSIX snapshot refresh**
-  - baseline: `139.3k` to `166.0k` req/s
-  - SHM: `988.4k` to `1.67M` req/s
+  - baseline: `169.5k` to `200.1k` req/s
+  - SHM: `985.8k` to `1.67M` req/s
 - **POSIX local cache lookup**
-  - C: `73.12M` req/s
-  - Go: `110.46M` req/s
-  - Rust: `198.75M` req/s
+  - C: `67.86M` req/s
+  - Go: `112.18M` req/s
+  - Rust: `201.12M` req/s
 
 - **Windows Named Pipe ping-pong**
-  - `19.1k` to `21.5k` req/s
+  - `15.5k` to `18.7k` req/s
 - **Windows SHM ping-pong**
-  - `2.04M` to `2.75M` req/s
+  - `1.98M` to `2.49M` req/s
 - **Windows Named Pipe batch ping-pong**
-  - `7.26M` to `8.44M` req/s
+  - `6.71M` to `8.01M` req/s
 - **Windows SHM batch ping-pong**
-  - `38.25M` to `60.13M` req/s
+  - `9.28M` to `59.65M` req/s
+- **Windows Named Pipe pipeline (depth=16)**
+  - `236.2k` to `269.6k` req/s
+- **Windows Named Pipe pipeline+batch (depth=16)**
+  - `29.92M` to `40.52M` req/s
 - **Windows snapshot refresh**
-  - Named Pipe: `19.2k` to `21.0k` req/s
-  - SHM: `862.5k` to `1.29M` req/s
+  - Named Pipe: `15.1k` to `18.8k` req/s
+  - SHM: `798.4k` to `1.25M` req/s
 - **Windows local cache lookup**
-  - C: `125.06M` req/s
-  - Go: `116.71M` req/s
-  - Rust: `175.15M` req/s
+  - C: `129.04M` req/s
+  - Go: `106.63M` req/s
+  - Rust: `159.92M` req/s
 
 The full reports include:
 

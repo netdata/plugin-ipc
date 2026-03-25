@@ -20,11 +20,15 @@ fn main() {
 #[cfg(windows)]
 use netipc::protocol::{
     self, batch_item_get, increment_decode, increment_encode, BatchBuilder, Header, FLAG_BATCH,
-    HEADER_SIZE, INCREMENT_PAYLOAD_SIZE, KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG, METHOD_INCREMENT,
-    PROFILE_BASELINE, STATUS_OK, VERSION,
+    HEADER_SIZE, INCREMENT_PAYLOAD_SIZE, KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG,
+    METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE, STATUS_OK, VERSION,
 };
 #[cfg(windows)]
-use netipc::service::cgroups::{CgroupsCacheItem, CgroupsClient, Handlers, ManagedServer};
+use netipc::service::cgroups::CgroupsClient;
+#[cfg(windows)]
+use netipc::service::raw::{
+    increment_dispatch, snapshot_dispatch, CgroupsCacheItem, DispatchHandler, ManagedServer,
+};
 #[cfg(windows)]
 use netipc::transport::win_shm::{WinShmContext, PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID};
 #[cfg(windows)]
@@ -283,11 +287,8 @@ fn batch_client_config(profiles: u32) -> ClientConfig {
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-fn ping_pong_handlers() -> Handlers {
-    Handlers {
-        on_increment: Some(std::sync::Arc::new(|counter| Some(counter + 1))),
-        ..Handlers::default()
-    }
+fn ping_pong_handler() -> DispatchHandler {
+    increment_dispatch(std::sync::Arc::new(|counter| Some(counter + 1)))
 }
 
 // ---------------------------------------------------------------------------
@@ -312,9 +313,9 @@ fn snapshot_template() -> &'static Vec<(Box<[u8]>, Box<[u8]>)> {
 }
 
 #[cfg(windows)]
-fn snapshot_handlers() -> Handlers {
-    Handlers {
-        on_snapshot: Some(std::sync::Arc::new(|request, builder| {
+fn snapshot_handler() -> DispatchHandler {
+    snapshot_dispatch(
+        std::sync::Arc::new(|request, builder| {
             if request.layout_version != 1 || request.flags != 0 {
                 return false;
             }
@@ -338,10 +339,9 @@ fn snapshot_handlers() -> Handlers {
                 }
             }
             true
-        })),
-        snapshot_max_items: 16,
-        ..Handlers::default()
-    }
+        }),
+        16,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -356,16 +356,22 @@ fn run_server(
     duration_sec: u32,
     handler_type: &str,
 ) -> i32 {
-    let handlers = match handler_type {
-        "ping-pong" => ping_pong_handlers(),
-        "snapshot" => snapshot_handlers(),
+    let (expected_method_code, handler) = match handler_type {
+        "ping-pong" => (METHOD_INCREMENT, Some(ping_pong_handler())),
+        "snapshot" => (METHOD_CGROUPS_SNAPSHOT, Some(snapshot_handler())),
         _ => {
             eprintln!("Unknown handler type: {handler_type}");
             return 1;
         }
     };
 
-    let mut server = ManagedServer::new(run_dir, service, server_config(profiles), handlers);
+    let mut server = ManagedServer::new(
+        run_dir,
+        service,
+        server_config(profiles),
+        expected_method_code,
+        handler,
+    );
 
     println!("READY");
 
@@ -398,7 +404,8 @@ fn run_batch_server(run_dir: &str, service: &str, profiles: u32, duration_sec: u
         run_dir,
         service,
         batch_server_config(profiles),
-        ping_pong_handlers(),
+        METHOD_INCREMENT,
+        Some(ping_pong_handler()),
     );
 
     println!("READY");
@@ -726,7 +733,7 @@ fn run_snapshot_client(
 }
 
 // ---------------------------------------------------------------------------
-//  Batch ping-pong client (random 1-1000 items per batch)
+//  Batch ping-pong client (random 2-1000 items per batch)
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
@@ -784,7 +791,10 @@ fn run_batch_ping_pong_client(
     while !tick_deadline.expired() {
         rl.wait();
 
-        let batch_size = (rng.next() % BENCH_MAX_BATCH_ITEMS) + 1;
+        // Random batch size 2-1000. item_count==1 is normalized to the
+        // single-item increment path by the server, so it is not a real
+        // batch round trip.
+        let batch_size = (rng.next() % (BENCH_MAX_BATCH_ITEMS - 1)) + 2;
 
         let mut bb = BatchBuilder::new(&mut req_buf, batch_size);
 
@@ -1172,7 +1182,7 @@ fn run_pipeline_batch_client(
         while received < depth {
             if sent < depth {
                 let slot = sent;
-                let bs = (rng.next() % BENCH_MAX_BATCH_ITEMS) + 1;
+                let bs = (rng.next() % (BENCH_MAX_BATCH_ITEMS - 1)) + 2;
                 let mut bb = BatchBuilder::new(&mut req_bufs[slot], bs);
 
                 for i in 0..bs {

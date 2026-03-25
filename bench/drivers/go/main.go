@@ -25,6 +25,7 @@ import (
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/service/cgroups"
+	rawsvc "github.com/netdata/plugin-ipc/go/pkg/netipc/service/raw"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
 )
 
@@ -204,17 +205,15 @@ func initSnapshotTemplate() bool {
 	return true
 }
 
-func pingPongHandlers() cgroups.Handlers {
-	return cgroups.Handlers{
-		OnIncrement: func(counter uint64) (uint64, bool) {
-			return counter + 1, true
-		},
-	}
+func pingPongDispatch() rawsvc.DispatchHandler {
+	return rawsvc.IncrementDispatch(func(counter uint64) (uint64, bool) {
+		return counter + 1, true
+	})
 }
 
-func snapshotHandlers() cgroups.Handlers {
-	return cgroups.Handlers{
-		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+func snapshotHandler() cgroups.Handler {
+	return cgroups.Handler{
+		Handle: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
 			if request.LayoutVersion != 1 || request.Flags != 0 || !initSnapshotTemplate() {
 				return false
 			}
@@ -235,37 +234,55 @@ func snapshotHandlers() cgroups.Handlers {
 // ---------------------------------------------------------------------------
 
 func runServer(runDir, service string, profiles uint32, durationSec int, handlerType string) int {
-	var handlers cgroups.Handlers
 	switch handlerType {
 	case "ping-pong":
-		handlers = pingPongHandlers()
+		server := rawsvc.NewServer(
+			runDir, service, serverConfig(profiles), protocol.MethodIncrement, pingPongDispatch(),
+		)
+
+		fmt.Println("READY")
+
+		cpuStart := cpuNS()
+
+		go func() {
+			time.Sleep(time.Duration(durationSec+3) * time.Second)
+			server.Stop()
+		}()
+
+		if err := server.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "server: %v\n", err)
+		}
+
+		cpuEnd := cpuNS()
+		cpuSec := float64(cpuEnd-cpuStart) / 1e9
+
+		fmt.Printf("SERVER_CPU_SEC=%.6f\n", cpuSec)
+		return 0
 	case "snapshot":
-		handlers = snapshotHandlers()
+		server := cgroups.NewServer(runDir, service, serverConfig(profiles), snapshotHandler())
+
+		fmt.Println("READY")
+
+		cpuStart := cpuNS()
+
+		go func() {
+			time.Sleep(time.Duration(durationSec+3) * time.Second)
+			server.Stop()
+		}()
+
+		if err := server.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "server: %v\n", err)
+		}
+
+		cpuEnd := cpuNS()
+		cpuSec := float64(cpuEnd-cpuStart) / 1e9
+
+		fmt.Printf("SERVER_CPU_SEC=%.6f\n", cpuSec)
+		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "unknown handler type: %s\n", handlerType)
 		return 1
 	}
-
-	server := cgroups.NewServer(runDir, service, serverConfig(profiles), handlers)
-
-	fmt.Println("READY")
-
-	cpuStart := cpuNS()
-
-	go func() {
-		time.Sleep(time.Duration(durationSec+3) * time.Second)
-		server.Stop()
-	}()
-
-	if err := server.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "server: %v\n", err)
-	}
-
-	cpuEnd := cpuNS()
-	cpuSec := float64(cpuEnd-cpuStart) / 1e9
-
-	fmt.Printf("SERVER_CPU_SEC=%.6f\n", cpuSec)
-	return 0
 }
 
 // ---------------------------------------------------------------------------
@@ -276,7 +293,9 @@ func runBatchServer(runDir, service string, profiles uint32, durationSec int) in
 	cfg := batchServerConfig(profiles)
 	cfg.MaxResponsePayloadBytes = batchBufSize * 2 // extra room for builder overhead
 
-	server := cgroups.NewServerWithWorkers(runDir, service, cfg, pingPongHandlers(), 4)
+	server := rawsvc.NewServerWithWorkers(
+		runDir, service, cfg, protocol.MethodIncrement, pingPongDispatch(), 4,
+	)
 
 	fmt.Println("READY")
 
@@ -299,7 +318,7 @@ func runBatchServer(runDir, service string, profiles uint32, durationSec int) in
 }
 
 // ---------------------------------------------------------------------------
-//  Batch ping-pong client (random 1-1000 items per batch)
+//  Batch ping-pong client (random 2-1000 items per batch)
 // ---------------------------------------------------------------------------
 
 func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec int, targetRPS uint64, scenario, serverLang string) int {

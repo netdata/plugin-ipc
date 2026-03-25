@@ -178,29 +178,59 @@ static void rate_limiter_wait(rate_limiter_t *rl)
 /*  Ping-pong handler (INCREMENT method)                               */
 /* ------------------------------------------------------------------ */
 
-static bool ping_pong_handler(void *user,
-                               uint16_t method_code,
-                               const uint8_t *request_payload,
-                               size_t request_len,
-                               uint8_t *response_buf,
-                               size_t response_buf_size,
-                               size_t *response_len_out)
+static nipc_error_t ping_pong_handler(void *user,
+                                      const nipc_header_t *request_hdr,
+                                      const uint8_t *request_payload,
+                                      size_t request_len,
+                                      uint8_t *response_buf,
+                                      size_t response_buf_size,
+                                      size_t *response_len_out)
 {
     (void)user;
 
-    if (method_code != NIPC_METHOD_INCREMENT)
-        return false;
-    if (request_len < 8)
-        return false;
-    if (response_buf_size < 8)
-        return false;
+    if (!request_hdr || request_hdr->code != NIPC_METHOD_INCREMENT)
+        return NIPC_ERR_BAD_LAYOUT;
+
+    if ((request_hdr->flags & NIPC_FLAG_BATCH) && request_hdr->item_count > 1) {
+        nipc_batch_builder_t builder;
+        nipc_batch_builder_init(&builder, response_buf, response_buf_size,
+                                request_hdr->item_count);
+
+        for (uint32_t i = 0; i < request_hdr->item_count; i++) {
+            const void *item_ptr;
+            uint32_t item_len;
+            uint64_t counter;
+            uint8_t item[NIPC_INCREMENT_PAYLOAD_SIZE];
+            nipc_error_t err = nipc_batch_item_get(request_payload, request_len,
+                                                   request_hdr->item_count, i,
+                                                   &item_ptr, &item_len);
+            if (err != NIPC_OK)
+                return err;
+            err = nipc_increment_decode(item_ptr, item_len, &counter);
+            if (err != NIPC_OK)
+                return err;
+            nipc_increment_encode(counter + 1, item, sizeof(item));
+            err = nipc_batch_builder_add(&builder, item, sizeof(item));
+            if (err != NIPC_OK)
+                return err;
+        }
+
+        uint32_t out_count = 0;
+        *response_len_out = nipc_batch_builder_finish(&builder, &out_count);
+        return (out_count == request_hdr->item_count) ? NIPC_OK : NIPC_ERR_BAD_LAYOUT;
+    }
+
+    if (response_buf_size < NIPC_INCREMENT_PAYLOAD_SIZE)
+        return NIPC_ERR_OVERFLOW;
 
     uint64_t counter;
-    memcpy(&counter, request_payload, 8);
-    counter++;
-    memcpy(response_buf, &counter, 8);
-    *response_len_out = 8;
-    return true;
+    nipc_error_t err = nipc_increment_decode(request_payload, request_len, &counter);
+    if (err != NIPC_OK)
+        return err;
+
+    nipc_increment_encode(counter + 1, response_buf, NIPC_INCREMENT_PAYLOAD_SIZE);
+    *response_len_out = NIPC_INCREMENT_PAYLOAD_SIZE;
+    return NIPC_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -241,26 +271,28 @@ static BOOL CALLBACK snapshot_template_init(PINIT_ONCE init_once, PVOID paramete
     return TRUE;
 }
 
-static bool snapshot_handler(void *user,
-                              uint16_t method_code,
-                              const uint8_t *request_payload,
-                              size_t request_len,
-                              uint8_t *response_buf,
-                              size_t response_buf_size,
-                              size_t *response_len_out)
+static nipc_error_t snapshot_handler(void *user,
+                                     const nipc_header_t *request_hdr,
+                                     const uint8_t *request_payload,
+                                     size_t request_len,
+                                     uint8_t *response_buf,
+                                     size_t response_buf_size,
+                                     size_t *response_len_out)
 {
     (void)user;
 
-    if (method_code != NIPC_METHOD_CGROUPS_SNAPSHOT)
-        return false;
+    if (!request_hdr || request_hdr->code != NIPC_METHOD_CGROUPS_SNAPSHOT)
+        return NIPC_ERR_BAD_LAYOUT;
+    if ((request_hdr->flags & NIPC_FLAG_BATCH) || request_hdr->item_count != 1)
+        return NIPC_ERR_BAD_LAYOUT;
 
     nipc_cgroups_req_t req;
     if (nipc_cgroups_req_decode(request_payload, request_len, &req) != NIPC_OK)
-        return false;
+        return NIPC_ERR_BAD_LAYOUT;
 
     if (!InitOnceExecuteOnce(&g_snapshot_template_once,
                              snapshot_template_init, NULL, NULL))
-        return false;
+        return NIPC_ERR_HANDLER_FAILED;
 
     static uint64_t gen = 0;
     gen++;
@@ -281,11 +313,11 @@ static bool snapshot_handler(void *user,
             item->path, item->path_len);
 
         if (err != NIPC_OK)
-            return false;
+            return err;
     }
 
     *response_len_out = nipc_cgroups_builder_finish(&builder);
-    return true;
+    return (*response_len_out > 0) ? NIPC_OK : NIPC_ERR_OVERFLOW;
 }
 
 /* ------------------------------------------------------------------ */
@@ -313,6 +345,7 @@ static DWORD WINAPI timer_thread(LPVOID arg)
 
 static int run_server(const char *run_dir, const char *service,
                       uint32_t profiles, int duration_sec,
+                      uint16_t expected_method_code,
                       nipc_server_handler_fn handler)
 {
     nipc_np_server_config_t scfg = {
@@ -328,8 +361,8 @@ static int run_server(const char *run_dir, const char *service,
 
     nipc_managed_server_t server;
     nipc_error_t err = nipc_server_init(&server, run_dir, service, &scfg,
-                                          1, RESPONSE_BUF_SIZE,
-                                          handler, NULL);
+                                        1, expected_method_code,
+                                        handler, NULL);
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed: %d\n", err);
         return 1;
@@ -373,6 +406,7 @@ static int run_server(const char *run_dir, const char *service,
 
 static int run_server_batch(const char *run_dir, const char *service,
                             uint32_t profiles, int duration_sec,
+                            uint16_t expected_method_code,
                             nipc_server_handler_fn handler)
 {
     nipc_np_server_config_t scfg = {
@@ -386,13 +420,10 @@ static int run_server_batch(const char *run_dir, const char *service,
         .packet_size               = 0,
     };
 
-    /* Response buffer must accommodate batch builder overhead */
-    size_t server_resp_buf = BENCH_BATCH_BUF_SIZE * 2;
-
     nipc_managed_server_t server;
     nipc_error_t err = nipc_server_init(&server, run_dir, service, &scfg,
-                                          4, server_resp_buf,
-                                          handler, NULL);
+                                        4, expected_method_code,
+                                        handler, NULL);
     if (err != NIPC_OK) {
         fprintf(stderr, "batch server init failed: %d\n", err);
         return 1;
@@ -431,7 +462,7 @@ static int run_server_batch(const char *run_dir, const char *service,
 }
 
 /* ------------------------------------------------------------------ */
-/*  Batch ping-pong client (random 1-1000 items per batch)             */
+/*  Batch ping-pong client (random 2-1000 items per batch)             */
 /* ------------------------------------------------------------------ */
 
 static uint32_t bench_rand_state = 12345;
@@ -504,8 +535,10 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
     while (GetTickCount64() < btick_deadline) {
         rate_limiter_wait(&rl);
 
-        /* Random batch size 1-1000 */
-        uint32_t batch_size = (bench_rand() % BENCH_MAX_BATCH_ITEMS) + 1;
+        /* Random batch size 2-1000. item_count==1 is normalized to the
+         * single-item increment path by the server, so it is not a real
+         * batch round trip. */
+        uint32_t batch_size = (bench_rand() % (BENCH_MAX_BATCH_ITEMS - 1)) + 2;
 
         /* Build batch request */
         nipc_batch_builder_t bb;
@@ -1107,23 +1140,29 @@ int main(int argc, char **argv)
         CreateDirectoryA(run_dir, NULL);
 
         uint32_t profiles;
+        uint16_t expected_method_code;
         nipc_server_handler_fn handler;
 
         if (strcmp(cmd, "np-ping-pong-server") == 0) {
             profiles = BENCH_PROFILE_NP;
+            expected_method_code = NIPC_METHOD_INCREMENT;
             handler = ping_pong_handler;
         } else if (strcmp(cmd, "shm-ping-pong-server") == 0) {
             profiles = BENCH_PROFILE_SHM;
+            expected_method_code = NIPC_METHOD_INCREMENT;
             handler = ping_pong_handler;
         } else if (strcmp(cmd, "snapshot-server") == 0) {
             profiles = BENCH_PROFILE_NP;
+            expected_method_code = NIPC_METHOD_CGROUPS_SNAPSHOT;
             handler = snapshot_handler;
         } else {
             profiles = BENCH_PROFILE_SHM;
+            expected_method_code = NIPC_METHOD_CGROUPS_SNAPSHOT;
             handler = snapshot_handler;
         }
 
-        return run_server(run_dir, service, profiles, duration, handler);
+        return run_server(run_dir, service, profiles, duration,
+                          expected_method_code, handler);
     }
 
     /* Batch server subcommands */
@@ -1148,6 +1187,7 @@ int main(int argc, char **argv)
             profiles = BENCH_PROFILE_SHM;
 
         return run_server_batch(run_dir, service, profiles, duration,
+                                NIPC_METHOD_INCREMENT,
                                 ping_pong_handler);
     }
 
@@ -1398,7 +1438,8 @@ int main(int argc, char **argv)
         return (errors > 0) ? 1 : 0;
     }
 
-    /* Pipeline+batch client: each pipelined message is a random batch */
+    /* Pipeline+batch client: each pipelined message is a random 2-1000 item
+     * batch. item_count==1 is normalized to the single-item path. */
     if (strcmp(cmd, "np-pipeline-batch-client") == 0) {
         if (argc < 7) {
             usage(argv[0]);
@@ -1495,7 +1536,7 @@ int main(int argc, char **argv)
             while (received < depth) {
                 if (sent < depth) {
                     int slot = sent;
-                    uint32_t bs = (bench_rand() % BENCH_MAX_BATCH_ITEMS) + 1;
+                    uint32_t bs = (bench_rand() % (BENCH_MAX_BATCH_ITEMS - 1)) + 2;
                     batch_sizes[slot] = bs;
 
                     nipc_batch_builder_t bb;
