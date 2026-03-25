@@ -52,8 +52,7 @@ static void cleanup_all(const char *service)
     char path[256];
     snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, service);
     unlink(path);
-    snprintf(path, sizeof(path), "%s/%s.ipcshm", TEST_RUN_DIR, service);
-    unlink(path);
+    nipc_shm_cleanup_stale(TEST_RUN_DIR, service);
 }
 
 static nipc_uds_server_config_t default_server_config(void)
@@ -89,23 +88,21 @@ static nipc_uds_client_config_t default_client_config(void)
 /*  Cgroups snapshot handler (server side)                              */
 /* ------------------------------------------------------------------ */
 
-static bool test_cgroups_handler(void *user,
-                                  uint16_t method_code,
-                                  const uint8_t *request_payload,
-                                  size_t request_len,
-                                  uint8_t *response_buf,
-                                  size_t response_buf_size,
-                                  size_t *response_len_out)
+static nipc_error_t test_cgroups_handler(void *user,
+                                         const nipc_header_t *request_hdr,
+                                         const uint8_t *request_payload,
+                                         size_t request_len,
+                                         uint8_t *response_buf,
+                                         size_t response_buf_size,
+                                         size_t *response_len_out)
 {
     (void)user;
-
-    if (method_code != NIPC_METHOD_CGROUPS_SNAPSHOT)
-        return false;
+    (void)request_hdr;
 
     nipc_cgroups_req_t req;
     nipc_error_t err = nipc_cgroups_req_decode(request_payload, request_len, &req);
     if (err != NIPC_OK)
-        return false;
+        return err;
 
     nipc_cgroups_builder_t builder;
     nipc_cgroups_builder_init(&builder, response_buf, response_buf_size,
@@ -126,11 +123,11 @@ static bool test_cgroups_handler(void *user,
             items[i].name, (uint32_t)strlen(items[i].name),
             items[i].path, (uint32_t)strlen(items[i].path));
         if (err != NIPC_OK)
-            return false;
+            return err;
     }
 
     *response_len_out = nipc_cgroups_builder_finish(&builder);
-    return true;
+    return (*response_len_out > 0) ? NIPC_OK : NIPC_ERR_OVERFLOW;
 }
 
 /* ------------------------------------------------------------------ */
@@ -140,23 +137,21 @@ static bool test_cgroups_handler(void *user,
 #define LARGE_N 1000
 #define LARGE_BUF_SIZE (256 * LARGE_N)
 
-static bool large_handler(void *user,
-                            uint16_t method_code,
-                            const uint8_t *request_payload,
-                            size_t request_len,
-                            uint8_t *response_buf,
-                            size_t response_buf_size,
-                            size_t *response_len_out)
+static nipc_error_t large_handler(void *user,
+                                  const nipc_header_t *request_hdr,
+                                  const uint8_t *request_payload,
+                                  size_t request_len,
+                                  uint8_t *response_buf,
+                                  size_t response_buf_size,
+                                  size_t *response_len_out)
 {
     (void)user;
-
-    if (method_code != NIPC_METHOD_CGROUPS_SNAPSHOT)
-        return false;
+    (void)request_hdr;
 
     nipc_cgroups_req_t req;
     nipc_error_t err = nipc_cgroups_req_decode(request_payload, request_len, &req);
     if (err != NIPC_OK)
-        return false;
+        return err;
 
     nipc_cgroups_builder_t builder;
     nipc_cgroups_builder_init(&builder, response_buf, response_buf_size,
@@ -173,11 +168,11 @@ static bool large_handler(void *user,
             name, (uint32_t)strlen(name),
             path, (uint32_t)strlen(path));
         if (err != NIPC_OK)
-            return false;
+            return err;
     }
 
     *response_len_out = nipc_cgroups_builder_finish(&builder);
-    return true;
+    return (*response_len_out > 0) ? NIPC_OK : NIPC_ERR_OVERFLOW;
 }
 
 /* ------------------------------------------------------------------ */
@@ -202,7 +197,7 @@ static void *server_thread_fn(void *arg)
 
     nipc_error_t err = nipc_server_init(&ctx->server,
         TEST_RUN_DIR, ctx->service, &scfg,
-        1, ctx->resp_buf_size, ctx->handler, NULL);
+        1, NIPC_METHOD_CGROUPS_SNAPSHOT, ctx->handler, NULL);
 
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed: %d\n", err);

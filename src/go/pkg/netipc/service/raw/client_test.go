@@ -1,6 +1,6 @@
 //go:build unix
 
-package cgroups
+package raw
 
 import (
 	"os"
@@ -23,7 +23,7 @@ func ensureRunDir() {
 
 func cleanupAll(service string) {
 	os.Remove(testRunDir + "/" + service + ".sock")
-	os.Remove(testRunDir + "/" + service + ".ipcshm")
+	posix.ShmCleanupStale(testRunDir, service)
 }
 
 func waitUnixSocketReady(service string) {
@@ -120,18 +120,12 @@ func failingHandler(*protocol.CgroupsRequest, *protocol.CgroupsBuilder) bool {
 	return false
 }
 
-func testHandlers() Handlers {
-	return Handlers{
-		OnSnapshot:       testCgroupsHandler,
-		SnapshotMaxItems: 3,
-	}
+func testSnapshotDispatch() DispatchHandler {
+	return SnapshotDispatch(testCgroupsHandler, 3)
 }
 
-func failingHandlers() Handlers {
-	return Handlers{
-		OnSnapshot:       failingHandler,
-		SnapshotMaxItems: 3,
-	}
+func failingSnapshotDispatch() DispatchHandler {
+	return SnapshotDispatch(failingHandler, 3)
 }
 
 type testServer struct {
@@ -139,11 +133,11 @@ type testServer struct {
 	doneCh chan struct{}
 }
 
-func startTestServer(service string, handlers Handlers) *testServer {
+func startTestServer(service string, handler DispatchHandler) *testServer {
 	ensureRunDir()
 	cleanupAll(service)
 
-	s := NewServer(testRunDir, service, testServerConfig(), handlers)
+	s := NewServer(testRunDir, service, testServerConfig(), protocol.MethodCgroupsSnapshot, handler)
 	doneCh := make(chan struct{})
 
 	go func() {
@@ -168,7 +162,7 @@ func TestClientLifecycle(t *testing.T) {
 	cleanupAll(svc)
 
 	// Init without server running
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	if client.state != StateDisconnected {
 		t.Fatal("expected DISCONNECTED")
 	}
@@ -186,7 +180,7 @@ func TestClientLifecycle(t *testing.T) {
 	}
 
 	// Start server
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
 	// Refresh -> READY
@@ -227,10 +221,10 @@ func TestCgroupsCall(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	client.Refresh()
 	if !client.Ready() {
 		t.Fatal("client not ready")
@@ -302,9 +296,9 @@ func TestRetryOnFailure(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts1 := startTestServer(svc, testHandlers())
+	ts1 := startTestServer(svc, testSnapshotDispatch())
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	client.Refresh()
 	if !client.Ready() {
 		t.Fatal("client not ready")
@@ -325,7 +319,7 @@ func TestRetryOnFailure(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Restart server
-	ts2 := startTestServer(svc, testHandlers())
+	ts2 := startTestServer(svc, testSnapshotDispatch())
 	defer ts2.stop()
 
 	// Next call triggers reconnect + retry
@@ -352,11 +346,11 @@ func TestMultipleClients(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
 	// Client 1
-	client1 := NewClient(testRunDir, svc, testClientConfig())
+	client1 := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	client1.Refresh()
 	if !client1.Ready() {
 		t.Fatal("client 1 not ready")
@@ -371,7 +365,7 @@ func TestMultipleClients(t *testing.T) {
 	}
 
 	// Now multi-client: keep client 1 open, connect client 2
-	client2 := NewClient(testRunDir, svc, testClientConfig())
+	client2 := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	client2.Refresh()
 	if !client2.Ready() {
 		t.Fatal("client 2 not ready")
@@ -395,7 +389,7 @@ func TestConcurrentClients(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
 	const numClients = 5
@@ -411,7 +405,7 @@ func TestConcurrentClients(t *testing.T) {
 	for i := 0; i < numClients; i++ {
 		go func() {
 			r := result{}
-			client := NewClient(testRunDir, svc, testClientConfig())
+			client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 			defer client.Close()
 
 			for retry := 0; retry < 100; retry++ {
@@ -470,10 +464,10 @@ func TestHandlerFailure(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, failingHandlers())
+	ts := startTestServer(svc, failingSnapshotDispatch())
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	client.Refresh()
 	if !client.Ready() {
 		t.Fatal("client not ready")
@@ -498,10 +492,10 @@ func TestStatusReporting(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	client.Refresh()
 	if !client.Ready() {
 		t.Fatal("client not ready")
@@ -555,7 +549,7 @@ func TestNonRequestTerminatesSession(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
 	// Connect via raw UDS session (transport level)
@@ -612,7 +606,7 @@ func TestNonRequestTerminatesSession(t *testing.T) {
 	session.Close()
 
 	// Verify server is still alive: connect a new client and do a normal call
-	verifyClient := NewClient(testRunDir, svc, testClientConfig())
+	verifyClient := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	refreshUnixClientReady(t, verifyClient)
 
 	view, err := verifyClient.CallSnapshot()

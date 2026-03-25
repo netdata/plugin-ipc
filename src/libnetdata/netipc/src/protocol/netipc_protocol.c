@@ -573,6 +573,7 @@ void nipc_cgroups_builder_init(nipc_cgroups_builder_t *b,
     b->generation      = generation;
     b->item_count      = 0;
     b->max_items       = max_items;
+    b->error           = NIPC_OK;
 
     /* Packed item data starts after reserved directory */
     b->data_offset = NIPC_CGROUPS_RESP_HDR_SIZE +
@@ -601,8 +602,10 @@ nipc_error_t nipc_cgroups_builder_add(nipc_cgroups_builder_t *b,
                                       uint32_t enabled,
                                       const char *name, uint32_t name_len,
                                       const char *path, uint32_t path_len) {
-    if (b->item_count >= b->max_items)
+    if (b->item_count >= b->max_items) {
+        b->error = NIPC_ERR_OVERFLOW;
         return NIPC_ERR_OVERFLOW;
+    }
 
     /* Align item start to 8 bytes */
     size_t item_start = nipc_align8(b->data_offset);
@@ -612,8 +615,10 @@ nipc_error_t nipc_cgroups_builder_add(nipc_cgroups_builder_t *b,
                        (size_t)name_len + 1 +
                        (size_t)path_len + 1;
 
-    if (item_start + item_size > b->buf_len)
+    if (item_start + item_size > b->buf_len) {
+        b->error = NIPC_ERR_OVERFLOW;
         return NIPC_ERR_OVERFLOW;
+    }
 
     /* Zero alignment padding */
     if (item_start > b->data_offset)
@@ -811,22 +816,29 @@ bool nipc_dispatch_string_reverse(
     return *resp_len > 0;
 }
 
-bool nipc_dispatch_cgroups_snapshot(
+nipc_error_t nipc_dispatch_cgroups_snapshot(
     const uint8_t *req, size_t req_len,
     uint8_t *resp, size_t resp_size, size_t *resp_len,
     uint32_t max_items,
     nipc_cgroups_handler_fn handler, void *user)
 {
     nipc_cgroups_req_t request;
-    if (nipc_cgroups_req_decode(req, req_len, &request) != NIPC_OK)
-        return false;
+    nipc_error_t err = nipc_cgroups_req_decode(req, req_len, &request);
+    if (err != NIPC_OK)
+        return err;
 
     nipc_cgroups_builder_t builder;
     nipc_cgroups_builder_init(&builder, resp, resp_size, max_items, 0, 0);
 
-    if (!handler(user, &request, &builder))
-        return false;
+    if (!handler(user, &request, &builder)) {
+        if (builder.error != NIPC_OK)
+            return builder.error;
+        return NIPC_ERR_HANDLER_FAILED;
+    }
+
+    if (builder.error != NIPC_OK)
+        return builder.error;
 
     *resp_len = nipc_cgroups_builder_finish(&builder);
-    return *resp_len > 0;
+    return (*resp_len > 0) ? NIPC_OK : NIPC_ERR_OVERFLOW;
 }

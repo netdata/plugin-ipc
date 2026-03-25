@@ -682,7 +682,7 @@ func TestSessionFdAndRole(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-//  Test: Directional limit negotiation (min of client/server)
+//  Test: Directional limit negotiation
 // ---------------------------------------------------------------------------
 
 func TestDirectionalLimitNegotiation(t *testing.T) {
@@ -718,18 +718,20 @@ func TestDirectionalLimitNegotiation(t *testing.T) {
 	server := sr.session
 	defer server.Close()
 
-	// min(client, server) per direction
-	if client.MaxRequestPayloadBytes != 2048 {
-		t.Errorf("req_payload = %d, want 2048", client.MaxRequestPayloadBytes)
+	// Requests are sender-driven, so request-side negotiation uses the larger
+	// value. Responses are server-driven, so response-side negotiation uses the
+	// server's value.
+	if client.MaxRequestPayloadBytes != 4096 {
+		t.Errorf("req_payload = %d, want 4096", client.MaxRequestPayloadBytes)
 	}
-	if client.MaxRequestBatchItems != 8 {
-		t.Errorf("req_batch = %d, want 8", client.MaxRequestBatchItems)
+	if client.MaxRequestBatchItems != 16 {
+		t.Errorf("req_batch = %d, want 16", client.MaxRequestBatchItems)
 	}
-	if client.MaxResponsePayloadBytes != 4096 {
-		t.Errorf("resp_payload = %d, want 4096", client.MaxResponsePayloadBytes)
+	if client.MaxResponsePayloadBytes != 8192 {
+		t.Errorf("resp_payload = %d, want 8192", client.MaxResponsePayloadBytes)
 	}
-	if client.MaxResponseBatchItems != 16 {
-		t.Errorf("resp_batch = %d, want 16", client.MaxResponseBatchItems)
+	if client.MaxResponseBatchItems != 32 {
+		t.Errorf("resp_batch = %d, want 32", client.MaxResponseBatchItems)
 	}
 
 	// Server should have the same negotiated values

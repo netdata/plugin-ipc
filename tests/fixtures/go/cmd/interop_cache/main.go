@@ -65,9 +65,9 @@ func clientConfig() posix.ClientConfig {
 	}
 }
 
-func testHandlers() cgroups.Handlers {
-	return cgroups.Handlers{
-		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+func testHandler() cgroups.Handler {
+	return cgroups.Handler{
+		Handle: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
 			if request.LayoutVersion != 1 || request.Flags != 0 {
 				return false
 			}
@@ -93,17 +93,44 @@ func testHandlers() cgroups.Handlers {
 	}
 }
 
-func runServer(runDir, service string) int {
-	server := cgroups.NewServer(runDir, service, serverConfig(), testHandlers())
+func waitForSocket(runDir, service string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	path := fmt.Sprintf("%s/%s.sock", runDir, service)
+	for time.Now().Before(deadline) {
+		if info, err := os.Stat(path); err == nil && info.Mode()&os.ModeSocket != 0 {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
 
-	fmt.Println("READY")
+func runServer(runDir, service string) int {
+	server := cgroups.NewServer(runDir, service, serverConfig(), testHandler())
 
 	go func() {
 		time.Sleep(10 * time.Second)
 		server.Stop()
 	}()
 
-	if err := server.Run(); err != nil {
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.Run()
+	}()
+
+	if !waitForSocket(runDir, service, 5*time.Second) {
+		server.Stop()
+		if err := <-serverErr; err != nil {
+			fmt.Fprintf(os.Stderr, "server: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "server: socket not ready\n")
+		}
+		return 1
+	}
+
+	fmt.Println("READY")
+
+	if err := <-serverErr; err != nil {
 		fmt.Fprintf(os.Stderr, "server: %v\n", err)
 		return 1
 	}
@@ -113,8 +140,14 @@ func runServer(runDir, service string) int {
 func runClient(runDir, service string) int {
 	cache := cgroups.NewCache(runDir, service, clientConfig())
 
-	// Refresh to populate cache
-	updated := cache.Refresh()
+	updated := false
+	for i := 0; i < 200; i++ {
+		if cache.Refresh() {
+			updated = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if !updated || !cache.Ready() {
 		fmt.Fprintf(os.Stderr, "client: cache not ready after refresh\n")
 		fmt.Println("FAIL")

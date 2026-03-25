@@ -187,15 +187,26 @@ Sent by the server as a CONTROL message with `code = HELLO_ACK`.
 | 4 | 4 | u32 | server_supported_profiles | Server's supported profiles |
 | 8 | 4 | u32 | intersection_profiles | AND of client and server support |
 | 12 | 4 | u32 | selected_profile | Profile chosen for this session |
-| 16 | 4 | u32 | agreed_max_request_payload_bytes | Negotiated request payload limit |
-| 20 | 4 | u32 | agreed_max_request_batch_items | Negotiated request batch item limit |
-| 24 | 4 | u32 | agreed_max_response_payload_bytes | Negotiated response payload limit |
-| 28 | 4 | u32 | agreed_max_response_batch_items | Negotiated response batch item limit |
+| 16 | 4 | u32 | agreed_max_request_payload_bytes | Agreed request payload limit, sender-driven |
+| 20 | 4 | u32 | agreed_max_request_batch_items | Agreed request batch item limit, sender-driven |
+| 24 | 4 | u32 | agreed_max_response_payload_bytes | Agreed response payload limit, server-driven |
+| 28 | 4 | u32 | agreed_max_response_batch_items | Agreed response batch item limit, server-driven |
 | 32 | 4 | u32 | agreed_packet_size | Negotiated packet size = min(client, server) |
 | 36 | 4 | - | padding | Reserved, must be `0` |
 | 40 | 8 | u64 | session_id | Server-assigned session identifier |
 
 Total: 48 bytes.
+
+Directional semantics:
+
+- Requests are sender-driven.
+  The operational request limits come from the larger of the client and server
+  advertised request capacities, so long-lived sessions can learn and retain a
+  larger request envelope when batching grows.
+- Responses are server-driven.
+  The operational response limits come from the server's currently learned
+  response capacities, so later clients inherit the service's learned steady
+  state without having to rediscover it themselves.
 
 The `session_id` is a server-generated monotonic counter (starting at 1,
 incremented per accepted session). It uniquely identifies this session for
@@ -235,13 +246,22 @@ Bit 0 is always the baseline profile for the platform.
    c. Otherwise select the highest set bit in `intersection`.
    d. Higher bits represent faster/more capable profiles (SHM > baseline).
       Bit 0 is always the baseline fallback.
-6. Server negotiates directional limits by taking the minimum of client
-   and server values for each direction.
+6. Server negotiates directional limits with directional ownership:
+   - request payload and batch limits are sender-driven, so the
+     operational request limits are the larger of the client and server
+     advertised request capacities
+   - response payload and batch limits are server-driven, so the
+     operational response limits come from the server's current learned
+     response capacities
 7. Server computes `agreed_packet_size = min(client_packet_size,
    server_packet_size)`.
 8. Server sends HELLO_ACK with `transport_status = OK` and all
    negotiated values.
-9. Both sides use the negotiated values for the remainder of the session.
+9. Both sides use the negotiated values for the remainder of the
+   session. These capacities are fixed for that session. If higher
+   layers later reconnect with larger learned capacities, the next
+   session gets a new `session_id` and a new per-session SHM region /
+   kernel object set.
 
 ### Default constants
 

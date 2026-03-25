@@ -71,27 +71,22 @@ static nipc_np_client_config_t default_client_config(void)
     };
 }
 
-static bool on_increment(void *user, uint64_t request, uint64_t *response)
+static nipc_error_t raw_noop_handler(void *user,
+                                     const nipc_header_t *request_hdr,
+                                     const uint8_t *request_payload,
+                                     size_t request_len,
+                                     uint8_t *response_buf,
+                                     size_t response_buf_size,
+                                     size_t *response_len_out)
 {
     (void)user;
-    *response = request + 1;
-    return true;
-}
-
-static bool raw_noop_handler(void *user,
-                             uint16_t method_code,
-                             const uint8_t *request_payload, size_t request_len,
-                             uint8_t *response_buf, size_t response_buf_size,
-                             size_t *response_len_out)
-{
-    (void)user;
-    (void)method_code;
+    (void)request_hdr;
     (void)request_payload;
     (void)request_len;
     (void)response_buf;
     (void)response_buf_size;
     *response_len_out = 0;
-    return true;
+    return NIPC_OK;
 }
 
 static bool on_snapshot(void *user,
@@ -150,26 +145,20 @@ static bool on_snapshot_fail(void *user,
     return false;
 }
 
-static nipc_cgroups_handlers_t full_handlers = {
-    .on_increment = on_increment,
-    .on_string_reverse = NULL,
-    .on_cgroups_snapshot = on_snapshot,
+static nipc_cgroups_service_handler_t full_service_handler = {
+    .handle = on_snapshot,
     .snapshot_max_items = 3,
     .user = NULL,
 };
 
-static nipc_cgroups_handlers_t empty_snapshot_handlers = {
-    .on_increment = on_increment,
-    .on_string_reverse = NULL,
-    .on_cgroups_snapshot = on_snapshot_empty,
+static nipc_cgroups_service_handler_t empty_snapshot_service_handler = {
+    .handle = on_snapshot_empty,
     .snapshot_max_items = 1,
     .user = NULL,
 };
 
-static nipc_cgroups_handlers_t failing_snapshot_handlers = {
-    .on_increment = on_increment,
-    .on_string_reverse = NULL,
-    .on_cgroups_snapshot = on_snapshot_fail,
+static nipc_cgroups_service_handler_t failing_snapshot_service_handler = {
+    .handle = on_snapshot_fail,
     .snapshot_max_items = 3,
     .user = NULL,
 };
@@ -178,7 +167,7 @@ typedef struct {
     char service[64];
     int worker_count;
     nipc_np_server_config_t config;
-    nipc_cgroups_handlers_t handlers;
+    nipc_cgroups_service_handler_t service_handler;
     HANDLE ready_event;
     volatile LONG init_ok;
     nipc_managed_server_t server;
@@ -190,7 +179,7 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
 
     nipc_error_t err = nipc_server_init_typed(&ctx->server, TEST_RUN_DIR,
                                               ctx->service, &ctx->config,
-                                              ctx->worker_count, &ctx->handlers);
+                                              ctx->worker_count, &ctx->service_handler);
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed for %s: %d\n", ctx->service, err);
         InterlockedExchange(&ctx->init_ok, 0);
@@ -208,13 +197,13 @@ static HANDLE start_server_named(server_thread_ctx_t *ctx,
                                  const char *service,
                                  int worker_count,
                                  const nipc_np_server_config_t *config,
-                                 const nipc_cgroups_handlers_t *handlers)
+                                 const nipc_cgroups_service_handler_t *service_handler)
 {
     memset(ctx, 0, sizeof(*ctx));
     strncpy(ctx->service, service, sizeof(ctx->service) - 1);
     ctx->worker_count = worker_count;
     ctx->config = *config;
-    ctx->handlers = *handlers;
+    ctx->service_handler = *service_handler;
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     InterlockedExchange(&ctx->init_ok, 0);
 
@@ -242,10 +231,10 @@ static HANDLE start_server_named(server_thread_ctx_t *ctx,
 static HANDLE start_default_server_named(server_thread_ctx_t *ctx,
                                          const char *service,
                                          int worker_count,
-                                         const nipc_cgroups_handlers_t *handlers)
+                                         const nipc_cgroups_service_handler_t *service_handler)
 {
     nipc_np_server_config_t config = default_server_config();
-    return start_server_named(ctx, service, worker_count, &config, handlers);
+    return start_server_named(ctx, service, worker_count, &config, service_handler);
 }
 
 static void stop_server_drain(server_thread_ctx_t *ctx, HANDLE thread)
@@ -283,9 +272,10 @@ static void test_client_init_defaults_and_truncation(void)
     nipc_client_ctx_t client;
     nipc_client_init(&client, run_dir, service_name, &ccfg);
 
-    check("request buffer default size", client.request_buf_size == 65536u);
-    check("response buffer default size", client.response_buf_size == 65536u + NIPC_HEADER_LEN);
-    check("send buffer default size", client.send_buf_size == 65536u + NIPC_HEADER_LEN);
+    check("request payload default max", client.transport_config.max_request_payload_bytes == 16u);
+    check("response payload default max", client.transport_config.max_response_payload_bytes == 65536u);
+    check("response buffer allocated lazily", client.response_buf_size == 0u);
+    check("send buffer allocated lazily", client.send_buf_size == 0u);
     check("run_dir truncated", strlen(client.run_dir) == sizeof(client.run_dir) - 1);
     check("service_name truncated", strlen(client.service_name) == sizeof(client.service_name) - 1);
     check("run_dir NUL-terminated", client.run_dir[sizeof(client.run_dir) - 1] == '\0');
@@ -303,30 +293,30 @@ static void test_server_init_argument_validation(void)
 
     check("raw init null run_dir",
           nipc_server_init(&server, NULL, "svc_raw_null_run",
-                           &scfg, 1, RESPONSE_BUF_SIZE,
+                           &scfg, 1, NIPC_METHOD_INCREMENT,
                            raw_noop_handler, NULL)
               == NIPC_ERR_BAD_LAYOUT);
 
     check("raw init null service_name",
           nipc_server_init(&server, TEST_RUN_DIR, NULL,
-                           &scfg, 1, RESPONSE_BUF_SIZE,
+                           &scfg, 1, NIPC_METHOD_INCREMENT,
                            raw_noop_handler, NULL)
               == NIPC_ERR_BAD_LAYOUT);
 
     check("raw init null handler",
           nipc_server_init(&server, TEST_RUN_DIR, "svc_raw_null_handler",
-                           &scfg, 1, RESPONSE_BUF_SIZE,
+                           &scfg, 1, NIPC_METHOD_INCREMENT,
                            NULL, NULL)
               == NIPC_ERR_BAD_LAYOUT);
 
-    check("typed init null handlers",
-          nipc_server_init_typed(&server, TEST_RUN_DIR, "svc_typed_null_handlers",
+    check("typed init null service handler",
+          nipc_server_init_typed(&server, TEST_RUN_DIR, "svc_typed_null_service_handler",
                                  &scfg, 1, NULL)
               == NIPC_ERR_BAD_LAYOUT);
 
     check("raw init invalid service name",
           nipc_server_init(&server, TEST_RUN_DIR, "svc/raw_bad_name",
-                           &scfg, 1, RESPONSE_BUF_SIZE,
+                           &scfg, 1, NIPC_METHOD_INCREMENT,
                            raw_noop_handler, NULL)
               == NIPC_ERR_BAD_LAYOUT);
 }
@@ -341,7 +331,7 @@ static void test_server_init_worker_count_clamp(void)
     nipc_managed_server_t server;
     nipc_np_server_config_t scfg = default_server_config();
     nipc_error_t err = nipc_server_init_typed(&server, TEST_RUN_DIR, service,
-                                              &scfg, 0, &full_handlers);
+                                              &scfg, 0, &full_service_handler);
     check("typed init with worker_count 0 succeeds", err == NIPC_OK);
     if (err == NIPC_OK) {
         check("worker_count clamped to 1", server.worker_count == 1);
@@ -358,7 +348,7 @@ static void test_refresh_from_broken_state(void)
     unique_service(service, sizeof(service), "svc_broken");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
     if (!server_thread)
         return;
 
@@ -394,7 +384,7 @@ static void test_retry_on_broken_session(void)
     unique_service(service, sizeof(service), "svc_retry");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
     if (!server_thread)
         return;
 
@@ -455,7 +445,7 @@ static void test_handler_failure(void)
     unique_service(service, sizeof(service), "svc_hfail");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &failing_snapshot_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &failing_snapshot_service_handler);
     if (!server_thread)
         return;
 
@@ -482,7 +472,7 @@ static void test_client_auth_failure(void)
     unique_service(service, sizeof(service), "svc_auth");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
     if (!server_thread)
         return;
 
@@ -508,7 +498,7 @@ static void test_client_incompatible(void)
     scfg.supported_profiles = NIPC_PROFILE_SHM_HYBRID;
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_server_named(&sctx, service, 4, &scfg, &full_handlers);
+    HANDLE server_thread = start_server_named(&sctx, service, 4, &scfg, &full_service_handler);
     if (!server_thread)
         return;
 
@@ -531,7 +521,7 @@ static void test_cache_refresh_rebuilds_and_linear_lookup(void)
     unique_service(service, sizeof(service), "svc_cache_rebuild");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
     if (!server_thread)
         return;
 
@@ -569,7 +559,7 @@ static void test_cache_empty_snapshot(void)
     unique_service(service, sizeof(service), "svc_cache_empty");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &empty_snapshot_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &empty_snapshot_service_handler);
     if (!server_thread)
         return;
 

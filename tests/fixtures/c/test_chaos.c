@@ -71,8 +71,7 @@ static void cleanup_all(const char *service)
     char path[256];
     snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, service);
     unlink(path);
-    snprintf(path, sizeof(path), "%s/%s.ipcshm", TEST_RUN_DIR, service);
-    unlink(path);
+    nipc_shm_cleanup_stale(TEST_RUN_DIR, service);
 }
 
 /* Fill buffer with random bytes from /dev/urandom */
@@ -99,23 +98,21 @@ static void fill_random(void *buf, size_t len)
 /*  Cgroups handler (server side)                                      */
 /* ------------------------------------------------------------------ */
 
-static bool test_cgroups_handler(void *user,
-                                  uint16_t method_code,
-                                  const uint8_t *request_payload,
-                                  size_t request_len,
-                                  uint8_t *response_buf,
-                                  size_t response_buf_size,
-                                  size_t *response_len_out)
+static nipc_error_t test_cgroups_handler(void *user,
+                                         const nipc_header_t *request_hdr,
+                                         const uint8_t *request_payload,
+                                         size_t request_len,
+                                         uint8_t *response_buf,
+                                         size_t response_buf_size,
+                                         size_t *response_len_out)
 {
     (void)user;
-
-    if (method_code != NIPC_METHOD_CGROUPS_SNAPSHOT)
-        return false;
+    (void)request_hdr;
 
     nipc_cgroups_req_t req;
     nipc_error_t err = nipc_cgroups_req_decode(request_payload, request_len, &req);
     if (err != NIPC_OK)
-        return false;
+        return err;
 
     nipc_cgroups_builder_t builder;
     nipc_cgroups_builder_init(&builder, response_buf, response_buf_size,
@@ -123,14 +120,14 @@ static bool test_cgroups_handler(void *user,
 
     err = nipc_cgroups_builder_add(&builder,
         1001, 0, 1, "test-cg1", 8, "/sys/fs/cgroup/test1", 20);
-    if (err != NIPC_OK) return false;
+    if (err != NIPC_OK) return err;
 
     err = nipc_cgroups_builder_add(&builder,
         2002, 0, 1, "test-cg2", 8, "/sys/fs/cgroup/test2", 20);
-    if (err != NIPC_OK) return false;
+    if (err != NIPC_OK) return err;
 
     *response_len_out = nipc_cgroups_builder_finish(&builder);
-    return true;
+    return (*response_len_out > 0) ? NIPC_OK : NIPC_ERR_OVERFLOW;
 }
 
 /* ------------------------------------------------------------------ */
@@ -162,7 +159,7 @@ static void *chaos_server_fn(void *arg)
 
     nipc_error_t err = nipc_server_init(&ctx->server,
         TEST_RUN_DIR, ctx->service, &scfg,
-        4, RESPONSE_BUF_SIZE, test_cgroups_handler, NULL);
+        4, NIPC_METHOD_CGROUPS_SNAPSHOT, test_cgroups_handler, NULL);
 
     if (err != NIPC_OK) {
         fprintf(stderr, "chaos server init failed: %d\n", err);
@@ -661,6 +658,7 @@ static void test_shm_chaos(void)
 {
     printf("Test 8: SHM chaos - random bytes in request area\n");
     const char *svc = "chaos_shm";
+    uint64_t session_id = 0;
     cleanup_all(svc);
 
     /* Start server with SHM support */
@@ -700,6 +698,8 @@ static void test_shm_chaos(void)
             nipc_cgroups_resp_view_t view;
             nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
             check("initial SHM call succeeded", err == NIPC_OK);
+            if (err == NIPC_OK)
+                session_id = client.session.session_id;
         }
 
         nipc_client_close(&client);
@@ -707,7 +707,9 @@ static void test_shm_chaos(void)
 
     /* Now directly open the SHM file and write garbage */
     char shm_path[256];
-    snprintf(shm_path, sizeof(shm_path), "%s/%s.ipcshm", TEST_RUN_DIR, svc);
+    snprintf(shm_path, sizeof(shm_path), "%s/%s-%016llx.ipcshm",
+             TEST_RUN_DIR, svc, (unsigned long long)session_id);
+    check("SHM session established", session_id != 0);
 
     int shm_fd = open(shm_path, O_RDWR);
     if (shm_fd >= 0) {
@@ -775,10 +777,8 @@ static void test_shm_chaos(void)
         }
         close(shm_fd);
     } else {
-        /* SHM file might not exist if negotiation fell back to baseline.
-         * This is acceptable -- just skip the SHM chaos test. */
-        printf("    SHM file not found (server may be baseline-only), skipping\n");
-        check("SHM chaos (skipped -- no SHM file)", 1);
+        printf("    expected live SHM file not found: %s\n", shm_path);
+        check("open live SHM file for chaos", 0);
     }
 
     /* Verify server survived (it should have broken the SHM session

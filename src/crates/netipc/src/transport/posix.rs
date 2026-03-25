@@ -568,6 +568,16 @@ impl UdsListener {
         self.fd
     }
 
+    /// Update the payload limits used for future handshakes.
+    pub fn set_payload_limits(
+        &mut self,
+        max_request_payload_bytes: u32,
+        max_response_payload_bytes: u32,
+    ) {
+        self.config.max_request_payload_bytes = max_request_payload_bytes;
+        self.config.max_response_payload_bytes = max_response_payload_bytes;
+    }
+
     /// Accept one client. Performs the full handshake.
     /// Blocks until a client connects and the handshake completes.
     pub fn accept(&self) -> Result<UdsSession, UdsError> {
@@ -1059,11 +1069,13 @@ fn server_handshake(
         highest_bit(intersection)
     };
 
-    // Negotiate limits: min(client, server) per direction
-    let agreed_req_pay = hello.max_request_payload_bytes.min(s_req_pay);
-    let agreed_req_bat = hello.max_request_batch_items.min(s_req_bat);
-    let agreed_resp_pay = hello.max_response_payload_bytes.min(s_resp_pay);
-    let agreed_resp_bat = hello.max_response_batch_items.min(s_resp_bat);
+    // Negotiate limits:
+    // - requests use the larger of client/server advertised capacities
+    // - responses are server-authoritative
+    let agreed_req_pay = hello.max_request_payload_bytes.max(s_req_pay);
+    let agreed_req_bat = hello.max_request_batch_items.max(s_req_bat);
+    let agreed_resp_pay = s_resp_pay;
+    let agreed_resp_bat = s_resp_bat;
     let agreed_pkt = hello.packet_size.min(server_pkt_size);
 
     // Send HELLO_ACK (success)

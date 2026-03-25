@@ -1,6 +1,6 @@
 //go:build unix
 
-package cgroups
+package raw
 
 import (
 	"encoding/binary"
@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -128,7 +128,7 @@ func newRawPosixShmClient(t *testing.T) (*Client, *posix.ShmContext) {
 		t.Fatalf("ShmClientAttach failed: %v", err)
 	}
 
-	client := NewClient(runDir, service, testClientConfig())
+	client := NewIncrementClient(runDir, service, testClientConfig())
 	client.state = StateReady
 	client.shm = clientShm
 
@@ -140,11 +140,23 @@ func newRawPosixShmClient(t *testing.T) (*Client, *posix.ShmContext) {
 	return client, server
 }
 
-func startServerWithWorkersSocketReady(service string, handlers Handlers, workers int) *testServer {
+func startServerWithWorkersSocketReady(
+	service string,
+	expectedMethodCode uint16,
+	handler DispatchHandler,
+	workers int,
+) *testServer {
 	ensureRunDir()
 	cleanupAll(service)
 
-	s := NewServerWithWorkers(testRunDir, service, testServerConfig(), handlers, workers)
+	s := NewServerWithWorkers(
+		testRunDir,
+		service,
+		testServerConfig(),
+		expectedMethodCode,
+		handler,
+		workers,
+	)
 	doneCh := make(chan struct{})
 
 	go func() {
@@ -156,11 +168,16 @@ func startServerWithWorkersSocketReady(service string, handlers Handlers, worker
 	return &testServer{server: s, doneCh: doneCh}
 }
 
-func startServerWithConfigSocketReady(service string, cfg posix.ServerConfig, handlers Handlers) *testServer {
+func startServerWithConfigSocketReady(
+	service string,
+	cfg posix.ServerConfig,
+	expectedMethodCode uint16,
+	handler DispatchHandler,
+) *testServer {
 	ensureRunDir()
 	cleanupAll(service)
 
-	s := NewServer(testRunDir, service, cfg, handlers)
+	s := NewServer(testRunDir, service, cfg, expectedMethodCode, handler)
 	doneCh := make(chan struct{})
 
 	go func() {
@@ -179,7 +196,13 @@ func unixShmSessionPath(service string, sessionID uint64) string {
 func TestUnixServerStopWhileIdle(t *testing.T) {
 	svc := uniqueUnixService("go_unix_stop_idle")
 	cleanupAll(svc)
-	server := NewServer(testRunDir, svc, testServerConfig(), testHandlers())
+	server := NewServer(
+		testRunDir,
+		svc,
+		testServerConfig(),
+		protocol.MethodCgroupsSnapshot,
+		testSnapshotDispatch(),
+	)
 
 	done := make(chan error, 1)
 	go func() {
@@ -202,7 +225,7 @@ func TestUnixServerStopWhileIdle(t *testing.T) {
 }
 
 func TestUnixTryConnectInvalidServiceReturnsDisconnected(t *testing.T) {
-	client := NewClient(testRunDir, "bad/service", testClientConfig())
+	client := NewSnapshotClient(testRunDir, "bad/service", testClientConfig())
 	defer client.Close()
 
 	if state := client.tryConnect(); state != StateDisconnected {
@@ -241,10 +264,10 @@ func TestUnixPollFdRejectsInvalidFdAndHangup(t *testing.T) {
 
 func TestUnixRefreshFromBrokenReconnects(t *testing.T) {
 	svc := uniqueUnixService("go_unix_refresh_broken")
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	defer client.Close()
 
 	refreshUnixClientReady(t, client)
@@ -264,42 +287,51 @@ func TestUnixRefreshFromBrokenReconnects(t *testing.T) {
 	}
 }
 
-func TestUnixSingleResponseOverflowReturnsInternalErrorAndRecovers(t *testing.T) {
+func TestUnixSingleResponseOverflowRetriesAndRecovers(t *testing.T) {
 	svc := uniqueUnixService("go_unix_single_overflow")
 
 	scfg := testServerConfig()
-	scfg.MaxResponsePayloadBytes = 16
-	ts := startTestServerUnixWithConfig(svc, scfg, Handlers{
-		OnIncrement: func(v uint64) (uint64, bool) {
-			return v + 1, true
-		},
-		OnSnapshot:       testCgroupsHandler,
-		SnapshotMaxItems: 3,
-	})
+	scfg.MaxResponsePayloadBytes = 64
+	var calls atomic.Int32
+	ts := startTestServerUnixWithConfig(
+		svc,
+		scfg,
+		protocol.MethodCgroupsSnapshot,
+		SnapshotDispatch(func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+			if request.LayoutVersion != 1 || request.Flags != 0 {
+				return false
+			}
+			builder.SetHeader(1, uint64(calls.Add(1)))
+			if calls.Load() == 1 {
+				return builder.Add(
+					1001,
+					0,
+					1,
+					[]byte("oversized-snapshot"),
+					[]byte("/sys/fs/cgroup/this-path-is-intentionally-too-large-for-the-first-response"),
+				) == nil
+			}
+			return true
+		}, 1),
+	)
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	defer client.Close()
 	refreshUnixClientReady(t, client)
 
-	if _, err := client.CallSnapshot(); !errors.Is(err, protocol.ErrBadLayout) {
-		t.Fatalf("CallSnapshot overflow = %v, want %v", err, protocol.ErrBadLayout)
-	}
-	if client.state != StateBroken {
-		t.Fatalf("client state after single-response overflow = %d, want BROKEN", client.state)
-	}
-
-	changed := client.Refresh()
-	if !changed || client.state != StateReady {
-		t.Fatalf("Refresh after single-response overflow = %v, state=%d, want READY", changed, client.state)
-	}
-
-	got, err := client.CallIncrement(8)
+	view, err := client.CallSnapshot()
 	if err != nil {
-		t.Fatalf("CallIncrement after overflow Refresh failed: %v", err)
+		t.Fatalf("CallSnapshot after single-response overflow failed: %v", err)
 	}
-	if got != 9 {
-		t.Fatalf("CallIncrement after overflow Refresh = %d, want 9", got)
+	if view.ItemCount != 0 || view.Generation != 2 {
+		t.Fatalf("CallSnapshot after single-response overflow returned item_count=%d generation=%d, want 0 and 2", view.ItemCount, view.Generation)
+	}
+	if client.state != StateReady {
+		t.Fatalf("client state after single-response overflow = %d, want READY", client.state)
+	}
+	if client.reconnectCount < 1 {
+		t.Fatalf("expected reconnect_count >= 1 after single-response overflow, got %d", client.reconnectCount)
 	}
 }
 
@@ -308,11 +340,14 @@ func TestUnixShmCreateFailureKeepsServerHealthy(t *testing.T) {
 	obstruction := unixShmSessionPath(svc, 1)
 
 	scfg := testUnixShmServerConfig()
-	ts := startServerWithConfigSocketReady(svc, scfg, Handlers{
-		OnIncrement: func(v uint64) (uint64, bool) {
+	ts := startServerWithConfigSocketReady(
+		svc,
+		scfg,
+		protocol.MethodIncrement,
+		IncrementDispatch(func(v uint64) (uint64, bool) {
 			return v + 1, true
-		},
-	})
+		}),
+	)
 	defer func() {
 		ts.stop()
 		_ = os.RemoveAll(obstruction)
@@ -322,7 +357,7 @@ func TestUnixShmCreateFailureKeepsServerHealthy(t *testing.T) {
 		t.Fatalf("mkdir SHM obstruction failed: %v", err)
 	}
 
-	badClient := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	badClient := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
 	defer badClient.Close()
 
 	if changed := badClient.Refresh(); changed {
@@ -345,7 +380,7 @@ func TestUnixShmCreateFailureKeepsServerHealthy(t *testing.T) {
 		t.Fatalf("remove SHM obstruction failed: %v", err)
 	}
 
-	goodClient := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	goodClient := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
 	defer goodClient.Close()
 	refreshUnixClientReady(t, goodClient)
 
@@ -362,7 +397,13 @@ func TestUnixShmCreateFailureKeepsServerHealthy(t *testing.T) {
 }
 
 func TestUnixServerRunRejectsInvalidServiceName(t *testing.T) {
-	server := NewServer(testRunDir, "bad/service", testServerConfig(), testHandlers())
+	server := NewServer(
+		testRunDir,
+		"bad/service",
+		testServerConfig(),
+		protocol.MethodCgroupsSnapshot,
+		testSnapshotDispatch(),
+	)
 	if err := server.Run(); !errors.Is(err, posix.ErrBadParam) {
 		t.Fatalf("Run() invalid service name = %v, want %v", err, posix.ErrBadParam)
 	}
@@ -382,8 +423,10 @@ func TestUnixServerRejectsSessionAtWorkerCapacity(t *testing.T) {
 	defer releaseOnce()
 
 	var handlerCalls atomic.Int32
-	ts := startServerWithWorkersSocketReady(svc, Handlers{
-		OnIncrement: func(v uint64) (uint64, bool) {
+	ts := startServerWithWorkersSocketReady(
+		svc,
+		protocol.MethodIncrement,
+		IncrementDispatch(func(v uint64) (uint64, bool) {
 			handlerCalls.Add(1)
 			if v == 41 {
 				select {
@@ -393,11 +436,12 @@ func TestUnixServerRejectsSessionAtWorkerCapacity(t *testing.T) {
 				<-release
 			}
 			return v + 1, true
-		},
-	}, 1)
+		}),
+		1,
+	)
 	defer ts.stop()
 
-	client1 := NewClient(testRunDir, svc, testClientConfig())
+	client1 := NewIncrementClient(testRunDir, svc, testClientConfig())
 	defer client1.Close()
 	refreshUnixClientReady(t, client1)
 
@@ -464,7 +508,7 @@ func TestUnixServerRejectsSessionAtWorkerCapacity(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	verify := NewClient(testRunDir, svc, testClientConfig())
+	verify := NewIncrementClient(testRunDir, svc, testClientConfig())
 	defer verify.Close()
 	refreshUnixClientReady(t, verify)
 
@@ -479,7 +523,7 @@ func TestUnixServerRejectsSessionAtWorkerCapacity(t *testing.T) {
 
 func TestUnixIdlePeerDisconnectKeepsServerHealthy(t *testing.T) {
 	svc := uniqueUnixService("go_unix_idle_disconnect")
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
 	ccfg := testClientConfig()
@@ -491,7 +535,7 @@ func TestUnixIdlePeerDisconnectKeepsServerHealthy(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	verify := NewClient(testRunDir, svc, testClientConfig())
+	verify := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	defer verify.Close()
 	refreshUnixClientReady(t, verify)
 
@@ -505,7 +549,7 @@ func TestUnixIdlePeerDisconnectKeepsServerHealthy(t *testing.T) {
 }
 
 func TestUnixClientTransportWithoutSession(t *testing.T) {
-	client := NewClient(testRunDir, uniqueUnixService("go_unix_transport"), testClientConfig())
+	client := NewIncrementClient(testRunDir, uniqueUnixService("go_unix_transport"), testClientConfig())
 	defer client.Close()
 
 	hdr := protocol.Header{
@@ -525,7 +569,7 @@ func TestUnixClientTransportWithoutSession(t *testing.T) {
 }
 
 func TestUnixClientTransportReceiveShmError(t *testing.T) {
-	client := NewClient(testRunDir, uniqueUnixService("go_unix_transport_shm_err"), testClientConfig())
+	client := NewIncrementClient(testRunDir, uniqueUnixService("go_unix_transport_shm_err"), testClientConfig())
 	defer client.Close()
 
 	client.state = StateReady
@@ -562,7 +606,13 @@ func TestUnixClientTransportReceiveShmRejectsBadHeader(t *testing.T) {
 }
 
 func TestUnixDispatchSingleUnsupportedMethods(t *testing.T) {
-	server := NewServer(testRunDir, uniqueUnixService("go_unix_dispatch"), testServerConfig(), Handlers{})
+	server := NewServer(
+		testRunDir,
+		uniqueUnixService("go_unix_dispatch"),
+		testServerConfig(),
+		protocol.MethodCgroupsSnapshot,
+		nil,
+	)
 	responseBuf := make([]byte, 128)
 
 	for _, methodCode := range []uint16{
@@ -571,27 +621,37 @@ func TestUnixDispatchSingleUnsupportedMethods(t *testing.T) {
 		protocol.MethodCgroupsSnapshot,
 		0xffff,
 	} {
-		if n, ok := server.dispatchSingle(methodCode, nil, responseBuf); ok || n != 0 {
-			t.Fatalf("dispatchSingle(%d) = (%d, %v), want (0, false)", methodCode, n, ok)
+		if n, err := server.dispatchSingle(methodCode, nil, responseBuf); err == nil || n != 0 {
+			t.Fatalf("dispatchSingle(%d) = (%d, %v), want (0, error)", methodCode, n, err)
 		}
 	}
 
-	server = NewServer(testRunDir, uniqueUnixService("go_unix_snapshot_dispatch"), testServerConfig(), testHandlers())
-	if n, ok := server.dispatchSingle(protocol.MethodCgroupsSnapshot, nil, nil); ok || n != 0 {
-		t.Fatalf("dispatchSingle snapshot with zero response buffer = (%d, %v), want (0, false)", n, ok)
+	server = NewServer(
+		testRunDir,
+		uniqueUnixService("go_unix_snapshot_dispatch"),
+		testServerConfig(),
+		protocol.MethodCgroupsSnapshot,
+		testSnapshotDispatch(),
+	)
+	if n, err := server.dispatchSingle(protocol.MethodCgroupsSnapshot, nil, nil); err == nil || n != 0 {
+		t.Fatalf("dispatchSingle snapshot with zero response buffer = (%d, %v), want (0, error)", n, err)
 	}
 
-	server = NewServer(testRunDir, uniqueUnixService("go_unix_snapshot_dispatch_zero"), testServerConfig(), Handlers{
-		OnSnapshot: testCgroupsHandler,
-	})
-	if n, ok := server.dispatchSingle(protocol.MethodCgroupsSnapshot, nil, nil); ok || n != 0 {
-		t.Fatalf("dispatchSingle snapshot with derived zero max items = (%d, %v), want (0, false)", n, ok)
+	server = NewServer(
+		testRunDir,
+		uniqueUnixService("go_unix_snapshot_dispatch_zero"),
+		testServerConfig(),
+		protocol.MethodCgroupsSnapshot,
+		SnapshotDispatch(testCgroupsHandler, 0),
+	)
+	if n, err := server.dispatchSingle(protocol.MethodCgroupsSnapshot, nil, nil); err == nil || n != 0 {
+		t.Fatalf("dispatchSingle snapshot with derived zero max items = (%d, %v), want (0, error)", n, err)
 	}
 }
 
 func TestUnixNonRequestTerminatesSession(t *testing.T) {
 	svc := uniqueUnixService("go_unix_nonreq")
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
 	ccfg := testClientConfig()
@@ -633,7 +693,7 @@ func TestUnixNonRequestTerminatesSession(t *testing.T) {
 	}
 	session.Close()
 
-	verify := NewClient(testRunDir, svc, testClientConfig())
+	verify := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	defer verify.Close()
 	refreshUnixClientReady(t, verify)
 
@@ -648,7 +708,7 @@ func TestUnixNonRequestTerminatesSession(t *testing.T) {
 
 func TestUnixTruncatedRawRequestKeepsServerHealthy(t *testing.T) {
 	svc := uniqueUnixService("go_unix_short_req")
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
 	ccfg := testClientConfig()
@@ -665,7 +725,7 @@ func TestUnixTruncatedRawRequestKeepsServerHealthy(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	verify := NewClient(testRunDir, svc, testClientConfig())
+	verify := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	defer verify.Close()
 	refreshUnixClientReady(t, verify)
 
@@ -680,12 +740,15 @@ func TestUnixTruncatedRawRequestKeepsServerHealthy(t *testing.T) {
 
 func TestUnixPeerDisconnectDuringResponseKeepsServerHealthy(t *testing.T) {
 	svc := uniqueUnixService("go_unix_send_fail")
-	ts := startTestServer(svc, Handlers{
-		OnIncrement: func(v uint64) (uint64, bool) {
+	ts := startTestServerUnixWithConfig(
+		svc,
+		testServerConfig(),
+		protocol.MethodIncrement,
+		IncrementDispatch(func(v uint64) (uint64, bool) {
 			time.Sleep(100 * time.Millisecond)
 			return v + 1, true
-		},
-	})
+		}),
+	)
 	defer ts.stop()
 
 	ccfg := testClientConfig()
@@ -712,7 +775,7 @@ func TestUnixPeerDisconnectDuringResponseKeepsServerHealthy(t *testing.T) {
 
 	time.Sleep(250 * time.Millisecond)
 
-	verify := NewClient(testRunDir, svc, testClientConfig())
+	verify := NewIncrementClient(testRunDir, svc, testClientConfig())
 	defer verify.Close()
 	refreshUnixClientReady(t, verify)
 
@@ -727,10 +790,10 @@ func TestUnixPeerDisconnectDuringResponseKeepsServerHealthy(t *testing.T) {
 
 func TestUnixCallSnapshotWithMalformedTransportState(t *testing.T) {
 	svc := uniqueUnixService("go_unix_malformed_state")
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	defer client.Close()
 
 	refreshUnixClientReady(t, client)
@@ -753,7 +816,13 @@ func TestUnixCallIncrementBatchWithMalformedTransportState(t *testing.T) {
 	scfg := testServerConfig()
 	scfg.MaxRequestBatchItems = 16
 	scfg.MaxResponseBatchItems = 16
-	s := NewServer(testRunDir, svc, scfg, pingPongHandlers())
+	s := NewServer(
+		testRunDir,
+		svc,
+		scfg,
+		protocol.MethodIncrement,
+		pingPongIncrementDispatch(),
+	)
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
@@ -769,7 +838,7 @@ func TestUnixCallIncrementBatchWithMalformedTransportState(t *testing.T) {
 	ccfg := testClientConfig()
 	ccfg.MaxRequestBatchItems = 16
 	ccfg.MaxResponseBatchItems = 16
-	client := NewClient(testRunDir, svc, ccfg)
+	client := NewIncrementClient(testRunDir, svc, ccfg)
 	defer client.Close()
 
 	refreshUnixClientReady(t, client)
@@ -852,7 +921,7 @@ func TestUnixCallIncrementRejectsMalformedResponseEnvelope(t *testing.T) {
 					return session.Send(&respHdr, respPayload[:])
 				})
 
-			client := NewClient(testRunDir, svc, testClientConfig())
+			client := NewIncrementClient(testRunDir, svc, testClientConfig())
 			defer client.Close()
 
 			refreshUnixClientReady(t, client)
@@ -886,7 +955,7 @@ func TestUnixCallIncrementRejectsMalformedPayload(t *testing.T) {
 			return session.Send(&respHdr, []byte{1, 2, 3, 4})
 		})
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewIncrementClient(testRunDir, svc, testClientConfig())
 	defer client.Close()
 
 	refreshUnixClientReady(t, client)
@@ -961,7 +1030,7 @@ func TestUnixCallStringReverseRejectsMalformedResponseEnvelope(t *testing.T) {
 					return session.Send(&respHdr, respPayload)
 				})
 
-			client := NewClient(testRunDir, svc, testClientConfig())
+			client := NewStringReverseClient(testRunDir, svc, testClientConfig())
 			defer client.Close()
 
 			refreshUnixClientReady(t, client)
@@ -995,7 +1064,7 @@ func TestUnixCallSnapshotRejectsMalformedPayload(t *testing.T) {
 			return session.Send(&respHdr, []byte{1, 2, 3, 4})
 		})
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	defer client.Close()
 
 	refreshUnixClientReady(t, client)
@@ -1032,7 +1101,7 @@ func TestUnixCallStringReverseRejectsMalformedPayload(t *testing.T) {
 			return session.Send(&respHdr, respPayload)
 		})
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewStringReverseClient(testRunDir, svc, testClientConfig())
 	defer client.Close()
 
 	refreshUnixClientReady(t, client)
@@ -1142,7 +1211,7 @@ func TestUnixCallIncrementBatchRejectsMalformedResponseEnvelope(t *testing.T) {
 			ccfg.MaxRequestBatchItems = 16
 			ccfg.MaxResponseBatchItems = 16
 
-			client := NewClient(testRunDir, svc, ccfg)
+			client := NewIncrementClient(testRunDir, svc, ccfg)
 			defer client.Close()
 
 			refreshUnixClientReady(t, client)
@@ -1192,7 +1261,7 @@ func TestUnixCallIncrementBatchRejectsMalformedPayload(t *testing.T) {
 		ccfg := testClientConfig()
 		ccfg.MaxRequestBatchItems = 16
 		ccfg.MaxResponseBatchItems = 16
-		client := NewClient(testRunDir, svc, ccfg)
+		client := NewIncrementClient(testRunDir, svc, ccfg)
 		defer client.Close()
 
 		refreshUnixClientReady(t, client)
@@ -1239,7 +1308,7 @@ func TestUnixCallIncrementBatchRejectsMalformedPayload(t *testing.T) {
 		ccfg := testClientConfig()
 		ccfg.MaxRequestBatchItems = 16
 		ccfg.MaxResponseBatchItems = 16
-		client := NewClient(testRunDir, svc, ccfg)
+		client := NewIncrementClient(testRunDir, svc, ccfg)
 		defer client.Close()
 
 		refreshUnixClientReady(t, client)
@@ -1279,7 +1348,7 @@ func TestUnixCallIncrementBatchRejectsMalformedPayload(t *testing.T) {
 		ccfg := testClientConfig()
 		ccfg.MaxRequestBatchItems = 16
 		ccfg.MaxResponseBatchItems = 16
-		client := NewClient(testRunDir, svc, ccfg)
+		client := NewIncrementClient(testRunDir, svc, ccfg)
 		defer client.Close()
 
 		refreshUnixClientReady(t, client)

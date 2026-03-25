@@ -1720,15 +1720,15 @@ static void test_dispatch_cgroups_snapshot_happy(void) {
 
     uint8_t resp[4096];
     size_t resp_len;
-    bool ok = nipc_dispatch_cgroups_snapshot(req_buf, 4,
-                                              resp, sizeof(resp), &resp_len,
-                                              10, test_cg_handler, NULL);
-    CHECK(ok, "dispatch_cgroups_snapshot happy path");
+    nipc_error_t err = nipc_dispatch_cgroups_snapshot(req_buf, 4,
+                                                      resp, sizeof(resp), &resp_len,
+                                                      10, test_cg_handler, NULL);
+    CHECK(err == NIPC_OK, "dispatch_cgroups_snapshot happy path");
     CHECK(resp_len > 0, "dispatch_cgroups_snapshot produced output");
 
     /* Verify the response decodes correctly */
     nipc_cgroups_resp_view_t view;
-    nipc_error_t err = nipc_cgroups_resp_decode(resp, resp_len, &view);
+    err = nipc_cgroups_resp_decode(resp, resp_len, &view);
     CHECK(err == NIPC_OK, "dispatch_cgroups_snapshot response decodes");
     CHECK(view.item_count == 1, "dispatch_cgroups_snapshot 1 item");
 }
@@ -1737,19 +1737,19 @@ static void test_dispatch_cgroups_snapshot_bad_req(void) {
     uint8_t req[2] = {0}; /* too small */
     uint8_t resp[4096];
     size_t resp_len;
-    bool ok = nipc_dispatch_cgroups_snapshot(req, sizeof(req),
-                                              resp, sizeof(resp), &resp_len,
-                                              10, test_cg_handler, NULL);
-    CHECK(!ok, "dispatch_cgroups_snapshot bad request");
+    nipc_error_t err = nipc_dispatch_cgroups_snapshot(req, sizeof(req),
+                                                      resp, sizeof(resp), &resp_len,
+                                                      10, test_cg_handler, NULL);
+    CHECK(err != NIPC_OK, "dispatch_cgroups_snapshot bad request");
 }
 
 static void test_dispatch_cgroups_snapshot_handler_fails(void) {
     uint8_t req[32] = {0};
     uint8_t resp[1024] = {0};
     size_t resp_len = 0;
-    bool ok = nipc_dispatch_cgroups_snapshot(req, sizeof(req), resp, sizeof(resp),
-                                             &resp_len, 10, fail_cg_handler, NULL);
-    CHECK(!ok, "dispatch_cgroups_snapshot handler fails");
+    nipc_error_t err = nipc_dispatch_cgroups_snapshot(req, sizeof(req), resp, sizeof(resp),
+                                                      &resp_len, 10, fail_cg_handler, NULL);
+    CHECK(err != NIPC_OK, "dispatch_cgroups_snapshot handler fails");
 }
 
 /* ================================================================== */
@@ -1867,9 +1867,9 @@ static void test_dispatch_cgroups_snapshot_handler_failure_path(void) {
     CHECK(req_len > 0, "cgroups_req_encode for handler failure test");
 
     /* Dispatch with failing handler */
-    bool ok = nipc_dispatch_cgroups_snapshot(req, req_len, resp, sizeof(resp),
-                                             &resp_len, 10, snapshot_handler_fails, NULL);
-    CHECK(!ok, "dispatch_cgroups_snapshot handler failure path covered");
+    nipc_error_t err = nipc_dispatch_cgroups_snapshot(req, req_len, resp, sizeof(resp),
+                                                      &resp_len, 10, snapshot_handler_fails, NULL);
+    CHECK(err != NIPC_OK, "dispatch_cgroups_snapshot handler failure path covered");
 }
 
 /* ================================================================== */

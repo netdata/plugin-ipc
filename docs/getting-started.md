@@ -24,8 +24,30 @@ The Level 2 examples below are schematic. They show the intended public
 API shape from the specifications:
 
 - Clients use typed calls only
-- Servers register typed callbacks only
+- Servers expose one service kind only
 - Request/response scratch buffers remain internal to the library
+
+## Service-Oriented Discovery
+
+Clients connect to services, not plugins.
+
+- the client knows `service_namespace + service_name`
+- the client does not know which plugin/process implements that service
+- one service endpoint serves one request kind only
+
+Examples:
+
+- `cgroups-snapshot`
+- `ip-to-asn`
+- `pid-traffic`
+
+Runtime expectations:
+
+- plugins may start in any order
+- a client may start before the service exists
+- a provider may restart or disappear
+- optional enrichments must not break the caller
+- clients should call `Refresh()` periodically and tolerate temporary absence
 
 ## Client (L2 typed calls)
 
@@ -44,7 +66,7 @@ nipc_uds_client_config_t cfg = {
 };
 
 nipc_client_ctx_t client;
-nipc_client_init(&client, "/run/netdata", "cgroups", &cfg);
+nipc_client_init(&client, "/run/netdata", "cgroups-snapshot", &cfg);
 nipc_client_refresh(&client);  /* attempt connect */
 
 if (nipc_client_ready(&client)) {
@@ -81,7 +103,7 @@ let config = ClientConfig {
     ..ClientConfig::default()
 };
 
-let mut client = CgroupsClient::new("/run/netdata", "cgroups", config);
+let mut client = CgroupsClient::new("/run/netdata", "cgroups-snapshot", config);
 client.refresh();  // attempt connect
 
 if client.ready() {
@@ -115,7 +137,7 @@ config := posix.ClientConfig{
     AuthToken:               0xDEADBEEFCAFEBABE,
 }
 
-client := cgroups.NewClient("/run/netdata", "cgroups", config)
+client := cgroups.NewClient("/run/netdata", "cgroups-snapshot", config)
 defer client.Close()
 
 client.Refresh() // attempt connect
@@ -137,10 +159,10 @@ if client.Ready() {
 The managed server receives wire messages, but that is internal to the
 library. The public L2 server contract is typed:
 
-- You register typed callbacks for the supported methods
+- You expose one service kind only
 - Callbacks receive decoded request data
 - Callbacks return typed response data or fill typed builders
-- User code never switches on `method_code` and never touches raw payload
+- User code never switches on plugin identity, `method_code`, or raw payload
   bytes or raw response buffers
 
 ### C
@@ -148,23 +170,16 @@ library. The public L2 server contract is typed:
 ```c
 #include "netipc/netipc_service.h"
 
-/* Typed business-logic handlers — pure logic, no wire format */
-bool on_increment(void *user, uint64_t req, uint64_t *resp) {
-    *resp = req + 1;
-    return true;
-}
-
 bool on_cgroups(void *user, const nipc_cgroups_req_t *req,
                 nipc_cgroups_builder_t *builder) {
     /* Fill builder with cgroup items */
     return true;
 }
 
-/* Public L2 shape: register typed callbacks, not raw handlers */
-nipc_cgroups_handlers_t handlers = {
-    .on_increment = on_increment,
-    .on_cgroups   = on_cgroups,
-    .user         = NULL,
+/* Public L2 shape: one service kind, one typed handler surface */
+nipc_cgroups_service_handler_t service_handler = {
+    .handle = on_cgroups,
+    .user                = NULL,
 };
 
 nipc_uds_server_config_t scfg = {
@@ -178,8 +193,8 @@ nipc_uds_server_config_t scfg = {
 };
 
 nipc_managed_server_t server;
-nipc_server_init_typed(&server, "/run/netdata", "cgroups", &scfg,
-                       4, &handlers);
+nipc_server_init_typed(&server, "/run/netdata", "cgroups-snapshot", &scfg,
+                       4, &service_handler);
 
 /* Blocking: accepts clients, performs typed dispatch internally */
 nipc_server_run(&server);
@@ -195,20 +210,19 @@ nipc_server_destroy(&server);
 ### Rust
 
 ```rust
-use netipc::service::cgroups::{CgroupsHandlers, CgroupsServer, ServerConfig};
+use netipc::service::cgroups::{Handler, ManagedServer, ServerConfig};
 
-let handlers = CgroupsHandlers {
-    on_increment: Box::new(|req| Ok(req + 1)),
-    on_cgroups: Box::new(|req, builder| {
+let handler = Handler {
+    handle: Some(Box::new(|req, builder| {
         // Fill builder with cgroup items
-        Ok(())
-    }),
+        true
+    })),
     ..Default::default()
 };
 
 let config = ServerConfig { /* ... */ };
-let mut server = CgroupsServer::new(
-    "/run/netdata", "cgroups", config, 4, handlers);
+let mut server = ManagedServer::new(
+    "/run/netdata", "cgroups-snapshot", config, handler);
 
 server.run().unwrap();
 server.stop();
@@ -217,11 +231,8 @@ server.stop();
 ### Go
 
 ```go
-handlers := cgroups.Handlers{
-    OnIncrement: func(v uint64) (uint64, bool) {
-        return v + 1, true
-    },
-    OnSnapshot: func(req protocol.CgroupsRequestView, builder *protocol.CgroupsBuilder) bool {
+handler := cgroups.Handler{
+    Handle: func(req protocol.CgroupsRequestView, builder *protocol.CgroupsBuilder) bool {
         // Fill builder with cgroup items
         return true
     },
@@ -229,7 +240,7 @@ handlers := cgroups.Handlers{
 
 config := posix.ServerConfig{ /* ... */ }
 server := cgroups.NewServerWithWorkers(
-    "/run/netdata", "cgroups", config, handlers, 4)
+    "/run/netdata", "cgroups-snapshot", config, handler, 4)
 
 go server.Run()
 server.Stop()
@@ -245,7 +256,7 @@ latest snapshot, and provides O(1) lookup by hash + name.
 ```c
 nipc_cgroups_cache_t cache;
 nipc_uds_client_config_t ccfg = { /* ... */ };
-nipc_cgroups_cache_init(&cache, "/run/netdata", "cgroups", &ccfg);
+nipc_cgroups_cache_init(&cache, "/run/netdata", "cgroups-snapshot", &ccfg);
 
 /* Call periodically from your loop */
 if (nipc_cgroups_cache_refresh(&cache)) {
@@ -267,7 +278,7 @@ nipc_cgroups_cache_close(&cache);
 ```rust
 use netipc::service::cgroups::CgroupsCache;
 
-let mut cache = CgroupsCache::new("/run/netdata", "cgroups", config);
+let mut cache = CgroupsCache::new("/run/netdata", "cgroups-snapshot", config);
 
 // Call periodically
 if cache.refresh() {
@@ -285,7 +296,7 @@ cache.close();
 ### Go
 
 ```go
-cache := cgroups.NewCache("/run/netdata", "cgroups", config)
+cache := cgroups.NewCache("/run/netdata", "cgroups-snapshot", config)
 defer cache.Close()
 
 // Call periodically
@@ -303,6 +314,11 @@ if item, found := cache.Lookup(hash, "docker-abc123"); found {
 
 - **Caller-driven**: no hidden threads, no timers. You call `Refresh()`
   from your own loop at your own cadence.
+- **Service-oriented**: the client binds to a service kind, not to a plugin.
+- **One endpoint, one request kind**: a `cgroups-snapshot` server serves
+  snapshot requests only.
+- **Asynchronous startup**: providers may appear late or disappear. Callers
+  must tolerate absence and reconnect through their normal loop.
 - **At-least-once retry**: if a call fails and the client was READY,
   it automatically disconnects, reconnects (full handshake), and
   retries once before returning an error.

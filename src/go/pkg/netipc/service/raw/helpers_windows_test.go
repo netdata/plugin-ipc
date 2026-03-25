@@ -1,6 +1,6 @@
 //go:build windows
 
-package cgroups
+package raw
 
 import (
 	"fmt"
@@ -47,8 +47,13 @@ func waitWinClientReady(t *testing.T, client *Client) {
 	t.Fatalf("client not ready, final state=%d", client.state)
 }
 
-func startTestServerWinWithConfig(service string, cfg windows.ServerConfig, handlers Handlers) *winTestServer {
-	s := NewServer(winTestRunDir, service, cfg, handlers)
+func startTestServerWinWithConfig(
+	service string,
+	cfg windows.ServerConfig,
+	expectedMethodCode uint16,
+	handler DispatchHandler,
+) *winTestServer {
+	s := NewServer(winTestRunDir, service, cfg, expectedMethodCode, handler)
 	doneCh := make(chan struct{})
 
 	go func() {
@@ -59,6 +64,18 @@ func startTestServerWinWithConfig(service string, cfg windows.ServerConfig, hand
 	time.Sleep(200 * time.Millisecond)
 
 	return &winTestServer{server: s, doneCh: doneCh}
+}
+
+func startTestIncrementServerWinWithConfig(service string, cfg windows.ServerConfig) *winTestServer {
+	return startTestServerWinWithConfig(service, cfg, protocol.MethodIncrement, winIncrementDispatchHandler())
+}
+
+func startTestStringReverseServerWinWithConfig(service string, cfg windows.ServerConfig) *winTestServer {
+	return startTestServerWinWithConfig(service, cfg, protocol.MethodStringReverse, winStringReverseDispatchHandler())
+}
+
+func startTestSnapshotServerWinWithConfig(service string, cfg windows.ServerConfig) *winTestServer {
+	return startTestServerWinWithConfig(service, cfg, protocol.MethodCgroupsSnapshot, winSnapshotDispatchHandler())
 }
 
 func newRawWinShmClient(t *testing.T, profile uint32) (*Client, *windows.WinShmContext) {
@@ -82,7 +99,7 @@ func newRawWinShmClient(t *testing.T, profile uint32) (*Client, *windows.WinShmC
 	}
 
 	cfg := testWinShmClientConfig()
-	client := NewClient(runDir, service, cfg)
+	client := NewIncrementClient(runDir, service, cfg)
 	client.state = StateReady
 	client.shm = clientShm
 
@@ -229,22 +246,22 @@ func winFailingCgroupsHandler(*protocol.CgroupsRequest, *protocol.CgroupsBuilder
 	return false
 }
 
-func winTestHandlers() Handlers {
-	return Handlers{
-		OnIncrement: func(v uint64) (uint64, bool) {
-			return v + 1, true
-		},
-		OnStringReverse: func(s string) (string, bool) {
-			return winReverseString(s), true
-		},
-		OnSnapshot:       winTestCgroupsHandler,
-		SnapshotMaxItems: 3,
-	}
+func winIncrementDispatchHandler() DispatchHandler {
+	return IncrementDispatch(func(v uint64) (uint64, bool) {
+		return v + 1, true
+	})
 }
 
-func winFailingHandlers() Handlers {
-	return Handlers{
-		OnSnapshot:       winFailingCgroupsHandler,
-		SnapshotMaxItems: 3,
-	}
+func winStringReverseDispatchHandler() DispatchHandler {
+	return StringReverseDispatch(func(s string) (string, bool) {
+		return winReverseString(s), true
+	})
+}
+
+func winSnapshotDispatchHandler() DispatchHandler {
+	return SnapshotDispatch(winTestCgroupsHandler, 3)
+}
+
+func winFailingSnapshotDispatchHandler() DispatchHandler {
+	return SnapshotDispatch(winFailingCgroupsHandler, 3)
 }

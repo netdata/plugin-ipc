@@ -24,6 +24,7 @@ import (
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/service/cgroups"
+	rawsvc "github.com/netdata/plugin-ipc/go/pkg/netipc/service/raw"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/windows"
 )
 
@@ -239,12 +240,10 @@ func batchClientConfigWin(profiles uint32) windows.ClientConfig {
 //  Ping-pong handler
 // ---------------------------------------------------------------------------
 
-func pingPongHandlersWin() cgroups.Handlers {
-	return cgroups.Handlers{
-		OnIncrement: func(counter uint64) (uint64, bool) {
-			return counter + 1, true
-		},
-	}
+func pingPongDispatchWin() rawsvc.DispatchHandler {
+	return rawsvc.IncrementDispatch(func(counter uint64) (uint64, bool) {
+		return counter + 1, true
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -271,9 +270,9 @@ func initSnapshotTemplateWin() bool {
 	return true
 }
 
-func snapshotHandlersWin() cgroups.Handlers {
-	return cgroups.Handlers{
-		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+func snapshotHandlerWin() cgroups.Handler {
+	return cgroups.Handler{
+		Handle: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
 			if request.LayoutVersion != 1 || request.Flags != 0 || !initSnapshotTemplateWin() {
 				return false
 			}
@@ -294,37 +293,55 @@ func snapshotHandlersWin() cgroups.Handlers {
 // ---------------------------------------------------------------------------
 
 func runServerWin(runDir, service string, profiles uint32, durationSec int, handlerType string) int {
-	var handlers cgroups.Handlers
 	switch handlerType {
 	case "ping-pong":
-		handlers = pingPongHandlersWin()
+		server := rawsvc.NewServer(
+			runDir, service, serverConfigWin(profiles), protocol.MethodIncrement, pingPongDispatchWin(),
+		)
+
+		fmt.Println("READY")
+
+		cpuStart := cpuNSWin()
+
+		go func() {
+			time.Sleep(time.Duration(durationSec+3) * time.Second)
+			server.Stop()
+		}()
+
+		if err := server.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "server: %v\n", err)
+		}
+
+		cpuEnd := cpuNSWin()
+		cpuSec := float64(cpuEnd-cpuStart) / 1e9
+
+		fmt.Printf("SERVER_CPU_SEC=%.6f\n", cpuSec)
+		return 0
 	case "snapshot":
-		handlers = snapshotHandlersWin()
+		server := cgroups.NewServer(runDir, service, serverConfigWin(profiles), snapshotHandlerWin())
+
+		fmt.Println("READY")
+
+		cpuStart := cpuNSWin()
+
+		go func() {
+			time.Sleep(time.Duration(durationSec+3) * time.Second)
+			server.Stop()
+		}()
+
+		if err := server.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "server: %v\n", err)
+		}
+
+		cpuEnd := cpuNSWin()
+		cpuSec := float64(cpuEnd-cpuStart) / 1e9
+
+		fmt.Printf("SERVER_CPU_SEC=%.6f\n", cpuSec)
+		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "unknown handler type: %s\n", handlerType)
 		return 1
 	}
-
-	server := cgroups.NewServer(runDir, service, serverConfigWin(profiles), handlers)
-
-	fmt.Println("READY")
-
-	cpuStart := cpuNSWin()
-
-	go func() {
-		time.Sleep(time.Duration(durationSec+3) * time.Second)
-		server.Stop()
-	}()
-
-	if err := server.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "server: %v\n", err)
-	}
-
-	cpuEnd := cpuNSWin()
-	cpuSec := float64(cpuEnd-cpuStart) / 1e9
-
-	fmt.Printf("SERVER_CPU_SEC=%.6f\n", cpuSec)
-	return 0
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +352,9 @@ func runBatchServerWin(runDir, service string, profiles uint32, durationSec int)
 	cfg := batchServerConfigWin(profiles)
 	cfg.MaxResponsePayloadBytes = batchBufSizeWin * 2 // extra room for builder overhead
 
-	server := cgroups.NewServer(runDir, service, cfg, pingPongHandlersWin())
+	server := rawsvc.NewServer(
+		runDir, service, cfg, protocol.MethodIncrement, pingPongDispatchWin(),
+	)
 
 	fmt.Println("READY")
 

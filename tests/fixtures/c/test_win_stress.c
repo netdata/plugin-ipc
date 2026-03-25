@@ -16,6 +16,7 @@
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_win_shm.h"
+#include "test_win_raw_client_helpers.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,54 +74,56 @@ static bool on_string_reverse(void *user,
     return true;
 }
 
-static bool on_snapshot(void *user,
-                        const nipc_cgroups_req_t *req,
-                        nipc_cgroups_builder_t *builder)
+static nipc_error_t handle_increment_raw(void *user,
+                                         const nipc_header_t *request_hdr,
+                                         const uint8_t *request_payload,
+                                         size_t request_len,
+                                         uint8_t *response_buf,
+                                         size_t response_buf_size,
+                                         size_t *response_len_out)
 {
     (void)user;
-    (void)req;
 
-    static const struct {
-        uint32_t hash;
-        uint32_t enabled;
-        const char *name;
-        const char *path;
-    } items[] = {
-        { 1001, 1, "docker-abc123", "/sys/fs/cgroup/docker/abc123" },
-        { 2002, 1, "k8s-pod-xyz",   "/sys/fs/cgroup/kubepods/xyz" },
-        { 3003, 0, "systemd-user",  "/sys/fs/cgroup/user.slice/user-1000" },
-    };
+    if (request_hdr->code != NIPC_METHOD_INCREMENT)
+        return NIPC_ERR_BAD_LAYOUT;
 
-    for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
-        nipc_error_t err = nipc_cgroups_builder_add(
-            builder,
-            items[i].hash,
-            0,
-            items[i].enabled,
-            items[i].name,
-            (uint32_t)strlen(items[i].name),
-            items[i].path,
-            (uint32_t)strlen(items[i].path));
-        if (err != NIPC_OK)
-            return false;
-    }
+    if (!nipc_dispatch_increment(request_payload, request_len,
+                                 response_buf, response_buf_size,
+                                 response_len_out, on_increment, NULL))
+        return NIPC_ERR_BAD_LAYOUT;
 
-    return true;
+    return NIPC_OK;
 }
 
-static nipc_cgroups_handlers_t g_handlers = {
-    .on_increment = on_increment,
-    .on_string_reverse = on_string_reverse,
-    .on_cgroups_snapshot = on_snapshot,
-    .snapshot_max_items = 3,
-    .user = NULL,
-};
+static nipc_error_t handle_string_reverse_raw(void *user,
+                                              const nipc_header_t *request_hdr,
+                                              const uint8_t *request_payload,
+                                              size_t request_len,
+                                              uint8_t *response_buf,
+                                              size_t response_buf_size,
+                                              size_t *response_len_out)
+{
+    (void)user;
+
+    if (request_hdr->code != NIPC_METHOD_STRING_REVERSE)
+        return NIPC_ERR_BAD_LAYOUT;
+
+    if (!nipc_dispatch_string_reverse(request_payload, request_len,
+                                      response_buf, response_buf_size,
+                                      response_len_out,
+                                      on_string_reverse, NULL))
+        return NIPC_ERR_BAD_LAYOUT;
+
+    return NIPC_OK;
+}
 
 typedef struct {
     char service[64];
     int worker_count;
     uint32_t max_request_payload_bytes;
     uint32_t max_response_payload_bytes;
+    uint16_t expected_method_code;
+    nipc_server_handler_fn raw_handler;
     HANDLE ready_event;
     volatile LONG init_ok;
     nipc_managed_server_t server;
@@ -140,9 +143,11 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
     cfg.auth_token = AUTH_TOKEN;
     cfg.packet_size = 0;
 
-    nipc_error_t err = nipc_server_init_typed(&ctx->server, TEST_RUN_DIR,
-                                              ctx->service, &cfg,
-                                              ctx->worker_count, &g_handlers);
+    nipc_error_t err = nipc_server_init(&ctx->server, TEST_RUN_DIR,
+                                        ctx->service, &cfg,
+                                        ctx->worker_count,
+                                        ctx->expected_method_code,
+                                        ctx->raw_handler, NULL);
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed for %s: %d\n", ctx->service, err);
         InterlockedExchange(&ctx->init_ok, 0);
@@ -159,12 +164,16 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
 static HANDLE start_server(server_thread_ctx_t *ctx,
                            const char *prefix,
                            int worker_count,
+                           uint16_t expected_method_code,
+                           nipc_server_handler_fn raw_handler,
                            uint32_t max_request_payload_bytes,
                            uint32_t max_response_payload_bytes)
 {
     memset(ctx, 0, sizeof(*ctx));
     unique_service(ctx->service, sizeof(ctx->service), prefix);
     ctx->worker_count = worker_count;
+    ctx->expected_method_code = expected_method_code;
+    ctx->raw_handler = raw_handler;
     ctx->max_request_payload_bytes = max_request_payload_bytes;
     ctx->max_response_payload_bytes = max_response_payload_bytes;
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -234,7 +243,10 @@ static void test_many_simultaneous_clients(void)
     fflush(stdout);
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_server(&sctx, "win_stress_many", 16, 4096, 4096);
+    HANDLE server_thread = start_server(&sctx, "win_stress_many", 16,
+                                        NIPC_METHOD_INCREMENT,
+                                        handle_increment_raw,
+                                        4096, 4096);
     if (!server_thread)
         return;
 
@@ -245,10 +257,10 @@ static void test_many_simultaneous_clients(void)
     for (int i = 0; i < 8; i++) {
         nipc_np_client_config_t cfg = default_client_config(4096);
         uint64_t value = 0;
-        nipc_client_init(&clients[i], TEST_RUN_DIR, sctx.service, &cfg);
+            nipc_client_init(&clients[i], TEST_RUN_DIR, sctx.service, &cfg);
         if (refresh_until_ready(&clients[i], 50, 10)) {
             ready++;
-            if (nipc_client_call_increment(&clients[i], (uint64_t)i, &value) == NIPC_OK &&
+            if (test_win_client_call_increment_raw(&clients[i], (uint64_t)i, &value) == NIPC_OK &&
                 value == (uint64_t)i + 1) {
                 call_ok++;
             }
@@ -270,7 +282,10 @@ static void test_rapid_connect_disconnect_cycles(void)
     fflush(stdout);
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_server(&sctx, "win_stress_rapid", 8, 4096, 4096);
+    HANDLE server_thread = start_server(&sctx, "win_stress_rapid", 8,
+                                        NIPC_METHOD_INCREMENT,
+                                        handle_increment_raw,
+                                        4096, 4096);
     if (!server_thread)
         return;
 
@@ -282,7 +297,7 @@ static void test_rapid_connect_disconnect_cycles(void)
 
         nipc_client_init(&client, TEST_RUN_DIR, sctx.service, &cfg);
         if (refresh_until_ready(&client, 200, 2) &&
-            nipc_client_call_increment(&client, 1, &value) == NIPC_OK &&
+            test_win_client_call_increment_raw(&client, 1, &value) == NIPC_OK &&
             value == 2) {
             success++;
         }
@@ -300,7 +315,10 @@ static void test_large_payload_string_reverse(void)
     fflush(stdout);
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_server(&sctx, "win_stress_large", 4, 65536, 65536);
+    HANDLE server_thread = start_server(&sctx, "win_stress_large", 4,
+                                        NIPC_METHOD_STRING_REVERSE,
+                                        handle_string_reverse_raw,
+                                        65536, 65536);
     if (!server_thread)
         return;
 
@@ -323,8 +341,8 @@ static void test_large_payload_string_reverse(void)
     check("large payload client ready", refresh_until_ready(&client, 50, 10));
 
     if (nipc_client_ready(&client)) {
-        nipc_error_t err = nipc_client_call_string_reverse(&client, payload,
-                                                           PAYLOAD_LEN, &view);
+        nipc_error_t err = test_win_client_call_string_reverse_raw(
+            &client, payload, PAYLOAD_LEN, &view);
         check("large string_reverse succeeded", err == NIPC_OK);
         if (err == NIPC_OK) {
             check("large response length matches", view.str_len == PAYLOAD_LEN);

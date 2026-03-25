@@ -1,8 +1,8 @@
-//! L2 cross-language interop binary.
+//! L2 cross-language interop binary for the cgroups-snapshot service kind.
 //!
 //! Usage:
 //!   interop_service server <run_dir> <service_name>
-//!     Starts a managed server with a cgroups handler (3 items),
+//!     Starts a managed server for cgroups-snapshot only (3 items),
 //!     prints READY, handles 1 client session, then exits.
 //!
 //!   interop_service client <run_dir> <service_name>
@@ -18,7 +18,7 @@ fn main() {
 mod posix_only {
 
     use netipc::protocol::{PROFILE_BASELINE, PROFILE_SHM_HYBRID};
-    use netipc::service::cgroups::{CgroupsClient, Handlers, ManagedServer};
+    use netipc::service::cgroups::{CgroupsClient, Handler, ManagedServer};
     use netipc::transport::posix::{ClientConfig, ServerConfig};
 
     const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;
@@ -32,11 +32,9 @@ mod posix_only {
         }
     }
 
-    fn server_handlers() -> Handlers {
-        Handlers {
-            on_increment: Some(std::sync::Arc::new(|v| Some(v + 1))),
-            on_string_reverse: Some(std::sync::Arc::new(|s| Some(s.chars().rev().collect()))),
-            on_snapshot: Some(std::sync::Arc::new(|request, builder| {
+    fn server_handler() -> Handler {
+        Handler {
+            handle: Some(std::sync::Arc::new(|request, builder| {
                 if request.layout_version != 1 || request.flags != 0 {
                     return false;
                 }
@@ -68,6 +66,7 @@ mod posix_only {
                 true
             })),
             snapshot_max_items: 3,
+            ..Handler::default()
         }
     }
 
@@ -101,7 +100,7 @@ mod posix_only {
     }
 
     fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut server = ManagedServer::new(run_dir, service, server_config(), server_handlers());
+        let mut server = ManagedServer::new(run_dir, service, server_config(), server_handler());
 
         // Signal readiness
         println!("READY");
@@ -132,19 +131,6 @@ mod posix_only {
         }
 
         let mut ok = true;
-
-        // --- Test INCREMENT: 42 -> 43 ---
-        match client.call_increment(42) {
-            Ok(v) if v == 43 => {}
-            Ok(v) => {
-                eprintln!("client: increment expected 43, got {v}");
-                ok = false;
-            }
-            Err(e) => {
-                eprintln!("client: increment call failed: {e:?}");
-                ok = false;
-            }
-        }
 
         // --- Test CGROUPS_SNAPSHOT: 3 items ---
         match client.call_snapshot() {
@@ -188,35 +174,6 @@ mod posix_only {
             }
             Err(e) => {
                 eprintln!("client: cgroups call failed: {e:?}");
-                ok = false;
-            }
-        }
-
-        // --- Test INCREMENT batch: [10,20,30] -> [11,21,31] ---
-        match client.call_increment_batch(&[10, 20, 30]) {
-            Ok(ref results) if results == &[11, 21, 31] => {}
-            Ok(ref results) => {
-                eprintln!("client: increment batch expected [11,21,31], got {results:?}");
-                ok = false;
-            }
-            Err(e) => {
-                eprintln!("client: increment batch call failed: {e:?}");
-                ok = false;
-            }
-        }
-
-        // --- Test STRING_REVERSE: "hello" -> "olleh" ---
-        match client.call_string_reverse("hello") {
-            Ok(ref s) if s.as_str() == "olleh" => {}
-            Ok(ref s) => {
-                eprintln!(
-                    "client: string_reverse expected \"olleh\", got \"{}\"",
-                    s.as_str()
-                );
-                ok = false;
-            }
-            Err(e) => {
-                eprintln!("client: string_reverse call failed: {e:?}");
                 ok = false;
             }
         }

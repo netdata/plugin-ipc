@@ -519,6 +519,12 @@ func (l *Listener) Fd() int {
 	return l.fd
 }
 
+// SetPayloadLimits updates the payload limits used for future handshakes.
+func (l *Listener) SetPayloadLimits(maxRequestPayloadBytes, maxResponsePayloadBytes uint32) {
+	l.config.MaxRequestPayloadBytes = maxRequestPayloadBytes
+	l.config.MaxResponsePayloadBytes = maxResponsePayloadBytes
+}
+
 // Accept accepts one client connection. Performs the full handshake.
 // Blocks until a client connects and the handshake completes.
 func (l *Listener) Accept() (*Session, error) {
@@ -616,6 +622,13 @@ func applyDefault(val, def uint32) uint32 {
 
 func minU32(a, b uint32) uint32 {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxU32(a, b uint32) uint32 {
+	if a > b {
 		return a
 	}
 	return b
@@ -900,11 +913,13 @@ func serverHandshake(fd int, config *ServerConfig, sessionID uint64) (*Session, 
 		selected = highestBit(intersection)
 	}
 
-	// Negotiate limits: min(client, server) per direction
-	agreedReqPay := minU32(hello.MaxRequestPayloadBytes, sReqPay)
-	agreedReqBat := minU32(hello.MaxRequestBatchItems, sReqBat)
-	agreedRespPay := minU32(hello.MaxResponsePayloadBytes, sRespPay)
-	agreedRespBat := minU32(hello.MaxResponseBatchItems, sRespBat)
+	// Negotiate limits:
+	// - requests use the larger of client/server advertised capacities
+	// - responses are server-authoritative
+	agreedReqPay := maxU32(hello.MaxRequestPayloadBytes, sReqPay)
+	agreedReqBat := maxU32(hello.MaxRequestBatchItems, sReqBat)
+	agreedRespPay := sRespPay
+	agreedRespBat := sRespBat
 	agreedPkt := minU32(hello.PacketSize, serverPktSize)
 
 	// Send HELLO_ACK (success)

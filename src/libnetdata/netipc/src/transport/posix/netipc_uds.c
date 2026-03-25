@@ -96,6 +96,11 @@ static inline uint32_t min_u32(uint32_t a, uint32_t b)
     return a < b ? a : b;
 }
 
+static inline uint32_t max_u32(uint32_t a, uint32_t b)
+{
+    return a > b ? a : b;
+}
+
 static inline uint32_t apply_default(uint32_t val, uint32_t def)
 {
     return val == 0 ? def : val;
@@ -352,11 +357,11 @@ static nipc_uds_error_t server_handshake(int fd,
     else
         selected = highest_bit(intersection);
 
-    /* Negotiate limits: min(client, server) per direction */
-    uint32_t agreed_req_pay  = min_u32(hello.max_request_payload_bytes, s_req_pay);
-    uint32_t agreed_req_bat  = min_u32(hello.max_request_batch_items, s_req_bat);
-    uint32_t agreed_resp_pay = min_u32(hello.max_response_payload_bytes, s_resp_pay);
-    uint32_t agreed_resp_bat = min_u32(hello.max_response_batch_items, s_resp_bat);
+    /* Negotiate limits: requests are sender-driven, responses are server-driven. */
+    uint32_t agreed_req_pay  = max_u32(hello.max_request_payload_bytes, s_req_pay);
+    uint32_t agreed_req_bat  = max_u32(hello.max_request_batch_items, s_req_bat);
+    uint32_t agreed_resp_pay = s_resp_pay;
+    uint32_t agreed_resp_bat = s_resp_bat;
     uint32_t agreed_pkt      = min_u32(hello.packet_size, server_pkt_size);
 
     /* Send HELLO_ACK (success) */

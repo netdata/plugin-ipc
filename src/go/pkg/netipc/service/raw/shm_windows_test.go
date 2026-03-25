@@ -1,6 +1,6 @@
 //go:build windows
 
-package cgroups
+package raw
 
 import (
 	"errors"
@@ -12,75 +12,95 @@ import (
 )
 
 func TestWinShmRoundTrip(t *testing.T) {
-	svc := uniqueWinService("go_win_shm_roundtrip")
-	ts := startTestServerWinWithConfig(svc, testWinShmServerConfig(), winTestHandlers())
-	defer ts.stop()
+	t.Run("snapshot", func(t *testing.T) {
+		svc := uniqueWinService("go_win_shm_roundtrip_snapshot")
+		ts := startTestSnapshotServerWinWithConfig(svc, testWinShmServerConfig())
+		defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinShmClientConfig())
-	defer client.Close()
+		client := NewSnapshotClient(winTestRunDir, svc, testWinShmClientConfig())
+		defer client.Close()
 
-	waitWinClientReady(t, client)
+		waitWinClientReady(t, client)
 
-	if client.session == nil {
-		t.Fatal("expected negotiated session")
-	}
-	if client.shm == nil {
-		t.Fatal("expected WinSHM attachment")
-	}
-	if client.session.SelectedProfile != windows.WinShmProfileHybrid {
-		t.Fatalf("selected profile = %d, want %d", client.session.SelectedProfile, windows.WinShmProfileHybrid)
-	}
-
-	view, err := client.CallSnapshot()
-	if err != nil {
-		t.Fatalf("CallSnapshot failed: %v", err)
-	}
-	if view.ItemCount != 3 {
-		t.Fatalf("snapshot item count = %d, want 3", view.ItemCount)
-	}
-
-	got, err := client.CallIncrement(41)
-	if err != nil {
-		t.Fatalf("CallIncrement failed: %v", err)
-	}
-	if got != 42 {
-		t.Fatalf("increment result = %d, want 42", got)
-	}
-
-	reversed, err := client.CallStringReverse("hello")
-	if err != nil {
-		t.Fatalf("CallStringReverse failed: %v", err)
-	}
-	if reversed.Str != "olleh" {
-		t.Fatalf("string reverse result = %q, want %q", reversed.Str, "olleh")
-	}
-
-	batch, err := client.CallIncrementBatch([]uint64{1, 41, 99})
-	if err != nil {
-		t.Fatalf("CallIncrementBatch failed: %v", err)
-	}
-	wantBatch := []uint64{2, 42, 100}
-	if len(batch) != len(wantBatch) {
-		t.Fatalf("batch result len = %d, want %d", len(batch), len(wantBatch))
-	}
-	for i, want := range wantBatch {
-		if batch[i] != want {
-			t.Fatalf("batch[%d] = %d, want %d", i, batch[i], want)
+		if client.session == nil {
+			t.Fatal("expected negotiated session")
 		}
-	}
+		if client.shm == nil {
+			t.Fatal("expected WinSHM attachment")
+		}
+		if client.session.SelectedProfile != windows.WinShmProfileHybrid {
+			t.Fatalf("selected profile = %d, want %d", client.session.SelectedProfile, windows.WinShmProfileHybrid)
+		}
 
-	status := client.Status()
-	if status.CallCount != 4 || status.ErrorCount != 0 {
-		t.Fatalf("unexpected client status: %+v", status)
-	}
+		view, err := client.CallSnapshot()
+		if err != nil {
+			t.Fatalf("CallSnapshot failed: %v", err)
+		}
+		if view.ItemCount != 3 {
+			t.Fatalf("snapshot item count = %d, want 3", view.ItemCount)
+		}
+		if status := client.Status(); status.CallCount != 1 || status.ErrorCount != 0 {
+			t.Fatalf("unexpected client status: %+v", status)
+		}
+	})
+
+	t.Run("increment", func(t *testing.T) {
+		svc := uniqueWinService("go_win_shm_roundtrip_increment")
+		ts := startTestIncrementServerWinWithConfig(svc, testWinShmServerConfig())
+		defer ts.stop()
+
+		client := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
+		defer client.Close()
+		waitWinClientReady(t, client)
+
+		got, err := client.CallIncrement(41)
+		if err != nil {
+			t.Fatalf("CallIncrement failed: %v", err)
+		}
+		if got != 42 {
+			t.Fatalf("increment result = %d, want 42", got)
+		}
+
+		batch, err := client.CallIncrementBatch([]uint64{1, 41, 99})
+		if err != nil {
+			t.Fatalf("CallIncrementBatch failed: %v", err)
+		}
+		wantBatch := []uint64{2, 42, 100}
+		if len(batch) != len(wantBatch) {
+			t.Fatalf("batch result len = %d, want %d", len(batch), len(wantBatch))
+		}
+		for i, want := range wantBatch {
+			if batch[i] != want {
+				t.Fatalf("batch[%d] = %d, want %d", i, batch[i], want)
+			}
+		}
+	})
+
+	t.Run("string-reverse", func(t *testing.T) {
+		svc := uniqueWinService("go_win_shm_roundtrip_reverse")
+		ts := startTestStringReverseServerWinWithConfig(svc, testWinShmServerConfig())
+		defer ts.stop()
+
+		client := NewStringReverseClient(winTestRunDir, svc, testWinShmClientConfig())
+		defer client.Close()
+		waitWinClientReady(t, client)
+
+		reversed, err := client.CallStringReverse("hello")
+		if err != nil {
+			t.Fatalf("CallStringReverse failed: %v", err)
+		}
+		if reversed.Str != "olleh" {
+			t.Fatalf("string reverse result = %q, want %q", reversed.Str, "olleh")
+		}
+	})
 }
 
 func TestWinShmIdleTimeoutKeepsSessionAlive(t *testing.T) {
 	svc := uniqueWinService("go_win_shm_idle")
-	ts := startTestServerWinWithConfig(svc, testWinShmServerConfig(), winTestHandlers())
+	ts := startTestIncrementServerWinWithConfig(svc, testWinShmServerConfig())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinShmClientConfig())
+	client := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
 	defer client.Close()
 
 	waitWinClientReady(t, client)
@@ -97,7 +117,7 @@ func TestWinShmIdleTimeoutKeepsSessionAlive(t *testing.T) {
 }
 
 func TestWinServerRunInvalidServiceName(t *testing.T) {
-	server := NewServer(winTestRunDir, "bad/name", testWinServerConfig(), winTestHandlers())
+	server := NewServer(winTestRunDir, "bad/name", testWinServerConfig(), protocol.MethodIncrement, winIncrementDispatchHandler())
 	if err := server.Run(); err == nil {
 		t.Fatal("expected Run() to fail for invalid service name")
 	}
@@ -127,7 +147,7 @@ func TestWinShmAttachFailureLeavesClientDisconnected(t *testing.T) {
 		doneCh <- err
 	}()
 
-	client := NewClient(winTestRunDir, svc, testWinShmClientConfig())
+	client := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
 	defer client.Close()
 
 	if changed := client.Refresh(); changed {
@@ -153,10 +173,10 @@ func TestWinShmAttachFailureLeavesClientDisconnected(t *testing.T) {
 
 func TestWinShmMalformedShortRequestRecovers(t *testing.T) {
 	svc := uniqueWinService("go_win_shm_short_req")
-	ts := startTestServerWinWithConfig(svc, testWinShmServerConfig(), winTestHandlers())
+	ts := startTestIncrementServerWinWithConfig(svc, testWinShmServerConfig())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinShmClientConfig())
+	client := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
 	defer client.Close()
 
 	waitWinClientReady(t, client)
@@ -184,10 +204,10 @@ func TestWinShmMalformedShortRequestRecovers(t *testing.T) {
 
 func TestWinShmMalformedHeaderRequestRecovers(t *testing.T) {
 	svc := uniqueWinService("go_win_shm_bad_hdr")
-	ts := startTestServerWinWithConfig(svc, testWinShmServerConfig(), winTestHandlers())
+	ts := startTestIncrementServerWinWithConfig(svc, testWinShmServerConfig())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinShmClientConfig())
+	client := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
 	defer client.Close()
 
 	waitWinClientReady(t, client)
@@ -216,10 +236,10 @@ func TestWinShmMalformedHeaderRequestRecovers(t *testing.T) {
 
 func TestWinShmUnexpectedMessageKindRecovers(t *testing.T) {
 	svc := uniqueWinService("go_win_shm_bad_kind")
-	ts := startTestServerWinWithConfig(svc, testWinShmServerConfig(), winTestHandlers())
+	ts := startTestIncrementServerWinWithConfig(svc, testWinShmServerConfig())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinShmClientConfig())
+	client := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
 	defer client.Close()
 
 	waitWinClientReady(t, client)
@@ -260,10 +280,10 @@ func TestWinShmUnexpectedMessageKindRecovers(t *testing.T) {
 
 func TestWinShmMalformedBatchRequestRecovers(t *testing.T) {
 	svc := uniqueWinService("go_win_shm_bad_batch")
-	ts := startTestServerWinWithConfig(svc, testWinShmServerConfig(), winTestHandlers())
+	ts := startTestIncrementServerWinWithConfig(svc, testWinShmServerConfig())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinShmClientConfig())
+	client := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
 	defer client.Close()
 
 	waitWinClientReady(t, client)
@@ -303,18 +323,15 @@ func TestWinShmMalformedBatchRequestRecovers(t *testing.T) {
 
 func TestWinShmBatchHandlerFailureNeedsRefresh(t *testing.T) {
 	svc := uniqueWinService("go_win_shm_batch_fail")
-	handlers := Handlers{
-		OnIncrement: func(v uint64) (uint64, bool) {
-			if v == 99 {
-				return 0, false
-			}
-			return v + 1, true
-		},
-	}
-	ts := startTestServerWinWithConfig(svc, testWinShmServerConfig(), handlers)
+	ts := startTestServerWinWithConfig(svc, testWinShmServerConfig(), protocol.MethodIncrement, IncrementDispatch(func(v uint64) (uint64, bool) {
+		if v == 99 {
+			return 0, false
+		}
+		return v + 1, true
+	}))
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinShmClientConfig())
+	client := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
 	defer client.Close()
 
 	waitWinClientReady(t, client)
@@ -341,7 +358,7 @@ func TestWinShmBatchHandlerFailureNeedsRefresh(t *testing.T) {
 	}
 }
 
-func TestWinShmBatchResponseOverflowNeedsRefresh(t *testing.T) {
+func TestWinShmBatchResponseOverflowRetriesAndRecovers(t *testing.T) {
 	svc := uniqueWinService("go_win_shm_batch_overflow")
 
 	scfg := testWinShmServerConfig()
@@ -352,36 +369,33 @@ func TestWinShmBatchResponseOverflowNeedsRefresh(t *testing.T) {
 	ccfg.MaxResponseBatchItems = 2
 	ccfg.MaxRequestBatchItems = 2
 
-	ts := startTestServerWinWithConfig(svc, scfg, Handlers{
-		OnIncrement: func(v uint64) (uint64, bool) {
-			return v + 1, true
-		},
-	})
+	ts := startTestServerWinWithConfig(svc, scfg, protocol.MethodIncrement, winIncrementDispatchHandler())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, ccfg)
+	client := NewIncrementClient(winTestRunDir, svc, ccfg)
 	defer client.Close()
 
 	waitWinClientReady(t, client)
 
-	_, err := client.CallIncrementBatch([]uint64{1, 2})
-	if !errors.Is(err, protocol.ErrBadLayout) {
-		t.Fatalf("CallIncrementBatch overflow = %v, want %v", err, protocol.ErrBadLayout)
+	gotBatch, err := client.CallIncrementBatch([]uint64{1, 2})
+	if err != nil {
+		t.Fatalf("CallIncrementBatch after WinSHM overflow failed: %v", err)
 	}
-	if client.state != StateBroken {
-		t.Fatalf("client state after batch overflow = %d, want BROKEN", client.state)
+	if len(gotBatch) != 2 || gotBatch[0] != 2 || gotBatch[1] != 3 {
+		t.Fatalf("CallIncrementBatch after WinSHM overflow = %v, want [2 3]", gotBatch)
 	}
-
-	changed := client.Refresh()
-	if !changed || !client.Ready() {
-		t.Fatalf("Refresh after batch overflow = %v, state=%d, want READY", changed, client.state)
+	if client.state != StateReady {
+		t.Fatalf("client state after batch overflow recovery = %d, want READY", client.state)
+	}
+	if client.reconnectCount < 1 {
+		t.Fatalf("expected reconnect_count >= 1 after WinSHM batch overflow, got %d", client.reconnectCount)
 	}
 
 	got, err := client.CallIncrement(8)
 	if err != nil {
-		t.Fatalf("CallIncrement after overflow Refresh failed: %v", err)
+		t.Fatalf("CallIncrement after WinSHM overflow recovery failed: %v", err)
 	}
 	if got != 9 {
-		t.Fatalf("CallIncrement after overflow Refresh = %d, want 9", got)
+		t.Fatalf("CallIncrement after WinSHM overflow recovery = %d, want 9", got)
 	}
 }

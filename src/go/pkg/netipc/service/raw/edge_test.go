@@ -1,6 +1,6 @@
 //go:build unix
 
-package cgroups
+package raw
 
 import (
 	"testing"
@@ -19,10 +19,10 @@ func TestClientRefreshFromReady(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	defer client.Close()
 
 	client.Refresh() // DISCONNECTED -> READY
@@ -47,7 +47,13 @@ func TestClientRefreshFromAuthFailed(t *testing.T) {
 	// Server with token=1
 	sCfg := testServerConfig()
 	sCfg.AuthToken = 0x1111
-	s := NewServer(testRunDir, svc, sCfg, testHandlers())
+	s := NewServer(
+		testRunDir,
+		svc,
+		sCfg,
+		protocol.MethodCgroupsSnapshot,
+		testSnapshotDispatch(),
+	)
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
@@ -62,7 +68,7 @@ func TestClientRefreshFromAuthFailed(t *testing.T) {
 	// Client with wrong token
 	cCfg := testClientConfig()
 	cCfg.AuthToken = 0x2222
-	client := NewClient(testRunDir, svc, cCfg)
+	client := NewSnapshotClient(testRunDir, svc, cCfg)
 	defer client.Close()
 
 	client.Refresh()
@@ -87,7 +93,13 @@ func TestClientRefreshFromIncompatible(t *testing.T) {
 	// Server supports only SHMFutex
 	sCfg := testServerConfig()
 	sCfg.SupportedProfiles = protocol.ProfileSHMFutex
-	s := NewServer(testRunDir, svc, sCfg, testHandlers())
+	s := NewServer(
+		testRunDir,
+		svc,
+		sCfg,
+		protocol.MethodCgroupsSnapshot,
+		testSnapshotDispatch(),
+	)
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
@@ -102,7 +114,7 @@ func TestClientRefreshFromIncompatible(t *testing.T) {
 	// Client supports only Baseline
 	cCfg := testClientConfig()
 	cCfg.SupportedProfiles = protocol.ProfileBaseline
-	client := NewClient(testRunDir, svc, cCfg)
+	client := NewSnapshotClient(testRunDir, svc, cCfg)
 	defer client.Close()
 
 	client.Refresh()
@@ -124,9 +136,9 @@ func TestClientRefreshFromBroken(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	defer client.Close()
 
 	client.Refresh()
@@ -149,7 +161,7 @@ func TestClientRefreshFromBroken(t *testing.T) {
 	}
 
 	// Start a new server
-	ts2 := startTestServer(svc, testHandlers())
+	ts2 := startTestServer(svc, testSnapshotDispatch())
 	defer ts2.stop()
 
 	// Refresh from BROKEN should reconnect
@@ -175,7 +187,7 @@ func TestCallWithRetryNotReady(t *testing.T) {
 	svc := "go_edge_notready"
 	ensureRunDir()
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	defer client.Close()
 
 	// Don't call Refresh - client is DISCONNECTED
@@ -193,11 +205,25 @@ func TestCallWithRetryNotReady(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNewServerWithWorkersMinimum(t *testing.T) {
-	s := NewServerWithWorkers("/tmp", "test", posix.ServerConfig{}, testHandlers(), 0)
+	s := NewServerWithWorkers(
+		"/tmp",
+		"test",
+		posix.ServerConfig{},
+		protocol.MethodCgroupsSnapshot,
+		testSnapshotDispatch(),
+		0,
+	)
 	if s.workerCount != 1 {
 		t.Fatalf("expected workerCount=1 for input 0, got %d", s.workerCount)
 	}
-	s2 := NewServerWithWorkers("/tmp", "test", posix.ServerConfig{}, testHandlers(), -5)
+	s2 := NewServerWithWorkers(
+		"/tmp",
+		"test",
+		posix.ServerConfig{},
+		protocol.MethodCgroupsSnapshot,
+		testSnapshotDispatch(),
+		-5,
+	)
 	if s2.workerCount != 1 {
 		t.Fatalf("expected workerCount=1 for input -5, got %d", s2.workerCount)
 	}
@@ -284,7 +310,7 @@ func TestCacheCloseResetsState(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
 	cache := NewCache(testRunDir, svc, testClientConfig())
@@ -347,7 +373,7 @@ func TestCacheLookupHashNameMismatch(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
 	cache := NewCache(testRunDir, svc, testClientConfig())
@@ -390,7 +416,7 @@ func TestCallIncrementBatchEmpty(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewIncrementClient(testRunDir, svc, testClientConfig())
 	defer client.Close()
 
 	results, err := client.CallIncrementBatch(nil)
@@ -463,7 +489,7 @@ func TestIsProfileError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestClientStatusFresh(t *testing.T) {
-	client := NewClient(testRunDir, "nosvc", testClientConfig())
+	client := NewSnapshotClient(testRunDir, "nosvc", testClientConfig())
 	defer client.Close()
 
 	status := client.Status()

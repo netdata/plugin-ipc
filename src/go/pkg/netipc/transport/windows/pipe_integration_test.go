@@ -480,12 +480,12 @@ func TestPipeDirectionalLimitNegotiation(t *testing.T) {
 	server := sr.session
 	defer server.Close()
 
-	if client.MaxRequestPayloadBytes != 2048 || client.MaxRequestBatchItems != 8 || client.MaxResponsePayloadBytes != 4096 || client.MaxResponseBatchItems != 16 {
-		t.Fatalf("unexpected negotiated client limits: %+v", client)
-	}
-	if server.MaxRequestPayloadBytes != client.MaxRequestPayloadBytes || server.MaxResponsePayloadBytes != client.MaxResponsePayloadBytes {
-		t.Fatalf("server/client negotiation mismatch: server=%+v client=%+v", server, client)
-	}
+    if client.MaxRequestPayloadBytes != 4096 || client.MaxRequestBatchItems != 16 || client.MaxResponsePayloadBytes != 8192 || client.MaxResponseBatchItems != 32 {
+        t.Fatalf("unexpected negotiated client limits: %+v", client)
+    }
+    if server.MaxRequestPayloadBytes != client.MaxRequestPayloadBytes || server.MaxResponsePayloadBytes != client.MaxResponsePayloadBytes {
+        t.Fatalf("server/client negotiation mismatch: server=%+v client=%+v", server, client)
+    }
 }
 
 func TestPipeProfileSelection(t *testing.T) {

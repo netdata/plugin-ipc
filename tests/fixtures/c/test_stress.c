@@ -62,8 +62,7 @@ static void cleanup_all(const char *service)
     char path[256];
     snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, service);
     unlink(path);
-    snprintf(path, sizeof(path), "%s/%s.ipcshm", TEST_RUN_DIR, service);
-    unlink(path);
+    nipc_shm_cleanup_stale(TEST_RUN_DIR, service);
 }
 
 static double elapsed_ms(struct timespec *start, struct timespec *end)
@@ -92,8 +91,8 @@ typedef struct {
     size_t resp_buf_size;
 } handler_config_t;
 
-static bool large_snapshot_handler(void *user,
-    uint16_t method_code,
+static nipc_error_t large_snapshot_handler(void *user,
+    const nipc_header_t *request_hdr,
     const uint8_t *request_payload,
     size_t request_len,
     uint8_t *response_buf,
@@ -101,14 +100,12 @@ static bool large_snapshot_handler(void *user,
     size_t *response_len_out)
 {
     handler_config_t *cfg = (handler_config_t *)user;
-
-    if (method_code != NIPC_METHOD_CGROUPS_SNAPSHOT)
-        return false;
+    (void)request_hdr;
 
     nipc_cgroups_req_t req;
     nipc_error_t err = nipc_cgroups_req_decode(request_payload, request_len, &req);
     if (err != NIPC_OK)
-        return false;
+        return err;
 
     nipc_cgroups_builder_t builder;
     nipc_cgroups_builder_init(&builder, response_buf, response_buf_size,
@@ -125,11 +122,11 @@ static bool large_snapshot_handler(void *user,
             name, (uint32_t)strlen(name),
             path, (uint32_t)strlen(path));
         if (err != NIPC_OK)
-            return false;
+            return err;
     }
 
     *response_len_out = nipc_cgroups_builder_finish(&builder);
-    return true;
+    return (*response_len_out > 0) ? NIPC_OK : NIPC_ERR_OVERFLOW;
 }
 
 /* ------------------------------------------------------------------ */
@@ -167,7 +164,7 @@ static void *stress_server_thread_fn(void *arg)
 
     nipc_error_t err = nipc_server_init(&ctx->server,
         TEST_RUN_DIR, ctx->service, &scfg,
-        ctx->worker_count, ctx->resp_buf_size,
+        ctx->worker_count, NIPC_METHOD_CGROUPS_SNAPSHOT,
         ctx->handler, ctx->handler_user);
 
     if (err != NIPC_OK) {
@@ -984,7 +981,7 @@ static void *mixed_server_thread_fn(void *arg)
 
     nipc_error_t err = nipc_server_init(&ctx->server,
         TEST_RUN_DIR, ctx->service, &scfg,
-        ctx->worker_count, ctx->resp_buf_size,
+        ctx->worker_count, NIPC_METHOD_CGROUPS_SNAPSHOT,
         ctx->handler, ctx->handler_user);
 
     if (err != NIPC_OK) {

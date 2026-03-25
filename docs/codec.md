@@ -68,7 +68,7 @@ layer owns that buffer:
   and unchanged
 - Level 2 client calls:
   response views are valid until the next typed call on the same client
-  context, or until that client is closed, unless the method-specific
+  context, or until that client is closed, unless the service-kind-specific
   contract states a narrower lifetime
 - Level 2 server callbacks:
   request views and response builders are valid only for the duration of
@@ -87,13 +87,13 @@ in isolation given only its byte range. The outer envelope identifies
 where the payload starts and how long it is. The codec takes that byte
 range and decodes it without needing any other context.
 
-Each method payload has its own internal structure:
+Each payload type has its own internal structure:
 
-- A fixed method-local header with scalar fields
+- A fixed payload-local header with scalar fields
 - Offset + length pairs for variable-length fields
 - A packed variable data area
 
-The outer envelope never knows the inner method field layout. The codec
+The outer envelope never knows the inner payload field layout. The codec
 never knows about the outer envelope.
 
 ### 5. String field representation
@@ -180,12 +180,12 @@ payloads without exposing raw offset/length bookkeeping. The builder:
 - Accepts variable-length fields (strings) via set/append methods
 - Internally manages: packed variable-data placement, offset + length
   assignment, trailing NUL insertion, alignment and padding
-- Finalizes into one self-contained method payload via a finish method
+- Finalizes into one self-contained payload via a finish method
 
 Handlers interact only with semantic field names. They never compute
 offsets, manage padding, or insert NUL terminators manually.
 
-## Per-method-type contract files
+## Per-service-kind contract files
 
 Each message type gets its own specification file that defines:
 

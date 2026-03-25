@@ -94,6 +94,12 @@ directional limits:
 
 Both are rounded up to the region alignment boundary.
 
+These capacities are fixed for the lifetime of the current SHM session.
+Level 1 does not resize a mapped region in place. If higher layers later
+reconnect with larger learned limits, the new session gets a new
+`session_id`, a new SHM file, and capacities derived from that new
+handshake.
+
 ## Publication protocol
 
 SHM uses a publish/consume model with one in-flight message per
@@ -201,6 +207,10 @@ the `session_id` assigned during the handshake.
 
 The server must track all active per-session SHM regions so they can
 be cleaned up on session close and server shutdown.
+
+If a later reconnect negotiates larger capacities, the server creates a
+new SHM file for the new session instead of resizing the old file in
+place.
 
 ### Client attaches to the region
 

@@ -17,6 +17,14 @@ this specification is wrong.
   (Windows)
 - service_name: `cgroups-snapshot`
 
+Discovery and ownership model:
+
+- clients resolve `cgroups-snapshot` by service identity only
+- clients do not know which plugin/process provides it
+- the endpoint serves the `cgroups-snapshot` request kind only
+- the provider may start late, restart, or disappear; clients are expected
+  to reconnect through higher layers
+
 ## Method code
 
 The outer envelope's `code` field carries method code `2`
@@ -83,9 +91,9 @@ by per-item data.
 Total fixed snapshot header: 24 bytes.
 
 The `item_count` field is the authoritative source for the number of
-snapshot items in this response. It is internal to the method payload
+snapshot items in this response. It is internal to the snapshot payload
 and unrelated to the Level 1 outer envelope's `item_count` (which is
-always 1 for this method).
+always 1 for this service kind).
 
 ### Per-item directory
 

@@ -1282,8 +1282,41 @@ fn test_receive_payload_exceeds_limit() {
 
 #[test]
 fn test_receive_batch_count_exceeds_limit() {
+    let (fd0, fd1) = socketpair_seqpacket();
+    let mut session = test_session(fd0, Role::Client, 4096);
+    session.max_response_batch_items = 16;
+    session.inflight_ids.insert(1);
+
+    let hdr = Header {
+        magic: MAGIC_MSG,
+        version: VERSION,
+        header_len: protocol::HEADER_LEN,
+        kind: KIND_RESPONSE,
+        code: 1,
+        flags: 0,
+        transport_status: protocol::STATUS_OK,
+        payload_len: 1,
+        item_count: 17,
+        message_id: 1,
+    };
+    let mut pkt = [0u8; HEADER_SIZE + 1];
+    hdr.encode(&mut pkt[..HEADER_SIZE]);
+    pkt[HEADER_SIZE] = 0xAD;
+    raw_send(fd1, &pkt).expect("send oversized batch-count response");
+
+    let mut buf = [0u8; 64];
+    let err = session
+        .receive(&mut buf)
+        .expect_err("batch count exceeds limit");
+    assert!(matches!(err, UdsError::LimitExceeded));
+
+    unsafe { libc::close(fd1) };
+}
+
+#[test]
+fn test_directional_limit_negotiation() {
     ensure_run_dir();
-    let svc = unique_service("rs_batchmax");
+    let svc = unique_service("rs_dir_limits");
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
@@ -1292,27 +1325,20 @@ fn test_receive_batch_count_exceeds_limit() {
 
     let server_thread = thread::spawn(move || {
         let scfg = ServerConfig {
-            max_request_batch_items: 100,
-            max_response_batch_items: 100,
+            max_request_payload_bytes: 2048,
+            max_request_batch_items: 8,
+            max_response_payload_bytes: 8192,
+            max_response_batch_items: 32,
             ..default_server_config()
         };
         let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
         ready_clone.store(true, Ordering::Release);
 
-        let mut session = listener.accept().expect("accept");
-        let mut buf = [0u8; 8192];
-        let (hdr, _payload) = session.receive(&mut buf).expect("recv");
-
-        // Send response with item_count = 100 (exceeds client's limit of 16)
-        let mut resp = Header {
-            kind: protocol::KIND_RESPONSE,
-            code: hdr.code,
-            message_id: hdr.message_id,
-            item_count: 100,
-            transport_status: protocol::STATUS_OK,
-            ..Header::default()
-        };
-        session.send(&mut resp, &[]).expect("send");
+        let session = listener.accept().expect("accept");
+        assert_eq!(session.max_request_payload_bytes, 4096);
+        assert_eq!(session.max_request_batch_items, 16);
+        assert_eq!(session.max_response_payload_bytes, 8192);
+        assert_eq!(session.max_response_batch_items, 32);
     });
 
     while !ready.load(Ordering::Acquire) {
@@ -1320,23 +1346,18 @@ fn test_receive_batch_count_exceeds_limit() {
     }
 
     let ccfg = ClientConfig {
+        max_request_payload_bytes: 4096,
+        max_request_batch_items: 16,
+        max_response_payload_bytes: 4096,
         max_response_batch_items: 16,
         ..default_client_config()
     };
-    let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
+    let session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
 
-    let mut hdr = Header {
-        kind: protocol::KIND_REQUEST,
-        code: 1,
-        item_count: 1,
-        message_id: 1,
-        ..Header::default()
-    };
-    session.send(&mut hdr, &[1]).expect("send");
-
-    let mut rbuf = [0u8; 8192];
-    let result = session.receive(&mut rbuf);
-    assert!(matches!(result, Err(UdsError::LimitExceeded)));
+    assert_eq!(session.max_request_payload_bytes, 4096);
+    assert_eq!(session.max_request_batch_items, 16);
+    assert_eq!(session.max_response_payload_bytes, 8192);
+    assert_eq!(session.max_response_batch_items, 32);
 
     drop(session);
     server_thread.join().expect("server join");

@@ -51,9 +51,9 @@ func clientConfig() windows.ClientConfig {
 	}
 }
 
-func testHandlers() cgroups.Handlers {
-	return cgroups.Handlers{
-		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+func testHandler() cgroups.Handler {
+	return cgroups.Handler{
+		Handle: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
 			if request.LayoutVersion != 1 || request.Flags != 0 {
 				return false
 			}
@@ -80,7 +80,7 @@ func testHandlers() cgroups.Handlers {
 }
 
 func runServer(runDir, service string) int {
-	server := cgroups.NewServer(runDir, service, serverConfig(), testHandlers())
+	server := cgroups.NewServer(runDir, service, serverConfig(), testHandler())
 
 	fmt.Println("READY")
 

@@ -14,6 +14,23 @@ Finish the rewrite to a production-ready state with:
 - The rewrite itself is in good shape. Linux is green, Windows tests are green, and POSIX/Windows benchmark floors are green.
 - The Windows benchmark blocker is now explained and fixed with concrete evidence. The remaining work is not about core correctness regressions. It is about coverage completeness, coverage-threshold raising, Windows validation parity, and one deferred Windows managed-server stress investigation.
 
+## Architecture Correction
+
+- The intended public model is service-oriented, not plugin-oriented.
+- Clients connect to a service kind, not to a specific plugin/process.
+- One service endpoint serves one request kind only.
+- Examples of service kinds:
+  - `cgroups-snapshot`
+  - `ip-to-asn`
+  - `pid-traffic`
+- Startup order is intentionally asynchronous:
+  - providers may start late
+  - providers may restart or disappear
+  - enrichments are optional
+  - clients must tolerate absence and reconnect from their normal loop
+- The current generic multi-method server surface is now known design drift
+  and must be corrected before Netdata integration.
+
 ## Current Focus (2026-03-24)
 
 - user decision:
@@ -3042,7 +3059,7 @@ Required next work:
            - atomic-load bounds failures after a successful `Mmap`
            - `ShmClientAttach()` `Dup` / `Mmap` / `Stat` failure branches
      - immediate follow-up after the SHM slice:
-       - move the tiny `Handlers.snapshotMaxItems()` coverage from the Windows-only test file into a shared Go test file so Linux covers `service/cgroups/types.go` too
+       - move the tiny `Handler.snapshotMaxItems()` coverage from the Windows-only test file into a shared Go test file so Linux covers `service/cgroups/types.go` too
        - status:
          - completed
          - `service/cgroups/types.go` is now `100.0%`

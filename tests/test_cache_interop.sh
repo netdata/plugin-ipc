@@ -97,7 +97,7 @@ run_test() {
 
     # Clean any stale socket/shm
     rm -f "${RUN_DIR}/${service}.sock"
-    rm -f "${RUN_DIR}/${service}.ipcshm"
+    rm -f "${RUN_DIR}/${service}-"*.ipcshm
 
     # Start server in background, wait for READY
     local server_pid

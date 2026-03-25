@@ -1,6 +1,6 @@
 //go:build unix
 
-package cgroups
+package raw
 
 import (
 	"errors"
@@ -25,11 +25,16 @@ func testUnixShmClientConfig() posix.ClientConfig {
 	return cfg
 }
 
-func startTestServerUnixWithConfig(service string, cfg posix.ServerConfig, handlers Handlers) *testServer {
+func startTestServerUnixWithConfig(
+	service string,
+	cfg posix.ServerConfig,
+	expectedMethodCode uint16,
+	handler DispatchHandler,
+) *testServer {
 	ensureRunDir()
 	cleanupAll(service)
 
-	s := NewServer(testRunDir, service, cfg, handlers)
+	s := NewServer(testRunDir, service, cfg, expectedMethodCode, handler)
 	doneCh := make(chan struct{})
 
 	go func() {
@@ -87,10 +92,15 @@ func encodeUnixIncrementBatchPayload(t *testing.T, values ...uint64) []byte {
 
 func TestUnixShmRoundTrip(t *testing.T) {
 	svc := uniqueUnixService("go_unix_shm_roundtrip")
-	ts := startTestServerUnixWithConfig(svc, testUnixShmServerConfig(), pingPongHandlers())
+	ts := startTestServerUnixWithConfig(
+		svc,
+		testUnixShmServerConfig(),
+		protocol.MethodIncrement,
+		pingPongIncrementDispatch(),
+	)
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	client := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
 	defer client.Close()
 
 	refreshUnixClientReady(t, client)
@@ -138,7 +148,7 @@ func TestUnixShmAttachFailureLeavesClientDisconnected(t *testing.T) {
 		doneCh <- err
 	}()
 
-	client := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	client := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
 	defer client.Close()
 
 	if changed := client.Refresh(); changed {
@@ -310,10 +320,15 @@ func TestUnixCallIncrementBatchShmRejectsMalformedPayload(t *testing.T) {
 
 func TestUnixShmMalformedBatchRequestRecovers(t *testing.T) {
 	svc := uniqueUnixService("go_unix_shm_bad_batch")
-	ts := startTestServerUnixWithConfig(svc, testUnixShmServerConfig(), pingPongHandlers())
+	ts := startTestServerUnixWithConfig(
+		svc,
+		testUnixShmServerConfig(),
+		protocol.MethodIncrement,
+		pingPongIncrementDispatch(),
+	)
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	client := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
 	defer client.Close()
 
 	refreshUnixClientReady(t, client)
@@ -351,10 +366,15 @@ func TestUnixShmMalformedBatchRequestRecovers(t *testing.T) {
 
 func TestUnixShmShortRequestKeepsServerHealthy(t *testing.T) {
 	svc := uniqueUnixService("go_unix_shm_short_req")
-	ts := startTestServerUnixWithConfig(svc, testUnixShmServerConfig(), pingPongHandlers())
+	ts := startTestServerUnixWithConfig(
+		svc,
+		testUnixShmServerConfig(),
+		protocol.MethodIncrement,
+		pingPongIncrementDispatch(),
+	)
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	client := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
 	defer client.Close()
 	refreshUnixClientReady(t, client)
 
@@ -367,7 +387,7 @@ func TestUnixShmShortRequestKeepsServerHealthy(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	verify := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	verify := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
 	defer verify.Close()
 	refreshUnixClientReady(t, verify)
 
@@ -382,10 +402,15 @@ func TestUnixShmShortRequestKeepsServerHealthy(t *testing.T) {
 
 func TestUnixShmBadHeaderKeepsServerHealthy(t *testing.T) {
 	svc := uniqueUnixService("go_unix_shm_bad_header")
-	ts := startTestServerUnixWithConfig(svc, testUnixShmServerConfig(), pingPongHandlers())
+	ts := startTestServerUnixWithConfig(
+		svc,
+		testUnixShmServerConfig(),
+		protocol.MethodIncrement,
+		pingPongIncrementDispatch(),
+	)
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	client := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
 	defer client.Close()
 	refreshUnixClientReady(t, client)
 
@@ -399,7 +424,7 @@ func TestUnixShmBadHeaderKeepsServerHealthy(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	verify := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	verify := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
 	defer verify.Close()
 	refreshUnixClientReady(t, verify)
 
@@ -414,18 +439,21 @@ func TestUnixShmBadHeaderKeepsServerHealthy(t *testing.T) {
 
 func TestUnixShmBatchHandlerFailureNeedsRefresh(t *testing.T) {
 	svc := uniqueUnixService("go_unix_shm_batch_fail")
-	handlers := Handlers{
-		OnIncrement: func(v uint64) (uint64, bool) {
-			if v == 99 {
-				return 0, false
-			}
-			return v + 1, true
-		},
-	}
-	ts := startTestServerUnixWithConfig(svc, testUnixShmServerConfig(), handlers)
+	handler := IncrementDispatch(func(v uint64) (uint64, bool) {
+		if v == 99 {
+			return 0, false
+		}
+		return v + 1, true
+	})
+	ts := startTestServerUnixWithConfig(
+		svc,
+		testUnixShmServerConfig(),
+		protocol.MethodIncrement,
+		handler,
+	)
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, testUnixShmClientConfig())
+	client := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
 	defer client.Close()
 
 	refreshUnixClientReady(t, client)
@@ -452,7 +480,7 @@ func TestUnixShmBatchHandlerFailureNeedsRefresh(t *testing.T) {
 	}
 }
 
-func TestUnixShmBatchResponseOverflowNeedsRefresh(t *testing.T) {
+func TestUnixShmBatchResponseOverflowRetriesAndRecovers(t *testing.T) {
 	svc := uniqueUnixService("go_unix_shm_batch_overflow")
 
 	scfg := testUnixShmServerConfig()
@@ -463,36 +491,40 @@ func TestUnixShmBatchResponseOverflowNeedsRefresh(t *testing.T) {
 	ccfg.MaxResponseBatchItems = 2
 	ccfg.MaxRequestBatchItems = 2
 
-	ts := startTestServerUnixWithConfig(svc, scfg, Handlers{
-		OnIncrement: func(v uint64) (uint64, bool) {
+	ts := startTestServerUnixWithConfig(
+		svc,
+		scfg,
+		protocol.MethodIncrement,
+		IncrementDispatch(func(v uint64) (uint64, bool) {
 			return v + 1, true
-		},
-	})
+		}),
+	)
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, ccfg)
+	client := NewIncrementClient(testRunDir, svc, ccfg)
 	defer client.Close()
 
 	refreshUnixClientReady(t, client)
 
-	_, err := client.CallIncrementBatch([]uint64{1, 2})
-	if !errors.Is(err, protocol.ErrBadLayout) {
-		t.Fatalf("CallIncrementBatch overflow = %v, want %v", err, protocol.ErrBadLayout)
+	gotBatch, err := client.CallIncrementBatch([]uint64{1, 2})
+	if err != nil {
+		t.Fatalf("CallIncrementBatch after SHM overflow failed: %v", err)
 	}
-	if client.state != StateBroken {
-		t.Fatalf("client state after batch overflow = %d, want BROKEN", client.state)
+	if len(gotBatch) != 2 || gotBatch[0] != 2 || gotBatch[1] != 3 {
+		t.Fatalf("CallIncrementBatch after SHM overflow = %v, want [2 3]", gotBatch)
 	}
-
-	changed := client.Refresh()
-	if !changed || !client.Ready() {
-		t.Fatalf("Refresh after batch overflow = %v, state=%d, want READY", changed, client.state)
+	if client.state != StateReady {
+		t.Fatalf("client state after batch overflow recovery = %d, want READY", client.state)
+	}
+	if client.reconnectCount < 1 {
+		t.Fatalf("expected reconnect_count >= 1 after SHM batch overflow, got %d", client.reconnectCount)
 	}
 
 	got, err := client.CallIncrement(8)
 	if err != nil {
-		t.Fatalf("CallIncrement after overflow Refresh failed: %v", err)
+		t.Fatalf("CallIncrement after SHM overflow recovery failed: %v", err)
 	}
 	if got != 9 {
-		t.Fatalf("CallIncrement after overflow Refresh = %d, want 9", got)
+		t.Fatalf("CallIncrement after SHM overflow recovery = %d, want 9", got)
 	}
 }

@@ -130,6 +130,7 @@ typedef enum {
     RAW_RESP_SHORT_PACKET = 1,
     RAW_RESP_BAD_BATCH_DIR_SHORT,
     RAW_RESP_SHORT_CONTINUATION,
+    RAW_RESP_PAYLOAD_EXCEEDED,
     RAW_RESP_BATCH_COUNT_EXCEEDED,
     RAW_RESP_BAD_CONTINUATION_HEADER,
     RAW_RESP_MISSING_CONTINUATION,
@@ -409,6 +410,24 @@ static void *raw_response_server_thread(void *arg)
 
                 uint8_t short_chunk[8] = {0};
                 send(session.fd, short_chunk, sizeof(short_chunk), MSG_NOSIGNAL);
+                break;
+            }
+            case RAW_RESP_PAYLOAD_EXCEEDED: {
+                uint8_t pkt[NIPC_HEADER_LEN + 1] = {0};
+                nipc_header_t resp = {
+                    .magic = NIPC_MAGIC_MSG,
+                    .version = NIPC_VERSION,
+                    .header_len = NIPC_HEADER_LEN,
+                    .kind = NIPC_KIND_RESPONSE,
+                    .code = hdr.code,
+                    .item_count = 1,
+                    .message_id = hdr.message_id,
+                    .transport_status = NIPC_STATUS_OK,
+                    .payload_len = session.max_response_payload_bytes + 1,
+                };
+                pkt[NIPC_HEADER_LEN] = 0xAC;
+                nipc_header_encode(&resp, pkt, sizeof(pkt));
+                send(session.fd, pkt, sizeof(pkt), MSG_NOSIGNAL);
                 break;
             }
             case RAW_RESP_BATCH_COUNT_EXCEEDED: {
@@ -1872,21 +1891,16 @@ static void test_inflight_duplicate(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Coverage: receive with payload exceeding negotiated limit           */
+/*  Coverage: directional request/response negotiation                 */
 /* ------------------------------------------------------------------ */
 
 static void *oversized_server(void *arg)
 {
     server_ctx_t *ctx = (server_ctx_t *)arg;
 
-    /* Server with small max response but will send large payload */
-    nipc_uds_server_config_t scfg = ctx->config;
-    scfg.max_response_payload_bytes = 65536;
-    scfg.max_request_payload_bytes = 65536;
-
     nipc_uds_listener_t listener;
     nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
-                                             &scfg, &listener);
+                                           &ctx->config, &listener);
     if (err != NIPC_UDS_OK) {
         __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
         return NULL;
@@ -1896,7 +1910,7 @@ static void *oversized_server(void *arg)
     nipc_uds_session_t session;
     err = nipc_uds_accept(&listener, 1, &session);
     if (err == NIPC_UDS_OK) {
-        /* Read one request, then send response with payload_len > client's limit */
+        /* Read one request, then send a large response that fits the server-advertised limit. */
         uint8_t buf[4096];
         nipc_header_t hdr;
         const void *payload;
@@ -1911,7 +1925,6 @@ static void *oversized_server(void *arg)
             resp.message_id = hdr.message_id;
             resp.item_count = 1;
             resp.transport_status = NIPC_STATUS_OK;
-            /* Send a payload larger than client's max_response_payload_bytes */
             uint8_t big[2048];
             memset(big, 0xBB, sizeof(big));
             nipc_uds_send(&session, &resp, big, sizeof(big));
@@ -1923,9 +1936,9 @@ static void *oversized_server(void *arg)
     return NULL;
 }
 
-static void test_receive_exceeds_limit(void)
+static void test_directional_limit_negotiation(void)
 {
-    printf("Test: Receive with payload exceeding negotiated limit\n");
+    printf("Test: Directional request/response negotiation\n");
     const char *svc = "test_exceed_limit";
     cleanup_socket(svc);
 
@@ -1934,7 +1947,9 @@ static void test_receive_exceeds_limit(void)
         .config  = default_server_config(),
     };
     sctx.config.max_response_payload_bytes = 65536;
-    sctx.config.max_request_payload_bytes = 65536;
+    sctx.config.max_response_batch_items = 32;
+    sctx.config.max_request_payload_bytes = 128;
+    sctx.config.max_request_batch_items = 8;
     __atomic_store_n(&sctx.ready, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&sctx.done, 0, __ATOMIC_RELAXED);
 
@@ -1947,15 +1962,26 @@ static void test_receive_exceeds_limit(void)
         usleep(500);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
-    /* Client with small max_response */
+    /* Client requests large request capacity but advertises small response capacity. */
     nipc_uds_client_config_t ccfg = default_client_config();
-    ccfg.max_response_payload_bytes = 128; /* small limit */
     ccfg.max_request_payload_bytes = 65536;
+    ccfg.max_request_batch_items = 16;
+    ccfg.max_response_payload_bytes = 128;
+    ccfg.max_response_batch_items = 16;
     nipc_uds_session_t session;
     nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
     check("connect", err == NIPC_UDS_OK);
 
     if (err == NIPC_UDS_OK) {
+        check("request payload uses sender-driven size",
+              session.max_request_payload_bytes == 65536);
+        check("request batch uses sender-driven size",
+              session.max_request_batch_items == 16);
+        check("response payload uses server-driven size",
+              session.max_response_payload_bytes == 65536);
+        check("response batch uses server-driven size",
+              session.max_response_batch_items == 32);
+
         /* Send a request */
         nipc_header_t hdr = {0};
         hdr.kind = NIPC_KIND_REQUEST;
@@ -1971,9 +1997,72 @@ static void test_receive_exceeds_limit(void)
         const void *rpay;
         size_t rpay_len;
         nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
-                                                    &resp_hdr, &rpay, &rpay_len);
-        check("oversized response rejected",
-              rerr == NIPC_UDS_ERR_LIMIT_EXCEEDED);
+                                                 &resp_hdr, &rpay, &rpay_len);
+        check("large server-driven response accepted", rerr == NIPC_UDS_OK);
+        if (rerr == NIPC_UDS_OK) {
+            check("response payload length", rpay_len == 2048);
+            check("response payload byte", ((const uint8_t *)rpay)[0] == 0xBB);
+        }
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+static void test_receive_payload_exceeds_limit(void)
+{
+    printf("Test: Receive rejects response payload over limit\n");
+    const char *svc = "test_payload_over_limit";
+    cleanup_socket(svc);
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    scfg.max_response_payload_bytes = 4096;
+
+    raw_response_server_ctx_t sctx = {
+        .service = svc,
+        .config = scfg,
+        .mode = RAW_RESP_PAYLOAD_EXCEEDED,
+        .ready = 0,
+        .done = 0,
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("raw-response server ready",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = 7003,
+        };
+        uint8_t payload[] = { 0xAE };
+        nipc_uds_error_t serr = nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+        check("send request ok", serr == NIPC_UDS_OK);
+
+        if (serr == NIPC_UDS_OK) {
+            uint8_t buf[4096];
+            nipc_header_t resp_hdr;
+            const void *resp_payload;
+            size_t resp_payload_len;
+            nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                     &resp_hdr, &resp_payload, &resp_payload_len);
+            check("response payload over limit rejected", rerr == NIPC_UDS_ERR_LIMIT_EXCEEDED);
+        }
 
         nipc_uds_close_session(&session);
     }
@@ -2741,7 +2830,8 @@ int main(void)
     /* Coverage gap tests */
     test_handshake_wrong_kind();   printf("\n");
     test_inflight_duplicate();     printf("\n");
-    test_receive_exceeds_limit();  printf("\n");
+    test_directional_limit_negotiation();  printf("\n");
+    test_receive_payload_exceeds_limit(); printf("\n");
     test_receive_unknown_message_id(); printf("\n");
     test_stale_live_server();      printf("\n");
     test_listen_bind_failure();    printf("\n");

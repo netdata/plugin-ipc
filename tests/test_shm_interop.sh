@@ -92,7 +92,7 @@ run_test() {
     echo -n "  $name ... "
 
     # Clean any stale SHM file
-    rm -f "${RUN_DIR}/${service}.ipcshm"
+    rm -f "${RUN_DIR}/${service}-"*.ipcshm
 
     # Start server in background, wait for READY
     local server_pid

@@ -3,7 +3,7 @@
  *
  * Focus:
  *   1. protocol-violation session termination on malformed outer headers
- *   2. typed server validation of required handler tables
+ *   2. typed server validation of the snapshot service contract
  *   3. internal session table growth path under NIPC_INTERNAL_TESTING
  *   4. cache refresh failure on malformed snapshot responses
  *
@@ -52,8 +52,7 @@ static void cleanup_all(const char *service)
     char path[256];
     snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, service);
     unlink(path);
-    snprintf(path, sizeof(path), "%s/%s.ipcshm", TEST_RUN_DIR, service);
-    unlink(path);
+    nipc_shm_cleanup_stale(TEST_RUN_DIR, service);
 }
 
 static nipc_uds_server_config_t default_server_config(void)
@@ -83,32 +82,6 @@ static nipc_uds_client_config_t default_client_config(void)
         .auth_token = AUTH_TOKEN,
         .packet_size = 0,
     };
-}
-
-static bool typed_increment_handler(void *user, uint64_t delta, uint64_t *new_val)
-{
-    (void)user;
-    *new_val = delta + 1;
-    return true;
-}
-
-static bool typed_string_reverse_handler(void *user,
-                                         const char *str,
-                                         uint32_t str_len,
-                                         char *resp_buf,
-                                         uint32_t resp_capacity,
-                                         uint32_t *resp_len)
-{
-    (void)user;
-
-    if (str_len > resp_capacity)
-        return false;
-
-    for (uint32_t i = 0; i < str_len; i++)
-        resp_buf[i] = str[str_len - 1 - i];
-
-    *resp_len = str_len;
-    return true;
 }
 
 static bool typed_snapshot_handler(void *user,
@@ -146,10 +119,8 @@ static bool typed_snapshot_handler(void *user,
     return true;
 }
 
-static nipc_cgroups_handlers_t g_typed_handlers = {
-    .on_increment = typed_increment_handler,
-    .on_string_reverse = typed_string_reverse_handler,
-    .on_cgroups_snapshot = typed_snapshot_handler,
+static nipc_cgroups_service_handler_t g_service_handler = {
+    .handle = typed_snapshot_handler,
     .snapshot_max_items = 3,
     .user = NULL,
 };
@@ -159,7 +130,7 @@ typedef struct {
     int worker_count;
     size_t response_buf_size;
     bool typed;
-    const nipc_cgroups_handlers_t *typed_handlers;
+    const nipc_cgroups_service_handler_t *service_handler;
     nipc_server_handler_fn raw_handler;
     void *raw_user;
     nipc_managed_server_t server;
@@ -177,10 +148,11 @@ static void *server_thread_fn(void *arg)
 
     if (ctx->typed) {
         err = nipc_server_init_typed(&ctx->server, TEST_RUN_DIR, ctx->service,
-                                     &scfg, ctx->worker_count, ctx->typed_handlers);
+                                     &scfg, ctx->worker_count, ctx->service_handler);
     } else {
         err = nipc_server_init(&ctx->server, TEST_RUN_DIR, ctx->service,
-                               &scfg, ctx->worker_count, ctx->response_buf_size,
+                               &scfg, ctx->worker_count,
+                               NIPC_METHOD_CGROUPS_SNAPSHOT,
                                ctx->raw_handler, ctx->raw_user);
     }
 
@@ -208,7 +180,7 @@ static void start_typed_server(server_thread_ctx_t *ctx,
     ctx->worker_count = worker_count;
     ctx->response_buf_size = response_buf_size;
     ctx->typed = true;
-    ctx->typed_handlers = &g_typed_handlers;
+    ctx->service_handler = &g_service_handler;
     __atomic_store_n(&ctx->ready, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&ctx->done, 0, __ATOMIC_RELAXED);
 
@@ -223,11 +195,11 @@ static void start_typed_server(server_thread_ctx_t *ctx,
     }
 }
 
-static void start_typed_server_with_handlers(server_thread_ctx_t *ctx,
+static void start_typed_server_with_service_handler(server_thread_ctx_t *ctx,
                                              const char *service,
                                              int worker_count,
                                              size_t response_buf_size,
-                                             const nipc_cgroups_handlers_t *handlers,
+                                             const nipc_cgroups_service_handler_t *service_handler,
                                              pthread_t *tid)
 {
     memset(ctx, 0, sizeof(*ctx));
@@ -235,7 +207,7 @@ static void start_typed_server_with_handlers(server_thread_ctx_t *ctx,
     ctx->worker_count = worker_count;
     ctx->response_buf_size = response_buf_size;
     ctx->typed = true;
-    ctx->typed_handlers = handlers;
+    ctx->service_handler = service_handler;
     __atomic_store_n(&ctx->ready, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&ctx->done, 0, __ATOMIC_RELAXED);
 
@@ -348,7 +320,7 @@ static void run_bad_header_session_test(const char *service,
         bad_hdr.version = bad_version;
         bad_hdr.header_len = NIPC_HEADER_LEN;
         bad_hdr.kind = NIPC_KIND_REQUEST;
-        bad_hdr.code = NIPC_METHOD_INCREMENT;
+        bad_hdr.code = NIPC_METHOD_CGROUPS_SNAPSHOT;
         bad_hdr.flags = 0;
         bad_hdr.item_count = 1;
         bad_hdr.payload_len = 0;
@@ -399,126 +371,84 @@ static void test_bad_version_terminates_only_the_bad_session(void)
                                 NIPC_MAGIC_MSG, 99);
 }
 
-static void test_typed_server_rejects_null_handlers(void)
+static void test_typed_server_rejects_null_service_handler(void)
 {
-    printf("--- Typed server rejects NULL handler table ---\n");
+    printf("--- Typed server rejects NULL service handler ---\n");
 
     nipc_managed_server_t server;
     nipc_uds_server_config_t scfg = default_server_config();
     nipc_error_t err = nipc_server_init_typed(&server, TEST_RUN_DIR,
-                                              "hard_null_handlers", &scfg,
+                                              "hard_null_service_handler", &scfg,
                                               1, NULL);
-    check("typed init rejects NULL handlers", err == NIPC_ERR_BAD_LAYOUT);
-    cleanup_all("hard_null_handlers");
+    check("typed init rejects NULL service handler", err == NIPC_ERR_BAD_LAYOUT);
+    cleanup_all("hard_null_service_handler");
 }
 
-static void test_typed_server_missing_method_handlers(void)
+static void test_typed_server_missing_snapshot_handler(void)
 {
-    printf("--- Typed server reports missing method handlers as INTERNAL_ERROR ---\n");
+    printf("--- Typed server rejects snapshot calls when the snapshot handler is missing ---\n");
 
-    const char *svc = "hard_missing_handlers";
+    const char *svc = "hard_missing_snapshot_handler";
     server_thread_ctx_t sctx;
     pthread_t server_tid;
     nipc_uds_client_config_t ccfg = default_client_config();
-    nipc_cgroups_handlers_t handlers = {
-        .on_increment = NULL,
-        .on_string_reverse = NULL,
-        .on_cgroups_snapshot = NULL,
+    nipc_cgroups_service_handler_t service_handler = {
+        .handle = NULL,
         .snapshot_max_items = 0,
         .user = NULL,
     };
 
     cleanup_all(svc);
-    start_typed_server_with_handlers(&sctx, svc, 2, RESPONSE_BUF_SIZE,
-                                     &handlers, &server_tid);
-    check("missing handlers: server started",
+    start_typed_server_with_service_handler(&sctx, svc, 2, RESPONSE_BUF_SIZE,
+                                            &service_handler, &server_tid);
+    check("missing service handler: server started",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     {
-        nipc_client_ctx_t client;
-        uint64_t value = 0;
-        nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
-        nipc_client_refresh(&client);
-        check("missing handlers: increment client ready", nipc_client_ready(&client));
-        if (nipc_client_ready(&client)) {
-            nipc_error_t err = nipc_client_call_increment(&client, 7, &value);
-            check("missing handlers: increment returns BAD_LAYOUT",
-                  err == NIPC_ERR_BAD_LAYOUT);
-        }
-        nipc_client_close(&client);
+    nipc_client_ctx_t client;
+    nipc_cgroups_resp_view_t view;
+    nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+    nipc_client_refresh(&client);
+    check("missing handler: snapshot client ready", nipc_client_ready(&client));
+    if (nipc_client_ready(&client)) {
+        nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
+        check("missing handler: snapshot returns BAD_LAYOUT",
+              err == NIPC_ERR_BAD_LAYOUT);
     }
-
-    {
-        nipc_client_ctx_t client;
-        nipc_string_reverse_view_t view;
-        nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
-        nipc_client_refresh(&client);
-        check("missing handlers: string client ready", nipc_client_ready(&client));
-        if (nipc_client_ready(&client)) {
-            nipc_error_t err = nipc_client_call_string_reverse(&client, "hello", 5, &view);
-            check("missing handlers: string returns BAD_LAYOUT",
-                  err == NIPC_ERR_BAD_LAYOUT);
-        }
-        nipc_client_close(&client);
-    }
-
-    {
-        nipc_client_ctx_t client;
-        nipc_cgroups_resp_view_t view;
-        nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
-        nipc_client_refresh(&client);
-        check("missing handlers: snapshot client ready", nipc_client_ready(&client));
-        if (nipc_client_ready(&client)) {
-            nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
-            check("missing handlers: snapshot returns BAD_LAYOUT",
-                  err == NIPC_ERR_BAD_LAYOUT);
-        }
-        nipc_client_close(&client);
+    nipc_client_close(&client);
     }
 
     stop_server(&sctx, server_tid);
     cleanup_all(svc);
 }
 
-static void test_typed_server_dispatches_supported_methods(void)
+static void test_typed_server_dispatches_snapshot_service(void)
 {
-    printf("--- Typed server dispatches supported methods through typed wrappers ---\n");
+    printf("--- Typed server dispatches the snapshot service through the typed wrapper ---\n");
 
-    const char *svc = "hard_typed_dispatch";
+    const char *svc = "hard_typed_snapshot_dispatch";
     server_thread_ctx_t sctx;
     pthread_t server_tid;
     nipc_uds_client_config_t ccfg = default_client_config();
-    nipc_cgroups_handlers_t handlers = g_typed_handlers;
+    nipc_cgroups_service_handler_t service_handler = g_service_handler;
     nipc_client_ctx_t client;
-    nipc_string_reverse_view_t str_view;
     nipc_cgroups_resp_view_t snap_view;
-    uint64_t inc_value = 0;
 
-    handlers.snapshot_max_items = 0; /* force the default estimate path */
+    service_handler.snapshot_max_items = 0; /* force the default estimate path */
 
     cleanup_all(svc);
-    start_typed_server_with_handlers(&sctx, svc, 2, RESPONSE_BUF_SIZE,
-                                     &handlers, &server_tid);
+    start_typed_server_with_service_handler(&sctx, svc, 2, RESPONSE_BUF_SIZE,
+                                            &service_handler, &server_tid);
     check("typed dispatch: server started",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
     nipc_client_refresh(&client);
-    check("typed dispatch: client ready", nipc_client_ready(&client));
+    check("typed snapshot dispatch: client ready", nipc_client_ready(&client));
 
     if (nipc_client_ready(&client)) {
-        nipc_error_t err = nipc_client_call_increment(&client, 9, &inc_value);
-        check("typed dispatch: increment succeeds",
-              err == NIPC_OK && inc_value == 10);
-
-        err = nipc_client_call_string_reverse(&client, "stressed", 8, &str_view);
-        check("typed dispatch: string succeeds",
-              err == NIPC_OK &&
-              str_view.str_len == 8 &&
-              memcmp(str_view.str, "desserts", 8) == 0);
-
-        err = nipc_client_call_cgroups_snapshot(&client, &snap_view);
-        check("typed dispatch: snapshot succeeds",
+        nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &snap_view);
+        check("typed snapshot dispatch: snapshot succeeds",
               err == NIPC_OK &&
               snap_view.item_count == 3 &&
               snap_view.systemd_enabled == 0 &&
@@ -530,9 +460,9 @@ static void test_typed_server_dispatches_supported_methods(void)
     cleanup_all(svc);
 }
 
-static void test_typed_server_unknown_method_returns_internal_error(void)
+static void test_typed_server_unknown_method_returns_unsupported(void)
 {
-    printf("--- Typed server maps unknown method codes to INTERNAL_ERROR ---\n");
+    printf("--- Typed server rejects unexpected request kinds with UNSUPPORTED ---\n");
 
     const char *svc = "hard_typed_unknown";
     server_thread_ctx_t sctx;
@@ -571,8 +501,8 @@ static void test_typed_server_unknown_method_returns_internal_error(void)
           resp_hdr.kind == NIPC_KIND_RESPONSE);
     check("typed unknown: response code preserved",
           resp_hdr.code == req_hdr.code);
-    check("typed unknown: response status INTERNAL_ERROR",
-          resp_hdr.transport_status == NIPC_STATUS_INTERNAL_ERROR);
+    check("typed unknown: response status UNSUPPORTED",
+          resp_hdr.transport_status == NIPC_STATUS_UNSUPPORTED);
     check("typed unknown: empty payload",
           payload_len == 0);
 
@@ -590,7 +520,7 @@ static void test_typed_server_init_propagates_raw_init_error(void)
     nipc_error_t err = nipc_server_init_typed(&server,
                                               "/tmp/nipc_missing_parent_99999",
                                               "hard_typed_init_fail",
-                                              &scfg, 1, &g_typed_handlers);
+                                              &scfg, 1, &g_service_handler);
     check("typed init returns raw BAD_LAYOUT on listen failure",
           err == NIPC_ERR_BAD_LAYOUT);
 }
@@ -612,7 +542,7 @@ static void test_internal_session_table_growth(void)
     cleanup_all(svc);
 
     err = nipc_server_init_typed(&server, TEST_RUN_DIR, svc, &scfg, 4,
-                                 &g_typed_handlers);
+                                 &g_service_handler);
     check("growth: server init", err == NIPC_OK);
     if (err != NIPC_OK)
         return;
@@ -661,23 +591,21 @@ static void test_internal_session_table_growth(void)
     cleanup_all(svc);
 }
 
-static bool malformed_snapshot_handler(void *user,
-                                       uint16_t method_code,
-                                       const uint8_t *request_payload,
-                                       size_t request_len,
-                                       uint8_t *response_buf,
-                                       size_t response_buf_size,
-                                       size_t *response_len_out)
+static nipc_error_t malformed_snapshot_handler(void *user,
+                                               const nipc_header_t *request_hdr,
+                                               const uint8_t *request_payload,
+                                               size_t request_len,
+                                               uint8_t *response_buf,
+                                               size_t response_buf_size,
+                                               size_t *response_len_out)
 {
     (void)user;
-
-    if (method_code != NIPC_METHOD_CGROUPS_SNAPSHOT)
-        return false;
+    (void)request_hdr;
 
     nipc_cgroups_req_t req;
     nipc_error_t err = nipc_cgroups_req_decode(request_payload, request_len, &req);
     if (err != NIPC_OK)
-        return false;
+        return err;
 
     nipc_cgroups_builder_t builder;
     nipc_cgroups_builder_init(&builder, response_buf, response_buf_size, 1, 1, 77);
@@ -687,11 +615,11 @@ static bool malformed_snapshot_handler(void *user,
                                    "malformed", 9,
                                    "/sys/fs/cgroup/malformed", 25);
     if (err != NIPC_OK)
-        return false;
+        return err;
 
     *response_len_out = nipc_cgroups_builder_finish(&builder);
     if (*response_len_out == 0)
-        return false;
+        return builder.error ? builder.error : NIPC_ERR_HANDLER_FAILED;
 
     /* Corrupt name_offset inside the first item so outer decode succeeds,
      * but per-item decode fails inside cache_build_items(). Layout:
@@ -702,7 +630,7 @@ static bool malformed_snapshot_handler(void *user,
         memcpy(response_buf + item_start + 16, &bad_name_offset, sizeof(bad_name_offset));
     }
 
-    return true;
+    return NIPC_OK;
 }
 
 static void test_cache_refresh_rejects_malformed_snapshot(void)
@@ -752,16 +680,16 @@ int main(void)
     test_bad_version_terminates_only_the_bad_session();
     printf("\n");
 
-    test_typed_server_rejects_null_handlers();
+    test_typed_server_rejects_null_service_handler();
     printf("\n");
 
-    test_typed_server_missing_method_handlers();
+    test_typed_server_missing_snapshot_handler();
     printf("\n");
 
-    test_typed_server_dispatches_supported_methods();
+    test_typed_server_dispatches_snapshot_service();
     printf("\n");
 
-    test_typed_server_unknown_method_returns_internal_error();
+    test_typed_server_unknown_method_returns_unsupported();
     printf("\n");
 
     test_typed_server_init_propagates_raw_init_error();

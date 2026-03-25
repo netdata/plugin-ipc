@@ -112,6 +112,13 @@ Initialize does NOT connect and does NOT require the server to be
 running. The underlying Level 2 client context is created in
 DISCONNECTED state.
 
+Important service model:
+
+- the helper binds to a service kind such as `cgroups-snapshot`
+- it does not care which plugin/process provides that service
+- snapshot enrichments are optional by design
+- startup order is not guaranteed
+
 ### Refresh
 
 The caller calls refresh periodically from its own loop. Refresh:
@@ -129,9 +136,19 @@ The caller calls refresh periodically from its own loop. Refresh:
    - Disconnects the Level 2 context (so the next refresh will
      attempt reconnection)
 
-Refresh will reconnect and retry once if previously READY (inherited from Level 2's
-at-least-once semantics). If the retry also fails, the previous cache
-is preserved.
+Refresh will reconnect and retry if previously READY (inherited from
+Level 2's at-least-once semantics). On ordinary failures this is one
+reconnect attempt. On overflow-driven resize recovery it may reconnect
+more than once while negotiated capacities grow. If recovery still
+fails, the previous cache is preserved.
+
+This is intentional:
+
+- providers may start late
+- providers may restart
+- providers may be unavailable for long periods
+- the consumer keeps operating with its previous cache or empty state until the
+  service becomes available
 
 ### Ready
 
@@ -196,6 +213,8 @@ If the server restarts or the connection breaks:
 5. If reconnection or refresh fails, the previous cache is preserved
 
 The consumer never loses its cache due to a transient server restart.
+The consumer also does not care which plugin/process now provides the
+service, as long as the same service contract is available again.
 
 ## Error handling summary
 

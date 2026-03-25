@@ -1,6 +1,6 @@
 //go:build unix
 
-package cgroups
+package raw
 
 import (
 	"fmt"
@@ -23,31 +23,28 @@ func simpleHash(s string) uint32 {
 }
 
 // largeHandler builds a snapshot with N items (realistic container names).
-func largeHandler(n int) Handlers {
-	return Handlers{
-		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
-			if request.LayoutVersion != 1 || request.Flags != 0 {
+func largeHandler(n int) DispatchHandler {
+	return SnapshotDispatch(func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+		if request.LayoutVersion != 1 || request.Flags != 0 {
+			return false
+		}
+		builder.SetHeader(1, 42)
+
+		for i := 0; i < n; i++ {
+			name := fmt.Sprintf("container-%04d", i)
+			path := fmt.Sprintf("/sys/fs/cgroup/docker/%04d", i)
+			hash := simpleHash(name)
+			enabled := uint32(1)
+			if i%5 == 0 {
+				enabled = 0
+			}
+			if err := builder.Add(hash, 0x10, enabled,
+				[]byte(name), []byte(path)); err != nil {
 				return false
 			}
-			builder.SetHeader(1, 42)
-
-			for i := 0; i < n; i++ {
-				name := fmt.Sprintf("container-%04d", i)
-				path := fmt.Sprintf("/sys/fs/cgroup/docker/%04d", i)
-				hash := simpleHash(name)
-				enabled := uint32(1)
-				if i%5 == 0 {
-					enabled = 0
-				}
-				if err := builder.Add(hash, 0x10, enabled,
-					[]byte(name), []byte(path)); err != nil {
-					return false
-				}
-			}
-			return true
-		},
-		SnapshotMaxItems: uint32(n),
-	}
+		}
+		return true
+	}, uint32(n))
 }
 
 // verifySnapshot checks all items in a snapshot view match expected data.
@@ -109,7 +106,7 @@ func verifySnapshot(t *testing.T, view *protocol.CgroupsResponseView, n int) boo
 // startLargeServer creates a server with a large response buffer.
 // startLargeServer creates a server with large response buffer and explicit
 // packet_size to enable chunked transport for payloads > 64KB.
-func startLargeServer(service string, handlers Handlers, maxResp uint32) *testServer {
+func startLargeServer(service string, handler DispatchHandler, maxResp uint32) *testServer {
 	ensureRunDir()
 	cleanupAll(service)
 
@@ -117,7 +114,7 @@ func startLargeServer(service string, handlers Handlers, maxResp uint32) *testSe
 	cfg.MaxResponsePayloadBytes = maxResp
 	cfg.PacketSize = 65536 // force smaller packets for reliable chunking
 
-	s := NewServer(testRunDir, service, cfg, handlers)
+	s := NewServer(testRunDir, service, cfg, protocol.MethodCgroupsSnapshot, handler)
 	doneCh := make(chan struct{})
 
 	go func() {
@@ -130,11 +127,18 @@ func startLargeServer(service string, handlers Handlers, maxResp uint32) *testSe
 }
 
 // startServerWithWorkers creates a server with explicit worker count.
-func startServerWithWorkers(service string, handlers Handlers, workers int) *testServer {
+func startServerWithWorkers(service string, handler DispatchHandler, workers int) *testServer {
 	ensureRunDir()
 	cleanupAll(service)
 
-	s := NewServerWithWorkers(testRunDir, service, testServerConfig(), handlers, workers)
+	s := NewServerWithWorkers(
+		testRunDir,
+		service,
+		testServerConfig(),
+		protocol.MethodCgroupsSnapshot,
+		handler,
+		workers,
+	)
 	doneCh := make(chan struct{})
 
 	go func() {
@@ -158,7 +162,7 @@ func TestStress1000Items(t *testing.T) {
 	ccfg.MaxResponsePayloadBytes = bufSize
 	ccfg.PacketSize = 65536
 
-	client := NewClient(testRunDir, svc, ccfg)
+	client := NewSnapshotClient(testRunDir, svc, ccfg)
 	client.Refresh()
 	if !client.Ready() {
 		t.Fatal("client not ready")
@@ -212,7 +216,7 @@ func TestStress5000Items(t *testing.T) {
 	ccfg.MaxResponsePayloadBytes = bufSize
 	ccfg.PacketSize = 65536
 
-	client := NewClient(testRunDir, svc, ccfg)
+	client := NewSnapshotClient(testRunDir, svc, ccfg)
 	client.Refresh()
 	if !client.Ready() {
 		t.Fatal("client not ready")
@@ -245,7 +249,7 @@ func TestStress50Clients(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startServerWithWorkers(svc, testHandlers(), 64)
+	ts := startServerWithWorkers(svc, testSnapshotDispatch(), 64)
 	defer ts.stop()
 
 	const numClients = 50
@@ -264,7 +268,7 @@ func TestStress50Clients(t *testing.T) {
 	for i := 0; i < numClients; i++ {
 		go func(id int) {
 			r := result{clientID: id}
-			client := NewClient(testRunDir, svc, testClientConfig())
+			client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 			defer client.Close()
 
 			for retry := 0; retry < 200; retry++ {
@@ -335,7 +339,7 @@ func TestStressConcurrentCacheClients(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startServerWithWorkers(svc, testHandlers(), 16)
+	ts := startServerWithWorkers(svc, testSnapshotDispatch(), 16)
 	defer ts.stop()
 
 	const numClients = 10
@@ -408,7 +412,7 @@ func TestStressRapidConnectDisconnect(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startServerWithWorkers(svc, testHandlers(), 16)
+	ts := startServerWithWorkers(svc, testSnapshotDispatch(), 16)
 	defer ts.stop()
 
 	const cycles = 1000
@@ -418,7 +422,7 @@ func TestStressRapidConnectDisconnect(t *testing.T) {
 	start := time.Now()
 
 	for i := 0; i < cycles; i++ {
-		client := NewClient(testRunDir, svc, testClientConfig())
+		client := NewSnapshotClient(testRunDir, svc, testClientConfig())
 
 		for r := 0; r < 50; r++ {
 			client.Refresh()
@@ -468,7 +472,7 @@ func TestStressLongRunning60s(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startServerWithWorkers(svc, testHandlers(), 8)
+	ts := startServerWithWorkers(svc, testSnapshotDispatch(), 8)
 	defer ts.stop()
 
 	const numClients = 5
@@ -546,7 +550,13 @@ func TestStressMixedTransport(t *testing.T) {
 		Backlog:                 16,
 	}
 
-	s := NewServer(testRunDir, svc, cfg, testHandlers())
+	s := NewServer(
+		testRunDir,
+		svc,
+		cfg,
+		protocol.MethodCgroupsSnapshot,
+		testSnapshotDispatch(),
+	)
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
@@ -575,7 +585,7 @@ func TestStressMixedTransport(t *testing.T) {
 		ccfg.PreferredProfiles = protocol.ProfileSHMHybrid
 
 		r := result{clientID: 0, profile: "SHM"}
-		client := NewClient(testRunDir, svc, ccfg)
+		client := NewSnapshotClient(testRunDir, svc, ccfg)
 		defer client.Close()
 
 		for retry := 0; retry < 200; retry++ {
@@ -607,7 +617,7 @@ func TestStressMixedTransport(t *testing.T) {
 		ccfg.PreferredProfiles = protocol.ProfileSHMHybrid
 
 		r := result{clientID: 1, profile: "SHM"}
-		client := NewClient(testRunDir, svc, ccfg)
+		client := NewSnapshotClient(testRunDir, svc, ccfg)
 		defer client.Close()
 
 		for retry := 0; retry < 200; retry++ {
@@ -636,7 +646,7 @@ func TestStressMixedTransport(t *testing.T) {
 		ccfg.PreferredProfiles = 0
 
 		r := result{clientID: 2, profile: "UDS"}
-		client := NewClient(testRunDir, svc, ccfg)
+		client := NewSnapshotClient(testRunDir, svc, ccfg)
 		defer client.Close()
 
 		for retry := 0; retry < 200; retry++ {

@@ -10,6 +10,21 @@ This guide is derived from the Level 1, Codec, Level 2, and Level 3
 specifications. It is not an independent design — it enforces the
 boundaries those specs define.
 
+## Core Service Rule
+
+The repository is organized around service kinds, not plugin identity.
+
+- clients connect to services, not plugins
+- one service endpoint serves one request kind only
+- service names are the stable public contract
+- provider plugin/process identity is an internal deployment detail
+
+Examples of service kinds:
+
+- `cgroups-snapshot`
+- `ip-to-asn`
+- `pid-traffic`
+
 ## Repository layout
 
 The repository mirrors Netdata's destination structure so that future
@@ -90,27 +105,31 @@ Transport modules contain:
 
 Transport modules must NOT contain:
 
-- Typed method knowledge (no method-specific encode/decode)
+- Typed payload knowledge (no service-kind codec encode/decode)
 - Callback dispatch or handler registration
 - Retry or reconnect policy
 - Cache or snapshot logic
 
 Transport modules import the protocol module for L1 wire primitives
 (header encode/decode, chunk header, batch directory validation) but
-must NOT use method-specific codec functions. Level 1 treats all
-method payloads as opaque bytes.
+must NOT use service-kind codec functions. Level 1 treats all
+payloads as opaque bytes.
 
 ### Service modules (`service/`)
 
 Service modules contain:
 
 - Level 2: typed client contexts, managed server mode, retry policy,
-  callback dispatch, batch-to-individual-item orchestration
+  and service-specific request/response orchestration
 - Level 3: snapshot refresh helpers, local cache management, lookup
   functions
 
 Service modules import both transport and codec modules. They compose
 Level 1 + Codec into the convenience surface.
+
+Each service module should correspond to one service kind. The public
+L2/L3 shape must not drift into “one server exports many unrelated
+request kinds”.
 
 Service modules must NOT contain:
 
@@ -122,9 +141,9 @@ Service modules must NOT contain:
 ### Protocol module is shared infrastructure
 
 The protocol module (`protocol/`) contains both L1 wire primitives
-(header, chunk header, batch directory) and method-specific codec
+(header, chunk header, batch directory) and service-kind codec
 functions. Transport modules import the protocol module for L1 wire
-primitives only. They must not call method-specific codec functions.
+primitives only. They must not call service-kind codec functions.
 Codec modules never call transport functions.
 
 ### No upward dependencies

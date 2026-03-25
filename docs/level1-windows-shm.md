@@ -70,6 +70,12 @@ mapped via `MapViewOfFile`. The region has three sections:
 
 All data offsets are aligned to 64-byte cache-line boundaries.
 
+The request and response capacities encoded in the header are fixed for
+the lifetime of that SHM session. Level 1 does not resize a mapped
+region in place. If higher layers later reconnect with larger learned
+limits, the new session gets a new `session_id`, a new mapping/event
+set, and capacities derived from that new handshake.
+
 ## Region header (128 bytes)
 
 | Offset | Size | Type | Field | Volatile | Description |
@@ -240,6 +246,10 @@ derived from the `session_id` assigned during the handshake.
 
 The server must track all active per-session SHM regions so they can
 be cleaned up on session close and server shutdown.
+
+If a later reconnect negotiates larger capacities, the server creates a
+new mapping/event set for the new session instead of resizing the old
+objects in place.
 
 ### Client attaches to the region
 

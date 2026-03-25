@@ -18,7 +18,7 @@ fn main() {
 mod posix_only {
 
     use netipc::protocol::{PROFILE_BASELINE, PROFILE_SHM_HYBRID};
-    use netipc::service::cgroups::{CgroupsCache, Handlers, ManagedServer};
+    use netipc::service::cgroups::{CgroupsCache, Handler, ManagedServer};
     use netipc::transport::posix::{ClientConfig, ServerConfig};
 
     const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;
@@ -32,9 +32,9 @@ mod posix_only {
         }
     }
 
-    fn server_handlers() -> Handlers {
-        Handlers {
-            on_snapshot: Some(std::sync::Arc::new(|request, builder| {
+    fn server_handler() -> Handler {
+        Handler {
+            handle: Some(std::sync::Arc::new(|request, builder| {
                 if request.layout_version != 1 || request.flags != 0 {
                     return false;
                 }
@@ -66,7 +66,7 @@ mod posix_only {
                 true
             })),
             snapshot_max_items: 3,
-            ..Handlers::default()
+            ..Handler::default()
         }
     }
 
@@ -100,7 +100,7 @@ mod posix_only {
     }
 
     fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut server = ManagedServer::new(run_dir, service, server_config(), server_handlers());
+        let mut server = ManagedServer::new(run_dir, service, server_config(), server_handler());
 
         println!("READY");
 

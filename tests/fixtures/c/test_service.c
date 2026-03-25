@@ -57,9 +57,7 @@ static void cleanup_socket(const char *service)
 
 static void cleanup_shm(const char *service)
 {
-    char path[256];
-    snprintf(path, sizeof(path), "%s/%s.ipcshm", TEST_RUN_DIR, service);
-    unlink(path);
+    nipc_shm_cleanup_stale(TEST_RUN_DIR, service);
 }
 
 static void session_shm_path(char *dst, size_t dst_len,
@@ -164,24 +162,22 @@ static nipc_uds_client_config_t default_client_config(void)
 /* ------------------------------------------------------------------ */
 
 /* Build a test snapshot with N items using the Codec builder. */
-static bool test_cgroups_handler(void *user,
-                                  uint16_t method_code,
-                                  const uint8_t *request_payload,
-                                  size_t request_len,
-                                  uint8_t *response_buf,
-                                  size_t response_buf_size,
-                                  size_t *response_len_out)
+static nipc_error_t test_cgroups_handler(void *user,
+                                         const nipc_header_t *request_hdr,
+                                         const uint8_t *request_payload,
+                                         size_t request_len,
+                                         uint8_t *response_buf,
+                                         size_t response_buf_size,
+                                         size_t *response_len_out)
 {
     (void)user;
-
-    if (method_code != NIPC_METHOD_CGROUPS_SNAPSHOT)
-        return false;
+    (void)request_hdr;
 
     /* Decode request to validate it */
     nipc_cgroups_req_t req;
     nipc_error_t err = nipc_cgroups_req_decode(request_payload, request_len, &req);
     if (err != NIPC_OK)
-        return false;
+        return err;
 
     /* Build a snapshot with 3 test items */
     nipc_cgroups_builder_t builder;
@@ -206,30 +202,30 @@ static bool test_cgroups_handler(void *user,
             items[i].name, (uint32_t)strlen(items[i].name),
             items[i].path, (uint32_t)strlen(items[i].path));
         if (err != NIPC_OK)
-            return false;
+            return err;
     }
 
     *response_len_out = nipc_cgroups_builder_finish(&builder);
-    return true;
+    return (*response_len_out > 0) ? NIPC_OK : NIPC_ERR_OVERFLOW;
 }
 
 /* Handler that always fails */
-static bool failing_handler(void *user,
-                             uint16_t method_code,
-                             const uint8_t *request_payload,
-                             size_t request_len,
-                             uint8_t *response_buf,
-                             size_t response_buf_size,
-                             size_t *response_len_out)
+static nipc_error_t failing_handler(void *user,
+                                    const nipc_header_t *request_hdr,
+                                    const uint8_t *request_payload,
+                                    size_t request_len,
+                                    uint8_t *response_buf,
+                                    size_t response_buf_size,
+                                    size_t *response_len_out)
 {
     (void)user;
-    (void)method_code;
+    (void)request_hdr;
     (void)request_payload;
     (void)request_len;
     (void)response_buf;
     (void)response_buf_size;
     (void)response_len_out;
-    return false;
+    return NIPC_ERR_HANDLER_FAILED;
 }
 
 /* ------------------------------------------------------------------ */
@@ -252,7 +248,7 @@ static void *server_thread_fn(void *arg)
 
     nipc_error_t err = nipc_server_init(&ctx->server,
         TEST_RUN_DIR, ctx->service, &scfg,
-        1, RESPONSE_BUF_SIZE, ctx->handler, NULL);
+        1, NIPC_METHOD_CGROUPS_SNAPSHOT, ctx->handler, NULL);
 
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed: %d\n", err);
@@ -472,7 +468,7 @@ static void test_retry_on_failure(void)
 
     /* Next call should trigger reconnect + retry (at-least-once).
      * The first attempt will fail because the old session is dead.
-     * L2 must detect this, reconnect, and retry once. */
+     * L2 must detect this and reconnect before retrying. */
     err = nipc_client_call_cgroups_snapshot(&client, &view);
     check("call after server restart succeeded", err == NIPC_OK);
 
@@ -702,7 +698,7 @@ static void test_graceful_drain(void)
 
     nipc_error_t err = nipc_server_init(&server,
         TEST_RUN_DIR, svc, &scfg,
-        4, RESPONSE_BUF_SIZE, test_cgroups_handler, NULL);
+        4, NIPC_METHOD_CGROUPS_SNAPSHOT, test_cgroups_handler, NULL);
     check("server init ok", err == NIPC_OK);
 
     /* Start server in background thread */
@@ -758,7 +754,8 @@ static void test_non_request_terminates_session(void)
     nipc_managed_server_t server;
     nipc_uds_server_config_t scfg = default_server_config();
     nipc_error_t err = nipc_server_init(&server, TEST_RUN_DIR, svc,
-                                         &scfg, 2, RESPONSE_BUF_SIZE,
+                                         &scfg, 2,
+                                         NIPC_METHOD_CGROUPS_SNAPSHOT,
                                          test_cgroups_handler, NULL);
     check("server init", err == NIPC_OK);
 
@@ -842,58 +839,7 @@ static void test_non_request_terminates_session(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Multi-method handler (INCREMENT + STRING_REVERSE + CGROUPS)         */
-/* ------------------------------------------------------------------ */
-
-static bool on_increment(void *user, uint64_t request, uint64_t *response)
-{
-    (void)user;
-    *response = request + 1;
-    return true;
-}
-
-static bool on_string_reverse(void *user,
-                                const char *request_str, uint32_t request_str_len,
-                                char *response_str, uint32_t response_capacity,
-                                uint32_t *response_str_len)
-{
-    (void)user;
-    if (request_str_len > response_capacity)
-        return false;
-
-    for (uint32_t i = 0; i < request_str_len; i++)
-        response_str[i] = request_str[request_str_len - 1 - i];
-
-    *response_str_len = request_str_len;
-    return true;
-}
-
-static bool multi_method_handler(
-    void *user,
-    uint16_t method_code,
-    const uint8_t *request_payload, size_t request_len,
-    uint8_t *response_buf, size_t response_buf_size,
-    size_t *response_len_out)
-{
-    switch (method_code) {
-    case NIPC_METHOD_INCREMENT:
-        return nipc_dispatch_increment(request_payload, request_len,
-                                        response_buf, response_buf_size,
-                                        response_len_out, on_increment, user);
-    case NIPC_METHOD_STRING_REVERSE:
-        return nipc_dispatch_string_reverse(request_payload, request_len,
-                                             response_buf, response_buf_size,
-                                             response_len_out, on_string_reverse, user);
-    case NIPC_METHOD_CGROUPS_SNAPSHOT:
-        return test_cgroups_handler(user, method_code, request_payload, request_len,
-                                     response_buf, response_buf_size, response_len_out);
-    default:
-        return false;
-    }
-}
-
-/* ------------------------------------------------------------------ */
-/*  Test: SHM-mode L2 service (increment + string_reverse over SHM)     */
+/*  SHM-mode snapshot service coverage                                 */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
@@ -929,7 +875,7 @@ static void *shm_server_thread_fn(void *arg)
 
     nipc_error_t err = nipc_server_init(&ctx->server,
         TEST_RUN_DIR, ctx->service, &scfg,
-        2, RESPONSE_BUF_SIZE, multi_method_handler, NULL);
+        2, NIPC_METHOD_CGROUPS_SNAPSHOT, test_cgroups_handler, NULL);
 
     if (err != NIPC_OK) {
         fprintf(stderr, "SHM server init failed: %d\n", err);
@@ -960,7 +906,7 @@ static void *shm_limit_server_thread_fn(void *arg)
 
     nipc_error_t err = nipc_server_init(&ctx->server,
         TEST_RUN_DIR, ctx->service, &scfg,
-        2, RESPONSE_BUF_SIZE, multi_method_handler, NULL);
+        2, NIPC_METHOD_CGROUPS_SNAPSHOT, test_cgroups_handler, NULL);
 
     if (err != NIPC_OK) {
         fprintf(stderr, "limited SHM server init failed: %d\n", err);
@@ -1161,7 +1107,7 @@ out:
 
 static void test_shm_l2_service(void)
 {
-    printf("Test: SHM-mode L2 service (increment + string_reverse + cgroups)\n");
+    printf("Test: SHM-mode snapshot service\n");
     const char *svc = "svc_shm_l2";
     cleanup_all(svc);
 
@@ -1195,37 +1141,14 @@ static void test_shm_l2_service(void)
     nipc_client_refresh(&client);
     check("SHM client ready", nipc_client_ready(&client));
 
-    /* INCREMENT calls */
-    uint8_t resp_buf[RESPONSE_BUF_SIZE];
-    uint64_t inc_val;
-
-    nipc_error_t err = nipc_client_call_increment(&client, 41, &inc_val);
-    check("increment(41) ok", err == NIPC_OK);
-    if (err == NIPC_OK)
-        check("increment(41) == 42", inc_val == 42);
-
-    err = nipc_client_call_increment(&client, 99, &inc_val);
-    check("increment(99) ok", err == NIPC_OK);
-    if (err == NIPC_OK)
-        check("increment(99) == 100", inc_val == 100);
-
-    /* STRING_REVERSE call */
-    nipc_string_reverse_view_t str_view;
-    err = nipc_client_call_string_reverse(&client, "hello", 5, &str_view);
-    check("string_reverse(hello) ok", err == NIPC_OK);
-    if (err == NIPC_OK)
-        check("string_reverse(hello) == olleh",
-              str_view.str_len == 5 &&
-              memcmp(str_view.str, "olleh", 5) == 0);
-
     /* CGROUPS_SNAPSHOT call */
-    uint8_t cg_req[64];
     nipc_cgroups_resp_view_t cg_view;
-    err = nipc_client_call_cgroups_snapshot(&client, &cg_view);
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &cg_view);
     check("cgroups_snapshot ok", err == NIPC_OK);
     if (err == NIPC_OK) {
         check("cgroups item_count == 3", cg_view.item_count == 3);
         check("cgroups generation == 42", cg_view.generation == 42);
+        check("cgroups systemd_enabled == 1", cg_view.systemd_enabled == 1);
     }
 
     nipc_client_close(&client);
@@ -1297,7 +1220,8 @@ static void test_shm_client_rejects_malformed_responses(void)
         check(msg, nipc_client_ready(&client) && client.shm != NULL);
 
         if (nipc_client_ready(&client) && client.shm != NULL) {
-            nipc_error_t err = nipc_client_call_increment(&client, 41, &value_out);
+            nipc_cgroups_resp_view_t view;
+            nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
             snprintf(msg, sizeof(msg), "%s: client returns expected error", cases[i].label);
             check(msg, err == cases[i].expected);
             snprintf(msg, sizeof(msg), "%s: client no longer stays READY after malformed reply", cases[i].label);
@@ -1393,9 +1317,10 @@ static void test_shm_server_rejects_malformed_requests(void)
         check(msg, nipc_client_ready(&good_client) && good_client.shm != NULL);
 
         if (nipc_client_ready(&good_client) && good_client.shm != NULL) {
-            nipc_error_t err = nipc_client_call_increment(&good_client, 9, &increment_out);
-            snprintf(msg, sizeof(msg), "%s: replacement increment succeeds", cases[i].label);
-            check(msg, err == NIPC_OK && increment_out == 10);
+            nipc_cgroups_resp_view_t view;
+            nipc_error_t err = nipc_client_call_cgroups_snapshot(&good_client, &view);
+            snprintf(msg, sizeof(msg), "%s: replacement snapshot succeeds", cases[i].label);
+            check(msg, err == NIPC_OK && view.item_count == 3);
         }
 
         nipc_client_close(&good_client);
@@ -1407,35 +1332,33 @@ static void test_shm_server_rejects_malformed_requests(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Coverage: SHM batch client error propagation                       */
+/*  Coverage: SHM resize + retry paths                                 */
 /* ------------------------------------------------------------------ */
 
-static void test_shm_batch_send_overflow_on_negotiated_limit(void)
+static void test_shm_request_resize_retry(void)
 {
-    printf("Test: SHM batch send overflow on negotiated request limit\n");
+    printf("Test: SHM request resize retry until stable\n");
 
-    const char *svc = "svc_shm_batch_send_overflow";
+    const char *svc = "svc_shm_request_resize";
     shm_limit_server_ctx_t sctx;
     pthread_t tid;
     nipc_uds_client_config_t ccfg = {
         .supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
         .preferred_profiles = NIPC_PROFILE_SHM_HYBRID,
-        .max_request_payload_bytes = 4096,
-        .max_request_batch_items = 16,
+        .max_request_payload_bytes = 1,
+        .max_request_batch_items = 1,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-        .max_response_batch_items = 16,
+        .max_response_batch_items = 1,
         .auth_token = AUTH_TOKEN,
     };
     nipc_client_ctx_t client;
-    uint64_t req_values[] = {1, 2, 3, 4, 5, 6};
-    uint64_t resp_values[6] = {0};
 
     cleanup_all(svc);
     cleanup_session_shm(svc, 1);
 
     memset(&sctx, 0, sizeof(sctx));
     sctx.service = svc;
-    sctx.max_request_payload_bytes = 16;
+    sctx.max_request_payload_bytes = 1;
     sctx.max_response_payload_bytes = RESPONSE_BUF_SIZE;
     pthread_create(&tid, NULL, shm_limit_server_thread_fn, &sctx);
 
@@ -1447,19 +1370,26 @@ static void test_shm_batch_send_overflow_on_negotiated_limit(void)
         usleep(500);
     }
 
-    check("batch send overflow: server started",
+    check("request resize: server started",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
     nipc_client_refresh(&client);
-    check("batch send overflow: client negotiated SHM",
+    check("request resize: client negotiated SHM",
           nipc_client_ready(&client) && client.shm != NULL);
 
     if (nipc_client_ready(&client) && client.shm != NULL) {
-        nipc_error_t err = nipc_client_call_increment_batch(
-            &client, req_values, 6, resp_values);
-        check("batch send overflow: call returns OVERFLOW",
-              err == NIPC_ERR_OVERFLOW);
+        nipc_cgroups_resp_view_t view;
+        nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
+        check("request resize: snapshot succeeds after retry", err == NIPC_OK);
+        if (err == NIPC_OK)
+            check("request resize: snapshot item_count == 3", view.item_count == 3);
+
+        nipc_client_status_t status;
+        nipc_client_status(&client, &status);
+        check("request resize: reconnect_count >= 1", status.reconnect_count >= 1);
+        check("request resize: learned request size >= 4",
+              client.session.max_request_payload_bytes >= 4);
     }
 
     nipc_client_close(&client);
@@ -1469,73 +1399,68 @@ static void test_shm_batch_send_overflow_on_negotiated_limit(void)
     cleanup_session_shm(svc, 1);
 }
 
-static void test_shm_batch_rejects_malformed_responses(void)
+static void test_shm_response_resize_retry(void)
 {
-    struct {
-        fake_shm_response_mode_t mode;
-        const char *service;
-        const char *label;
-        nipc_error_t expected;
-    } cases[] = {
-        { FAKE_SHM_RESP_TOO_LARGE, "svc_shm_batch_resp_big", "oversize SHM batch response", NIPC_ERR_TRUNCATED },
-        { FAKE_SHM_RESP_BAD_ITEM_COUNT, "svc_shm_batch_resp_count", "wrong SHM batch item_count", NIPC_ERR_BAD_ITEM_COUNT },
+    printf("Test: SHM response resize retry until stable\n");
+
+    const char *svc = "svc_shm_response_resize";
+    shm_limit_server_ctx_t sctx;
+    pthread_t tid;
+    nipc_uds_client_config_t ccfg = {
+        .supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
+        .preferred_profiles = NIPC_PROFILE_SHM_HYBRID,
+        .max_request_payload_bytes = 4096,
+        .max_request_batch_items = 1,
+        .max_response_payload_bytes = 32,
+        .max_response_batch_items = 1,
+        .auth_token = AUTH_TOKEN,
     };
+    nipc_client_ctx_t client;
 
-    printf("Test: SHM batch client rejects malformed raw responses\n");
+    cleanup_all(svc);
+    cleanup_session_shm(svc, 1);
 
-    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        fake_shm_server_ctx_t sctx;
-        pthread_t tid;
-        nipc_uds_client_config_t ccfg = {
-            .supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
-            .preferred_profiles = NIPC_PROFILE_SHM_HYBRID,
-            .max_request_payload_bytes = 4096,
-            .max_request_batch_items = 16,
-            .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-            .max_response_batch_items = 16,
-            .auth_token = AUTH_TOKEN,
-        };
-        nipc_client_ctx_t client;
-        uint64_t req_values[] = {10, 20};
-        uint64_t resp_values[2] = {0};
-        char msg[160];
+    memset(&sctx, 0, sizeof(sctx));
+    sctx.service = svc;
+    sctx.max_request_payload_bytes = 4096;
+    sctx.max_response_payload_bytes = 32;
+    pthread_create(&tid, NULL, shm_limit_server_thread_fn, &sctx);
 
-        cleanup_all(cases[i].service);
-        cleanup_session_shm(cases[i].service, 1);
-
-        memset(&sctx, 0, sizeof(sctx));
-        sctx.service = cases[i].service;
-        sctx.mode = cases[i].mode;
-        pthread_create(&tid, NULL, fake_shm_response_server_thread_fn, &sctx);
-
-        for (int spin = 0;
-             spin < 2000 &&
-             !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) &&
-             !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE);
-             spin++) {
-            usleep(500);
-        }
-
-        snprintf(msg, sizeof(msg), "%s: fake SHM server started", cases[i].label);
-        check(msg, __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
-
-        nipc_client_init(&client, TEST_RUN_DIR, cases[i].service, &ccfg);
-        nipc_client_refresh(&client);
-        snprintf(msg, sizeof(msg), "%s: client negotiated SHM", cases[i].label);
-        check(msg, nipc_client_ready(&client) && client.shm != NULL);
-
-        if (nipc_client_ready(&client) && client.shm != NULL) {
-            nipc_error_t err = nipc_client_call_increment_batch(
-                &client, req_values, 2, resp_values);
-            snprintf(msg, sizeof(msg), "%s: client returns expected error", cases[i].label);
-            check(msg, err == cases[i].expected);
-        }
-
-        nipc_client_close(&client);
-        pthread_join(tid, NULL);
-        cleanup_all(cases[i].service);
-        cleanup_session_shm(cases[i].service, 1);
+    for (int spin = 0;
+         spin < 2000 &&
+         !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) &&
+         !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE);
+         spin++) {
+        usleep(500);
     }
+
+    check("response resize: server started",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+    nipc_client_refresh(&client);
+    check("response resize: client negotiated SHM",
+          nipc_client_ready(&client) && client.shm != NULL);
+
+    if (nipc_client_ready(&client) && client.shm != NULL) {
+        nipc_cgroups_resp_view_t view;
+        nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
+        check("response resize: snapshot succeeds after retry", err == NIPC_OK);
+        if (err == NIPC_OK)
+            check("response resize: snapshot item_count == 3", view.item_count == 3);
+
+        nipc_client_status_t status;
+        nipc_client_status(&client, &status);
+        check("response resize: reconnect_count >= 1", status.reconnect_count >= 1);
+        check("response resize: learned response size > 32",
+              client.session.max_response_payload_bytes > 32);
+    }
+
+    nipc_client_close(&client);
+    nipc_server_stop(&sctx.server);
+    pthread_join(tid, NULL);
+    cleanup_all(svc);
+    cleanup_session_shm(svc, 1);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1599,28 +1524,26 @@ static void test_cache_refresh_failure_preserves(void)
 /* ------------------------------------------------------------------ */
 
 /* Handler that returns garbage bytes that don't decode as valid cgroups */
-static bool garbage_handler(void *user,
-                              uint16_t method_code,
-                              const uint8_t *request_payload,
-                              size_t request_len,
-                              uint8_t *response_buf,
-                              size_t response_buf_size,
-                              size_t *response_len_out)
+static nipc_error_t garbage_handler(void *user,
+                                    const nipc_header_t *request_hdr,
+                                    const uint8_t *request_payload,
+                                    size_t request_len,
+                                    uint8_t *response_buf,
+                                    size_t response_buf_size,
+                                    size_t *response_len_out)
 {
     (void)user;
+    (void)request_hdr;
     (void)request_payload;
     (void)request_len;
 
-    if (method_code != NIPC_METHOD_CGROUPS_SNAPSHOT)
-        return false;
-
     /* Write garbage that won't decode as a valid cgroups response */
     if (response_buf_size < 16)
-        return false;
+        return NIPC_ERR_OVERFLOW;
 
     memset(response_buf, 0xFF, 16);
     *response_len_out = 16;
-    return true;
+    return NIPC_OK;
 }
 
 static void test_malformed_response_handling(void)
@@ -1797,68 +1720,55 @@ static void test_client_broken_refresh(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Coverage: batch increment end-to-end                                */
+/*  Coverage: server rejects wrong request kind                         */
 /* ------------------------------------------------------------------ */
 
-static void test_batch_increment(void)
+static void test_server_rejects_wrong_request_kind(void)
 {
-    printf("Test: Batch increment end-to-end\n");
-    const char *svc = "svc_batch_inc";
+    printf("Test: Server rejects wrong request kind\n");
+    const char *svc = "svc_wrong_kind";
     cleanup_all(svc);
 
-    /* Start server with multi-method handler */
-    shm_server_ctx_t sctx;
-    memset(&sctx, 0, sizeof(sctx));
-    sctx.service = svc;
+    server_thread_ctx_t sctx;
+    pthread_t tid;
+    start_server(&sctx, svc, test_cgroups_handler, &tid);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
-    nipc_uds_server_config_t scfg = default_server_config();
-    scfg.max_request_batch_items = 16;
-    scfg.max_response_batch_items = 16;
-    scfg.max_request_payload_bytes = 65536;
-    scfg.max_response_payload_bytes = 65536;
+    nipc_uds_session_t session;
+    memset(&session, 0, sizeof(session));
+    session.fd = -1;
 
-    nipc_error_t serr = nipc_server_init(&sctx.server,
-        TEST_RUN_DIR, svc, &scfg,
-        2, RESPONSE_BUF_SIZE, multi_method_handler, NULL);
-    check("server init ok", serr == NIPC_OK);
-
-    pthread_t stid;
-    pthread_create(&stid, NULL, (void *(*)(void *))nipc_server_run, &sctx.server);
-    usleep(50000);
-
-    /* Connect client with batch support */
     nipc_uds_client_config_t ccfg = default_client_config();
-    ccfg.max_request_batch_items = 16;
-    ccfg.max_response_batch_items = 16;
-    ccfg.max_request_payload_bytes = 65536;
-    ccfg.max_response_payload_bytes = 65536;
+    nipc_uds_error_t uerr = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("raw connect", uerr == NIPC_UDS_OK);
 
-    nipc_client_ctx_t client;
-    nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
-    nipc_client_refresh(&client);
-    check("client ready", nipc_client_ready(&client));
+    if (uerr == NIPC_UDS_OK) {
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .flags = 0,
+            .item_count = 1,
+            .message_id = 1,
+            .transport_status = NIPC_STATUS_OK,
+        };
+        uint8_t recv_buf[256];
+        nipc_header_t resp_hdr = {0};
+        const void *payload = NULL;
+        size_t payload_len = 0;
 
-    /* Call batch increment */
-    uint64_t request_values[] = {10, 20, 30, 40, 50};
-    uint64_t response_values[5] = {0};
-    uint8_t resp_buf[RESPONSE_BUF_SIZE];
+        check("send wrong-kind request",
+              nipc_uds_send(&session, &hdr, NULL, 0) == NIPC_UDS_OK);
+        check("receive wrong-kind response",
+              nipc_uds_receive(&session, recv_buf, sizeof(recv_buf),
+                               &resp_hdr, &payload, &payload_len) == NIPC_UDS_OK);
+        check("wrong-kind status unsupported",
+              resp_hdr.transport_status == NIPC_STATUS_UNSUPPORTED);
+        check("wrong-kind empty payload", payload_len == 0);
 
-    nipc_error_t err = nipc_client_call_increment_batch(
-        &client, request_values, 5, response_values);
-    check("batch increment ok", err == NIPC_OK);
-
-    if (err == NIPC_OK) {
-        check("batch[0] == 11", response_values[0] == 11);
-        check("batch[1] == 21", response_values[1] == 21);
-        check("batch[2] == 31", response_values[2] == 31);
-        check("batch[3] == 41", response_values[3] == 41);
-        check("batch[4] == 51", response_values[4] == 51);
+        nipc_uds_close_session(&session);
     }
 
-    nipc_client_close(&client);
-    nipc_server_stop(&sctx.server);
-    pthread_join(stid, NULL);
-    nipc_server_destroy(&sctx.server);
+    stop_server(&sctx, tid);
     cleanup_all(svc);
 }
 
@@ -1876,19 +1786,19 @@ static void test_server_init_null(void)
     /* NULL run_dir */
     check("null run_dir",
           nipc_server_init(&server, NULL, "svc", &scfg, 1,
-                           RESPONSE_BUF_SIZE, test_cgroups_handler, NULL)
+                           NIPC_METHOD_CGROUPS_SNAPSHOT, test_cgroups_handler, NULL)
               != NIPC_OK);
 
     /* NULL service_name */
     check("null service_name",
           nipc_server_init(&server, TEST_RUN_DIR, NULL, &scfg, 1,
-                           RESPONSE_BUF_SIZE, test_cgroups_handler, NULL)
+                           NIPC_METHOD_CGROUPS_SNAPSHOT, test_cgroups_handler, NULL)
               != NIPC_OK);
 
     /* NULL handler */
     check("null handler",
           nipc_server_init(&server, TEST_RUN_DIR, "svc", &scfg, 1,
-                           RESPONSE_BUF_SIZE, NULL, NULL)
+                           NIPC_METHOD_CGROUPS_SNAPSHOT, NULL, NULL)
               != NIPC_OK);
 }
 
@@ -1902,7 +1812,7 @@ static void test_server_init_listen_failure(void)
     /* Non-existent parent directory */
     check("listen failure returns error",
           nipc_server_init(&server, "/tmp/nonexistent_svc_dir_99999", "svc",
-                           &scfg, 1, RESPONSE_BUF_SIZE,
+                           &scfg, 1, NIPC_METHOD_CGROUPS_SNAPSHOT,
                            test_cgroups_handler, NULL)
               != NIPC_OK);
 }
@@ -1925,7 +1835,7 @@ static void test_drain_timeout(void)
 
     nipc_error_t err = nipc_server_init(&server,
         TEST_RUN_DIR, svc, &scfg,
-        4, RESPONSE_BUF_SIZE, test_cgroups_handler, NULL);
+        4, NIPC_METHOD_CGROUPS_SNAPSHOT, test_cgroups_handler, NULL);
     check("server init ok", err == NIPC_OK);
 
     pthread_t server_tid;
@@ -1945,7 +1855,7 @@ static void test_drain_timeout(void)
 
     /* Drain with short timeout */
     bool drained = nipc_server_drain(&server, 3000);
-    /* With fast handlers and 3s timeout, drain should succeed */
+    /* With fast service callbacks and 3s timeout, drain should succeed */
     check("drain completed", drained);
 
     for (int i = 0; i < 2; i++)
@@ -1958,30 +1868,28 @@ static void test_drain_timeout(void)
 /*  Coverage: cache with empty snapshot, linear scan fallback           */
 /* ------------------------------------------------------------------ */
 
-static bool empty_cgroups_handler(void *user,
-                                    uint16_t method_code,
-                                    const uint8_t *request_payload,
-                                    size_t request_len,
-                                    uint8_t *response_buf,
-                                    size_t response_buf_size,
-                                    size_t *response_len_out)
+static nipc_error_t empty_cgroups_handler(void *user,
+                                          const nipc_header_t *request_hdr,
+                                          const uint8_t *request_payload,
+                                          size_t request_len,
+                                          uint8_t *response_buf,
+                                          size_t response_buf_size,
+                                          size_t *response_len_out)
 {
     (void)user;
-
-    if (method_code != NIPC_METHOD_CGROUPS_SNAPSHOT)
-        return false;
+    (void)request_hdr;
 
     nipc_cgroups_req_t req;
     nipc_error_t err = nipc_cgroups_req_decode(request_payload, request_len, &req);
     if (err != NIPC_OK)
-        return false;
+        return err;
 
     /* Return an empty snapshot (0 items) */
     nipc_cgroups_builder_t builder;
     nipc_cgroups_builder_init(&builder, response_buf, response_buf_size,
                                0, 0, 77);
     *response_len_out = nipc_cgroups_builder_finish(&builder);
-    return true;
+    return NIPC_OK;
 }
 
 static void test_cache_empty_snapshot(void)
@@ -2003,7 +1911,7 @@ static void test_cache_empty_snapshot(void)
     nipc_uds_server_config_t scfg = default_server_config();
     nipc_error_t serr = nipc_server_init(&sctx.server,
         TEST_RUN_DIR, svc, &scfg,
-        1, RESPONSE_BUF_SIZE, empty_cgroups_handler, NULL);
+        1, NIPC_METHOD_CGROUPS_SNAPSHOT, empty_cgroups_handler, NULL);
     check("server init", serr == NIPC_OK);
 
     pthread_create(&tid, NULL, (void *(*)(void *))nipc_server_run, &sctx.server);
@@ -2105,16 +2013,6 @@ static void test_client_call_disconnected(void)
     nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
     check("call on DISCONNECTED fails", err == NIPC_ERR_NOT_READY);
 
-    /* Same for increment */
-    uint64_t inc_val;
-    err = nipc_client_call_increment(&client, 42, &inc_val);
-    check("increment on DISCONNECTED fails", err == NIPC_ERR_NOT_READY);
-
-    /* Same for string_reverse */
-    nipc_string_reverse_view_t sv;
-    err = nipc_client_call_string_reverse(&client, "hi", 2, &sv);
-    check("string_reverse on DISCONNECTED fails", err == NIPC_ERR_NOT_READY);
-
     nipc_client_close(&client);
     cleanup_all(svc);
 }
@@ -2138,7 +2036,7 @@ static void test_server_init_long_strings(void)
     /* This will fail at listen() because the service name is invalid
      * for UDS path construction, but the truncation code is exercised */
     nipc_error_t err = nipc_server_init(&server, TEST_RUN_DIR, long_name,
-                                          &scfg, 1, RESPONSE_BUF_SIZE,
+                                          &scfg, 1, NIPC_METHOD_CGROUPS_SNAPSHOT,
                                           test_cgroups_handler, NULL);
     /* The service_name is truncated to 127 chars, still valid chars
      * but the socket path will be long. It may succeed or fail
@@ -2156,7 +2054,7 @@ static void test_server_init_worker_floor_and_long_run_dir(void)
     nipc_uds_server_config_t scfg = default_server_config();
 
     nipc_error_t err = nipc_server_init(&server, TEST_RUN_DIR, "svc_worker_floor",
-                                        &scfg, 0, RESPONSE_BUF_SIZE,
+                                        &scfg, 0, NIPC_METHOD_CGROUPS_SNAPSHOT,
                                         test_cgroups_handler, NULL);
     check("worker_count floor init ok", err == NIPC_OK);
     if (err == NIPC_OK) {
@@ -2170,7 +2068,7 @@ static void test_server_init_worker_floor_and_long_run_dir(void)
     long_run_dir[sizeof(long_run_dir) - 1] = '\0';
 
     err = nipc_server_init(&server, long_run_dir, "svc_long_run_dir",
-                           &scfg, 1, RESPONSE_BUF_SIZE,
+                           &scfg, 1, NIPC_METHOD_CGROUPS_SNAPSHOT,
                            test_cgroups_handler, NULL);
     if (err == NIPC_OK)
         nipc_server_destroy(&server);
@@ -2189,16 +2087,15 @@ static void test_client_init_defaults_and_truncation(void)
     nipc_uds_client_config_t zero_cfg = {0};
 
     nipc_client_init(&client, TEST_RUN_DIR, "svc_client_defaults", &zero_cfg);
-    check("default request buffer size",
-          client.request_buf_size == 65536u);
+    check("default request payload size",
+          client.transport_config.max_request_payload_bytes == 16u);
+    check("default response payload size",
+          client.transport_config.max_response_payload_bytes == 65536u);
     check("default response buffer size",
-          client.response_buf_size == 65536u + NIPC_HEADER_LEN);
-    check("default send buffer size",
-          client.send_buf_size == 65536u + NIPC_HEADER_LEN);
-    check("default buffers allocated",
-          client.request_buf != NULL &&
-          client.response_buf != NULL &&
-          client.send_buf != NULL);
+          client.response_buf_size == 0u);
+    check("default send buffer size", client.send_buf_size == 0u);
+    check("buffers allocated lazily",
+          client.response_buf == NULL && client.send_buf == NULL);
     nipc_client_close(&client);
 
     char long_run_dir[400];
@@ -2216,128 +2113,6 @@ static void test_client_init_defaults_and_truncation(void)
           strlen(client.service_name) == sizeof(client.service_name) - 1 &&
           client.service_name[sizeof(client.service_name) - 1] == '\0');
     nipc_client_close(&client);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Coverage: empty batch fast-path + request overflow guards           */
-/* ------------------------------------------------------------------ */
-
-static void test_client_batch_and_request_overflow(void)
-{
-    printf("Test: Client batch fast-path and request overflow guards\n");
-    const char *svc = "svc_client_overflow";
-    cleanup_all(svc);
-
-    shm_server_ctx_t sctx;
-    memset(&sctx, 0, sizeof(sctx));
-    sctx.service = svc;
-
-    pthread_t tid;
-    pthread_create(&tid, NULL, shm_server_thread_fn, &sctx);
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
-    check("overflow server started",
-          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
-
-    {
-        nipc_uds_client_config_t ccfg = {
-            .supported_profiles        = NIPC_PROFILE_BASELINE,
-            .preferred_profiles        = 0,
-            .max_request_payload_bytes = 4096,
-            .max_request_batch_items   = 16,
-            .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-            .max_response_batch_items  = 16,
-            .auth_token                = AUTH_TOKEN,
-        };
-        nipc_client_ctx_t client;
-        nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
-        nipc_client_refresh(&client);
-        check("empty-batch client ready", nipc_client_ready(&client));
-
-        nipc_error_t err = nipc_client_call_increment_batch(&client, NULL, 0, NULL);
-        check("empty increment batch succeeds", err == NIPC_OK);
-
-        nipc_client_status_t status;
-        nipc_client_status(&client, &status);
-        check("empty increment batch increments call_count", status.call_count == 1);
-        check("empty increment batch keeps error_count at 0", status.error_count == 0);
-        nipc_client_close(&client);
-    }
-
-    {
-        nipc_uds_client_config_t ccfg = {
-            .supported_profiles        = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
-            .preferred_profiles        = NIPC_PROFILE_SHM_HYBRID,
-            .max_request_payload_bytes = 1,
-            .max_request_batch_items   = 1,
-            .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-            .max_response_batch_items  = 1,
-            .auth_token                = AUTH_TOKEN,
-        };
-        nipc_client_ctx_t client;
-        uint64_t inc_value = 0;
-        nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
-        nipc_client_refresh(&client);
-        check("increment SHM overflow client ready", nipc_client_ready(&client));
-        check("increment SHM overflow negotiated SHM", client.shm != NULL);
-
-        nipc_error_t err = nipc_client_call_increment(&client, 9, &inc_value);
-        check("increment detects tiny SHM send buffer overflow",
-              err == NIPC_ERR_OVERFLOW);
-        nipc_client_close(&client);
-    }
-
-    {
-        nipc_uds_client_config_t ccfg = {
-            .supported_profiles        = NIPC_PROFILE_BASELINE,
-            .preferred_profiles        = 0,
-            .max_request_payload_bytes = 8,
-            .max_request_batch_items   = 16,
-            .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-            .max_response_batch_items  = 16,
-            .auth_token                = AUTH_TOKEN,
-        };
-        nipc_client_ctx_t client;
-        uint64_t req = 7;
-        uint64_t resp = 0;
-        nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
-        nipc_client_refresh(&client);
-        check("batch overflow client ready", nipc_client_ready(&client));
-
-        nipc_error_t err = nipc_client_call_increment_batch(&client, &req, 1, &resp);
-        check("increment batch detects tiny request buffer overflow",
-              err == NIPC_ERR_OVERFLOW);
-        nipc_client_close(&client);
-    }
-
-    {
-        nipc_uds_client_config_t ccfg = {
-            .supported_profiles        = NIPC_PROFILE_BASELINE,
-            .preferred_profiles        = 0,
-            .max_request_payload_bytes = 8,
-            .max_request_batch_items   = 1,
-            .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-            .max_response_batch_items  = 1,
-            .auth_token                = AUTH_TOKEN,
-        };
-        nipc_client_ctx_t client;
-        nipc_string_reverse_view_t view;
-        nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
-        nipc_client_refresh(&client);
-        check("string overflow client ready", nipc_client_ready(&client));
-
-        nipc_error_t err = nipc_client_call_string_reverse(
-            &client, "this request is intentionally too large", 38, &view);
-        check("string reverse detects tiny request buffer overflow",
-              err == NIPC_ERR_OVERFLOW);
-        nipc_client_close(&client);
-    }
-
-    nipc_server_stop(&sctx.server);
-    pthread_join(tid, NULL);
-    cleanup_all(svc);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2416,8 +2191,8 @@ int main(void)
     test_shm_l2_service();         printf("\n");
     test_shm_client_rejects_malformed_responses(); printf("\n");
     test_shm_server_rejects_malformed_requests(); printf("\n");
-    test_shm_batch_send_overflow_on_negotiated_limit(); printf("\n");
-    test_shm_batch_rejects_malformed_responses(); printf("\n");
+    test_shm_request_resize_retry(); printf("\n");
+    test_shm_response_resize_retry(); printf("\n");
     test_cache_refresh_failure_preserves(); printf("\n");
     test_malformed_response_handling(); printf("\n");
 
@@ -2425,7 +2200,7 @@ int main(void)
     test_client_auth_failure();         printf("\n");
     test_client_incompatible();         printf("\n");
     test_client_broken_refresh();       printf("\n");
-    test_batch_increment();             printf("\n");
+    test_server_rejects_wrong_request_kind(); printf("\n");
     test_server_init_null();            printf("\n");
     test_server_init_listen_failure();  printf("\n");
     test_drain_timeout();               printf("\n");
@@ -2435,7 +2210,6 @@ int main(void)
     test_server_init_long_strings();    printf("\n");
     test_server_init_worker_floor_and_long_run_dir(); printf("\n");
     test_client_init_defaults_and_truncation(); printf("\n");
-    test_client_batch_and_request_overflow(); printf("\n");
     test_shm_negotiation_failure_on_obstructed_region(); printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);

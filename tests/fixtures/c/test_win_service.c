@@ -3,7 +3,7 @@
  *
  * Focus:
  *   - client lifecycle and status
- *   - typed increment / string_reverse / cgroups snapshot calls
+ *   - typed cgroups-snapshot calls
  *   - retry after a broken client-side session
  *   - auth/profile error mapping
  *   - cache refresh, preserve, and reconnect behavior
@@ -78,30 +78,6 @@ static nipc_np_client_config_t default_client_config(void)
     };
 }
 
-static bool on_increment(void *user, uint64_t request, uint64_t *response)
-{
-    (void)user;
-    *response = request + 1;
-    return true;
-}
-
-static bool on_string_reverse(void *user,
-                              const char *request_str, uint32_t request_str_len,
-                              char *response_str, uint32_t response_capacity,
-                              uint32_t *response_str_len)
-{
-    (void)user;
-
-    if (request_str_len > response_capacity)
-        return false;
-
-    for (uint32_t i = 0; i < request_str_len; i++)
-        response_str[i] = request_str[request_str_len - 1 - i];
-
-    *response_str_len = request_str_len;
-    return true;
-}
-
 static bool on_snapshot(void *user,
                         const nipc_cgroups_req_t *request,
                         nipc_cgroups_builder_t *builder)
@@ -159,26 +135,20 @@ static bool on_snapshot_empty(void *user,
     return true;
 }
 
-static nipc_cgroups_handlers_t full_handlers = {
-    .on_increment = on_increment,
-    .on_string_reverse = on_string_reverse,
-    .on_cgroups_snapshot = on_snapshot,
+static nipc_cgroups_service_handler_t full_service_handler = {
+    .handle = on_snapshot,
     .snapshot_max_items = 3,
     .user = NULL,
 };
 
-static nipc_cgroups_handlers_t failing_snapshot_handlers = {
-    .on_increment = on_increment,
-    .on_string_reverse = on_string_reverse,
-    .on_cgroups_snapshot = on_snapshot_fail,
+static nipc_cgroups_service_handler_t failing_snapshot_service_handler = {
+    .handle = on_snapshot_fail,
     .snapshot_max_items = 3,
     .user = NULL,
 };
 
-static nipc_cgroups_handlers_t empty_snapshot_handlers = {
-    .on_increment = on_increment,
-    .on_string_reverse = on_string_reverse,
-    .on_cgroups_snapshot = on_snapshot_empty,
+static nipc_cgroups_service_handler_t empty_snapshot_service_handler = {
+    .handle = on_snapshot_empty,
     .snapshot_max_items = 1,
     .user = NULL,
 };
@@ -187,7 +157,7 @@ typedef struct {
     char service[64];
     int worker_count;
     nipc_np_server_config_t config;
-    nipc_cgroups_handlers_t handlers;
+    nipc_cgroups_service_handler_t service_handler;
     HANDLE ready_event;
     volatile LONG init_ok;
     nipc_managed_server_t server;
@@ -199,7 +169,7 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
 
     nipc_error_t err = nipc_server_init_typed(&ctx->server, TEST_RUN_DIR,
                                               ctx->service, &ctx->config,
-                                              ctx->worker_count, &ctx->handlers);
+                                              ctx->worker_count, &ctx->service_handler);
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed for %s: %d\n", ctx->service, err);
         InterlockedExchange(&ctx->init_ok, 0);
@@ -217,13 +187,13 @@ static HANDLE start_server_named(server_thread_ctx_t *ctx,
                                  const char *service,
                            int worker_count,
                            const nipc_np_server_config_t *config,
-                           const nipc_cgroups_handlers_t *handlers)
+                           const nipc_cgroups_service_handler_t *service_handler)
 {
     memset(ctx, 0, sizeof(*ctx));
     strncpy(ctx->service, service, sizeof(ctx->service) - 1);
     ctx->worker_count = worker_count;
     ctx->config = *config;
-    ctx->handlers = *handlers;
+    ctx->service_handler = *service_handler;
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     InterlockedExchange(&ctx->init_ok, 0);
 
@@ -251,10 +221,10 @@ static HANDLE start_server_named(server_thread_ctx_t *ctx,
 static HANDLE start_default_server_named(server_thread_ctx_t *ctx,
                                          const char *service,
                                          int worker_count,
-                                         const nipc_cgroups_handlers_t *handlers)
+                                         const nipc_cgroups_service_handler_t *service_handler)
 {
     nipc_np_server_config_t config = default_server_config();
-    return start_server_named(ctx, service, worker_count, &config, handlers);
+    return start_server_named(ctx, service, worker_count, &config, service_handler);
 }
 
 static void stop_server(server_thread_ctx_t *ctx, HANDLE thread)
@@ -294,7 +264,7 @@ static void test_client_lifecycle(void)
     check("state becomes NOT_FOUND", client.state == NIPC_CLIENT_NOT_FOUND);
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
     if (!server_thread) {
         nipc_client_close(&client);
         return;
@@ -318,7 +288,7 @@ static void test_client_lifecycle_ready(void)
     unique_service(service, sizeof(service), "svc_ready");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
     if (!server_thread)
         return;
 
@@ -337,15 +307,15 @@ static void test_client_lifecycle_ready(void)
     stop_server(&sctx, server_thread);
 }
 
-static void test_multi_method_calls(void)
+static void test_snapshot_calls(void)
 {
-    printf("--- Increment / string_reverse / snapshot / batch ---\n");
+    printf("--- Snapshot calls ---\n");
 
     char service[64];
     unique_service(service, sizeof(service), "svc_methods");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
     if (!server_thread)
         return;
 
@@ -355,35 +325,15 @@ static void test_multi_method_calls(void)
     check("client ready", refresh_until_ready(&client, 100, 10));
 
     if (nipc_client_ready(&client)) {
-        uint64_t value = 0;
-        nipc_error_t err = nipc_client_call_increment(&client, 41, &value);
-        check("increment(41) ok", err == NIPC_OK);
-        check("increment(41) == 42", err == NIPC_OK && value == 42);
-
-        nipc_string_reverse_view_t str_view;
-        err = nipc_client_call_string_reverse(&client, "hello", 5, &str_view);
-        check("string_reverse ok", err == NIPC_OK);
-        check("string_reverse == olleh",
-              err == NIPC_OK && str_view.str_len == 5 &&
-              memcmp(str_view.str, "olleh", 5) == 0);
-
         nipc_cgroups_resp_view_t cg_view;
-        err = nipc_client_call_cgroups_snapshot(&client, &cg_view);
+        nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &cg_view);
         check("snapshot ok", err == NIPC_OK);
         check("snapshot item_count == 3", err == NIPC_OK && cg_view.item_count == 3);
         check("snapshot generation == 0", err == NIPC_OK && cg_view.generation == 0);
 
-        uint64_t in[4] = { 1, 41, 99, 1000 };
-        uint64_t out[4] = { 0 };
-        err = nipc_client_call_increment_batch(&client, in, 4, out);
-        check("increment batch ok", err == NIPC_OK);
-        check("increment batch values",
-              err == NIPC_OK &&
-              out[0] == 2 && out[1] == 42 && out[2] == 100 && out[3] == 1001);
-
         nipc_client_status_t status;
         nipc_client_status(&client, &status);
-        check("call_count == 4", status.call_count == 4);
+        check("call_count == 1", status.call_count == 1);
         check("error_count == 0", status.error_count == 0);
     }
 
@@ -399,7 +349,7 @@ static void test_retry_on_broken_session(void)
     unique_service(service, sizeof(service), "svc_retry");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
     if (!server_thread)
         return;
 
@@ -439,7 +389,7 @@ static void test_handler_failure(void)
     unique_service(service, sizeof(service), "svc_hfail");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &failing_snapshot_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &failing_snapshot_service_handler);
     if (!server_thread)
         return;
 
@@ -470,7 +420,7 @@ static void test_client_auth_failure(void)
     unique_service(service, sizeof(service), "svc_auth");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
     if (!server_thread)
         return;
 
@@ -496,7 +446,7 @@ static void test_client_incompatible(void)
     scfg.supported_profiles = NIPC_PROFILE_SHM_HYBRID;
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_server_named(&sctx, service, 4, &scfg, &full_handlers);
+    HANDLE server_thread = start_server_named(&sctx, service, 4, &scfg, &full_service_handler);
     if (!server_thread)
         return;
 
@@ -519,7 +469,7 @@ static void test_status_reporting(void)
     unique_service(service, sizeof(service), "svc_status");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
     if (!server_thread)
         return;
 
@@ -535,11 +485,17 @@ static void test_status_reporting(void)
     check("initial error_count == 0", s0.error_count == 0);
 
     if (nipc_client_ready(&client)) {
-        for (int i = 0; i < 3; i++) {
-            nipc_cgroups_resp_view_t view;
-            nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
-            check("snapshot call ok", err == NIPC_OK);
-        }
+        nipc_cgroups_resp_view_t view1;
+        nipc_error_t err1 = nipc_client_call_cgroups_snapshot(&client, &view1);
+        check("snapshot call 1 ok", err1 == NIPC_OK);
+
+        nipc_cgroups_resp_view_t view2;
+        nipc_error_t err2 = nipc_client_call_cgroups_snapshot(&client, &view2);
+        check("snapshot call 2 ok", err2 == NIPC_OK);
+
+        nipc_cgroups_resp_view_t view3;
+        nipc_error_t err3 = nipc_client_call_cgroups_snapshot(&client, &view3);
+        check("snapshot call 3 ok", err3 == NIPC_OK);
     }
 
     nipc_client_status_t s1;
@@ -569,7 +525,7 @@ static void test_cache_refresh_preserves(void)
     unique_service(service, sizeof(service), "svc_cache_pres");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
     if (!server_thread)
         return;
 
@@ -606,7 +562,7 @@ static void test_cache_reconnect_rebuilds(void)
     unique_service(service, sizeof(service), "svc_cache_reconn");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
     if (!server_thread)
         return;
 
@@ -641,7 +597,7 @@ static void test_cache_empty_snapshot(void)
     unique_service(service, sizeof(service), "svc_cache_empty");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &empty_snapshot_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &empty_snapshot_service_handler);
     if (!server_thread)
         return;
 
@@ -672,7 +628,7 @@ static void test_non_request_terminates_session(void)
     unique_service(service, sizeof(service), "svc_nonreq");
 
     server_thread_ctx_t sctx;
-    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_handlers);
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
     if (!server_thread)
         return;
 
@@ -736,7 +692,7 @@ int main(void)
 
     test_client_lifecycle();
     test_client_lifecycle_ready();
-    test_multi_method_calls();
+    test_snapshot_calls();
     /* Broken-session retry and cache subcases need a smaller Windows-only
      * harness. In this monolithic executable they deadlock intermittently
      * and poison the full ctest pass. */

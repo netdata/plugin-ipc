@@ -1,6 +1,6 @@
 //go:build unix
 
-package cgroups
+package raw
 
 import (
 	"fmt"
@@ -17,7 +17,7 @@ func TestCacheFullRoundTrip(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
 	cache := NewCache(testRunDir, svc, testClientConfig())
@@ -102,7 +102,7 @@ func TestCacheRefreshFailurePreserves(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 
 	cache := NewCache(testRunDir, svc, testClientConfig())
 
@@ -153,7 +153,7 @@ func TestCacheReconnectRebuilds(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts1 := startTestServer(svc, testHandlers())
+	ts1 := startTestServer(svc, testSnapshotDispatch())
 
 	cache := NewCache(testRunDir, svc, testClientConfig())
 	if !cache.Refresh() {
@@ -168,7 +168,7 @@ func TestCacheReconnectRebuilds(t *testing.T) {
 	cleanupAll(svc)
 	time.Sleep(50 * time.Millisecond)
 
-	ts2 := startTestServer(svc, testHandlers())
+	ts2 := startTestServer(svc, testSnapshotDispatch())
 	defer ts2.stop()
 
 	// Refresh should reconnect and rebuild cache
@@ -195,7 +195,7 @@ func TestCacheLookupNotFound(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, testHandlers())
+	ts := startTestServer(svc, testSnapshotDispatch())
 	defer ts.stop()
 
 	cache := NewCache(testRunDir, svc, testClientConfig())
@@ -268,8 +268,8 @@ func TestCacheLargeDataset(t *testing.T) {
 	const N = 1000
 
 	// Handler that builds N items
-	largeHandler := Handlers{
-		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+	largeHandler := SnapshotDispatch(
+		func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
 			if request.LayoutVersion != 1 || request.Flags != 0 {
 				return false
 			}
@@ -289,13 +289,13 @@ func TestCacheLargeDataset(t *testing.T) {
 			}
 			return true
 		},
-		SnapshotMaxItems: N,
-	}
+		N,
+	)
 
 	cfg := testServerConfig()
 	cfg.MaxResponsePayloadBytes = 256 * N
 
-	s := NewServer(testRunDir, svc, cfg, largeHandler)
+	s := NewServer(testRunDir, svc, cfg, protocol.MethodCgroupsSnapshot, largeHandler)
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)

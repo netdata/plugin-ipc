@@ -11,6 +11,7 @@
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_service.h"
+#include "test_win_raw_client_helpers.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -111,20 +112,136 @@ static bool on_string_reverse(void *user,
     return true;
 }
 
-static bool raw_noop_handler(void *user,
-                             uint16_t method_code,
-                             const uint8_t *request_payload, size_t request_len,
-                             uint8_t *response_buf, size_t response_buf_size,
-                             size_t *response_len_out)
+static nipc_error_t dispatch_increment_request(const nipc_header_t *request_hdr,
+                                               const uint8_t *request_payload,
+                                               size_t request_len,
+                                               uint8_t *response_buf,
+                                               size_t response_buf_size,
+                                               size_t *response_len_out,
+                                               nipc_increment_handler_fn handler)
+{
+    if (request_hdr->code != NIPC_METHOD_INCREMENT)
+        return NIPC_ERR_BAD_LAYOUT;
+
+    if (!handler)
+        return NIPC_ERR_HANDLER_FAILED;
+
+    if (!nipc_dispatch_increment(request_payload, request_len,
+                                 response_buf, response_buf_size,
+                                 response_len_out, handler, NULL))
+        return NIPC_ERR_BAD_LAYOUT;
+
+    return NIPC_OK;
+}
+
+static nipc_error_t dispatch_string_reverse_request(const nipc_header_t *request_hdr,
+                                                    const uint8_t *request_payload,
+                                                    size_t request_len,
+                                                    uint8_t *response_buf,
+                                                    size_t response_buf_size,
+                                                    size_t *response_len_out,
+                                                    nipc_string_reverse_handler_fn handler)
+{
+    if (request_hdr->code != NIPC_METHOD_STRING_REVERSE)
+        return NIPC_ERR_BAD_LAYOUT;
+
+    if (!handler)
+        return NIPC_ERR_HANDLER_FAILED;
+
+    if (!nipc_dispatch_string_reverse(request_payload, request_len,
+                                      response_buf, response_buf_size,
+                                      response_len_out, handler, NULL))
+        return NIPC_ERR_BAD_LAYOUT;
+
+    return NIPC_OK;
+}
+
+static nipc_error_t raw_noop_handler(void *user,
+                                     const nipc_header_t *request_hdr,
+                                     const uint8_t *request_payload,
+                                     size_t request_len,
+                                     uint8_t *response_buf,
+                                     size_t response_buf_size,
+                                     size_t *response_len_out)
 {
     (void)user;
-    (void)method_code;
+    (void)request_hdr;
     (void)request_payload;
     (void)request_len;
     (void)response_buf;
     (void)response_buf_size;
     *response_len_out = 0;
-    return true;
+    return NIPC_OK;
+}
+
+static nipc_error_t raw_increment_handler(void *user,
+                                          const nipc_header_t *request_hdr,
+                                          const uint8_t *request_payload,
+                                          size_t request_len,
+                                          uint8_t *response_buf,
+                                          size_t response_buf_size,
+                                          size_t *response_len_out)
+{
+    (void)user;
+    return dispatch_increment_request(request_hdr, request_payload, request_len,
+                                      response_buf, response_buf_size,
+                                      response_len_out, on_increment);
+}
+
+static nipc_error_t raw_blocking_increment_handler(void *user,
+                                                   const nipc_header_t *request_hdr,
+                                                   const uint8_t *request_payload,
+                                                   size_t request_len,
+                                                   uint8_t *response_buf,
+                                                   size_t response_buf_size,
+                                                   size_t *response_len_out)
+{
+    (void)user;
+    return dispatch_increment_request(request_hdr, request_payload, request_len,
+                                      response_buf, response_buf_size,
+                                      response_len_out, on_increment_blocking);
+}
+
+static nipc_error_t raw_missing_increment_handler(void *user,
+                                                  const nipc_header_t *request_hdr,
+                                                  const uint8_t *request_payload,
+                                                  size_t request_len,
+                                                  uint8_t *response_buf,
+                                                  size_t response_buf_size,
+                                                  size_t *response_len_out)
+{
+    (void)user;
+    return dispatch_increment_request(request_hdr, request_payload, request_len,
+                                      response_buf, response_buf_size,
+                                      response_len_out, NULL);
+}
+
+static nipc_error_t raw_string_reverse_handler(void *user,
+                                               const nipc_header_t *request_hdr,
+                                               const uint8_t *request_payload,
+                                               size_t request_len,
+                                               uint8_t *response_buf,
+                                               size_t response_buf_size,
+                                               size_t *response_len_out)
+{
+    (void)user;
+    return dispatch_string_reverse_request(request_hdr, request_payload, request_len,
+                                           response_buf, response_buf_size,
+                                           response_len_out, on_string_reverse);
+}
+
+static nipc_error_t raw_missing_string_handler(void *user,
+                                               const nipc_header_t *request_hdr,
+                                               const uint8_t *request_payload,
+                                               size_t request_len,
+                                               uint8_t *response_buf,
+                                               size_t response_buf_size,
+                                               size_t *response_len_out)
+{
+    (void)user;
+    return dispatch_string_reverse_request(request_hdr, request_payload, request_len,
+                                           response_buf, response_buf_size,
+                                           response_len_out, NULL);
 }
 
 static bool on_snapshot_one(void *user,
@@ -181,51 +298,21 @@ static bool on_snapshot_collision(void *user,
     return true;
 }
 
-static nipc_cgroups_handlers_t full_guard_handlers = {
-    .on_increment = on_increment,
-    .on_string_reverse = on_string_reverse,
-    .on_cgroups_snapshot = on_snapshot_one,
+static nipc_cgroups_service_handler_t snapshot_one_service_handler = {
+    .handle = on_snapshot_one,
     .snapshot_max_items = 1,
     .user = NULL,
 };
 
-static nipc_cgroups_handlers_t missing_increment_handlers = {
-    .on_increment = NULL,
-    .on_string_reverse = on_string_reverse,
-    .on_cgroups_snapshot = on_snapshot_one,
-    .snapshot_max_items = 1,
-    .user = NULL,
-};
-
-static nipc_cgroups_handlers_t missing_snapshot_handlers = {
-    .on_increment = on_increment,
-    .on_string_reverse = on_string_reverse,
-    .on_cgroups_snapshot = NULL,
+static nipc_cgroups_service_handler_t missing_snapshot_service_handler = {
+    .handle = NULL,
     .snapshot_max_items = 0,
     .user = NULL,
 };
 
-static nipc_cgroups_handlers_t missing_string_handlers = {
-    .on_increment = on_increment,
-    .on_string_reverse = NULL,
-    .on_cgroups_snapshot = on_snapshot_one,
-    .snapshot_max_items = 1,
-    .user = NULL,
-};
-
-static nipc_cgroups_handlers_t collision_snapshot_handlers = {
-    .on_increment = on_increment,
-    .on_string_reverse = on_string_reverse,
-    .on_cgroups_snapshot = on_snapshot_collision,
+static nipc_cgroups_service_handler_t collision_snapshot_service_handler = {
+    .handle = on_snapshot_collision,
     .snapshot_max_items = 8,
-    .user = NULL,
-};
-
-static nipc_cgroups_handlers_t blocking_increment_handlers = {
-    .on_increment = on_increment_blocking,
-    .on_string_reverse = NULL,
-    .on_cgroups_snapshot = NULL,
-    .snapshot_max_items = 0,
     .user = NULL,
 };
 
@@ -233,7 +320,10 @@ typedef struct {
     char service[64];
     int worker_count;
     nipc_np_server_config_t config;
-    nipc_cgroups_handlers_t handlers;
+    bool use_typed;
+    nipc_cgroups_service_handler_t service_handler;
+    uint16_t expected_method_code;
+    nipc_server_handler_fn raw_handler;
     HANDLE ready_event;
     volatile LONG init_ok;
     nipc_managed_server_t server;
@@ -243,9 +333,18 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
 {
     server_thread_ctx_t *ctx = (server_thread_ctx_t *)arg;
 
-    nipc_error_t err = nipc_server_init_typed(&ctx->server, TEST_RUN_DIR,
-                                              ctx->service, &ctx->config,
-                                              ctx->worker_count, &ctx->handlers);
+    nipc_error_t err;
+
+    if (ctx->use_typed) {
+        err = nipc_server_init_typed(&ctx->server, TEST_RUN_DIR,
+                                     ctx->service, &ctx->config,
+                                     ctx->worker_count, &ctx->service_handler);
+    } else {
+        err = nipc_server_init(&ctx->server, TEST_RUN_DIR,
+                               ctx->service, &ctx->config,
+                               ctx->worker_count, ctx->expected_method_code,
+                               ctx->raw_handler, NULL);
+    }
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed for %s: %d\n", ctx->service, err);
         InterlockedExchange(&ctx->init_ok, 0);
@@ -263,13 +362,14 @@ static HANDLE start_server_named(server_thread_ctx_t *ctx,
                                  const char *service,
                                  int worker_count,
                                  const nipc_np_server_config_t *config,
-                                 const nipc_cgroups_handlers_t *handlers)
+                                 const nipc_cgroups_service_handler_t *service_handler)
 {
     memset(ctx, 0, sizeof(*ctx));
     strncpy(ctx->service, service, sizeof(ctx->service) - 1);
     ctx->worker_count = worker_count;
     ctx->config = *config;
-    ctx->handlers = *handlers;
+    ctx->use_typed = true;
+    ctx->service_handler = *service_handler;
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     InterlockedExchange(&ctx->init_ok, 0);
 
@@ -281,6 +381,44 @@ static HANDLE start_server_named(server_thread_ctx_t *ctx,
     DWORD wr = WaitForSingleObject(ctx->ready_event, 5000);
     check("extra guard server ready event", wr == WAIT_OBJECT_0);
     check("extra guard server init ok", InterlockedCompareExchange(&ctx->init_ok, 0, 0) == 1);
+    CloseHandle(ctx->ready_event);
+    ctx->ready_event = NULL;
+
+    if (wr != WAIT_OBJECT_0 ||
+        InterlockedCompareExchange(&ctx->init_ok, 0, 0) != 1) {
+        WaitForSingleObject(thread, 10000);
+        CloseHandle(thread);
+        return NULL;
+    }
+
+    return thread;
+}
+
+static HANDLE start_raw_server_named(server_thread_ctx_t *ctx,
+                                     const char *service,
+                                     int worker_count,
+                                     const nipc_np_server_config_t *config,
+                                     uint16_t expected_method_code,
+                                     nipc_server_handler_fn raw_handler)
+{
+    memset(ctx, 0, sizeof(*ctx));
+    strncpy(ctx->service, service, sizeof(ctx->service) - 1);
+    ctx->worker_count = worker_count;
+    ctx->config = *config;
+    ctx->use_typed = false;
+    ctx->expected_method_code = expected_method_code;
+    ctx->raw_handler = raw_handler;
+    ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    InterlockedExchange(&ctx->init_ok, 0);
+
+    HANDLE thread = CreateThread(NULL, 0, managed_server_thread, ctx, 0, NULL);
+    check("extra guard raw server thread created", thread != NULL);
+    if (!thread)
+        return NULL;
+
+    DWORD wr = WaitForSingleObject(ctx->ready_event, 5000);
+    check("extra guard raw server ready event", wr == WAIT_OBJECT_0);
+    check("extra guard raw server init ok", InterlockedCompareExchange(&ctx->init_ok, 0, 0) == 1);
     CloseHandle(ctx->ready_event);
     ctx->ready_event = NULL;
 
@@ -352,7 +490,7 @@ static DWORD WINAPI blocking_client_thread(LPVOID arg)
 
     nipc_client_init(&client, TEST_RUN_DIR, ctx->service, &ccfg);
     if (refresh_until_ready(&client, 100, 10))
-        ctx->err = nipc_client_call_increment(&client, 41, &ctx->value_out);
+        ctx->err = test_win_client_call_increment_raw(&client, 41, &ctx->value_out);
     else
         ctx->err = NIPC_ERR_NOT_READY;
 
@@ -407,8 +545,9 @@ static void test_worker_limit_rejects_extra_client(void)
 
     server_thread_ctx_t sctx;
     nipc_np_server_config_t scfg = default_server_config();
-    HANDLE server_thread = start_server_named(
-        &sctx, service, 1, &scfg, &blocking_increment_handlers);
+    HANDLE server_thread = start_raw_server_named(
+        &sctx, service, 1, &scfg,
+        NIPC_METHOD_INCREMENT, raw_blocking_increment_handler);
     if (!server_thread)
         return;
 
@@ -484,8 +623,9 @@ static void test_server_destroy_joins_active_session(void)
 
     server_thread_ctx_t sctx;
     nipc_np_server_config_t scfg = default_server_config();
-    HANDLE server_thread = start_server_named(
-        &sctx, service, 1, &scfg, &blocking_increment_handlers);
+    HANDLE server_thread = start_raw_server_named(
+        &sctx, service, 1, &scfg,
+        NIPC_METHOD_INCREMENT, raw_blocking_increment_handler);
     if (!server_thread)
         return;
 
@@ -546,8 +686,9 @@ static void test_named_pipe_send_failure_recovers(void)
 
     server_thread_ctx_t sctx;
     nipc_np_server_config_t scfg = default_server_config();
-    HANDLE server_thread = start_server_named(
-        &sctx, service, 1, &scfg, &blocking_increment_handlers);
+    HANDLE server_thread = start_raw_server_named(
+        &sctx, service, 1, &scfg,
+        NIPC_METHOD_INCREMENT, raw_blocking_increment_handler);
     if (!server_thread)
         return;
 
@@ -588,7 +729,7 @@ static void test_named_pipe_send_failure_recovers(void)
         check("send-failure replacement client ready",
               refresh_until_ready(&client, 100, 10));
         if (nipc_client_ready(&client)) {
-            nipc_error_t err = nipc_client_call_increment(&client, 5, &value_out);
+            nipc_error_t err = test_win_client_call_increment_raw(&client, 5, &value_out);
             check("send-failure replacement increment succeeds",
                   err == NIPC_OK && value_out == 6);
         }
@@ -601,7 +742,7 @@ static void test_named_pipe_send_failure_recovers(void)
 
 static void test_string_dispatch_missing_handlers_and_unknown_method(void)
 {
-    printf("--- Typed dispatch edge paths ---\n");
+    printf("--- Dispatch edge paths ---\n");
 
     {
         char service[64];
@@ -611,8 +752,9 @@ static void test_string_dispatch_missing_handlers_and_unknown_method(void)
         nipc_np_session_t session = { .pipe = INVALID_HANDLE_VALUE };
 
         unique_service(service, sizeof(service), "svc_unknown_method");
-        HANDLE server_thread = start_server_named(
-            &sctx, service, 4, &scfg, &full_guard_handlers);
+        HANDLE server_thread = start_raw_server_named(
+            &sctx, service, 4, &scfg,
+            NIPC_METHOD_INCREMENT, raw_increment_handler);
         if (!server_thread)
             return;
 
@@ -636,11 +778,11 @@ static void test_string_dispatch_missing_handlers_and_unknown_method(void)
             check("raw unknown-method response recv ok",
                   nipc_np_receive(&session, recv_buf, sizeof(recv_buf),
                                   &resp_hdr, &payload, &payload_len) == NIPC_NP_OK);
-            check("unknown method maps to internal-error response",
+            check("unknown method maps to unsupported response",
                   resp_hdr.kind == NIPC_KIND_RESPONSE &&
                   resp_hdr.code == req.code &&
                   resp_hdr.message_id == req.message_id &&
-                  resp_hdr.transport_status == NIPC_STATUS_INTERNAL_ERROR &&
+                  resp_hdr.transport_status == NIPC_STATUS_UNSUPPORTED &&
                   payload_len == 0);
             nipc_np_close_session(&session);
         }
@@ -655,8 +797,9 @@ static void test_string_dispatch_missing_handlers_and_unknown_method(void)
         nipc_np_session_t session = { .pipe = INVALID_HANDLE_VALUE };
 
         unique_service(service, sizeof(service), "svc_missing_inc");
-        HANDLE server_thread = start_server_named(
-            &sctx, service, 4, &scfg, &missing_increment_handlers);
+        HANDLE server_thread = start_raw_server_named(
+            &sctx, service, 4, &scfg,
+            NIPC_METHOD_INCREMENT, raw_missing_increment_handler);
         if (!server_thread)
             return;
 
@@ -702,7 +845,7 @@ static void test_string_dispatch_missing_handlers_and_unknown_method(void)
 
         unique_service(service, sizeof(service), "svc_missing_snap");
         HANDLE server_thread = start_server_named(
-            &sctx, service, 4, &scfg, &missing_snapshot_handlers);
+            &sctx, service, 4, &scfg, &missing_snapshot_service_handler);
         if (!server_thread)
             return;
 
@@ -748,8 +891,9 @@ static void test_string_dispatch_missing_handlers_and_unknown_method(void)
         nipc_np_session_t session = { .pipe = INVALID_HANDLE_VALUE };
 
         unique_service(service, sizeof(service), "svc_missing_str");
-        HANDLE server_thread = start_server_named(
-            &sctx, service, 4, &scfg, &missing_string_handlers);
+        HANDLE server_thread = start_raw_server_named(
+            &sctx, service, 4, &scfg,
+            NIPC_METHOD_STRING_REVERSE, raw_missing_string_handler);
         if (!server_thread)
             return;
 
@@ -812,7 +956,7 @@ static void test_server_init_truncation_and_typed_error_propagation(void)
 
     {
         nipc_error_t err = nipc_server_init(&server, long_run_dir, long_service,
-                                            &scfg, 1, RESPONSE_BUF_SIZE,
+                                            &scfg, 1, NIPC_METHOD_INCREMENT,
                                             raw_noop_handler, NULL);
         check("raw init with long names succeeds", err == NIPC_OK);
         if (err == NIPC_OK) {
@@ -826,7 +970,7 @@ static void test_server_init_truncation_and_typed_error_propagation(void)
 
     check("typed init propagates raw invalid-service failure",
           nipc_server_init_typed(&server, TEST_RUN_DIR, "svc/typed_bad_name",
-                                 &scfg, 1, &full_guard_handlers)
+                                 &scfg, 1, &snapshot_one_service_handler)
           == NIPC_ERR_BAD_LAYOUT);
 }
 
@@ -840,7 +984,7 @@ static void test_cache_collision_lookup_and_rehash(void)
     server_thread_ctx_t sctx;
     nipc_np_server_config_t scfg = default_server_config();
     HANDLE server_thread = start_server_named(
-        &sctx, service, 4, &scfg, &collision_snapshot_handlers);
+        &sctx, service, 4, &scfg, &collision_snapshot_service_handler);
     if (!server_thread)
         return;
 
@@ -867,8 +1011,9 @@ static void test_drain_timeout_on_blocked_handler(void)
 
     server_thread_ctx_t sctx;
     nipc_np_server_config_t scfg = default_server_config();
-    HANDLE server_thread = start_server_named(
-        &sctx, service, 4, &scfg, &blocking_increment_handlers);
+    HANDLE server_thread = start_raw_server_named(
+        &sctx, service, 4, &scfg,
+        NIPC_METHOD_INCREMENT, raw_blocking_increment_handler);
     if (!server_thread)
         return;
 

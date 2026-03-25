@@ -1,6 +1,6 @@
 //go:build windows
 
-package cgroups
+package raw
 
 import (
 	"testing"
@@ -48,8 +48,8 @@ type winTestServer struct {
 
 // startTestServerWin creates a Windows Server (Named Pipe transport)
 // and starts it in a background goroutine. Returns a handle for cleanup.
-func startTestServerWin(service string, handlers Handlers) *winTestServer {
-	s := NewServer(winTestRunDir, service, testWinServerConfig(), handlers)
+func startTestServerWin(service string, expectedMethodCode uint16, handler DispatchHandler) *winTestServer {
+	s := NewServer(winTestRunDir, service, testWinServerConfig(), expectedMethodCode, handler)
 	doneCh := make(chan struct{})
 
 	go func() {
@@ -68,15 +68,16 @@ func (ts *winTestServer) stop() {
 	<-ts.doneCh
 }
 
-func winPingPongHandlers() Handlers {
-	return Handlers{
-		OnIncrement: func(v uint64) (uint64, bool) {
-			return v + 1, true
-		},
-		OnStringReverse: func(s string) (string, bool) {
-			return winReverseString(s), true
-		},
-	}
+func winPingPongIncrementDispatch() DispatchHandler {
+	return IncrementDispatch(func(v uint64) (uint64, bool) {
+		return v + 1, true
+	})
+}
+
+func winPingPongStringReverseDispatch() DispatchHandler {
+	return StringReverseDispatch(func(s string) (string, bool) {
+		return winReverseString(s), true
+	})
 }
 
 // winReverseString reverses a string byte-by-byte.
@@ -91,10 +92,10 @@ func winReverseString(s string) string {
 func TestWinIncrementPingPong(t *testing.T) {
 	svc := "go_win_pp_incr"
 
-	ts := startTestServerWin(svc, winPingPongHandlers())
+	ts := startTestServerWin(svc, protocol.MethodIncrement, winPingPongIncrementDispatch())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	client := NewIncrementClient(winTestRunDir, svc, testWinClientConfig())
 	waitWinClientReady(t, client)
 
 	// 10 rounds: send 0 -> get 1 -> send 1 -> get 2 -> ... -> value == 10
@@ -134,10 +135,10 @@ func TestWinIncrementPingPong(t *testing.T) {
 func TestWinStringReversePingPong(t *testing.T) {
 	svc := "go_win_pp_strrev"
 
-	ts := startTestServerWin(svc, winPingPongHandlers())
+	ts := startTestServerWin(svc, protocol.MethodStringReverse, winPingPongStringReverseDispatch())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	client := NewStringReverseClient(winTestRunDir, svc, testWinClientConfig())
 	waitWinClientReady(t, client)
 
 	original := "abcdefghijklmnopqrstuvwxyz"
@@ -172,66 +173,6 @@ func TestWinStringReversePingPong(t *testing.T) {
 	status := client.Status()
 	if status.CallCount != 6 {
 		t.Fatalf("expected call_count=6, got %d", status.CallCount)
-	}
-	if status.ErrorCount != 0 {
-		t.Fatalf("expected error_count=0, got %d", status.ErrorCount)
-	}
-
-	client.Close()
-}
-
-func TestWinMixedMethods(t *testing.T) {
-	svc := "go_win_pp_mixed"
-
-	ts := startTestServerWin(svc, winPingPongHandlers())
-	defer ts.stop()
-
-	client := NewClient(winTestRunDir, svc, testWinClientConfig())
-	waitWinClientReady(t, client)
-
-	// increment(100) -> 101
-	val, err := client.CallIncrement(100)
-	if err != nil {
-		t.Fatalf("increment(100) failed: %v", err)
-	}
-	if val != 101 {
-		t.Fatalf("expected 101, got %d", val)
-	}
-
-	// reverse("hello") -> verify locally computed reverse
-	helloStr := "hello"
-	view, err := client.CallStringReverse(helloStr)
-	if err != nil {
-		t.Fatalf("reverse(%q) failed: %v", helloStr, err)
-	}
-	expectedHelloRev := winReverseString(helloStr)
-	if view.Str != expectedHelloRev {
-		t.Fatalf("reverse(%q): expected %q, got %q", helloStr, expectedHelloRev, view.Str)
-	}
-
-	// increment(101) -> 102
-	val, err = client.CallIncrement(101)
-	if err != nil {
-		t.Fatalf("increment(101) failed: %v", err)
-	}
-	if val != 102 {
-		t.Fatalf("expected 102, got %d", val)
-	}
-
-	// reverse("world") -> verify locally computed reverse
-	worldStr := "world"
-	view, err = client.CallStringReverse(worldStr)
-	if err != nil {
-		t.Fatalf("reverse(%q) failed: %v", worldStr, err)
-	}
-	expectedWorldRev := winReverseString(worldStr)
-	if view.Str != expectedWorldRev {
-		t.Fatalf("reverse(%q): expected %q, got %q", worldStr, expectedWorldRev, view.Str)
-	}
-
-	status := client.Status()
-	if status.CallCount != 4 {
-		t.Fatalf("expected call_count=4, got %d", status.CallCount)
 	}
 	if status.ErrorCount != 0 {
 		t.Fatalf("expected error_count=0, got %d", status.ErrorCount)

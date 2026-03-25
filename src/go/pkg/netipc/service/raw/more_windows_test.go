@@ -1,6 +1,6 @@
 //go:build windows
 
-package cgroups
+package raw
 
 import (
 	"encoding/binary"
@@ -14,7 +14,7 @@ import (
 )
 
 func TestWinClientStatusFresh(t *testing.T) {
-	client := NewClient(winTestRunDir, uniqueWinService("go_win_fresh"), testWinClientConfig())
+	client := NewSnapshotClient(winTestRunDir, uniqueWinService("go_win_fresh"), testWinClientConfig())
 	defer client.Close()
 
 	status := client.Status()
@@ -29,7 +29,7 @@ func TestWinClientStatusFresh(t *testing.T) {
 func TestWinClientLifecycle(t *testing.T) {
 	svc := uniqueWinService("go_win_lifecycle")
 
-	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	client := NewIncrementClient(winTestRunDir, svc, testWinClientConfig())
 	defer client.Close()
 
 	if client.state != StateDisconnected {
@@ -47,7 +47,7 @@ func TestWinClientLifecycle(t *testing.T) {
 		t.Fatalf("expected NOT_FOUND, got %d", client.state)
 	}
 
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	ts := startTestIncrementServerWinWithConfig(svc, testWinServerConfig())
 
 	changed = client.Refresh()
 	if !changed {
@@ -78,10 +78,10 @@ func TestWinClientLifecycle(t *testing.T) {
 
 func TestWinClientRefreshFromReadyNoop(t *testing.T) {
 	svc := uniqueWinService("go_win_ready")
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	ts := startTestIncrementServerWinWithConfig(svc, testWinServerConfig())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	client := NewIncrementClient(winTestRunDir, svc, testWinClientConfig())
 	defer client.Close()
 
 	client.Refresh()
@@ -100,7 +100,13 @@ func TestWinClientRefreshFromReadyNoop(t *testing.T) {
 
 func TestWinServerStopWhileIdle(t *testing.T) {
 	svc := uniqueWinService("go_win_stop_idle")
-	server := NewServer(winTestRunDir, svc, testWinServerConfig(), winTestHandlers())
+	server := NewServer(
+		winTestRunDir,
+		svc,
+		testWinServerConfig(),
+		protocol.MethodIncrement,
+		winIncrementDispatchHandler(),
+	)
 
 	done := make(chan error, 1)
 	go func() {
@@ -132,12 +138,12 @@ func TestWinClientRefreshFromAuthFailed(t *testing.T) {
 
 	scfg := testWinServerConfig()
 	scfg.AuthToken = 0x1111
-	ts := startTestServerWinWithConfig(svc, scfg, winTestHandlers())
+	ts := startTestIncrementServerWinWithConfig(svc, scfg)
 	defer ts.stop()
 
 	ccfg := testWinClientConfig()
 	ccfg.AuthToken = 0x2222
-	client := NewClient(winTestRunDir, svc, ccfg)
+	client := NewIncrementClient(winTestRunDir, svc, ccfg)
 	defer client.Close()
 
 	client.Refresh()
@@ -156,12 +162,12 @@ func TestWinClientRefreshFromIncompatible(t *testing.T) {
 
 	scfg := testWinServerConfig()
 	scfg.SupportedProfiles = protocol.ProfileSHMFutex
-	ts := startTestServerWinWithConfig(svc, scfg, winTestHandlers())
+	ts := startTestIncrementServerWinWithConfig(svc, scfg)
 	defer ts.stop()
 
 	ccfg := testWinClientConfig()
 	ccfg.SupportedProfiles = protocol.ProfileBaseline
-	client := NewClient(winTestRunDir, svc, ccfg)
+	client := NewIncrementClient(winTestRunDir, svc, ccfg)
 	defer client.Close()
 
 	client.Refresh()
@@ -177,10 +183,10 @@ func TestWinClientRefreshFromIncompatible(t *testing.T) {
 
 func TestWinClientRefreshFromBroken(t *testing.T) {
 	svc := uniqueWinService("go_win_broken")
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	ts := startTestIncrementServerWinWithConfig(svc, testWinServerConfig())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	client := NewIncrementClient(winTestRunDir, svc, testWinClientConfig())
 	defer client.Close()
 
 	client.Refresh()
@@ -204,7 +210,7 @@ func TestWinClientRefreshFromBroken(t *testing.T) {
 }
 
 func TestWinCallWithRetryNotReady(t *testing.T) {
-	client := NewClient(winTestRunDir, uniqueWinService("go_win_notready"), testWinClientConfig())
+	client := NewSnapshotClient(winTestRunDir, uniqueWinService("go_win_notready"), testWinClientConfig())
 	defer client.Close()
 
 	if _, err := client.CallSnapshot(); err == nil {
@@ -215,23 +221,8 @@ func TestWinCallWithRetryNotReady(t *testing.T) {
 	}
 }
 
-func TestWinHandlersSnapshotMaxItems(t *testing.T) {
-	h := Handlers{}
-
-	got := h.snapshotMaxItems(4096)
-	want := protocol.EstimateCgroupsMaxItems(4096)
-	if got != want {
-		t.Fatalf("snapshotMaxItems default = %d, want %d", got, want)
-	}
-
-	h.SnapshotMaxItems = 7
-	if got := h.snapshotMaxItems(4096); got != 7 {
-		t.Fatalf("snapshotMaxItems override = %d, want 7", got)
-	}
-}
-
 func TestWinClientTransportWithoutSession(t *testing.T) {
-	client := NewClient(winTestRunDir, uniqueWinService("go_win_transport"), testWinClientConfig())
+	client := NewIncrementClient(winTestRunDir, uniqueWinService("go_win_transport"), testWinClientConfig())
 	defer client.Close()
 
 	hdr := protocol.Header{
@@ -252,7 +243,7 @@ func TestWinClientTransportWithoutSession(t *testing.T) {
 }
 
 func TestWinClientTransportReceiveWinShmError(t *testing.T) {
-	client := NewClient(winTestRunDir, uniqueWinService("go_win_transport_shm_err"), testWinShmClientConfig())
+	client := NewIncrementClient(winTestRunDir, uniqueWinService("go_win_transport_shm_err"), testWinShmClientConfig())
 	defer client.Close()
 
 	client.state = StateReady
@@ -437,7 +428,7 @@ func TestWinCallIncrementBatchWinShmRejectsMalformedPayload(t *testing.T) {
 }
 
 func TestWinClientMaxReceiveMessageBytes(t *testing.T) {
-	client := NewClient(winTestRunDir, uniqueWinService("go_win_recvmax"), testWinClientConfig())
+	client := NewSnapshotClient(winTestRunDir, uniqueWinService("go_win_recvmax"), testWinClientConfig())
 	defer client.Close()
 
 	if got := client.maxReceiveMessageBytes(); got != protocol.HeaderSize+cacheResponseBufSize {
@@ -455,8 +446,8 @@ func TestWinClientMaxReceiveMessageBytes(t *testing.T) {
 	}
 }
 
-func TestWinServerDispatchSingleMissingHandlers(t *testing.T) {
-	server := &Server{handlers: Handlers{}}
+func TestWinServerDispatchSingleMissingHandler(t *testing.T) {
+	server := &Server{expectedMethodCode: protocol.MethodIncrement}
 	responseBuf := make([]byte, 128)
 
 	for _, methodCode := range []uint16{
@@ -465,30 +456,34 @@ func TestWinServerDispatchSingleMissingHandlers(t *testing.T) {
 		protocol.MethodCgroupsSnapshot,
 		0xFFFF,
 	} {
-		if n, ok := server.dispatchSingle(methodCode, nil, responseBuf); ok || n != 0 {
-			t.Fatalf("dispatchSingle(%d) = (%d, %v), want (0, false)", methodCode, n, ok)
+		if n, err := server.dispatchSingle(methodCode, nil, responseBuf); !errors.Is(err, errHandlerFailed) || n != 0 {
+			t.Fatalf("dispatchSingle(%d) = (%d, %v), want (0, %v)", methodCode, n, err, errHandlerFailed)
 		}
 	}
 }
 
 func TestWinServerDispatchSingleSnapshotZeroCapacity(t *testing.T) {
 	server := &Server{
-		handlers: Handlers{
-			OnSnapshot: winTestCgroupsHandler,
-		},
+		expectedMethodCode: protocol.MethodCgroupsSnapshot,
+		handler:            winSnapshotDispatchHandler(),
 	}
 
-	if n, ok := server.dispatchSingle(protocol.MethodCgroupsSnapshot, nil, nil); ok || n != 0 {
-		t.Fatalf("dispatchSingle snapshot with zero response buffer = (%d, %v), want (0, false)", n, ok)
+	req := protocol.CgroupsRequest{LayoutVersion: 1, Flags: 0}
+	var reqBuf [4]byte
+	if req.Encode(reqBuf[:]) == 0 {
+		t.Fatal("request encode failed")
+	}
+	if n, err := server.dispatchSingle(protocol.MethodCgroupsSnapshot, reqBuf[:], nil); err == nil || n != 0 {
+		t.Fatalf("dispatchSingle snapshot with zero response buffer = (%d, %v), want (0, error)", n, err)
 	}
 }
 
 func TestWinCgroupsCall(t *testing.T) {
 	svc := uniqueWinService("go_win_cgroups")
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	ts := startTestSnapshotServerWinWithConfig(svc, testWinServerConfig())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	client := NewSnapshotClient(winTestRunDir, svc, testWinClientConfig())
 	defer client.Close()
 
 	client.Refresh()
@@ -535,13 +530,13 @@ func TestWinCallIncrementBatch(t *testing.T) {
 	cfg := testWinServerConfig()
 	cfg.MaxRequestBatchItems = 16
 	cfg.MaxResponseBatchItems = 16
-	ts := startTestServerWinWithConfig(svc, cfg, winTestHandlers())
+	ts := startTestServerWinWithConfig(svc, cfg, protocol.MethodIncrement, winIncrementDispatchHandler())
 	defer ts.stop()
 
 	ccfg := testWinClientConfig()
 	ccfg.MaxRequestBatchItems = 16
 	ccfg.MaxResponseBatchItems = 16
-	client := NewClient(winTestRunDir, svc, ccfg)
+	client := NewIncrementClient(winTestRunDir, svc, ccfg)
 	defer client.Close()
 
 	client.Refresh()
@@ -566,7 +561,7 @@ func TestWinCallIncrementBatch(t *testing.T) {
 }
 
 func TestWinCallIncrementBatchEmpty(t *testing.T) {
-	client := NewClient(winTestRunDir, uniqueWinService("go_win_empty_batch"), testWinClientConfig())
+	client := NewIncrementClient(winTestRunDir, uniqueWinService("go_win_empty_batch"), testWinClientConfig())
 	defer client.Close()
 
 	results, err := client.CallIncrementBatch(nil)
@@ -588,10 +583,10 @@ func TestWinCallIncrementBatchEmpty(t *testing.T) {
 
 func TestWinRetryOnClosedSession(t *testing.T) {
 	svc := uniqueWinService("go_win_retry")
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	ts := startTestSnapshotServerWinWithConfig(svc, testWinServerConfig())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	client := NewSnapshotClient(winTestRunDir, svc, testWinClientConfig())
 	defer client.Close()
 
 	client.Refresh()
@@ -621,10 +616,10 @@ func TestWinRetryOnClosedSession(t *testing.T) {
 
 func TestWinHandlerFailure(t *testing.T) {
 	svc := uniqueWinService("go_win_handler_fail")
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winFailingHandlers())
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), protocol.MethodCgroupsSnapshot, winFailingSnapshotDispatchHandler())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	client := NewSnapshotClient(winTestRunDir, svc, testWinClientConfig())
 	defer client.Close()
 
 	client.Refresh()
@@ -644,9 +639,9 @@ func TestWinHandlerFailure(t *testing.T) {
 
 func TestWinStatusReporting(t *testing.T) {
 	svc := uniqueWinService("go_win_status")
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	ts := startTestSnapshotServerWinWithConfig(svc, testWinServerConfig())
 
-	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	client := NewSnapshotClient(winTestRunDir, svc, testWinClientConfig())
 	client.Refresh()
 	if !client.Ready() {
 		t.Fatal("client not ready")
@@ -705,7 +700,7 @@ func TestWinCacheStatusFresh(t *testing.T) {
 
 func TestWinCacheFullRoundTrip(t *testing.T) {
 	svc := uniqueWinService("go_win_cache_rt")
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	ts := startTestSnapshotServerWinWithConfig(svc, testWinServerConfig())
 
 	cache := NewCache(winTestRunDir, svc, testWinClientConfig())
 	if cache.Ready() {
@@ -755,7 +750,7 @@ func TestWinCacheRefreshNoServer(t *testing.T) {
 
 func TestWinCacheRefreshFailurePreserves(t *testing.T) {
 	svc := uniqueWinService("go_win_cache_preserve")
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	ts := startTestSnapshotServerWinWithConfig(svc, testWinServerConfig())
 
 	cache := NewCache(winTestRunDir, svc, testWinClientConfig())
 	if !cache.Refresh() {
@@ -791,7 +786,7 @@ func TestWinCacheRefreshFailurePreserves(t *testing.T) {
 
 func TestWinCacheReconnectRebuilds(t *testing.T) {
 	svc := uniqueWinService("go_win_cache_reconnect")
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	ts := startTestSnapshotServerWinWithConfig(svc, testWinServerConfig())
 	defer ts.stop()
 
 	cache := NewCache(winTestRunDir, svc, testWinClientConfig())
@@ -813,7 +808,7 @@ func TestWinCacheReconnectRebuilds(t *testing.T) {
 
 func TestWinCacheLookupHashNameMismatch(t *testing.T) {
 	svc := uniqueWinService("go_win_cache_lookup")
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	ts := startTestSnapshotServerWinWithConfig(svc, testWinServerConfig())
 	defer ts.stop()
 
 	cache := NewCache(winTestRunDir, svc, testWinClientConfig())
@@ -836,7 +831,7 @@ func TestWinCacheLookupHashNameMismatch(t *testing.T) {
 
 func TestWinCacheCloseResetsState(t *testing.T) {
 	svc := uniqueWinService("go_win_cache_close")
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	ts := startTestSnapshotServerWinWithConfig(svc, testWinServerConfig())
 
 	cache := NewCache(winTestRunDir, svc, testWinClientConfig())
 	if !cache.Refresh() {
@@ -880,28 +875,25 @@ func TestWinCacheLargeDataset(t *testing.T) {
 
 	cfg := testWinServerConfig()
 	cfg.MaxResponsePayloadBytes = 256 * itemCount
-	ts := startTestServerWinWithConfig(svc, cfg, Handlers{
-		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
-			if request.LayoutVersion != 1 || request.Flags != 0 {
+	ts := startTestServerWinWithConfig(svc, cfg, protocol.MethodCgroupsSnapshot, SnapshotDispatch(func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+		if request.LayoutVersion != 1 || request.Flags != 0 {
+			return false
+		}
+		builder.SetHeader(1, 100)
+
+		for i := uint32(0); i < itemCount; i++ {
+			name := fmt.Sprintf("cgroup-%d", i)
+			path := fmt.Sprintf("/sys/fs/cgroup/test/%d", i)
+			enabled := uint32(1)
+			if i%3 == 0 {
+				enabled = 0
+			}
+			if err := builder.Add(i+1000, 0, enabled, []byte(name), []byte(path)); err != nil {
 				return false
 			}
-			builder.SetHeader(1, 100)
-
-			for i := uint32(0); i < itemCount; i++ {
-				name := fmt.Sprintf("cgroup-%d", i)
-				path := fmt.Sprintf("/sys/fs/cgroup/test/%d", i)
-				enabled := uint32(1)
-				if i%3 == 0 {
-					enabled = 0
-				}
-				if err := builder.Add(i+1000, 0, enabled, []byte(name), []byte(path)); err != nil {
-					return false
-				}
-			}
-			return true
-		},
-		SnapshotMaxItems: itemCount,
-	})
+		}
+		return true
+	}, itemCount))
 	defer ts.stop()
 
 	ccfg := testWinClientConfig()
@@ -949,7 +941,7 @@ func TestWinIsErrorHelpers(t *testing.T) {
 
 func TestWinNonRequestTerminatesSession(t *testing.T) {
 	svc := uniqueWinService("go_win_nonreq")
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	ts := startTestSnapshotServerWinWithConfig(svc, testWinServerConfig())
 	defer ts.stop()
 
 	ccfg := testWinClientConfig()
@@ -991,7 +983,7 @@ func TestWinNonRequestTerminatesSession(t *testing.T) {
 	}
 	session.Close()
 
-	verify := NewClient(winTestRunDir, svc, testWinClientConfig())
+	verify := NewSnapshotClient(winTestRunDir, svc, testWinClientConfig())
 	defer verify.Close()
 
 	verify.Refresh()
@@ -1010,12 +1002,10 @@ func TestWinNonRequestTerminatesSession(t *testing.T) {
 
 func TestWinPeerDisconnectDuringResponseKeepsServerHealthy(t *testing.T) {
 	svc := uniqueWinService("go_win_send_fail")
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), Handlers{
-		OnIncrement: func(v uint64) (uint64, bool) {
-			time.Sleep(100 * time.Millisecond)
-			return v + 1, true
-		},
-	})
+	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), protocol.MethodIncrement, IncrementDispatch(func(v uint64) (uint64, bool) {
+		time.Sleep(100 * time.Millisecond)
+		return v + 1, true
+	}))
 	defer ts.stop()
 
 	ccfg := testWinClientConfig()
@@ -1042,7 +1032,7 @@ func TestWinPeerDisconnectDuringResponseKeepsServerHealthy(t *testing.T) {
 
 	time.Sleep(250 * time.Millisecond)
 
-	verify := NewClient(winTestRunDir, svc, testWinClientConfig())
+	verify := NewIncrementClient(winTestRunDir, svc, testWinClientConfig())
 	defer verify.Close()
 
 	verify.Refresh()
@@ -1061,10 +1051,10 @@ func TestWinPeerDisconnectDuringResponseKeepsServerHealthy(t *testing.T) {
 
 func TestWinCallSnapshotWithMalformedTransportState(t *testing.T) {
 	svc := uniqueWinService("go_win_malformed_state")
-	ts := startTestServerWinWithConfig(svc, testWinServerConfig(), winTestHandlers())
+	ts := startTestSnapshotServerWinWithConfig(svc, testWinServerConfig())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	client := NewSnapshotClient(winTestRunDir, svc, testWinClientConfig())
 	defer client.Close()
 
 	client.Refresh()
@@ -1093,10 +1083,10 @@ func TestWinCallIncrementBatchWithMalformedTransportState(t *testing.T) {
 	ccfg.MaxRequestBatchItems = 16
 	ccfg.MaxResponseBatchItems = 16
 
-	ts := startTestServerWinWithConfig(svc, scfg, winTestHandlers())
+	ts := startTestServerWinWithConfig(svc, scfg, protocol.MethodIncrement, winIncrementDispatchHandler())
 	defer ts.stop()
 
-	client := NewClient(winTestRunDir, svc, ccfg)
+	client := NewIncrementClient(winTestRunDir, svc, ccfg)
 	defer client.Close()
 
 	client.Refresh()
@@ -1182,7 +1172,7 @@ func TestWinCallIncrementRejectsMalformedResponseEnvelope(t *testing.T) {
 					return session.Send(&respHdr, respPayload[:])
 				})
 
-			client := NewClient(winTestRunDir, svc, testWinClientConfig())
+			client := NewIncrementClient(winTestRunDir, svc, testWinClientConfig())
 			defer client.Close()
 
 			client.Refresh()
@@ -1218,7 +1208,7 @@ func TestWinCallIncrementRejectsMalformedPayload(t *testing.T) {
 			return session.Send(&respHdr, []byte{1, 2, 3, 4})
 		})
 
-	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	client := NewIncrementClient(winTestRunDir, svc, testWinClientConfig())
 	defer client.Close()
 
 	client.Refresh()
@@ -1295,7 +1285,7 @@ func TestWinCallStringReverseRejectsMalformedResponseEnvelope(t *testing.T) {
 					return session.Send(&respHdr, respPayload)
 				})
 
-			client := NewClient(winTestRunDir, svc, testWinClientConfig())
+			client := NewStringReverseClient(winTestRunDir, svc, testWinClientConfig())
 			defer client.Close()
 
 			client.Refresh()
@@ -1331,7 +1321,7 @@ func TestWinCallSnapshotRejectsMalformedPayload(t *testing.T) {
 			return session.Send(&respHdr, []byte{1, 2, 3, 4})
 		})
 
-	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	client := NewSnapshotClient(winTestRunDir, svc, testWinClientConfig())
 	defer client.Close()
 
 	client.Refresh()
@@ -1371,7 +1361,7 @@ func TestWinCallStringReverseRejectsMalformedPayload(t *testing.T) {
 			return session.Send(&respHdr, respPayload)
 		})
 
-	client := NewClient(winTestRunDir, svc, testWinClientConfig())
+	client := NewStringReverseClient(winTestRunDir, svc, testWinClientConfig())
 	defer client.Close()
 
 	client.Refresh()
@@ -1483,7 +1473,7 @@ func TestWinCallIncrementBatchRejectsMalformedResponseEnvelope(t *testing.T) {
 			ccfg.MaxRequestBatchItems = 16
 			ccfg.MaxResponseBatchItems = 16
 
-			client := NewClient(winTestRunDir, svc, ccfg)
+			client := NewIncrementClient(winTestRunDir, svc, ccfg)
 			defer client.Close()
 
 			client.Refresh()
@@ -1536,7 +1526,7 @@ func TestWinCallIncrementBatchRejectsMalformedPayload(t *testing.T) {
 		ccfg.MaxRequestBatchItems = 16
 		ccfg.MaxResponseBatchItems = 16
 
-		client := NewClient(winTestRunDir, svc, ccfg)
+		client := NewIncrementClient(winTestRunDir, svc, ccfg)
 		defer client.Close()
 
 		client.Refresh()
@@ -1586,7 +1576,7 @@ func TestWinCallIncrementBatchRejectsMalformedPayload(t *testing.T) {
 		ccfg.MaxRequestBatchItems = 16
 		ccfg.MaxResponseBatchItems = 16
 
-		client := NewClient(winTestRunDir, svc, ccfg)
+		client := NewIncrementClient(winTestRunDir, svc, ccfg)
 		defer client.Close()
 
 		client.Refresh()
@@ -1629,7 +1619,7 @@ func TestWinCallIncrementBatchRejectsMalformedPayload(t *testing.T) {
 		ccfg.MaxRequestBatchItems = 16
 		ccfg.MaxResponseBatchItems = 16
 
-		client := NewClient(winTestRunDir, svc, ccfg)
+		client := NewIncrementClient(winTestRunDir, svc, ccfg)
 		defer client.Close()
 
 		client.Refresh()

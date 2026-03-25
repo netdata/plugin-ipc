@@ -54,8 +54,7 @@ static void cleanup_all(const char *service)
     char path[256];
     snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, service);
     unlink(path);
-    snprintf(path, sizeof(path), "%s/%s.ipcshm", TEST_RUN_DIR, service);
-    unlink(path);
+    nipc_shm_cleanup_stale(TEST_RUN_DIR, service);
 }
 
 static nipc_uds_server_config_t default_server_config(void)
@@ -88,30 +87,28 @@ static nipc_uds_client_config_t default_client_config(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Handlers                                                           */
+/*  Typed callbacks                                                    */
 /* ------------------------------------------------------------------ */
 
 /* Builds a snapshot with N items where N = hash of first requested item.
  * Uses the message_id encoded in the request flags as a "client ID"
  * to generate unique data per client. */
-static bool echo_handler(void *user,
-                          uint16_t method_code,
-                          const uint8_t *request_payload,
-                          size_t request_len,
-                          uint8_t *response_buf,
-                          size_t response_buf_size,
-                          size_t *response_len_out)
+static nipc_error_t echo_handler(void *user,
+                                 const nipc_header_t *request_hdr,
+                                 const uint8_t *request_payload,
+                                 size_t request_len,
+                                 uint8_t *response_buf,
+                                 size_t response_buf_size,
+                                 size_t *response_len_out)
 {
     (void)user;
-
-    if (method_code != NIPC_METHOD_CGROUPS_SNAPSHOT)
-        return false;
+    (void)request_hdr;
 
     /* Decode request to validate it */
     nipc_cgroups_req_t req;
     nipc_error_t err = nipc_cgroups_req_decode(request_payload, request_len, &req);
     if (err != NIPC_OK)
-        return false;
+        return err;
 
     /* Build a snapshot with 3 test items */
     nipc_cgroups_builder_t builder;
@@ -136,41 +133,39 @@ static bool echo_handler(void *user,
             items[i].name, (uint32_t)strlen(items[i].name),
             items[i].path, (uint32_t)strlen(items[i].path));
         if (err != NIPC_OK)
-            return false;
+            return err;
     }
 
     *response_len_out = nipc_cgroups_builder_finish(&builder);
-    return true;
+    return (*response_len_out > 0) ? NIPC_OK : NIPC_ERR_OVERFLOW;
 }
 
 /* Handler that sleeps briefly to simulate work, allowing concurrency testing */
-static bool slow_handler(void *user,
-                          uint16_t method_code,
-                          const uint8_t *request_payload,
-                          size_t request_len,
-                          uint8_t *response_buf,
-                          size_t response_buf_size,
-                          size_t *response_len_out)
+static nipc_error_t slow_handler(void *user,
+                                 const nipc_header_t *request_hdr,
+                                 const uint8_t *request_payload,
+                                 size_t request_len,
+                                 uint8_t *response_buf,
+                                 size_t response_buf_size,
+                                 size_t *response_len_out)
 {
     /* Sleep 100ms to ensure concurrent sessions overlap */
     usleep(100000);
-    return echo_handler(user, method_code, request_payload, request_len,
+    return echo_handler(user, request_hdr, request_payload, request_len,
                         response_buf, response_buf_size, response_len_out);
 }
 
-/* Handler that fails for method_code 0xFFFF, succeeds otherwise */
-static bool selective_handler(void *user,
-                               uint16_t method_code,
-                               const uint8_t *request_payload,
-                               size_t request_len,
-                               uint8_t *response_buf,
-                               size_t response_buf_size,
-                               size_t *response_len_out)
+/* Session isolation test uses a second raw handler symbol, but the server
+ * still services only the cgroups snapshot request kind. */
+static nipc_error_t selective_handler(void *user,
+                                      const nipc_header_t *request_hdr,
+                                      const uint8_t *request_payload,
+                                      size_t request_len,
+                                      uint8_t *response_buf,
+                                      size_t response_buf_size,
+                                      size_t *response_len_out)
 {
-    if (method_code == 0xFFFF)
-        return false;
-
-    return echo_handler(user, method_code, request_payload, request_len,
+    return echo_handler(user, request_hdr, request_payload, request_len,
                         response_buf, response_buf_size, response_len_out);
 }
 
@@ -194,7 +189,7 @@ static void *server_thread_fn(void *arg)
 
     nipc_error_t err = nipc_server_init(&ctx->server,
         TEST_RUN_DIR, ctx->service, &scfg,
-        ctx->worker_count, RESPONSE_BUF_SIZE, ctx->handler, NULL);
+        ctx->worker_count, NIPC_METHOD_CGROUPS_SNAPSHOT, ctx->handler, NULL);
 
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed: %d\n", err);

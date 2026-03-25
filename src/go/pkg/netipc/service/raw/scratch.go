@@ -1,4 +1,4 @@
-package cgroups
+package raw
 
 func ensureClientScratch(buf *[]byte, needed int) []byte {
 	if len(*buf) < needed {

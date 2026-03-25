@@ -25,21 +25,80 @@
 #define SERVER_POLL_TIMEOUT_MS 100
 #define NIPC_CLIENT_BUF_DEFAULT 65536u
 
-static size_t client_request_buf_size(const nipc_np_client_config_t *config)
+static uint32_t next_power_of_2_u32(uint32_t n)
 {
-    uint32_t max_req = config ? config->max_request_payload_bytes : 0;
-    if (max_req == 0)
-        max_req = NIPC_CLIENT_BUF_DEFAULT;
-    return (size_t)max_req;
+    if (n < 16)
+        return 16;
+    n--;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    return n + 1;
 }
 
-static size_t client_response_buf_size(const nipc_np_client_config_t *config)
+static bool ensure_buffer(uint8_t **buf, size_t *buf_size, size_t need)
 {
-    uint32_t max_resp = config ? config->max_response_payload_bytes : 0;
-    if (max_resp == 0)
-        max_resp = NIPC_CLIENT_BUF_DEFAULT;
-    return (size_t)max_resp + NIPC_HEADER_LEN;
+    if (*buf && *buf_size >= need)
+        return true;
+
+    uint8_t *new_buf = realloc(*buf, need);
+    if (!new_buf)
+        return false;
+
+    *buf = new_buf;
+    *buf_size = need;
+    return true;
 }
+
+static void client_note_request_capacity(nipc_client_ctx_t *ctx, uint32_t payload_len)
+{
+    uint32_t grown = next_power_of_2_u32(payload_len);
+    if (grown > ctx->transport_config.max_request_payload_bytes)
+        ctx->transport_config.max_request_payload_bytes = grown;
+}
+
+static void client_note_response_capacity(nipc_client_ctx_t *ctx, uint32_t payload_len)
+{
+    uint32_t grown = next_power_of_2_u32(payload_len);
+    if (grown > ctx->transport_config.max_response_payload_bytes)
+        ctx->transport_config.max_response_payload_bytes = grown;
+}
+
+static bool client_prepare_session_buffers(nipc_client_ctx_t *ctx)
+{
+    size_t response_need = (size_t)ctx->session.max_response_payload_bytes + NIPC_HEADER_LEN;
+    if (response_need < NIPC_HEADER_LEN + 1024u)
+        response_need = NIPC_HEADER_LEN + 1024u;
+
+    if (!ensure_buffer(&ctx->response_buf, &ctx->response_buf_size, response_need))
+        return false;
+
+    if (ctx->session.selected_profile == NIPC_WIN_SHM_PROFILE_HYBRID ||
+        ctx->session.selected_profile == NIPC_WIN_SHM_PROFILE_BUSYWAIT) {
+        size_t send_need = (size_t)ctx->session.max_request_payload_bytes + NIPC_HEADER_LEN;
+        if (!ensure_buffer(&ctx->send_buf, &ctx->send_buf_size, send_need))
+            return false;
+    }
+
+    return true;
+}
+
+static uint32_t cgroups_request_payload_default(void)
+{
+    return 16u;
+}
+
+static uint32_t cgroups_response_payload_default(void)
+{
+    return NIPC_CLIENT_BUF_DEFAULT;
+}
+
+static void server_note_request_capacity(nipc_managed_server_t *server,
+                                         uint32_t payload_len);
+static void server_note_response_capacity(nipc_managed_server_t *server,
+                                          uint32_t payload_len);
 
 /* ------------------------------------------------------------------ */
 /*  Internal: client connection helpers                                */
@@ -87,6 +146,12 @@ static nipc_client_state_t client_try_connect(nipc_client_ctx_t *ctx)
 
     ctx->session = session;
     ctx->session_valid = true;
+
+    if (!client_prepare_session_buffers(ctx)) {
+        nipc_np_close_session(&ctx->session);
+        ctx->session_valid = false;
+        return NIPC_CLIENT_DISCONNECTED;
+    }
 
     /* Win SHM upgrade if negotiated */
     if (session.selected_profile == NIPC_WIN_SHM_PROFILE_HYBRID ||
@@ -140,7 +205,15 @@ static nipc_error_t transport_send(nipc_client_ctx_t *ctx,
                                     const void *payload,
                                     size_t payload_len)
 {
+    if (payload_len > UINT32_MAX)
+        return NIPC_ERR_OVERFLOW;
+
     if (ctx->shm) {
+        if (payload_len > ctx->session.max_request_payload_bytes) {
+            client_note_request_capacity(ctx, (uint32_t)payload_len);
+            return NIPC_ERR_OVERFLOW;
+        }
+
         size_t msg_len = NIPC_HEADER_LEN + payload_len;
         uint8_t *msg = ctx->send_buf;
         if (!msg || msg_len > ctx->send_buf_size)
@@ -156,13 +229,21 @@ static nipc_error_t transport_send(nipc_client_ctx_t *ctx,
             memcpy(msg + NIPC_HEADER_LEN, payload, payload_len);
 
         nipc_win_shm_error_t serr = nipc_win_shm_send(ctx->shm, msg, msg_len);
-        return (serr == NIPC_WIN_SHM_OK) ? NIPC_OK : NIPC_ERR_OVERFLOW;
+        if (serr == NIPC_WIN_SHM_ERR_MSG_TOO_LARGE) {
+            client_note_request_capacity(ctx, (uint32_t)payload_len);
+            return NIPC_ERR_OVERFLOW;
+        }
+        return (serr == NIPC_WIN_SHM_OK) ? NIPC_OK : NIPC_ERR_NOT_READY;
     }
 
     /* Named Pipe path */
     nipc_np_error_t uerr = nipc_np_send(&ctx->session, hdr,
                                           payload, payload_len);
-    return (uerr == NIPC_NP_OK) ? NIPC_OK : NIPC_ERR_OVERFLOW;
+    if (uerr == NIPC_NP_ERR_LIMIT_EXCEEDED) {
+        client_note_request_capacity(ctx, (uint32_t)payload_len);
+        return NIPC_ERR_OVERFLOW;
+    }
+    return (uerr == NIPC_NP_OK) ? NIPC_OK : NIPC_ERR_NOT_READY;
 }
 
 static nipc_error_t transport_receive(nipc_client_ctx_t *ctx,
@@ -239,16 +320,31 @@ static nipc_error_t do_raw_call(nipc_client_ctx_t *ctx,
         return NIPC_ERR_BAD_LAYOUT;
     if (resp_hdr.message_id != hdr.message_id)
         return NIPC_ERR_BAD_LAYOUT;
-    if (resp_hdr.transport_status != NIPC_STATUS_OK)
+    switch (resp_hdr.transport_status) {
+    case NIPC_STATUS_OK:
+        break;
+    case NIPC_STATUS_LIMIT_EXCEEDED:
+        if (ctx->session.max_response_payload_bytes > 0)
+            client_note_response_capacity(
+                ctx, ctx->session.max_response_payload_bytes * 2u);
+        return NIPC_ERR_OVERFLOW;
+    case NIPC_STATUS_UNSUPPORTED:
         return NIPC_ERR_BAD_LAYOUT;
+    case NIPC_STATUS_BAD_ENVELOPE:
+    case NIPC_STATUS_INTERNAL_ERROR:
+    default:
+        return NIPC_ERR_BAD_LAYOUT;
+    }
 
     return NIPC_OK;
 }
 
 /*
- * Generic call-with-retry: try once, if it fails and previously READY,
- * disconnect, reconnect, retry once. The caller provides a function
- * pointer for the single-attempt logic.
+ * Generic call-with-retry:
+ *   - ordinary failures reconnect and retry once
+ *   - overflow-driven resize recovery may reconnect repeatedly until
+ *     negotiated capacities grow or recovery fails
+ * The caller provides a function pointer for the single-attempt logic.
  */
 typedef nipc_error_t (*nipc_attempt_fn)(nipc_client_ctx_t *ctx, void *state);
 
@@ -261,32 +357,59 @@ static nipc_error_t call_with_retry(nipc_client_ctx_t *ctx,
         return NIPC_ERR_NOT_READY;
     }
 
-    nipc_error_t err = attempt(ctx, state);
-    if (err == NIPC_OK) {
-        ctx->call_count++;
-        return NIPC_OK;
-    }
+    for (;;) {
+        uint32_t prev_req = ctx->session.max_request_payload_bytes;
+        uint32_t prev_resp = ctx->session.max_response_payload_bytes;
+        uint32_t prev_cfg_req = ctx->transport_config.max_request_payload_bytes;
+        uint32_t prev_cfg_resp = ctx->transport_config.max_response_payload_bytes;
 
-    /* Retry once: disconnect, reconnect, resend */
-    client_disconnect(ctx);
-    ctx->state = NIPC_CLIENT_BROKEN;
-    ctx->state = client_try_connect(ctx);
-    if (ctx->state != NIPC_CLIENT_READY) {
-        ctx->error_count++;
-        return err;
-    }
-    ctx->reconnect_count++;
+        nipc_error_t err = attempt(ctx, state);
+        if (err == NIPC_OK) {
+            ctx->call_count++;
+            return NIPC_OK;
+        }
 
-    err = attempt(ctx, state);
-    if (err == NIPC_OK) {
-        ctx->call_count++;
-        return NIPC_OK;
-    }
+        if (err != NIPC_ERR_OVERFLOW) {
+            client_disconnect(ctx);
+            ctx->state = NIPC_CLIENT_BROKEN;
+            ctx->state = client_try_connect(ctx);
+            if (ctx->state != NIPC_CLIENT_READY) {
+                ctx->error_count++;
+                return err;
+            }
 
-    client_disconnect(ctx);
-    ctx->state = NIPC_CLIENT_BROKEN;
-    ctx->error_count++;
-    return err;
+            ctx->reconnect_count++;
+            err = attempt(ctx, state);
+            if (err == NIPC_OK) {
+                ctx->call_count++;
+                return NIPC_OK;
+            }
+
+            client_disconnect(ctx);
+            ctx->state = NIPC_CLIENT_BROKEN;
+            ctx->error_count++;
+            return err;
+        }
+
+        client_disconnect(ctx);
+        ctx->state = NIPC_CLIENT_BROKEN;
+        ctx->state = client_try_connect(ctx);
+        if (ctx->state != NIPC_CLIENT_READY) {
+            ctx->error_count++;
+            return err;
+        }
+        ctx->reconnect_count++;
+
+        if (ctx->session.max_request_payload_bytes <= prev_req &&
+            ctx->session.max_response_payload_bytes <= prev_resp &&
+            ctx->transport_config.max_request_payload_bytes <= prev_cfg_req &&
+            ctx->transport_config.max_response_payload_bytes <= prev_cfg_resp) {
+            client_disconnect(ctx);
+            ctx->state = NIPC_CLIENT_BROKEN;
+            ctx->error_count++;
+            return err;
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -351,26 +474,10 @@ void nipc_client_init(nipc_client_ctx_t *ctx,
 
     if (config)
         ctx->transport_config = *config;
-
-    ctx->request_buf_size = client_request_buf_size(config);
-    ctx->response_buf_size = client_response_buf_size(config);
-    ctx->send_buf_size = ctx->request_buf_size + NIPC_HEADER_LEN;
-
-    ctx->request_buf = malloc(ctx->request_buf_size);
-    ctx->response_buf = malloc(ctx->response_buf_size);
-    ctx->send_buf = malloc(ctx->send_buf_size);
-
-    if (!ctx->request_buf || !ctx->response_buf || !ctx->send_buf) {
-        free(ctx->request_buf);
-        free(ctx->response_buf);
-        free(ctx->send_buf);
-        ctx->request_buf = NULL;
-        ctx->response_buf = NULL;
-        ctx->send_buf = NULL;
-        ctx->request_buf_size = 0;
-        ctx->response_buf_size = 0;
-        ctx->send_buf_size = 0;
-    }
+    if (ctx->transport_config.max_request_payload_bytes == 0)
+        ctx->transport_config.max_request_payload_bytes = cgroups_request_payload_default();
+    if (ctx->transport_config.max_response_payload_bytes == 0)
+        ctx->transport_config.max_response_payload_bytes = cgroups_response_payload_default();
 }
 
 bool nipc_client_refresh(nipc_client_ctx_t *ctx)
@@ -417,13 +524,10 @@ void nipc_client_status(const nipc_client_ctx_t *ctx,
 void nipc_client_close(nipc_client_ctx_t *ctx)
 {
     client_disconnect(ctx);
-    free(ctx->request_buf);
     free(ctx->response_buf);
     free(ctx->send_buf);
-    ctx->request_buf = NULL;
     ctx->response_buf = NULL;
     ctx->send_buf = NULL;
-    ctx->request_buf_size = 0;
     ctx->response_buf_size = 0;
     ctx->send_buf_size = 0;
     ctx->state = NIPC_CLIENT_DISCONNECTED;
@@ -444,190 +548,6 @@ nipc_error_t nipc_client_call_cgroups_snapshot(
 }
 
 /* ------------------------------------------------------------------ */
-/*  Public API: typed INCREMENT call                                   */
-/* ------------------------------------------------------------------ */
-
-typedef struct {
-    uint64_t  request_value;
-    uint64_t *value_out;
-} increment_call_state_t;
-
-static nipc_error_t do_increment_attempt(nipc_client_ctx_t *ctx, void *state)
-{
-    increment_call_state_t *s = (increment_call_state_t *)state;
-
-    uint8_t req_buf[NIPC_INCREMENT_PAYLOAD_SIZE];
-    size_t req_len = nipc_increment_encode(s->request_value,
-                                            req_buf, sizeof(req_buf));
-    if (req_len == 0)
-        return NIPC_ERR_TRUNCATED;
-
-    const void *payload;
-    size_t payload_len;
-    nipc_error_t err = do_raw_call(ctx, NIPC_METHOD_INCREMENT,
-                                     req_buf, req_len,
-                                     &payload, &payload_len);
-    if (err != NIPC_OK)
-        return err;
-
-    return nipc_increment_decode(payload, payload_len, s->value_out);
-}
-
-nipc_error_t nipc_client_call_increment(
-    nipc_client_ctx_t *ctx,
-    uint64_t request_value,
-    uint64_t *value_out)
-{
-    increment_call_state_t state = {
-        .request_value     = request_value,
-        .value_out         = value_out,
-    };
-    return call_with_retry(ctx, do_increment_attempt, &state);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Public API: batch INCREMENT call                                   */
-/* ------------------------------------------------------------------ */
-
-typedef struct {
-    const uint64_t *request_values;
-    uint32_t        count;
-    uint64_t       *response_values;
-} increment_batch_state_t;
-
-static nipc_error_t do_increment_batch_attempt(nipc_client_ctx_t *ctx,
-                                                 void *state)
-{
-    increment_batch_state_t *s = (increment_batch_state_t *)state;
-    if (s->count == 0)
-        return NIPC_OK;
-
-    size_t req_buf_size = s->count * (8 + NIPC_INCREMENT_PAYLOAD_SIZE) + 64;
-    if (!ctx->request_buf || req_buf_size > ctx->request_buf_size)
-        return NIPC_ERR_OVERFLOW;
-
-    nipc_batch_builder_t bb;
-    nipc_batch_builder_init(&bb, ctx->request_buf, ctx->request_buf_size, s->count);
-
-    for (uint32_t i = 0; i < s->count; i++) {
-        uint8_t item[NIPC_INCREMENT_PAYLOAD_SIZE];
-        nipc_increment_encode(s->request_values[i], item, sizeof(item));
-        nipc_error_t err = nipc_batch_builder_add(&bb, item, sizeof(item));
-        if (err != NIPC_OK)
-            return err;
-    }
-
-    uint32_t out_count;
-    size_t req_len = nipc_batch_builder_finish(&bb, &out_count);
-
-    /* Send as batch */
-    nipc_header_t hdr = {0};
-    hdr.kind       = NIPC_KIND_REQUEST;
-    hdr.code       = NIPC_METHOD_INCREMENT;
-    hdr.flags      = NIPC_FLAG_BATCH;
-    hdr.item_count = s->count;
-    hdr.message_id = (uint64_t)(ctx->call_count + 1);
-    hdr.transport_status = NIPC_STATUS_OK;
-
-    nipc_error_t err = transport_send(ctx, &hdr, ctx->request_buf, req_len);
-    if (err != NIPC_OK)
-        return err;
-
-    /* Receive batch response */
-    nipc_header_t resp_hdr;
-    const void *payload;
-    size_t payload_len;
-    err = transport_receive(ctx, ctx->response_buf, ctx->response_buf_size,
-                            &resp_hdr, &payload, &payload_len);
-    if (err != NIPC_OK)
-        return err;
-
-    if (resp_hdr.kind != NIPC_KIND_RESPONSE) return NIPC_ERR_BAD_KIND;
-    if (resp_hdr.code != NIPC_METHOD_INCREMENT) return NIPC_ERR_BAD_LAYOUT;
-    if (resp_hdr.message_id != hdr.message_id) return NIPC_ERR_BAD_LAYOUT;
-    if (resp_hdr.transport_status != NIPC_STATUS_OK) return NIPC_ERR_BAD_LAYOUT;
-    if (resp_hdr.item_count != s->count) return NIPC_ERR_BAD_ITEM_COUNT;
-
-    /* Extract and decode each response item */
-    for (uint32_t i = 0; i < s->count; i++) {
-        const void *item_ptr;
-        uint32_t item_len;
-        err = nipc_batch_item_get(payload, payload_len, s->count, i,
-                                   &item_ptr, &item_len);
-        if (err != NIPC_OK) return err;
-
-        err = nipc_increment_decode(item_ptr, item_len,
-                                     &s->response_values[i]);
-        if (err != NIPC_OK) return err;
-    }
-
-    return NIPC_OK;
-}
-
-nipc_error_t nipc_client_call_increment_batch(
-    nipc_client_ctx_t *ctx,
-    const uint64_t *request_values, uint32_t count,
-    uint64_t *response_values)
-{
-    increment_batch_state_t state = {
-        .request_values    = request_values,
-        .count             = count,
-        .response_values   = response_values,
-    };
-    return call_with_retry(ctx, do_increment_batch_attempt, &state);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Public API: typed STRING_REVERSE call                              */
-/* ------------------------------------------------------------------ */
-
-typedef struct {
-    const char *request_str;
-    uint32_t    request_str_len;
-    nipc_string_reverse_view_t *view_out;
-} string_reverse_call_state_t;
-
-static nipc_error_t do_string_reverse_attempt(nipc_client_ctx_t *ctx,
-                                                void *state)
-{
-    string_reverse_call_state_t *s = (string_reverse_call_state_t *)state;
-
-    size_t req_buf_size = NIPC_STRING_REVERSE_HDR_SIZE + s->request_str_len + 1;
-    if (!ctx->request_buf || req_buf_size > ctx->request_buf_size)
-        return NIPC_ERR_OVERFLOW;
-
-    size_t req_len = nipc_string_reverse_encode(s->request_str,
-                                                  s->request_str_len,
-                                                  ctx->request_buf, ctx->request_buf_size);
-    if (req_len == 0)
-        return NIPC_ERR_TRUNCATED;
-
-    const void *payload;
-    size_t payload_len;
-    nipc_error_t err = do_raw_call(ctx, NIPC_METHOD_STRING_REVERSE,
-                                     ctx->request_buf, req_len,
-                                     &payload, &payload_len);
-    if (err != NIPC_OK)
-        return err;
-
-    return nipc_string_reverse_decode(payload, payload_len, s->view_out);
-}
-
-nipc_error_t nipc_client_call_string_reverse(
-    nipc_client_ctx_t *ctx,
-    const char *request_str,
-    uint32_t request_str_len,
-    nipc_string_reverse_view_t *view_out)
-{
-    string_reverse_call_state_t state = {
-        .request_str       = request_str,
-        .request_str_len   = request_str_len,
-        .view_out          = view_out,
-    };
-    return call_with_retry(ctx, do_string_reverse_attempt, &state);
-}
-
-/* ------------------------------------------------------------------ */
 /*  Internal: managed server session handler                           */
 /* ------------------------------------------------------------------ */
 
@@ -644,6 +564,8 @@ static void server_handle_session(nipc_managed_server_t *server,
 {
     /* Dynamically allocate recv buffer based on negotiated max */
     size_t recv_size = NIPC_HEADER_LEN + session->max_request_payload_bytes;
+    if (recv_size < NIPC_HEADER_LEN + 1024u)
+        recv_size = NIPC_HEADER_LEN + 1024u;
     uint8_t *recv_buf = malloc(recv_size);
     if (!recv_buf)
         return;
@@ -684,6 +606,24 @@ static void server_handle_session(nipc_managed_server_t *server,
             nipc_np_error_t uerr = nipc_np_receive(
                 session, recv_buf, recv_size,
                 &hdr, &payload, &payload_len);
+            if (uerr == NIPC_NP_ERR_LIMIT_EXCEEDED) {
+                if (hdr.kind == NIPC_KIND_REQUEST) {
+                    if (hdr.payload_len > 0)
+                        server_note_request_capacity(server, hdr.payload_len);
+
+                    nipc_header_t resp_hdr = {0};
+                    resp_hdr.kind = NIPC_KIND_RESPONSE;
+                    resp_hdr.code = hdr.code;
+                    resp_hdr.message_id = hdr.message_id;
+                    resp_hdr.transport_status = NIPC_STATUS_LIMIT_EXCEEDED;
+                    resp_hdr.item_count = 1;
+                    resp_hdr.flags = 0;
+
+                    if (nipc_np_send(session, &resp_hdr, NULL, 0) != NIPC_NP_OK)
+                        break;
+                }
+                break;
+            }
             if (uerr != NIPC_NP_OK)
                 break;
         }
@@ -692,80 +632,85 @@ static void server_handle_session(nipc_managed_server_t *server,
         if (hdr.kind != NIPC_KIND_REQUEST)
             break;
 
-        /* Dispatch: single-item or batch */
-        size_t response_len = 0;
-        bool ok = true;
-        bool is_batch = (hdr.flags & NIPC_FLAG_BATCH) && hdr.item_count >= 1;
+        if (hdr.code != server->expected_method_code) {
+            nipc_header_t resp_hdr = {0};
+            resp_hdr.kind             = NIPC_KIND_RESPONSE;
+            resp_hdr.code             = hdr.code;
+            resp_hdr.message_id       = hdr.message_id;
+            resp_hdr.transport_status = NIPC_STATUS_UNSUPPORTED;
+            resp_hdr.item_count       = 1;
+            resp_hdr.flags            = 0;
 
-        if (!is_batch) {
-            /* Single-item dispatch */
-            ok = server->handler(
-                server->handler_user,
-                hdr.code,
-                (const uint8_t *)payload, payload_len,
-                resp_buf, resp_buf_size,
-                &response_len);
-        } else {
-            /* Batch dispatch: extract each item, call handler per item,
-             * reassemble responses using batch builder. */
-            nipc_batch_builder_t bb;
-            nipc_batch_builder_init(&bb, resp_buf, resp_buf_size,
-                                     hdr.item_count);
-
-            /* Separate scratch buffer for per-item handler responses. */
-            size_t item_resp_size = 4096;
-            uint8_t *item_resp = malloc(item_resp_size);
-            if (!item_resp) { ok = false; }
-
-            for (uint32_t i = 0; i < hdr.item_count && ok; i++) {
-                const void *item_ptr;
-                uint32_t item_len;
-                nipc_error_t gerr = nipc_batch_item_get(
-                    payload, payload_len, hdr.item_count, i,
-                    &item_ptr, &item_len);
-                if (gerr != NIPC_OK) { ok = false; break; }
-
-                size_t item_resp_len = 0;
-                ok = server->handler(
-                    server->handler_user,
-                    hdr.code,
-                    (const uint8_t *)item_ptr, item_len,
-                    item_resp, item_resp_size,
-                    &item_resp_len);
-                if (!ok) break;
-
-                nipc_error_t aerr = nipc_batch_builder_add(
-                    &bb, item_resp, item_resp_len);
-                if (aerr != NIPC_OK) { ok = false; break; }
+            if (shm) {
+                uint8_t msg[NIPC_HEADER_LEN];
+                resp_hdr.magic = NIPC_MAGIC_MSG;
+                resp_hdr.version = NIPC_VERSION;
+                resp_hdr.header_len = NIPC_HEADER_LEN;
+                resp_hdr.payload_len = 0;
+                nipc_header_encode(&resp_hdr, msg, sizeof(msg));
+                if (nipc_win_shm_send(shm, msg, sizeof(msg)) != NIPC_WIN_SHM_OK)
+                    break;
+            } else {
+                if (nipc_np_send(session, &resp_hdr, NULL, 0) != NIPC_NP_OK)
+                    break;
             }
-
-            if (ok) {
-                uint32_t out_count;
-                response_len = nipc_batch_builder_finish(&bb, &out_count);
-            }
-            free(item_resp);
+            continue;
         }
+
+        if (payload_len <= UINT32_MAX)
+            server_note_request_capacity(server, (uint32_t)payload_len);
+
+        /* Dispatch: one request kind per service endpoint. */
+        size_t response_len = 0;
+        nipc_error_t dispatch_err = server->handler(
+            server->handler_user,
+            &hdr,
+            (const uint8_t *)payload, payload_len,
+            resp_buf, resp_buf_size,
+            &response_len);
 
         /* Build response header */
         nipc_header_t resp_hdr = {0};
         resp_hdr.kind       = NIPC_KIND_RESPONSE;
         resp_hdr.code       = hdr.code;
         resp_hdr.message_id = hdr.message_id;
-
-        if (ok) {
-            resp_hdr.transport_status = NIPC_STATUS_OK;
-            if (is_batch) {
-                resp_hdr.flags      = NIPC_FLAG_BATCH;
-                resp_hdr.item_count = hdr.item_count;
-            } else {
-                resp_hdr.item_count = 1;
-                resp_hdr.flags      = 0;
-            }
+        if ((hdr.flags & NIPC_FLAG_BATCH) && hdr.item_count > 1) {
+            resp_hdr.item_count = hdr.item_count;
+            resp_hdr.flags = NIPC_FLAG_BATCH;
         } else {
-            resp_hdr.transport_status = NIPC_STATUS_INTERNAL_ERROR;
             resp_hdr.item_count = 1;
-            resp_hdr.flags      = 0;
+            resp_hdr.flags = 0;
+        }
+
+        switch (dispatch_err) {
+        case NIPC_OK:
+            if (response_len <= UINT32_MAX)
+                server_note_response_capacity(server, (uint32_t)response_len);
+            resp_hdr.transport_status = NIPC_STATUS_OK;
+            break;
+        case NIPC_ERR_OVERFLOW:
+            if (session->max_response_payload_bytes >= UINT32_MAX / 2u)
+                server_note_response_capacity(server, UINT32_MAX);
+            else
+                server_note_response_capacity(server,
+                                             session->max_response_payload_bytes * 2u);
+            resp_hdr.transport_status = NIPC_STATUS_LIMIT_EXCEEDED;
             response_len = 0;
+            break;
+        case NIPC_ERR_TRUNCATED:
+        case NIPC_ERR_BAD_LAYOUT:
+        case NIPC_ERR_OUT_OF_BOUNDS:
+        case NIPC_ERR_MISSING_NUL:
+        case NIPC_ERR_BAD_ALIGNMENT:
+        case NIPC_ERR_BAD_ITEM_COUNT:
+            resp_hdr.transport_status = NIPC_STATUS_BAD_ENVELOPE;
+            response_len = 0;
+            break;
+        case NIPC_ERR_HANDLER_FAILED:
+        default:
+            resp_hdr.transport_status = NIPC_STATUS_INTERNAL_ERROR;
+            response_len = 0;
+            break;
         }
 
         /* Send response via the active transport */
@@ -797,59 +742,72 @@ static void server_handle_session(nipc_managed_server_t *server,
             if (uerr != NIPC_NP_OK)
                 break;
         }
+
+        if (dispatch_err == NIPC_ERR_OVERFLOW)
+            break;
     }
 
     free(recv_buf);
 }
 
 static uint32_t server_snapshot_max_items(size_t response_buf_size,
-                                          const nipc_cgroups_handlers_t *handlers)
+                                          const nipc_cgroups_service_handler_t *service_handler)
 {
-    if (handlers->snapshot_max_items != 0)
-        return handlers->snapshot_max_items;
+    if (service_handler->snapshot_max_items != 0)
+        return service_handler->snapshot_max_items;
     return nipc_cgroups_builder_estimate_max_items(response_buf_size);
 }
 
-static bool server_typed_dispatch(void *user,
-                                  uint16_t method_code,
-                                  const uint8_t *request_payload,
-                                  size_t request_len,
-                                  uint8_t *response_buf,
-                                  size_t response_buf_size,
-                                  size_t *response_len_out)
+static void server_note_request_capacity(nipc_managed_server_t *server,
+                                         uint32_t payload_len)
+{
+    uint32_t grown = next_power_of_2_u32(payload_len);
+    uint32_t current = server->learned_request_payload_bytes;
+    while (grown > current) {
+        uint32_t previous = (uint32_t)InterlockedCompareExchange(
+            (volatile LONG *)&server->learned_request_payload_bytes,
+            (LONG)grown, (LONG)current);
+        if (previous == current)
+            break;
+        current = previous;
+    }
+}
+
+static void server_note_response_capacity(nipc_managed_server_t *server,
+                                          uint32_t payload_len)
+{
+    uint32_t grown = next_power_of_2_u32(payload_len);
+    uint32_t current = server->learned_response_payload_bytes;
+    while (grown > current) {
+        uint32_t previous = (uint32_t)InterlockedCompareExchange(
+            (volatile LONG *)&server->learned_response_payload_bytes,
+            (LONG)grown, (LONG)current);
+        if (previous == current)
+            break;
+        current = previous;
+    }
+}
+
+static nipc_error_t server_typed_dispatch(void *user,
+                                          const nipc_header_t *request_hdr,
+                                          const uint8_t *request_payload,
+                                          size_t request_len,
+                                          uint8_t *response_buf,
+                                          size_t response_buf_size,
+                                          size_t *response_len_out)
 {
     nipc_managed_server_t *server = (nipc_managed_server_t *)user;
-    nipc_cgroups_handlers_t *handlers = &server->typed_handlers;
+    nipc_cgroups_service_handler_t *service_handler = &server->service_handler;
+    (void)request_hdr;
 
-    switch (method_code) {
-    case NIPC_METHOD_INCREMENT:
-        if (!handlers->on_increment)
-            return false;
-        return nipc_dispatch_increment(
-            request_payload, request_len,
-            response_buf, response_buf_size, response_len_out,
-            handlers->on_increment, handlers->user);
+    if (!service_handler->handle)
+        return NIPC_ERR_HANDLER_FAILED;
 
-    case NIPC_METHOD_STRING_REVERSE:
-        if (!handlers->on_string_reverse)
-            return false;
-        return nipc_dispatch_string_reverse(
-            request_payload, request_len,
-            response_buf, response_buf_size, response_len_out,
-            handlers->on_string_reverse, handlers->user);
-
-    case NIPC_METHOD_CGROUPS_SNAPSHOT:
-        if (!handlers->on_cgroups_snapshot)
-            return false;
-        return nipc_dispatch_cgroups_snapshot(
-            request_payload, request_len,
-            response_buf, response_buf_size, response_len_out,
-            server_snapshot_max_items(response_buf_size, handlers),
-            handlers->on_cgroups_snapshot, handlers->user);
-
-    default:
-        return false;
-    }
+    return nipc_dispatch_cgroups_snapshot(
+        request_payload, request_len,
+        response_buf, response_buf_size, response_len_out,
+        server_snapshot_max_items(response_buf_size, service_handler),
+        service_handler->handle, service_handler->user);
 }
 
 /* ------------------------------------------------------------------ */
@@ -863,10 +821,13 @@ static unsigned __stdcall session_handler_thread(void *arg)
     nipc_managed_server_t *server = sctx->server;
 
     /* Allocate a per-session response buffer */
-    uint8_t *resp_buf = malloc(server->response_buf_size);
+    size_t resp_size = (size_t)sctx->session.max_response_payload_bytes;
+    if (resp_size < 1024u)
+        resp_size = 1024u;
+    uint8_t *resp_buf = malloc(resp_size);
     if (resp_buf) {
         server_handle_session(server, &sctx->session, sctx->shm,
-                              resp_buf, server->response_buf_size);
+                              resp_buf, resp_size);
         free(resp_buf);
     }
 
@@ -915,7 +876,7 @@ static nipc_error_t server_init_raw(nipc_managed_server_t *server,
                                     const char *service_name,
                                     const nipc_np_server_config_t *config,
                                     int worker_count,
-                                    size_t response_buf_size,
+                                    uint16_t expected_method_code,
                                     nipc_server_handler_fn handler,
                                     void *user)
 {
@@ -948,7 +909,15 @@ static nipc_error_t server_init_raw(nipc_managed_server_t *server,
     server->handler = handler;
     server->handler_user = user;
     server->worker_count = worker_count;
-    server->response_buf_size = response_buf_size;
+    server->expected_method_code = expected_method_code;
+    server->learned_request_payload_bytes =
+        (config && config->max_request_payload_bytes > 0)
+            ? config->max_request_payload_bytes
+            : NIPC_MAX_PAYLOAD_DEFAULT;
+    server->learned_response_payload_bytes =
+        (config && config->max_response_payload_bytes > 0)
+            ? config->max_response_payload_bytes
+            : NIPC_MAX_PAYLOAD_DEFAULT;
     server->auth_token = config->auth_token;
 
 
@@ -986,23 +955,27 @@ nipc_error_t nipc_server_init_typed(nipc_managed_server_t *server,
                                     const char *service_name,
                                     const nipc_np_server_config_t *config,
                                     int worker_count,
-                                    const nipc_cgroups_handlers_t *handlers)
+                                    const nipc_cgroups_service_handler_t *service_handler)
 {
-    if (!handlers)
+    if (!service_handler)
         return NIPC_ERR_BAD_LAYOUT;
 
-    size_t response_buf_size = (config && config->max_response_payload_bytes > 0)
-        ? (size_t)config->max_response_payload_bytes
-        : (size_t)NIPC_CLIENT_BUF_DEFAULT;
+    nipc_np_server_config_t typed_cfg = {0};
+    if (config)
+        typed_cfg = *config;
+    if (typed_cfg.max_request_payload_bytes == 0)
+        typed_cfg.max_request_payload_bytes = cgroups_request_payload_default();
+    if (typed_cfg.max_response_payload_bytes == 0)
+        typed_cfg.max_response_payload_bytes = cgroups_response_payload_default();
 
     nipc_error_t err = server_init_raw(server, run_dir, service_name,
-                                       config, worker_count,
-                                       response_buf_size,
+                                       &typed_cfg, worker_count,
+                                       NIPC_METHOD_CGROUPS_SNAPSHOT,
                                        server_typed_dispatch, server);
     if (err != NIPC_OK)
         return err;
 
-    server->typed_handlers = *handlers;
+    server->service_handler = *service_handler;
     return NIPC_OK;
 }
 
@@ -1011,12 +984,12 @@ nipc_error_t nipc_server_init_raw_for_tests(nipc_managed_server_t *server,
                                             const char *service_name,
                                             const nipc_np_server_config_t *config,
                                             int worker_count,
-                                            size_t response_buf_size,
+                                            uint16_t expected_method_code,
                                             nipc_server_handler_fn handler,
                                             void *user)
 {
     return server_init_raw(server, run_dir, service_name, config,
-                           worker_count, response_buf_size, handler, user);
+                           worker_count, expected_method_code, handler, user);
 }
 
 void nipc_server_run(nipc_managed_server_t *server)
@@ -1024,6 +997,9 @@ void nipc_server_run(nipc_managed_server_t *server)
     InterlockedExchange(&server->running, 1);
 
     while (InterlockedCompareExchange(&server->running, 0, 0)) {
+        server->listener.config.max_request_payload_bytes = server->learned_request_payload_bytes;
+        server->listener.config.max_response_payload_bytes = server->learned_response_payload_bytes;
+
         /* Accept one client via L1 (blocking with internal timeout) */
         nipc_np_session_t session;
         memset(&session, 0, sizeof(session));
@@ -1037,6 +1013,9 @@ void nipc_server_run(nipc_managed_server_t *server)
             Sleep(10);
             continue;
         }
+
+        server_note_request_capacity(server, session.max_request_payload_bytes);
+        server_note_response_capacity(server, session.max_response_payload_bytes);
 
         /* Enforce worker_count limit: reap finished sessions, check count */
         EnterCriticalSection(&server->sessions_lock);

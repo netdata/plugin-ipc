@@ -1,9 +1,9 @@
 /*
- * test_ping_pong.c - L2 typed ping-pong tests for INCREMENT and STRING_REVERSE.
+ * test_ping_pong.c - L2 typed ping-pong tests for the cgroups-snapshot service.
  *
- * Proves the architecture: L1 transport is generic, Codec is per-method,
- * L2 composes them. Both fixed-size (INCREMENT) and variable-length
- * (STRING_REVERSE) payloads are exercised over the same connection.
+ * Proves the service model: one endpoint serves one request kind, sessions are
+ * long-lived, and repeated typed snapshot calls can vary response size without
+ * changing the service contract.
  */
 
 #include "netipc/netipc_service.h"
@@ -24,9 +24,9 @@ static int g_pass = 0;
 static int g_fail = 0;
 
 #define TEST_RUN_DIR  "/tmp/nipc_pingpong_test"
-#define SERVICE_NAME  "ping-pong"
+#define SERVICE_NAME  "cgroups-snapshot-ping-pong"
 #define AUTH_TOKEN    0x1234567890ABCDEFull
-#define RESPONSE_BUF  4096
+#define RESPONSE_BUF  65536
 
 static void check(const char *name, int cond)
 {
@@ -52,55 +52,53 @@ static void cleanup_socket(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Multi-method server handler                                        */
+/*  Snapshot service handler                                           */
 /* ------------------------------------------------------------------ */
 
-/* ---- Typed business-logic handlers (never touch wire format) ---- */
+typedef struct {
+    uint32_t calls;
+    uint32_t max_items;
+    bool empty_snapshot;
+} snapshot_service_ctx_t;
 
-static bool on_increment(void *user, uint64_t request, uint64_t *response)
+static bool snapshot_handler(void *user,
+                             const nipc_cgroups_req_t *request,
+                             nipc_cgroups_builder_t *builder)
 {
-    (void)user;
-    *response = request + 1;
-    return true;
-}
+    snapshot_service_ctx_t *ctx = (snapshot_service_ctx_t *)user;
+    uint32_t round;
+    uint32_t item_count;
 
-static bool on_string_reverse(void *user,
-                                const char *request_str, uint32_t request_str_len,
-                                char *response_str, uint32_t response_capacity,
-                                uint32_t *response_str_len)
-{
-    (void)user;
-    if (request_str_len > response_capacity)
+    if (!ctx || !request)
         return false;
 
-    for (uint32_t i = 0; i < request_str_len; i++)
-        response_str[i] = request_str[request_str_len - 1 - i];
-
-    *response_str_len = request_str_len;
-    return true;
-}
-
-/* ---- Thin dispatcher: routes method_code to typed helpers ---- */
-
-static bool multi_method_handler(
-    void *user,
-    uint16_t method_code,
-    const uint8_t *request_payload, size_t request_len,
-    uint8_t *response_buf, size_t response_buf_size,
-    size_t *response_len_out)
-{
-    switch (method_code) {
-    case NIPC_METHOD_INCREMENT:
-        return nipc_dispatch_increment(request_payload, request_len,
-                                        response_buf, response_buf_size,
-                                        response_len_out, on_increment, user);
-    case NIPC_METHOD_STRING_REVERSE:
-        return nipc_dispatch_string_reverse(request_payload, request_len,
-                                             response_buf, response_buf_size,
-                                             response_len_out, on_string_reverse, user);
-    default:
+    if (request->layout_version != 1 || request->flags != 0)
         return false;
+
+    round = __atomic_add_fetch(&ctx->calls, 1u, __ATOMIC_RELAXED);
+    nipc_cgroups_builder_set_header(builder, 1u, round);
+
+    if (ctx->empty_snapshot)
+        return true;
+
+    item_count = 1u + ((round - 1u) % ctx->max_items);
+    for (uint32_t i = 0; i < item_count; i++) {
+        char name[64];
+        char path[128];
+
+        snprintf(name, sizeof(name), "snapshot-%u-item-%u", round, i);
+        snprintf(path, sizeof(path), "/sys/fs/cgroup/service/%u/%u", round, i);
+
+        if (nipc_cgroups_builder_add(builder,
+                                     1000u + round * 16u + i,
+                                     i,
+                                     1u,
+                                     name, (uint32_t)strlen(name),
+                                     path, (uint32_t)strlen(path)) != NIPC_OK)
+            return false;
     }
+
+    return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -109,6 +107,7 @@ static bool multi_method_handler(
 
 typedef struct {
     nipc_managed_server_t server;
+    snapshot_service_ctx_t service_ctx;
     bool started;
 } server_ctx_t;
 
@@ -125,17 +124,22 @@ static bool start_server(server_ctx_t *sctx)
 
     nipc_uds_server_config_t scfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = RESPONSE_BUF,
-        .max_request_batch_items   = 16,
+        .max_request_payload_bytes = 16,
+        .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF,
-        .max_response_batch_items  = 16,
+        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
 
-    nipc_error_t err = nipc_server_init(&sctx->server,
-                                          TEST_RUN_DIR, SERVICE_NAME,
-                                          &scfg, 4, RESPONSE_BUF,
-                                          multi_method_handler, NULL);
+    nipc_cgroups_service_handler_t service_handler = {
+        .handle = snapshot_handler,
+        .snapshot_max_items = sctx->service_ctx.max_items,
+        .user = &sctx->service_ctx,
+    };
+
+    nipc_error_t err = nipc_server_init_typed(&sctx->server,
+                                              TEST_RUN_DIR, SERVICE_NAME,
+                                              &scfg, 4, &service_handler);
     if (err != NIPC_OK)
         return false;
 
@@ -160,19 +164,20 @@ static void stop_server(server_ctx_t *sctx)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Test: INCREMENT ping-pong                                          */
+/*  Test: repeated snapshot calls                                      */
 /* ------------------------------------------------------------------ */
 
-static void test_increment_ping_pong(void)
+static void test_snapshot_ping_pong(void)
 {
-    printf("\nTest: INCREMENT ping-pong (10 rounds)\n");
+    printf("\nTest: repeated snapshot calls over one long-lived session\n");
 
     server_ctx_t sctx = {0};
+    sctx.service_ctx.max_items = 4;
     check("server started", start_server(&sctx));
 
     nipc_uds_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = RESPONSE_BUF,
+        .max_request_payload_bytes = 16,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF,
         .max_response_batch_items  = 1,
@@ -184,15 +189,15 @@ static void test_increment_ping_pong(void)
     nipc_client_refresh(&client);
     check("client ready", nipc_client_ready(&client));
 
-    uint8_t resp_buf[RESPONSE_BUF];
-    uint64_t value = 0;
     int responses_received = 0;
     bool all_ok = true;
 
     for (int round = 0; round < 10; round++) {
-        uint64_t sent = value;
-        uint64_t result;
-        nipc_error_t err = nipc_client_call_increment(&client, sent, &result);
+        nipc_cgroups_resp_view_t view;
+        nipc_cgroups_item_view_t item0;
+        uint32_t expected_generation = (uint32_t)(round + 1);
+        uint32_t expected_items = 1u + (round % 4u);
+        nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
 
         if (err != NIPC_OK) {
             printf("  FAIL: round %d: call error %d\n", round, err);
@@ -201,38 +206,56 @@ static void test_increment_ping_pong(void)
         }
         responses_received++;
 
-        if (result != sent + 1) {
-            printf("  FAIL: round %d: sent %lu, expected %lu, got %lu\n",
-                   round, (unsigned long)sent,
-                   (unsigned long)(sent + 1), (unsigned long)result);
+        if (view.generation != expected_generation) {
+            printf("  FAIL: round %d: generation %u != expected %u\n",
+                   round, view.generation, expected_generation);
             all_ok = false;
             break;
         }
-        value = result; /* feed the response back as next request */
+
+        if (view.item_count != expected_items) {
+            printf("  FAIL: round %d: item_count %u != expected %u\n",
+                   round, view.item_count, expected_items);
+            all_ok = false;
+            break;
+        }
+
+        if (nipc_cgroups_resp_item(&view, 0, &item0) != NIPC_OK) {
+            printf("  FAIL: round %d: item 0 decode failed\n", round);
+            all_ok = false;
+            break;
+        }
+
+        if (strncmp(item0.name.ptr, "snapshot-", 9) != 0 ||
+            strncmp(item0.path.ptr, "/sys/fs/cgroup/service/", 23) != 0) {
+            printf("  FAIL: round %d: item 0 content mismatch\n", round);
+            all_ok = false;
+            break;
+        }
     }
 
-    check("each response == request + 1", all_ok);
+    check("every snapshot round succeeds", all_ok);
     check("responses received == 10", responses_received == 10);
-    check("final value == 10", value == 10);
 
     nipc_client_close(&client);
     stop_server(&sctx);
 }
 
 /* ------------------------------------------------------------------ */
-/*  Test: STRING_REVERSE ping-pong                                     */
+/*  Test: session stays reused in steady state                         */
 /* ------------------------------------------------------------------ */
 
-static void test_string_reverse_ping_pong(void)
+static void test_snapshot_session_reuse(void)
 {
-    printf("\nTest: STRING_REVERSE ping-pong (alphabet)\n");
+    printf("\nTest: snapshot service reuses one session in steady state\n");
 
     server_ctx_t sctx = {0};
+    sctx.service_ctx.max_items = 3;
     check("server started", start_server(&sctx));
 
     nipc_uds_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = RESPONSE_BUF,
+        .max_request_payload_bytes = 16,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF,
         .max_response_batch_items  = 1,
@@ -243,131 +266,39 @@ static void test_string_reverse_ping_pong(void)
     nipc_client_init(&client, TEST_RUN_DIR, SERVICE_NAME, &ccfg);
     nipc_client_refresh(&client);
     check("client ready", nipc_client_ready(&client));
-
-    uint8_t resp_buf[RESPONSE_BUF];
-    char current[64];
-    strncpy(current, "abcdefghijklmnopqrstuvwxyz", sizeof(current));
-    current[sizeof(current) - 1] = '\0';
-
-    bool all_ok = true;
-    int responses_received = 0;
 
     for (int round = 0; round < 6; round++) {
-        uint32_t sent_len = (uint32_t)strlen(current);
-
-        nipc_string_reverse_view_t view;
-        nipc_error_t err = nipc_client_call_string_reverse(
-            &client, current, sent_len, &view);
-
-        if (err != NIPC_OK) {
-            printf("  FAIL: round %d: call error %d\n", round, err);
-            all_ok = false;
-            break;
-        }
-        responses_received++;
-
-        /* Verify response length matches request length */
-        if (view.str_len != sent_len) {
-            printf("  FAIL: round %d: response len %u != request len %u\n",
-                   round, view.str_len, sent_len);
-            all_ok = false;
-            break;
-        }
-
-        /* Verify response is the reverse of the request we sent */
-        bool is_reverse = true;
-        for (uint32_t i = 0; i < sent_len; i++) {
-            if (view.str[i] != current[sent_len - 1 - i]) {
-                printf("  FAIL: round %d: pos %u: expected '%c', got '%c'\n",
-                       round, i, current[sent_len - 1 - i], view.str[i]);
-                is_reverse = false;
-                break;
-            }
-        }
-        if (!is_reverse) {
-            all_ok = false;
-            break;
-        }
-
-        /* Feed response back as next request */
-        memcpy(current, view.str, view.str_len);
-        current[view.str_len] = '\0';
+        nipc_cgroups_resp_view_t view;
+        nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
+        check("snapshot call ok", err == NIPC_OK);
     }
 
-    check("every response is the reverse of its request", all_ok);
-    check("responses received == 6", responses_received == 6);
-    /* After even number of reversals, should be back to original */
-    check("6 reversals returns to original",
-          strcmp(current, "abcdefghijklmnopqrstuvwxyz") == 0);
+    nipc_client_status_t status;
+    nipc_client_status(&client, &status);
+    check("steady state uses one connect", status.connect_count == 1);
+    check("steady state avoids reconnects", status.reconnect_count == 0);
+    check("steady state call_count == 6", status.call_count == 6);
 
     nipc_client_close(&client);
     stop_server(&sctx);
 }
 
 /* ------------------------------------------------------------------ */
-/*  Test: INCREMENT batch                                              */
+/*  Test: empty snapshot                                               */
 /* ------------------------------------------------------------------ */
 
-static void test_increment_batch(void)
+static void test_empty_snapshot(void)
 {
-    printf("\nTest: INCREMENT batch (5 items)\n");
+    printf("\nTest: empty snapshot is valid for the service kind\n");
 
     server_ctx_t sctx = {0};
+    sctx.service_ctx.max_items = 1;
+    sctx.service_ctx.empty_snapshot = true;
     check("server started", start_server(&sctx));
 
     nipc_uds_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = RESPONSE_BUF,
-        .max_request_batch_items   = 16,
-        .max_response_payload_bytes = RESPONSE_BUF,
-        .max_response_batch_items  = 16,
-        .auth_token                = AUTH_TOKEN,
-    };
-
-    nipc_client_ctx_t client;
-    nipc_client_init(&client, TEST_RUN_DIR, SERVICE_NAME, &ccfg);
-    nipc_client_refresh(&client);
-    check("client ready", nipc_client_ready(&client));
-
-    uint64_t requests[5]  = {10, 20, 30, 40, 50};
-    uint64_t responses[5] = {0};
-    uint8_t resp_buf[RESPONSE_BUF];
-
-    nipc_error_t err = nipc_client_call_increment_batch(
-        &client, requests, 5, responses);
-
-    check("batch call ok", err == NIPC_OK);
-
-    bool all_ok = true;
-    for (int i = 0; i < 5; i++) {
-        if (responses[i] != requests[i] + 1) {
-            printf("  FAIL: item %d: sent %lu, expected %lu, got %lu\n",
-                   i, (unsigned long)requests[i],
-                   (unsigned long)(requests[i] + 1),
-                   (unsigned long)responses[i]);
-            all_ok = false;
-        }
-    }
-    check("each response == request + 1", all_ok);
-
-    nipc_client_close(&client);
-    stop_server(&sctx);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Test: mixed methods on same connection                             */
-/* ------------------------------------------------------------------ */
-
-static void test_mixed_methods(void)
-{
-    printf("\nTest: mixed INCREMENT + STRING_REVERSE on same connection\n");
-
-    server_ctx_t sctx = {0};
-    check("server started", start_server(&sctx));
-
-    nipc_uds_client_config_t ccfg = {
-        .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = RESPONSE_BUF,
+        .max_request_payload_bytes = 16,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF,
         .max_response_batch_items  = 1,
@@ -379,65 +310,13 @@ static void test_mixed_methods(void)
     nipc_client_refresh(&client);
     check("client ready", nipc_client_ready(&client));
 
-    uint8_t resp_buf[RESPONSE_BUF];
-
-    /* Interleave: increment, reverse, increment, reverse */
-    uint64_t inc_val;
-    nipc_error_t err;
-
-    err = nipc_client_call_increment(&client, 100, &inc_val);
-    check("increment 100 -> 101", err == NIPC_OK && inc_val == 101);
-
-    nipc_string_reverse_view_t sv;
-    err = nipc_client_call_string_reverse(&client, "hello", 5, &sv);
-    check("reverse 'hello' -> 'olleh'",
-          err == NIPC_OK && sv.str_len == 5 && memcmp(sv.str, "olleh", 5) == 0);
-
-    err = nipc_client_call_increment(&client, inc_val, &inc_val);
-    check("increment 101 -> 102", err == NIPC_OK && inc_val == 102);
-
-    err = nipc_client_call_string_reverse(&client, "world", 5, &sv);
-    check("reverse 'world' -> 'dlrow'",
-          err == NIPC_OK && sv.str_len == 5 && memcmp(sv.str, "dlrow", 5) == 0);
-
-    err = nipc_client_call_increment(&client, inc_val, &inc_val);
-    check("increment 102 -> 103", err == NIPC_OK && inc_val == 103);
-
-    nipc_client_close(&client);
-    stop_server(&sctx);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Test: empty string                                                 */
-/* ------------------------------------------------------------------ */
-
-static void test_empty_string(void)
-{
-    printf("\nTest: STRING_REVERSE with empty string\n");
-
-    server_ctx_t sctx = {0};
-    check("server started", start_server(&sctx));
-
-    nipc_uds_client_config_t ccfg = {
-        .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = RESPONSE_BUF,
-        .max_request_batch_items   = 1,
-        .max_response_payload_bytes = RESPONSE_BUF,
-        .max_response_batch_items  = 1,
-        .auth_token                = AUTH_TOKEN,
-    };
-
-    nipc_client_ctx_t client;
-    nipc_client_init(&client, TEST_RUN_DIR, SERVICE_NAME, &ccfg);
-    nipc_client_refresh(&client);
-    check("client ready", nipc_client_ready(&client));
-
-    uint8_t resp_buf[RESPONSE_BUF];
-    nipc_string_reverse_view_t sv;
-    nipc_error_t err = nipc_client_call_string_reverse(&client, "", 0, &sv);
-
-    check("empty string: call ok", err == NIPC_OK);
-    check("empty string: result len == 0", err == NIPC_OK && sv.str_len == 0);
+    nipc_cgroups_resp_view_t view;
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
+    check("empty snapshot call ok", err == NIPC_OK);
+    check("empty snapshot has 0 items",
+          err == NIPC_OK && view.item_count == 0);
+    check("empty snapshot keeps systemd_enabled",
+          err == NIPC_OK && view.systemd_enabled == 1);
 
     nipc_client_close(&client);
     stop_server(&sctx);
@@ -449,15 +328,13 @@ static void test_empty_string(void)
 
 int main(void)
 {
-    printf("=== L2 Ping-Pong Tests (INCREMENT + STRING_REVERSE) ===\n");
+    printf("=== L2 Ping-Pong Tests (CGROUPS_SNAPSHOT service kind) ===\n");
 
     ensure_run_dir();
 
-    test_increment_ping_pong();
-    test_string_reverse_ping_pong();
-    test_increment_batch();
-    test_mixed_methods();
-    test_empty_string();
+    test_snapshot_ping_pong();
+    test_snapshot_session_reuse();
+    test_empty_snapshot();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail > 0 ? 1 : 0;

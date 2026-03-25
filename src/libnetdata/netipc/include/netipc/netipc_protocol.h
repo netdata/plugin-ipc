@@ -86,6 +86,7 @@ typedef enum {
     NIPC_ERR_BAD_ALIGNMENT,   /* item not 8-byte aligned */
     NIPC_ERR_BAD_ITEM_COUNT,  /* directory inconsistent with payload size */
     NIPC_ERR_OVERFLOW,        /* builder ran out of space */
+    NIPC_ERR_HANDLER_FAILED,  /* typed handler rejected an otherwise valid request */
     NIPC_ERR_NOT_READY,       /* client not connected / service unavailable */
 } nipc_error_t;
 
@@ -358,6 +359,7 @@ typedef struct {
     uint64_t  generation;
     uint32_t  item_count;
     uint32_t  max_items;  /* directory slots reserved at init */
+    nipc_error_t error;   /* sticky builder failure for dispatch */
 
     /* Current write position for packed item data (absolute). */
     size_t    data_offset;
@@ -490,7 +492,7 @@ typedef bool (*nipc_cgroups_handler_fn)(
     const nipc_cgroups_req_t *request,
     nipc_cgroups_builder_t *builder);
 
-bool nipc_dispatch_cgroups_snapshot(
+nipc_error_t nipc_dispatch_cgroups_snapshot(
     const uint8_t *req, size_t req_len,
     uint8_t *resp, size_t resp_size, size_t *resp_len,
     uint32_t max_items,

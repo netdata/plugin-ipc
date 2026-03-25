@@ -1,6 +1,7 @@
 //go:build windows
 
-// L2 cross-language interop binary (Windows).
+// L2 cross-language interop binary (Windows) for the cgroups-snapshot
+// service kind.
 package main
 
 import (
@@ -51,12 +52,9 @@ func clientConfig() windows.ClientConfig {
 	}
 }
 
-func testHandlers() cgroups.Handlers {
-	return cgroups.Handlers{
-		OnIncrement: func(v uint64) (uint64, bool) {
-			return v + 1, true
-		},
-		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+func testHandler() cgroups.Handler {
+	return cgroups.Handler{
+		Handle: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
 			if request.LayoutVersion != 1 || request.Flags != 0 {
 				return false
 			}
@@ -78,19 +76,12 @@ func testHandlers() cgroups.Handlers {
 			}
 			return true
 		},
-		OnStringReverse: func(s string) (string, bool) {
-			runes := []rune(s)
-			for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
-				runes[i], runes[j] = runes[j], runes[i]
-			}
-			return string(runes), true
-		},
 		SnapshotMaxItems: 3,
 	}
 }
 
 func runServer(runDir, service string) int {
-	server := cgroups.NewServer(runDir, service, serverConfig(), testHandlers())
+	server := cgroups.NewServer(runDir, service, serverConfig(), testHandler())
 
 	fmt.Println("READY")
 
@@ -122,16 +113,6 @@ func runClient(runDir, service string) int {
 	}
 
 	ok := true
-
-	// --- Test INCREMENT: 42 -> 43 ---
-	incResult, err := client.CallIncrement(42)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "client: increment call failed: %v\n", err)
-		ok = false
-	} else if incResult != 43 {
-		fmt.Fprintf(os.Stderr, "client: increment expected 43, got %d\n", incResult)
-		ok = false
-	}
 
 	// --- Test CGROUPS_SNAPSHOT: 3 items ---
 	view, err := client.CallSnapshot()
@@ -166,38 +147,6 @@ func runClient(runDir, service string) int {
 				ok = false
 			}
 		}
-	}
-
-	// --- Test INCREMENT batch: [10,20,30] -> [11,21,31] ---
-	batchResults, err := client.CallIncrementBatch([]uint64{10, 20, 30})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "client: increment batch call failed: %v\n", err)
-		ok = false
-	} else {
-		expected := []uint64{11, 21, 31}
-		if len(batchResults) != len(expected) {
-			fmt.Fprintf(os.Stderr, "client: batch expected %d results, got %d\n",
-				len(expected), len(batchResults))
-			ok = false
-		} else {
-			for i, v := range batchResults {
-				if v != expected[i] {
-					fmt.Fprintf(os.Stderr, "client: batch[%d] expected %d, got %d\n",
-						i, expected[i], v)
-					ok = false
-				}
-			}
-		}
-	}
-
-	// --- Test STRING_REVERSE: "hello" -> "olleh" ---
-	srView, err := client.CallStringReverse("hello")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "client: string_reverse call failed: %v\n", err)
-		ok = false
-	} else if srView.Str != "olleh" {
-		fmt.Fprintf(os.Stderr, "client: string_reverse expected \"olleh\", got %q\n", srView.Str)
-		ok = false
 	}
 
 	client.Close()

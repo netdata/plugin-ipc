@@ -56,6 +56,18 @@ This is the Windows baseline profile.
    defined in the wire envelope spec. Handshake messages travel over
    the Named Pipe.
 
+   The handshake determines the session profile, directional limits,
+   packet size, and `session_id`.
+
+   Directional limits are not symmetric:
+   - request limits are sender-driven
+   - response limits are server-driven
+
+   The negotiated capacities are fixed for that session. If higher
+   layers later reconnect with larger learned capacities, the next
+   session gets a new `session_id` and therefore a new per-session SHM
+   object set.
+
 4. **Data plane**: if the negotiated profile is NAMED_PIPE (bit 0),
    all subsequent messages travel over the same pipe. If a higher
    profile is negotiated (e.g., SHM_HYBRID), the data plane switches
@@ -84,9 +96,9 @@ When the handshake negotiates a SHM profile, the shared memory region
 and synchronization objects use kernel object names:
 
 ```
-Local\netipc-{hash:016llx}-{service}-p{profile}-mapping
-Local\netipc-{hash:016llx}-{service}-p{profile}-req_event
-Local\netipc-{hash:016llx}-{service}-p{profile}-resp_event
+Local\netipc-{hash:016llx}-{service}-p{profile}-s{session_id:016llx}-mapping
+Local\netipc-{hash:016llx}-{service}-p{profile}-s{session_id:016llx}-req_event
+Local\netipc-{hash:016llx}-{service}-p{profile}-s{session_id:016llx}-resp_event
 ```
 
 Where:
@@ -97,9 +109,12 @@ Where:
 - `service` = `service_name` (same character rules as the pipe name:
   alphanumeric, dash, underscore, dot only; reject otherwise)
 - `profile` = the selected profile number (1, 2, 4, or 8)
+- `session_id` = the server-assigned session identifier from HELLO_ACK
 
 The Named Pipe connection remains open for the session lifetime. The
-data plane switches to the shared memory region.
+data plane switches to the shared memory region. If a later reconnect
+learns larger capacities, it establishes a new session with a new
+`session_id` and therefore a different SHM mapping / event name set.
 
 ## Disconnect detection
 

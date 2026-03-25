@@ -1,12 +1,12 @@
 //go:build unix
 
-// L2 cross-language interop binary.
+// L2 cross-language interop binary for the cgroups-snapshot service kind.
 //
 // Usage:
 //
 //	interop_service server <run_dir> <service_name>
-//	  Starts a managed server with a cgroups handler (3 items),
-//	  prints READY, handles clients, exits after ~10s.
+//	  Starts a managed server for cgroups-snapshot only, prints READY,
+//	  handles clients, exits after ~10s.
 //
 //	interop_service client <run_dir> <service_name>
 //	  Connects, calls snapshot, verifies 3 items, prints PASS/FAIL.
@@ -65,12 +65,9 @@ func clientConfig() posix.ClientConfig {
 	}
 }
 
-func testHandlers() cgroups.Handlers {
-	return cgroups.Handlers{
-		OnIncrement: func(v uint64) (uint64, bool) {
-			return v + 1, true
-		},
-		OnSnapshot: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+func testHandler() cgroups.Handler {
+	return cgroups.Handler{
+		Handle: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
 			if request.LayoutVersion != 1 || request.Flags != 0 {
 				return false
 			}
@@ -92,21 +89,24 @@ func testHandlers() cgroups.Handlers {
 			}
 			return true
 		},
-		OnStringReverse: func(s string) (string, bool) {
-			runes := []rune(s)
-			for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
-				runes[i], runes[j] = runes[j], runes[i]
-			}
-			return string(runes), true
-		},
 		SnapshotMaxItems: 3,
 	}
 }
 
-func runServer(runDir, service string) int {
-	server := cgroups.NewServer(runDir, service, serverConfig(), testHandlers())
+func waitForSocket(runDir, service string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	path := fmt.Sprintf("%s/%s.sock", runDir, service)
+	for time.Now().Before(deadline) {
+		if info, err := os.Stat(path); err == nil && info.Mode()&os.ModeSocket != 0 {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
 
-	fmt.Println("READY")
+func runServer(runDir, service string) int {
+	server := cgroups.NewServer(runDir, service, serverConfig(), testHandler())
 
 	// Stop after 10s timeout (interop test should finish sooner)
 	go func() {
@@ -114,7 +114,24 @@ func runServer(runDir, service string) int {
 		server.Stop()
 	}()
 
-	if err := server.Run(); err != nil {
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.Run()
+	}()
+
+	if !waitForSocket(runDir, service, 5*time.Second) {
+		server.Stop()
+		if err := <-serverErr; err != nil {
+			fmt.Fprintf(os.Stderr, "server: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "server: socket not ready\n")
+		}
+		return 1
+	}
+
+	fmt.Println("READY")
+
+	if err := <-serverErr; err != nil {
 		fmt.Fprintf(os.Stderr, "server: %v\n", err)
 		return 1
 	}
@@ -137,16 +154,6 @@ func runClient(runDir, service string) int {
 	}
 
 	ok := true
-
-	// --- Test INCREMENT: 42 -> 43 ---
-	incResult, err := client.CallIncrement(42)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "client: increment call failed: %v\n", err)
-		ok = false
-	} else if incResult != 43 {
-		fmt.Fprintf(os.Stderr, "client: increment expected 43, got %d\n", incResult)
-		ok = false
-	}
 
 	// --- Test CGROUPS_SNAPSHOT: 3 items ---
 	view, err := client.CallSnapshot()
@@ -186,38 +193,6 @@ func runClient(runDir, service string) int {
 				ok = false
 			}
 		}
-	}
-
-	// --- Test INCREMENT batch: [10,20,30] -> [11,21,31] ---
-	batchResults, err := client.CallIncrementBatch([]uint64{10, 20, 30})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "client: increment batch call failed: %v\n", err)
-		ok = false
-	} else {
-		expected := []uint64{11, 21, 31}
-		if len(batchResults) != len(expected) {
-			fmt.Fprintf(os.Stderr, "client: batch expected %d results, got %d\n",
-				len(expected), len(batchResults))
-			ok = false
-		} else {
-			for i, v := range batchResults {
-				if v != expected[i] {
-					fmt.Fprintf(os.Stderr, "client: batch[%d] expected %d, got %d\n",
-						i, expected[i], v)
-					ok = false
-				}
-			}
-		}
-	}
-
-	// --- Test STRING_REVERSE: "hello" -> "olleh" ---
-	srView, err := client.CallStringReverse("hello")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "client: string_reverse call failed: %v\n", err)
-		ok = false
-	} else if srView.Str != "olleh" {
-		fmt.Fprintf(os.Stderr, "client: string_reverse expected \"olleh\", got %q\n", srView.Str)
-		ok = false
 	}
 
 	client.Close()

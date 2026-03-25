@@ -35,6 +35,28 @@ The library is organized into four independent concerns:
 - Each message type adds Codec functions that are usable from Level 1
   directly, without Level 2.
 
+## Service-Oriented Discovery
+
+The public identity model is service-oriented:
+
+- clients connect to `service_namespace + service_name`
+- clients do not bind to plugin/process identity
+- service names are the stable public contract
+- one service endpoint serves one request kind only
+
+Examples of service kinds:
+
+- `cgroups-snapshot`
+- `ip-to-asn`
+- `pid-traffic`
+
+Runtime model:
+
+- providers may start late
+- providers may restart or disappear
+- enrichments are optional
+- clients must tolerate absence and reconnect from their own loop
+
 ## Documents
 
 ### Level 1: Transport

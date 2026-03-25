@@ -344,6 +344,10 @@ fn min_u32(a: u32, b: u32) -> u32 {
     a.min(b)
 }
 
+fn max_u32(a: u32, b: u32) -> u32 {
+    a.max(b)
+}
+
 fn highest_bit(mask: u32) -> u32 {
     if mask == 0 {
         return 0;
@@ -849,6 +853,16 @@ impl NpListener {
         self.handle
     }
 
+    /// Update the payload limits used for future handshakes.
+    pub fn set_payload_limits(
+        &mut self,
+        max_request_payload_bytes: u32,
+        max_response_payload_bytes: u32,
+    ) {
+        self.config.max_request_payload_bytes = max_request_payload_bytes;
+        self.config.max_response_payload_bytes = max_response_payload_bytes;
+    }
+
     /// Accept one client connection. Performs the full handshake.
     pub fn accept(&mut self) -> Result<NpSession, NpError> {
         // Wait for client
@@ -1124,11 +1138,13 @@ fn server_handshake(
         highest_bit(intersection)
     };
 
-    // Negotiate limits
-    let agreed_req_pay = min_u32(hello.max_request_payload_bytes, s_req_pay);
-    let agreed_req_bat = min_u32(hello.max_request_batch_items, s_req_bat);
-    let agreed_resp_pay = min_u32(hello.max_response_payload_bytes, s_resp_pay);
-    let agreed_resp_bat = min_u32(hello.max_response_batch_items, s_resp_bat);
+    // Negotiate limits:
+    // - requests use the larger of client/server advertised capacities
+    // - responses are server-authoritative
+    let agreed_req_pay = max_u32(hello.max_request_payload_bytes, s_req_pay);
+    let agreed_req_bat = max_u32(hello.max_request_batch_items, s_req_bat);
+    let agreed_resp_pay = s_resp_pay;
+    let agreed_resp_bat = s_resp_bat;
     let agreed_pkt = min_u32(hello.packet_size, server_pkt_size);
 
     // Send HELLO_ACK
@@ -1579,6 +1595,47 @@ mod tests {
             session.send(&mut hdr2, &[2]),
             Err(NpError::DuplicateMsgId(42))
         ));
+
+        session.close();
+        server.join().expect("server join");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_directional_limit_negotiation() {
+        ensure_run_dir();
+        let svc = unique_service("rs_dir_limits");
+
+        let scfg = ServerConfig {
+            max_request_payload_bytes: 2048,
+            max_request_batch_items: 8,
+            max_response_payload_bytes: 8192,
+            max_response_batch_items: 32,
+            ..default_server_config()
+        };
+        let mut listener = NpListener::bind(TEST_RUN_DIR, &svc, scfg).expect("bind");
+
+        let server = thread::spawn(move || {
+            let mut session = listener.accept().expect("accept");
+            assert_eq!(session.max_request_payload_bytes, 4096);
+            assert_eq!(session.max_request_batch_items, 16);
+            assert_eq!(session.max_response_payload_bytes, 8192);
+            assert_eq!(session.max_response_batch_items, 32);
+            session.close();
+        });
+
+        let ccfg = ClientConfig {
+            max_request_payload_bytes: 4096,
+            max_request_batch_items: 16,
+            max_response_payload_bytes: 4096,
+            max_response_batch_items: 16,
+            ..default_client_config()
+        };
+        let mut session = NpSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
+        assert_eq!(session.max_request_payload_bytes, 4096);
+        assert_eq!(session.max_request_batch_items, 16);
+        assert_eq!(session.max_response_payload_bytes, 8192);
+        assert_eq!(session.max_response_batch_items, 32);
 
         session.close();
         server.join().expect("server join");

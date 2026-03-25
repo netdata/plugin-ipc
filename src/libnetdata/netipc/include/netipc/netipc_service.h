@@ -2,8 +2,15 @@
  * netipc_service.h - L2 orchestration: client context and managed server.
  *
  * Pure convenience layer. Uses L1 transport + Codec exclusively.
- * Adds zero wire behavior. Provides lifecycle management, typed calls,
- * and a multi-client server with worker dispatch.
+ * Adds zero wire behavior. Provides lifecycle management, typed
+ * cgroups-snapshot calls, and managed multi-client worker dispatch for
+ * one service kind per endpoint.
+ *
+ * The public L2 contract is service-oriented:
+ *   - clients connect to a service kind, not a plugin identity
+ *   - one server endpoint serves one request kind only
+ *   - outer request codes remain part of the envelope for validation,
+ *     not public multi-method dispatch
  *
  * L2 callers never see transports, handshakes, or chunking.
  *
@@ -69,7 +76,7 @@ typedef struct {
     /* State */
     nipc_client_state_t state;
 
-    /* Configuration (set at init, immutable) */
+    /* Configuration (mutable learned sizing, updated across reconnects) */
     char run_dir[256];
     char service_name[128];
 
@@ -95,9 +102,7 @@ typedef struct {
     uint32_t call_count;
     uint32_t error_count;
 
-    /* Internal reusable Level 2 scratch, derived from negotiated limits. */
-    uint8_t *request_buf;
-    size_t   request_buf_size;
+    /* Internal reusable Level 2 scratch, allocated lazily from session sizes. */
     uint8_t *response_buf;
     size_t   response_buf_size;
     uint8_t *send_buf;
@@ -162,7 +167,10 @@ void nipc_client_close(nipc_client_ctx_t *ctx);
  *
  * Retry policy (per spec):
  *   If the call fails and the context was previously READY, the client
- *   disconnects, reconnects (full handshake), and retries ONCE.
+ *   disconnects, reconnects (full handshake), and retries.
+ *   - Ordinary transport / peer failures retry once.
+ *   - Overflow-driven resize recovery may reconnect more than once
+ *     while negotiated capacities grow.
  *   If not previously READY, fails immediately.
  *
  * Returns NIPC_OK on success, or an error code.
@@ -172,69 +180,20 @@ nipc_error_t nipc_client_call_cgroups_snapshot(
     nipc_cgroups_resp_view_t *view_out);
 
 /* ------------------------------------------------------------------ */
-/*  Typed INCREMENT call                                               */
-/* ------------------------------------------------------------------ */
-
-/*
- * Blocking typed call: send value, receive incremented value.
- *
- * value_out:    on success, the response value.
- *
- * Same retry policy as cgroups snapshot.
- */
-nipc_error_t nipc_client_call_increment(
-    nipc_client_ctx_t *ctx,
-    uint64_t request_value,
-    uint64_t *value_out);
-
-/*
- * Batch typed call: send N values, receive N incremented values.
- *
- * request_values/count: array of values to send.
- * response_values: caller-owned array (>= count elements) for results.
- *
- * Returns NIPC_OK on success (all count responses decoded).
- */
-nipc_error_t nipc_client_call_increment_batch(
-    nipc_client_ctx_t *ctx,
-    const uint64_t *request_values, uint32_t count,
-    uint64_t *response_values);
-
-/* ------------------------------------------------------------------ */
-/*  Typed STRING_REVERSE call                                          */
-/* ------------------------------------------------------------------ */
-
-/*
- * Blocking typed call: send string, receive reversed string.
- *
- * view_out:     on success, ephemeral view into internal client storage. Valid
- *   only until the next call on this context.
- *
- * Same retry policy as cgroups snapshot.
- */
-nipc_error_t nipc_client_call_string_reverse(
-    nipc_client_ctx_t *ctx,
-    const char *request_str,
-    uint32_t request_str_len,
-    nipc_string_reverse_view_t *view_out);
-
-/* ------------------------------------------------------------------ */
 /*  Managed server                                                     */
 /* ------------------------------------------------------------------ */
 
 /* Internal dispatch callback shape used by the managed-server loop. */
-typedef bool (*nipc_server_handler_fn)(
+typedef nipc_error_t (*nipc_server_handler_fn)(
     void *user,
-    uint16_t method_code,
+    const nipc_header_t *request_hdr,
     const uint8_t *request_payload, size_t request_len,
     uint8_t *response_buf, size_t response_buf_size,
     size_t *response_len_out);
 
-/* Typed managed-server callbacks for the cgroups service surface. */
+/* Typed managed-server callback surface for the cgroups-snapshot service. */
 typedef struct {
-    nipc_increment_handler_fn      on_increment;
-    nipc_string_reverse_handler_fn on_string_reverse;
-    nipc_cgroups_handler_fn        on_cgroups_snapshot;
+    nipc_cgroups_handler_fn handle;
 
     /* Optional explicit reservation hint for snapshot builders. When 0,
      * the library derives a safe upper bound from negotiated response
@@ -242,7 +201,7 @@ typedef struct {
     uint32_t snapshot_max_items;
 
     void *user;
-} nipc_cgroups_handlers_t;
+} nipc_cgroups_service_handler_t;
 
 typedef struct nipc_managed_server nipc_managed_server_t;
 
@@ -276,10 +235,10 @@ struct nipc_managed_server {
     /* Callback */
     nipc_server_handler_fn handler;
     void *handler_user;
-    nipc_cgroups_handlers_t typed_handlers;
-
-    /* Response buffer size (per-session allocation) */
-    size_t   response_buf_size;
+    nipc_cgroups_service_handler_t service_handler;
+    uint16_t expected_method_code;
+    uint32_t learned_request_payload_bytes;
+    uint32_t learned_response_payload_bytes;
 
     /* State — use __atomic builtins (POSIX) or Interlocked* (Windows) */
 #ifdef _WIN32
@@ -312,7 +271,8 @@ struct nipc_managed_server {
 };
 
 /*
- * Initialize and start listening with typed cgroups handlers.
+ * Initialize a managed server for the typed cgroups-snapshot service kind.
+ * One endpoint serves one request kind only.
  * Does NOT start workers. Call nipc_server_run() to start the
  * acceptor+worker loop.
  */
@@ -325,7 +285,7 @@ nipc_error_t nipc_server_init_typed(nipc_managed_server_t *server,
                                const nipc_uds_server_config_t *config,
 #endif
                                int worker_count,
-                               const nipc_cgroups_handlers_t *handlers);
+                               const nipc_cgroups_service_handler_t *service_handler);
 
 #ifdef NIPC_INTERNAL_TESTING
 /*
@@ -343,7 +303,7 @@ nipc_error_t nipc_server_init_raw_for_tests(
     const nipc_uds_server_config_t *config,
 #endif
     int worker_count,
-    size_t response_buf_size,
+    uint16_t expected_method_code,
     nipc_server_handler_fn handler,
     void *user);
 

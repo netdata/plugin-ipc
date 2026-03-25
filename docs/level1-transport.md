@@ -32,7 +32,7 @@ and "the peer has received those bytes correctly." Specifically:
 
 Level 1 does NOT own:
 
-- Typed method payload encoding or decoding (Codec)
+- Typed payload encoding or decoding (Codec)
 - Response builder mechanics (Codec)
 - Callback dispatch or handler registration (Level 2)
 - Worker thread management (Level 2 managed server)
@@ -151,6 +151,25 @@ behind the caller's back.
 
 Retry and reconnect policies are concerns of Level 2 and Level 3, where the
 semantics (at-least-once, idempotent methods, cache preservation) are known.
+
+## Service Identity
+
+Level 1 is service-oriented, not plugin-oriented.
+
+- clients connect to `service_namespace + service_name`
+- they do not care which plugin/process provides that service
+- one listener serves one service endpoint
+- one service endpoint serves one request kind only
+
+Examples of service kinds:
+
+- `cgroups-snapshot`
+- `ip-to-asn`
+- `pid-traffic`
+
+Providers may appear late, restart, or be absent entirely. Level 1 only
+implements connect/listen/accept/close for service endpoints. Optional
+dependency handling and reconnect cadence belong to Level 2 / Level 3.
 
 ## Features
 

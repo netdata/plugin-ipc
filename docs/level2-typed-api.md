@@ -10,6 +10,24 @@ Level 2 exists so that the common patterns — blocking request/response,
 client lifecycle management, managed multi-client servers — do not have
 to be reimplemented by every integration.
 
+## Service Model
+
+Level 2 is built around service kinds, not plugin identity.
+
+- one Level 2 client context targets one service kind
+- one managed server endpoint exports one service kind
+- one service endpoint serves one request kind only
+- clients connect to a service name and do not care which plugin serves it
+
+Examples of service kinds:
+
+- `cgroups-snapshot`
+- `ip-to-asn`
+- `pid-traffic`
+
+The provider of a service is an operational detail. Clients only know the
+service identity and the typed payload contract for that service kind.
+
 ## Scope
 
 Level 2 owns:
@@ -19,7 +37,7 @@ Level 2 owns:
 - Connection state machine with automatic reconnect policy
 - Managed server mode (acceptor, per-session request/response loops,
   concurrent session limit)
-- Per-method typed dispatch helpers in the Codec layer
+- Service-kind-specific typed dispatch helpers built from the Codec layer
 
 Level 2 does NOT own:
 
@@ -85,16 +103,17 @@ The client side:
 
 The server side:
 
-- Registers typed callbacks per supported method
+- Registers the typed handler surface for one service kind
 - Receives one decoded typed request value or typed request view
 - Returns one typed response value or fills one typed response builder,
   depending on the message type
 - Never exposes raw payload bytes, raw response buffers, or outer
   transport metadata to the callback
 
-Method-code dispatch, raw request decoding, raw response encoding, and
-batch extraction are internal Level 2 concerns implemented using Codec +
-Level 1 primitives.
+Raw request decoding, raw response encoding, and batch extraction are
+internal Level 2 concerns implemented using Codec + Level 1 primitives.
+Each endpoint is bound to one request kind. Level 2 should not expose a
+public “one server dispatches many unrelated request kinds” contract.
 
 ### 4. Internal reusable buffers are owned by the library
 
@@ -108,7 +127,7 @@ Examples of internal reusable state:
 - Batch assembly and batch extraction scratch
 
 These buffers are implementation details. Their sizing is derived from
-the negotiated limits and the method-specific Codec contracts. They are
+the negotiated limits and the service-kind-specific Codec contracts. They are
 never part of the public Level 2 API.
 
 Borrowed typed views returned by Level 2 therefore have explicit
@@ -128,13 +147,22 @@ Level 2 client calls are intentionally at-least-once, not exactly-once.
 
 If a call fails and the session was previously READY, Level 2 must
 disconnect, reconnect (including a full handshake), and resend the
-request once. This means the server may receive the same request twice.
-Duplicate requests are acceptable by contract.
+request. This means the server may receive the same request more than
+once. Duplicate requests are acceptable by contract.
+
+There are two important cases:
+
+- For ordinary transport / peer failures, Level 2 reconnects and retries
+  once.
+- For overflow-driven resize recovery, Level 2 may reconnect more than
+  once while negotiated request/response capacities grow. Recovery stops
+  when the call succeeds, reconnect fails, a non-overflow error occurs,
+  or a reconnect no longer increases the relevant negotiated capacities.
 
 If the session was NOT previously READY, the call fails immediately
 without attempting reconnection.
 
-If the retry also fails, Level 2 reports failure to the caller.
+If recovery fails, Level 2 reports failure to the caller.
 
 ### 6. No hidden background threads (client)
 
@@ -146,9 +174,25 @@ methods.
 The caller owns the timing of connection work by calling `refresh()`
 from its own loop at whatever cadence it chooses.
 
+### 7. Optional dependencies and asynchronous startup
+
+Plugin startup order is not guaranteed.
+
+- a client may start before the provider of its service exists
+- a provider may restart or disappear while clients are running
+- enrichments from external services are optional by design
+
+Therefore:
+
+- `initialize()` must not require the provider to be running
+- `refresh()` owns connection and reconnection attempts
+- `ready()` must stay cheap and cached
+- callers are expected to tolerate `NOT_FOUND` / disconnected states and
+  continue operating without that enrichment until the service appears
+
 ## Client context
 
-Level 2 provides one persistent client context per service. For example,
+Level 2 provides one persistent client context per service kind. For example,
 a plugin that needs IP-to-ASN enrichment creates one `ctx_ip_to_asn`
 context at startup and uses it for the lifetime of the process.
 
@@ -191,7 +235,7 @@ and logging, not for hot-path decisions.
 
 ### Typed single-item calls
 
-Level 2 exposes per-method-type blocking call functions. Each call:
+Level 2 exposes service-kind-specific blocking call functions. Each call:
 
 1. Encodes the typed request using the Codec
 2. Sends it via Level 1 as a single-item message
@@ -217,24 +261,23 @@ There are no callbacks on the client side. Every typed call is a
 synchronous function that returns the decoded result. The public shape is
 equivalent to:
 
-- **C**: `call_increment(&client, value, &result)` returns an error code,
-  result via out-parameter. `call_snapshot(&client, &view)` returns an
-  error code, view via out-parameter.
-- **Rust**: `client.call_increment(value)` returns `Result<u64>`.
-  `client.call_snapshot()` returns `Result<SnapshotView<'_>>`.
-- **Go**: `client.CallIncrement(value)` returns `(uint64, error)`.
-  `client.CallSnapshot()` returns `(*SnapshotView, error)`.
+- **C**: a fixed-shape service may expose `call_request(&client, req, &resp)`.
+  A snapshot service may expose `call_snapshot(&client, &view)`.
+- **Rust**: a fixed-shape service may expose `client.call(req) -> Result<Resp>`.
+  A snapshot service may expose `client.call_snapshot() -> Result<SnapshotView<'_>>`.
+- **Go**: a fixed-shape service may expose `client.Call(req) (Resp, error)`.
+  A snapshot service may expose `client.CallSnapshot() (*SnapshotView, error)`.
 
 When a client call returns a borrowed response view, that view is valid
 until the next typed call on the same client context or until the client
-is closed, unless the method-specific contract states a narrower
+is closed, unless the service-kind-specific contract states a narrower
 lifetime.
 
 If the client is not READY, the call fails immediately without I/O.
 
 ### Typed batch calls
 
-Level 2 also provides per-method-type batch call functions. Each batch
+Level 2 also provides service-kind-specific batch call functions. Each batch
 call:
 
 1. Encodes each typed request item using the Codec
@@ -251,7 +294,7 @@ The public batch-call signature is also typed. The caller provides typed
 request items only. It does not provide raw batch payloads or batch
 scratch buffers.
 
-The returned result is method-specific:
+The returned result is service-kind-specific:
 
 - For fixed-size items, a typed collection of values may be returned
 - For variable-size items, a typed batch view may be returned
@@ -275,11 +318,10 @@ The caller provides at initialization:
 - Auth token for handshake verification
 - Supported/preferred profiles and directional limits
 - Maximum concurrent sessions (worker count limit)
-- A typed handler table / typed service implementation for the supported
-  methods
+- The typed handler implementation for that one service kind
 
-The service set is fixed after startup. Adding or removing services
-requires process restart.
+The endpoint identity is fixed after startup. A given listener exports
+one service kind only.
 
 ### Operation
 
@@ -291,9 +333,8 @@ The managed server internally:
    up to the configured maximum concurrent sessions
 4. Each session thread reads one Level 1 message at a time into internal
    reusable per-session storage
-5. Level 2 dispatches internally by `method_code`, decodes the request
-   with the appropriate Codec helper, invokes the typed callback, encodes
-   the typed response, and sends it back via Level 1
+5. Level 2 decodes the request for that service kind, invokes the typed
+   callback, encodes the typed response, and sends it back via Level 1
 6. Per-session isolation: each session has its own internal reusable
    buffers and builders, with no cross-session coordination
 
@@ -301,15 +342,14 @@ The managed server internally:
 
 The public managed-server contract is typed.
 
-The caller registers one typed callback per supported method (or an
-equivalent typed service object / handler table). Level 2 performs the
-method-code dispatch internally.
+The caller registers the typed handler surface for that service kind.
+The public contract is not “one server with many unrelated methods”.
 
 The typed business-logic callback:
 
 - Receives decoded typed data (not raw bytes)
-- For simple types (INCREMENT): receives and returns scalar values
-- For complex types (CGROUPS_SNAPSHOT): receives a decoded request
+- For simple services: receives and returns scalar or fixed-shape values
+- For snapshot services: receives a decoded request
   and fills a response builder
 - Returns success or failure
 - Never sees transport details, wire format, raw response buffers, or
@@ -318,8 +358,8 @@ The typed business-logic callback:
 
 Internal note:
 
-- Implementations may still use method-code switches and per-method Codec
-  dispatch helpers internally
+- Implementations may still validate the request code and call
+  service-kind-specific Codec helpers internally
 - That internal structure is not part of the public Level 2 contract
 
 Handler failure semantics:

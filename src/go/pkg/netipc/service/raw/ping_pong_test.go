@@ -1,21 +1,24 @@
 //go:build unix
 
-package cgroups
+package raw
 
 import (
 	"testing"
 	"time"
+
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 )
 
-func pingPongHandlers() Handlers {
-	return Handlers{
-		OnIncrement: func(v uint64) (uint64, bool) {
-			return v + 1, true
-		},
-		OnStringReverse: func(s string) (string, bool) {
-			return reverseString(s), true
-		},
-	}
+func pingPongIncrementDispatch() DispatchHandler {
+	return IncrementDispatch(func(v uint64) (uint64, bool) {
+		return v + 1, true
+	})
+}
+
+func pingPongStringReverseDispatch() DispatchHandler {
+	return StringReverseDispatch(func(s string) (string, bool) {
+		return reverseString(s), true
+	})
 }
 
 // reverseString reverses a string byte-by-byte.
@@ -32,10 +35,15 @@ func TestIncrementPingPong(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, pingPongHandlers())
+	ts := startTestServerUnixWithConfig(
+		svc,
+		testServerConfig(),
+		protocol.MethodIncrement,
+		pingPongIncrementDispatch(),
+	)
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewIncrementClient(testRunDir, svc, testClientConfig())
 	client.Refresh()
 	if !client.Ready() {
 		t.Fatal("client not ready")
@@ -81,10 +89,15 @@ func TestStringReversePingPong(t *testing.T) {
 	ensureRunDir()
 	cleanupAll(svc)
 
-	ts := startTestServer(svc, pingPongHandlers())
+	ts := startTestServerUnixWithConfig(
+		svc,
+		testServerConfig(),
+		protocol.MethodStringReverse,
+		pingPongStringReverseDispatch(),
+	)
 	defer ts.stop()
 
-	client := NewClient(testRunDir, svc, testClientConfig())
+	client := NewStringReverseClient(testRunDir, svc, testClientConfig())
 	client.Refresh()
 	if !client.Ready() {
 		t.Fatal("client not ready")
@@ -143,7 +156,13 @@ func TestIncrementBatch(t *testing.T) {
 	sCfg.MaxResponseBatchItems = 16
 	sCfg.MaxRequestPayloadBytes = 65536
 
-	s := NewServer(testRunDir, svc, sCfg, pingPongHandlers())
+	s := NewServer(
+		testRunDir,
+		svc,
+		sCfg,
+		protocol.MethodIncrement,
+		pingPongIncrementDispatch(),
+	)
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
@@ -163,7 +182,7 @@ func TestIncrementBatch(t *testing.T) {
 	cCfg.MaxResponseBatchItems = 16
 	cCfg.MaxRequestPayloadBytes = 65536
 
-	client := NewClient(testRunDir, svc, cCfg)
+	client := NewIncrementClient(testRunDir, svc, cCfg)
 	client.Refresh()
 	if !client.Ready() {
 		t.Fatal("client not ready")
@@ -190,72 +209,6 @@ func TestIncrementBatch(t *testing.T) {
 	status := client.Status()
 	if status.CallCount != 1 {
 		t.Fatalf("expected call_count=1, got %d", status.CallCount)
-	}
-	if status.ErrorCount != 0 {
-		t.Fatalf("expected error_count=0, got %d", status.ErrorCount)
-	}
-
-	client.Close()
-	cleanupAll(svc)
-}
-
-func TestMixedMethods(t *testing.T) {
-	svc := "go_pp_mixed"
-	ensureRunDir()
-	cleanupAll(svc)
-
-	ts := startTestServer(svc, pingPongHandlers())
-	defer ts.stop()
-
-	client := NewClient(testRunDir, svc, testClientConfig())
-	client.Refresh()
-	if !client.Ready() {
-		t.Fatal("client not ready")
-	}
-
-	// increment(100) -> 101
-	val, err := client.CallIncrement(100)
-	if err != nil {
-		t.Fatalf("increment(100) failed: %v", err)
-	}
-	if val != 101 {
-		t.Fatalf("expected 101, got %d", val)
-	}
-
-	// reverse("hello") -> verify locally computed reverse
-	helloStr := "hello"
-	view, err := client.CallStringReverse(helloStr)
-	if err != nil {
-		t.Fatalf("reverse(%q) failed: %v", helloStr, err)
-	}
-	expectedHelloRev := reverseString(helloStr)
-	if view.Str != expectedHelloRev {
-		t.Fatalf("reverse(%q): expected %q, got %q", helloStr, expectedHelloRev, view.Str)
-	}
-
-	// increment(101) -> 102
-	val, err = client.CallIncrement(101)
-	if err != nil {
-		t.Fatalf("increment(101) failed: %v", err)
-	}
-	if val != 102 {
-		t.Fatalf("expected 102, got %d", val)
-	}
-
-	// reverse("world") -> verify locally computed reverse
-	worldStr := "world"
-	view, err = client.CallStringReverse(worldStr)
-	if err != nil {
-		t.Fatalf("reverse(%q) failed: %v", worldStr, err)
-	}
-	expectedWorldRev := reverseString(worldStr)
-	if view.Str != expectedWorldRev {
-		t.Fatalf("reverse(%q): expected %q, got %q", worldStr, expectedWorldRev, view.Str)
-	}
-
-	status := client.Status()
-	if status.CallCount != 4 {
-		t.Fatalf("expected call_count=4, got %d", status.CallCount)
 	}
 	if status.ErrorCount != 0 {
 		t.Fatalf("expected error_count=0, got %d", status.ErrorCount)

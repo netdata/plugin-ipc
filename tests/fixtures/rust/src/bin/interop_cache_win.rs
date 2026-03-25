@@ -7,7 +7,7 @@
 #[cfg(windows)]
 use netipc::protocol::{PROFILE_BASELINE, PROFILE_SHM_HYBRID};
 #[cfg(windows)]
-use netipc::service::cgroups::{CgroupsCache, Handlers, ManagedServer};
+use netipc::service::cgroups::{CgroupsCache, CgroupsClient, Handler, ManagedServer};
 #[cfg(windows)]
 use netipc::transport::windows::{ClientConfig, ServerConfig};
 
@@ -26,9 +26,9 @@ fn detect_profiles() -> u32 {
 }
 
 #[cfg(windows)]
-fn server_handlers() -> Handlers {
-    Handlers {
-        on_snapshot: Some(std::sync::Arc::new(|request, builder| {
+fn server_handler() -> Handler {
+    Handler {
+        handle: Some(std::sync::Arc::new(|request, builder| {
             if request.layout_version != 1 || request.flags != 0 {
                 return false;
             }
@@ -60,7 +60,7 @@ fn server_handlers() -> Handlers {
             true
         })),
         snapshot_max_items: 3,
-        ..Handlers::default()
+        ..Handler::default()
     }
 }
 
@@ -77,9 +77,19 @@ fn run_server(run_dir: &str, service: &str) -> i32 {
         ..ServerConfig::default()
     };
 
-    let mut server = ManagedServer::new(run_dir, service, config, server_handlers());
-
+    let mut server = ManagedServer::new(run_dir, service, config, server_handler());
     let stop_flag = server.running_flag();
+    let wake_run_dir = run_dir.to_string();
+    let wake_service = service.to_string();
+    let wake_config = ClientConfig {
+        supported_profiles: profiles,
+        max_request_payload_bytes: 4096,
+        max_request_batch_items: 1,
+        max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
+        max_response_batch_items: 1,
+        auth_token: AUTH_TOKEN,
+        ..ClientConfig::default()
+    };
 
     println!("READY");
 
@@ -87,6 +97,8 @@ fn run_server(run_dir: &str, service: &str) -> i32 {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(10));
         sf.store(false, std::sync::atomic::Ordering::Release);
+        let mut wake = CgroupsClient::new(&wake_run_dir, &wake_service, wake_config);
+        let _ = wake.refresh();
     });
 
     let _ = server.run();

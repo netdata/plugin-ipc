@@ -28,23 +28,21 @@
 /*  Cgroups handler: 3 test items (same as L2 interop)                 */
 /* ------------------------------------------------------------------ */
 
-static bool test_handler(void *user,
-                          uint16_t method_code,
-                          const uint8_t *request_payload,
-                          size_t request_len,
-                          uint8_t *response_buf,
-                          size_t response_buf_size,
-                          size_t *response_len_out)
+static nipc_error_t test_handler(void *user,
+                                 const nipc_header_t *request_hdr,
+                                 const uint8_t *request_payload,
+                                 size_t request_len,
+                                 uint8_t *response_buf,
+                                 size_t response_buf_size,
+                                 size_t *response_len_out)
 {
     (void)user;
-
-    if (method_code != NIPC_METHOD_CGROUPS_SNAPSHOT)
-        return false;
+    (void)request_hdr;
 
     nipc_cgroups_req_t req;
     nipc_error_t err = nipc_cgroups_req_decode(request_payload, request_len, &req);
     if (err != NIPC_OK)
-        return false;
+        return err;
 
     nipc_cgroups_builder_t builder;
     nipc_cgroups_builder_init(&builder, response_buf, response_buf_size,
@@ -65,11 +63,11 @@ static bool test_handler(void *user,
             items[i].name, (uint32_t)strlen(items[i].name),
             items[i].path, (uint32_t)strlen(items[i].path));
         if (err != NIPC_OK)
-            return false;
+            return err;
     }
 
     *response_len_out = nipc_cgroups_builder_finish(&builder);
-    return true;
+    return (*response_len_out > 0) ? NIPC_OK : NIPC_ERR_OVERFLOW;
 }
 
 /* ------------------------------------------------------------------ */
@@ -99,7 +97,7 @@ static int run_server(const char *run_dir, const char *service)
 
     nipc_managed_server_t server;
     nipc_error_t err = nipc_server_init(&server, run_dir, service, &scfg,
-                                          1, RESPONSE_BUF_SIZE,
+                                          1, NIPC_METHOD_CGROUPS_SNAPSHOT,
                                           test_handler, NULL);
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed: %d\n", err);
