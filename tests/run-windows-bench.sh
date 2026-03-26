@@ -42,6 +42,11 @@ BENCH_BUILD_TYPE="${NIPC_BENCH_BUILD_TYPE:-Release}"
 
 OUTPUT_CSV="${1:-${ROOT_DIR}/benchmarks-windows.csv}"
 DURATION="${2:-5}"
+REPETITIONS="${NIPC_BENCH_REPETITIONS:-5}"
+MAX_DURATION="${NIPC_BENCH_MAX_DURATION:-10}"
+PIPELINE_BATCH_MAX_DURATION="${NIPC_BENCH_PIPELINE_BATCH_MAX_DURATION:-20}"
+MAX_THROUGHPUT_RATIO="${NIPC_BENCH_MAX_THROUGHPUT_RATIO:-1.35}"
+MIN_STABLE_SAMPLES="${NIPC_BENCH_MIN_STABLE_SAMPLES:-3}"
 RUN_DIR="${TEMP:-/tmp}/netipc-bench-$$"
 POWERSHELL_EXE="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 BLOCK_FIRST="${NIPC_BENCH_FIRST_BLOCK:-1}"
@@ -265,6 +270,238 @@ run_block() {
     [ "$idx" -ge "$BLOCK_FIRST" ] && [ "$idx" -le "$BLOCK_LAST" ]
 }
 
+require_positive_integer() {
+    local name="$1"
+    local value="$2"
+
+    case "$value" in
+        ''|*[!0-9]*)
+            err "${name} must be a positive integer, got: ${value}"
+            exit 1
+            ;;
+    esac
+
+    if [ "$value" -lt 1 ]; then
+        err "${name} must be >= 1, got: ${value}"
+        exit 1
+    fi
+}
+
+require_positive_number() {
+    local name="$1"
+    local value="$2"
+
+    if ! awk -v value="$value" 'BEGIN { exit ((value + 0) > 0 ? 0 : 1) }'; then
+        err "${name} must be > 0, got: ${value}"
+        exit 1
+    fi
+}
+
+target_rps_label() {
+    local target_rps="$1"
+    if [ "$target_rps" = "0" ]; then
+        printf "max"
+    else
+        printf "%s/s" "$target_rps"
+    fi
+}
+
+sample_duration_for_target() {
+    local scenario="$1"
+    local target_rps="$2"
+    local fixed_duration="$3"
+    if [ "$target_rps" != "0" ]; then
+        printf '%s' "$fixed_duration"
+        return
+    fi
+
+    case "$scenario" in
+        np-pipeline-batch-d*)
+            printf '%s' "$PIPELINE_BATCH_MAX_DURATION"
+            ;;
+        *)
+            printf '%s' "$MAX_DURATION"
+            ;;
+    esac
+}
+
+sample_file_path() {
+    local scenario="$1"
+    local client="$2"
+    local server="$3"
+    local target_rps="$4"
+    printf '%s/samples-%s-%s-%s-%s.csv' "$RUN_DIR" "$scenario" "$client" "$server" "$target_rps"
+}
+
+init_sample_file() {
+    local sample_file="$1"
+    echo "repeat,throughput,p50_us,p95_us,p99_us,client_cpu_pct,server_cpu_pct,total_cpu_pct" > "$sample_file"
+}
+
+append_sample_file() {
+    local sample_file="$1"
+    local repeat_idx="$2"
+    local metrics="$3"
+    printf '%s,%s\n' "$repeat_idx" "$metrics" >> "$sample_file"
+}
+
+median_from_sample_file() {
+    local sample_file="$1"
+    local column="$2"
+    awk -F',' -v column="$column" 'NR > 1 { print $column + 0 }' "$sample_file" | sort -g | awk '
+        { values[NR] = $1 }
+        END {
+            if (NR == 0) {
+                exit 1
+            }
+            if ((NR % 2) == 1) {
+                printf "%.3f", values[(NR + 1) / 2]
+            } else {
+                printf "%.3f", (values[NR / 2] + values[(NR / 2) + 1]) / 2.0
+            }
+        }
+    '
+}
+
+min_from_sample_file() {
+    local sample_file="$1"
+    local column="$2"
+    awk -F',' -v column="$column" 'NR > 1 { print $column + 0 }' "$sample_file" | sort -g | head -1
+}
+
+max_from_sample_file() {
+    local sample_file="$1"
+    local column="$2"
+    awk -F',' -v column="$column" 'NR > 1 { print $column + 0 }' "$sample_file" | sort -g | tail -1
+}
+
+aggregate_sample_file() {
+    local sample_file="$1"
+    local throughput p50 p95 p99 client_cpu server_cpu_pct total_cpu_pct
+
+    throughput=$(median_from_sample_file "$sample_file" 2) || return 1
+    p50=$(median_from_sample_file "$sample_file" 3) || return 1
+    p95=$(median_from_sample_file "$sample_file" 4) || return 1
+    p99=$(median_from_sample_file "$sample_file" 5) || return 1
+    client_cpu=$(median_from_sample_file "$sample_file" 6) || return 1
+    server_cpu_pct=$(median_from_sample_file "$sample_file" 7) || return 1
+    total_cpu_pct=$(median_from_sample_file "$sample_file" 8) || return 1
+
+    printf '%s,%s,%s,%s,%s,%s,%s\n' \
+        "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
+}
+
+throughput_ratio_is_acceptable() {
+    awk -v ratio="$1" -v max_ratio="$2" 'BEGIN { exit ((ratio + 0) <= (max_ratio + 0) ? 0 : 1) }'
+}
+
+throughput_stability_from_sample_file() {
+    local sample_file="$1"
+    awk -F',' 'NR > 1 { print $2 + 0 }' "$sample_file" | sort -g | awk '
+        {
+            values[++n] = $1
+        }
+        END {
+            if (n == 0) {
+                exit 1
+            }
+
+            start = 1
+            stop = n
+            if (n >= 5) {
+                start = 2
+                stop = n - 1
+            }
+
+            stable_n = stop - start + 1
+            if (stable_n <= 0) {
+                exit 1
+            }
+
+            stable_min = values[start]
+            stable_max = values[stop]
+            raw_min = values[1]
+            raw_max = values[n]
+
+            if (stable_min <= 0) {
+                stable_ratio = 999999.0
+            } else {
+                stable_ratio = stable_max / stable_min
+            }
+
+            if (raw_min <= 0) {
+                raw_ratio = 999999.0
+            } else {
+                raw_ratio = raw_max / raw_min
+            }
+
+            printf "%d,%d,%.3f,%.3f,%.6f,%.3f,%.3f,%.6f\n", stable_n, start - 1, stable_min, stable_max, stable_ratio, raw_min, raw_max, raw_ratio
+        }
+    '
+}
+
+run_repeated_measurement() {
+    local scenario="$1"
+    local client_lang="$2"
+    local server_lang="$3"
+    local target_rps="$4"
+    local duration="$5"
+    local measure_fn="$6"
+    shift 6
+
+    local sample_file
+    sample_file=$(sample_file_path "$scenario" "$client_lang" "$server_lang" "$target_rps")
+    init_sample_file "$sample_file"
+
+    local repeat_idx
+    for repeat_idx in $(seq 1 "$REPETITIONS"); do
+        log "    sample ${repeat_idx}/${REPETITIONS}"
+        local metrics
+        metrics=$("$measure_fn" "$@") || return 1
+        append_sample_file "$sample_file" "$repeat_idx" "$metrics"
+    done
+
+    local aggregate
+    aggregate=$(aggregate_sample_file "$sample_file") || return 1
+
+    local throughput p50 p95 p99 client_cpu server_cpu_pct total_cpu_pct
+    IFS=',' read -r throughput p50 p95 p99 client_cpu server_cpu_pct total_cpu_pct <<< "$aggregate"
+
+    local stability
+    stability=$(throughput_stability_from_sample_file "$sample_file") || return 1
+
+    local stable_samples trimmed_each_side stable_min stable_max stable_ratio raw_min raw_max raw_ratio
+    IFS=',' read -r stable_samples trimmed_each_side stable_min stable_max stable_ratio raw_min raw_max raw_ratio <<< "$stability"
+
+    if [ "$stable_samples" -lt "$MIN_STABLE_SAMPLES" ]; then
+        warn "  Unstable repeated throughput for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
+        warn "  stable_samples=${stable_samples} stable_min=${stable_min} stable_max=${stable_max} stable_ratio=${stable_ratio}"
+        warn "  Required: stable_samples >= ${MIN_STABLE_SAMPLES}"
+        warn "  Per-repeat samples: ${sample_file}"
+        export NIPC_KEEP_RUN_DIR=1
+        return 1
+    fi
+
+    if ! throughput_ratio_is_acceptable "$stable_ratio" "$MAX_THROUGHPUT_RATIO"; then
+        warn "  Unstable repeated throughput for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
+        warn "  stable_min=${stable_min} stable_max=${stable_max} stable_ratio=${stable_ratio} (max ${MAX_THROUGHPUT_RATIO})"
+        warn "  Per-repeat samples: ${sample_file}"
+        export NIPC_KEEP_RUN_DIR=1
+        return 1
+    fi
+
+    if ! throughput_ratio_is_acceptable "$raw_ratio" "$MAX_THROUGHPUT_RATIO" && [ "$trimmed_each_side" -gt 0 ]; then
+        warn "  Ignored one low and one high throughput sample for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
+        warn "  raw_min=${raw_min} raw_max=${raw_max} raw_ratio=${raw_ratio}"
+        warn "  stable_min=${stable_min} stable_max=${stable_max} stable_ratio=${stable_ratio}"
+    fi
+
+    write_csv_row "$scenario" "$client_lang" "$server_lang" "$target_rps" \
+        "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
+
+    log "    median_throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us stable_ratio=${stable_ratio}"
+}
+
 server_cpu_from_output() {
     local server_out="$1"
     local cpu_line
@@ -324,7 +561,17 @@ dump_bench_processes() {
     fi
 }
 
-run_pair() {
+remove_server_pid() {
+    local target_pid="$1"
+    local new_pids=()
+    local p
+    for p in "${SERVER_PIDS[@]:-}"; do
+        [ "$p" != "$target_pid" ] && new_pids+=("$p")
+    done
+    SERVER_PIDS=("${new_pids[@]:-}")
+}
+
+measure_pair_once() {
     local scenario="$1"
     local server_lang="$2"
     local client_lang="$3"
@@ -365,16 +612,6 @@ run_pair() {
     esac
 
     local svc_name="${scenario}-${server_lang}-${client_lang}-${target_rps}"
-
-    local rps_label
-    if [ "$target_rps" = "0" ]; then
-        rps_label="max"
-    else
-        rps_label="${target_rps}/s"
-    fi
-
-    log "  ${scenario}: ${client_lang}->${server_lang} @ ${rps_label}"
-
     local server_duration="$duration"
     local server_out="${RUN_DIR}/server-${server_lang}-${svc_name}.out"
 
@@ -402,13 +639,8 @@ run_pair() {
         dump_server_output "$server_out"
         dump_bench_processes
         export NIPC_KEEP_RUN_DIR=1
-        local server_cpu_sec
-        server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$svc_name")
-        local new_pids=()
-        for p in "${SERVER_PIDS[@]:-}"; do
-            [ "$p" != "$server_pid" ] && new_pids+=("$p")
-        done
-        SERVER_PIDS=("${new_pids[@]:-}")
+        stop_server "$server_pid" "$server_lang" "$svc_name" >/dev/null
+        remove_server_pid "$server_pid"
         return 1
     fi
 
@@ -418,13 +650,8 @@ run_pair() {
         dump_server_output "$server_out"
         dump_bench_processes
         export NIPC_KEEP_RUN_DIR=1
-        local server_cpu_sec
-        server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$svc_name")
-        local new_pids=()
-        for p in "${SERVER_PIDS[@]:-}"; do
-            [ "$p" != "$server_pid" ] && new_pids+=("$p")
-        done
-        SERVER_PIDS=("${new_pids[@]:-}")
+        stop_server "$server_pid" "$server_lang" "$svc_name" >/dev/null
+        remove_server_pid "$server_pid"
         return 1
     fi
 
@@ -438,13 +665,8 @@ run_pair() {
         dump_server_output "$server_out"
         dump_bench_processes
         export NIPC_KEEP_RUN_DIR=1
-        local server_cpu_sec
-        server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$svc_name")
-        local new_pids=()
-        for p in "${SERVER_PIDS[@]:-}"; do
-            [ "$p" != "$server_pid" ] && new_pids+=("$p")
-        done
-        SERVER_PIDS=("${new_pids[@]:-}")
+        stop_server "$server_pid" "$server_lang" "$svc_name" >/dev/null
+        remove_server_pid "$server_pid"
         return 1
     fi
 
@@ -462,33 +684,283 @@ run_pair() {
         dump_server_output "$server_out"
         dump_bench_processes
         export NIPC_KEEP_RUN_DIR=1
-        local server_cpu_sec
-        server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$svc_name")
-        local new_pids=()
-        for p in "${SERVER_PIDS[@]:-}"; do
-            [ "$p" != "$server_pid" ] && new_pids+=("$p")
-        done
-        SERVER_PIDS=("${new_pids[@]:-}")
+        stop_server "$server_pid" "$server_lang" "$svc_name" >/dev/null
+        remove_server_pid "$server_pid"
         return 1
     fi
 
     local server_cpu_sec
     server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$svc_name")
-
-    local new_pids=()
-    for p in "${SERVER_PIDS[@]:-}"; do
-        [ "$p" != "$server_pid" ] && new_pids+=("$p")
-    done
-    SERVER_PIDS=("${new_pids[@]:-}")
+    remove_server_pid "$server_pid"
 
     local server_cpu_pct total_cpu_pct
     server_cpu_pct=$(cpu_pct_for_duration "$server_cpu_sec" "$duration")
     total_cpu_pct=$(sum_cpu_pct "$client_cpu" "$server_cpu_pct")
 
-    write_csv_row "$scenario" "$client_lang" "$server_lang" "$target_rps" \
+    printf '%s,%s,%s,%s,%s,%s,%s\n' \
         "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
+}
 
-    log "    throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us"
+run_pair() {
+    local scenario="$1"
+    local server_lang="$2"
+    local client_lang="$3"
+    local target_rps="$4"
+    local duration="$5"
+    local effective_duration
+    effective_duration=$(sample_duration_for_target "$scenario" "$target_rps" "$duration")
+
+    log "  ${scenario}: ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps") (${REPETITIONS} samples x ${effective_duration}s)"
+    run_repeated_measurement "$scenario" "$client_lang" "$server_lang" "$target_rps" "$effective_duration" \
+        measure_pair_once "$scenario" "$server_lang" "$client_lang" "$target_rps" "$effective_duration"
+}
+
+measure_lookup_once() {
+    local lang="$1"
+    local duration="$2"
+
+    local bin
+    bin="$(bench_bin "$lang")"
+
+    local line
+    local lookup_status
+    local lookup_err="${RUN_DIR}/lookup-${lang}.err"
+    set +e
+    line=$("$bin" lookup-bench "$duration" 2>"$lookup_err" | grep "^lookup," | head -1)
+    lookup_status=$?
+    set -e
+
+    if [ "$lookup_status" -ne 0 ]; then
+        warn "  ${lang} lookup benchmark failed"
+        dump_client_error "$lookup_err"
+        export NIPC_KEEP_RUN_DIR=1
+        return 1
+    fi
+
+    if [ -z "$line" ]; then
+        warn "  No output from ${lang} lookup benchmark"
+        dump_client_error "$lookup_err"
+        export NIPC_KEEP_RUN_DIR=1
+        return 1
+    fi
+
+    local throughput p50 p95 p99 client_cpu server_cpu_pct total_cpu_pct
+    throughput=$(echo "$line" | cut -d',' -f4)
+    p50=$(echo "$line" | cut -d',' -f5)
+    p95=$(echo "$line" | cut -d',' -f6)
+    p99=$(echo "$line" | cut -d',' -f7)
+    client_cpu=$(echo "$line" | cut -d',' -f8)
+    server_cpu_pct=$(echo "$line" | cut -d',' -f9)
+    total_cpu_pct=$(echo "$line" | cut -d',' -f10)
+
+    if ! throughput_is_positive "$throughput"; then
+        warn "  Invalid zero throughput from ${lang} lookup benchmark"
+        dump_client_error "$lookup_err"
+        export NIPC_KEEP_RUN_DIR=1
+        return 1
+    fi
+
+    printf '%s,%s,%s,%s,%s,%s,%s\n' \
+        "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
+}
+
+run_lookup_bench() {
+    local lang="$1"
+    local duration="$2"
+    local effective_duration
+    effective_duration=$(sample_duration_for_target "lookup" "0" "$duration")
+
+    log "  lookup: ${lang} (${REPETITIONS} samples x ${effective_duration}s)"
+    run_repeated_measurement "lookup" "$lang" "$lang" "0" "$effective_duration" \
+        measure_lookup_once "$lang" "$effective_duration"
+}
+
+measure_np_pipeline_once() {
+    local server_lang="$1"
+    local client_lang="$2"
+    local duration="$3"
+    local depth="$4"
+
+    local pipe_svc="pipeline-${server_lang}-${client_lang}"
+    local server_duration="$duration"
+    local server_pid
+    server_pid=$(start_server "$server_lang" "np-ping-pong-server" "$pipe_svc" "$server_duration") || {
+        warn "  Failed to start pipeline server"
+        return 1
+    }
+
+    sleep 0.2
+
+    local client_bin
+    client_bin="$(bench_bin "$client_lang")"
+    local client_timeout=$((duration + 15))
+    local client_output
+    local client_status
+    local client_err="${RUN_DIR}/client-np-pipeline-${server_lang}-${client_lang}.err"
+    set +e
+    client_output=$(timeout "$client_timeout" "$client_bin" "np-pipeline-client" "$RUN_DIR" "$pipe_svc" "$duration" "0" "$depth" 2>"$client_err")
+    client_status=$?
+    set -e
+
+    local server_cpu_sec
+    server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pipe_svc")
+    remove_server_pid "$server_pid"
+
+    if [ "$client_status" -ne 0 ]; then
+        warn "  ${client_lang} pipeline client failed for ${server_lang} server (exit ${client_status})"
+        dump_client_error "$client_err"
+        export NIPC_KEEP_RUN_DIR=1
+        return 1
+    fi
+
+    if [ -z "$client_output" ]; then
+        warn "  No output from ${client_lang} pipeline client for ${server_lang} server"
+        warn "  Preserving RUN_DIR for investigation: ${RUN_DIR}"
+        export NIPC_KEEP_RUN_DIR=1
+        dump_client_error "$client_err"
+        return 1
+    fi
+
+    local line
+    line=$(echo "$client_output" | grep "^np-pipeline" | head -1)
+    if [ -z "$line" ]; then
+        warn "  Could not parse pipeline output from ${client_lang} client for ${server_lang} server"
+        warn "  Raw client output follows:"
+        printf '%s\n' "$client_output" >&2
+        warn "  Preserving RUN_DIR for investigation: ${RUN_DIR}"
+        export NIPC_KEEP_RUN_DIR=1
+        dump_client_error "$client_err"
+        return 1
+    fi
+
+    local throughput p50 p95 p99 client_cpu
+    throughput=$(echo "$line" | cut -d',' -f4)
+    p50=$(echo "$line" | cut -d',' -f5)
+    p95=$(echo "$line" | cut -d',' -f6)
+    p99=$(echo "$line" | cut -d',' -f7)
+    client_cpu=$(echo "$line" | cut -d',' -f8)
+
+    if ! throughput_is_positive "$throughput"; then
+        warn "  Invalid zero throughput from ${client_lang} pipeline client for ${server_lang} server"
+        warn "  Raw pipeline line: ${line:-<none>}"
+        warn "  Raw client output follows:"
+        printf '%s\n' "$client_output" >&2
+        warn "  Preserving RUN_DIR for investigation: ${RUN_DIR}"
+        export NIPC_KEEP_RUN_DIR=1
+        dump_client_error "$client_err"
+        return 1
+    fi
+
+    local server_cpu_pct total_cpu_pct
+    server_cpu_pct=$(cpu_pct_for_duration "$server_cpu_sec" "$duration")
+    total_cpu_pct=$(sum_cpu_pct "$client_cpu" "$server_cpu_pct")
+
+    printf '%s,%s,%s,%s,%s,%s,%s\n' \
+        "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
+}
+
+run_np_pipeline() {
+    local server_lang="$1"
+    local client_lang="$2"
+    local duration="$3"
+    local depth="$4"
+    local scenario="np-pipeline-d${depth}"
+    local effective_duration
+    effective_duration=$(sample_duration_for_target "$scenario" "0" "$duration")
+
+    log "  np-pipeline: ${client_lang}->${server_lang} depth=${depth} (${REPETITIONS} samples x ${effective_duration}s)"
+    run_repeated_measurement "$scenario" "$client_lang" "$server_lang" "0" "$effective_duration" \
+        measure_np_pipeline_once "$server_lang" "$client_lang" "$effective_duration" "$depth"
+}
+
+measure_np_pipeline_batch_once() {
+    local server_lang="$1"
+    local client_lang="$2"
+    local duration="$3"
+    local depth="$4"
+
+    local pb_svc="pipe-batch-${server_lang}-${client_lang}"
+    local server_duration="$duration"
+    local server_pid
+    server_pid=$(start_server "$server_lang" "np-batch-ping-pong-server" "$pb_svc" "$server_duration") || {
+        warn "  Failed to start pipeline-batch server"
+        return 1
+    }
+
+    sleep 0.2
+
+    local client_bin
+    client_bin="$(bench_bin "$client_lang")"
+    local client_timeout=$((duration + 15))
+    local client_output
+    local client_status
+    local client_err="${RUN_DIR}/client-np-pipeline-batch-${server_lang}-${client_lang}.err"
+    set +e
+    client_output=$(timeout "$client_timeout" "$client_bin" "np-pipeline-batch-client" "$RUN_DIR" "$pb_svc" "$duration" "0" "$depth" 2>"$client_err")
+    client_status=$?
+    set -e
+
+    local server_cpu_sec
+    server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pb_svc")
+    remove_server_pid "$server_pid"
+
+    if [ "$client_status" -ne 0 ]; then
+        warn "  ${client_lang} pipeline-batch client failed for ${server_lang} server (exit ${client_status})"
+        dump_client_error "$client_err"
+        export NIPC_KEEP_RUN_DIR=1
+        return 1
+    fi
+
+    if [ -z "$client_output" ]; then
+        warn "  No output from ${client_lang} pipeline-batch client for ${server_lang} server"
+        dump_client_error "$client_err"
+        export NIPC_KEEP_RUN_DIR=1
+        return 1
+    fi
+
+    local line
+    line=$(echo "$client_output" | grep "^np-pipeline-batch" | head -1)
+    if [ -z "$line" ]; then
+        warn "  Could not parse pipeline-batch output from ${client_lang} client for ${server_lang} server"
+        dump_client_error "$client_err"
+        export NIPC_KEEP_RUN_DIR=1
+        return 1
+    fi
+
+    local throughput p50 p95 p99 client_cpu
+    throughput=$(echo "$line" | cut -d',' -f4)
+    p50=$(echo "$line" | cut -d',' -f5)
+    p95=$(echo "$line" | cut -d',' -f6)
+    p99=$(echo "$line" | cut -d',' -f7)
+    client_cpu=$(echo "$line" | cut -d',' -f8)
+
+    if ! throughput_is_positive "$throughput"; then
+        warn "  Invalid zero throughput from ${client_lang} pipeline-batch client for ${server_lang} server"
+        dump_client_error "$client_err"
+        export NIPC_KEEP_RUN_DIR=1
+        return 1
+    fi
+
+    local server_cpu_pct total_cpu_pct
+    server_cpu_pct=$(cpu_pct_for_duration "$server_cpu_sec" "$duration")
+    total_cpu_pct=$(sum_cpu_pct "$client_cpu" "$server_cpu_pct")
+
+    printf '%s,%s,%s,%s,%s,%s,%s\n' \
+        "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
+}
+
+run_np_pipeline_batch() {
+    local server_lang="$1"
+    local client_lang="$2"
+    local duration="$3"
+    local depth="$4"
+    local scenario="np-pipeline-batch-d${depth}"
+    local effective_duration
+    effective_duration=$(sample_duration_for_target "$scenario" "0" "$duration")
+
+    log "  np-pipeline-batch: ${client_lang}->${server_lang} depth=${depth} (${REPETITIONS} samples x ${effective_duration}s)"
+    run_repeated_measurement "$scenario" "$client_lang" "$server_lang" "0" "$effective_duration" \
+        measure_np_pipeline_batch_once "$server_lang" "$client_lang" "$effective_duration" "$depth"
 }
 
 # ---------------------------------------------------------------------------
@@ -527,8 +999,19 @@ check_binaries() {
 # ---------------------------------------------------------------------------
 
 main() {
+    require_positive_integer "DURATION" "$DURATION"
+    require_positive_integer "NIPC_BENCH_REPETITIONS" "$REPETITIONS"
+    require_positive_integer "NIPC_BENCH_MAX_DURATION" "$MAX_DURATION"
+    require_positive_integer "NIPC_BENCH_PIPELINE_BATCH_MAX_DURATION" "$PIPELINE_BATCH_MAX_DURATION"
+    require_positive_integer "NIPC_BENCH_MIN_STABLE_SAMPLES" "$MIN_STABLE_SAMPLES"
+    require_positive_number "NIPC_BENCH_MAX_THROUGHPUT_RATIO" "$MAX_THROUGHPUT_RATIO"
     log "Windows Benchmark Suite"
-    log "Duration per run: ${DURATION}s"
+    log "Duration per fixed-rate sample: ${DURATION}s"
+    log "Duration per max-tier sample: ${MAX_DURATION}s"
+    log "Duration per pipeline-batch max-tier sample: ${PIPELINE_BATCH_MAX_DURATION}s"
+    log "Samples per published row: ${REPETITIONS}"
+    log "Max allowed stable throughput ratio: ${MAX_THROUGHPUT_RATIO}"
+    log "Minimum stable samples required: ${MIN_STABLE_SAMPLES}"
     log "Output: ${OUTPUT_CSV}"
 
     if ! check_binaries; then
@@ -643,42 +1126,7 @@ main() {
     if run_block 7; then
         log "=== Local Cache Lookup ==="
         for lang in "${LANGS[@]}"; do
-            local bin
-            bin="$(bench_bin "$lang")"
-            log "  lookup: ${lang}"
-            local line
-            local lookup_status
-            local lookup_err="${RUN_DIR}/lookup-${lang}.err"
-            set +e
-            line=$("$bin" lookup-bench "$DURATION" 2>"$lookup_err" | grep "^lookup," | head -1)
-            lookup_status=$?
-            set -e
-            if [ "$lookup_status" -ne 0 ]; then
-                warn "  ${lang} lookup benchmark failed"
-                dump_client_error "$lookup_err"
-                RUN_FAILED=1
-                continue
-            fi
-            if [ -n "$line" ]; then
-                local throughput p50 p95 p99 client_cpu server_cpu_pct total_cpu_pct
-                throughput=$(echo "$line" | cut -d',' -f4)
-                p50=$(echo "$line" | cut -d',' -f5)
-                p95=$(echo "$line" | cut -d',' -f6)
-                p99=$(echo "$line" | cut -d',' -f7)
-                client_cpu=$(echo "$line" | cut -d',' -f8)
-                server_cpu_pct=$(echo "$line" | cut -d',' -f9)
-                total_cpu_pct=$(echo "$line" | cut -d',' -f10)
-                if ! throughput_is_positive "$throughput"; then
-                    warn "  Invalid zero throughput from ${lang} lookup benchmark"
-                    dump_client_error "$lookup_err"
-                    RUN_FAILED=1
-                    continue
-                fi
-                write_csv_row "lookup" "$lang" "$lang" "0" \
-                    "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
-            else
-                warn "  No output from ${lang} lookup benchmark"
-                dump_client_error "$lookup_err"
+            if ! run_lookup_bench "$lang" "$DURATION"; then
                 RUN_FAILED=1
             fi
         done
@@ -689,92 +1137,10 @@ main() {
         log "=== NP Pipeline (depth=${PIPELINE_DEPTH}) ==="
         for server_lang in "${LANGS[@]}"; do
             for client_lang in "${LANGS[@]}"; do
-            local pipe_svc="pipeline-${server_lang}-${client_lang}"
-
-            log "  np-pipeline: ${client_lang}->${server_lang} depth=${PIPELINE_DEPTH}"
-
-            local server_duration="$DURATION"
-            local server_pid
-            server_pid=$(start_server "$server_lang" "np-ping-pong-server" "$pipe_svc" "$server_duration") || {
-                warn "  Failed to start pipeline server"
-                continue
-            }
-
-            sleep 0.2
-
-            local client_bin
-            client_bin="$(bench_bin "$client_lang")"
-            local client_timeout=$((DURATION + 15))
-            local client_output
-            local client_status
-            local client_err="${RUN_DIR}/client-np-pipeline-${server_lang}-${client_lang}.err"
-            set +e
-            client_output=$(timeout "$client_timeout" "$client_bin" "np-pipeline-client" "$RUN_DIR" "$pipe_svc" "$DURATION" "0" "$PIPELINE_DEPTH" 2>"$client_err")
-            client_status=$?
-            set -e
-
-            local server_cpu_sec
-            server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pipe_svc")
-
-            local new_pids=()
-            for p in "${SERVER_PIDS[@]:-}"; do
-                [ "$p" != "$server_pid" ] && new_pids+=("$p")
-            done
-            SERVER_PIDS=("${new_pids[@]:-}")
-
-            if [ "$client_status" -ne 0 ]; then
-                warn "  ${client_lang} pipeline client failed for ${server_lang} server (exit ${client_status})"
-                dump_client_error "$client_err"
-                RUN_FAILED=1
-            elif [ -n "$client_output" ]; then
-                local line
-                line=$(echo "$client_output" | grep "^np-pipeline" | head -1)
-                if [ -n "$line" ]; then
-                    local throughput p50 p95 p99 client_cpu
-                    throughput=$(echo "$line" | cut -d',' -f4)
-                    p50=$(echo "$line" | cut -d',' -f5)
-                    p95=$(echo "$line" | cut -d',' -f6)
-                    p99=$(echo "$line" | cut -d',' -f7)
-                    client_cpu=$(echo "$line" | cut -d',' -f8)
-
-                    if ! throughput_is_positive "$throughput"; then
-                        warn "  Invalid zero throughput from ${client_lang} pipeline client for ${server_lang} server"
-                        warn "  Raw pipeline line: ${line:-<none>}"
-                        warn "  Raw client output follows:"
-                        printf '%s\n' "$client_output" >&2
-                        warn "  Preserving RUN_DIR for investigation: ${RUN_DIR}"
-                        export NIPC_KEEP_RUN_DIR=1
-                        dump_client_error "$client_err"
-                        RUN_FAILED=1
-                        sleep 0.5
-                        continue
-                    fi
-
-                    local server_cpu_pct total_cpu_pct
-                    server_cpu_pct=$(cpu_pct_for_duration "$server_cpu_sec" "$DURATION")
-                    total_cpu_pct=$(sum_cpu_pct "$client_cpu" "$server_cpu_pct")
-
-                    write_csv_row "np-pipeline-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
-                        "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
-                    log "    throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us"
-                else
-                    warn "  Could not parse pipeline output from ${client_lang} client for ${server_lang} server"
-                    warn "  Raw client output follows:"
-                    printf '%s\n' "$client_output" >&2
-                    warn "  Preserving RUN_DIR for investigation: ${RUN_DIR}"
-                    export NIPC_KEEP_RUN_DIR=1
-                    dump_client_error "$client_err"
+                if ! run_np_pipeline "$server_lang" "$client_lang" "$DURATION" "$PIPELINE_DEPTH"; then
                     RUN_FAILED=1
                 fi
-            else
-                warn "  No output from ${client_lang} pipeline client for ${server_lang} server"
-                warn "  Preserving RUN_DIR for investigation: ${RUN_DIR}"
-                export NIPC_KEEP_RUN_DIR=1
-                dump_client_error "$client_err"
-                RUN_FAILED=1
-            fi
-
-            sleep 0.5
+                sleep 0.5
             done
         done
     fi
@@ -784,81 +1150,10 @@ main() {
         log "=== NP Pipeline+Batch (depth=${PIPELINE_DEPTH}) ==="
         for server_lang in "${LANGS[@]}"; do
             for client_lang in "${LANGS[@]}"; do
-            local pb_svc="pipe-batch-${server_lang}-${client_lang}"
-
-            log "  np-pipeline-batch: ${client_lang}->${server_lang} depth=${PIPELINE_DEPTH}"
-
-            local server_duration="$DURATION"
-            local server_pid
-            server_pid=$(start_server "$server_lang" "np-batch-ping-pong-server" "$pb_svc" "$server_duration") || {
-                warn "  Failed to start pipeline-batch server"
-                continue
-            }
-
-            sleep 0.2
-
-            local client_bin
-            client_bin="$(bench_bin "$client_lang")"
-            local client_timeout=$((DURATION + 15))
-            local client_output
-            local client_status
-            local client_err="${RUN_DIR}/client-np-pipeline-batch-${server_lang}-${client_lang}.err"
-            set +e
-            client_output=$(timeout "$client_timeout" "$client_bin" "np-pipeline-batch-client" "$RUN_DIR" "$pb_svc" "$DURATION" "0" "$PIPELINE_DEPTH" 2>"$client_err")
-            client_status=$?
-            set -e
-
-            local server_cpu_sec
-            server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pb_svc")
-
-            local new_pids=()
-            for p in "${SERVER_PIDS[@]:-}"; do
-                [ "$p" != "$server_pid" ] && new_pids+=("$p")
-            done
-            SERVER_PIDS=("${new_pids[@]:-}")
-
-            if [ "$client_status" -ne 0 ]; then
-                warn "  ${client_lang} pipeline-batch client failed for ${server_lang} server (exit ${client_status})"
-                dump_client_error "$client_err"
-                RUN_FAILED=1
-            elif [ -n "$client_output" ]; then
-                local line
-                line=$(echo "$client_output" | grep "^np-pipeline-batch" | head -1)
-                if [ -n "$line" ]; then
-                    local throughput p50 p95 p99 client_cpu
-                    throughput=$(echo "$line" | cut -d',' -f4)
-                    p50=$(echo "$line" | cut -d',' -f5)
-                    p95=$(echo "$line" | cut -d',' -f6)
-                    p99=$(echo "$line" | cut -d',' -f7)
-                    client_cpu=$(echo "$line" | cut -d',' -f8)
-
-                    if ! throughput_is_positive "$throughput"; then
-                        warn "  Invalid zero throughput from ${client_lang} pipeline-batch client for ${server_lang} server"
-                        dump_client_error "$client_err"
-                        RUN_FAILED=1
-                        sleep 0.5
-                        continue
-                    fi
-
-                    local server_cpu_pct total_cpu_pct
-                    server_cpu_pct=$(cpu_pct_for_duration "$server_cpu_sec" "$DURATION")
-                    total_cpu_pct=$(sum_cpu_pct "$client_cpu" "$server_cpu_pct")
-
-                    write_csv_row "np-pipeline-batch-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
-                        "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
-                    log "    throughput=${throughput} p50=${p50}us p95=${p95}us p99=${p99}us"
-                else
-                    warn "  Could not parse pipeline-batch output from ${client_lang} client for ${server_lang} server"
-                    dump_client_error "$client_err"
+                if ! run_np_pipeline_batch "$server_lang" "$client_lang" "$DURATION" "$PIPELINE_DEPTH"; then
                     RUN_FAILED=1
                 fi
-            else
-                warn "  No output from ${client_lang} pipeline-batch client for ${server_lang} server"
-                dump_client_error "$client_err"
-                RUN_FAILED=1
-            fi
-
-            sleep 0.5
+                sleep 0.5
             done
         done
     fi

@@ -2846,6 +2846,18 @@ Current expected result:
 - `201` CSV rows
 - generator passes
 - all configured Windows floors pass
+- trust methodology now enforced by the runner:
+  - each published row is the median of `5` measured samples by default
+  - fixed-rate rows use the CLI duration:
+    - `5s` in the command above
+  - most max-throughput rows use `NIPC_BENCH_MAX_DURATION`, default:
+    - `10s`
+  - `np-pipeline-batch-d16 @ max` uses `NIPC_BENCH_PIPELINE_BATCH_MAX_DURATION`, default:
+    - `20s`
+  - with `5` samples, one low and one high throughput sample are trimmed before the stability check
+  - the remaining stable core must contain at least `3` samples and stay within:
+    - `max/min <= 1.35`
+  - if the stable core exceeds that spread, the runner fails closed instead of publishing the row
 
 ### Windows coverage scripts
 

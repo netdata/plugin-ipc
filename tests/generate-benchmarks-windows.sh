@@ -23,6 +23,12 @@ INPUT_CSV="${1:-${ROOT_DIR}/benchmarks-windows.csv}"
 OUTPUT_MD="${2:-${ROOT_DIR}/benchmarks-windows.md}"
 EXPECTED_HEADER="scenario,client,server,target_rps,throughput,p50_us,p95_us,p99_us,client_cpu_pct,server_cpu_pct,total_cpu_pct"
 EXPECTED_TOTAL_ROWS=201
+RUNNER_DEFAULT_REPETITIONS=5
+RUNNER_DEFAULT_FIXED_DURATION=5
+RUNNER_DEFAULT_MAX_DURATION=10
+RUNNER_DEFAULT_PIPELINE_BATCH_MAX_DURATION=20
+RUNNER_DEFAULT_MAX_THROUGHPUT_RATIO=1.35
+RUNNER_DEFAULT_MIN_STABLE_SAMPLES=3
 VALIDATION_FAILED=0
 FLOOR_FAILED=0
 CSV_FILE=""
@@ -245,6 +251,21 @@ emit_validation_summary() {
     echo ""
 }
 
+emit_methodology() {
+    echo "## Methodology"
+    echo ""
+    echo "- The current Windows runner publishes one CSV row per matrix cell after aggregating repeated measurements."
+    echo "- Current runner defaults: ${RUNNER_DEFAULT_REPETITIONS} samples per cell."
+    echo "- Fixed-rate rows use ${RUNNER_DEFAULT_FIXED_DURATION}s samples by default."
+    echo "- Most max-tier rows use ${RUNNER_DEFAULT_MAX_DURATION}s samples by default."
+    echo '- `np-pipeline-batch-d16 @ max` uses '"${RUNNER_DEFAULT_PIPELINE_BATCH_MAX_DURATION}"'s samples by default because the 10s window was not stable enough on `win11`.'
+    echo "- Throughput trust is decided on the stable sample core, not one lucky or unlucky extreme."
+    echo "- With 5 samples, the runner drops one low and one high throughput sample before applying the stability gate."
+    echo "- The remaining stable core must contain at least ${RUNNER_DEFAULT_MIN_STABLE_SAMPLES} samples and stay within max/min <= ${RUNNER_DEFAULT_MAX_THROUGHPUT_RATIO}."
+    echo '- The script CLI duration still controls the fixed-rate rows; `NIPC_BENCH_MAX_DURATION` controls most max-tier rows; `NIPC_BENCH_PIPELINE_BATCH_MAX_DURATION` controls `np-pipeline-batch-d16 @ max`.'
+    echo ""
+}
+
 has_min_violation() {
     local scenario="$1"
     local target_rps="$2"
@@ -376,6 +397,7 @@ generate_md() {
         echo "Complete matrix rows expected: ${EXPECTED_TOTAL_ROWS}"
         echo ""
 
+        emit_methodology
         emit_validation_summary
         emit_scenario_section "Named Pipe Ping-Pong" "np-ping-pong" 0 100000 10000 1000
         emit_scenario_section "Win SHM Ping-Pong" "shm-ping-pong" 0 100000 10000 1000
