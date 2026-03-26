@@ -2846,6 +2846,15 @@ Current expected result:
 - `201` CSV rows
 - generator passes
 - all configured Windows floors pass
+- optional diagnostic mode for investigation without weakening publish mode:
+  - `NIPC_BENCH_DIAGNOSE_FAILURES=1 bash tests/run-windows-bench.sh ...`
+  - behavior:
+    - the publish run still fails closed
+    - the first failure remains authoritative
+    - each failed row is rerun once in an isolated diagnostic subdirectory under the preserved `RUN_DIR`
+    - side-by-side evidence is written to:
+      - `${RUN_DIR}/diagnostics-summary.txt`
+    - diagnostic reruns never write publish rows into the benchmark CSV
 - trust methodology now enforced by the runner:
   - each published row is the median of `5` measured samples by default
   - fixed-rate rows use the CLI duration:
