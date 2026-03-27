@@ -10,6 +10,48 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
 - Use it first to replace the current `cgroups.plugin` -> `ebpf.plugin` metadata channel on Linux.
 - Make the library available to C, Rust, and Go code inside Netdata.
 - Record integration design decisions before implementation.
+- User-approved local workspace cleanup in this slice:
+  - remove the generated Go test / helper binaries after the push
+  - affected files:
+    - `src/go/cgroups.test.exe`
+    - `src/go/main`
+    - `src/go/raw.test.exe`
+    - `src/go/windows.test.exe`
+- User-directed benchmark follow-up now in scope:
+  - treat the Linux `shm-batch-ping-pong` C/Rust spread as two independent problems:
+    - Rust server penalty versus C server with the same C client
+    - Rust client penalty versus C client with the same C server
+  - worst-case `rust -> rust` is the compounded result of both penalties
+  - objective:
+    - identify the exact Rust-side hot paths responsible for the server-side and client-side losses
+    - fix Rust until the Linux C/Rust SHM batch path is materially closer to the C baseline
+  - scope expansion approved by the user:
+    - do the same benchmark-delta investigation across all material language/client/server combinations
+    - identify every real implementation issue behind the benchmark gaps
+    - fix the implementation issues, not just explain them
+    - keep benchmark artifacts and benchmark-derived docs in sync after each validated fix
+  - first verified benchmark-delta findings:
+    - POSIX `shm-batch-ping-pong` with `client ∈ {c,rust}` and `server ∈ {c,rust}` still has a real Rust penalty on both sides:
+      - `c -> c = 64,148,960`
+      - `c -> rust = 58,334,803`
+      - `rust -> c = 52,277,542`
+      - `rust -> rust = 48,220,338`
+      - implication:
+        - Rust server penalty is real
+        - Rust client penalty is larger
+        - `rust -> rust` is the compounded case
+    - benchmark-driver distortion is also real and must be fixed before deeper transport conclusions:
+      - Go `lookup` benchmark does a synthetic linear scan instead of using the actual O(1) cache structure:
+        - `bench/drivers/go/main.go`
+      - Rust `lookup` benchmark also does a synthetic linear scan:
+        - `bench/drivers/rust/src/main.rs`
+      - Rust actual cache lookup currently allocates `name.to_string()` on every lookup:
+        - `src/crates/netipc/src/service/raw.rs`
+      - Go and Rust batch / pipeline clients still do avoidable hot-loop allocations that C avoids or minimizes:
+        - Go:
+          - `bench/drivers/go/main.go`
+        - Rust:
+          - `bench/drivers/rust/src/main.rs`
 - Current execution scope:
   - remove the multi-method service drift from docs, code, tests, and public APIs
   - align the implementation to one-service-kind-per-endpoint
@@ -1093,3 +1135,1381 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
 - Developer docs for the new in-tree `netipc` layout and per-language use.
 - `ebpf.plugin` and `cgroups.plugin` internal docs describing the new IPC path.
 - Rollout/kill-switch documentation if dual-path rollout is selected.
+
+## Benchmark remediation progress
+
+- Verified benchmark-distortion findings before changing code:
+  - POSIX `shm-batch-ping-pong` for `c/rust` exceeds the `1.2x` threshold:
+    - `c->c = 64,148,960`
+    - `c->rust = 58,334,803`
+    - `rust->c = 52,277,542`
+    - `rust->rust = 48,220,338`
+  - The full corrected Linux and Windows matrices also showed broader benchmark-driver artifacts:
+    - Go `lookup` benchmark used a synthetic linear scan instead of the actual cache-style hash lookup.
+    - Rust `lookup` benchmark used a synthetic linear scan too.
+    - Rust cache lookup allocated `name.to_string()` on every lookup.
+    - Go and Rust benchmark clients still had hot-loop buffer allocations in batch, pipeline, and ping-pong paths.
+- Implemented first remediation pass:
+  - `src/crates/netipc/src/service/raw.rs`
+    - replaced the flat `(hash, String)` lookup key with nested per-hash maps so Rust cache lookups stop allocating per call
+  - `bench/drivers/rust/src/main.rs`
+    - removed hot-loop allocations from SHM batch client
+    - removed hot-loop allocations from ping-pong client
+    - moved pipeline-batch receive buffer allocation out of the outer loop
+    - replaced lookup linear scan with hash-map lookup
+  - `bench/drivers/rust/src/bench_windows.rs`
+    - removed the same hot-loop allocations on Windows
+    - replaced lookup linear scan with hash-map lookup
+  - `bench/drivers/go/main.go`
+    - removed hot-loop allocations from batch, pipeline, pipeline-batch, and ping-pong clients
+    - replaced lookup linear scan with hash-map lookup
+  - `bench/drivers/go/main_windows.go`
+    - removed the same hot-loop allocations on Windows
+    - replaced lookup linear scan with hash-map lookup
+- Validation after the first remediation pass:
+  - `cargo test --manifest-path src/crates/netipc/Cargo.toml --lib -- --test-threads=1`
+    - `299 passed, 0 failed`
+  - `cd bench/drivers/go && go test -run '^$' ./...`
+    - compile-only pass
+  - `cd src/go && go test -count=1 ./pkg/netipc/service/raw ./pkg/netipc/service/cgroups`
+    - both packages passed
+- Targeted Linux rerun after the first remediation pass:
+  - `lookup`
+    - `c = 173,132,146`
+    - `rust = 45,886,102`
+    - `go = 47,703,281`
+    - fact: the fake benchmark scans are gone; the remaining gap is now in the actual lookup data structures
+  - `shm-batch-ping-pong`, target `0`
+    - `c->c = 62,314,895`
+    - `c->rust = 57,112,806`
+    - `rust->c = 51,620,887`
+    - `rust->rust = 47,356,599`
+    - fact: the Rust client and Rust server penalties are both still real
+  - `uds-pipeline-d16`, target `0`
+    - `c->c = 721,232`
+    - `c->rust = 717,024`
+    - `c->go = 572,552`
+    - `rust->c = 719,458`
+    - `rust->rust = 727,197`
+    - `rust->go = 576,525`
+    - fact: the remaining delta is mostly a Go server issue, not a client issue
+  - `uds-pipeline-batch-d16`, target `0`
+    - `c->c = 103,250,763`
+    - `c->rust = 91,495,522`
+    - `c->go = 51,623,524`
+    - `rust->c = 102,367,177`
+    - `rust->rust = 89,465,821`
+    - `rust->go = 52,915,850`
+    - fact: the earlier client-side benchmark distortion is gone; the remaining large delta is mainly the Go server path
+- Next concrete fixes identified from code + rerun evidence:
+  - Go and Rust cache lookup should mirror the C open-addressing hash table:
+    - evidence:
+      - C uses `hash ^ djb2(name)` with open addressing in `src/libnetdata/netipc/src/service/netipc_service.c`
+      - Go still uses a composite `map[{hash,name}]` in `src/go/pkg/netipc/service/raw/cache.go`
+      - Rust still uses nested `HashMap<u32, HashMap<String, usize>>` in `src/crates/netipc/src/service/raw.rs`
+    - implication:
+      - Go and Rust still pay full runtime string hashing on every lookup while C does not
+  - Go POSIX UDS transport should mirror the C/Rust vectored send path:
+    - evidence:
+      - C uses `sendmsg` + two `iovec`s in `src/libnetdata/netipc/src/transport/posix/netipc_uds.c`
+      - Rust uses `raw_send_iov()` in `src/crates/netipc/src/transport/posix.rs`
+      - Go still copies header + payload into a merged scratch buffer in `src/go/pkg/netipc/transport/posix/uds.go`
+    - implication:
+      - Go server responses on UDS still pay an extra memcpy per message on the hot path
+- Next measurement step:
+  - apply the lookup-index and Go UDS send fixes
+  - rerun only the affected slices first:
+    - Linux: `lookup`, `shm-batch-ping-pong`, `uds-pipeline-d16`, `uds-pipeline-batch-d16`
+    - Windows: `lookup`, `shm-batch-ping-pong`, `np-pipeline-d16`, `np-pipeline-batch-d16`
+  - only after the slice reruns are understood should the full matrices and docs be refreshed again.
+- Second targeted Linux rerun after rebuilding the Rust release benchmark:
+  - `lookup`
+    - `c = 170,976,986`
+    - `rust = 150,660,413`
+    - `go = 121,278,244`
+    - fact:
+      - Rust lookup is now near C after mirroring the C open-addressing structure
+      - Go lookup improved materially too, but it is still above the `1.2x` threshold versus C
+  - `shm-batch-ping-pong`, target `0`
+    - `c->c = 60,929,552`
+    - `c->rust = 55,151,867`
+    - `rust->c = 49,426,036`
+    - `rust->rust = 45,104,001`
+    - fact:
+      - Rust still has a real server-side penalty on this path
+      - Rust still has a larger real client-side penalty on this path
+  - `uds-pipeline-d16`, target `0`
+    - `c->c = 713,563`
+    - `c->rust = 720,602`
+    - `rust->c = 722,202`
+    - `rust->rust = 712,371`
+    - `c->go = 548,145`
+    - `rust->go = 563,484`
+    - fact:
+      - Rust is now aligned with C on the non-batch UDS pipeline path
+      - the remaining delta is almost entirely the Go server path
+  - `uds-pipeline-batch-d16`, target `0`
+    - `c->c = 101,588,680`
+    - `c->rust = 83,396,588`
+    - `rust->c = 99,570,528`
+    - `rust->rust = 86,762,291`
+    - `c->go = 52,899,078`
+    - `rust->go = 51,902,022`
+    - fact:
+      - Rust client-side is now close to C on this path
+      - Rust server-side still shows a real batch-path penalty
+      - Go server-side is still the dominant outlier
+- Structural batch-path asymmetry verified from code:
+  - C managed server exposes a whole-request callback:
+    - `src/libnetdata/netipc/include/netipc/netipc_service.h:187-192`
+    - callback receives `request_hdr`, full `request_payload`, and whole `response_buf`
+  - C benchmark server uses that whole-request callback to batch-specialize increment in one loop:
+    - `bench/drivers/c/bench_posix.c:164-216`
+    - the callback sees `NIPC_FLAG_BATCH`, loops all items itself, and emits the whole batch response directly
+  - Rust managed server exposes only per-item raw dispatch:
+    - `src/crates/netipc/src/service/raw.rs:1285-1297`
+    - batch handling is then forced through the managed-server loop:
+      - `src/crates/netipc/src/service/raw.rs:2002-2047`
+      - per item: `batch_item_get()` -> `dispatch_single_internal()` -> `bb.add()`
+  - Go managed server exposes the same per-item dispatch shape:
+    - `src/go/pkg/netipc/service/raw/types.go:57-59`
+    - batch handling is forced through:
+      - `src/go/pkg/netipc/service/raw/client.go:903-946`
+      - per item: `BatchItemGet()` -> `dispatchSingle()` -> `bb.Add()`
+  - fact:
+    - the remaining Rust and Go batch server gaps are not just transport issues
+    - C can specialize whole-batch increment handling at the callback boundary; Rust and Go cannot
+- Working theory for the remaining Linux gaps:
+  - `shm-batch-ping-pong`
+    - Rust still has both client-side and server-side cost versus C
+    - the server-side part aligns with the batch callback asymmetry above
+  - `uds-pipeline-batch-d16`
+    - Rust client-side is now nearly aligned with C
+    - the remaining Rust delta is mainly server-side batch handling overhead
+    - the much larger Go delta is likely server-side too, with the same structural asymmetry plus extra Go dispatch/runtime overhead
+- Decision required before the next implementation step:
+  - Background:
+    - The remaining batch-path gap is now tied to the managed-server design.
+    - Any serious fix must choose whether to optimize only the benchmarks or to change the service/server implementation model.
+  - 1. Batch server optimization strategy
+    - Evidence:
+      - C whole-request callback:
+        - `src/libnetdata/netipc/include/netipc/netipc_service.h:187-192`
+        - `bench/drivers/c/bench_posix.c:164-216`
+      - Rust per-item batch loop:
+        - `src/crates/netipc/src/service/raw.rs:1285-1297`
+        - `src/crates/netipc/src/service/raw.rs:2002-2047`
+      - Go per-item batch loop:
+        - `src/go/pkg/netipc/service/raw/types.go:57-59`
+        - `src/go/pkg/netipc/service/raw/client.go:903-946`
+    - A. Benchmark-only fast path
+      - Implement dedicated Rust/Go benchmark servers that bypass the managed server for increment batch.
+      - Pros:
+        - fastest way to measure the upper bound
+        - smallest code change
+      - Implications:
+        - benchmark numbers improve, but the library/server path stays asymmetric
+      - Risks:
+        - hides a real product/library performance issue
+        - docs and benchmarks stop representing real library behavior
+    - B. Internal managed-server specialization
+      - Keep the external single-kind API shape, but add internal fast paths for known service kinds such as increment batch.
+      - Pros:
+        - fixes real library behavior
+        - avoids large public API churn
+        - aligned with one-service-kind servers
+      - Implications:
+        - managed-server internals become aware of service-kind-specific fast paths
+      - Risks:
+        - hidden complexity if done ad hoc
+        - may still leave the public abstraction less explicit than the implementation
+    - C. Explicit service-kind-specific server APIs
+      - Redesign Rust/Go managed servers so each service kind gets its own whole-request server callback surface, matching the accepted single-kind architecture.
+      - Pros:
+        - cleanest long-term design
+        - makes the fast path explicit instead of hidden
+        - best fit for maintainability and performance
+      - Implications:
+        - broader API/implementation/test/doc rewrite in Rust and Go
+      - Risks:
+        - largest scope before the next measurement
+    - Recommendation:
+      - `1. C`
+      - Reason:
+        - the evidence shows a real API/implementation asymmetry, not just a hot-loop bug
+        - your accepted single-kind-service design already points in this direction
+- Priority check raised by Costa:
+  - Background:
+    - Current benchmark results are already very high in absolute terms.
+    - The remaining gaps are real, but fixing them now would require a broader Rust/Go managed-server redesign for batch-heavy paths.
+  - Facts:
+    - Clean Linux rerun:
+      - `lookup`
+        - `c = 170,976,986`
+        - `rust = 150,660,413`
+        - `go = 121,278,244`
+      - `shm-batch-ping-pong`
+        - `c->c = 60,929,552`
+        - `rust->rust = 45,104,001`
+      - `uds-pipeline-batch-d16`
+        - `c->c = 101,588,680`
+        - `rust->rust = 86,762,291`
+        - `go->go = 51,355,370`
+    - Fact:
+      - these are already very high throughputs in absolute terms
+      - the remaining work is now mainly about closing relative efficiency gaps, not about making the library viable
+  - Working theory:
+    - Deferring the remaining batch-path optimization is reasonable if there are more fundamental correctness, architecture, or product-fit issues still open.
+    - The benchmark investigation has already done its job by identifying the structural asymmetry and proving where it lives.
+- Updated decision from Costa:
+  - continue the benchmark investigation for trust in the framework
+  - investigate all remaining `>1.20x` differences
+  - treat the Rust/Go batch-path asymmetry as already identified, and focus next on the remaining unexplained gaps
+- Remaining unexplained Linux gaps after excluding the known batch-path issue:
+  - `lookup`
+    - `c = 170,976,986`
+    - `rust = 150,660,413`
+    - `go = 121,278,244`
+  - `uds-pipeline-d16`
+    - `c->c = 713,563`
+    - `c->go = 548,145`
+    - `rust->go = 563,484`
+    - fact:
+      - the Go server remains the unexplained outlier on the non-batch pipeline path
+- New concrete finding: Go lookup still pays a by-value item copy on every successful bucket probe
+  - Evidence:
+    - actual cache lookup:
+      - `src/go/pkg/netipc/service/raw/cache.go:122-130`
+      - `item := c.items[c.buckets[slot].index]` copies the whole `CacheItem`
+    - Go lookup benchmark mirrors the same behavior:
+      - `bench/drivers/go/main.go:1133-1136`
+      - `bucketItem := cacheItems[lookupIndex[slot].index]` copies the whole struct
+    - Rust uses a reference:
+      - `src/crates/netipc/src/service/raw.rs:2376-2379`
+    - C returns a pointer:
+      - `src/libnetdata/netipc/src/service/netipc_service.c:1492-1497`
+  - Implication:
+    - the current Go lookup gap is still at least partly a real Go implementation issue, not just a benchmark artifact
+- Follow-up measurement on the Go lookup bucket-copy fix:
+  - Applied:
+    - `src/go/pkg/netipc/service/raw/cache.go`
+    - `bench/drivers/go/main.go`
+    - changed bucket probes from by-value `CacheItem` copies to pointer/reference access
+  - Rerun results:
+    - `c = 172,638,775`
+    - `rust = 153,518,048`
+    - `go = 115,783,444`
+  - Fact:
+    - the fix had no material positive effect on Go lookup throughput
+    - therefore the by-value bucket copy was not the dominant cause of the remaining Go lookup gap
+- Go lookup profile after the bucket-copy fix:
+  - Evidence:
+    - live perf profile of `bench_posix_go lookup-bench`
+    - output row:
+      - `lookup,go,go,127,972,744`
+    - visible hot frames from `/tmp/nipc-go-lookup-perf.data`:
+      - `main.runLookupBench` almost all samples
+      - `time.runtimeNano` about `8%`
+      - `runtime.memequal` about `2%`
+  - Fact:
+    - no single framework/library helper stands out as the dominant hotspot
+    - the operation is so small that benchmark loop overhead and inlining dominate the profile
+  - Working theory:
+    - the remaining Go lookup gap is not currently a strong signal about the IPC framework itself
+    - it is at least partly a benchmark-methodology issue for a tiny in-memory operation
+- Go non-batch pipeline server profile:
+  - Evidence:
+    - live perf profile of `bench_posix_go uds-ping-pong-server` under `uds-pipeline-d16` load from a C client
+    - client result during profile:
+      - `uds-pipeline-d16,c,c,567,061,...`
+    - hot frames from `/tmp/nipc-go-server-perf.data`:
+      - `Session.Send` about `39.5%`
+      - `Session.Receive` about `33.8%`
+      - `raw.pollFd` about `23.1%`
+      - increment dispatch does not materially appear
+  - Fact:
+    - the remaining Go server gap on `uds-pipeline-d16` is not in increment handler logic
+    - it is dominated by the Go UDS server transport/poll path
+  - Supporting fact:
+    - Go as a client on the same scenario is only slightly slower than C/Rust:
+      - `go->c = 699,976` vs `c->c = 713,563`
+      - `go->rust = 685,614` vs `c->rust = 720,602`
+    - implication:
+      - the big remaining gap is mainly server-side, and `pollFd` is the strongest server-only suspect
+- New concrete finding: Go non-batch server gap is transport/poll dominated, not dispatch dominated
+  - Evidence:
+    - live perf profile of `bench_posix_go uds-ping-pong-server` under `uds-pipeline-d16` load
+    - hot path breakdown from `/tmp/nipc-go-server-perf.data`:
+      - `Session.Send` about `39.5%`
+      - `Session.Receive` about `33.8%`
+      - `raw.pollFd` about `23.1%`
+      - increment dispatch does not materially appear in the hot path
+  - Working theory:
+    - the remaining Go server delta on `uds-pipeline-d16` is in the Go UDS server transport/wrapper path, especially `poll + recvmsg + sendmsg`, not in the increment handler logic
+
+## Benchmark refresh slice (2026-03-26)
+
+- TL;DR:
+  - rerun the full official benchmark suites on the current worktree for both Linux and Windows
+  - regenerate the checked-in benchmark artifacts from those reruns
+  - compare the refreshed Linux and Windows matrices and flag any materially strange language deltas
+  - review and follow the existing repo TODO guidance for the real Windows `win11` benchmark workflow
+- Analysis:
+  - current checked-in benchmark artifacts are from `2026-03-25`:
+    - `benchmarks-posix.md`
+    - `benchmarks-windows.md`
+    - `README.md`
+  - the official full-matrix runners are:
+    - Linux:
+      - `tests/run-posix-bench.sh`
+      - `tests/generate-benchmarks-posix.sh`
+    - Windows:
+      - `tests/run-windows-bench.sh`
+      - `tests/generate-benchmarks-windows.sh`
+  - the verified Windows execution guidance already exists in repo TODOs and README:
+    - `README.md:342-365`
+    - `TODO-pending-from-rewrite.md:2754-2849`
+  - current runner/generator methodology facts for Windows trustworthiness:
+    - `tests/run-windows-bench.sh` currently writes exactly one CSV row per benchmark cell:
+      - `run_pair()` parses one client result and immediately appends it to `OUTPUT_CSV`
+      - there is no built-in repetition, aggregation, or instability gate
+    - `tests/generate-benchmarks-windows.sh` validates completeness and floors, but it trusts each CSV row as final truth:
+      - it has no notion of repeated samples, medians, spread, or outlier detection
+    - implication:
+      - a single noisy Windows measurement can currently become the published benchmark artifact if it still parses and keeps throughput above zero
+  - benchmark methodology references gathered before changing the Windows workflow:
+    - Google Benchmark user guide:
+      - repeated benchmarks exist because a single result may not be representative when benchmarks are noisy
+      - when repetitions are used, mean / median / standard deviation are reported
+      - source examined:
+        - `/tmp/google-benchmark-20260326/docs/user_guide.md`
+    - Criterion.rs analysis and user guide:
+      - noisy runs should be treated skeptically
+      - longer measurement time reduces the influence of outliers
+      - outlier classification is a first-class part of reliable benchmark analysis
+      - sources examined:
+        - `/tmp/criterion-rs-20260326/book/src/user_guide/command_line_output.md`
+        - `/tmp/criterion-rs-20260326/book/src/analysis.md`
+  - verified workflow facts from those docs:
+    - real Windows benchmark proof is expected on `win11`, not via Linux cross-compilation
+    - login shell may start as `MSYSTEM=MSYS`; benchmark runs should set:
+      - `PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"`
+      - `MSYSTEM=MINGW64`
+      - `CC=/mingw64/bin/gcc`
+      - `CXX=/mingw64/bin/g++`
+    - official Windows benchmark commands are:
+      - `bash tests/run-windows-bench.sh benchmarks-windows.csv 5`
+      - `bash tests/generate-benchmarks-windows.sh benchmarks-windows.csv benchmarks-windows.md`
+  - the current local worktree is not clean and includes benchmark-related source edits:
+    - `bench/drivers/go/main.go`
+    - `bench/drivers/go/main_windows.go`
+    - `bench/drivers/rust/src/main.rs`
+    - `bench/drivers/rust/src/bench_windows.rs`
+    - plus service/transport files that can affect benchmark behavior
+  - implication:
+    - the refreshed artifacts must reflect this exact current tree
+    - benchmark interpretation must distinguish:
+      - real implementation/runtime asymmetry
+      - normal platform differences
+      - measurement distortion or stale artifact drift
+- Decisions:
+  - no new user decision required before execution
+  - using the existing official full-suite runners is the correct path
+  - using the existing real `win11` workflow is the correct Windows path
+- Plan:
+  - run the full Linux benchmark suite locally on the current tree
+  - regenerate `benchmarks-posix.md`
+  - run the full Windows benchmark suite on `win11` using the documented native-toolchain environment
+  - regenerate `benchmarks-windows.md`
+  - compare refreshed CSVs and summarize the largest cross-language spreads by scenario
+  - classify strange deltas as:
+    - expected platform/runtime behavior
+    - suspicious and possibly measurement-related
+    - suspicious and likely implementation-related
+  - update benchmark-derived docs if the refreshed artifacts materially change the published snapshot
+  - for the Windows trustworthiness fix:
+    - change the Windows runner to collect multiple measured repetitions per benchmark cell instead of trusting a single sample
+    - aggregate repeated samples into one publication row using a robust statistic instead of one lucky or unlucky run
+    - preserve a fail-closed path:
+      - if repeated Windows samples for a cell diverge beyond a configured spread threshold, fail the run instead of publishing that cell
+    - keep the published CSV shape stable if possible, so the existing generator/report consumers do not need a schema rewrite just to gain trustworthiness
+- Implied decisions:
+  - benchmark duration remains the documented default `5` seconds unless the runner fails and forces a diagnostic rerun
+  - the first full pass should use the official artifact filenames:
+    - `benchmarks-posix.csv`
+    - `benchmarks-posix.md`
+    - `benchmarks-windows.csv`
+    - `benchmarks-windows.md`
+  - if Windows artifacts are produced remotely, copy them back into this repo without resetting unrelated local files
+- Testing requirements:
+  - Linux benchmark CSV must contain `201` data rows and pass the generator validation
+  - Windows benchmark CSV must contain `201` data rows and pass the generator validation
+  - refreshed artifacts must have no duplicate scenario keys and no zero-throughput rows
+- Documentation updates required:
+  - update the checked-in benchmark markdown files to match the refreshed CSVs
+  - update `README.md` only if the published generated dates, machine snapshot, or headline benchmark ranges are no longer true after the refresh
+- Execution results:
+  - reviewed Windows benchmark handoff guidance before execution:
+    - `README.md:342-365`
+    - `TODO-pending-from-rewrite.md:2754-2849`
+  - Linux benchmark refresh completed successfully on the current worktree:
+    - command:
+      - `cargo build --release --manifest-path src/crates/netipc/Cargo.toml --bin bench_posix`
+      - `bash tests/run-posix-bench.sh benchmarks-posix.csv 5`
+      - `bash tests/generate-benchmarks-posix.sh benchmarks-posix.csv benchmarks-posix.md`
+    - result:
+      - `201` rows
+      - generator passed
+      - all configured POSIX floors passed
+  - Windows benchmark refresh completed on `win11` native MSYS/MinGW toolchain path:
+    - disposable synced tree:
+      - `/tmp/plugin-ipc-bench-20260326`
+    - command:
+      - `cargo build --release --manifest-path src/crates/netipc/Cargo.toml --bin bench_windows`
+      - `bash tests/run-windows-bench.sh benchmarks-windows.csv 5`
+      - `bash tests/generate-benchmarks-windows.sh benchmarks-windows.csv benchmarks-windows.md`
+    - factual result:
+      - benchmark runner completed `201` rows
+      - generator wrote `benchmarks-windows.md`
+      - generator exited non-zero because of one floor violation:
+        - `shm-ping-pong rust->c @ max = 850,994`
+        - configured floor: `1,000,000`
+  - new user requirement after the unstable Windows reruns:
+    - make Windows benchmarks trustworthy instead of relying on single noisy runs
+    - allowed direction from user:
+      - increase duration
+      - run multiple repetitions
+      - use any stronger methodology needed, as long as the published Windows benchmark artifacts become trustworthy
+    - fit-for-purpose clarification:
+      - Windows benchmark artifacts must be publication-grade on `win11`
+      - single-run outliers must not be able to define the checked-in benchmark matrix
+  - Windows trustworthiness implementation now applied locally:
+    - `tests/run-windows-bench.sh`
+      - new default: `5` measured samples per Windows benchmark cell
+      - each published CSV row is now the median aggregate of those samples
+      - the runner now persists per-cell repeated samples in `RUN_DIR` during execution
+      - initial implementation used a blunt raw spread gate:
+        - fail if `max(sample_throughput) / min(sample_throughput) > 1.35`
+    - `tests/generate-benchmarks-windows.sh`
+      - markdown output now states that the current Windows report is based on repeated aggregated measurements instead of one single sample
+  - targeted proof of the new Windows trust method on `win11`:
+    - synced the updated Windows runner/generator into the same disposable proof tree:
+      - `/tmp/plugin-ipc-bench-20260326`
+    - command:
+      - `NIPC_BENCH_FIRST_BLOCK=2 NIPC_BENCH_LAST_BLOCK=2 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260326/shm-trust.csv 5`
+    - factual result:
+      - completed successfully with the new 5-sample median path
+      - no stability-gate failure
+      - the previously suspicious rows are now stable:
+        - `shm-ping-pong rust->c @ max = 2,527,551`
+        - `shm-ping-pong rust->rust @ 10000 = 9,999`
+      - all reported SHM sample ratios observed during that proof stayed well below the `1.35` gate
+    - implication:
+      - the old single-shot Windows SHM collapses were publication-methodology failures
+      - with repeated measurement + median aggregation + spread gating, the same `win11` host now produces a stable SHM matrix
+  - first stability-gate refinement after proof runs on `win11`:
+    - fact:
+      - the initial raw `max/min` gate was too blunt for legitimate runs with one obvious transient outlier
+    - evidence:
+      - repeated sample file from the first full repeated run:
+        - `/tmp/netipc-bench-300472/samples-np-ping-pong-c-go-100000.csv`
+      - measured throughputs:
+        - `17,798`
+        - `19,059`
+        - `15,586`
+        - `6,741`
+        - `18,303`
+      - implication:
+        - one bad transient sample should not discard the whole row if the remaining samples agree tightly
+    - attempted follow-up:
+      - a Tukey-style outlier fence was tested next
+    - fact:
+      - with only `5` samples, that approach was too aggressive and incorrectly marked normal edge values as outliers
+    - evidence:
+      - repeated sample file:
+        - `/tmp/netipc-bench-287769/samples-np-ping-pong-go-c-0.csv`
+      - measured throughputs:
+        - `17,419`
+        - `18,049`
+        - `18,078`
+        - `18,229`
+        - `18,533`
+      - implication:
+        - the real spread there is only about `1.06x`, so that row is stable and should be published
+  - final trust method now applied locally after those proof runs:
+    - `tests/run-windows-bench.sh`
+      - keep `5` measured samples per published row
+      - publish medians for throughput and latency/CPU columns
+      - when there are at least `5` samples, drop exactly one lowest and one highest throughput sample before the stability check
+      - require the remaining stable core to contain at least `3` samples
+      - require stable-core throughput spread:
+        - `stable_max / stable_min <= 1.35`
+      - if the raw extremes are noisy but the stable core is good:
+        - publish the row
+        - print a warning that records both raw and stable spreads
+    - `tests/generate-benchmarks-windows.sh`
+      - methodology text updated to describe the stable-core rule instead of the original raw-spread wording
+  - second stability-gate refinement after full-suite evidence on `win11`:
+    - fact:
+      - the first repeated full-suite rerun still found a real unstable case at `5s` max-throughput duration:
+        - `snapshot-shm rust->go @ max`
+    - evidence:
+      - repeated sample file:
+        - `/tmp/netipc-bench-300472/samples-snapshot-shm-rust-go-0.csv`
+      - measured throughputs:
+        - `1,042,824`
+        - `977,680`
+        - `648,337`
+        - `367,491`
+        - `1,027,273`
+      - stable core after dropping one low and one high sample:
+        - `648,337`
+        - `977,680`
+        - `1,027,273`
+      - stable-core ratio:
+        - `1.584474`
+    - implication:
+      - repeated measurement alone was not enough for all Windows max-throughput rows
+      - some max rows needed a longer measurement window, not just more samples
+  - max-throughput duration refinement now applied locally:
+    - `tests/run-windows-bench.sh`
+      - fixed-rate rows still use the CLI duration default:
+        - `5s`
+      - max-throughput rows now use a separate default duration:
+        - `NIPC_BENCH_MAX_DURATION=10`
+      - the runner logs both durations at startup
+    - targeted proof on `win11` for the previously failing case:
+      - command:
+        - `NIPC_BENCH_FIRST_BLOCK=4 NIPC_BENCH_LAST_BLOCK=4 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260326/snapshot-shm-10s.csv 10`
+      - factual result:
+        - previously failing `snapshot-shm rust->go @ max` became stable:
+          - median throughput `1,053,376`
+          - stable-core ratio `1.018280`
+        - another noisy row also stabilized after trimming one low and one high sample:
+          - `snapshot-shm rust->c @ max`
+          - raw range:
+            - `460,343 .. 1,167,598`
+          - stable-core range:
+            - `1,109,218 .. 1,133,875`
+          - stable-core ratio:
+            - `1.022229`
+    - implication:
+      - the final trustworthy Windows method is now:
+        - repeated measurement
+        - median publication
+        - stable-core gating
+        - longer max-throughput samples
+  - final proof run status after the trust-method changes:
+    - full-suite rerun now in progress on `win11` with the final method:
+      - fixed-rate rows:
+        - `5 samples x 5s`
+      - max-throughput rows:
+        - `5 samples x 10s`
+      - stability rule:
+        - publish only if the trimmed stable core stays within `1.35x`
+    - live confirmed progress:
+      - `np-ping-pong` block completed cleanly under the final method
+      - `shm-ping-pong` block started cleanly under the final method
+  - first full repeated rerun with the `10s` max default found one remaining unstable row late in the suite:
+    - scenario:
+      - `np-pipeline-batch-d16 rust->rust @ max`
+    - preserved sample file:
+      - `/tmp/netipc-bench-331471/samples-np-pipeline-batch-d16-rust-rust-0.csv`
+    - measured throughputs:
+      - `37,400,757`
+      - `31,635,302`
+      - `26,609,207`
+      - `39,324,202`
+      - `24,312,207`
+    - trimmed stable core:
+      - `26,609,207 .. 37,400,757`
+    - stable-core ratio:
+      - `1.405557`
+    - implication:
+      - the runner correctly failed closed
+      - the remaining instability was no longer global Windows SHM noise
+      - it was narrowed to `np-pipeline-batch @ max` on `win11`
+  - targeted proof for the remaining pipeline-batch max instability:
+    - command:
+      - `NIPC_BENCH_FIRST_BLOCK=9 NIPC_BENCH_LAST_BLOCK=9 NIPC_BENCH_MAX_DURATION=20 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260326/np-pipeline-batch-20s.csv 5`
+    - factual result:
+      - the full `np-pipeline-batch-d16` matrix passed cleanly at `20s`
+      - previously failing row became stable:
+        - `rust->rust @ max = 34,184,748`
+        - stable-core ratio `1.064913`
+      - previously noisy `go->c @ max` also tightened materially:
+        - `38,364,026`
+        - stable-core ratio `1.024521`
+    - implication:
+      - the remaining issue was short-window measurement noise for `np-pipeline-batch @ max`
+      - a longer max window fixes it without relaxing the trust gate
+  - final Windows trust method now applied locally:
+    - `tests/run-windows-bench.sh`
+      - fixed-rate rows:
+        - `5s`
+      - most max-throughput rows:
+        - `10s`
+      - `np-pipeline-batch-d16 @ max`:
+        - `20s`
+      - runner knobs now include:
+        - `NIPC_BENCH_MAX_DURATION`
+        - `NIPC_BENCH_PIPELINE_BATCH_MAX_DURATION`
+    - `tests/generate-benchmarks-windows.sh`
+      - methodology section now documents the `20s` pipeline-batch max window explicitly
+  - final published Windows artifact assembly:
+    - full repeated rerun output from:
+      - `/tmp/plugin-ipc-bench-20260326/benchmarks-windows.csv`
+      - used for all stable rows outside `np-pipeline-batch-d16`
+      - notable publishable warning retained from that full rerun:
+        - `np-pipeline-d16 go->c @ max`
+        - raw range:
+          - `111,201 .. 255,780`
+          - raw ratio `2.300159`
+        - trimmed stable core:
+          - `234,582 .. 241,982`
+          - stable ratio `1.031545`
+        - implication:
+          - the outlier-handling path is doing real work on `win11`
+          - the published median row is still trustworthy because the stable core stayed tight
+    - targeted validated `20s` rerun output from:
+      - `/tmp/plugin-ipc-bench-20260326/np-pipeline-batch-20s.csv`
+      - used to replace the incomplete/unstable `np-pipeline-batch-d16` block
+    - locally assembled final CSV:
+      - `202` lines total
+      - `201` data rows
+      - scenario counts all correct
+    - local validation:
+      - `bash tests/generate-benchmarks-windows.sh benchmarks-windows.csv benchmarks-windows.md`
+      - result:
+        - all configured Windows floors pass
+        - report generation passes cleanly
+  - follow-up approved by Costa after the first trustworthy publish:
+    - run one fresh full Windows suite on `win11` with the current default methodology
+    - objective:
+      - remove the remaining "assembled artifact" caveat if the one-shot full run now passes end to end
+    - execution rule:
+      - sync the current local benchmark-related sources to the disposable `win11` proof tree first
+      - only replace the checked-in Windows CSV/MD if that single fresh rerun passes with all floors green
+  - current fresh-proof-tree rerun on `win11` uses a new disposable tree based on `origin/main` plus the current local benchmark-related worktree files overlaid onto it:
+    - fresh tree:
+      - `/tmp/plugin-ipc-bench-20260327-fullrun-150313`
+    - factual setup issue discovered before the real rerun:
+      - `tests/run-windows-bench.sh` builds the C and Go benchmark binaries itself, but it only consumes an already-built Rust benchmark binary
+      - on a fresh disposable tree, the first launch printed:
+        - `Rust benchmark binary not found: .../src/crates/netipc/target/release/bench_windows.exe (Rust tests will be skipped)`
+      - implication:
+        - a fresh tree needs an explicit Rust build before the full Windows benchmark suite, or the run degrades to a 2-language matrix and is not publishable
+    - corrective action applied on `win11` before the real rerun:
+      - `cargo build --release --manifest-path src/crates/netipc/Cargo.toml --bin bench_windows`
+    - real rerun then restarted from the same fresh tree with diagnostics enabled:
+      - `NIPC_BENCH_DIAGNOSE_FAILURES=1 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260327-fullrun-150313/full-after-fix.csv 5`
+    - live evidence from the ongoing one-shot full rerun:
+      - no new diagnostics summary file has appeared so far
+      - block `1` (`np-ping-pong`) is already materially clean end to end:
+        - `np-ping-pong c->c @ max = 19,627`, `stable_ratio=1.018133`
+        - `np-ping-pong rust->c @ max = 19,880`, `stable_ratio=1.045638`
+        - `np-ping-pong go->go @ max = 19,195`, with one low and one high outlier trimmed, `stable_ratio=1.098122`
+        - all published `10000/s` rows reached target cleanly:
+          - examples:
+            - `rust->c = 9,999`, `stable_ratio=1.000000`
+            - `rust->rust = 9,999`, `stable_ratio=1.000000`
+            - `go->go = 10,000`, `stable_ratio=1.000000`
+        - the first published `1000/s` rows are also landing at target:
+          - `go->c = 1,000`, `stable_ratio=1.000000`
+          - `go->go = 1,000`, `stable_ratio=1.000000`
+      - the rerun has already crossed into the historically suspicious SHM block without reproducing the old collapse:
+        - `shm-ping-pong c->c @ max = 2,565,990`, `stable_ratio=1.042022`
+        - `shm-ping-pong rust->c @ max = 2,443,021`, `stable_ratio=1.089130`
+        - `shm-ping-pong c->rust @ max = 2,611,306`, `stable_ratio=1.071212`
+        - `shm-ping-pong rust->rust @ max = 2,617,581`, `stable_ratio=1.027963`
+        - `shm-ping-pong go->rust @ max = 2,327,904`, `stable_ratio=1.012447`
+      - factual interim conclusion:
+        - the current one-shot full rerun is already materially stronger evidence than the older failing full runs
+        - the earlier full-suite `shm-ping-pong rust->c` collapse is not reproducing on the same `win11` host after the current lifecycle and Windows SHM fixes
+    - live continuation coordinates for the long one-shot rerun:
+      - `win11` source tree:
+        - `/tmp/plugin-ipc-bench-20260327-fullrun-150313`
+      - live output files:
+        - CSV:
+          - `/tmp/plugin-ipc-bench-20260327-fullrun-150313/full-after-fix.csv`
+        - log:
+          - `/tmp/plugin-ipc-bench-20260327-fullrun-150313/full-after-fix.log`
+      - last verified progress in this session:
+        - `75` lines in the CSV (`74` data rows)
+        - blocks `1` and `2` completed cleanly
+        - block `3` (`snapshot-baseline`) had started and was publishing stable `@ max` rows:
+          - `c->c = 19,872`, `stable_ratio=1.029521`
+          - `rust->c = 19,291`, `stable_ratio=1.043116`
+        - no new diagnostics summary file had appeared yet
+    - later checkpoint from the same still-running one-shot rerun:
+      - `121` lines in the CSV (`120` data rows)
+      - blocks `1` through `4` had already cleared cleanly and the run had advanced deep into block `5` (`np-batch-ping-pong`)
+      - live batch evidence:
+        - `np-batch-ping-pong c->go @ max = 7,699,399`, `stable_ratio=1.045676`
+        - `np-batch-ping-pong rust->go @ max = 7,532,805`, `stable_ratio=1.018880`
+        - `np-batch-ping-pong go->go @ max = 7,152,856`, `stable_ratio=1.030591`
+        - `np-batch-ping-pong c->c @ 100000/s = 7,693,465`, `stable_ratio=1.011300`
+        - `np-batch-ping-pong rust->c @ 100000/s = 7,497,010`, `stable_ratio=1.015083`
+      - no new diagnostics summary file had appeared yet at this checkpoint either
+    - completed outcome of the clean one-shot Windows rerun:
+      - the long `win11` one-shot rerun finished cleanly
+      - final CSV size:
+        - `202` logical lines
+        - `201` data rows
+      - no new diagnostics summary file was produced during this rerun
+      - `tests/generate-benchmarks-windows.sh` passed on `win11` against the final CSV:
+        - `All performance floors met`
+      - the final generated report was copied back into the repo as:
+        - `benchmarks-windows.csv`
+        - `benchmarks-windows.md`
+      - the same generator also passed locally after copying the artifacts back:
+        - `bash tests/generate-benchmarks-windows.sh benchmarks-windows.csv benchmarks-windows.md`
+        - result:
+          - `All performance floors met`
+      - user-approved follow-up after the successful one-shot rerun:
+        - commit the Windows artifact refresh and the TODO update as a separate git commit
+        - do not include unrelated dirty files from the broader worktree
+      - implication:
+        - the remaining "assembled artifact" caveat is now removed
+        - the checked-in Windows artifacts now come from a single clean one-shot full rerun on `win11`
+      - stable final Windows max-throughput spreads from that clean one-shot artifact:
+        - `shm-ping-pong`:
+          - best:
+            - `rust->rust = 2,617,581`
+          - worst:
+            - `go->go = 2,113,834`
+          - spread:
+            - `1.238x`
+          - conclusion:
+            - no strange SHM collapse remains in the final clean artifact
+        - `lookup`:
+          - best:
+            - `rust = 176,259,707`
+          - worst:
+            - `go = 98,385,649`
+          - spread:
+            - `1.792x`
+        - `np-pipeline-d16`:
+          - best:
+            - `go->rust = 240,205`
+          - worst:
+            - `c->go = 216,940`
+          - spread:
+            - `1.107x`
+        - `np-pipeline-batch-d16`:
+          - best:
+            - `go->c = 39,065,948`
+          - worst:
+            - `c->go = 27,896,181`
+          - spread:
+            - `1.400x`
+  - first one-shot full rerun attempt with the current defaults did not produce a clean replacement artifact:
+    - partial output path:
+      - `/tmp/plugin-ipc-bench-20260326/benchmarks-windows-oneshot.csv`
+    - factual failure observed during block `1`:
+      - `np-ping-pong rust->rust @ 1000/s`
+      - Rust client exited non-zero
+      - streamed client output reported:
+        - `client: 4207 errors`
+        - partial line:
+          - `np-ping-pong,rust,rust,159,75.500,177.400,177.400,5.6,0.0,5.6`
+    - implication:
+      - the one-shot rerun cannot replace the current published Windows artifact
+      - before attempting another full rerun, the new failure should be isolated on block `1` to determine whether it is reproducible or a one-off transport/runtime glitch
+  - isolated recheck of block `1` completed cleanly on the same `win11` proof tree:
+    - command:
+      - `NIPC_BENCH_FIRST_BLOCK=1 NIPC_BENCH_LAST_BLOCK=1 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260326/block1-recheck.csv 5`
+    - output path:
+      - `/tmp/plugin-ipc-bench-20260326/block1-recheck.csv`
+    - factual result:
+      - all `36` block-1 measurements completed with exit code `0`
+      - the previously failing row completed cleanly:
+        - `np-ping-pong rust->rust @ 1000/s = 1000`
+        - `p50=66.200us`
+        - `p95=248.200us`
+        - `p99=369.500us`
+        - `stable_ratio=1.000000`
+    - implication:
+      - the first one-shot block-1 failure is not immediately reproducible
+      - this currently looks like a transient host/runtime glitch, not established deterministic instability in the `rust->rust @ 1000/s` pair
+      - the next valid check is another clean one-shot full Windows rerun with the same default methodology
+  - second one-shot full rerun with the current defaults also failed to produce a clean replacement artifact:
+    - partial output path:
+      - `/tmp/plugin-ipc-bench-20260326/benchmarks-windows-oneshot-2.csv`
+    - factual failure observed during block `2`:
+      - `shm-ping-pong rust->c @ max`
+      - repeated-sample file:
+        - `/tmp/netipc-bench-410987/samples-shm-ping-pong-rust-c-0.csv`
+      - repeated throughputs:
+        - `618,076`
+        - `618,160`
+        - `1,951,036`
+        - `2,303,714`
+        - `2,476,081`
+      - stable-core gate result:
+        - `stable_min=618,160`
+        - `stable_max=2,303,714`
+        - `stable_ratio=3.726728`
+        - configured max: `1.35`
+    - implication:
+      - the current default methodology still does not guarantee a clean one-shot full Windows run on `win11`
+      - the blocker has moved from a random-looking block-1 client failure to a concrete SHM max-throughput instability event
+  - focused reproduction of the same SHM pair in isolation did not reproduce the collapse:
+    - direct pair under the same synced `win11` tree:
+      - C server: `bench_windows_c.exe shm-ping-pong-server`
+      - Rust client: `bench_windows.exe shm-ping-pong-client`
+    - isolated `rust -> c @ max` repeated `10` times with `10s` samples:
+      - throughput range:
+        - `2,446,407 .. 2,578,450`
+      - all `10` runs stayed in the fast band
+    - isolated `rust -> c @ max` repeated `10` times with `20s` samples:
+      - throughput range:
+        - `2,363,335 .. 2,589,588`
+      - all `10` runs stayed in the fast band
+    - implication:
+      - the SHM collapse is not a simple deterministic `rust client -> c server` bug
+      - longer isolated samples are stable, but that alone does not explain the one-shot full-run failure
+  - sequence test also failed to reproduce the SHM collapse:
+    - setup:
+      - one `c -> c @ max` SHM prime run
+      - followed immediately by `5` direct `rust -> c @ max` SHM runs
+      - repeated for `5` cycles on the same `RUN_DIR`
+    - factual result:
+      - all `25` post-prime `rust -> c` runs stayed in the fast band:
+        - `2,357,337 .. 2,664,284`
+    - implication:
+      - the failure is not explained by a simple "previous `c -> c` SHM row poisons the next `rust -> c` row" theory
+      - current best description:
+        - rare transient host/runtime glitch during full-matrix execution on `win11`
+        - not immediately reproducible in dedicated pair or simple sequence tests
+  - pending user decision before more Windows runner code changes:
+    - context:
+      - Costa asked for trustworthy Windows benchmarks
+      - current state is better than before, but a clean one-shot full run is still not guaranteed
+    - user constraint raised during decision review:
+      - automatic retries must not hide real failures or real bugs
+      - if retries are ever used, first-attempt failures must remain visible and reportable
+    - user decision:
+      - keep the main Windows benchmark publication path fail-closed
+      - do not add silent self-healing retries to publish mode
+      - add a separate diagnostic mode that can rerun failed rows in isolation
+      - diagnostic mode must preserve and report the original first-attempt failure evidence side by side with any diagnostic rerun evidence
+    - option A:
+      - add automatic per-row retry on Windows when a row fails because of client error or stability-gate failure
+      - keep the current `5`-sample median + `1.35` stable-core gate inside each attempt
+      - implications:
+        - one transient bad row no longer destroys a 2-hour full run
+        - a row is still published only if a full fresh attempt passes the same gate
+      - risks:
+        - published rows may come from retry attempt `2` or `3`, not from the first pass
+        - the report and logs must say that retries happened, or the methodology becomes misleading
+    - option B:
+      - keep fail-closed behavior, but increase Windows SHM max collection further:
+        - for example `20s` per sample and/or `7-9` repeats
+      - implications:
+        - simpler story than retries
+        - every accepted row is still strictly one attempt
+      - risks:
+        - much longer full-suite runtime
+        - evidence so far does not prove that longer duration alone fixes the rare full-run glitch
+    - option C:
+      - keep the current runner and accept targeted reruns / assembled Windows artifacts when one-shot full runs glitch
+      - implications:
+        - fastest operationally
+        - still produces trustworthy rows when each replacement row is validated carefully
+      - risks:
+        - no clean single-command reproduction
+        - more manual work and more caveats around publication
+    - accepted direction:
+      - strict publish mode plus separate diagnostic reruns
+      - rationale:
+        - failures stay visible
+        - diagnostic reruns can still accelerate root-cause work without turning the publication path into silent self-healing
+  - implemented Windows diagnostic mode for failed rows:
+    - file:
+      - `tests/run-windows-bench.sh`
+    - new behavior:
+      - publish mode remains fail-closed by default
+      - opt-in diagnostics via:
+        - `NIPC_BENCH_DIAGNOSE_FAILURES=1`
+      - when a row fails in publish mode:
+        - the original failure remains authoritative
+        - the original `RUN_DIR` and first-attempt sample file remain preserved
+        - the same row is rerun in an isolated diagnostic subdirectory under the preserved `RUN_DIR`
+        - diagnostic rerun output is recorded in:
+          - `${RUN_DIR}/diagnostics-summary.txt`
+        - diagnostic reruns never write rows into the publish CSV
+    - implementation details:
+      - row-level measurement state is now tracked explicitly:
+        - failure reason
+        - sample-file path
+        - aggregate throughput/latency/CPU values
+        - stability metrics
+      - diagnostic reruns restore the original first-failure state after logging the isolated rerun evidence
+  - forced validation of the new diagnostic mode on `win11`:
+    - purpose:
+      - prove that publish mode still fails closed
+      - prove that diagnostic reruns preserve the original evidence and create side-by-side isolated rerun evidence
+    - command:
+      - `NIPC_BENCH_FIRST_BLOCK=7 NIPC_BENCH_LAST_BLOCK=7 NIPC_BENCH_DIAGNOSE_FAILURES=1 NIPC_BENCH_REPETITIONS=3 NIPC_BENCH_MAX_DURATION=1 NIPC_BENCH_PIPELINE_BATCH_MAX_DURATION=1 NIPC_BENCH_MAX_THROUGHPUT_RATIO=0.9 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260326/diag-lookup-2.csv 1`
+    - factual result:
+      - runner exited non-zero as expected
+      - publish CSV remained header-only:
+        - `/tmp/plugin-ipc-bench-20260326/diag-lookup-2.csv`
+      - preserved original run dir:
+        - `/tmp/netipc-bench-425494`
+      - diagnostic summary created:
+        - `/tmp/netipc-bench-425494/diagnostics-summary.txt`
+      - distinct diagnostic rerun dirs created per failed row:
+        - `/tmp/netipc-bench-425494/diagnostics/001-lookup-c-c-0`
+        - `/tmp/netipc-bench-425494/diagnostics/002-lookup-rust-rust-0`
+        - `/tmp/netipc-bench-425494/diagnostics/003-lookup-go-go-0`
+    - implication:
+      - the new mode preserves truth in publish mode
+      - it also gives immediate isolated rerun evidence for investigation without silently healing the benchmark artifact
+  - next-step approval from Costa:
+    - commit and push the strict publish + diagnostic-mode runner changes
+    - then proceed immediately to the real Windows SHM investigation using the new diagnostic mode on the actual failing slice
+  - commit / push completed for the diagnostic-mode runner change:
+    - commit:
+      - `870fc93`
+    - subject:
+      - `bench: add Windows diagnostic reruns`
+    - pushed to:
+      - `origin/main`
+  - real Windows SHM investigation with the new diagnostic mode:
+    - command:
+      - `NIPC_BENCH_FIRST_BLOCK=2 NIPC_BENCH_LAST_BLOCK=2 NIPC_BENCH_DIAGNOSE_FAILURES=1 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260326/shm-diagnose.csv 5`
+    - factual result:
+      - block `2` completed successfully with exit code `0`
+      - no diagnostic rerun triggered for any SHM row
+      - the previously suspicious row completed cleanly:
+        - `shm-ping-pong rust->c @ max = 2,465,857`
+        - `stable_ratio=1.021516`
+      - the full SHM max matrix stayed stable:
+        - `c->c = 2,461,053`
+        - `rust->c = 2,465,857`
+        - `go->c = 2,162,135`
+        - `c->rust = 2,597,936`
+        - `rust->rust = 2,530,435`
+        - `go->rust = 2,065,765`
+        - `c->go = 2,570,619`
+        - `rust->go = 2,254,772`
+        - `go->go = 2,079,323`
+      - all `100000/s`, `10000/s`, and `1000/s` SHM rows also completed stably in the same block run
+    - implication:
+      - the Windows SHM instability still does not reproduce when block `2` runs in isolation under the real runner
+      - current strongest working theory:
+        - the failure depends on broader full-suite context on `win11`
+        - not on the standalone SHM block itself
+  - targeted confirmation of the Windows SHM anomaly:
+    - command:
+      - `NIPC_BENCH_FIRST_BLOCK=2 NIPC_BENCH_LAST_BLOCK=2 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260326/shm-confirm.csv 5`
+    - confirmed max-throughput rerun on the same `win11` tree:
+      - `c->c = 2,396,963`
+      - `rust->c = 1,708,649`
+      - `go->c = 886,451`
+      - `c->rust = 2,566,391`
+      - `rust->rust = 2,563,582`
+      - `go->rust = 2,053,507`
+      - `c->go = 2,539,899`
+      - `rust->go = 2,215,733`
+      - `go->go = 2,047,115`
+    - factual conclusion:
+      - the original `rust->c` full-suite collapse is not stable
+      - max-throughput Windows SHM rows can swing materially between reruns on `win11`
+      - target-rate Windows SHM rows remain stable near their requested rates
+      - implication:
+        - the strange Windows SHM max delta is currently a measurement-stability / host-noise issue, not proven deterministic language regression
+- Refreshed max-throughput spread summary:
+  - Linux:
+    - `lookup`:
+      - fastest `c->c = 167,974,040`
+      - slowest `go->go = 127,908,975`
+      - spread: `1.31x`
+      - improvement versus checked-in previous artifact: `1.77x -> 1.31x`
+    - `shm-ping-pong`:
+      - fastest `rust->rust = 3,486,454`
+      - slowest `go->go = 1,725,340`
+      - spread: `2.02x`
+      - note:
+        - this widened versus the previous checked-in artifact because `go->go` max throughput dropped materially
+    - `shm-batch-ping-pong`:
+      - fastest `c->c = 61,778,266`
+      - slowest `go->go = 31,810,209`
+      - spread: `1.94x`
+    - `uds-pipeline-d16`:
+      - fastest `rust->c = 712,544`
+      - slowest `rust->go = 550,630`
+      - spread: `1.29x`
+    - `uds-pipeline-batch-d16`:
+      - fastest `c->c = 99,746,787`
+      - slowest `go->go = 50,690,629`
+      - spread: `1.97x`
+  - Windows:
+    - `lookup`:
+      - fastest `rust->rust = 178,835,588`
+      - slowest `go->go = 97,109,788`
+      - spread: `1.84x`
+    - `shm-ping-pong` full suite:
+      - fastest `c->rust = 2,650,754`
+      - slowest `rust->c = 850,994`
+      - spread: `3.11x`
+      - but targeted confirmation disproved `rust->c` as a stable deterministic outlier
+    - `shm-batch-ping-pong`:
+      - fastest `c->c = 52,520,469`
+      - slowest `go->go = 34,390,650`
+      - spread: `1.53x`
+    - `np-pipeline-batch-d16`:
+      - fastest `go->rust = 38,249,582`
+      - slowest `go->go = 24,333,588`
+      - spread: `1.57x`
+- Strange delta findings that remain real after the refresh:
+  - Linux `uds-pipeline-d16`:
+    - Go server remains the clear slow case across clients:
+      - `c->go = 559,691`
+      - `rust->go = 550,630`
+      - `go->go = 553,858`
+      - versus C/Rust servers near `686k-713k`
+    - implication:
+      - this is a stable Go-server transport/runtime cost, not client-specific noise
+  - Linux `uds-pipeline-batch-d16`:
+    - server choice dominates:
+      - C server: `96.2M-99.7M`
+      - Rust server: `84.1M-86.3M`
+      - Go server: `50.7M-51.3M`
+    - implication:
+      - the known batch-path server asymmetry is still real
+  - Linux `shm-batch-ping-pong`:
+    - C server stays strongest
+    - Rust server is mid-band
+    - Go server is slowest
+    - implication:
+      - still consistent with real server-side implementation overhead, not runner corruption
+  - Linux / Windows `lookup`:
+    - Linux:
+      - `c = 167.97M`
+      - `rust = 146.15M`
+      - `go = 127.91M`
+    - Windows:
+      - `rust = 178.84M`
+      - `c = 125.60M`
+      - `go = 97.11M`
+    - implication:
+      - lookup is now measuring runtime/data-structure efficiency more than IPC transport behavior
+      - the previous fake linear-scan distortion is gone, but cross-language runtime overhead remains visible
+- Strange delta finding that is currently suspicious but not yet proven real:
+  - Windows `shm-ping-pong @ max`:
+    - full-suite run made `rust->c` miss the floor
+    - immediate confirmation run moved the collapse to `go->c` instead
+    - conclusion:
+      - this is currently a max-throughput measurement-stability issue on `win11`
+      - do not interpret a single bad max row there as a stable language-specific regression without targeted rerun confirmation
+  - second isolated Windows SHM rerun on the same `win11` tree reinforced the same conclusion:
+    - command:
+      - `NIPC_BENCH_FIRST_BLOCK=2 NIPC_BENCH_LAST_BLOCK=2 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260326/shm-rerun.csv 5`
+    - `@max` rows:
+      - `c->c = 2,516,450`
+      - `rust->c = 2,430,413`
+      - `go->c = 2,179,591`
+      - `c->rust = 2,497,180`
+      - `rust->rust = 2,473,159`
+      - `go->rust = 2,114,944`
+      - `c->go = 2,571,394`
+      - `rust->go = 2,282,433`
+      - `go->go = 2,100,658`
+    - implication:
+      - the full-suite `rust->c` collapse to `850,994` is definitely not stable
+    - additional warning sign from the same isolated rerun:
+      - some `target_rps=10000` rows also became unstable:
+        - `c->rust = 5,073`
+        - `rust->rust = 4,098`
+        - while other rows in the same block stayed near `10,000`
+      - implication:
+        - the Windows SHM benchmark instability is not limited to one language pair or only to the first full-suite run
+- Post-commit diagnostic runner work (`870fc93 bench: add Windows diagnostic reruns`):
+  - committed and pushed:
+    - commit: `870fc93`
+    - pushed to `origin/main`
+  - immediate next investigation on `win11`:
+    - goal:
+      - identify the smallest Windows benchmark context that reproduces the earlier full-suite SHM collapse
+    - standalone SHM block with diagnostics enabled:
+      - command:
+        - `NIPC_BENCH_FIRST_BLOCK=2 NIPC_BENCH_LAST_BLOCK=2 NIPC_BENCH_DIAGNOSE_FAILURES=1 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260326/shm-diagnose.csv 5`
+      - result:
+        - exited `0`
+        - no diagnostics triggered
+      - key `shm-ping-pong @ max` rows:
+        - `c->c = 2,461,053` with `stable_ratio=1.018190`
+        - `rust->c = 2,465,857` with `stable_ratio=1.021516`
+        - `go->c = 2,162,135` with `stable_ratio=1.017540`
+        - `c->rust = 2,597,936` with `stable_ratio=1.016334`
+        - `rust->rust = 2,530,435` with `stable_ratio=1.020250`
+        - `go->rust = 2,065,765` with `stable_ratio=1.029206`
+        - `c->go = 2,571,619` with `stable_ratio=1.013998`
+        - `rust->go = 2,254,772` with `stable_ratio=1.022145`
+        - `go->go = 2,079,323` with `stable_ratio=1.010925`
+      - factual conclusion:
+        - block `2` alone is stable under the real repeated-median runner
+        - the earlier full-suite `rust->c` collapse is not a standalone SHM bug
+    - combined `NP -> SHM` prefix with diagnostics enabled:
+      - command:
+        - `NIPC_BENCH_FIRST_BLOCK=1 NIPC_BENCH_LAST_BLOCK=2 NIPC_BENCH_DIAGNOSE_FAILURES=1 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260326/np-shm-diagnose.csv 5`
+      - result:
+        - exited `0`
+        - no diagnostics triggered
+        - total measurements: `72`
+      - key `np-ping-pong @ max` rows:
+        - `c->c = 19,411`
+        - `rust->c = 19,735`
+        - `go->c = 18,744`
+        - `c->rust = 20,188`
+        - `rust->rust = 20,301`
+        - `go->rust = 19,277`
+        - `c->go = 19,383`
+        - `rust->go = 18,558`
+        - `go->go = 19,241`
+      - key `shm-ping-pong @ max` rows:
+        - `c->c = 2,522,584`
+        - `rust->c = 2,522,004`
+        - `go->c = 2,071,095`
+        - `c->rust = 2,580,971`
+        - `rust->rust = 2,511,775`
+        - `go->rust = 2,308,182`
+        - `c->go = 2,657,019`
+        - `rust->go = 2,273,563`
+        - `go->go = 2,109,132`
+      - factual conclusion:
+        - the failure does not reproduce with blocks `1-2`
+        - the earlier bad `rust->c` full-suite row requires broader full-suite context than just the `NP -> SHM` transition
+  - updated working theory:
+    - speculation:
+      - a later block, or cumulative state from multiple later blocks, is needed to trigger the rare full-suite Windows instability
+    - not supported by evidence anymore:
+      - standalone SHM bug
+      - simple `NP -> SHM` transition bug
+  - next diagnostic step:
+    - extend the prefix to block `3` and repeat:
+      - `NIPC_BENCH_FIRST_BLOCK=1 NIPC_BENCH_LAST_BLOCK=3 NIPC_BENCH_DIAGNOSE_FAILURES=1 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260326/np-shm-batch-diagnose.csv 5`
+- Current deep-dive findings after extending the prefix to block `3`:
+  - factual setup:
+    - command executed on `win11`:
+      - `NIPC_BENCH_FIRST_BLOCK=1 NIPC_BENCH_LAST_BLOCK=3 NIPC_BENCH_DIAGNOSE_FAILURES=1 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260326/np-shm-shmbatch-diagnose.csv 5`
+    - result:
+      - exited non-zero
+      - publish CSV was partial, not empty
+      - remote CSV line count:
+        - `89` total lines
+        - `88` data rows
+      - expected for blocks `1-3`:
+        - `90` data rows
+      - missing rows:
+        - `shm-ping-pong,rust,go,0`
+        - `shm-ping-pong,c,c,10000`
+  - factual evidence that the run continued after failures:
+    - the partial CSV still contains later rows after the first failed `shm-ping-pong rust->go @ max`
+    - it also contains all `snapshot-baseline` rows for block `3`
+    - implication:
+      - the runner is correctly fail-recording rows while continuing the remaining matrix
+  - factual evidence that first failure was an intermittent runtime failure, not a stable throughput regression:
+    - preserved first-attempt sample file for `shm-ping-pong rust->go @ max` has only `4` completed repeats in `/tmp/netipc-bench-410987/samples-shm-ping-pong-rust-go-0.csv`
+    - those four repeats were all healthy:
+      - `2,183,340`
+      - `2,290,965`
+      - `2,295,026`
+      - `2,240,149`
+    - implication:
+      - the row failed because one repeat died mid-row, not because all repeats drifted slow
+  - factual evidence of a runner/server lifecycle bug:
+    - the runner hard-kills every benchmark server after each sample in [tests/run-windows-bench.sh:247](/home/costa/src/plugin-ipc.git/tests/run-windows-bench.sh#L247) to [tests/run-windows-bench.sh:263](/home/costa/src/plugin-ipc.git/tests/run-windows-bench.sh#L263)
+    - the Windows benchmark servers are implemented to stop themselves after `duration+3` seconds and then run normal teardown / CPU reporting:
+      - C: [bench/drivers/c/bench_windows.c:380](/home/costa/src/plugin-ipc.git/bench/drivers/c/bench_windows.c#L380) and [bench/drivers/c/bench_windows.c:398](/home/costa/src/plugin-ipc.git/bench/drivers/c/bench_windows.c#L398)
+      - Rust: [bench/drivers/rust/src/bench_windows.rs:380](/home/costa/src/plugin-ipc.git/bench/drivers/rust/src/bench_windows.rs#L380) to [bench/drivers/rust/src/bench_windows.rs:392](/home/costa/src/plugin-ipc.git/bench/drivers/rust/src/bench_windows.rs#L392)
+      - Go: [bench/drivers/go/main_windows.go:319](/home/costa/src/plugin-ipc.git/bench/drivers/go/main_windows.go#L319) to [bench/drivers/go/main_windows.go:331](/home/costa/src/plugin-ipc.git/bench/drivers/go/main_windows.go#L331)
+    - implication:
+      - the runner is violating the server lifecycle contract on Windows
+      - hard kill can bypass `nipc_server_destroy()` / `server.Stop()` cleanup
+      - this directly explains:
+        - transient client timeouts
+        - `"in use by live server"` collisions on the next repeat
+        - immediate success when the same row is rerun in isolation
+  - factual evidence that Windows SHM naming is sensitive to leaked sessions:
+    - Windows server session IDs restart from `1` for every server process in [src/libnetdata/netipc/src/service/netipc_service_win.c:933](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/service/netipc_service_win.c#L933)
+    - new sessions increment from that counter in [src/libnetdata/netipc/src/service/netipc_service_win.c:1008](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/service/netipc_service_win.c#L1008)
+    - Windows SHM object names include `run_dir + service_name + auth_token + session_id` in [src/libnetdata/netipc/include/netipc/netipc_win_shm.h:8](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_win_shm.h#L8) to [src/libnetdata/netipc/include/netipc/netipc_win_shm.h:11](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_win_shm.h#L11)
+    - stale cleanup is intentionally a no-op on Windows in [src/libnetdata/netipc/include/netipc/netipc_win_shm.h:215](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_win_shm.h#L215) to [src/libnetdata/netipc/include/netipc/netipc_win_shm.h:220](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_win_shm.h#L220) and [src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:781](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c#L781)
+    - implication:
+      - if a previous sample's server/session stays alive briefly, the next sample for the same service can collide on named pipe and/or SHM object names
+  - factual evidence of a separate diagnostic bookkeeping bug:
+    - the root run dir found on disk for the latest run was `/tmp/netipc-bench-410987`
+    - it contains files only up to SHM `@ max` rows
+    - later successful rows from the same run are present in the output CSV but their sample files are not present under that root
+    - the runner warning printed a different root path (`/tmp/netipc-bench-456611`) that does not exist on disk
+    - implication:
+      - diagnostic mode currently preserves the truth of the first failure in the terminal output
+      - but it does **not** yet preserve the filesystem evidence reliably enough
+  - factual evidence of a Windows SHM transport hardening gap:
+    - C Windows SHM create path does not check `GetLastError() == ERROR_ALREADY_EXISTS` after `CreateFileMappingW` / `CreateEventW` in [src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:198](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c#L198) to [src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:266](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c#L266)
+    - Rust and Go Windows SHM server-create paths also do not appear to check for existing named objects:
+      - Rust: [src/crates/netipc/src/transport/win_shm.rs:252](/home/costa/src/plugin-ipc.git/src/crates/netipc/src/transport/win_shm.rs#L252) to [src/crates/netipc/src/transport/win_shm.rs:317](/home/costa/src/plugin-ipc.git/src/crates/netipc/src/transport/win_shm.rs#L317)
+      - Go: [src/go/pkg/netipc/transport/windows/shm.go:166](/home/costa/src/plugin-ipc.git/src/go/pkg/netipc/transport/windows/shm.go#L166) to [src/go/pkg/netipc/transport/windows/shm.go:249](/home/costa/src/plugin-ipc.git/src/go/pkg/netipc/transport/windows/shm.go#L249)
+    - implication:
+      - a leaked Windows SHM object may be treated as a successful create instead of an explicit collision
+      - this can turn cleanup problems into nondeterministic runtime behavior
+- Decision needed before code:
+  - `1. A` Fix the Windows benchmark runner only.
+    - scope:
+      - replace hard-kill shutdown with graceful server stop / wait and hard-kill fallback only on timeout
+      - make per-repeat server/client output files unique
+      - fix diagnostic bookkeeping so preserved run dirs and summaries always match the actual run
+    - benefits:
+      - directly targets the strongest evidence
+      - smallest code-change surface
+      - most likely enough to make the benchmark harness trustworthy
+    - implications:
+      - benchmark methodology changes only, not transport semantics
+      - if Windows SHM object-collision handling is also weak, the benchmark harness may become stable while the product bug remains latent
+    - risks:
+      - could leave a real Windows transport bug hidden until another scenario hits it outside the benchmark harness
+  - `1. B` Fix the Windows benchmark runner and harden Windows SHM object creation in C, Rust, and Go.
+    - scope:
+      - everything in `1. A`
+      - plus explicit `ERROR_ALREADY_EXISTS` handling for Windows SHM mappings/events and clearer collision errors
+    - benefits:
+      - addresses both the likely benchmark root cause and a real transport safety gap
+      - makes leaked object collisions explicit instead of nondeterministic
+    - implications:
+      - larger change across multiple language implementations
+      - requires more testing
+    - risks:
+      - broader patch, more review surface, more chance of side effects if the three implementations are not kept perfectly aligned
+  - `1. C` Continue diagnosis without code changes.
+    - scope:
+      - more targeted reruns and more artifact collection
+    - benefits:
+      - lowest code risk
+    - implications:
+      - more benchmark time burned with a runner we already know is violating server lifecycle on Windows
+    - risks:
+      - low leverage
+      - likely delays the obvious fix
+  - recommendation:
+    - `1. B`
+    - reasoning:
+      - the hard-kill runner behavior is the strongest causal explanation for the benchmark instability
+      - but the Windows SHM create path also has a real hardening gap
+      - if the goal is "Windows benchmarks trustworthy", fixing only the runner is probably enough for the harness, but not enough for the underlying transport robustness
+  - user decision:
+    - `1. B`
+    - accepted scope:
+      - fix the Windows benchmark runner lifecycle and diagnostics bookkeeping
+      - harden Windows SHM object creation in C, Rust, and Go to detect existing named objects explicitly
+  - implementation and verification after `1. B`:
+    - local code changes completed:
+      - runner:
+        - `tests/run-windows-bench.sh`
+      - Windows SHM hardening:
+        - `src/libnetdata/netipc/include/netipc/netipc_win_shm.h`
+        - `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`
+        - `src/crates/netipc/src/transport/win_shm.rs`
+        - `src/go/pkg/netipc/transport/windows/shm.go`
+      - regression coverage:
+        - `tests/fixtures/c/test_win_shm.c`
+        - `src/crates/netipc/src/transport/win_shm.rs`
+        - `src/go/pkg/netipc/transport/windows/shm_test.go`
+    - factual runner behavior after the patch:
+      - the Windows runner now:
+        - uses a unique per-repeat runtime/artifact directory instead of reusing the same `RUN_DIR` for every repeat
+        - waits for benchmark servers to stop themselves before killing them
+        - preserves the root run dir on any measurement-command failure, not only on stability-gate failures
+        - records the first-attempt artifact directory in the diagnostics summary
+    - factual transport behavior after the patch:
+      - C, Rust, and Go Windows SHM server-create paths now reject existing named mappings/events explicitly instead of treating them as successful creates
+      - new error surface:
+        - C:
+          - `NIPC_WIN_SHM_ERR_ADDR_IN_USE`
+        - Rust:
+          - `WinShmError::AddrInUse`
+        - Go:
+          - `ErrWinShmAddrInUse`
+    - first verification on `win11`:
+      - focused Windows SHM duplicate-create coverage now passes in all three implementations:
+        - Go:
+          - `cd src/go && GOOS=windows GOARCH=amd64 go test -run TestWinShmServerCreateRejectsExistingObjects -count=1 ./pkg/netipc/transport/windows`
+        - Rust:
+          - `cargo test --manifest-path src/crates/netipc/Cargo.toml test_server_create_rejects_existing_objects_windows -- --test-threads=1`
+        - C:
+          - `cmake --build build -j4 --target test_win_shm`
+          - `ctest --test-dir build --output-on-failure -R '^test_win_shm$'`
+      - result:
+        - all passed
+    - factual new issue exposed by the stricter runner:
+      - extending the real benchmark rerun to `NIPC_BENCH_FIRST_BLOCK=1 NIPC_BENCH_LAST_BLOCK=3` no longer reproduced the old random SHM collapse first
+      - instead, it exposed a deterministic Rust benchmark-driver shutdown bug:
+        - every row using a Rust Windows benchmark server failed with:
+          - `Server rust (...) did not exit cleanly within 10s; forcing kill`
+        - preserved server output contained only:
+          - `READY`
+        - implication:
+          - the stricter runner removed the old benchmark-driver hard-kill masking and surfaced a real Rust benchmark-driver lifecycle bug
+      - root cause:
+        - `bench/drivers/rust/src/bench_windows.rs` still used the old Windows stop pattern:
+          - only `running_flag.store(false, ...)`
+          - no wake connection
+        - this is the same Windows accept-loop issue already fixed earlier in the Rust Windows tests:
+          - `ConnectNamedPipe()` stays blocked until a connection wakes it
+      - fix:
+        - `bench/drivers/rust/src/bench_windows.rs` now mirrors the tested shutdown pattern:
+          - after `duration+3`, set `running_flag = false`
+          - then issue a dummy `NpSession::connect(...)` so the blocked accept loop can observe shutdown and exit cleanly
+      - direct proof on `win11`:
+        - command:
+          - `timeout 20 src/crates/netipc/target/release/bench_windows.exe np-ping-pong-server /tmp/plugin-ipc-bench-20260327 rust-stop-check 1`
+        - result:
+          - `READY`
+          - `SERVER_CPU_SEC=0.000000`
+        - implication:
+          - the Rust Windows benchmark server now exits on its own instead of hanging until killed
+    - focused real benchmark proof after all fixes:
+      - command:
+        - `NIPC_BENCH_FIRST_BLOCK=2 NIPC_BENCH_LAST_BLOCK=2 NIPC_BENCH_DIAGNOSE_FAILURES=1 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260327/block-2-after-fix.csv 5`
+      - result:
+        - exited `0`
+        - no diagnostic reruns were needed
+        - all `36` `shm-ping-pong` rows published
+      - key evidence:
+        - the previously suspicious Windows row is now stable:
+          - `shm-ping-pong rust->c @ max = 2,458,786`
+          - stable ratio:
+            - `1.009920`
+        - all SHM `@ max` rows completed inside the stability gate:
+          - `c->c = 2,505,981` with `stable_ratio=1.038817`
+          - `rust->c = 2,458,786` with `stable_ratio=1.009920`
+          - `c->rust = 2,588,642` with `stable_ratio=1.028021`
+          - `rust->rust = 2,649,571` with `stable_ratio=1.018367`
+          - `rust->go = 2,242,750` with `stable_ratio=1.045399`
+        - the previously suspicious fixed-rate rows are now also stable:
+          - `rust->c @ 100000/s = 99,997` with `stable_ratio=1.000010`
+          - `rust->c @ 10000/s = 9,999` with `stable_ratio=1.000000`
+          - `rust->rust @ 10000/s = 9,999` with `stable_ratio=1.000000`
+      - factual conclusion from the focused SHM rerun:
+        - the Windows SHM benchmark instability is materially reduced after:
+          - runner lifecycle fixes
+          - per-repeat runtime isolation
+          - explicit Windows SHM collision detection
+          - Rust benchmark-server wake-on-stop fix
+        - the earlier `rust->c` SHM collapse no longer reproduces in the real benchmark block that used to be suspicious
+    - partial full-suite proof after the focused fixes:
+      - command started on `win11`:
+        - `NIPC_BENCH_DIAGNOSE_FAILURES=1 bash tests/run-windows-bench.sh /tmp/plugin-ipc-bench-20260327/full-after-fix.csv 5`
+      - factual behavior before manual interruption:
+        - no diagnostics were emitted
+        - no forced-kill Rust benchmark-server failures reappeared
+        - the run cleared the exact NP area where the stricter runner had previously exposed the Rust benchmark-server shutdown bug:
+          - `np-ping-pong @ max` rows for Rust servers completed cleanly
+          - `np-ping-pong @ 100000/s` rows for Rust servers completed cleanly
+          - `np-ping-pong @ 10000/s` rows were still running cleanly when the run was stopped intentionally for time
+      - reason for interruption:
+        - no new technical blocker remained
+        - the rest of the work was wall-clock runtime only
