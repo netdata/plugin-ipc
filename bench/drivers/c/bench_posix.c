@@ -467,7 +467,7 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
                                        uint64_t target_rps,
                                        const char *scenario, const char *lang)
 {
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = profiles,
         .preferred_profiles        = profiles,
         .max_request_payload_bytes = BENCH_BATCH_BUF_SIZE,
@@ -475,7 +475,6 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
         .max_response_payload_bytes = BENCH_BATCH_BUF_SIZE,
         .max_response_batch_items  = BENCH_MAX_BATCH_ITEMS,
         .auth_token                = AUTH_TOKEN,
-        .packet_size               = 0,
     };
 
     nipc_client_ctx_t client;
@@ -699,7 +698,7 @@ static int run_ping_pong_client(const char *run_dir, const char *service,
                                  uint64_t target_rps,
                                  const char *scenario, const char *lang)
 {
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = profiles,
         .preferred_profiles        = profiles,
         .max_request_payload_bytes = 4096,
@@ -707,7 +706,6 @@ static int run_ping_pong_client(const char *run_dir, const char *service,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
         .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
-        .packet_size               = 0,
     };
 
     nipc_client_ctx_t client;
@@ -874,7 +872,7 @@ static int run_snapshot_client(const char *run_dir, const char *service,
                                 uint64_t target_rps,
                                 const char *scenario, const char *lang)
 {
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = profiles,
         .preferred_profiles        = profiles,
         .max_request_payload_bytes = 4096,
@@ -882,7 +880,6 @@ static int run_snapshot_client(const char *run_dir, const char *service,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
         .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
-        .packet_size               = 0,
     };
 
     nipc_client_ctx_t client;
@@ -1254,7 +1251,7 @@ int main(int argc, char **argv)
          * batch. item_count==1 is normalized to the single-item path.
          * Use the batch server (higher limits). The pipeline client
          * sends `depth` batch messages, receives `depth` batch responses. */
-        nipc_uds_client_config_t ccfg = {
+        nipc_client_config_t ccfg = {
             .supported_profiles        = BENCH_PROFILE_UDS,
             .preferred_profiles        = BENCH_PROFILE_UDS,
             .max_request_payload_bytes = BENCH_BATCH_BUF_SIZE,
@@ -1262,7 +1259,6 @@ int main(int argc, char **argv)
             .max_response_payload_bytes = BENCH_BATCH_BUF_SIZE,
             .max_response_batch_items  = BENCH_MAX_BATCH_ITEMS,
             .auth_token                = AUTH_TOKEN,
-            .packet_size               = 0,
         };
 
         nipc_client_ctx_t client;
@@ -1410,7 +1406,7 @@ int main(int argc, char **argv)
         if (depth < 1)
             depth = 1;
 
-        nipc_uds_client_config_t ccfg = {
+        nipc_client_config_t ccfg = {
             .supported_profiles        = BENCH_PROFILE_UDS,
             .preferred_profiles        = BENCH_PROFILE_UDS,
             .max_request_payload_bytes = 4096,
@@ -1418,7 +1414,6 @@ int main(int argc, char **argv)
             .max_response_payload_bytes = RESPONSE_BUF_SIZE,
             .max_response_batch_items  = 1,
             .auth_token                = AUTH_TOKEN,
-            .packet_size               = 0,
         };
 
         nipc_client_ctx_t client;

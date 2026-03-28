@@ -116,6 +116,23 @@ func TestWinShmCreateAttachRejectsLongObjectName(t *testing.T) {
 	}
 }
 
+func TestWinShmServerCreateRejectsExistingObjects(t *testing.T) {
+	runDir := t.TempDir()
+	service := "addr-in-use"
+	const authToken uint64 = 0x445566
+	const sessionID uint64 = 25
+
+	server, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileHybrid, 4096, 4096)
+	if err != nil {
+		t.Fatalf("WinShmServerCreate failed: %v", err)
+	}
+	defer server.WinShmDestroy()
+
+	if _, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileHybrid, 4096, 4096); !errors.Is(err, ErrWinShmAddrInUse) {
+		t.Fatalf("second WinShmServerCreate = %v, want ErrWinShmAddrInUse", err)
+	}
+}
+
 func TestWinShmServerCreateRejectsLateEventNameOverflow(t *testing.T) {
 	runDir := t.TempDir()
 	const authToken uint64 = 0x9989

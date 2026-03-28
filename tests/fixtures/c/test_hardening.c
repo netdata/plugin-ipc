@@ -70,7 +70,20 @@ static nipc_uds_server_config_t default_server_config(void)
     };
 }
 
-static nipc_uds_client_config_t default_client_config(void)
+static nipc_client_config_t default_client_config(void)
+{
+    return (nipc_client_config_t){
+        .supported_profiles = NIPC_PROFILE_BASELINE,
+        .preferred_profiles = 0,
+        .max_request_payload_bytes = 4096,
+        .max_request_batch_items = 1,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .max_response_batch_items = 1,
+        .auth_token = AUTH_TOKEN,
+    };
+}
+
+static nipc_uds_client_config_t default_transport_client_config(void)
 {
     return (nipc_uds_client_config_t){
         .supported_profiles = NIPC_PROFILE_BASELINE,
@@ -81,6 +94,19 @@ static nipc_uds_client_config_t default_client_config(void)
         .max_response_batch_items = 1,
         .auth_token = AUTH_TOKEN,
         .packet_size = 0,
+    };
+}
+
+static nipc_server_config_t default_typed_server_config(void)
+{
+    return (nipc_server_config_t){
+        .supported_profiles = NIPC_PROFILE_BASELINE,
+        .preferred_profiles = 0,
+        .max_request_payload_bytes = 4096,
+        .max_request_batch_items = 1,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .max_response_batch_items = 1,
+        .auth_token = AUTH_TOKEN,
     };
 }
 
@@ -141,17 +167,19 @@ typedef struct {
 static void *server_thread_fn(void *arg)
 {
     server_thread_ctx_t *ctx = (server_thread_ctx_t *)arg;
-    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_server_config_t scfg = default_typed_server_config();
+    nipc_uds_server_config_t raw_scfg = default_server_config();
     nipc_error_t err;
 
     scfg.max_response_payload_bytes = (uint32_t)ctx->response_buf_size;
+    raw_scfg.max_response_payload_bytes = (uint32_t)ctx->response_buf_size;
 
     if (ctx->typed) {
         err = nipc_server_init_typed(&ctx->server, TEST_RUN_DIR, ctx->service,
                                      &scfg, ctx->worker_count, ctx->service_handler);
     } else {
         err = nipc_server_init(&ctx->server, TEST_RUN_DIR, ctx->service,
-                               &scfg, ctx->worker_count,
+                               &raw_scfg, ctx->worker_count,
                                NIPC_METHOD_CGROUPS_SNAPSHOT,
                                ctx->raw_handler, ctx->raw_user);
     }
@@ -260,7 +288,7 @@ static void stop_server(server_thread_ctx_t *ctx, pthread_t tid)
 static void verify_server_still_works(const char *service, const char *prefix)
 {
     nipc_client_ctx_t client;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_resp_view_t view;
     nipc_error_t err;
     char msg[128];
@@ -291,7 +319,7 @@ static void run_bad_header_session_test(const char *service,
 {
     server_thread_ctx_t sctx;
     pthread_t server_tid;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_client_config_t ccfg = default_transport_client_config();
     nipc_uds_session_t session;
     nipc_uds_error_t uerr;
     nipc_header_t bad_hdr;
@@ -376,7 +404,7 @@ static void test_typed_server_rejects_null_service_handler(void)
     printf("--- Typed server rejects NULL service handler ---\n");
 
     nipc_managed_server_t server;
-    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_server_config_t scfg = default_typed_server_config();
     nipc_error_t err = nipc_server_init_typed(&server, TEST_RUN_DIR,
                                               "hard_null_service_handler", &scfg,
                                               1, NULL);
@@ -391,7 +419,7 @@ static void test_typed_server_missing_snapshot_handler(void)
     const char *svc = "hard_missing_snapshot_handler";
     server_thread_ctx_t sctx;
     pthread_t server_tid;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_service_handler_t service_handler = {
         .handle = NULL,
         .snapshot_max_items = 0,
@@ -429,7 +457,7 @@ static void test_typed_server_dispatches_snapshot_service(void)
     const char *svc = "hard_typed_snapshot_dispatch";
     server_thread_ctx_t sctx;
     pthread_t server_tid;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_service_handler_t service_handler = g_service_handler;
     nipc_client_ctx_t client;
     nipc_cgroups_resp_view_t snap_view;
@@ -467,7 +495,7 @@ static void test_typed_server_unknown_method_returns_unsupported(void)
     const char *svc = "hard_typed_unknown";
     server_thread_ctx_t sctx;
     pthread_t server_tid;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_client_config_t ccfg = default_transport_client_config();
     nipc_uds_session_t session;
     nipc_header_t req_hdr = {0};
     nipc_header_t resp_hdr = {0};
@@ -516,7 +544,7 @@ static void test_typed_server_init_propagates_raw_init_error(void)
     printf("--- Typed server init propagates raw listen/init errors ---\n");
 
     nipc_managed_server_t server;
-    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_server_config_t scfg = default_typed_server_config();
     nipc_error_t err = nipc_server_init_typed(&server,
                                               "/tmp/nipc_missing_parent_99999",
                                               "hard_typed_init_fail",
@@ -531,7 +559,7 @@ static void test_internal_session_table_growth(void)
 
     const char *svc = "hard_growth";
     nipc_managed_server_t server;
-    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_server_config_t scfg = default_typed_server_config();
     nipc_client_ctx_t clients[3];
     pthread_t server_tid;
     nipc_error_t err;
@@ -561,7 +589,7 @@ static void test_internal_session_table_growth(void)
     usleep(50000);
 
     for (int i = 0; i < 3; i++) {
-        nipc_uds_client_config_t ccfg = default_client_config();
+        nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&clients[i], TEST_RUN_DIR, svc, &ccfg);
         nipc_client_refresh(&clients[i]);
         if (nipc_client_ready(&clients[i]))
@@ -642,7 +670,7 @@ static void test_cache_refresh_rejects_malformed_snapshot(void)
     pthread_t server_tid;
     nipc_cgroups_cache_t cache;
     nipc_cgroups_cache_status_t status;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     bool updated;
 
     cleanup_all(svc);

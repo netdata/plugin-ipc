@@ -1,6 +1,5 @@
 use super::*;
 use crate::protocol::{CgroupsBuilder, NipcError, PROFILE_BASELINE, PROFILE_SHM_HYBRID};
-use crate::transport::windows::{ClientConfig, ServerConfig};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;

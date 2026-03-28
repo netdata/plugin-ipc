@@ -70,9 +70,9 @@ static nipc_uds_server_config_t default_server_config(void)
     };
 }
 
-static nipc_uds_client_config_t default_client_config(void)
+static nipc_client_config_t default_client_config(void)
 {
-    return (nipc_uds_client_config_t){
+    return (nipc_client_config_t){
         .supported_profiles        = NIPC_PROFILE_BASELINE,
         .preferred_profiles        = 0,
         .max_request_payload_bytes = 4096,
@@ -80,7 +80,6 @@ static nipc_uds_client_config_t default_client_config(void)
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
         .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
-        .packet_size               = 0,
     };
 }
 
@@ -254,7 +253,7 @@ static void test_full_round_trip(void)
     check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_cgroups_cache_t cache;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, svc, &ccfg);
 
     check("not ready before refresh", !nipc_cgroups_cache_ready(&cache));
@@ -315,7 +314,7 @@ static void test_refresh_failure_preserves(void)
     start_server(&sctx, svc, test_cgroups_handler, RESPONSE_BUF_SIZE, &tid);
 
     nipc_cgroups_cache_t cache;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, svc, &ccfg);
 
     /* First refresh populates cache */
@@ -359,7 +358,7 @@ static void test_reconnect_rebuilds(void)
     start_server(&sctx1, svc, test_cgroups_handler, RESPONSE_BUF_SIZE, &tid1);
 
     nipc_cgroups_cache_t cache;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, svc, &ccfg);
 
     check("first refresh ok", nipc_cgroups_cache_refresh(&cache));
@@ -406,7 +405,7 @@ static void test_lookup_not_found(void)
     start_server(&sctx, svc, test_cgroups_handler, RESPONSE_BUF_SIZE, &tid);
 
     nipc_cgroups_cache_t cache;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, svc, &ccfg);
     nipc_cgroups_cache_refresh(&cache);
 
@@ -438,7 +437,7 @@ static void test_empty_cache(void)
     cleanup_all(svc);
 
     nipc_cgroups_cache_t cache;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, svc, &ccfg);
 
     check("not ready", !nipc_cgroups_cache_ready(&cache));
@@ -472,7 +471,7 @@ static void test_large_dataset(void)
     check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_cgroups_cache_t cache;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     ccfg.max_response_payload_bytes = LARGE_BUF_SIZE;
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, svc, &ccfg);
 

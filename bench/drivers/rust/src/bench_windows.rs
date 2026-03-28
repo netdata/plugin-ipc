@@ -24,7 +24,7 @@ use netipc::protocol::{
     METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE, STATUS_OK, VERSION,
 };
 #[cfg(windows)]
-use netipc::service::cgroups::CgroupsClient;
+use netipc::service::cgroups::{CgroupsClient, ClientConfig as TypedClientConfig};
 #[cfg(windows)]
 use netipc::service::raw::{
     increment_dispatch, snapshot_dispatch, CgroupsCacheItem, DispatchHandler, ManagedServer,
@@ -255,6 +255,20 @@ fn client_config(profiles: u32) -> ClientConfig {
 }
 
 #[cfg(windows)]
+fn typed_client_config(profiles: u32) -> TypedClientConfig {
+    TypedClientConfig {
+        supported_profiles: profiles,
+        preferred_profiles: profiles,
+        max_request_payload_bytes: 4096,
+        max_request_batch_items: 1,
+        max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
+        max_response_batch_items: 1,
+        auth_token: AUTH_TOKEN,
+        ..TypedClientConfig::default()
+    }
+}
+
+#[cfg(windows)]
 fn batch_server_config(profiles: u32) -> ServerConfig {
     ServerConfig {
         supported_profiles: profiles,
@@ -280,6 +294,27 @@ fn batch_client_config(profiles: u32) -> ClientConfig {
         auth_token: AUTH_TOKEN,
         ..ClientConfig::default()
     }
+}
+
+#[cfg(windows)]
+fn spawn_server_stop_waker(
+    run_dir: &str,
+    service: &str,
+    wake_config: ClientConfig,
+    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    duration_sec: u32,
+) {
+    let stop_run_dir = run_dir.to_string();
+    let stop_service = service.to_string();
+
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(duration_sec as u64 + 3));
+        stop_flag.store(false, Ordering::Release);
+
+        // Wake a blocking ConnectNamedPipe() so the accept loop can observe
+        // the stop flag and exit cleanly.
+        let _ = NpSession::connect(&stop_run_dir, &stop_service, &wake_config);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -378,11 +413,7 @@ fn run_server(
     let cpu_start = cpu_ns();
 
     let stop_flag = server.running_flag();
-    let dur = duration_sec;
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(dur as u64 + 3));
-        stop_flag.store(false, Ordering::Release);
-    });
+    spawn_server_stop_waker(run_dir, service, client_config(profiles), stop_flag, duration_sec);
 
     let _ = server.run();
 
@@ -413,11 +444,13 @@ fn run_batch_server(run_dir: &str, service: &str, profiles: u32, duration_sec: u
     let cpu_start = cpu_ns();
 
     let stop_flag = server.running_flag();
-    let dur = duration_sec;
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(dur as u64 + 3));
-        stop_flag.store(false, Ordering::Release);
-    });
+    spawn_server_stop_waker(
+        run_dir,
+        service,
+        batch_client_config(profiles),
+        stop_flag,
+        duration_sec,
+    );
 
     let _ = server.run();
 
@@ -498,6 +531,9 @@ fn run_ping_pong_client(
     let mut counter: u64 = 0;
     let mut requests: u64 = 0;
     let mut errors: u64 = 0;
+    let mut msg_buf = vec![0u8; HEADER_SIZE + 8];
+    let mut resp_buf = vec![0u8; HEADER_SIZE + 64];
+    let mut recv_buf = vec![0u8; 256];
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
@@ -527,7 +563,7 @@ fn run_ping_pong_client(
         let send_ok = if let Some(ref mut shm_ctx) = shm {
             // Win SHM path
             let msg_len = HEADER_SIZE + 8;
-            let mut msg = vec![0u8; msg_len];
+            let msg = &mut msg_buf[..msg_len];
             hdr.magic = MAGIC_MSG;
             hdr.version = VERSION;
             hdr.header_len = protocol::HEADER_LEN;
@@ -540,7 +576,6 @@ fn run_ping_pong_client(
                 continue;
             }
 
-            let mut resp_buf = vec![0u8; HEADER_SIZE + 64];
             match shm_ctx.receive(&mut resp_buf, 30000) {
                 Ok(resp_len) => {
                     if resp_len >= HEADER_SIZE + 8 {
@@ -569,7 +604,6 @@ fn run_ping_pong_client(
                 errors += 1;
                 continue;
             }
-            let mut recv_buf = vec![0u8; 256];
             match session.receive(&mut recv_buf) {
                 Ok((_resp_hdr, payload)) => {
                     if payload.len() >= 8 {
@@ -647,7 +681,7 @@ fn run_snapshot_client(
     scenario: &str,
     server_lang: &str,
 ) -> i32 {
-    let mut client = CgroupsClient::new(run_dir, service, client_config(profiles));
+    let mut client = CgroupsClient::new(run_dir, service, typed_client_config(profiles));
 
     for _ in 0..200 {
         client.refresh();
@@ -779,6 +813,7 @@ fn run_batch_ping_pong_client(
 
     let mut req_buf = vec![0u8; BENCH_BATCH_BUF_SIZE];
     let mut recv_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
+    let mut msg_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
     let mut expected = vec![0u64; BENCH_MAX_BATCH_ITEMS as usize];
 
     // SHM upgrade if negotiated
@@ -836,7 +871,7 @@ fn run_batch_ping_pong_client(
         // Send + receive via SHM or Named Pipe
         let io_result = if let Some(ref mut shm_ctx) = shm {
             let msg_len = HEADER_SIZE + req_len;
-            let mut msg = vec![0u8; msg_len];
+            let msg = &mut msg_buf[..msg_len];
             hdr.magic = MAGIC_MSG;
             hdr.version = VERSION;
             hdr.header_len = protocol::HEADER_LEN;
@@ -1334,6 +1369,20 @@ fn run_pipeline_batch_client(
 
 #[cfg(windows)]
 fn run_lookup_bench(duration_sec: u32) -> i32 {
+    #[derive(Clone, Copy, Default)]
+    struct Bucket {
+        index: usize,
+        used: bool,
+    }
+
+    fn hash_name(name: &str) -> u32 {
+        let mut h: u32 = 5381;
+        for b in name.as_bytes() {
+            h = ((h << 5).wrapping_add(h)).wrapping_add(*b as u32);
+        }
+        h
+    }
+
     let items: Vec<CgroupsCacheItem> = (0..16)
         .map(|i| CgroupsCacheItem {
             hash: 1000 + i,
@@ -1344,6 +1393,19 @@ fn run_lookup_bench(duration_sec: u32) -> i32 {
         })
         .collect();
 
+    let mut lookup_index = vec![Bucket::default(); 32];
+    let mask = (lookup_index.len() - 1) as u32;
+    for (idx, item) in items.iter().enumerate() {
+        let mut slot = (item.hash ^ hash_name(&item.name)) & mask;
+        while lookup_index[slot as usize].used {
+            slot = (slot + 1) & mask;
+        }
+        lookup_index[slot as usize] = Bucket {
+            index: idx,
+            used: true,
+        };
+    }
+
     let mut lookups: u64 = 0;
     let mut hits: u64 = 0;
 
@@ -1353,10 +1415,17 @@ fn run_lookup_bench(duration_sec: u32) -> i32 {
 
     while !tick_deadline.expired() {
         for item in &items {
-            let found = items
-                .iter()
-                .find(|it| it.hash == item.hash && it.name == item.name);
-            if found.is_some() {
+            let mut slot = (item.hash ^ hash_name(&item.name)) & mask;
+            let mut found = false;
+            while lookup_index[slot as usize].used {
+                let bucket_item = &items[lookup_index[slot as usize].index];
+                if bucket_item.hash == item.hash && bucket_item.name == item.name {
+                    found = true;
+                    break;
+                }
+                slot = (slot + 1) & mask;
+            }
+            if found {
                 hits += 1;
             }
             lookups += 1;

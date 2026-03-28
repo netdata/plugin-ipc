@@ -155,7 +155,7 @@ static int run_server(const char *run_dir, const char *service)
 static int run_client(const char *run_dir, const char *service)
 {
     uint32_t profiles = detect_profiles();
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = profiles,
         .preferred_profiles        = profiles,
         .max_request_payload_bytes = 4096,
@@ -163,7 +163,6 @@ static int run_client(const char *run_dir, const char *service)
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
         .max_response_batch_items  = 16,
         .auth_token                = AUTH_TOKEN,
-        .packet_size               = 0,
     };
 
     nipc_client_ctx_t client;

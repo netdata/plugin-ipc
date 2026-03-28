@@ -69,6 +69,46 @@ typedef struct {
 } nipc_client_status_t;
 
 /* ------------------------------------------------------------------ */
+/*  Public L2/L3 service configuration                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Public service-level client configuration shared by the L2 and L3 APIs.
+ *
+ * This configuration is intentionally transport-agnostic. Transport-only
+ * tuning such as packet sizing stays below the public L2/L3 boundary.
+ *
+ * Zero-valued fields map to the normal library defaults.
+ */
+typedef struct {
+    uint32_t supported_profiles;
+    uint32_t preferred_profiles;
+    uint32_t max_request_payload_bytes;
+    uint32_t max_request_batch_items;
+    uint32_t max_response_payload_bytes;
+    uint32_t max_response_batch_items;
+    uint64_t auth_token;
+} nipc_client_config_t;
+
+/*
+ * Public service-level server configuration shared by the typed L2 API.
+ *
+ * Transport-only tuning such as socket backlog or packet sizing stays in the
+ * transport layer and is not part of the public L2/L3 contract.
+ *
+ * Zero-valued fields map to the normal library defaults.
+ */
+typedef struct {
+    uint32_t supported_profiles;
+    uint32_t preferred_profiles;
+    uint32_t max_request_payload_bytes;
+    uint32_t max_request_batch_items;
+    uint32_t max_response_payload_bytes;
+    uint32_t max_response_batch_items;
+    uint64_t auth_token;
+} nipc_server_config_t;
+
+/* ------------------------------------------------------------------ */
 /*  Client context                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -120,11 +160,7 @@ typedef struct {
 void nipc_client_init(nipc_client_ctx_t *ctx,
                       const char *run_dir,
                       const char *service_name,
-#ifdef _WIN32
-                      const nipc_np_client_config_t *config);
-#else
-                      const nipc_uds_client_config_t *config);
-#endif
+                      const nipc_client_config_t *config);
 
 /*
  * Attempt connect if DISCONNECTED, reconnect if BROKEN.
@@ -279,11 +315,7 @@ struct nipc_managed_server {
 nipc_error_t nipc_server_init_typed(nipc_managed_server_t *server,
                                const char *run_dir,
                                const char *service_name,
-#ifdef _WIN32
-                               const nipc_np_server_config_t *config,
-#else
-                               const nipc_uds_server_config_t *config,
-#endif
+                               const nipc_server_config_t *config,
                                int worker_count,
                                const nipc_cgroups_service_handler_t *service_handler);
 
@@ -422,11 +454,7 @@ typedef struct {
 void nipc_cgroups_cache_init(nipc_cgroups_cache_t *cache,
                               const char *run_dir,
                               const char *service_name,
-#ifdef _WIN32
-                              const nipc_np_client_config_t *config);
-#else
-                              const nipc_uds_client_config_t *config);
-#endif
+                              const nipc_client_config_t *config);
 
 /*
  * Refresh the cache. Drives the L2 client (connect/reconnect as

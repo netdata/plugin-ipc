@@ -61,6 +61,7 @@ var (
 	ErrWinShmMapView       = errors.New("MapViewOfFile failed")
 	ErrWinShmCreateEvent   = errors.New("CreateEventW failed")
 	ErrWinShmOpenEvent     = errors.New("OpenEventW failed")
+	ErrWinShmAddrInUse     = errors.New("Windows SHM object name already in use by live server")
 	ErrWinShmBadMagic      = errors.New("Windows SHM header magic mismatch")
 	ErrWinShmBadVersion    = errors.New("Windows SHM header version mismatch")
 	ErrWinShmBadHeader     = errors.New("Windows SHM header_len mismatch")
@@ -88,13 +89,19 @@ var (
 )
 
 const (
-	_PAGE_READWRITE      = 0x04
-	_FILE_MAP_ALL_ACCESS = 0x000F001F
-	_EVENT_MODIFY_STATE  = 0x0002
-	_SYNCHRONIZE         = 0x00100000
-	_INFINITE            = 0xFFFFFFFF
-	_WAIT_TIMEOUT        = 0x00000102
+	_PAGE_READWRITE       = 0x04
+	_FILE_MAP_ALL_ACCESS  = 0x000F001F
+	_EVENT_MODIFY_STATE   = 0x0002
+	_SYNCHRONIZE          = 0x00100000
+	_INFINITE             = 0xFFFFFFFF
+	_WAIT_TIMEOUT         = 0x00000102
+	_ERROR_ALREADY_EXISTS = 183
 )
+
+func isWindowsErrno(err error, want syscall.Errno) bool {
+	errno, ok := err.(syscall.Errno)
+	return ok && errno == want
+}
 
 // ---------------------------------------------------------------------------
 //  Role
@@ -176,6 +183,10 @@ func WinShmServerCreate(runDir, serviceName string, authToken, sessionID uint64,
 	if mapping == 0 {
 		return nil, fmt.Errorf("%w: %v", ErrWinShmCreateMapping, callErr)
 	}
+	if isWindowsErrno(callErr, syscall.Errno(_ERROR_ALREADY_EXISTS)) {
+		syscall.CloseHandle(mapping)
+		return nil, ErrWinShmAddrInUse
+	}
 
 	// Map view
 	base, _, callErr := procMapViewOfFile.Call(
@@ -230,6 +241,12 @@ func WinShmServerCreate(runDir, serviceName string, authToken, sessionID uint64,
 			return nil, fmt.Errorf("%w: req_event: %v", ErrWinShmCreateEvent, callErr)
 		}
 		reqEvent = syscall.Handle(r)
+		if isWindowsErrno(callErr, syscall.Errno(_ERROR_ALREADY_EXISTS)) {
+			syscall.CloseHandle(reqEvent)
+			procUnmapViewOfFile.Call(base)
+			syscall.CloseHandle(mapping)
+			return nil, ErrWinShmAddrInUse
+		}
 
 		respEventName, err := buildWinShmObjectName(hash, serviceName, profile, sessionID, "resp_event")
 		if err != nil {
@@ -248,6 +265,13 @@ func WinShmServerCreate(runDir, serviceName string, authToken, sessionID uint64,
 			return nil, fmt.Errorf("%w: resp_event: %v", ErrWinShmCreateEvent, callErr)
 		}
 		respEvent = syscall.Handle(r)
+		if isWindowsErrno(callErr, syscall.Errno(_ERROR_ALREADY_EXISTS)) {
+			syscall.CloseHandle(respEvent)
+			syscall.CloseHandle(reqEvent)
+			procUnmapViewOfFile.Call(base)
+			syscall.CloseHandle(mapping)
+			return nil, ErrWinShmAddrInUse
+		}
 	}
 
 	return &WinShmContext{

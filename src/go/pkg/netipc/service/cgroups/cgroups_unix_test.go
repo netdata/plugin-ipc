@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
-	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
 )
 
 const (
@@ -22,7 +21,7 @@ const (
 var unixServiceCounter atomic.Uint64
 
 func uniqueUnixService(prefix string) string {
-	return fmt.Sprintf("%s_%d_%d", prefix, os.Getpid(), unixServiceCounter.Add(1))
+	return fmt.Sprintf("%s_%d_%d_%d", prefix, os.Getpid(), unixServiceCounter.Add(1), time.Now().UnixNano())
 }
 
 func ensureUnixRunDir(t *testing.T) {
@@ -34,11 +33,10 @@ func ensureUnixRunDir(t *testing.T) {
 
 func cleanupUnix(service string) {
 	_ = os.Remove(fmt.Sprintf("%s/%s.sock", testRunDirUnix, service))
-	posix.ShmCleanupStale(testRunDirUnix, service)
 }
 
-func testUnixServerConfig() posix.ServerConfig {
-	return posix.ServerConfig{
+func testUnixServerConfig() ServerConfig {
+	return ServerConfig{
 		SupportedProfiles:       protocol.ProfileBaseline,
 		PreferredProfiles:       protocol.ProfileBaseline,
 		MaxRequestPayloadBytes:  4096,
@@ -46,12 +44,11 @@ func testUnixServerConfig() posix.ServerConfig {
 		MaxResponsePayloadBytes: testResponseSize,
 		MaxResponseBatchItems:   1,
 		AuthToken:               testAuthToken,
-		Backlog:                 4,
 	}
 }
 
-func testUnixClientConfig() posix.ClientConfig {
-	return posix.ClientConfig{
+func testUnixClientConfig() ClientConfig {
+	return ClientConfig{
 		SupportedProfiles:       protocol.ProfileBaseline,
 		PreferredProfiles:       protocol.ProfileBaseline,
 		MaxRequestPayloadBytes:  4096,

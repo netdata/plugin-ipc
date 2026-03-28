@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
-	windows "github.com/netdata/plugin-ipc/go/pkg/netipc/transport/windows"
 )
 
 const testWinRunDir = `C:\Temp\nipc_go_cgroups_public`
@@ -33,8 +32,8 @@ func ensureWinRunDir(t *testing.T) {
 	}
 }
 
-func testWinServerConfig() windows.ServerConfig {
-	return windows.ServerConfig{
+func testWinServerConfig() ServerConfig {
+	return ServerConfig{
 		SupportedProfiles:       protocol.ProfileBaseline,
 		PreferredProfiles:       protocol.ProfileBaseline,
 		MaxRequestPayloadBytes:  4096,
@@ -45,8 +44,8 @@ func testWinServerConfig() windows.ServerConfig {
 	}
 }
 
-func testWinClientConfig() windows.ClientConfig {
-	return windows.ClientConfig{
+func testWinClientConfig() ClientConfig {
+	return ClientConfig{
 		SupportedProfiles:       protocol.ProfileBaseline,
 		PreferredProfiles:       protocol.ProfileBaseline,
 		MaxRequestPayloadBytes:  4096,

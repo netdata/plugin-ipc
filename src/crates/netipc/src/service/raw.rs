@@ -2219,6 +2219,20 @@ pub struct CgroupsCacheStatus {
 /// Default response buffer size for L3 cache refresh.
 const CACHE_RESPONSE_BUF_SIZE: usize = 65536;
 
+#[derive(Debug, Clone, Copy, Default)]
+struct CgroupsHashBucket {
+    index: u32,
+    used: bool,
+}
+
+fn cache_hash_name(name: &str) -> u32 {
+    let mut h: u32 = 5381;
+    for b in name.as_bytes() {
+        h = ((h << 5).wrapping_add(h)).wrapping_add(*b as u32);
+    }
+    h
+}
+
 /// L3 client-side cgroups snapshot cache.
 ///
 /// Wraps an L2 client and maintains a local owned copy of the most
@@ -2229,8 +2243,8 @@ const CACHE_RESPONSE_BUF_SIZE: usize = 65536;
 pub struct CgroupsCache {
     client: RawClient,
     items: Vec<CgroupsCacheItem>,
-    /// Hash table: (hash, name) -> index into items vec
-    lookup_index: std::collections::HashMap<(u32, String), usize>,
+    /// Open-addressing hash table: (hash ^ djb2(name)) -> index into items vec
+    buckets: Vec<CgroupsHashBucket>,
     systemd_enabled: u32,
     generation: u64,
     populated: bool,
@@ -2250,7 +2264,7 @@ impl CgroupsCache {
         CgroupsCache {
             client: RawClient::new_snapshot(run_dir, service_name, config),
             items: Vec::new(),
-            lookup_index: std::collections::HashMap::new(),
+            buckets: Vec::new(),
             systemd_enabled: 0,
             generation: 0,
             populated: false,
@@ -2305,15 +2319,27 @@ impl CgroupsCache {
                     }
                 }
 
-                // Rebuild lookup index
-                let mut idx = std::collections::HashMap::with_capacity(new_items.len());
-                for (i, item) in new_items.iter().enumerate() {
-                    idx.insert((item.hash, item.name.clone()), i);
+                // Rebuild open-addressing lookup table.
+                let mut buckets = Vec::new();
+                if !new_items.is_empty() {
+                    let bcount = next_power_of_2_u32((new_items.len() as u32) * 2) as usize;
+                    buckets.resize(bcount, CgroupsHashBucket::default());
+                    let mask = (bcount - 1) as u32;
+                    for (i, item) in new_items.iter().enumerate() {
+                        let mut slot = (item.hash ^ cache_hash_name(&item.name)) & mask;
+                        while buckets[slot as usize].used {
+                            slot = (slot + 1) & mask;
+                        }
+                        buckets[slot as usize] = CgroupsHashBucket {
+                            index: i as u32,
+                            used: true,
+                        };
+                    }
                 }
 
                 // Replace old cache
                 self.items = new_items;
-                self.lookup_index = idx;
+                self.buckets = buckets;
                 self.systemd_enabled = view.systemd_enabled;
                 self.generation = view.generation;
                 self.populated = true;
@@ -2338,14 +2364,28 @@ impl CgroupsCache {
         self.populated
     }
 
-    /// Look up a cached item by hash + name. O(1) via HashMap. No I/O.
+    /// Look up a cached item by hash + name. O(1) via open-addressing hash
+    /// table. No I/O.
     pub fn lookup(&self, hash: u32, name: &str) -> Option<&CgroupsCacheItem> {
         if !self.populated {
             return None;
         }
-        self.lookup_index
-            .get(&(hash, name.to_string()))
-            .map(|&idx| &self.items[idx])
+        if !self.buckets.is_empty() {
+            let mask = (self.buckets.len() - 1) as u32;
+            let mut slot = (hash ^ cache_hash_name(name)) & mask;
+            while self.buckets[slot as usize].used {
+                let item = &self.items[self.buckets[slot as usize].index as usize];
+                if item.hash == hash && item.name == name {
+                    return Some(item);
+                }
+                slot = (slot + 1) & mask;
+            }
+            return None;
+        }
+
+        self.items
+            .iter()
+            .find(|item| item.hash == hash && item.name == name)
     }
 
     /// Fill a status snapshot for diagnostics.
@@ -2365,7 +2405,7 @@ impl CgroupsCache {
     /// Close the cache: free all cached items, close the L2 client.
     pub fn close(&mut self) {
         self.items.clear();
-        self.lookup_index.clear();
+        self.buckets.clear();
         self.populated = false;
         self.client.close();
     }

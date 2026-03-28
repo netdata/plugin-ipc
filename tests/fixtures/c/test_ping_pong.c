@@ -122,7 +122,7 @@ static bool start_server(server_ctx_t *sctx)
 {
     cleanup_socket();
 
-    nipc_uds_server_config_t scfg = {
+    nipc_server_config_t scfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
         .max_request_payload_bytes = 16,
         .max_request_batch_items   = 1,
@@ -175,7 +175,7 @@ static void test_snapshot_ping_pong(void)
     sctx.service_ctx.max_items = 4;
     check("server started", start_server(&sctx));
 
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
         .max_request_payload_bytes = 16,
         .max_request_batch_items   = 1,
@@ -253,7 +253,7 @@ static void test_snapshot_session_reuse(void)
     sctx.service_ctx.max_items = 3;
     check("server started", start_server(&sctx));
 
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
         .max_request_payload_bytes = 16,
         .max_request_batch_items   = 1,
@@ -296,7 +296,7 @@ static void test_empty_snapshot(void)
     sctx.service_ctx.empty_snapshot = true;
     check("server started", start_server(&sctx));
 
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
         .max_request_payload_bytes = 16,
         .max_request_batch_items   = 1,

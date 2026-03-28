@@ -14,18 +14,26 @@ import (
 	windows "github.com/netdata/plugin-ipc/go/pkg/netipc/transport/windows"
 )
 
-// cacheKey is the composite key for O(1) hash+name lookup.
-type cacheKey struct {
-	hash uint32
-	name string
+// cacheBucket is one open-addressing bucket for hash+name lookup.
+type cacheBucket struct {
+	index int
+	used  bool
+}
+
+func cacheHashName(name string) uint32 {
+	h := uint32(5381)
+	for i := 0; i < len(name); i++ {
+		h = ((h << 5) + h) + uint32(name[i])
+	}
+	return h
 }
 
 // Cache is an L3 client-side cgroups snapshot cache.
 type Cache struct {
 	client *Client
 	items  []CacheItem
-	// O(1) lookup index: (hash, name) -> index into items slice
-	lookupIndex map[cacheKey]int
+	// Open-addressing hash table: (hash ^ djb2(name)) -> index into items slice.
+	buckets []cacheBucket
 
 	systemdEnabled      uint32
 	generation          uint64
@@ -70,14 +78,24 @@ func (c *Cache) Refresh() bool {
 		})
 	}
 
-	// Rebuild lookup index
-	idx := make(map[cacheKey]int, len(newItems))
-	for i := range newItems {
-		idx[cacheKey{hash: newItems[i].Hash, name: newItems[i].Name}] = i
+	// Rebuild open-addressing lookup table.
+	var buckets []cacheBucket
+	if len(newItems) > 0 {
+		bcount := nextPowerOf2U32(uint32(len(newItems)) * 2)
+		buckets = make([]cacheBucket, bcount)
+		mask := bcount - 1
+		for i := range newItems {
+			slot := (newItems[i].Hash ^ cacheHashName(newItems[i].Name)) & mask
+			for buckets[slot].used {
+				slot = (slot + 1) & mask
+			}
+			buckets[slot].index = i
+			buckets[slot].used = true
+		}
 	}
 
 	c.items = newItems
-	c.lookupIndex = idx
+	c.buckets = buckets
 	c.systemdEnabled = view.SystemdEnabled
 	c.generation = view.Generation
 	c.populated = true
@@ -92,13 +110,28 @@ func (c *Cache) Ready() bool {
 	return c.populated
 }
 
-// Lookup finds a cached item by hash + name. O(1) via map. No I/O.
+// Lookup finds a cached item by hash + name. O(1) via open-addressing hash
+// table. No I/O.
 func (c *Cache) Lookup(hash uint32, name string) (CacheItem, bool) {
 	if !c.populated {
 		return CacheItem{}, false
 	}
-	if i, ok := c.lookupIndex[cacheKey{hash: hash, name: name}]; ok {
-		return c.items[i], true
+	if len(c.buckets) > 0 {
+		mask := uint32(len(c.buckets) - 1)
+		slot := (hash ^ cacheHashName(name)) & mask
+		for c.buckets[slot].used {
+			item := c.items[c.buckets[slot].index]
+			if item.Hash == hash && item.Name == name {
+				return item, true
+			}
+			slot = (slot + 1) & mask
+		}
+		return CacheItem{}, false
+	}
+	for i := range c.items {
+		if c.items[i].Hash == hash && c.items[i].Name == name {
+			return c.items[i], true
+		}
 	}
 	return CacheItem{}, false
 }
@@ -120,7 +153,7 @@ func (c *Cache) Status() CacheStatus {
 // Close frees all cached items and closes the L2 client.
 func (c *Cache) Close() {
 	c.items = nil
-	c.lookupIndex = nil
+	c.buckets = nil
 	c.populated = false
 	c.client.Close()
 }

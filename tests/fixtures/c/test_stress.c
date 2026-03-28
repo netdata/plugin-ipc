@@ -322,14 +322,13 @@ static void test_snapshot_1000(void)
                         4, BUF_1K, BUF_1K, 65536, &tid);
     check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
         .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = BUF_1K,
         .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
-        .packet_size               = 65536,
     };
     nipc_client_ctx_t client;
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
@@ -371,14 +370,13 @@ static void test_snapshot_5000(void)
                         4, BUF_5K, BUF_5K, 65536, &tid);
     check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
         .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = BUF_5K,
         .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
-        .packet_size               = 65536,
     };
     nipc_client_ctx_t client;
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
@@ -422,7 +420,7 @@ static void *scale_client_thread_fn(void *arg)
     ctx->error_count = 0;
     ctx->content_verified = true;
 
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
         .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
@@ -623,7 +621,7 @@ static void test_rapid_connect_disconnect(void)
                         8, 65536, 65536, 0, &stid);
     check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
         .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
@@ -730,7 +728,7 @@ static void *stability_client_fn(void *arg)
 {
     stability_client_ctx_t *ctx = (stability_client_ctx_t *)arg;
 
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
         .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
@@ -1011,7 +1009,7 @@ static void *mixed_client_fn(void *arg)
     ctx->success = 0;
     ctx->failure = 0;
 
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = ctx->profile,
         .preferred_profiles        = ctx->profile,
         .max_request_payload_bytes = 4096,

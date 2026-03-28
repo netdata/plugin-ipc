@@ -95,6 +95,44 @@ static uint32_t cgroups_response_payload_default(void)
     return NIPC_CLIENT_BUF_DEFAULT;
 }
 
+static nipc_np_client_config_t service_client_config_to_transport(
+    const nipc_client_config_t *config)
+{
+    nipc_np_client_config_t transport = {0};
+
+    if (!config)
+        return transport;
+
+    transport.supported_profiles = config->supported_profiles;
+    transport.preferred_profiles = config->preferred_profiles;
+    transport.max_request_payload_bytes = config->max_request_payload_bytes;
+    transport.max_request_batch_items = config->max_request_batch_items;
+    transport.max_response_payload_bytes = config->max_response_payload_bytes;
+    transport.max_response_batch_items = config->max_response_batch_items;
+    transport.auth_token = config->auth_token;
+
+    return transport;
+}
+
+static nipc_np_server_config_t service_server_config_to_transport(
+    const nipc_server_config_t *config)
+{
+    nipc_np_server_config_t transport = {0};
+
+    if (!config)
+        return transport;
+
+    transport.supported_profiles = config->supported_profiles;
+    transport.preferred_profiles = config->preferred_profiles;
+    transport.max_request_payload_bytes = config->max_request_payload_bytes;
+    transport.max_request_batch_items = config->max_request_batch_items;
+    transport.max_response_payload_bytes = config->max_response_payload_bytes;
+    transport.max_response_batch_items = config->max_response_batch_items;
+    transport.auth_token = config->auth_token;
+
+    return transport;
+}
+
 static void server_note_request_capacity(nipc_managed_server_t *server,
                                          uint32_t payload_len);
 static void server_note_response_capacity(nipc_managed_server_t *server,
@@ -448,7 +486,7 @@ static nipc_error_t do_cgroups_attempt(nipc_client_ctx_t *ctx, void *state)
 void nipc_client_init(nipc_client_ctx_t *ctx,
                       const char *run_dir,
                       const char *service_name,
-                      const nipc_np_client_config_t *config)
+                      const nipc_client_config_t *config)
 {
     memset(ctx, 0, sizeof(*ctx));
     ctx->state = NIPC_CLIENT_DISCONNECTED;
@@ -472,8 +510,7 @@ void nipc_client_init(nipc_client_ctx_t *ctx,
         ctx->service_name[len] = '\0';
     }
 
-    if (config)
-        ctx->transport_config = *config;
+    ctx->transport_config = service_client_config_to_transport(config);
     if (ctx->transport_config.max_request_payload_bytes == 0)
         ctx->transport_config.max_request_payload_bytes = cgroups_request_payload_default();
     if (ctx->transport_config.max_response_payload_bytes == 0)
@@ -953,16 +990,14 @@ static nipc_error_t server_init_raw(nipc_managed_server_t *server,
 nipc_error_t nipc_server_init_typed(nipc_managed_server_t *server,
                                     const char *run_dir,
                                     const char *service_name,
-                                    const nipc_np_server_config_t *config,
+                                    const nipc_server_config_t *config,
                                     int worker_count,
                                     const nipc_cgroups_service_handler_t *service_handler)
 {
     if (!service_handler)
         return NIPC_ERR_BAD_LAYOUT;
 
-    nipc_np_server_config_t typed_cfg = {0};
-    if (config)
-        typed_cfg = *config;
+    nipc_np_server_config_t typed_cfg = service_server_config_to_transport(config);
     if (typed_cfg.max_request_payload_bytes == 0)
         typed_cfg.max_request_payload_bytes = cgroups_request_payload_default();
     if (typed_cfg.max_response_payload_bytes == 0)
@@ -1350,9 +1385,9 @@ static nipc_cgroups_cache_item_t *cache_build_items(
 }
 
 void nipc_cgroups_cache_init(nipc_cgroups_cache_t *cache,
-                              const char *run_dir,
-                              const char *service_name,
-                              const nipc_np_client_config_t *config)
+                             const char *run_dir,
+                             const char *service_name,
+                             const nipc_client_config_t *config)
 {
     memset(cache, 0, sizeof(*cache));
 

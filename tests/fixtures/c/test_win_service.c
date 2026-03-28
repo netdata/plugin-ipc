@@ -50,9 +50,9 @@ static void unique_service(char *buf, size_t len, const char *prefix)
              prefix, (long)n, (unsigned long)GetCurrentProcessId());
 }
 
-static nipc_np_server_config_t default_server_config(void)
+static nipc_server_config_t default_server_config(void)
 {
-    return (nipc_np_server_config_t){
+    return (nipc_server_config_t){
         .supported_profiles         = NIPC_PROFILE_BASELINE,
         .preferred_profiles         = 0,
         .max_request_payload_bytes  = 4096,
@@ -60,11 +60,23 @@ static nipc_np_server_config_t default_server_config(void)
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
         .max_response_batch_items   = 16,
         .auth_token                 = AUTH_TOKEN,
-        .packet_size                = 0,
     };
 }
 
-static nipc_np_client_config_t default_client_config(void)
+static nipc_client_config_t default_client_config(void)
+{
+    return (nipc_client_config_t){
+        .supported_profiles         = NIPC_PROFILE_BASELINE,
+        .preferred_profiles         = 0,
+        .max_request_payload_bytes  = 4096,
+        .max_request_batch_items    = 16,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .max_response_batch_items   = 16,
+        .auth_token                 = AUTH_TOKEN,
+    };
+}
+
+static nipc_np_client_config_t default_transport_client_config(void)
 {
     return (nipc_np_client_config_t){
         .supported_profiles         = NIPC_PROFILE_BASELINE,
@@ -156,7 +168,7 @@ static nipc_cgroups_service_handler_t empty_snapshot_service_handler = {
 typedef struct {
     char service[64];
     int worker_count;
-    nipc_np_server_config_t config;
+    nipc_server_config_t config;
     nipc_cgroups_service_handler_t service_handler;
     HANDLE ready_event;
     volatile LONG init_ok;
@@ -186,7 +198,7 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
 static HANDLE start_server_named(server_thread_ctx_t *ctx,
                                  const char *service,
                            int worker_count,
-                           const nipc_np_server_config_t *config,
+                           const nipc_server_config_t *config,
                            const nipc_cgroups_service_handler_t *service_handler)
 {
     memset(ctx, 0, sizeof(*ctx));
@@ -223,7 +235,7 @@ static HANDLE start_default_server_named(server_thread_ctx_t *ctx,
                                          int worker_count,
                                          const nipc_cgroups_service_handler_t *service_handler)
 {
-    nipc_np_server_config_t config = default_server_config();
+    nipc_server_config_t config = default_server_config();
     return start_server_named(ctx, service, worker_count, &config, service_handler);
 }
 
@@ -252,7 +264,7 @@ static void test_client_lifecycle(void)
     printf("--- Client lifecycle ---\n");
 
     nipc_client_ctx_t client;
-    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     char service[64];
     unique_service(service, sizeof(service), "svc_lifecycle");
 
@@ -283,7 +295,7 @@ static void test_client_lifecycle_ready(void)
     printf("--- Client lifecycle ready/close ---\n");
 
     nipc_client_ctx_t client;
-    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     char service[64];
     unique_service(service, sizeof(service), "svc_ready");
 
@@ -320,7 +332,7 @@ static void test_snapshot_calls(void)
         return;
 
     nipc_client_ctx_t client;
-    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("client ready", refresh_until_ready(&client, 100, 10));
 
@@ -354,7 +366,7 @@ static void test_retry_on_broken_session(void)
         return;
 
     nipc_client_ctx_t client;
-    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("client ready", refresh_until_ready(&client, 100, 10));
 
@@ -394,7 +406,7 @@ static void test_handler_failure(void)
         return;
 
     nipc_client_ctx_t client;
-    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("client ready", refresh_until_ready(&client, 100, 10));
 
@@ -425,7 +437,7 @@ static void test_client_auth_failure(void)
         return;
 
     nipc_client_ctx_t client;
-    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     ccfg.auth_token = 0x1111111111111111ull;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     nipc_client_refresh(&client);
@@ -442,7 +454,7 @@ static void test_client_incompatible(void)
     char service[64];
     unique_service(service, sizeof(service), "svc_incompat");
 
-    nipc_np_server_config_t scfg = default_server_config();
+    nipc_server_config_t scfg = default_server_config();
     scfg.supported_profiles = NIPC_PROFILE_SHM_HYBRID;
 
     server_thread_ctx_t sctx;
@@ -451,7 +463,7 @@ static void test_client_incompatible(void)
         return;
 
     nipc_client_ctx_t client;
-    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     ccfg.supported_profiles = NIPC_PROFILE_BASELINE;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     nipc_client_refresh(&client);
@@ -474,7 +486,7 @@ static void test_status_reporting(void)
         return;
 
     nipc_client_ctx_t client;
-    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("client ready", refresh_until_ready(&client, 100, 10));
 
@@ -530,7 +542,7 @@ static void test_cache_refresh_preserves(void)
         return;
 
     nipc_cgroups_cache_t cache;
-    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, service, &ccfg);
 
     check("first refresh ok", nipc_cgroups_cache_refresh(&cache));
@@ -567,7 +579,7 @@ static void test_cache_reconnect_rebuilds(void)
         return;
 
     nipc_cgroups_cache_t cache;
-    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, service, &ccfg);
 
     check("first refresh ok", nipc_cgroups_cache_refresh(&cache));
@@ -602,7 +614,7 @@ static void test_cache_empty_snapshot(void)
         return;
 
     nipc_cgroups_cache_t cache;
-    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, service, &ccfg);
 
     check("empty refresh ok", nipc_cgroups_cache_refresh(&cache));
@@ -632,7 +644,7 @@ static void test_non_request_terminates_session(void)
     if (!server_thread)
         return;
 
-    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_np_client_config_t ccfg = default_transport_client_config();
     nipc_np_session_t session;
     nipc_np_error_t uerr = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
     check("raw connect ok", uerr == NIPC_NP_OK);
@@ -672,7 +684,8 @@ static void test_non_request_terminates_session(void)
     }
 
     nipc_client_ctx_t verify_client;
-    nipc_client_init(&verify_client, TEST_RUN_DIR, service, &ccfg);
+    nipc_client_config_t verify_cfg = default_client_config();
+    nipc_client_init(&verify_client, TEST_RUN_DIR, service, &verify_cfg);
     check("verify client ready", refresh_until_ready(&verify_client, 100, 10));
     if (nipc_client_ready(&verify_client)) {
         nipc_cgroups_resp_view_t view;

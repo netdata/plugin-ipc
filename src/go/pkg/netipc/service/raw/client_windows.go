@@ -12,6 +12,7 @@ package raw
 import (
 	"encoding/binary"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -643,6 +644,8 @@ type Server struct {
 	running                     atomic.Bool
 	learnedRequestPayloadBytes  atomic.Uint32
 	learnedResponsePayloadBytes atomic.Uint32
+	workerCount                 int
+	wg                          sync.WaitGroup
 	listener                    *windows.Listener // stored so Stop() can close it
 }
 
@@ -653,6 +656,20 @@ func NewServer(
 	expectedMethodCode uint16,
 	handler DispatchHandler,
 ) *Server {
+	return NewServerWithWorkers(runDir, serviceName, config, expectedMethodCode, handler, 8)
+}
+
+// NewServerWithWorkers creates a server with an explicit worker count limit.
+func NewServerWithWorkers(
+	runDir, serviceName string,
+	config windows.ServerConfig,
+	expectedMethodCode uint16,
+	handler DispatchHandler,
+	workerCount int,
+) *Server {
+	if workerCount < 1 {
+		workerCount = 1
+	}
 	learnedRequest := config.MaxRequestPayloadBytes
 	if learnedRequest == 0 {
 		learnedRequest = protocol.MaxPayloadDefault
@@ -667,6 +684,7 @@ func NewServer(
 		config:             config,
 		expectedMethodCode: expectedMethodCode,
 		handler:            handler,
+		workerCount:        workerCount,
 	}
 	s.learnedRequestPayloadBytes.Store(learnedRequest)
 	s.learnedResponsePayloadBytes.Store(learnedResponse)
@@ -711,6 +729,7 @@ func (s *Server) Run() error {
 	}()
 
 	s.running.Store(true)
+	sem := make(chan struct{}, s.workerCount)
 
 	for s.running.Load() {
 		listener.SetPayloadLimits(
@@ -724,6 +743,13 @@ func (s *Server) Run() error {
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
+		select {
+		case sem <- struct{}{}:
+		default:
+			session.Close()
 			continue
 		}
 
@@ -742,14 +768,23 @@ func (s *Server) Run() error {
 			if serr != nil {
 				// SHM create failed for negotiated SHM — reject session
 				session.Close()
+				<-sem
 				continue
 			}
 			shm = shmCtx
 		}
 
-		s.handleSession(session, shm)
+		s.wg.Add(1)
+		go func(sess *windows.Session, shmCtx *windows.WinShmContext) {
+			defer func() {
+				<-sem
+				s.wg.Done()
+			}()
+			s.handleSession(sess, shmCtx)
+		}(session, shm)
 	}
 
+	s.wg.Wait()
 	return nil
 }
 

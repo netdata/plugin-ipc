@@ -53,9 +53,11 @@ MAX_DURATION="${NIPC_BENCH_MAX_DURATION:-10}"
 PIPELINE_BATCH_MAX_DURATION="${NIPC_BENCH_PIPELINE_BATCH_MAX_DURATION:-20}"
 MAX_THROUGHPUT_RATIO="${NIPC_BENCH_MAX_THROUGHPUT_RATIO:-1.35}"
 MIN_STABLE_SAMPLES="${NIPC_BENCH_MIN_STABLE_SAMPLES:-3}"
+SERVER_STOP_GRACE_SEC="${NIPC_BENCH_SERVER_STOP_GRACE_SEC:-10}"
 DIAGNOSE_FAILURES="${NIPC_BENCH_DIAGNOSE_FAILURES:-0}"
 RUN_DIR="${TEMP:-/tmp}/netipc-bench-$$"
 ROOT_RUN_DIR="$RUN_DIR"
+MEASURE_RUN_DIR="$RUN_DIR"
 DIAGNOSTIC_SUMMARY_FILE=""
 DIAGNOSTIC_FAILURE_COUNT=0
 ACTIVE_DIAGNOSTIC=0
@@ -75,9 +77,9 @@ BENCH_GO="${BUILD_DIR}/bin/bench_windows_go.exe"
 
 cleanup() {
     if [ "${NIPC_KEEP_RUN_DIR:-0}" = "1" ]; then
-        warn "Preserving RUN_DIR: $RUN_DIR"
+        warn "Preserving RUN_DIR: $ROOT_RUN_DIR"
     else
-        rm -rf "$RUN_DIR"
+        rm -rf "$ROOT_RUN_DIR"
     fi
     for pid in "${SERVER_PIDS[@]:-}"; do
         kill "$pid" 2>/dev/null || true
@@ -105,6 +107,7 @@ LAST_MEASUREMENT_STABLE_RATIO=""
 LAST_MEASUREMENT_RAW_MIN=""
 LAST_MEASUREMENT_RAW_MAX=""
 LAST_MEASUREMENT_RAW_RATIO=""
+LAST_MEASUREMENT_ARTIFACT_DIR=""
 
 log() {
     printf "${CYAN}[bench]${NC} %s\n" "$*" >&2
@@ -188,13 +191,15 @@ start_server() {
     local subcmd="$2"
     local svc="$3"
     local duration_arg="$4"
+    local runtime_dir="${MEASURE_RUN_DIR:-$RUN_DIR}"
 
     local bin
     bin="$(bench_bin "$lang")"
 
-    local server_out="${RUN_DIR}/server-${lang}-${svc}.out"
+    mkdir -p "$runtime_dir"
+    local server_out="${runtime_dir}/server-${lang}-${svc}.out"
 
-    "$bin" "$subcmd" "$RUN_DIR" "$svc" "$duration_arg" > "$server_out" 2>&1 &
+    "$bin" "$subcmd" "$runtime_dir" "$svc" "$duration_arg" > "$server_out" 2>&1 &
     local pid=$!
     SERVER_PIDS+=("$pid")
 
@@ -248,18 +253,35 @@ stop_server() {
     local pid="$1"
     local lang="$2"
     local svc="$3"
-    local server_out="${RUN_DIR}/server-${lang}-${svc}.out"
+    local runtime_dir="${MEASURE_RUN_DIR:-$RUN_DIR}"
+    local server_out="${runtime_dir}/server-${lang}-${svc}.out"
     local server_cpu
     server_cpu=$(server_cpu_from_output "$server_out")
+    local wait_status=0
+    local forced_stop=0
 
     if [ -z "$server_cpu" ]; then
         server_cpu=$(server_cpu_seconds "$pid")
     fi
 
     if kill -0 "$pid" 2>/dev/null; then
+        local waited=0
+        local wait_ticks=$((SERVER_STOP_GRACE_SEC * 10))
+        while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$wait_ticks" ]; do
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+    fi
+
+    if kill -0 "$pid" 2>/dev/null; then
+        forced_stop=1
+        warn "  Server ${lang} (${svc}) did not exit cleanly within ${SERVER_STOP_GRACE_SEC}s; forcing kill"
         kill "$pid" 2>/dev/null || true
     fi
-    wait "$pid" 2>/dev/null || true
+
+    if ! wait "$pid" 2>/dev/null; then
+        wait_status=$?
+    fi
 
     if [ -f "$server_out" ]; then
         local output_cpu
@@ -270,6 +292,17 @@ stop_server() {
     fi
 
     echo "${server_cpu:-0.0}"
+
+    if [ "$forced_stop" -eq 1 ]; then
+        return 1
+    fi
+
+    if [ "$wait_status" -ne 0 ]; then
+        warn "  Server ${lang} (${svc}) exited with status ${wait_status}"
+        return 1
+    fi
+
+    return 0
 }
 
 write_csv_row() {
@@ -371,6 +404,7 @@ reset_last_measurement() {
     LAST_MEASUREMENT_RAW_MIN=""
     LAST_MEASUREMENT_RAW_MAX=""
     LAST_MEASUREMENT_RAW_RATIO=""
+    LAST_MEASUREMENT_ARTIFACT_DIR=""
 }
 
 sample_count_from_sample_file() {
@@ -436,6 +470,21 @@ sample_file_path() {
     local server="$3"
     local target_rps="$4"
     printf '%s/samples-%s-%s-%s-%s.csv' "$RUN_DIR" "$scenario" "$client" "$server" "$target_rps"
+}
+
+measurement_artifact_dir() {
+    local scenario="$1"
+    local client="$2"
+    local server="$3"
+    local target_rps="$4"
+    local repeat_idx="$5"
+    printf '%s/artifacts/%s-%s-%s-%s/repeat-%03d' \
+        "$RUN_DIR" \
+        "$(sanitize_path_component "$scenario")" \
+        "$(sanitize_path_component "$client")" \
+        "$(sanitize_path_component "$server")" \
+        "$(sanitize_path_component "$target_rps")" \
+        "$repeat_idx"
 }
 
 init_sample_file() {
@@ -577,6 +626,7 @@ maybe_diagnose_failed_measurement() {
     local original_raw_min="$LAST_MEASUREMENT_RAW_MIN"
     local original_raw_max="$LAST_MEASUREMENT_RAW_MAX"
     local original_raw_ratio="$LAST_MEASUREMENT_RAW_RATIO"
+    local original_artifact_dir="$LAST_MEASUREMENT_ARTIFACT_DIR"
     local original_sample_count
     original_sample_count=$(sample_count_from_sample_file "$original_sample_file")
 
@@ -587,6 +637,9 @@ maybe_diagnose_failed_measurement() {
     warn "  Diagnostic rerun enabled for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
     warn "  First-attempt failure remains authoritative"
     warn "  First-attempt evidence: run_dir=${original_run_dir}"
+    if [ -n "$original_artifact_dir" ]; then
+        warn "  First-attempt artifacts: ${original_artifact_dir}"
+    fi
     warn "  First-attempt sample file: ${original_sample_file}"
     if [ -n "$original_reason" ]; then
         warn "  First-attempt reason: ${original_reason}"
@@ -598,6 +651,7 @@ maybe_diagnose_failed_measurement() {
     append_diagnostics_summary "first_attempt.status=${original_status:-failed}"
     append_diagnostics_summary "first_attempt.reason=${original_reason:-unknown}"
     append_diagnostics_summary "first_attempt.run_dir=${original_run_dir}"
+    append_diagnostics_summary "first_attempt.artifact_dir=${original_artifact_dir}"
     append_diagnostics_summary "first_attempt.sample_file=${original_sample_file}"
     append_diagnostics_summary "first_attempt.sample_count=${original_sample_count}"
     append_diagnostics_summary "first_attempt.stable_samples=${original_stable_samples:-}"
@@ -609,10 +663,12 @@ maybe_diagnose_failed_measurement() {
     append_diagnostics_summary "first_attempt.raw_ratio=${original_raw_ratio:-}"
 
     local saved_run_dir="$RUN_DIR"
+    local saved_measure_run_dir="$MEASURE_RUN_DIR"
     local saved_emit_csv_rows="$EMIT_CSV_ROWS"
     local saved_active_diagnostic="$ACTIVE_DIAGNOSTIC"
 
     RUN_DIR="$diag_run_dir"
+    MEASURE_RUN_DIR="$RUN_DIR"
     EMIT_CSV_ROWS=0
     ACTIVE_DIAGNOSTIC=1
     mkdir -p "$RUN_DIR"
@@ -674,8 +730,10 @@ maybe_diagnose_failed_measurement() {
     LAST_MEASUREMENT_RAW_MIN="$original_raw_min"
     LAST_MEASUREMENT_RAW_MAX="$original_raw_max"
     LAST_MEASUREMENT_RAW_RATIO="$original_raw_ratio"
+    LAST_MEASUREMENT_ARTIFACT_DIR="$original_artifact_dir"
 
     RUN_DIR="$saved_run_dir"
+    MEASURE_RUN_DIR="$saved_measure_run_dir"
     EMIT_CSV_ROWS="$saved_emit_csv_rows"
     ACTIVE_DIAGNOSTIC="$saved_active_diagnostic"
 }
@@ -698,11 +756,15 @@ run_repeated_measurement() {
 
     local repeat_idx
     for repeat_idx in $(seq 1 "$REPETITIONS"); do
-        log "    sample ${repeat_idx}/${REPETITIONS}"
+        MEASURE_RUN_DIR=$(measurement_artifact_dir "$scenario" "$client_lang" "$server_lang" "$target_rps" "$repeat_idx")
+        LAST_MEASUREMENT_ARTIFACT_DIR="$MEASURE_RUN_DIR"
+        mkdir -p "$MEASURE_RUN_DIR"
+        log "    sample ${repeat_idx}/${REPETITIONS} (artifacts: ${MEASURE_RUN_DIR})"
         local metrics
         if ! metrics=$("$measure_fn" "$@"); then
             LAST_MEASUREMENT_STATUS="failed"
             LAST_MEASUREMENT_REASON="measurement_command_failed_repeat_${repeat_idx}"
+            export NIPC_KEEP_RUN_DIR=1
             maybe_diagnose_failed_measurement \
                 "$scenario" "$client_lang" "$server_lang" "$target_rps" "$duration" "$sample_file" \
                 "$measure_fn" "$@"
@@ -905,7 +967,8 @@ measure_pair_once() {
 
     local svc_name="${scenario}-${server_lang}-${client_lang}-${target_rps}"
     local server_duration="$duration"
-    local server_out="${RUN_DIR}/server-${server_lang}-${svc_name}.out"
+    local runtime_dir="${MEASURE_RUN_DIR:-$RUN_DIR}"
+    local server_out="${runtime_dir}/server-${server_lang}-${svc_name}.out"
 
     local server_pid
     server_pid=$(start_server "$server_lang" "$server_subcmd" "$svc_name" "$server_duration") || return 1
@@ -918,9 +981,9 @@ measure_pair_once() {
     local client_timeout=$((duration + 15))
     local client_output
     local client_status
-    local client_err="${RUN_DIR}/client-${scenario}-${server_lang}-${client_lang}-${target_rps}.err"
+    local client_err="${runtime_dir}/client-${scenario}-${server_lang}-${client_lang}-${target_rps}.err"
     set +e
-    client_output=$(timeout "$client_timeout" "$client_bin" "$client_subcmd" "$RUN_DIR" "$svc_name" "$duration" "$target_rps" 2>"$client_err")
+    client_output=$(timeout "$client_timeout" "$client_bin" "$client_subcmd" "$runtime_dir" "$svc_name" "$duration" "$target_rps" 2>"$client_err")
     client_status=$?
     set -e
 
@@ -982,8 +1045,18 @@ measure_pair_once() {
     fi
 
     local server_cpu_sec
+    local stop_status
+    set +e
     server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$svc_name")
+    stop_status=$?
+    set -e
     remove_server_pid "$server_pid"
+    if [ "$stop_status" -ne 0 ]; then
+        dump_server_output "$server_out"
+        dump_bench_processes
+        export NIPC_KEEP_RUN_DIR=1
+        return 1
+    fi
 
     local server_cpu_pct total_cpu_pct
     server_cpu_pct=$(cpu_pct_for_duration "$server_cpu_sec" "$duration")
@@ -1010,13 +1083,15 @@ run_pair() {
 measure_lookup_once() {
     local lang="$1"
     local duration="$2"
+    local runtime_dir="${MEASURE_RUN_DIR:-$RUN_DIR}"
 
     local bin
     bin="$(bench_bin "$lang")"
 
     local line
     local lookup_status
-    local lookup_err="${RUN_DIR}/lookup-${lang}.err"
+    mkdir -p "$runtime_dir"
+    local lookup_err="${runtime_dir}/lookup-${lang}.err"
     set +e
     line=$("$bin" lookup-bench "$duration" 2>"$lookup_err" | grep "^lookup," | head -1)
     lookup_status=$?
@@ -1075,6 +1150,7 @@ measure_np_pipeline_once() {
 
     local pipe_svc="pipeline-${server_lang}-${client_lang}"
     local server_duration="$duration"
+    local runtime_dir="${MEASURE_RUN_DIR:-$RUN_DIR}"
     local server_pid
     server_pid=$(start_server "$server_lang" "np-ping-pong-server" "$pipe_svc" "$server_duration") || {
         warn "  Failed to start pipeline server"
@@ -1088,15 +1164,24 @@ measure_np_pipeline_once() {
     local client_timeout=$((duration + 15))
     local client_output
     local client_status
-    local client_err="${RUN_DIR}/client-np-pipeline-${server_lang}-${client_lang}.err"
+    local client_err="${runtime_dir}/client-np-pipeline-${server_lang}-${client_lang}.err"
     set +e
-    client_output=$(timeout "$client_timeout" "$client_bin" "np-pipeline-client" "$RUN_DIR" "$pipe_svc" "$duration" "0" "$depth" 2>"$client_err")
+    client_output=$(timeout "$client_timeout" "$client_bin" "np-pipeline-client" "$runtime_dir" "$pipe_svc" "$duration" "0" "$depth" 2>"$client_err")
     client_status=$?
     set -e
 
     local server_cpu_sec
+    local stop_status
+    set +e
     server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pipe_svc")
+    stop_status=$?
+    set -e
     remove_server_pid "$server_pid"
+    if [ "$stop_status" -ne 0 ]; then
+        dump_bench_processes
+        export NIPC_KEEP_RUN_DIR=1
+        return 1
+    fi
 
     if [ "$client_status" -ne 0 ]; then
         warn "  ${client_lang} pipeline client failed for ${server_lang} server (exit ${client_status})"
@@ -1173,6 +1258,7 @@ measure_np_pipeline_batch_once() {
 
     local pb_svc="pipe-batch-${server_lang}-${client_lang}"
     local server_duration="$duration"
+    local runtime_dir="${MEASURE_RUN_DIR:-$RUN_DIR}"
     local server_pid
     server_pid=$(start_server "$server_lang" "np-batch-ping-pong-server" "$pb_svc" "$server_duration") || {
         warn "  Failed to start pipeline-batch server"
@@ -1186,15 +1272,24 @@ measure_np_pipeline_batch_once() {
     local client_timeout=$((duration + 15))
     local client_output
     local client_status
-    local client_err="${RUN_DIR}/client-np-pipeline-batch-${server_lang}-${client_lang}.err"
+    local client_err="${runtime_dir}/client-np-pipeline-batch-${server_lang}-${client_lang}.err"
     set +e
-    client_output=$(timeout "$client_timeout" "$client_bin" "np-pipeline-batch-client" "$RUN_DIR" "$pb_svc" "$duration" "0" "$depth" 2>"$client_err")
+    client_output=$(timeout "$client_timeout" "$client_bin" "np-pipeline-batch-client" "$runtime_dir" "$pb_svc" "$duration" "0" "$depth" 2>"$client_err")
     client_status=$?
     set -e
 
     local server_cpu_sec
+    local stop_status
+    set +e
     server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pb_svc")
+    stop_status=$?
+    set -e
     remove_server_pid "$server_pid"
+    if [ "$stop_status" -ne 0 ]; then
+        dump_bench_processes
+        export NIPC_KEEP_RUN_DIR=1
+        return 1
+    fi
 
     if [ "$client_status" -ne 0 ]; then
         warn "  ${client_lang} pipeline-batch client failed for ${server_lang} server (exit ${client_status})"
@@ -1296,6 +1391,7 @@ main() {
     require_positive_integer "NIPC_BENCH_MAX_DURATION" "$MAX_DURATION"
     require_positive_integer "NIPC_BENCH_PIPELINE_BATCH_MAX_DURATION" "$PIPELINE_BATCH_MAX_DURATION"
     require_positive_integer "NIPC_BENCH_MIN_STABLE_SAMPLES" "$MIN_STABLE_SAMPLES"
+    require_positive_integer "NIPC_BENCH_SERVER_STOP_GRACE_SEC" "$SERVER_STOP_GRACE_SEC"
     require_positive_number "NIPC_BENCH_MAX_THROUGHPUT_RATIO" "$MAX_THROUGHPUT_RATIO"
     require_zero_or_one "NIPC_BENCH_DIAGNOSE_FAILURES" "$DIAGNOSE_FAILURES"
     log "Windows Benchmark Suite"
@@ -1303,6 +1399,7 @@ main() {
     log "Duration per max-tier sample: ${MAX_DURATION}s"
     log "Duration per pipeline-batch max-tier sample: ${PIPELINE_BATCH_MAX_DURATION}s"
     log "Samples per published row: ${REPETITIONS}"
+    log "Server stop grace before forced kill: ${SERVER_STOP_GRACE_SEC}s"
     log "Max allowed stable throughput ratio: ${MAX_THROUGHPUT_RATIO}"
     log "Minimum stable samples required: ${MIN_STABLE_SAMPLES}"
     log "Diagnostic reruns for failed rows: $( [ "$DIAGNOSE_FAILURES" = "1" ] && printf enabled || printf disabled )"

@@ -4,7 +4,6 @@ package cgroups
 
 import (
 	raw "github.com/netdata/plugin-ipc/go/pkg/netipc/service/raw"
-	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
 )
 
 // Cache is the public L3 client-side cgroups snapshot cache.
@@ -13,8 +12,8 @@ type Cache struct {
 }
 
 // NewCache creates a new L3 cache. Does NOT connect.
-func NewCache(runDir, serviceName string, config posix.ClientConfig) *Cache {
-	return &Cache{inner: raw.NewCache(runDir, serviceName, config)}
+func NewCache(runDir, serviceName string, config ClientConfig) *Cache {
+	return &Cache{inner: raw.NewCache(runDir, serviceName, clientConfigToTransport(config))}
 }
 
 // Refresh drives the L2 client and requests a fresh snapshot.

@@ -68,6 +68,7 @@ mod ffi {
         pub fn CloseHandle(hObject: HANDLE) -> BOOL;
 
         pub fn GetLastError() -> DWORD;
+        pub fn SetLastError(dwErrCode: DWORD);
 
         pub fn GetTickCount() -> DWORD;
         pub fn GetTickCount64() -> u64;
@@ -91,6 +92,7 @@ pub const BUSYWAIT_POLL_MASK: u32 = 1023;
 
 pub const PROFILE_HYBRID: u32 = 0x02;
 pub const PROFILE_BUSYWAIT: u32 = 0x04;
+const ERROR_ALREADY_EXISTS: u32 = 183;
 
 // Header field byte offsets
 const OFF_MAGIC: usize = 0;
@@ -134,6 +136,8 @@ pub enum WinShmError {
     CreateEvent(u32),
     /// OpenEventW failed.
     OpenEvent(u32),
+    /// Named mapping/event already exists.
+    AddrInUse,
     /// Header magic mismatch.
     BadMagic,
     /// Header version mismatch.
@@ -159,6 +163,9 @@ impl std::fmt::Display for WinShmError {
             WinShmError::MapView(e) => write!(f, "MapViewOfFile failed: {e}"),
             WinShmError::CreateEvent(e) => write!(f, "CreateEventW failed: {e}"),
             WinShmError::OpenEvent(e) => write!(f, "OpenEventW failed: {e}"),
+            WinShmError::AddrInUse => {
+                write!(f, "Windows SHM object name already in use by live server")
+            }
             WinShmError::BadMagic => write!(f, "SHM header magic mismatch"),
             WinShmError::BadVersion => write!(f, "SHM header version mismatch"),
             WinShmError::BadHeader => write!(f, "SHM header_len mismatch"),
@@ -250,6 +257,7 @@ impl WinShmContext {
         let region_size = (resp_off + resp_cap) as usize;
 
         // Create page-file backed mapping
+        unsafe { ffi::SetLastError(0) };
         let mapping = unsafe {
             ffi::CreateFileMappingW(
                 ffi::INVALID_HANDLE_VALUE,
@@ -262,6 +270,11 @@ impl WinShmContext {
         };
         if mapping == 0 {
             return Err(WinShmError::CreateMapping(last_error()));
+        }
+        let mapping_err = last_error();
+        if mapping_err == ERROR_ALREADY_EXISTS {
+            unsafe { ffi::CloseHandle(mapping) };
+            return Err(WinShmError::AddrInUse);
         }
 
         let base =
@@ -293,6 +306,7 @@ impl WinShmContext {
         // Create events for HYBRID
         let (req_event, resp_event) = if profile == PROFILE_HYBRID {
             let re_name = build_object_name(hash, service_name, profile, session_id, "req_event")?;
+            unsafe { ffi::SetLastError(0) };
             let re = unsafe { ffi::CreateEventW(std::ptr::null(), 0, 0, re_name.as_ptr()) };
             if re == 0 {
                 let e = last_error();
@@ -302,9 +316,18 @@ impl WinShmContext {
                 }
                 return Err(WinShmError::CreateEvent(e));
             }
+            if last_error() == ERROR_ALREADY_EXISTS {
+                unsafe {
+                    ffi::CloseHandle(re);
+                    ffi::UnmapViewOfFile(base as *const _);
+                    ffi::CloseHandle(mapping);
+                }
+                return Err(WinShmError::AddrInUse);
+            }
 
             let rsp_name =
                 build_object_name(hash, service_name, profile, session_id, "resp_event")?;
+            unsafe { ffi::SetLastError(0) };
             let rsp = unsafe { ffi::CreateEventW(std::ptr::null(), 0, 0, rsp_name.as_ptr()) };
             if rsp == 0 {
                 let e = last_error();
@@ -314,6 +337,15 @@ impl WinShmContext {
                     ffi::CloseHandle(mapping);
                 }
                 return Err(WinShmError::CreateEvent(e));
+            }
+            if last_error() == ERROR_ALREADY_EXISTS {
+                unsafe {
+                    ffi::CloseHandle(rsp);
+                    ffi::CloseHandle(re);
+                    ffi::UnmapViewOfFile(base as *const _);
+                    ffi::CloseHandle(mapping);
+                }
+                return Err(WinShmError::AddrInUse);
             }
             (re, rsp)
         } else {
@@ -1041,6 +1073,42 @@ mod tests {
             Err(err) => err,
         };
         assert_eq!(err, WinShmError::BadMagic);
+
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_server_create_rejects_existing_objects_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_addr_in_use");
+        let auth_token: u64 = 0x424242;
+        let session_id: u64 = 22;
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create");
+
+        let err = match WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        ) {
+            Ok(_) => panic!("duplicate server_create must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, WinShmError::AddrInUse);
 
         server.destroy();
     }

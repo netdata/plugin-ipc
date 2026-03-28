@@ -195,6 +195,7 @@ nipc_win_shm_error_t nipc_win_shm_server_create(
     size_t region_size = (size_t)resp_off + resp_capacity;
 
     /* Create file mapping backed by page file */
+    SetLastError(ERROR_SUCCESS);
     HANDLE mapping = CreateFileMappingW(
         INVALID_HANDLE_VALUE,   /* page file backed */
         NULL,                   /* default security */
@@ -204,6 +205,10 @@ nipc_win_shm_error_t nipc_win_shm_server_create(
         mapping_name);
     if (!mapping)
         return NIPC_WIN_SHM_ERR_CREATE_MAPPING;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(mapping);
+        return NIPC_WIN_SHM_ERR_ADDR_IN_USE;
+    }
 
     /* Map the view */
     void *base = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, region_size);
@@ -250,19 +255,34 @@ nipc_win_shm_error_t nipc_win_shm_server_create(
         }
 
         /* Auto-reset events (bManualReset = FALSE) */
+        SetLastError(ERROR_SUCCESS);
         req_event = CreateEventW(NULL, FALSE, FALSE, req_event_name);
         if (!req_event) {
             UnmapViewOfFile(base);
             CloseHandle(mapping);
             return NIPC_WIN_SHM_ERR_CREATE_EVENT;
         }
+        if (GetLastError() == ERROR_ALREADY_EXISTS) {
+            CloseHandle(req_event);
+            UnmapViewOfFile(base);
+            CloseHandle(mapping);
+            return NIPC_WIN_SHM_ERR_ADDR_IN_USE;
+        }
 
+        SetLastError(ERROR_SUCCESS);
         resp_event = CreateEventW(NULL, FALSE, FALSE, resp_event_name);
         if (!resp_event) {
             CloseHandle(req_event);
             UnmapViewOfFile(base);
             CloseHandle(mapping);
             return NIPC_WIN_SHM_ERR_CREATE_EVENT;
+        }
+        if (GetLastError() == ERROR_ALREADY_EXISTS) {
+            CloseHandle(resp_event);
+            CloseHandle(req_event);
+            UnmapViewOfFile(base);
+            CloseHandle(mapping);
+            return NIPC_WIN_SHM_ERR_ADDR_IN_USE;
         }
     }
 

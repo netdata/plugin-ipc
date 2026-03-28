@@ -7,9 +7,9 @@
 #[cfg(windows)]
 use netipc::protocol::{PROFILE_BASELINE, PROFILE_SHM_HYBRID};
 #[cfg(windows)]
-use netipc::service::cgroups::{CgroupsCache, CgroupsClient, Handler, ManagedServer};
-#[cfg(windows)]
-use netipc::transport::windows::{ClientConfig, ServerConfig};
+use netipc::service::cgroups::{
+    CgroupsCache, CgroupsClient, ClientConfig, Handler, ManagedServer, ServerConfig,
+};
 
 #[cfg(windows)]
 const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;

@@ -203,8 +203,8 @@ func TestUdsListenFailsWhenRunDirMissing(t *testing.T) {
 }
 
 func TestUdsRawGenericErrors(t *testing.T) {
-	if err := rawSendMsg(-1, []byte("x")); !errors.Is(err, ErrSend) {
-		t.Fatalf("rawSendMsg(invalid fd) = %v, want ErrSend", err)
+	if err := rawSendIov(-1, []byte("x"), nil); !errors.Is(err, ErrSend) {
+		t.Fatalf("rawSendIov(invalid fd) = %v, want ErrSend", err)
 	}
 
 	buf := make([]byte, 16)

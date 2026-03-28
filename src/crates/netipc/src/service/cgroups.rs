@@ -5,18 +5,104 @@
 //! validation, not for public multi-method dispatch.
 
 use super::raw;
-use crate::protocol::{CgroupsResponseView, NipcError, METHOD_CGROUPS_SNAPSHOT};
+use crate::protocol::{CgroupsResponseView, NipcError, METHOD_CGROUPS_SNAPSHOT, PROFILE_BASELINE};
 
 #[cfg(unix)]
-use crate::transport::posix::{ClientConfig, ServerConfig};
+use crate::transport::posix::{ClientConfig as TransportClientConfig, ServerConfig as TransportServerConfig};
 
 #[cfg(windows)]
-use crate::transport::windows::{ClientConfig, ServerConfig};
+use crate::transport::windows::{ClientConfig as TransportClientConfig, ServerConfig as TransportServerConfig};
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 pub use raw::{CgroupsCacheItem, CgroupsCacheStatus, ClientState, ClientStatus, SnapshotHandler};
+
+/// Public L2/L3 client configuration for the cgroups-snapshot service.
+///
+/// This service-level configuration is shared across supported operating
+/// systems. Transport-only tuning stays below the public typed API.
+#[derive(Debug, Clone)]
+pub struct ClientConfig {
+    pub supported_profiles: u32,
+    pub preferred_profiles: u32,
+    pub max_request_payload_bytes: u32,
+    pub max_request_batch_items: u32,
+    pub max_response_payload_bytes: u32,
+    pub max_response_batch_items: u32,
+    pub auth_token: u64,
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            supported_profiles: PROFILE_BASELINE,
+            preferred_profiles: 0,
+            max_request_payload_bytes: 0,
+            max_request_batch_items: 0,
+            max_response_payload_bytes: 0,
+            max_response_batch_items: 0,
+            auth_token: 0,
+        }
+    }
+}
+
+impl ClientConfig {
+    fn into_transport(self) -> TransportClientConfig {
+        let mut transport = TransportClientConfig::default();
+        transport.supported_profiles = self.supported_profiles;
+        transport.preferred_profiles = self.preferred_profiles;
+        transport.max_request_payload_bytes = self.max_request_payload_bytes;
+        transport.max_request_batch_items = self.max_request_batch_items;
+        transport.max_response_payload_bytes = self.max_response_payload_bytes;
+        transport.max_response_batch_items = self.max_response_batch_items;
+        transport.auth_token = self.auth_token;
+        transport
+    }
+}
+
+/// Public typed-server configuration for the cgroups-snapshot service.
+///
+/// This configuration is intentionally transport-agnostic. Transport-only
+/// knobs such as socket backlog or packet sizing stay below the service layer.
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    pub supported_profiles: u32,
+    pub preferred_profiles: u32,
+    pub max_request_payload_bytes: u32,
+    pub max_request_batch_items: u32,
+    pub max_response_payload_bytes: u32,
+    pub max_response_batch_items: u32,
+    pub auth_token: u64,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            supported_profiles: PROFILE_BASELINE,
+            preferred_profiles: 0,
+            max_request_payload_bytes: 0,
+            max_request_batch_items: 0,
+            max_response_payload_bytes: 0,
+            max_response_batch_items: 0,
+            auth_token: 0,
+        }
+    }
+}
+
+impl ServerConfig {
+    fn into_transport(self) -> TransportServerConfig {
+        let mut transport = TransportServerConfig::default();
+        transport.supported_profiles = self.supported_profiles;
+        transport.preferred_profiles = self.preferred_profiles;
+        transport.max_request_payload_bytes = self.max_request_payload_bytes;
+        transport.max_request_batch_items = self.max_request_batch_items;
+        transport.max_response_payload_bytes = self.max_response_payload_bytes;
+        transport.max_response_batch_items = self.max_response_batch_items;
+        transport.auth_token = self.auth_token;
+        transport
+    }
+}
 
 /// L2 client context for the cgroups-snapshot service.
 pub struct CgroupsClient {
@@ -28,7 +114,7 @@ impl CgroupsClient {
     /// server to be running.
     pub fn new(run_dir: &str, service_name: &str, config: ClientConfig) -> Self {
         Self {
-            inner: raw::RawClient::new_snapshot(run_dir, service_name, config),
+            inner: raw::RawClient::new_snapshot(run_dir, service_name, config.into_transport()),
         }
     }
 
@@ -100,7 +186,7 @@ impl ManagedServer {
             inner: raw::ManagedServer::with_workers(
                 run_dir,
                 service_name,
-                config,
+                config.into_transport(),
                 METHOD_CGROUPS_SNAPSHOT,
                 raw_handler,
                 worker_count,
@@ -138,7 +224,7 @@ impl CgroupsCache {
     /// Does NOT connect. Does NOT require the server to be running.
     pub fn new(run_dir: &str, service_name: &str, config: ClientConfig) -> Self {
         Self {
-            inner: raw::CgroupsCache::new(run_dir, service_name, config),
+            inner: raw::CgroupsCache::new(run_dir, service_name, config.into_transport()),
         }
     }
 

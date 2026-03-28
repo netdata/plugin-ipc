@@ -12,14 +12,38 @@ func snapshotDispatch(handler Handler) raw.DispatchHandler {
 	return raw.SnapshotDispatch(handler.Handle, handler.SnapshotMaxItems)
 }
 
+func clientConfigToTransport(config ClientConfig) posix.ClientConfig {
+	return posix.ClientConfig{
+		SupportedProfiles:       config.SupportedProfiles,
+		PreferredProfiles:       config.PreferredProfiles,
+		MaxRequestPayloadBytes:  config.MaxRequestPayloadBytes,
+		MaxRequestBatchItems:    config.MaxRequestBatchItems,
+		MaxResponsePayloadBytes: config.MaxResponsePayloadBytes,
+		MaxResponseBatchItems:   config.MaxResponseBatchItems,
+		AuthToken:               config.AuthToken,
+	}
+}
+
+func serverConfigToTransport(config ServerConfig) posix.ServerConfig {
+	return posix.ServerConfig{
+		SupportedProfiles:       config.SupportedProfiles,
+		PreferredProfiles:       config.PreferredProfiles,
+		MaxRequestPayloadBytes:  config.MaxRequestPayloadBytes,
+		MaxRequestBatchItems:    config.MaxRequestBatchItems,
+		MaxResponsePayloadBytes: config.MaxResponsePayloadBytes,
+		MaxResponseBatchItems:   config.MaxResponseBatchItems,
+		AuthToken:               config.AuthToken,
+	}
+}
+
 // Client is the public L2 client context for the cgroups-snapshot service.
 type Client struct {
 	inner *raw.Client
 }
 
 // NewClient creates a new client context. Does NOT connect.
-func NewClient(runDir, serviceName string, config posix.ClientConfig) *Client {
-	return &Client{inner: raw.NewSnapshotClient(runDir, serviceName, config)}
+func NewClient(runDir, serviceName string, config ClientConfig) *Client {
+	return &Client{inner: raw.NewSnapshotClient(runDir, serviceName, clientConfigToTransport(config))}
 }
 
 // Refresh attempts connect if DISCONNECTED/NOT_FOUND, reconnect if BROKEN.
@@ -53,12 +77,12 @@ type Server struct {
 }
 
 // NewServer creates a new managed server.
-func NewServer(runDir, serviceName string, config posix.ServerConfig, handler Handler) *Server {
+func NewServer(runDir, serviceName string, config ServerConfig, handler Handler) *Server {
 	return &Server{
 		inner: raw.NewServer(
 			runDir,
 			serviceName,
-			config,
+			serverConfigToTransport(config),
 			protocol.MethodCgroupsSnapshot,
 			snapshotDispatch(handler),
 		),
@@ -66,13 +90,13 @@ func NewServer(runDir, serviceName string, config posix.ServerConfig, handler Ha
 }
 
 // NewServerWithWorkers creates a server with an explicit worker count limit.
-func NewServerWithWorkers(runDir, serviceName string, config posix.ServerConfig,
+func NewServerWithWorkers(runDir, serviceName string, config ServerConfig,
 	handler Handler, workerCount int) *Server {
 	return &Server{
 		inner: raw.NewServerWithWorkers(
 			runDir,
 			serviceName,
-			config,
+			serverConfigToTransport(config),
 			protocol.MethodCgroupsSnapshot,
 			snapshotDispatch(handler),
 			workerCount,

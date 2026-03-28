@@ -27,6 +27,34 @@ const (
 // ClientStatus is a diagnostic counters snapshot.
 type ClientStatus = raw.ClientStatus
 
+// ClientConfig is the public L2/L3 client configuration for the
+// cgroups-snapshot service.
+//
+// Transport-only tuning stays below the public typed API.
+type ClientConfig struct {
+	SupportedProfiles       uint32
+	PreferredProfiles       uint32
+	MaxRequestPayloadBytes  uint32
+	MaxRequestBatchItems    uint32
+	MaxResponsePayloadBytes uint32
+	MaxResponseBatchItems   uint32
+	AuthToken               uint64
+}
+
+// ServerConfig is the public typed-server configuration for the
+// cgroups-snapshot service.
+//
+// Transport-only tuning stays below the public typed API.
+type ServerConfig struct {
+	SupportedProfiles       uint32
+	PreferredProfiles       uint32
+	MaxRequestPayloadBytes  uint32
+	MaxRequestBatchItems    uint32
+	MaxResponsePayloadBytes uint32
+	MaxResponseBatchItems   uint32
+	AuthToken               uint64
+}
+
 // SnapshotHandler is the typed callback used by the cgroups-snapshot service.
 type SnapshotHandler = func(*protocol.CgroupsRequest, *protocol.CgroupsBuilder) bool
 

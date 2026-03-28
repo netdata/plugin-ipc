@@ -20,7 +20,7 @@ mod posix_only {
         METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE, PROFILE_SHM_HYBRID, STATUS_OK,
         VERSION,
     };
-    use netipc::service::cgroups::CgroupsClient;
+    use netipc::service::cgroups::{CgroupsClient, ClientConfig as TypedClientConfig};
     use netipc::service::raw::{
         increment_dispatch, snapshot_dispatch, CgroupsCacheItem, DispatchHandler, ManagedServer,
     };
@@ -155,6 +155,19 @@ mod posix_only {
             max_response_batch_items: 1,
             auth_token: AUTH_TOKEN,
             ..ClientConfig::default()
+        }
+    }
+
+    fn typed_client_config(profiles: u32) -> TypedClientConfig {
+        TypedClientConfig {
+            supported_profiles: profiles,
+            preferred_profiles: profiles,
+            max_request_payload_bytes: 4096,
+            max_request_batch_items: 1,
+            max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
+            max_response_batch_items: 1,
+            auth_token: AUTH_TOKEN,
+            ..TypedClientConfig::default()
         }
     }
 
@@ -390,6 +403,7 @@ mod posix_only {
 
         let mut req_buf = vec![0u8; BENCH_BATCH_BUF_SIZE];
         let mut recv_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
+        let mut msg_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
         let mut expected = vec![0u64; BENCH_MAX_BATCH_ITEMS as usize];
 
         // SHM upgrade if negotiated
@@ -481,7 +495,7 @@ mod posix_only {
             let io_result = if let Some(ref mut shm_ctx) = shm {
                 // SHM path: assemble header + payload into one message
                 let msg_len = HEADER_SIZE + req_len;
-                let mut msg = vec![0u8; msg_len];
+                let msg = &mut msg_buf[..msg_len];
                 hdr.magic = MAGIC_MSG;
                 hdr.version = VERSION;
                 hdr.header_len = protocol::HEADER_LEN;
@@ -806,6 +820,7 @@ mod posix_only {
             .collect();
         let mut req_lens = vec![0usize; depth];
         let mut batch_sizes = vec![0u32; depth];
+        let mut recv_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
 
         let cpu_start = cpu_ns();
         let wall_start = Instant::now();
@@ -864,7 +879,6 @@ mod posix_only {
             }
 
             // Receive `depth` batch responses
-            let mut recv_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
             for d in 0..depth {
                 match session.receive(&mut recv_buf) {
                     Ok((_resp_hdr, _payload)) => {
@@ -992,6 +1006,10 @@ mod posix_only {
             return 1;
         }
 
+        let mut msg_buf = vec![0u8; HEADER_SIZE + 8];
+        let mut resp_shm_buf = vec![0u8; HEADER_SIZE + 64];
+        let mut recv_buf = vec![0u8; 256];
+
         while wall_start.elapsed() < deadline {
             rl.wait();
 
@@ -1013,7 +1031,7 @@ mod posix_only {
             let send_ok = if let Some(ref mut shm_ctx) = shm {
                 // SHM path
                 let msg_len = HEADER_SIZE + 8;
-                let mut msg = vec![0u8; msg_len];
+                let msg = &mut msg_buf[..msg_len];
                 hdr.magic = MAGIC_MSG;
                 hdr.version = VERSION;
                 hdr.header_len = protocol::HEADER_LEN;
@@ -1026,7 +1044,6 @@ mod posix_only {
                     continue;
                 }
 
-                let mut resp_shm_buf = vec![0u8; HEADER_SIZE + 64];
                 match shm_ctx.receive(&mut resp_shm_buf, 30000) {
                     Ok(resp_len) => {
                         if resp_len >= HEADER_SIZE + 8 {
@@ -1057,7 +1074,6 @@ mod posix_only {
                     errors += 1;
                     continue;
                 }
-                let mut recv_buf = vec![0u8; 256];
                 match session.receive(&mut recv_buf) {
                     Ok((_resp_hdr, payload)) => {
                         if payload.len() >= 8 {
@@ -1086,7 +1102,6 @@ mod posix_only {
                     errors += 1;
                     continue;
                 }
-                let mut recv_buf = vec![0u8; 256];
                 match session.receive(&mut recv_buf) {
                     Ok((_resp_hdr, payload)) => {
                         if payload.len() >= 8 {
@@ -1166,7 +1181,7 @@ mod posix_only {
         scenario: &str,
         server_lang: &str,
     ) -> i32 {
-        let mut client = CgroupsClient::new(run_dir, service, client_config(profiles));
+        let mut client = CgroupsClient::new(run_dir, service, typed_client_config(profiles));
 
         for _ in 0..200 {
             client.refresh();
@@ -1251,6 +1266,20 @@ mod posix_only {
     // ---------------------------------------------------------------------------
 
     fn run_lookup_bench(duration_sec: u32) -> i32 {
+        #[derive(Clone, Copy, Default)]
+        struct Bucket {
+            index: usize,
+            used: bool,
+        }
+
+        fn hash_name(name: &str) -> u32 {
+            let mut h: u32 = 5381;
+            for b in name.as_bytes() {
+                h = ((h << 5).wrapping_add(h)).wrapping_add(*b as u32);
+            }
+            h
+        }
+
         // Build a synthetic cache with 16 items
         let items: Vec<CgroupsCacheItem> = (0..16)
             .map(|i| CgroupsCacheItem {
@@ -1262,6 +1291,19 @@ mod posix_only {
             })
             .collect();
 
+        let mut lookup_index = vec![Bucket::default(); 32];
+        let mask = (lookup_index.len() - 1) as u32;
+        for (idx, item) in items.iter().enumerate() {
+            let mut slot = (item.hash ^ hash_name(&item.name)) & mask;
+            while lookup_index[slot as usize].used {
+                slot = (slot + 1) & mask;
+            }
+            lookup_index[slot as usize] = Bucket {
+                index: idx,
+                used: true,
+            };
+        }
+
         let mut lookups: u64 = 0;
         let mut hits: u64 = 0;
 
@@ -1269,14 +1311,19 @@ mod posix_only {
         let wall_start = Instant::now();
         let deadline = Duration::from_secs(duration_sec as u64);
 
-        // Simulate L3 cache lookup without transport
         while wall_start.elapsed() < deadline {
             for item in &items {
-                // Linear scan like the real L3 cache
-                let found = items
-                    .iter()
-                    .find(|it| it.hash == item.hash && it.name == item.name);
-                if found.is_some() {
+                let mut slot = (item.hash ^ hash_name(&item.name)) & mask;
+                let mut found = false;
+                while lookup_index[slot as usize].used {
+                    let bucket_item = &items[lookup_index[slot as usize].index];
+                    if bucket_item.hash == item.hash && bucket_item.name == item.name {
+                        found = true;
+                        break;
+                    }
+                    slot = (slot + 1) & mask;
+                }
+                if found {
                     hits += 1;
                 }
                 lookups += 1;

@@ -61,6 +61,7 @@ typedef enum {
     NIPC_WIN_SHM_ERR_MAP_VIEW,           /* MapViewOfFile failed */
     NIPC_WIN_SHM_ERR_CREATE_EVENT,       /* CreateEventW failed */
     NIPC_WIN_SHM_ERR_OPEN_EVENT,         /* OpenEventW failed */
+    NIPC_WIN_SHM_ERR_ADDR_IN_USE,        /* named mapping/event already exists */
     NIPC_WIN_SHM_ERR_BAD_MAGIC,          /* header magic mismatch */
     NIPC_WIN_SHM_ERR_BAD_VERSION,        /* header version mismatch */
     NIPC_WIN_SHM_ERR_BAD_HEADER,         /* header_len mismatch */

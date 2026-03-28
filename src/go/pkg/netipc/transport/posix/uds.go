@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
+	"unsafe"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 )
@@ -26,11 +27,11 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	defaultBacklog          = 16
-	defaultBatchItems       = 1
+	defaultBacklog                   = 16
+	defaultBatchItems                = 1
 	defaultPacketSizeFallback uint32 = 65536
-	helloPayloadSize        = 44
-	helloAckPayloadSize     = 48
+	helloPayloadSize                 = 44
+	helloAckPayloadSize              = 48
 
 	// sun_path max — 108 on Linux, 104 on macOS/FreeBSD.
 	// We use a conservative limit.
@@ -83,27 +84,27 @@ const (
 
 // ClientConfig configures a client connection.
 type ClientConfig struct {
-	SupportedProfiles      uint32
-	PreferredProfiles      uint32
-	MaxRequestPayloadBytes uint32 // 0 = use default (1024)
-	MaxRequestBatchItems   uint32 // 0 = use default (1)
+	SupportedProfiles       uint32
+	PreferredProfiles       uint32
+	MaxRequestPayloadBytes  uint32 // 0 = use default (1024)
+	MaxRequestBatchItems    uint32 // 0 = use default (1)
 	MaxResponsePayloadBytes uint32
-	MaxResponseBatchItems  uint32
-	AuthToken              uint64
-	PacketSize             uint32 // 0 = auto-detect from SO_SNDBUF
+	MaxResponseBatchItems   uint32
+	AuthToken               uint64
+	PacketSize              uint32 // 0 = auto-detect from SO_SNDBUF
 }
 
 // ServerConfig configures a listener and its accepted sessions.
 type ServerConfig struct {
-	SupportedProfiles      uint32
-	PreferredProfiles      uint32
-	MaxRequestPayloadBytes uint32
-	MaxRequestBatchItems   uint32
+	SupportedProfiles       uint32
+	PreferredProfiles       uint32
+	MaxRequestPayloadBytes  uint32
+	MaxRequestBatchItems    uint32
 	MaxResponsePayloadBytes uint32
-	MaxResponseBatchItems  uint32
-	AuthToken              uint64
-	PacketSize             uint32 // 0 = auto-detect from SO_SNDBUF
-	Backlog                int    // 0 = default (16)
+	MaxResponseBatchItems   uint32
+	AuthToken               uint64
+	PacketSize              uint32 // 0 = auto-detect from SO_SNDBUF
+	Backlog                 int    // 0 = default (16)
 }
 
 // ---------------------------------------------------------------------------
@@ -127,9 +128,8 @@ type Session struct {
 	// Internal receive buffer for chunked reassembly
 	recvBuf []byte
 
-	// Reusable packet scratch buffers for send/receive chunk assembly.
-	sendBuf []byte
-	pktBuf  []byte
+	// Reusable packet scratch buffer for receive chunk assembly.
+	pktBuf []byte
 
 	// In-flight message_id set (client-side only)
 	inflightIDs map[uint64]struct{}
@@ -152,7 +152,6 @@ func (s *Session) Close() {
 		s.fd = -1
 	}
 	s.recvBuf = nil
-	s.sendBuf = nil
 	s.pktBuf = nil
 }
 
@@ -222,10 +221,9 @@ func (s *Session) sendInner(hdr *protocol.Header, payload []byte) error {
 
 	// Single packet?
 	if totalMsg <= int(s.PacketSize) {
-		msg := ensureScratchBuf(&s.sendBuf, totalMsg)
-		hdr.Encode(msg[:protocol.HeaderSize])
-		copy(msg[protocol.HeaderSize:], payload)
-		return rawSendMsg(s.fd, msg[:totalMsg])
+		var hdrBuf [protocol.HeaderSize]byte
+		hdr.Encode(hdrBuf[:])
+		return rawSendIov(s.fd, hdrBuf[:], payload)
 	}
 
 	// Chunked send
@@ -247,10 +245,9 @@ func (s *Session) sendInner(hdr *protocol.Header, payload []byte) error {
 	chunkCount := 1 + continuationChunks
 
 	// Send first chunk: outer header + first part of payload
-	pktBuf := ensureScratchBuf(&s.sendBuf, int(s.PacketSize))
-	hdr.Encode(pktBuf[:protocol.HeaderSize])
-	copy(pktBuf[protocol.HeaderSize:], payload[:firstChunkPayload])
-	if err := rawSendMsg(s.fd, pktBuf[:protocol.HeaderSize+firstChunkPayload]); err != nil {
+	var hdrBuf [protocol.HeaderSize]byte
+	hdr.Encode(hdrBuf[:])
+	if err := rawSendIov(s.fd, hdrBuf[:], payload[:firstChunkPayload]); err != nil {
 		return err
 	}
 
@@ -274,9 +271,9 @@ func (s *Session) sendInner(hdr *protocol.Header, payload []byte) error {
 			ChunkPayloadLen: uint32(thisChunk),
 		}
 
-		chk.Encode(pktBuf[:protocol.HeaderSize])
-		copy(pktBuf[protocol.HeaderSize:], payload[offset:offset+thisChunk])
-		if err := rawSendMsg(s.fd, pktBuf[:protocol.HeaderSize+thisChunk]); err != nil {
+		var chkBuf [protocol.HeaderSize]byte
+		chk.Encode(chkBuf[:])
+		if err := rawSendIov(s.fd, chkBuf[:], payload[offset:offset+thisChunk]); err != nil {
 			return err
 		}
 
@@ -435,10 +432,10 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 			return protocol.Header{}, nil, wrapErr(ErrChunk, "chunk exceeds payload_len")
 		}
 
-			copy(s.recvBuf[assembled:assembled+chunkData], pktBuf[protocol.HeaderSize:protocol.HeaderSize+chunkData])
-			assembled += chunkData
-			ci++
-		}
+		copy(s.recvBuf[assembled:assembled+chunkData], pktBuf[protocol.HeaderSize:protocol.HeaderSize+chunkData])
+		assembled += chunkData
+		ci++
+	}
 
 	payload := s.recvBuf[:hdr.PayloadLen]
 
@@ -639,13 +636,36 @@ func maxU32(a, b uint32) uint32 {
 // ---------------------------------------------------------------------------
 
 // rawSendIov sends header + payload as one SEQPACKET message using sendmsg.
-func rawSendMsg(fd int, msg []byte) error {
-	n, err := syscall.SendmsgN(fd, msg, nil, nil, 0)
-	if err != nil {
-		return wrapErr(ErrSend, err.Error())
+func rawSendIov(fd int, hdr []byte, payload []byte) error {
+	var iov [2]syscall.Iovec
+	iov[0].Base = unsafe.SliceData(hdr)
+	iov[0].SetLen(len(hdr))
+
+	iovlen := uint64(1)
+	if len(payload) > 0 {
+		iov[1].Base = unsafe.SliceData(payload)
+		iov[1].SetLen(len(payload))
+		iovlen = 2
 	}
-	if n != len(msg) {
-		return wrapErr(ErrSend, fmt.Sprintf("short write: %d/%d", n, len(msg)))
+
+	msg := syscall.Msghdr{
+		Iov:    &iov[0],
+		Iovlen: iovlen,
+	}
+
+	n, _, errno := syscall.Syscall(
+		syscall.SYS_SENDMSG,
+		uintptr(fd),
+		uintptr(unsafe.Pointer(&msg)),
+		uintptr(syscall.MSG_NOSIGNAL),
+	)
+	if errno != 0 {
+		return wrapErr(ErrSend, errno.Error())
+	}
+
+	expected := len(hdr) + len(payload)
+	if int(n) != expected {
+		return wrapErr(ErrSend, fmt.Sprintf("short write: %d/%d", n, expected))
 	}
 	return nil
 }

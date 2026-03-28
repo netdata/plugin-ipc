@@ -1044,6 +1044,31 @@ static void test_client_attach_validation(void)
     nipc_win_shm_destroy(&server);
 }
 
+static void test_server_create_rejects_existing_objects(void)
+{
+    printf("--- Server create rejects existing kernel objects ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_win_shm_ctx_t first = {0};
+    nipc_win_shm_ctx_t second = {0};
+    nipc_win_shm_error_t err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, service, AUTH_TOKEN, 77,
+        NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &first);
+    check("initial server create", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK)
+        return;
+
+    err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, service, AUTH_TOKEN, 77,
+        NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &second);
+    check("duplicate server create gets ADDR_IN_USE",
+          err == NIPC_WIN_SHM_ERR_ADDR_IN_USE);
+
+    nipc_win_shm_destroy(&first);
+}
+
 static void test_hybrid_receive_timeout_and_disconnect(void)
 {
     printf("--- HYBRID receive timeout / disconnect ---\n");
@@ -1429,6 +1454,7 @@ int main(void)
 
     test_header_layout();
     test_service_name_validation();
+    test_server_create_rejects_existing_objects();
     test_client_attach_validation();
     test_hybrid_receive_timeout_and_disconnect();
     test_hybrid_receive_zero_timeout_waits_for_data();

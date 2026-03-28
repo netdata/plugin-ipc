@@ -72,9 +72,9 @@ static nipc_uds_server_config_t default_server_config(void)
     };
 }
 
-static nipc_uds_client_config_t default_client_config(void)
+static nipc_client_config_t default_client_config(void)
 {
-    return (nipc_uds_client_config_t){
+    return (nipc_client_config_t){
         .supported_profiles        = NIPC_PROFILE_BASELINE,
         .preferred_profiles        = 0,
         .max_request_payload_bytes = 4096,
@@ -82,7 +82,6 @@ static nipc_uds_client_config_t default_client_config(void)
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
         .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
-        .packet_size               = 0,
     };
 }
 
@@ -296,7 +295,7 @@ static void *client_thread_fn(void *arg)
     ctx->error_count = 0;
     ctx->content_verified = true;
 
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_client_ctx_t client;
     nipc_client_init(&client, TEST_RUN_DIR, ctx->service, &ccfg);
 
@@ -455,7 +454,7 @@ static void test_client_disconnect_recovery(void)
     start_server(&sctx, svc, echo_handler, &stid);
     check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
 
     /* Client 1: connect, call, then disconnect abruptly */
     {
@@ -523,7 +522,7 @@ static void test_handler_failure_per_session(void)
     start_server(&sctx, svc, selective_handler, &stid);
     check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
 
     /* Client 1: normal call - should succeed */
     nipc_client_ctx_t c1;
@@ -569,7 +568,7 @@ static void test_rapid_connect_disconnect(void)
     start_server(&sctx, svc, echo_handler, &stid);
     check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     int success_count = 0;
     const int cycles = 100;
 
@@ -682,7 +681,7 @@ static void *shutdown_client_fn(void *arg)
     shutdown_client_ctx_t *ctx = (shutdown_client_ctx_t *)arg;
     __atomic_store_n(&ctx->calls_made, 0, __ATOMIC_RELAXED);
 
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_client_ctx_t client;
     nipc_client_init(&client, TEST_RUN_DIR, ctx->service, &ccfg);
 

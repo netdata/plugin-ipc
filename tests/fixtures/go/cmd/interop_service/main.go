@@ -21,7 +21,6 @@ import (
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/service/cgroups"
-	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
 )
 
 const (
@@ -38,9 +37,9 @@ func detectProfiles() uint32 {
 	return protocol.ProfileBaseline
 }
 
-func serverConfig() posix.ServerConfig {
+func serverConfig() cgroups.ServerConfig {
 	profiles := detectProfiles()
-	return posix.ServerConfig{
+	return cgroups.ServerConfig{
 		SupportedProfiles:       profiles,
 		PreferredProfiles:       profiles,
 		MaxRequestPayloadBytes:  4096,
@@ -48,13 +47,12 @@ func serverConfig() posix.ServerConfig {
 		MaxResponsePayloadBytes: responseBufSize,
 		MaxResponseBatchItems:   16,
 		AuthToken:               authToken,
-		Backlog:                 4,
 	}
 }
 
-func clientConfig() posix.ClientConfig {
+func clientConfig() cgroups.ClientConfig {
 	profiles := detectProfiles()
-	return posix.ClientConfig{
+	return cgroups.ClientConfig{
 		SupportedProfiles:       profiles,
 		PreferredProfiles:       profiles,
 		MaxRequestPayloadBytes:  4096,

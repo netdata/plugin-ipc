@@ -56,7 +56,7 @@ Runtime expectations:
 ```c
 #include "netipc/netipc_service.h"
 
-nipc_uds_client_config_t cfg = {
+nipc_client_config_t cfg = {
     .supported_profiles        = NIPC_PROFILE_BASELINE,
     .max_request_payload_bytes = 4096,
     .max_request_batch_items   = 1,
@@ -126,10 +126,10 @@ client.close();
 
 ```go
 import "github.com/netdata/plugin-ipc/go/pkg/netipc/service/cgroups"
-import "github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
+import "github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 
-config := posix.ClientConfig{
-    SupportedProfiles:       posix.ProfileBaseline,
+config := cgroups.ClientConfig{
+    SupportedProfiles:       protocol.ProfileBaseline,
     MaxRequestPayloadBytes:  4096,
     MaxRequestBatchItems:    1,
     MaxResponsePayloadBytes: 65536,
@@ -182,14 +182,13 @@ nipc_cgroups_service_handler_t service_handler = {
     .user                = NULL,
 };
 
-nipc_uds_server_config_t scfg = {
+nipc_server_config_t scfg = {
     .supported_profiles        = NIPC_PROFILE_BASELINE,
     .max_request_payload_bytes = 4096,
     .max_request_batch_items   = 1,
     .max_response_payload_bytes = 65536,
     .max_response_batch_items  = 1,
     .auth_token                = 0xDEADBEEFCAFEBABE,
-    .backlog                   = 16,
 };
 
 nipc_managed_server_t server;
@@ -238,7 +237,7 @@ handler := cgroups.Handler{
     },
 }
 
-config := posix.ServerConfig{ /* ... */ }
+config := cgroups.ServerConfig{ /* ... */ }
 server := cgroups.NewServerWithWorkers(
     "/run/netdata", "cgroups-snapshot", config, handler, 4)
 
@@ -255,7 +254,7 @@ latest snapshot, and provides O(1) lookup by hash + name.
 
 ```c
 nipc_cgroups_cache_t cache;
-nipc_uds_client_config_t ccfg = { /* ... */ };
+nipc_client_config_t ccfg = { /* ... */ };
 nipc_cgroups_cache_init(&cache, "/run/netdata", "cgroups-snapshot", &ccfg);
 
 /* Call periodically from your loop */

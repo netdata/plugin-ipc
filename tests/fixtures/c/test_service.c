@@ -143,7 +143,20 @@ static nipc_uds_server_config_t default_server_config(void)
     };
 }
 
-static nipc_uds_client_config_t default_client_config(void)
+static nipc_client_config_t default_client_config(void)
+{
+    return (nipc_client_config_t){
+        .supported_profiles        = NIPC_PROFILE_BASELINE,
+        .preferred_profiles        = 0,
+        .max_request_payload_bytes = 4096,
+        .max_request_batch_items   = 1,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .max_response_batch_items  = 1,
+        .auth_token                = AUTH_TOKEN,
+    };
+}
+
+static nipc_uds_client_config_t default_transport_client_config(void)
 {
     return (nipc_uds_client_config_t){
         .supported_profiles        = NIPC_PROFILE_BASELINE,
@@ -304,7 +317,7 @@ static void test_client_lifecycle(void)
 
     /* Init without server running */
     nipc_client_ctx_t client;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
 
     check("initial state is DISCONNECTED",
@@ -367,7 +380,7 @@ static void test_cgroups_call(void)
 
     /* Init + connect client */
     nipc_client_ctx_t client;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
     nipc_client_refresh(&client);
     check("client is READY", nipc_client_ready(&client));
@@ -442,7 +455,7 @@ static void test_retry_on_failure(void)
 
     /* Init + connect client */
     nipc_client_ctx_t client;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
     nipc_client_refresh(&client);
     check("client ready (1st connect)", nipc_client_ready(&client));
@@ -504,7 +517,7 @@ static void test_multiple_clients(void)
 
     /* Create and connect two clients */
     nipc_client_ctx_t client1, client2;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
 
     nipc_client_init(&client1, TEST_RUN_DIR, svc, &ccfg);
     nipc_client_refresh(&client1);
@@ -561,7 +574,7 @@ static void test_handler_failure(void)
 
     /* Connect client */
     nipc_client_ctx_t client;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
     nipc_client_refresh(&client);
     check("client ready", nipc_client_ready(&client));
@@ -602,7 +615,7 @@ static void test_status_reporting(void)
 
     /* Connect client */
     nipc_client_ctx_t client;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
     nipc_client_refresh(&client);
     check("client ready", nipc_client_ready(&client));
@@ -657,7 +670,7 @@ static void *drain_client_fn(void *arg)
 {
     drain_client_ctx_t *ctx = (drain_client_ctx_t *)arg;
 
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_client_ctx_t client;
     nipc_client_init(&client, TEST_RUN_DIR, ctx->service, &ccfg);
 
@@ -765,7 +778,7 @@ static void test_non_request_terminates_session(void)
     usleep(50000);
 
     /* Connect via raw UDS session */
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_client_config_t ccfg = default_transport_client_config();
     nipc_uds_session_t session;
     memset(&session, 0, sizeof(session));
     session.fd = -1;
@@ -817,7 +830,8 @@ static void test_non_request_terminates_session(void)
 
     /* Verify server is still alive: connect a new client and do a normal call */
     nipc_client_ctx_t verify_client;
-    nipc_client_init(&verify_client, TEST_RUN_DIR, svc, &ccfg);
+    nipc_client_config_t verify_cfg = default_client_config();
+    nipc_client_init(&verify_client, TEST_RUN_DIR, svc, &verify_cfg);
     nipc_client_refresh(&verify_client);
     check("server still alive after bad client",
           nipc_client_ready(&verify_client));
@@ -1126,7 +1140,7 @@ static void test_shm_l2_service(void)
     check("SHM server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Connect client with SHM profile */
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
         .preferred_profiles        = NIPC_PROFILE_SHM_HYBRID,
         .max_request_payload_bytes = 4096,
@@ -1182,7 +1196,7 @@ static void test_shm_client_rejects_malformed_responses(void)
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         fake_shm_server_ctx_t sctx;
         pthread_t tid;
-        nipc_uds_client_config_t ccfg = {
+        nipc_client_config_t ccfg = {
             .supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
             .preferred_profiles = NIPC_PROFILE_SHM_HYBRID,
             .max_request_payload_bytes = 4096,
@@ -1261,7 +1275,7 @@ static void test_shm_server_rejects_malformed_requests(void)
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         shm_server_ctx_t sctx;
         pthread_t tid;
-        nipc_uds_client_config_t ccfg = {
+        nipc_client_config_t ccfg = {
             .supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
             .preferred_profiles = NIPC_PROFILE_SHM_HYBRID,
             .max_request_payload_bytes = 4096,
@@ -1342,7 +1356,7 @@ static void test_shm_request_resize_retry(void)
     const char *svc = "svc_shm_request_resize";
     shm_limit_server_ctx_t sctx;
     pthread_t tid;
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
         .preferred_profiles = NIPC_PROFILE_SHM_HYBRID,
         .max_request_payload_bytes = 1,
@@ -1406,7 +1420,7 @@ static void test_shm_response_resize_retry(void)
     const char *svc = "svc_shm_response_resize";
     shm_limit_server_ctx_t sctx;
     pthread_t tid;
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
         .preferred_profiles = NIPC_PROFILE_SHM_HYBRID,
         .max_request_payload_bytes = 4096,
@@ -1481,7 +1495,7 @@ static void test_cache_refresh_failure_preserves(void)
 
     /* Init cache and do first refresh */
     nipc_cgroups_cache_t cache;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, svc, &ccfg);
 
     bool updated = nipc_cgroups_cache_refresh(&cache);
@@ -1560,7 +1574,7 @@ static void test_malformed_response_handling(void)
           __atomic_load_n(&sctx_good.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_cgroups_cache_t cache;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, svc, &ccfg);
 
     bool updated = nipc_cgroups_cache_refresh(&cache);
@@ -1616,7 +1630,7 @@ static void test_client_auth_failure(void)
 
     /* Connect client with WRONG auth token */
     nipc_client_ctx_t client;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     ccfg.auth_token = 0x1111111111111111ull; /* wrong token */
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
     nipc_client_refresh(&client);
@@ -1646,7 +1660,7 @@ static void test_client_incompatible(void)
 
     /* Connect client that supports only SHM_FUTEX (no overlap with server) */
     nipc_client_ctx_t client;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     ccfg.supported_profiles = NIPC_PROFILE_SHM_FUTEX; /* no overlap */
     ccfg.preferred_profiles = NIPC_PROFILE_SHM_FUTEX;
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
@@ -1677,7 +1691,7 @@ static void test_client_broken_refresh(void)
 
     /* Connect client */
     nipc_client_ctx_t client;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
     nipc_client_refresh(&client);
     check("client ready", nipc_client_ready(&client));
@@ -1738,7 +1752,7 @@ static void test_server_rejects_wrong_request_kind(void)
     memset(&session, 0, sizeof(session));
     session.fd = -1;
 
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_client_config_t ccfg = default_transport_client_config();
     nipc_uds_error_t uerr = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
     check("raw connect", uerr == NIPC_UDS_OK);
 
@@ -1919,7 +1933,7 @@ static void test_cache_empty_snapshot(void)
 
     /* Create cache and refresh */
     nipc_cgroups_cache_t cache;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, svc, &ccfg);
 
     bool updated = nipc_cgroups_cache_refresh(&cache);
@@ -1960,7 +1974,7 @@ static void test_cache_linear_scan(void)
 
     /* Create cache and refresh */
     nipc_cgroups_cache_t cache;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, svc, &ccfg);
 
     bool updated = nipc_cgroups_cache_refresh(&cache);
@@ -2004,7 +2018,7 @@ static void test_client_call_disconnected(void)
     cleanup_all(svc);
 
     nipc_client_ctx_t client;
-    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
 
     /* Client is DISCONNECTED, call should fail immediately */
@@ -2084,7 +2098,7 @@ static void test_client_init_defaults_and_truncation(void)
     printf("Test: Client init defaults and truncation\n");
 
     nipc_client_ctx_t client;
-    nipc_uds_client_config_t zero_cfg = {0};
+    nipc_client_config_t zero_cfg = {0};
 
     nipc_client_init(&client, TEST_RUN_DIR, "svc_client_defaults", &zero_cfg);
     check("default request payload size",
@@ -2140,7 +2154,7 @@ static void test_shm_negotiation_failure_on_obstructed_region(void)
     check("obstructed SHM server started",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
         .preferred_profiles        = NIPC_PROFILE_SHM_HYBRID,
         .max_request_payload_bytes = 4096,

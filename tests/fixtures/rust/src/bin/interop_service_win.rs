@@ -8,9 +8,7 @@
 #[cfg(windows)]
 use netipc::protocol::{PROFILE_BASELINE, PROFILE_SHM_HYBRID};
 #[cfg(windows)]
-use netipc::service::cgroups::{CgroupsClient, Handler, ManagedServer};
-#[cfg(windows)]
-use netipc::transport::windows::{ClientConfig, ServerConfig};
+use netipc::service::cgroups::{CgroupsClient, ClientConfig, Handler, ManagedServer, ServerConfig};
 #[cfg(windows)]
 use std::thread;
 #[cfg(windows)]

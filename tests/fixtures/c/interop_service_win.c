@@ -128,7 +128,7 @@ static int run_server(const char *run_dir, const char *service)
 static int run_client(const char *run_dir, const char *service)
 {
     uint32_t profiles = detect_profiles();
-    nipc_np_client_config_t ccfg = {0};
+    nipc_client_config_t ccfg = {0};
     ccfg.supported_profiles        = profiles;
     ccfg.max_request_payload_bytes = 4096;
     ccfg.max_request_batch_items   = 16;

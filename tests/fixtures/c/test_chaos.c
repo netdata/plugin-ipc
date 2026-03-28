@@ -202,7 +202,7 @@ static void stop_chaos_server(chaos_server_ctx_t *sctx, pthread_t tid)
 
 static bool verify_server_alive(const char *service)
 {
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
         .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
@@ -669,7 +669,7 @@ static void test_shm_chaos(void)
 
     /* First, do a normal connect to trigger SHM creation */
     {
-        nipc_uds_client_config_t ccfg = {
+        nipc_client_config_t ccfg = {
             .supported_profiles        = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
             .preferred_profiles        = NIPC_PROFILE_SHM_HYBRID,
             .max_request_payload_bytes = 4096,

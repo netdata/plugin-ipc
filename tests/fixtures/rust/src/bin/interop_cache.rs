@@ -18,8 +18,9 @@ fn main() {
 mod posix_only {
 
     use netipc::protocol::{PROFILE_BASELINE, PROFILE_SHM_HYBRID};
-    use netipc::service::cgroups::{CgroupsCache, Handler, ManagedServer};
-    use netipc::transport::posix::{ClientConfig, ServerConfig};
+    use netipc::service::cgroups::{
+        CgroupsCache, ClientConfig, Handler, ManagedServer, ServerConfig,
+    };
 
     const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;
     const RESPONSE_BUF_SIZE: usize = 65536;
@@ -80,7 +81,6 @@ mod posix_only {
             max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
             max_response_batch_items: 1,
             auth_token: AUTH_TOKEN,
-            backlog: 4,
             ..ServerConfig::default()
         }
     }

@@ -74,6 +74,32 @@ static nipc_np_client_config_t default_client_config(void)
     };
 }
 
+static nipc_server_config_t default_typed_server_config(void)
+{
+    return (nipc_server_config_t){
+        .supported_profiles         = NIPC_PROFILE_BASELINE,
+        .preferred_profiles         = 0,
+        .max_request_payload_bytes  = 4096,
+        .max_request_batch_items    = 16,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .max_response_batch_items   = 16,
+        .auth_token                 = AUTH_TOKEN,
+    };
+}
+
+static nipc_client_config_t default_typed_client_config(void)
+{
+    return (nipc_client_config_t){
+        .supported_profiles         = NIPC_PROFILE_BASELINE,
+        .preferred_profiles         = 0,
+        .max_request_payload_bytes  = 4096,
+        .max_request_batch_items    = 16,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .max_response_batch_items   = 16,
+        .auth_token                 = AUTH_TOKEN,
+    };
+}
+
 static bool on_increment(void *user, uint64_t request, uint64_t *response)
 {
     (void)user;
@@ -319,7 +345,8 @@ static nipc_cgroups_service_handler_t collision_snapshot_service_handler = {
 typedef struct {
     char service[64];
     int worker_count;
-    nipc_np_server_config_t config;
+    nipc_server_config_t typed_config;
+    nipc_np_server_config_t raw_config;
     bool use_typed;
     nipc_cgroups_service_handler_t service_handler;
     uint16_t expected_method_code;
@@ -337,11 +364,11 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
 
     if (ctx->use_typed) {
         err = nipc_server_init_typed(&ctx->server, TEST_RUN_DIR,
-                                     ctx->service, &ctx->config,
+                                     ctx->service, &ctx->typed_config,
                                      ctx->worker_count, &ctx->service_handler);
     } else {
         err = nipc_server_init(&ctx->server, TEST_RUN_DIR,
-                               ctx->service, &ctx->config,
+                               ctx->service, &ctx->raw_config,
                                ctx->worker_count, ctx->expected_method_code,
                                ctx->raw_handler, NULL);
     }
@@ -361,13 +388,13 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
 static HANDLE start_server_named(server_thread_ctx_t *ctx,
                                  const char *service,
                                  int worker_count,
-                                 const nipc_np_server_config_t *config,
+                                 const nipc_server_config_t *config,
                                  const nipc_cgroups_service_handler_t *service_handler)
 {
     memset(ctx, 0, sizeof(*ctx));
     strncpy(ctx->service, service, sizeof(ctx->service) - 1);
     ctx->worker_count = worker_count;
-    ctx->config = *config;
+    ctx->typed_config = *config;
     ctx->use_typed = true;
     ctx->service_handler = *service_handler;
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -404,7 +431,7 @@ static HANDLE start_raw_server_named(server_thread_ctx_t *ctx,
     memset(ctx, 0, sizeof(*ctx));
     strncpy(ctx->service, service, sizeof(ctx->service) - 1);
     ctx->worker_count = worker_count;
-    ctx->config = *config;
+    ctx->raw_config = *config;
     ctx->use_typed = false;
     ctx->expected_method_code = expected_method_code;
     ctx->raw_handler = raw_handler;
@@ -486,7 +513,7 @@ static DWORD WINAPI blocking_client_thread(LPVOID arg)
 {
     blocking_client_ctx_t *ctx = (blocking_client_ctx_t *)arg;
     nipc_client_ctx_t client;
-    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_typed_client_config();
 
     nipc_client_init(&client, TEST_RUN_DIR, ctx->service, &ccfg);
     if (refresh_until_ready(&client, 100, 10))
@@ -724,8 +751,9 @@ static void test_named_pipe_send_failure_recovers(void)
 
     {
         nipc_client_ctx_t client;
+        nipc_client_config_t typed_ccfg = default_typed_client_config();
         uint64_t value_out = 0;
-        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        nipc_client_init(&client, TEST_RUN_DIR, service, &typed_ccfg);
         check("send-failure replacement client ready",
               refresh_until_ready(&client, 100, 10));
         if (nipc_client_ready(&client)) {
@@ -838,7 +866,7 @@ static void test_string_dispatch_missing_handlers_and_unknown_method(void)
 
     {
         char service[64];
-        nipc_np_server_config_t scfg = default_server_config();
+        nipc_server_config_t scfg = default_typed_server_config();
         server_thread_ctx_t sctx;
         nipc_np_client_config_t ccfg = default_client_config();
         nipc_np_session_t session = { .pipe = INVALID_HANDLE_VALUE };
@@ -938,7 +966,8 @@ static void test_server_init_truncation_and_typed_error_propagation(void)
     char long_run_dir[512];
     char long_service[192];
     nipc_managed_server_t server;
-    nipc_np_server_config_t scfg = default_server_config();
+    nipc_np_server_config_t raw_scfg = default_server_config();
+    nipc_server_config_t typed_scfg = default_typed_server_config();
 
     memset(long_run_dir, 'r', sizeof(long_run_dir) - 1);
     long_run_dir[0] = 'C';
@@ -956,7 +985,7 @@ static void test_server_init_truncation_and_typed_error_propagation(void)
 
     {
         nipc_error_t err = nipc_server_init(&server, long_run_dir, long_service,
-                                            &scfg, 1, NIPC_METHOD_INCREMENT,
+                                            &raw_scfg, 1, NIPC_METHOD_INCREMENT,
                                             raw_noop_handler, NULL);
         check("raw init with long names succeeds", err == NIPC_OK);
         if (err == NIPC_OK) {
@@ -970,7 +999,7 @@ static void test_server_init_truncation_and_typed_error_propagation(void)
 
     check("typed init propagates raw invalid-service failure",
           nipc_server_init_typed(&server, TEST_RUN_DIR, "svc/typed_bad_name",
-                                 &scfg, 1, &snapshot_one_service_handler)
+                                 &typed_scfg, 1, &snapshot_one_service_handler)
           == NIPC_ERR_BAD_LAYOUT);
 }
 
@@ -982,14 +1011,14 @@ static void test_cache_collision_lookup_and_rehash(void)
     unique_service(service, sizeof(service), "svc_cache_collide");
 
     server_thread_ctx_t sctx;
-    nipc_np_server_config_t scfg = default_server_config();
+    nipc_server_config_t scfg = default_typed_server_config();
     HANDLE server_thread = start_server_named(
         &sctx, service, 4, &scfg, &collision_snapshot_service_handler);
     if (!server_thread)
         return;
 
     nipc_cgroups_cache_t cache;
-    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_client_config_t ccfg = default_typed_client_config();
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, service, &ccfg);
 
     check("collision refresh ok", nipc_cgroups_cache_refresh(&cache));

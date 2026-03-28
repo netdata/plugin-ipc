@@ -46,6 +46,19 @@ const (
 	batchBufSize  = maxBatchItems*48 + 4096 // 52096
 )
 
+type cacheBucket struct {
+	index int
+	used  bool
+}
+
+func cacheHashName(name string) uint32 {
+	h := uint32(5381)
+	for i := 0; i < len(name); i++ {
+		h = ((h << 5) + h) + uint32(name[i])
+	}
+	return h
+}
+
 // ---------------------------------------------------------------------------
 //  Timing helpers
 // ---------------------------------------------------------------------------
@@ -181,6 +194,30 @@ func batchClientConfig(profiles uint32) posix.ClientConfig {
 	}
 }
 
+func typedServerConfig(profiles uint32) cgroups.ServerConfig {
+	return cgroups.ServerConfig{
+		SupportedProfiles:       profiles,
+		PreferredProfiles:       profiles,
+		MaxRequestPayloadBytes:  4096,
+		MaxRequestBatchItems:    1,
+		MaxResponsePayloadBytes: responseBufSize,
+		MaxResponseBatchItems:   1,
+		AuthToken:               authToken,
+	}
+}
+
+func typedClientConfig(profiles uint32) cgroups.ClientConfig {
+	return cgroups.ClientConfig{
+		SupportedProfiles:       profiles,
+		PreferredProfiles:       profiles,
+		MaxRequestPayloadBytes:  4096,
+		MaxRequestBatchItems:    1,
+		MaxResponsePayloadBytes: responseBufSize,
+		MaxResponseBatchItems:   1,
+		AuthToken:               authToken,
+	}
+}
+
 // ---------------------------------------------------------------------------
 //  Snapshot handler (16 cgroup items)
 // ---------------------------------------------------------------------------
@@ -259,7 +296,7 @@ func runServer(runDir, service string, profiles uint32, durationSec int, handler
 		fmt.Printf("SERVER_CPU_SEC=%.6f\n", cpuSec)
 		return 0
 	case "snapshot":
-		server := cgroups.NewServer(runDir, service, serverConfig(profiles), snapshotHandler())
+		server := cgroups.NewServer(runDir, service, typedServerConfig(profiles), snapshotHandler())
 
 		fmt.Println("READY")
 
@@ -371,6 +408,8 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 	reqBuf := make([]byte, batchBufSize)
 	respBuf := make([]byte, batchBufSize+protocol.HeaderSize)
 	expected := make([]uint64, maxBatchItems)
+	itemBuf := make([]byte, protocol.IncrementPayloadSize)
+	msgBuf := make([]byte, batchBufSize+protocol.HeaderSize)
 
 	var counter, totalItems, errors, msgSeq uint64
 
@@ -386,7 +425,6 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 
 		// Build batch request
 		bb := protocol.NewBatchBuilder(reqBuf, batchSize)
-		itemBuf := make([]byte, protocol.IncrementPayloadSize)
 
 		buildOK := true
 		for i := uint32(0); i < batchSize; i++ {
@@ -421,7 +459,7 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 		if shm != nil {
 			// SHM path
 			msgLen := protocol.HeaderSize + reqLen
-			msg := make([]byte, msgLen)
+			msg := msgBuf[:msgLen]
 			hdr.Magic = protocol.MagicMsg
 			hdr.Version = protocol.Version
 			hdr.HeaderLen = protocol.HeaderLen
@@ -618,6 +656,7 @@ func runPipelineClient(runDir, service string, durationSec int, targetRPS uint64
 	deadline := time.Duration(durationSec) * time.Second
 
 	recvBuf := make([]byte, 256)
+	var reqPayload [8]byte
 
 	for time.Since(wallStart) < deadline {
 		rl.wait()
@@ -628,8 +667,7 @@ func runPipelineClient(runDir, service string, durationSec int, targetRPS uint64
 		sendOK := true
 		for d := 0; d < depth; d++ {
 			val := counter + uint64(d)
-			reqPayload := make([]byte, 8)
-			binary.NativeEndian.PutUint64(reqPayload, val)
+			binary.NativeEndian.PutUint64(reqPayload[:], val)
 
 			msgSeq++
 			hdr := protocol.Header{
@@ -641,7 +679,7 @@ func runPipelineClient(runDir, service string, durationSec int, targetRPS uint64
 				PayloadLen:      8,
 			}
 
-			if serr := session.Send(&hdr, reqPayload); serr != nil {
+			if serr := session.Send(&hdr, reqPayload[:]); serr != nil {
 				sendOK = false
 				errors++
 				break
@@ -727,6 +765,7 @@ func runPipelineBatchClient(runDir, service string, durationSec int, targetRPS u
 	// Pre-allocate per-depth buffers
 	reqBufs := make([][]byte, depth)
 	batchSizes := make([]uint32, depth)
+	itemBuf := make([]byte, protocol.IncrementPayloadSize)
 	for i := range reqBufs {
 		reqBufs[i] = make([]byte, batchBufSize)
 	}
@@ -750,7 +789,6 @@ func runPipelineBatchClient(runDir, service string, durationSec int, targetRPS u
 			batchSizes[d] = bs
 
 			bb := protocol.NewBatchBuilder(reqBufs[d], bs)
-			itemBuf := make([]byte, protocol.IncrementPayloadSize)
 
 			for i := uint32(0); i < bs; i++ {
 				protocol.IncrementEncode(counter+uint64(i), itemBuf)
@@ -874,6 +912,10 @@ func runPingPongClient(runDir, service string, profiles uint32, durationSec int,
 	rl := newRateLimiter(targetRPS)
 
 	var counter, requests, errors uint64
+	var reqPayload [8]byte
+	msgBuf := make([]byte, protocol.HeaderSize+8)
+	respMsgBuf := make([]byte, protocol.HeaderSize+64)
+	recvBuf := make([]byte, 256)
 
 	cpuStart := cpuNS()
 	wallStart := time.Now()
@@ -882,8 +924,7 @@ func runPingPongClient(runDir, service string, profiles uint32, durationSec int,
 	for time.Since(wallStart) < deadline {
 		rl.wait()
 
-		reqPayload := make([]byte, 8)
-		binary.NativeEndian.PutUint64(reqPayload, counter)
+		binary.NativeEndian.PutUint64(reqPayload[:], counter)
 
 		hdr := protocol.Header{
 			Kind:            protocol.KindRequest,
@@ -900,19 +941,18 @@ func runPingPongClient(runDir, service string, profiles uint32, durationSec int,
 		if shm != nil {
 			// SHM path
 			msgLen := protocol.HeaderSize + 8
-			msg := make([]byte, msgLen)
+			msg := msgBuf[:msgLen]
 			hdr.Magic = protocol.MagicMsg
 			hdr.Version = protocol.Version
 			hdr.HeaderLen = protocol.HeaderLen
 			hdr.Encode(msg[:protocol.HeaderSize])
-			copy(msg[protocol.HeaderSize:], reqPayload)
+			copy(msg[protocol.HeaderSize:], reqPayload[:])
 
 			if err := shm.ShmSend(msg); err != nil {
 				errors++
 				continue
 			}
 
-			respMsgBuf := make([]byte, protocol.HeaderSize+64)
 			respMsgLen, err := shm.ShmReceive(respMsgBuf, 30000)
 			if err != nil {
 				errors++
@@ -927,12 +967,11 @@ func runPingPongClient(runDir, service string, profiles uint32, durationSec int,
 			}
 		} else {
 			// UDS path
-			if err := session.Send(&hdr, reqPayload); err != nil {
+			if err := session.Send(&hdr, reqPayload[:]); err != nil {
 				errors++
 				continue
 			}
 
-			recvBuf := make([]byte, 256)
 			_, payload, err := session.Receive(recvBuf)
 			if err != nil {
 				errors++
@@ -982,8 +1021,7 @@ func runPingPongClient(runDir, service string, profiles uint32, durationSec int,
 // ---------------------------------------------------------------------------
 
 func runSnapshotClient(runDir, service string, profiles uint32, durationSec int, targetRPS uint64, scenario, serverLang string) int {
-	cfg := clientConfig(profiles)
-	client := cgroups.NewClient(runDir, service, cfg)
+	client := cgroups.NewClient(runDir, service, typedClientConfig(profiles))
 
 	for i := 0; i < 200; i++ {
 		client.Refresh()
@@ -1095,8 +1133,16 @@ func runLookupBench(durationSec int) int {
 		}
 	}
 
-	// We cannot directly populate the Cache struct since it's internal.
-	// Instead, we replicate the lookup logic (linear scan by hash+name).
+	lookupIndex := make([]cacheBucket, 32)
+	mask := uint32(len(lookupIndex) - 1)
+	for i := range cacheItems {
+		slot := (cacheItems[i].Hash ^ cacheHashName(cacheItems[i].Name)) & mask
+		for lookupIndex[slot].used {
+			slot = (slot + 1) & mask
+		}
+		lookupIndex[slot] = cacheBucket{index: i, used: true}
+	}
+
 	var lookups, hits uint64
 
 	cpuStart := cpuNS()
@@ -1105,12 +1151,18 @@ func runLookupBench(durationSec int) int {
 
 	for time.Since(wallStart) < deadline {
 		for _, it := range items {
-			// Linear scan
-			for j := range cacheItems {
-				if cacheItems[j].Hash == it.hash && cacheItems[j].Name == it.name {
-					hits++
+			slot := (it.hash ^ cacheHashName(it.name)) & mask
+			found := false
+			for lookupIndex[slot].used {
+				bucketItem := &cacheItems[lookupIndex[slot].index]
+				if bucketItem.Hash == it.hash && bucketItem.Name == it.name {
+					found = true
 					break
 				}
+				slot = (slot + 1) & mask
+			}
+			if found {
+				hits++
 			}
 			lookups++
 		}

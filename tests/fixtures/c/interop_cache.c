@@ -119,7 +119,7 @@ static int run_server(const char *run_dir, const char *service)
 static int run_client(const char *run_dir, const char *service)
 {
     uint32_t profiles = detect_profiles();
-    nipc_uds_client_config_t ccfg = {
+    nipc_client_config_t ccfg = {
         .supported_profiles        = profiles,
         .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,

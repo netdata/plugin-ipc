@@ -10,7 +10,6 @@ import (
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/service/cgroups"
-	windows "github.com/netdata/plugin-ipc/go/pkg/netipc/transport/windows"
 )
 
 const (
@@ -22,14 +21,14 @@ const (
 // default BASELINE only.
 func detectProfiles() uint32 {
 	if os.Getenv("NIPC_PROFILE") == "shm" {
-		return windows.WinShmProfileHybrid | protocol.ProfileBaseline
+		return protocol.ProfileSHMHybrid | protocol.ProfileBaseline
 	}
 	return protocol.ProfileBaseline
 }
 
-func serverConfig() windows.ServerConfig {
+func serverConfig() cgroups.ServerConfig {
 	profiles := detectProfiles()
-	return windows.ServerConfig{
+	return cgroups.ServerConfig{
 		SupportedProfiles:       profiles,
 		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
@@ -39,9 +38,9 @@ func serverConfig() windows.ServerConfig {
 	}
 }
 
-func clientConfig() windows.ClientConfig {
+func clientConfig() cgroups.ClientConfig {
 	profiles := detectProfiles()
-	return windows.ClientConfig{
+	return cgroups.ClientConfig{
 		SupportedProfiles:       profiles,
 		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,

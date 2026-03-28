@@ -223,9 +223,9 @@ static bool refresh_until_ready(nipc_client_ctx_t *client, int max_tries, DWORD 
     return false;
 }
 
-static nipc_np_client_config_t default_client_config(uint32_t max_payload)
+static nipc_client_config_t default_client_config(uint32_t max_payload)
 {
-    nipc_np_client_config_t cfg = {0};
+    nipc_client_config_t cfg = {0};
     cfg.supported_profiles = NIPC_PROFILE_BASELINE;
     cfg.preferred_profiles = 0;
     cfg.max_request_payload_bytes = max_payload;
@@ -233,7 +233,6 @@ static nipc_np_client_config_t default_client_config(uint32_t max_payload)
     cfg.max_response_payload_bytes = max_payload;
     cfg.max_response_batch_items = 16;
     cfg.auth_token = AUTH_TOKEN;
-    cfg.packet_size = 0;
     return cfg;
 }
 
@@ -255,7 +254,7 @@ static void test_many_simultaneous_clients(void)
     int call_ok = 0;
 
     for (int i = 0; i < 8; i++) {
-        nipc_np_client_config_t cfg = default_client_config(4096);
+        nipc_client_config_t cfg = default_client_config(4096);
         uint64_t value = 0;
             nipc_client_init(&clients[i], TEST_RUN_DIR, sctx.service, &cfg);
         if (refresh_until_ready(&clients[i], 50, 10)) {
@@ -292,7 +291,7 @@ static void test_rapid_connect_disconnect_cycles(void)
     int success = 0;
     for (int i = 0; i < 100; i++) {
         nipc_client_ctx_t client;
-        nipc_np_client_config_t cfg = default_client_config(4096);
+        nipc_client_config_t cfg = default_client_config(4096);
         uint64_t value = 0;
 
         nipc_client_init(&client, TEST_RUN_DIR, sctx.service, &cfg);
@@ -323,7 +322,7 @@ static void test_large_payload_string_reverse(void)
         return;
 
     nipc_client_ctx_t client;
-    nipc_np_client_config_t cfg = default_client_config(65536);
+    nipc_client_config_t cfg = default_client_config(65536);
     nipc_string_reverse_view_t view;
     enum { PAYLOAD_LEN = 60000 };
     char *payload = malloc(PAYLOAD_LEN);

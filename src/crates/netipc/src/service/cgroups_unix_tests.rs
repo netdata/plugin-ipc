@@ -1,15 +1,11 @@
 use super::*;
 #[cfg(target_os = "linux")]
 use crate::protocol::PROFILE_SHM_FUTEX;
-use crate::protocol::{
-    increment_encode, CgroupsBuilder, Header, NipcError, KIND_REQUEST, KIND_RESPONSE,
-    METHOD_INCREMENT, PROFILE_BASELINE, STATUS_OK, STATUS_UNSUPPORTED,
-};
-use crate::transport::posix::{ClientConfig, ServerConfig, UdsSession};
+use crate::protocol::{CgroupsBuilder, NipcError, PROFILE_BASELINE};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TEST_RUN_DIR: &str = "/tmp/nipc_cgroups_rust_test";
 const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;
@@ -21,18 +17,21 @@ fn ensure_run_dir() {
 }
 
 fn unique_service(prefix: &str) -> String {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     format!(
-        "{}_{}_{}",
+        "{}_{}_{}_{}",
         prefix,
         std::process::id(),
-        SERVICE_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+        SERVICE_COUNTER.fetch_add(1, Ordering::Relaxed) + 1,
+        stamp
     )
 }
 
 fn cleanup_all(service: &str) {
     let _ = std::fs::remove_file(format!("{TEST_RUN_DIR}/{service}.sock"));
-    #[cfg(target_os = "linux")]
-    crate::transport::shm::cleanup_stale(TEST_RUN_DIR, service);
 }
 
 fn server_config() -> ServerConfig {
@@ -44,7 +43,6 @@ fn server_config() -> ServerConfig {
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
         max_response_batch_items: 1,
         auth_token: AUTH_TOKEN,
-        backlog: 4,
         ..ServerConfig::default()
     }
 }
@@ -72,7 +70,6 @@ fn shm_server_config() -> ServerConfig {
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
         max_response_batch_items: 1,
         auth_token: AUTH_TOKEN,
-        backlog: 4,
         ..ServerConfig::default()
     }
 }
@@ -245,43 +242,6 @@ fn test_cache_round_trip_unix() {
     assert!(status.populated);
     assert_eq!(status.item_count, 3);
     assert_eq!(status.generation, 42);
-}
-
-#[test]
-fn test_server_rejects_wrong_method_kind_unix() {
-    let service = unique_service("wrong_kind");
-    let _server = TestServer::start(&service, server_config());
-
-    let mut session =
-        UdsSession::connect(TEST_RUN_DIR, &service, &client_config()).expect("connect raw");
-
-    let mut payload = [0u8; crate::protocol::INCREMENT_PAYLOAD_SIZE];
-    let payload_len = increment_encode(41, &mut payload);
-    assert_eq!(payload_len, crate::protocol::INCREMENT_PAYLOAD_SIZE);
-
-    let mut hdr = Header {
-        kind: KIND_REQUEST,
-        code: METHOD_INCREMENT,
-        item_count: 1,
-        message_id: 1,
-        transport_status: STATUS_OK,
-        ..Header::default()
-    };
-
-    session.send(&mut hdr, &payload).expect("send wrong kind");
-
-    let mut buf = [0u8; 4096];
-    let (resp_hdr, resp_payload) = session.receive(&mut buf).expect("receive response");
-    assert_eq!(resp_hdr.kind, KIND_RESPONSE);
-    assert_eq!(resp_hdr.code, METHOD_INCREMENT);
-    assert_eq!(resp_hdr.message_id, 1);
-    assert_eq!(resp_hdr.transport_status, STATUS_UNSUPPORTED);
-    assert!(resp_payload.is_empty());
-
-    let mut client = CgroupsClient::new(TEST_RUN_DIR, &service, client_config());
-    connect_ready(&mut client);
-    let view = client.call_snapshot().expect("snapshot after rejection");
-    assert_eq!(view.item_count, 3);
 }
 
 #[test]
