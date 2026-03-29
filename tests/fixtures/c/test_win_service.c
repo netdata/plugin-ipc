@@ -247,6 +247,153 @@ static void stop_server(server_thread_ctx_t *ctx, HANDLE thread)
     check("server drained cleanly", nipc_server_drain(&ctx->server, 10000));
 }
 
+typedef struct {
+    char service[64];
+    HANDLE ready_event;
+    volatile LONG ready;
+    volatile LONG accepted;
+    volatile LONG result;
+} raw_hello_ack_server_ctx_t;
+
+static size_t build_hello_ack_packet_with_version(uint8_t *dst, size_t dst_size,
+                                                  uint16_t version)
+{
+    nipc_hello_ack_t ack = {
+        .layout_version = 1,
+        .flags = 0,
+        .server_supported_profiles = NIPC_PROFILE_BASELINE,
+        .intersection_profiles = NIPC_PROFILE_BASELINE,
+        .selected_profile = NIPC_PROFILE_BASELINE,
+        .agreed_max_request_payload_bytes = NIPC_MAX_PAYLOAD_DEFAULT,
+        .agreed_max_request_batch_items = 1,
+        .agreed_max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .agreed_max_response_batch_items = 1,
+        .agreed_packet_size = 0,
+        ._reserved = 0,
+        .session_id = 77,
+    };
+    uint8_t payload[sizeof(ack)];
+
+    if (dst_size < NIPC_HEADER_LEN + sizeof(payload))
+        return 0;
+    if (nipc_hello_ack_encode(&ack, payload, sizeof(payload)) != sizeof(payload))
+        return 0;
+
+    nipc_header_t hdr = {
+        .magic = NIPC_MAGIC_MSG,
+        .version = version,
+        .header_len = NIPC_HEADER_LEN,
+        .kind = NIPC_KIND_CONTROL,
+        .code = NIPC_CODE_HELLO_ACK,
+        .flags = 0,
+        .item_count = 1,
+        .message_id = 0,
+        .payload_len = (uint32_t)sizeof(payload),
+        .transport_status = NIPC_STATUS_OK,
+    };
+
+    if (nipc_header_encode(&hdr, dst, dst_size) != NIPC_HEADER_LEN)
+        return 0;
+    memcpy(dst + NIPC_HEADER_LEN, payload, sizeof(payload));
+    return NIPC_HEADER_LEN + sizeof(payload);
+}
+
+static DWORD WINAPI raw_hello_ack_version_server_thread(LPVOID arg)
+{
+    raw_hello_ack_server_ctx_t *ctx = (raw_hello_ack_server_ctx_t *)arg;
+    wchar_t pipe_name[NIPC_NP_MAX_PIPE_NAME];
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    DWORD bytes_read = 0;
+    DWORD bytes_written = 0;
+    uint8_t hello_buf[256];
+    uint8_t packet[NIPC_HEADER_LEN + sizeof(nipc_hello_ack_t)];
+    size_t packet_len = 0;
+
+    if (nipc_np_build_pipe_name(pipe_name, NIPC_NP_MAX_PIPE_NAME,
+                                TEST_RUN_DIR, ctx->service) < 0) {
+        SetEvent(ctx->ready_event);
+        return 1;
+    }
+
+    pipe = CreateNamedPipeW(
+        pipe_name,
+        PIPE_ACCESS_DUPLEX,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+        1,
+        NIPC_NP_DEFAULT_PACKET_SIZE,
+        NIPC_NP_DEFAULT_PACKET_SIZE,
+        0,
+        NULL);
+    if (pipe == INVALID_HANDLE_VALUE) {
+        SetEvent(ctx->ready_event);
+        return 1;
+    }
+
+    packet_len = build_hello_ack_packet_with_version(packet, sizeof(packet), NIPC_VERSION + 1u);
+    if (packet_len == 0) {
+        CloseHandle(pipe);
+        SetEvent(ctx->ready_event);
+        return 1;
+    }
+
+    InterlockedExchange(&ctx->ready, 1);
+    SetEvent(ctx->ready_event);
+
+    if (!ConnectNamedPipe(pipe, NULL) && GetLastError() != ERROR_PIPE_CONNECTED) {
+        CloseHandle(pipe);
+        return 1;
+    }
+
+    InterlockedExchange(&ctx->accepted, 1);
+
+    if (!ReadFile(pipe, hello_buf, sizeof(hello_buf), &bytes_read, NULL) || bytes_read == 0) {
+        CloseHandle(pipe);
+        return 1;
+    }
+
+    if (!WriteFile(pipe, packet, (DWORD)packet_len, &bytes_written, NULL)
+        || bytes_written != (DWORD)packet_len) {
+        CloseHandle(pipe);
+        return 1;
+    }
+
+    InterlockedExchange(&ctx->result, 1);
+    CloseHandle(pipe);
+    return 0;
+}
+
+static HANDLE start_raw_hello_ack_version_server(raw_hello_ack_server_ctx_t *ctx,
+                                                 const char *service)
+{
+    memset(ctx, 0, sizeof(*ctx));
+    strncpy(ctx->service, service, sizeof(ctx->service) - 1);
+    ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    check("raw hello_ack ready event", ctx->ready_event != NULL);
+    if (!ctx->ready_event)
+        return NULL;
+
+    HANDLE thread = CreateThread(NULL, 0, raw_hello_ack_version_server_thread, ctx, 0, NULL);
+    check("raw hello_ack server thread created", thread != NULL);
+    if (!thread) {
+        CloseHandle(ctx->ready_event);
+        ctx->ready_event = NULL;
+        return NULL;
+    }
+
+    DWORD wr = WaitForSingleObject(ctx->ready_event, 5000);
+    check("raw hello_ack server ready", wr == WAIT_OBJECT_0);
+    CloseHandle(ctx->ready_event);
+    ctx->ready_event = NULL;
+
+    if (wr != WAIT_OBJECT_0) {
+        WaitForSingleObject(thread, 10000);
+        CloseHandle(thread);
+        return NULL;
+    }
+
+    return thread;
+}
+
 static bool refresh_until_ready(nipc_client_ctx_t *client, int max_tries, DWORD sleep_ms)
 {
     for (int i = 0; i < max_tries; i++) {
@@ -471,6 +618,42 @@ static void test_client_incompatible(void)
 
     nipc_client_close(&client);
     stop_server(&sctx, server_thread);
+}
+
+static void test_client_protocol_version_incompatible(void)
+{
+    printf("--- Client protocol version mismatch mapping ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_proto_incompat");
+
+    raw_hello_ack_server_ctx_t sctx;
+    HANDLE server_thread = start_raw_hello_ack_version_server(&sctx, service);
+    if (!server_thread)
+        return;
+
+    nipc_client_ctx_t client;
+    nipc_client_config_t ccfg = default_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+
+    check("refresh changed state", nipc_client_refresh(&client));
+    check("state is INCOMPATIBLE after protocol mismatch",
+          client.state == NIPC_CLIENT_INCOMPATIBLE);
+    check("client not ready after protocol mismatch", !nipc_client_ready(&client));
+
+    check("raw hello_ack server completed",
+          WaitForSingleObject(server_thread, 10000) == WAIT_OBJECT_0);
+    check("raw hello_ack server accepted exactly one client",
+          InterlockedCompareExchange(&sctx.accepted, 0, 0) == 1);
+    check("raw hello_ack server result ok",
+          InterlockedCompareExchange(&sctx.result, 0, 0) == 1);
+    CloseHandle(server_thread);
+
+    check("refresh from INCOMPATIBLE is no-op", !nipc_client_refresh(&client));
+    check("state remains INCOMPATIBLE",
+          client.state == NIPC_CLIENT_INCOMPATIBLE);
+
+    nipc_client_close(&client);
 }
 
 static void test_status_reporting(void)
@@ -712,6 +895,7 @@ int main(void)
     test_handler_failure();
     test_client_auth_failure();
     test_client_incompatible();
+    test_client_protocol_version_incompatible();
     test_status_reporting();
     test_non_request_terminates_session();
 

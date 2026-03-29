@@ -133,6 +133,47 @@ func TestWinServerStopWhileIdle(t *testing.T) {
 	}
 }
 
+func TestWinServerStopWithActiveClientAndRestart(t *testing.T) {
+	svc := uniqueWinService("go_win_stop_active")
+	ts1 := startTestSnapshotServerWinWithConfig(svc, testWinServerConfig())
+
+	client := NewSnapshotClient(winTestRunDir, svc, testWinClientConfig())
+	defer client.Close()
+	waitWinClientReady(t, client)
+
+	if _, err := client.CallSnapshot(); err != nil {
+		t.Fatalf("first snapshot failed: %v", err)
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		ts1.stop()
+		close(stopDone)
+	}()
+
+	select {
+	case <-stopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("active server stop did not exit")
+	}
+
+	ts2 := startTestSnapshotServerWinWithConfig(svc, testWinServerConfig())
+	defer ts2.stop()
+
+	view, err := client.CallSnapshot()
+	if err != nil {
+		t.Fatalf("snapshot after restart failed: %v", err)
+	}
+	if view.ItemCount != 3 {
+		t.Fatalf("expected 3 items after restart, got %d", view.ItemCount)
+	}
+
+	status := client.Status()
+	if status.ReconnectCount < 1 {
+		t.Fatalf("expected reconnect_count >= 1, got %d", status.ReconnectCount)
+	}
+}
+
 func TestWinClientRefreshFromAuthFailed(t *testing.T) {
 	svc := uniqueWinService("go_win_auth")
 
@@ -178,6 +219,36 @@ func TestWinClientRefreshFromIncompatible(t *testing.T) {
 	changed := client.Refresh()
 	if changed {
 		t.Fatal("refresh from INCOMPATIBLE should be a no-op")
+	}
+}
+
+func TestWinClientRefreshFromProtocolVersionMismatch(t *testing.T) {
+	svc := uniqueWinService("go_win_proto_incompat")
+	packet := encodeHelloAckPacketWithVersion(protocol.Version+1, protocol.StatusOK, 1)
+	srv := startRawWinHelloAckServer(t, svc, packet)
+
+	client := NewSnapshotClient(winTestRunDir, svc, testWinClientConfig())
+	defer client.Close()
+
+	changed := client.Refresh()
+	if !changed {
+		t.Fatal("Refresh should move client into StateIncompatible")
+	}
+	if client.state != StateIncompatible {
+		t.Fatalf("expected StateIncompatible, got %d", client.state)
+	}
+	if client.Ready() {
+		t.Fatal("client should not be ready after protocol version mismatch")
+	}
+
+	srv.wait(t)
+
+	changed = client.Refresh()
+	if changed {
+		t.Fatal("Refresh from StateIncompatible should be a no-op after protocol mismatch")
+	}
+	if client.state != StateIncompatible {
+		t.Fatalf("expected StateIncompatible after second refresh, got %d", client.state)
 	}
 }
 
@@ -934,8 +1005,9 @@ func TestWinIsErrorHelpers(t *testing.T) {
 		t.Fatal("auth error classification mismatch")
 	}
 
-	if !isProfileError(windows.ErrNoProfile) || isProfileError(windows.ErrAuthFailed) || isProfileError(nil) {
-		t.Fatal("profile error classification mismatch")
+	if !isIncompatibleError(windows.ErrNoProfile) || !isIncompatibleError(windows.ErrIncompatible) ||
+		isIncompatibleError(windows.ErrAuthFailed) || isIncompatibleError(nil) {
+		t.Fatal("incompatible error classification mismatch")
 	}
 }
 

@@ -22,7 +22,6 @@ NC='\033[0m'
 PASS=0
 FAIL=0
 SKIP=0
-RUN_DIR="C:\\Temp\\nipc_win_shm_interop_test"
 TIMEOUT=10
 
 # Resolve binary paths
@@ -46,6 +45,13 @@ if [[ -x "$INTEROP_WIN_SHM_GO" ]]; then
     HAS_GO=1
 fi
 
+RUN_DIR_HOST="$(mktemp -d "${TMPDIR:-/tmp}/nipc_win_shm_interop.XXXXXX")"
+if command -v cygpath >/dev/null 2>&1; then
+    RUN_DIR="$(cygpath -w "$RUN_DIR_HOST")"
+else
+    RUN_DIR="$RUN_DIR_HOST"
+fi
+
 cleanup() {
     local pids
     pids=$(jobs -p 2>/dev/null) || true
@@ -53,6 +59,7 @@ cleanup() {
         kill $pids 2>/dev/null || true
         wait $pids 2>/dev/null || true
     fi
+    rm -rf "$RUN_DIR_HOST"
 }
 trap cleanup EXIT
 
@@ -92,7 +99,8 @@ run_test() {
 
     # Start server in background, wait for READY
     local server_pid
-    "$server_bin" server "$RUN_DIR" "$service" > /tmp/nipc_win_shm_server_out_$$ 2>&1 &
+    local server_log="${RUN_DIR_HOST}/${service}.server.log"
+    "$server_bin" server "$RUN_DIR" "$service" > "$server_log" 2>&1 &
     server_pid=$!
 
     # Wait for READY line
@@ -100,12 +108,11 @@ run_test() {
     while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
         if ! kill -0 "$server_pid" 2>/dev/null; then
             echo -e "${RED}FAIL${NC} (server exited early)"
-            cat /tmp/nipc_win_shm_server_out_$$ >&2 || true
+            cat "$server_log" >&2 || true
             FAIL=$((FAIL + 1))
-            rm -f /tmp/nipc_win_shm_server_out_$$
             return
         fi
-        if grep -q "^READY$" /tmp/nipc_win_shm_server_out_$$ 2>/dev/null; then
+        if grep -q "^READY$" "$server_log" 2>/dev/null; then
             break
         fi
         sleep 0.1
@@ -117,7 +124,6 @@ run_test() {
         kill "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
         FAIL=$((FAIL + 1))
-        rm -f /tmp/nipc_win_shm_server_out_$$
         return
     fi
 
@@ -138,7 +144,6 @@ run_test() {
 
     # Wait for server to exit
     wait "$server_pid" 2>/dev/null || true
-    rm -f /tmp/nipc_win_shm_server_out_$$
 }
 
 main() {

@@ -36,6 +36,8 @@ use std::sync::Arc;
 
 /// Poll/receive timeout for server loops (ms). Controls shutdown detection latency.
 const SERVER_POLL_TIMEOUT_MS: u32 = 100;
+const CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS: u64 = 5;
+const CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS: u64 = 5_000;
 
 fn next_power_of_2_u32(n: u32) -> u32 {
     if n < 16 {
@@ -414,7 +416,9 @@ impl RawClient {
                         // Retry attach: server creates the SHM region after
                         // the UDS handshake, so it may not exist yet.
                         let mut shm_ok = false;
-                        for _ in 0..200 {
+                        let deadline = std::time::Instant::now()
+                            + std::time::Duration::from_millis(CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS);
+                        loop {
                             match ShmContext::client_attach(
                                 &self.run_dir,
                                 &self.service_name,
@@ -426,7 +430,12 @@ impl RawClient {
                                     break;
                                 }
                                 Err(_) => {
-                                    std::thread::sleep(std::time::Duration::from_millis(5));
+                                    if std::time::Instant::now() >= deadline {
+                                        break;
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(
+                                        CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS,
+                                    ));
                                 }
                             }
                         }
@@ -447,6 +456,7 @@ impl RawClient {
                     UdsError::Connect(_) => ClientState::NotFound,
                     UdsError::AuthFailed => ClientState::AuthFailed,
                     UdsError::NoProfile => ClientState::Incompatible,
+                    UdsError::Incompatible(_) => ClientState::Incompatible,
                     _ => ClientState::Disconnected,
                 }
             }
@@ -465,7 +475,9 @@ impl RawClient {
                     || selected_profile == WIN_SHM_PROFILE_BUSYWAIT
                 {
                     let mut shm_ok = false;
-                    for _ in 0..200 {
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_millis(CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS);
+                    loop {
                         match WinShmContext::client_attach(
                             &self.run_dir,
                             &self.service_name,
@@ -479,7 +491,12 @@ impl RawClient {
                                 break;
                             }
                             Err(_) => {
-                                std::thread::sleep(std::time::Duration::from_millis(5));
+                                if std::time::Instant::now() >= deadline {
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(
+                                    CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS,
+                                ));
                             }
                         }
                     }
@@ -497,6 +514,7 @@ impl RawClient {
                 NpError::Connect(_) => ClientState::NotFound,
                 NpError::AuthFailed => ClientState::AuthFailed,
                 NpError::NoProfile => ClientState::Incompatible,
+                NpError::Incompatible(_) => ClientState::Incompatible,
                 _ => ClientState::Disconnected,
             },
         }
@@ -1572,7 +1590,6 @@ impl ManagedServer {
             let running = self.running.clone();
             let learned_request_payload_bytes = self.learned_request_payload_bytes.clone();
             let learned_response_payload_bytes = self.learned_response_payload_bytes.clone();
-
             let t = std::thread::spawn(move || {
                 handle_session_win_threaded(
                     session,
@@ -1705,6 +1722,11 @@ fn handle_session_win_threaded(
                 }
             } else {
                 // Named Pipe path
+                match session.wait_readable(SERVER_POLL_TIMEOUT_MS) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(_) => break,
+                }
                 match session.receive(&mut recv_buf) {
                     Ok((hdr, payload)) => (hdr, payload),
                     Err(_) => break,

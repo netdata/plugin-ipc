@@ -519,11 +519,16 @@ fn test_disconnect_detection() {
         ..Header::default()
     };
     session.send(&mut hdr, &[0xFF]).expect("send");
+    session.inflight_ids.insert(100);
 
     // Receive should fail because server disconnected
     let mut rbuf = [0u8; 4096];
     let result = session.receive(&mut rbuf);
     assert!(result.is_err());
+    assert!(
+        session.inflight_ids.is_empty(),
+        "disconnect must fail every in-flight request on the session"
+    );
 
     drop(session);
     server_thread.join().expect("server join");
@@ -1050,6 +1055,10 @@ fn uds_error_display_all_variants() {
         (UdsError::Handshake("test".into()), "handshake error: test"),
         (UdsError::AuthFailed, "authentication token rejected"),
         (UdsError::NoProfile, "no common transport profile"),
+        (
+            UdsError::Incompatible("version mismatch".into()),
+            "incompatible protocol: version mismatch",
+        ),
         (UdsError::Protocol("bad".into()), "protocol violation: bad"),
         (UdsError::AddrInUse, "address already in use by live server"),
         (UdsError::Chunk("mismatch".into()), "chunk error: mismatch"),
@@ -2156,6 +2165,189 @@ fn test_connect_rejects_bad_hello_ack_status() {
 }
 
 #[test]
+fn test_connect_rejects_bad_hello_ack_version_as_incompatible() {
+    ensure_run_dir();
+    let svc = unique_service("rs_bad_ack_version");
+    cleanup_socket(&svc);
+
+    let ready = Arc::new(AtomicBool::new(false));
+    let ready_clone = ready.clone();
+    let svc_clone = svc.clone();
+    let server = thread::spawn(move || {
+        let fd = raw_listener_fd(&svc_clone);
+        ready_clone.store(true, Ordering::Release);
+        let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert!(client_fd >= 0, "accept failed: {}", errno());
+
+        let mut hello = [0u8; 128];
+        let _ = raw_recv(client_fd, &mut hello).expect("recv hello");
+
+        let ack = HelloAck {
+            layout_version: 1,
+            ..HelloAck::default()
+        };
+        let mut ack_buf = [0u8; HELLO_ACK_PAYLOAD_SIZE];
+        ack.encode(&mut ack_buf);
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION + 1,
+            header_len: protocol::HEADER_LEN,
+            kind: protocol::KIND_CONTROL,
+            flags: 0,
+            code: protocol::CODE_HELLO_ACK,
+            transport_status: protocol::STATUS_OK,
+            payload_len: HELLO_ACK_PAYLOAD_SIZE as u32,
+            item_count: 1,
+            message_id: 0,
+        };
+        let mut pkt = [0u8; HEADER_SIZE + HELLO_ACK_PAYLOAD_SIZE];
+        hdr.encode(&mut pkt[..HEADER_SIZE]);
+        pkt[HEADER_SIZE..].copy_from_slice(&ack_buf);
+        raw_send(client_fd, &pkt).expect("send bad-version ack");
+
+        unsafe {
+            libc::close(client_fd);
+            libc::close(fd);
+        }
+    });
+
+    while !ready.load(Ordering::Acquire) {
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
+        Ok(_) => panic!("bad hello ack version should fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, UdsError::Incompatible(_)));
+
+    server.join().expect("server join");
+    cleanup_socket(&svc);
+}
+
+#[test]
+fn test_connect_rejects_incompatible_hello_ack_status() {
+    ensure_run_dir();
+    let svc = unique_service("rs_ack_incompat_status");
+    cleanup_socket(&svc);
+
+    let ready = Arc::new(AtomicBool::new(false));
+    let ready_clone = ready.clone();
+    let svc_clone = svc.clone();
+    let server = thread::spawn(move || {
+        let fd = raw_listener_fd(&svc_clone);
+        ready_clone.store(true, Ordering::Release);
+        let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert!(client_fd >= 0, "accept failed: {}", errno());
+
+        let mut hello = [0u8; 128];
+        let _ = raw_recv(client_fd, &mut hello).expect("recv hello");
+
+        let ack = HelloAck {
+            layout_version: 1,
+            ..HelloAck::default()
+        };
+        let mut ack_buf = [0u8; HELLO_ACK_PAYLOAD_SIZE];
+        ack.encode(&mut ack_buf);
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION,
+            header_len: protocol::HEADER_LEN,
+            kind: protocol::KIND_CONTROL,
+            flags: 0,
+            code: protocol::CODE_HELLO_ACK,
+            transport_status: protocol::STATUS_INCOMPATIBLE,
+            payload_len: HELLO_ACK_PAYLOAD_SIZE as u32,
+            item_count: 1,
+            message_id: 0,
+        };
+        let mut pkt = [0u8; HEADER_SIZE + HELLO_ACK_PAYLOAD_SIZE];
+        hdr.encode(&mut pkt[..HEADER_SIZE]);
+        pkt[HEADER_SIZE..].copy_from_slice(&ack_buf);
+        raw_send(client_fd, &pkt).expect("send incompatible-status ack");
+
+        unsafe {
+            libc::close(client_fd);
+            libc::close(fd);
+        }
+    });
+
+    while !ready.load(Ordering::Acquire) {
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
+        Ok(_) => panic!("incompatible hello ack status should fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, UdsError::Incompatible(_)));
+
+    server.join().expect("server join");
+    cleanup_socket(&svc);
+}
+
+#[test]
+fn test_connect_rejects_bad_hello_ack_layout_as_incompatible() {
+    ensure_run_dir();
+    let svc = unique_service("rs_bad_ack_layout");
+    cleanup_socket(&svc);
+
+    let ready = Arc::new(AtomicBool::new(false));
+    let ready_clone = ready.clone();
+    let svc_clone = svc.clone();
+    let server = thread::spawn(move || {
+        let fd = raw_listener_fd(&svc_clone);
+        ready_clone.store(true, Ordering::Release);
+        let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert!(client_fd >= 0, "accept failed: {}", errno());
+
+        let mut hello = [0u8; 128];
+        let _ = raw_recv(client_fd, &mut hello).expect("recv hello");
+
+        let ack = HelloAck {
+            layout_version: 2,
+            ..HelloAck::default()
+        };
+        let mut ack_buf = [0u8; HELLO_ACK_PAYLOAD_SIZE];
+        ack.encode(&mut ack_buf);
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION,
+            header_len: protocol::HEADER_LEN,
+            kind: protocol::KIND_CONTROL,
+            flags: 0,
+            code: protocol::CODE_HELLO_ACK,
+            transport_status: protocol::STATUS_OK,
+            payload_len: HELLO_ACK_PAYLOAD_SIZE as u32,
+            item_count: 1,
+            message_id: 0,
+        };
+        let mut pkt = [0u8; HEADER_SIZE + HELLO_ACK_PAYLOAD_SIZE];
+        hdr.encode(&mut pkt[..HEADER_SIZE]);
+        pkt[HEADER_SIZE..].copy_from_slice(&ack_buf);
+        raw_send(client_fd, &pkt).expect("send bad-layout ack");
+
+        unsafe {
+            libc::close(client_fd);
+            libc::close(fd);
+        }
+    });
+
+    while !ready.load(Ordering::Acquire) {
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
+        Ok(_) => panic!("bad hello ack layout should fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, UdsError::Incompatible(_)));
+
+    server.join().expect("server join");
+    cleanup_socket(&svc);
+}
+
+#[test]
 fn test_connect_rejects_truncated_hello_ack() {
     ensure_run_dir();
     let svc = unique_service("rs_bad_ack_trunc");
@@ -2262,6 +2454,124 @@ fn test_accept_rejects_bad_hello_kind() {
         Err(err) => err,
     };
     assert!(matches!(err, UdsError::Protocol(_)));
+
+    client.join().expect("client join");
+    drop(listener);
+    cleanup_socket(&svc);
+}
+
+#[test]
+fn test_accept_rejects_bad_hello_version_as_incompatible() {
+    ensure_run_dir();
+    let svc = unique_service("rs_bad_hello_version");
+    cleanup_socket(&svc);
+
+    let listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("bind listener");
+
+    let svc_clone = svc.clone();
+    let client = thread::spawn(move || {
+        let path = build_socket_path(TEST_RUN_DIR, &svc_clone).expect("socket path");
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+        assert!(fd >= 0, "socket failed: {}", errno());
+        connect_unix(fd, &path).expect("connect");
+
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION + 1,
+            header_len: protocol::HEADER_LEN,
+            kind: protocol::KIND_CONTROL,
+            flags: 0,
+            code: protocol::CODE_HELLO,
+            transport_status: protocol::STATUS_OK,
+            payload_len: HELLO_PAYLOAD_SIZE as u32,
+            item_count: 1,
+            message_id: 0,
+        };
+        let mut payload = [0u8; HELLO_PAYLOAD_SIZE];
+        let hello = Hello {
+            layout_version: 1,
+            supported_profiles: PROFILE_BASELINE,
+            max_request_payload_bytes: 4096,
+            max_request_batch_items: 16,
+            max_response_payload_bytes: 4096,
+            max_response_batch_items: 16,
+            auth_token: AUTH_TOKEN,
+            packet_size: DEFAULT_PACKET_SIZE_FALLBACK,
+            ..Hello::default()
+        };
+        hello.encode(&mut payload);
+        let mut pkt = [0u8; HEADER_SIZE + HELLO_PAYLOAD_SIZE];
+        hdr.encode(&mut pkt[..HEADER_SIZE]);
+        pkt[HEADER_SIZE..].copy_from_slice(&payload);
+        raw_send(fd, &pkt).expect("send incompatible hello");
+        unsafe { libc::close(fd) };
+    });
+
+    let err = match listener.accept() {
+        Ok(_) => panic!("bad hello version should fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, UdsError::Incompatible(_)));
+
+    client.join().expect("client join");
+    drop(listener);
+    cleanup_socket(&svc);
+}
+
+#[test]
+fn test_accept_rejects_bad_hello_layout_as_incompatible() {
+    ensure_run_dir();
+    let svc = unique_service("rs_bad_hello_layout");
+    cleanup_socket(&svc);
+
+    let listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("bind listener");
+
+    let svc_clone = svc.clone();
+    let client = thread::spawn(move || {
+        let path = build_socket_path(TEST_RUN_DIR, &svc_clone).expect("socket path");
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+        assert!(fd >= 0, "socket failed: {}", errno());
+        connect_unix(fd, &path).expect("connect");
+
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION,
+            header_len: protocol::HEADER_LEN,
+            kind: protocol::KIND_CONTROL,
+            flags: 0,
+            code: protocol::CODE_HELLO,
+            transport_status: protocol::STATUS_OK,
+            payload_len: HELLO_PAYLOAD_SIZE as u32,
+            item_count: 1,
+            message_id: 0,
+        };
+        let mut payload = [0u8; HELLO_PAYLOAD_SIZE];
+        let hello = Hello {
+            layout_version: 2,
+            supported_profiles: PROFILE_BASELINE,
+            max_request_payload_bytes: 4096,
+            max_request_batch_items: 16,
+            max_response_payload_bytes: 4096,
+            max_response_batch_items: 16,
+            auth_token: AUTH_TOKEN,
+            packet_size: DEFAULT_PACKET_SIZE_FALLBACK,
+            ..Hello::default()
+        };
+        hello.encode(&mut payload);
+        let mut pkt = [0u8; HEADER_SIZE + HELLO_PAYLOAD_SIZE];
+        hdr.encode(&mut pkt[..HEADER_SIZE]);
+        pkt[HEADER_SIZE..].copy_from_slice(&payload);
+        raw_send(fd, &pkt).expect("send incompatible-layout hello");
+        unsafe { libc::close(fd) };
+    });
+
+    let err = match listener.accept() {
+        Ok(_) => panic!("bad hello layout should fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, UdsError::Incompatible(_)));
 
     client.join().expect("client join");
     drop(listener);

@@ -131,7 +131,14 @@ static int run_client(const char *run_dir, const char *service)
     nipc_cgroups_cache_t cache;
     nipc_cgroups_cache_init(&cache, run_dir, service, &ccfg);
 
-    bool updated = nipc_cgroups_cache_refresh(&cache);
+    bool updated = false;
+    for (int i = 0; i < 200; i++) {
+        if (nipc_cgroups_cache_refresh(&cache)) {
+            updated = true;
+            break;
+        }
+        Sleep(10);
+    }
     if (!updated || !nipc_cgroups_cache_ready(&cache)) {
         fprintf(stderr, "client: cache not ready after refresh\n");
         nipc_cgroups_cache_close(&cache);

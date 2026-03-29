@@ -48,7 +48,7 @@ echo -e "${YELLOW}Building test binaries...${NC}"
 run cmake --build "$BUILD_DIR" -j"$(nproc)" 2>&1
 
 # All C test binaries to run
-TESTS=(test_protocol test_uds test_shm test_service test_cache test_multi_server)
+TESTS=(test_protocol test_uds test_shm test_service test_service_extra test_cache test_multi_server)
 
 total=0
 passed=0

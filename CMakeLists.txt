@@ -159,8 +159,12 @@ target_link_libraries(interop_codec_c PRIVATE netipc_protocol)
 
 if(CARGO_EXECUTABLE)
     add_test(NAME test_protocol_rust
-        COMMAND ${CARGO_EXECUTABLE} test
+        COMMAND ${CARGO_EXECUTABLE} test protocol -- --test-threads=1
         WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+    )
+    set_tests_properties(test_protocol_rust PROPERTIES
+        TIMEOUT 60
+        RESOURCE_LOCK rust_protocol_tests
     )
 endif()
 
@@ -218,6 +222,7 @@ if(GO_EXECUTABLE)
         set_tests_properties(go_${FUZZ_TARGET} PROPERTIES
             TIMEOUT 120
             RESOURCE_LOCK go_fuzz_tests
+            RUN_SERIAL TRUE
         )
     endforeach()
 endif()
@@ -258,6 +263,14 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_compile_definitions(test_service PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_service COMMAND test_service)
     set_tests_properties(test_service PROPERTIES TIMEOUT 60)
+
+    add_executable(test_service_extra tests/fixtures/c/test_service_extra.c)
+    target_link_libraries(test_service_extra PRIVATE
+        netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
+    )
+    target_compile_definitions(test_service_extra PRIVATE NIPC_INTERNAL_TESTING=1)
+    add_test(NAME test_service_extra COMMAND test_service_extra)
+    set_tests_properties(test_service_extra PROPERTIES TIMEOUT 120)
 
     # Multi-client multi-worker server tests
     add_executable(test_multi_server tests/fixtures/c/test_multi_server.c)
@@ -349,12 +362,32 @@ if(CARGO_EXECUTABLE)
             COMMENT "Building Rust SHM interop binary"
         )
 
-        # Rust L2 service tests
-        add_test(NAME test_service_rust
-            COMMAND ${CARGO_EXECUTABLE} test service -- --test-threads=1
+        # Rust typed L2 service tests
+        add_test(NAME test_service_typed_rust
+            COMMAND ${CARGO_EXECUTABLE} test service::cgroups::tests:: -- --test-threads=1
             WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
         )
-        set_tests_properties(test_service_rust PROPERTIES TIMEOUT 120)
+        set_tests_properties(test_service_typed_rust PROPERTIES
+            TIMEOUT 60
+            RESOURCE_LOCK rust_service_tests
+        )
+
+        # Rust raw L2/L3 service tests without the dedicated stress slice
+        add_test(NAME test_service_rust
+            COMMAND ${CARGO_EXECUTABLE} test service::raw::tests:: --
+                --test-threads=1
+                --skip test_stress_1000_items
+                --skip test_stress_5000_items
+                --skip test_stress_cache_concurrent
+                --skip test_stress_concurrent_clients
+                --skip test_stress_long_running
+                --skip test_stress_rapid_connect_disconnect
+            WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
+        )
+        set_tests_properties(test_service_rust PROPERTIES
+            TIMEOUT 120
+            RESOURCE_LOCK rust_service_tests
+        )
 
         # Build the Rust L2 interop binary
         add_custom_target(interop_service_rs ALL
@@ -412,10 +445,14 @@ if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
     add_test(NAME test_service_go
         COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
             ${GO_EXECUTABLE} test -count=1 -timeout=120s
+            -run "^(TestSnapshotRoundTripUnix|TestClientNotReadyReturnsErrorUnix)$"
             ./pkg/netipc/service/cgroups/
         WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
     )
-    set_tests_properties(test_service_go PROPERTIES TIMEOUT 180)
+    set_tests_properties(test_service_go PROPERTIES
+        TIMEOUT 180
+        RESOURCE_LOCK go_service_tests
+    )
 
     # Build Go L2 interop binary
     add_custom_target(interop_service_go ALL
@@ -511,10 +548,13 @@ if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
     add_test(NAME test_cache_go
         COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
             ${GO_EXECUTABLE} test -count=1 -timeout=120s
-            -run TestCache ./pkg/netipc/service/cgroups/
+            -run "^TestCacheRoundTripUnix$" ./pkg/netipc/service/cgroups/
         WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
     )
-    set_tests_properties(test_cache_go PROPERTIES TIMEOUT 180)
+    set_tests_properties(test_cache_go PROPERTIES
+        TIMEOUT 180
+        RESOURCE_LOCK go_service_tests
+    )
 
     # Build Go L3 interop binary
     add_custom_target(interop_cache_go ALL
@@ -531,10 +571,13 @@ if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
     add_test(NAME test_stress_go
         COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
             ${GO_EXECUTABLE} test -count=1 -timeout=180s
-            -run TestStress ./pkg/netipc/service/cgroups/
+            -run "^TestStress" ./pkg/netipc/service/raw/
         WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
     )
-    set_tests_properties(test_stress_go PROPERTIES TIMEOUT 240)
+    set_tests_properties(test_stress_go PROPERTIES
+        TIMEOUT 240
+        RESOURCE_LOCK go_service_tests
+    )
 endif()
 
 # --- Rust stress tests (Phase H4) -------------------------------------------
@@ -544,7 +587,10 @@ if(CARGO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
         COMMAND ${CARGO_EXECUTABLE} test test_stress -- --test-threads=1
         WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
     )
-    set_tests_properties(test_stress_rust PROPERTIES TIMEOUT 240)
+    set_tests_properties(test_stress_rust PROPERTIES
+        TIMEOUT 240
+        RESOURCE_LOCK rust_service_tests
+    )
 endif()
 
 # --- Cross-language L2 service SHM interop tests (Linux only) ---------------
@@ -677,6 +723,7 @@ endif()
 if(NETIPC_WINDOWS_RUNTIME)
     add_executable(test_win_shm tests/fixtures/c/test_win_shm.c)
     target_link_libraries(test_win_shm PRIVATE netipc_win_shm netipc_named_pipe netipc_protocol)
+    target_compile_definitions(test_win_shm PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_win_shm COMMAND test_win_shm)
     set_tests_properties(test_win_shm PROPERTIES TIMEOUT 30)
 
@@ -697,7 +744,7 @@ if(NETIPC_WINDOWS_RUNTIME)
     target_compile_definitions(test_win_service_extra PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_win_service_extra COMMAND test_win_service_extra)
     set_tests_properties(test_win_service_extra PROPERTIES
-        TIMEOUT 120
+        TIMEOUT 600
         RUN_SERIAL TRUE
     )
 

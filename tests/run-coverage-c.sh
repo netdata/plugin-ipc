@@ -73,6 +73,7 @@ TESTS=(
     test_uds
     test_shm
     test_service
+    test_service_extra
     test_cache
     test_multi_server
     test_chaos

@@ -69,13 +69,6 @@ type Handler struct {
 	SnapshotMaxItems uint32
 }
 
-func (h Handler) snapshotMaxItems(responseBufSize int) uint32 {
-	if h.SnapshotMaxItems != 0 {
-		return h.SnapshotMaxItems
-	}
-	return protocol.EstimateCgroupsMaxItems(responseBufSize)
-}
-
 // CacheItem is an owned copy of a single cgroup item.
 type CacheItem = raw.CacheItem
 

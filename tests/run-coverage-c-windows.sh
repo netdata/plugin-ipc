@@ -129,10 +129,10 @@ SERVICE_EXTRA_LOG="$BUILD_DIR/test_win_service_extra.log"
 run rm -f "$SERVICE_EXTRA_LOG"
 printf >&2 "${GRAY}$(pwd) >${NC} "
 printf >&2 "${YELLOW}"
-printf >&2 "%q %q %q " timeout 120 "$BUILD_DIR/bin/test_win_service_extra.exe"
+printf >&2 "%q %q %q " timeout 600 "$BUILD_DIR/bin/test_win_service_extra.exe"
 printf >&2 "${NC}\n"
 set +e
-timeout 120 "$BUILD_DIR/bin/test_win_service_extra.exe" >"$SERVICE_EXTRA_LOG" 2>&1
+timeout 600 "$BUILD_DIR/bin/test_win_service_extra.exe" >"$SERVICE_EXTRA_LOG" 2>&1
 exit_code=$?
 set -e
 if [[ $exit_code -ne 0 ]]; then

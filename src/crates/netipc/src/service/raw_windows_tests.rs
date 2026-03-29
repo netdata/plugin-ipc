@@ -1,9 +1,12 @@
 use super::*;
 use crate::protocol::{
-    increment_encode, BatchBuilder, CgroupsBuilder, CgroupsRequest, Header, NipcError, FLAG_BATCH,
-    INCREMENT_PAYLOAD_SIZE, KIND_REQUEST, KIND_RESPONSE, METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT,
-    METHOD_STRING_REVERSE, PROFILE_BASELINE, PROFILE_SHM_HYBRID, STATUS_INTERNAL_ERROR, STATUS_OK,
+    increment_encode, BatchBuilder, CgroupsBuilder, CgroupsRequest, Header, HelloAck, NipcError,
+    CODE_HELLO_ACK, FLAG_BATCH, HEADER_SIZE, INCREMENT_PAYLOAD_SIZE, KIND_CONTROL, KIND_REQUEST,
+    KIND_RESPONSE, METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, METHOD_STRING_REVERSE,
+    PROFILE_BASELINE, PROFILE_SHM_HYBRID, STATUS_INTERNAL_ERROR, STATUS_OK, VERSION,
 };
+use crate::transport::windows::build_pipe_name;
+use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -284,6 +287,197 @@ struct RawSessionServer {
     thread: Option<thread::JoinHandle<Result<(), String>>>,
 }
 
+type RawHandle = isize;
+type Dword = u32;
+type Bool = i32;
+
+const INVALID_HANDLE_VALUE: RawHandle = -1;
+const PIPE_ACCESS_DUPLEX: Dword = 0x00000003;
+const PIPE_TYPE_MESSAGE: Dword = 0x00000004;
+const PIPE_READMODE_MESSAGE: Dword = 0x00000002;
+const PIPE_WAIT: Dword = 0x00000000;
+const ERROR_PIPE_CONNECTED: Dword = 535;
+const RAW_PIPE_PACKET_SIZE: Dword = 65536;
+
+unsafe extern "system" {
+    fn CreateNamedPipeW(
+        lp_name: *const u16,
+        dw_open_mode: Dword,
+        dw_pipe_mode: Dword,
+        n_max_instances: Dword,
+        n_out_buffer_size: Dword,
+        n_in_buffer_size: Dword,
+        n_default_time_out: Dword,
+        lp_security_attributes: *const core::ffi::c_void,
+    ) -> RawHandle;
+
+    fn ConnectNamedPipe(handle: RawHandle, overlapped: *mut core::ffi::c_void) -> Bool;
+    fn ReadFile(
+        handle: RawHandle,
+        buffer: *mut core::ffi::c_void,
+        bytes_to_read: Dword,
+        bytes_read: *mut Dword,
+        overlapped: *mut core::ffi::c_void,
+    ) -> Bool;
+    fn WriteFile(
+        handle: RawHandle,
+        buffer: *const core::ffi::c_void,
+        bytes_to_write: Dword,
+        bytes_written: *mut Dword,
+        overlapped: *mut core::ffi::c_void,
+    ) -> Bool;
+    fn CloseHandle(handle: RawHandle) -> Bool;
+    fn GetLastError() -> Dword;
+}
+
+struct RawHelloAckServer {
+    accepted: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<Result<(), String>>>,
+}
+
+fn encode_hello_ack_packet_with_version(version: u16, status: u16, layout_version: u16) -> Vec<u8> {
+    let ack = HelloAck {
+        layout_version,
+        flags: 0,
+        server_supported_profiles: PROFILE_BASELINE,
+        intersection_profiles: PROFILE_BASELINE,
+        selected_profile: PROFILE_BASELINE,
+        agreed_max_request_payload_bytes: crate::protocol::MAX_PAYLOAD_DEFAULT,
+        agreed_max_request_batch_items: 1,
+        agreed_max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
+        agreed_max_response_batch_items: 1,
+        agreed_packet_size: 0,
+        session_id: 77,
+    };
+
+    let mut payload = [0u8; 48];
+    let payload_len = ack.encode(&mut payload);
+
+    let hdr = Header {
+        magic: crate::protocol::MAGIC_MSG,
+        version,
+        header_len: HEADER_SIZE as u16,
+        kind: KIND_CONTROL,
+        code: CODE_HELLO_ACK,
+        flags: 0,
+        item_count: 1,
+        message_id: 0,
+        payload_len: payload_len as u32,
+        transport_status: status,
+    };
+
+    let mut packet = vec![0u8; HEADER_SIZE + payload_len];
+    hdr.encode(&mut packet[..HEADER_SIZE]);
+    packet[HEADER_SIZE..].copy_from_slice(&payload[..payload_len]);
+    packet
+}
+
+fn start_raw_hello_ack_version_server(service: &str, version: u16) -> RawHelloAckServer {
+    ensure_run_dir();
+    cleanup_all(service);
+
+    let accepted = Arc::new(AtomicBool::new(false));
+    let accepted_flag = Arc::clone(&accepted);
+    let svc = service.to_string();
+    let packet = encode_hello_ack_packet_with_version(version, STATUS_OK, 1);
+
+    let thread = thread::spawn(move || {
+        let pipe_name =
+            build_pipe_name(TEST_RUN_DIR, &svc).map_err(|e| format!("pipe name: {e}"))?;
+        let pipe = unsafe {
+            CreateNamedPipeW(
+                pipe_name.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                1,
+                RAW_PIPE_PACKET_SIZE,
+                RAW_PIPE_PACKET_SIZE,
+                0,
+                ptr::null(),
+            )
+        };
+        if pipe == INVALID_HANDLE_VALUE {
+            return Err(format!("CreateNamedPipeW failed: {}", unsafe {
+                GetLastError()
+            }));
+        }
+
+        let connect_ok = unsafe { ConnectNamedPipe(pipe, ptr::null_mut()) };
+        if connect_ok == 0 {
+            let err = unsafe { GetLastError() };
+            if err != ERROR_PIPE_CONNECTED {
+                unsafe {
+                    CloseHandle(pipe);
+                }
+                return Err(format!("ConnectNamedPipe failed: {err}"));
+            }
+        }
+
+        accepted_flag.store(true, Ordering::Release);
+
+        let mut hello_buf = [0u8; 256];
+        let mut hello_n = 0u32;
+        let read_ok = unsafe {
+            ReadFile(
+                pipe,
+                hello_buf.as_mut_ptr().cast(),
+                hello_buf.len() as u32,
+                &mut hello_n,
+                ptr::null_mut(),
+            )
+        };
+        if read_ok == 0 || hello_n == 0 {
+            unsafe {
+                CloseHandle(pipe);
+            }
+            return Err(format!("ReadFile failed: {}", unsafe { GetLastError() }));
+        }
+
+        let mut written = 0u32;
+        let write_ok = unsafe {
+            WriteFile(
+                pipe,
+                packet.as_ptr().cast(),
+                packet.len() as u32,
+                &mut written,
+                ptr::null_mut(),
+            )
+        };
+        let write_err = unsafe { GetLastError() };
+        unsafe {
+            CloseHandle(pipe);
+        }
+        if write_ok == 0 || written as usize != packet.len() {
+            return Err(format!("WriteFile failed: {write_err}"));
+        }
+
+        Ok(())
+    });
+
+    thread::sleep(Duration::from_millis(200));
+    RawHelloAckServer {
+        accepted,
+        thread: Some(thread),
+    }
+}
+
+impl RawHelloAckServer {
+    fn wait(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            match thread.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => panic!("raw windows hello_ack server failed: {err}"),
+                Err(_) => panic!("raw windows hello_ack server panicked"),
+            }
+        }
+
+        assert!(
+            self.accepted.load(Ordering::Acquire),
+            "raw windows hello_ack server accepted no clients"
+        );
+    }
+}
+
 fn start_raw_session_server<F>(service: &str, cfg: ServerConfig, handler: F) -> RawSessionServer
 where
     F: FnOnce(&mut NpSession, Header, &[u8]) -> Result<(), String> + Send + 'static,
@@ -397,21 +591,28 @@ fn test_cgroups_call_windows_shm() {
 }
 
 #[test]
-#[ignore = "Windows managed-server shutdown/reconnect still needs a dedicated investigation"]
 fn test_retry_on_failure_windows() {
-    let svc = "rs_win_svc_retry";
-    let mut server1 = TestServer::start(svc, METHOD_CGROUPS_SNAPSHOT, test_cgroups_dispatch());
+    let svc = unique_service("rs_win_svc_retry");
+    let mut server1 = TestServer::start(&svc, METHOD_CGROUPS_SNAPSHOT, test_cgroups_dispatch());
 
-    let mut client = snapshot_client(svc, client_config());
+    let mut client = snapshot_client(&svc, client_config());
     connect_ready(&mut client);
 
     let view = client.call_snapshot().expect("first call");
     assert_eq!(view.item_count, 3);
 
-    server1.stop();
-    thread::sleep(Duration::from_millis(50));
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        server1.stop();
+        let _ = stop_tx.send(());
+    });
+    assert!(
+        stop_rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+        "server stop should not hang with an active client session"
+    );
+    thread::sleep(Duration::from_millis(100));
 
-    let mut server2 = TestServer::start(svc, METHOD_CGROUPS_SNAPSHOT, test_cgroups_dispatch());
+    let mut server2 = TestServer::start(&svc, METHOD_CGROUPS_SNAPSHOT, test_cgroups_dispatch());
 
     let view2 = client.call_snapshot().expect("retry call");
     assert_eq!(view2.item_count, 3);
@@ -580,6 +781,27 @@ fn test_client_incompatible_windows() {
 
     client.close();
     server.stop();
+}
+
+#[test]
+fn test_client_protocol_version_incompatible_windows() {
+    let svc = unique_service("rs_win_svc_proto_incompat");
+    let mut server = start_raw_hello_ack_version_server(&svc, VERSION + 1);
+
+    let mut client = snapshot_client(&svc, client_config());
+    let changed = client.refresh();
+    assert!(changed, "refresh should move client into INCOMPATIBLE");
+    assert_eq!(client.state, ClientState::Incompatible);
+    assert!(!client.ready());
+
+    server.wait();
+
+    let changed = client.refresh();
+    assert!(!changed, "refresh from incompatible should be a no-op");
+    assert_eq!(client.state, ClientState::Incompatible);
+
+    client.close();
+    cleanup_all(&svc);
 }
 
 #[test]

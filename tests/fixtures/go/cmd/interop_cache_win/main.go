@@ -98,7 +98,14 @@ func runServer(runDir, service string) int {
 func runClient(runDir, service string) int {
 	cache := cgroups.NewCache(runDir, service, clientConfig())
 
-	updated := cache.Refresh()
+	updated := false
+	for i := 0; i < 200; i++ {
+		if cache.Refresh() {
+			updated = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if !updated || !cache.Ready() {
 		fmt.Fprintf(os.Stderr, "client: cache not ready after refresh\n")
 		cache.Close()

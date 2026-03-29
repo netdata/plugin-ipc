@@ -48,7 +48,7 @@ run cmake --build "$BUILD_DIR" -j"$(nproc)" 2>&1
 
 # Multi-threaded tests: these exercise the worker pool, multiple sessions, etc.
 # Also include test_uds and test_shm since they use threads for server/client pairs.
-TESTS=(test_multi_server test_service test_uds test_shm test_cache)
+TESTS=(test_multi_server test_service test_service_extra test_uds test_shm test_cache)
 
 total=0
 passed=0

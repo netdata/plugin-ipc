@@ -1069,6 +1069,219 @@ static void test_server_create_rejects_existing_objects(void)
     nipc_win_shm_destroy(&first);
 }
 
+static void test_win32_fault_injection(void)
+{
+    printf("--- Win32 fault injection ---\n");
+
+    {
+        char service[64];
+        nipc_win_shm_ctx_t ctx = {0};
+        nipc_win_shm_error_t err;
+
+        unique_service(service, sizeof(service));
+        nipc_win_shm_test_fault_set(NIPC_WIN_SHM_TEST_FAULT_CREATE_MAPPING, 5, 0);
+        err = nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 81,
+                                         NIPC_WIN_SHM_PROFILE_HYBRID,
+                                         4096, 4096, &ctx);
+        check("fault CreateFileMappingW -> CREATE_MAPPING",
+              err == NIPC_WIN_SHM_ERR_CREATE_MAPPING);
+        nipc_win_shm_test_fault_clear();
+
+        err = nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 81,
+                                         NIPC_WIN_SHM_PROFILE_HYBRID,
+                                         4096, 4096, &ctx);
+        check("server create recovers after CreateFileMappingW fault",
+              err == NIPC_WIN_SHM_OK);
+        if (err == NIPC_WIN_SHM_OK)
+            nipc_win_shm_destroy(&ctx);
+    }
+
+    {
+        char service[64];
+        nipc_win_shm_ctx_t ctx = {0};
+        nipc_win_shm_error_t err;
+
+        unique_service(service, sizeof(service));
+        nipc_win_shm_test_fault_set(NIPC_WIN_SHM_TEST_FAULT_MAP_VIEW, 6, 0);
+        err = nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 82,
+                                         NIPC_WIN_SHM_PROFILE_HYBRID,
+                                         4096, 4096, &ctx);
+        check("fault MapViewOfFile -> MAP_VIEW",
+              err == NIPC_WIN_SHM_ERR_MAP_VIEW);
+        nipc_win_shm_test_fault_clear();
+
+        err = nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 82,
+                                         NIPC_WIN_SHM_PROFILE_HYBRID,
+                                         4096, 4096, &ctx);
+        check("server create recovers after MapViewOfFile fault",
+              err == NIPC_WIN_SHM_OK);
+        if (err == NIPC_WIN_SHM_OK)
+            nipc_win_shm_destroy(&ctx);
+    }
+
+    {
+        char service[64];
+        nipc_win_shm_ctx_t ctx = {0};
+        nipc_win_shm_error_t err;
+
+        unique_service(service, sizeof(service));
+        nipc_win_shm_test_fault_set(NIPC_WIN_SHM_TEST_FAULT_CREATE_EVENT, 7, 0);
+        err = nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 83,
+                                         NIPC_WIN_SHM_PROFILE_HYBRID,
+                                         4096, 4096, &ctx);
+        check("fault CreateEventW req_event -> CREATE_EVENT",
+              err == NIPC_WIN_SHM_ERR_CREATE_EVENT);
+        nipc_win_shm_test_fault_clear();
+
+        err = nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 83,
+                                         NIPC_WIN_SHM_PROFILE_HYBRID,
+                                         4096, 4096, &ctx);
+        check("server create recovers after req_event CreateEventW fault",
+              err == NIPC_WIN_SHM_OK);
+        if (err == NIPC_WIN_SHM_OK)
+            nipc_win_shm_destroy(&ctx);
+    }
+
+    {
+        char service[64];
+        nipc_win_shm_ctx_t ctx = {0};
+        nipc_win_shm_error_t err;
+
+        unique_service(service, sizeof(service));
+        nipc_win_shm_test_fault_set(NIPC_WIN_SHM_TEST_FAULT_CREATE_EVENT, 8, 1);
+        err = nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 84,
+                                         NIPC_WIN_SHM_PROFILE_HYBRID,
+                                         4096, 4096, &ctx);
+        check("fault CreateEventW resp_event -> CREATE_EVENT",
+              err == NIPC_WIN_SHM_ERR_CREATE_EVENT);
+        nipc_win_shm_test_fault_clear();
+
+        err = nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 84,
+                                         NIPC_WIN_SHM_PROFILE_HYBRID,
+                                         4096, 4096, &ctx);
+        check("server create recovers after resp_event CreateEventW fault",
+              err == NIPC_WIN_SHM_OK);
+        if (err == NIPC_WIN_SHM_OK)
+            nipc_win_shm_destroy(&ctx);
+    }
+
+    {
+        char service[64];
+        nipc_win_shm_ctx_t server = {0};
+        nipc_win_shm_ctx_t client = {0};
+        nipc_win_shm_error_t err;
+
+        unique_service(service, sizeof(service));
+        err = nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 85,
+                                         NIPC_WIN_SHM_PROFILE_HYBRID,
+                                         4096, 4096, &server);
+        check("fault OpenFileMappingW setup server", err == NIPC_WIN_SHM_OK);
+        if (err == NIPC_WIN_SHM_OK) {
+            nipc_win_shm_test_fault_set(NIPC_WIN_SHM_TEST_FAULT_OPEN_MAPPING, 9, 0);
+            err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 85,
+                                             NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+            check("fault OpenFileMappingW -> OPEN_MAPPING",
+                  err == NIPC_WIN_SHM_ERR_OPEN_MAPPING);
+            nipc_win_shm_test_fault_clear();
+
+            err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 85,
+                                             NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+            check("client attach recovers after OpenFileMappingW fault",
+                  err == NIPC_WIN_SHM_OK);
+            if (err == NIPC_WIN_SHM_OK)
+                nipc_win_shm_close(&client);
+            nipc_win_shm_destroy(&server);
+        }
+    }
+
+    {
+        char service[64];
+        nipc_win_shm_ctx_t server = {0};
+        nipc_win_shm_ctx_t client = {0};
+        nipc_win_shm_error_t err;
+
+        unique_service(service, sizeof(service));
+        err = nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 86,
+                                         NIPC_WIN_SHM_PROFILE_HYBRID,
+                                         4096, 4096, &server);
+        check("fault MapViewOfFile attach setup server", err == NIPC_WIN_SHM_OK);
+        if (err == NIPC_WIN_SHM_OK) {
+            nipc_win_shm_test_fault_set(NIPC_WIN_SHM_TEST_FAULT_MAP_VIEW, 10, 0);
+            err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 86,
+                                             NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+            check("fault MapViewOfFile attach -> MAP_VIEW",
+                  err == NIPC_WIN_SHM_ERR_MAP_VIEW);
+            nipc_win_shm_test_fault_clear();
+
+            err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 86,
+                                             NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+            check("client attach recovers after MapViewOfFile fault",
+                  err == NIPC_WIN_SHM_OK);
+            if (err == NIPC_WIN_SHM_OK)
+                nipc_win_shm_close(&client);
+            nipc_win_shm_destroy(&server);
+        }
+    }
+
+    {
+        char service[64];
+        nipc_win_shm_ctx_t server = {0};
+        nipc_win_shm_ctx_t client = {0};
+        nipc_win_shm_error_t err;
+
+        unique_service(service, sizeof(service));
+        err = nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 87,
+                                         NIPC_WIN_SHM_PROFILE_HYBRID,
+                                         4096, 4096, &server);
+        check("fault OpenEventW req_event setup server", err == NIPC_WIN_SHM_OK);
+        if (err == NIPC_WIN_SHM_OK) {
+            nipc_win_shm_test_fault_set(NIPC_WIN_SHM_TEST_FAULT_OPEN_EVENT, 11, 0);
+            err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 87,
+                                             NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+            check("fault OpenEventW req_event -> OPEN_EVENT",
+                  err == NIPC_WIN_SHM_ERR_OPEN_EVENT);
+            nipc_win_shm_test_fault_clear();
+
+            err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 87,
+                                             NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+            check("client attach recovers after req_event OpenEventW fault",
+                  err == NIPC_WIN_SHM_OK);
+            if (err == NIPC_WIN_SHM_OK)
+                nipc_win_shm_close(&client);
+            nipc_win_shm_destroy(&server);
+        }
+    }
+
+    {
+        char service[64];
+        nipc_win_shm_ctx_t server = {0};
+        nipc_win_shm_ctx_t client = {0};
+        nipc_win_shm_error_t err;
+
+        unique_service(service, sizeof(service));
+        err = nipc_win_shm_server_create(TEST_RUN_DIR, service, AUTH_TOKEN, 88,
+                                         NIPC_WIN_SHM_PROFILE_HYBRID,
+                                         4096, 4096, &server);
+        check("fault OpenEventW resp_event setup server", err == NIPC_WIN_SHM_OK);
+        if (err == NIPC_WIN_SHM_OK) {
+            nipc_win_shm_test_fault_set(NIPC_WIN_SHM_TEST_FAULT_OPEN_EVENT, 12, 1);
+            err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 88,
+                                             NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+            check("fault OpenEventW resp_event -> OPEN_EVENT",
+                  err == NIPC_WIN_SHM_ERR_OPEN_EVENT);
+            nipc_win_shm_test_fault_clear();
+
+            err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN, 88,
+                                             NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+            check("client attach recovers after resp_event OpenEventW fault",
+                  err == NIPC_WIN_SHM_OK);
+            if (err == NIPC_WIN_SHM_OK)
+                nipc_win_shm_close(&client);
+            nipc_win_shm_destroy(&server);
+        }
+    }
+}
+
 static void test_hybrid_receive_timeout_and_disconnect(void)
 {
     printf("--- HYBRID receive timeout / disconnect ---\n");
@@ -1456,6 +1669,7 @@ int main(void)
     test_service_name_validation();
     test_server_create_rejects_existing_objects();
     test_client_attach_validation();
+    test_win32_fault_injection();
     test_hybrid_receive_timeout_and_disconnect();
     test_hybrid_receive_zero_timeout_waits_for_data();
     test_hybrid_receive_recheck_observes_ready_data();

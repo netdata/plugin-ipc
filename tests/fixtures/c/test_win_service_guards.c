@@ -163,6 +163,31 @@ static size_t build_message(uint8_t *dst, size_t dst_size,
     return NIPC_HEADER_LEN + payload_len;
 }
 
+static size_t build_status_message(uint8_t *dst, size_t dst_size,
+                                   uint16_t code,
+                                   uint64_t message_id,
+                                   uint32_t transport_status)
+{
+    if (dst_size < NIPC_HEADER_LEN)
+        return 0;
+
+    nipc_header_t hdr = {
+        .magic = NIPC_MAGIC_MSG,
+        .version = NIPC_VERSION,
+        .header_len = NIPC_HEADER_LEN,
+        .kind = NIPC_KIND_RESPONSE,
+        .code = code,
+        .flags = 0,
+        .item_count = 1,
+        .message_id = message_id,
+        .payload_len = 0,
+        .transport_status = transport_status,
+    };
+
+    nipc_header_encode(&hdr, dst, NIPC_HEADER_LEN);
+    return NIPC_HEADER_LEN;
+}
+
 static bool on_increment(void *user, uint64_t request, uint64_t *response)
 {
     (void)user;
@@ -473,6 +498,8 @@ typedef enum {
     FAKE_HYBRID_RESP_BAD_KIND,
     FAKE_HYBRID_RESP_BAD_CODE,
     FAKE_HYBRID_RESP_BAD_MESSAGE_ID,
+    FAKE_HYBRID_RESP_LIMIT_EXCEEDED,
+    FAKE_HYBRID_RESP_UNSUPPORTED,
     FAKE_HYBRID_RESP_DISCONNECT,
 } fake_hybrid_mode_t;
 
@@ -792,6 +819,22 @@ static DWORD WINAPI fake_hybrid_server_thread(LPVOID arg)
             (void)nipc_win_shm_send(&shm, msg, msg_len);
             break;
         }
+        case FAKE_HYBRID_RESP_LIMIT_EXCEEDED: {
+            uint8_t msg[NIPC_HEADER_LEN];
+            size_t msg_len = build_status_message(
+                msg, sizeof(msg), req_hdr.code, req_hdr.message_id,
+                NIPC_STATUS_LIMIT_EXCEEDED);
+            (void)nipc_win_shm_send(&shm, msg, msg_len);
+            break;
+        }
+        case FAKE_HYBRID_RESP_UNSUPPORTED: {
+            uint8_t msg[NIPC_HEADER_LEN];
+            size_t msg_len = build_status_message(
+                msg, sizeof(msg), req_hdr.code, req_hdr.message_id,
+                NIPC_STATUS_UNSUPPORTED);
+            (void)nipc_win_shm_send(&shm, msg, msg_len);
+            break;
+        }
         case FAKE_HYBRID_RESP_DISCONNECT:
             goto out;
         default:
@@ -999,6 +1042,62 @@ static void test_hybrid_client_rejects_malformed_responses(void)
 
         nipc_client_close(&client);
         check("fake hybrid response server exited",
+              WaitForSingleObject(server_thread, 10000) == WAIT_OBJECT_0);
+        CloseHandle(server_thread);
+    }
+}
+
+static void test_hybrid_typed_snapshot_response_guards(void)
+{
+    struct {
+        fake_hybrid_mode_t mode;
+        const char *label;
+        nipc_error_t expected;
+        bool expect_response_capacity_growth;
+    } cases[] = {
+        { FAKE_HYBRID_RESP_SHORT, "typed short SHM response", NIPC_ERR_TRUNCATED, false },
+        { FAKE_HYBRID_RESP_BAD_MAGIC, "typed bad SHM response header", NIPC_ERR_BAD_MAGIC, false },
+        { FAKE_HYBRID_RESP_BAD_KIND, "typed wrong SHM response kind", NIPC_ERR_BAD_KIND, false },
+        { FAKE_HYBRID_RESP_BAD_CODE, "typed wrong SHM response code", NIPC_ERR_BAD_LAYOUT, false },
+        { FAKE_HYBRID_RESP_BAD_MESSAGE_ID, "typed wrong SHM response message_id", NIPC_ERR_BAD_LAYOUT, false },
+        { FAKE_HYBRID_RESP_LIMIT_EXCEEDED, "typed SHM limit exceeded", NIPC_ERR_OVERFLOW, true },
+        { FAKE_HYBRID_RESP_UNSUPPORTED, "typed SHM unsupported response", NIPC_ERR_BAD_LAYOUT, false },
+        { FAKE_HYBRID_RESP_DISCONNECT, "typed missing SHM response after request", NIPC_ERR_TRUNCATED, false },
+    };
+
+    printf("--- Hybrid typed snapshot response guards ---\n");
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_hybrid_typed_resp");
+
+        fake_hybrid_server_ctx_t sctx;
+        HANDLE server_thread = start_fake_hybrid_server(&sctx, service, cases[i].mode);
+        if (!server_thread)
+            continue;
+
+        nipc_client_ctx_t client;
+        nipc_client_config_t ccfg = default_typed_hybrid_client_config();
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check(cases[i].label,
+              refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+
+        if (nipc_client_ready(&client) && client.shm != NULL) {
+            nipc_cgroups_resp_view_t view;
+            uint32_t before_resp_cap = client.transport_config.max_response_payload_bytes;
+            nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
+            check("typed malformed hybrid response returns expected error",
+                  err == cases[i].expected);
+            check("typed malformed hybrid response leaves client not READY",
+                  !nipc_client_ready(&client));
+            if (cases[i].expect_response_capacity_growth) {
+                check("typed SHM limit-exceeded learns larger response capacity",
+                      client.transport_config.max_response_payload_bytes > before_resp_cap);
+            }
+        }
+
+        nipc_client_close(&client);
+        check("fake typed hybrid response server exited",
               WaitForSingleObject(server_thread, 10000) == WAIT_OBJECT_0);
         CloseHandle(server_thread);
     }
@@ -1620,6 +1719,7 @@ int main(void)
     test_client_batch_and_string_guards();
     test_hybrid_attach_failure_disconnects();
     test_hybrid_client_rejects_malformed_responses();
+    test_hybrid_typed_snapshot_response_guards();
     test_hybrid_client_send_buffer_guard();
     test_hybrid_client_send_capacity_guard();
     test_hybrid_batch_send_capacity_guard();

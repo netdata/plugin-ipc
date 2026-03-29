@@ -10,10 +10,13 @@
 package windows
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unicode/utf16"
 	"unsafe"
 
@@ -71,6 +74,7 @@ var (
 	ErrHandshake      = errors.New("handshake protocol error")
 	ErrAuthFailed     = errors.New("authentication token rejected")
 	ErrNoProfile      = errors.New("no common transport profile")
+	ErrIncompatible   = errors.New("protocol or layout version mismatch")
 	ErrProtocol       = errors.New("wire protocol violation")
 	ErrAddrInUse      = errors.New("pipe name already in use by live server")
 	ErrChunk          = errors.New("chunk header mismatch")
@@ -85,6 +89,26 @@ func wrapErr(sentinel error, detail string) error {
 	return fmt.Errorf("%w: %s", sentinel, detail)
 }
 
+func headerVersionIncompatible(buf []byte, expectedCode uint16) bool {
+	if len(buf) < protocol.HeaderSize {
+		return false
+	}
+
+	return binary.NativeEndian.Uint32(buf[0:4]) == protocol.MagicMsg &&
+		binary.NativeEndian.Uint16(buf[4:6]) != protocol.Version &&
+		binary.NativeEndian.Uint16(buf[6:8]) == protocol.HeaderLen &&
+		binary.NativeEndian.Uint16(buf[8:10]) == protocol.KindControl &&
+		binary.NativeEndian.Uint16(buf[12:14]) == expectedCode
+}
+
+func helloLayoutIncompatible(buf []byte) bool {
+	return len(buf) >= 2 && binary.NativeEndian.Uint16(buf[0:2]) != 1
+}
+
+func helloAckLayoutIncompatible(buf []byte) bool {
+	return len(buf) >= 2 && binary.NativeEndian.Uint16(buf[0:2]) != 1
+}
+
 // ---------------------------------------------------------------------------
 //  Win32 syscall imports (pure Go, no cgo)
 // ---------------------------------------------------------------------------
@@ -96,7 +120,9 @@ var (
 	procConnectNamedPipe        = modkernel32.NewProc("ConnectNamedPipe")
 	procDisconnectNamedPipe     = modkernel32.NewProc("DisconnectNamedPipe")
 	procFlushFileBuffers        = modkernel32.NewProc("FlushFileBuffers")
+	procPeekNamedPipe           = modkernel32.NewProc("PeekNamedPipe")
 	procSetNamedPipeHandleState = modkernel32.NewProc("SetNamedPipeHandleState")
+	procSwitchToThread          = modkernel32.NewProc("SwitchToThread")
 )
 
 func createNamedPipe(name *uint16, openMode, pipeMode, maxInstances, outBufSize, inBufSize, defaultTimeout uint32) (syscall.Handle, error) {
@@ -131,6 +157,22 @@ func disconnectNamedPipe(handle syscall.Handle) {
 
 func flushFileBuffers(handle syscall.Handle) {
 	procFlushFileBuffers.Call(uintptr(handle))
+}
+
+func peekNamedPipeAvailable(handle syscall.Handle) (uint32, error) {
+	var available uint32
+	r, _, err := procPeekNamedPipe.Call(
+		uintptr(handle),
+		0,
+		0,
+		0,
+		uintptr(unsafe.Pointer(&available)),
+		0,
+	)
+	if r == 0 {
+		return 0, err
+	}
+	return available, nil
 }
 
 func setNamedPipeHandleState(handle syscall.Handle, mode *uint32) error {
@@ -225,6 +267,13 @@ func maxU32(a, b uint32) uint32 {
 		return a
 	}
 	return b
+}
+
+func pipeBufferSize(packetSize uint32) uint32 {
+	// The protocol packet size controls logical framing and chunk size. The
+	// underlying pipe quota must stay large enough for full-duplex pipelining
+	// even when tests force a tiny protocol packet size.
+	return maxU32(applyDefault(packetSize, defaultPipeBufSize), defaultPipeBufSize)
 }
 
 func highestBit(mask uint32) uint32 {
@@ -366,6 +415,13 @@ type Session struct {
 	inflightIDs map[uint64]struct{}
 }
 
+func (s *Session) failAllInflight() {
+	if s.role != RoleClient || len(s.inflightIDs) == 0 {
+		return
+	}
+	clear(s.inflightIDs)
+}
+
 // Handle returns the raw HANDLE for WaitForSingleObject integration.
 func (s *Session) Handle() syscall.Handle {
 	return s.handle
@@ -374,6 +430,54 @@ func (s *Session) Handle() syscall.Handle {
 // Role returns the session role.
 func (s *Session) GetRole() Role {
 	return s.role
+}
+
+// WaitReadable waits until bytes are available to read or the timeout expires.
+func (s *Session) WaitReadable(timeoutMs uint32) (bool, error) {
+	if s.handle == syscall.InvalidHandle {
+		return false, wrapErr(ErrBadParam, "session closed")
+	}
+
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	yielded := false
+	for {
+		available, err := peekNamedPipeAvailable(s.handle)
+		if err != nil {
+			if isDisconnectError(err) {
+				s.failAllInflight()
+				return false, ErrDisconnected
+			}
+			return false, wrapErr(ErrRecv, err.Error())
+		}
+		if available > 0 {
+			return true, nil
+		}
+		if !time.Now().Before(deadline) {
+			return false, nil
+		}
+		if !yielded {
+			yielded = true
+			for i := 0; i < 256; i++ {
+				procSwitchToThread.Call()
+				available, err = peekNamedPipeAvailable(s.handle)
+				if err != nil {
+					if isDisconnectError(err) {
+						s.failAllInflight()
+						return false, ErrDisconnected
+					}
+					return false, wrapErr(ErrRecv, err.Error())
+				}
+				if available > 0 {
+					return true, nil
+				}
+				if !time.Now().Before(deadline) {
+					return false, nil
+				}
+			}
+			continue
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // Close closes the session and releases resources.
@@ -391,6 +495,7 @@ func (s *Session) Close() {
 	s.recvBuf = nil
 	s.sendBuf = nil
 	s.pktBuf = nil
+	s.failAllInflight()
 }
 
 // Connect establishes a session to a server pipe derived from runDir + serviceName.
@@ -456,7 +561,11 @@ func (s *Session) Send(hdr *protocol.Header, payload []byte) error {
 	sendErr := s.sendInner(hdr, payload)
 
 	if sendErr != nil && tracked {
-		delete(s.inflightIDs, hdr.MessageID)
+		if errors.Is(sendErr, ErrDisconnected) {
+			s.failAllInflight()
+		} else {
+			delete(s.inflightIDs, hdr.MessageID)
+		}
 	}
 
 	return sendErr
@@ -539,6 +648,9 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 
 	n, err := rawRecv(s.handle, buf)
 	if err != nil {
+		if errors.Is(err, ErrDisconnected) {
+			s.failAllInflight()
+		}
 		return protocol.Header{}, nil, err
 	}
 
@@ -635,6 +747,9 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 	for assembled < int(hdr.PayloadLen) {
 		cn, err := rawRecv(s.handle, pktBuf)
 		if err != nil {
+			if errors.Is(err, ErrDisconnected) {
+				s.failAllInflight()
+			}
 			return protocol.Header{}, nil, wrapErr(ErrRecv, "continuation recv: "+err.Error())
 		}
 
@@ -705,10 +820,13 @@ func ensurePipeScratchBuf(buf *[]byte, needed int) []byte {
 
 // Listener is a listening Named Pipe endpoint.
 type Listener struct {
+	mu            sync.Mutex
 	handle        syscall.Handle
 	config        ServerConfig
 	pipeName      []uint16
 	nextSessionID atomic.Uint64
+	closing       bool
+	accepting     bool
 }
 
 // Listen creates a listener on a Named Pipe derived from runDir + serviceName.
@@ -718,7 +836,7 @@ func Listen(runDir, serviceName string, config ServerConfig) (*Listener, error) 
 		return nil, err
 	}
 
-	bufSize := applyDefault(config.PacketSize, defaultPipeBufSize)
+	bufSize := pipeBufferSize(config.PacketSize)
 
 	// Create first instance with FILE_FLAG_FIRST_PIPE_INSTANCE
 	handle, err := createPipeInstance(pipeName, bufSize, true)
@@ -735,41 +853,73 @@ func Listen(runDir, serviceName string, config ServerConfig) (*Listener, error) 
 
 // Handle returns the raw HANDLE.
 func (l *Listener) Handle() syscall.Handle {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return l.handle
 }
 
 // SetPayloadLimits updates the payload limits used for future handshakes.
 func (l *Listener) SetPayloadLimits(maxRequestPayloadBytes, maxResponsePayloadBytes uint32) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.config.MaxRequestPayloadBytes = maxRequestPayloadBytes
 	l.config.MaxResponsePayloadBytes = maxResponsePayloadBytes
 }
 
 // Accept accepts one client connection. Performs the full handshake.
 func (l *Listener) Accept() (*Session, error) {
-	err := connectNamedPipe(l.handle)
+	l.mu.Lock()
+	if l.handle == syscall.InvalidHandle {
+		l.mu.Unlock()
+		return nil, wrapErr(ErrAccept, "listener closed")
+	}
+	sessionHandle := l.handle
+	l.accepting = true
+	l.mu.Unlock()
+
+	err := connectNamedPipe(sessionHandle)
 	if err != nil {
 		// ERROR_PIPE_CONNECTED is fine — client connected between
 		// CreateNamedPipe and ConnectNamedPipe
 		if errno, ok := err.(syscall.Errno); !ok || errno != _ERROR_PIPE_CONNECTED {
+			l.mu.Lock()
+			l.accepting = false
+			l.mu.Unlock()
 			return nil, wrapErr(ErrAccept, err.Error())
 		}
 	}
 
-	sessionHandle := l.handle
+	l.mu.Lock()
+	l.accepting = false
+	if l.closing {
+		if l.handle == sessionHandle {
+			l.handle = syscall.InvalidHandle
+		}
+		l.mu.Unlock()
+		disconnectNamedPipe(sessionHandle)
+		syscall.CloseHandle(sessionHandle)
+		return nil, wrapErr(ErrAccept, "listener closed")
+	}
 
 	// Create new pipe instance for next client
-	bufSize := applyDefault(l.config.PacketSize, defaultPipeBufSize)
+	bufSize := pipeBufferSize(l.config.PacketSize)
+	config := l.config
 	next, perr := createPipeInstance(l.pipeName, bufSize, false)
 	if perr != nil {
+		if l.handle == sessionHandle {
+			l.handle = syscall.InvalidHandle
+		}
+		l.mu.Unlock()
 		disconnectNamedPipe(sessionHandle)
 		syscall.CloseHandle(sessionHandle)
 		return nil, perr
 	}
 	l.handle = next
+	l.mu.Unlock()
 
 	// Handshake
 	sessionID := l.nextSessionID.Add(1)
-	session, herr := serverHandshake(sessionHandle, &l.config, sessionID)
+	session, herr := serverHandshake(sessionHandle, &config, sessionID)
 	if herr != nil {
 		disconnectNamedPipe(sessionHandle)
 		syscall.CloseHandle(sessionHandle)
@@ -780,26 +930,40 @@ func (l *Listener) Accept() (*Session, error) {
 
 // Close closes the listener.
 func (l *Listener) Close() {
-	if l.handle != syscall.InvalidHandle {
-		// A loopback connect reliably wakes a blocking ConnectNamedPipe()
-		// so Accept() can observe shutdown and exit.
-		if len(l.pipeName) > 0 && l.pipeName[0] != 0 {
-			wake, err := syscall.CreateFile(
-				&l.pipeName[0],
-				_GENERIC_READ|_GENERIC_WRITE,
-				0,
-				nil,
-				_OPEN_EXISTING,
-				0,
-				0,
-			)
-			if err == nil && wake != syscall.InvalidHandle && wake != 0 {
-				syscall.CloseHandle(wake)
-			}
-		}
-		syscall.CloseHandle(l.handle)
+	l.mu.Lock()
+	handle := l.handle
+	if handle == syscall.InvalidHandle {
+		l.mu.Unlock()
+		return
+	}
+	l.closing = true
+	accepting := l.accepting
+	if !accepting {
 		l.handle = syscall.InvalidHandle
 	}
+	pipeName := l.pipeName
+	l.mu.Unlock()
+
+	if accepting && len(pipeName) > 0 && pipeName[0] != 0 {
+		// A loopback connect reliably wakes a blocking ConnectNamedPipe()
+		// so Accept() can observe shutdown and close the live listener handle
+		// from the owning goroutine.
+		wake, err := syscall.CreateFile(
+			&pipeName[0],
+			_GENERIC_READ|_GENERIC_WRITE,
+			0,
+			nil,
+			_OPEN_EXISTING,
+			0,
+			0,
+		)
+		if err == nil && wake != syscall.InvalidHandle && wake != 0 {
+			syscall.CloseHandle(wake)
+		}
+		return
+	}
+
+	syscall.CloseHandle(handle)
 }
 
 // ---------------------------------------------------------------------------
@@ -890,6 +1054,9 @@ func clientHandshake(handle syscall.Handle, config *ClientConfig) (*Session, err
 
 	ackHdr, err := protocol.DecodeHeader(ackBuf[:an])
 	if err != nil {
+		if errors.Is(err, protocol.ErrBadVersion) {
+			return nil, wrapErr(ErrIncompatible, "ack header version mismatch")
+		}
 		return nil, wrapErr(ErrProtocol, "ack header: "+err.Error())
 	}
 
@@ -903,6 +1070,9 @@ func clientHandshake(handle syscall.Handle, config *ClientConfig) (*Session, err
 	if ackHdr.TransportStatus == protocol.StatusUnsupported {
 		return nil, ErrNoProfile
 	}
+	if ackHdr.TransportStatus == protocol.StatusIncompatible {
+		return nil, ErrIncompatible
+	}
 	if ackHdr.TransportStatus != protocol.StatusOK {
 		return nil, wrapErr(ErrHandshake, fmt.Sprintf("transport_status=%d", ackHdr.TransportStatus))
 	}
@@ -912,6 +1082,10 @@ func clientHandshake(handle syscall.Handle, config *ClientConfig) (*Session, err
 	}
 	ack, err := protocol.DecodeHelloAck(ackBuf[protocol.HeaderSize:an])
 	if err != nil {
+		if errors.Is(err, protocol.ErrBadLayout) &&
+			helloAckLayoutIncompatible(ackBuf[protocol.HeaderSize:an]) {
+			return nil, wrapErr(ErrIncompatible, "ack payload layout version mismatch")
+		}
 		return nil, wrapErr(ErrProtocol, "ack payload: "+err.Error())
 	}
 
@@ -945,29 +1119,6 @@ func serverHandshake(handle syscall.Handle, config *ServerConfig, sessionID uint
 	}
 	sPreferred := config.PreferredProfiles
 
-	// Receive HELLO
-	var buf [128]byte
-	n, err := rawRecv(handle, buf[:])
-	if err != nil {
-		return nil, wrapErr(ErrRecv, "hello recv: "+err.Error())
-	}
-
-	hdr, err := protocol.DecodeHeader(buf[:n])
-	if err != nil {
-		return nil, wrapErr(ErrProtocol, "hello header: "+err.Error())
-	}
-
-	if hdr.Kind != protocol.KindControl || hdr.Code != protocol.CodeHello {
-		return nil, wrapErr(ErrProtocol, "expected HELLO")
-	}
-
-	hello, err := protocol.DecodeHello(buf[protocol.HeaderSize:n])
-	if err != nil {
-		return nil, wrapErr(ErrProtocol, "hello payload: "+err.Error())
-	}
-
-	intersection := hello.SupportedProfiles & sProfiles
-
 	// Helper: send rejection
 	sendRejection := func(status uint16) {
 		ack := protocol.HelloAck{LayoutVersion: 1}
@@ -990,6 +1141,39 @@ func serverHandshake(handle syscall.Handle, config *ServerConfig, sessionID uint
 		copy(pkt[protocol.HeaderSize:], ackPayBuf[:])
 		rawWrite(handle, pkt[:]) //nolint:errcheck
 	}
+
+	// Receive HELLO
+	var buf [128]byte
+	n, err := rawRecv(handle, buf[:])
+	if err != nil {
+		return nil, wrapErr(ErrRecv, "hello recv: "+err.Error())
+	}
+
+	hdr, err := protocol.DecodeHeader(buf[:n])
+	if err != nil {
+		if errors.Is(err, protocol.ErrBadVersion) &&
+			headerVersionIncompatible(buf[:n], protocol.CodeHello) {
+			sendRejection(protocol.StatusIncompatible)
+			return nil, ErrIncompatible
+		}
+		return nil, wrapErr(ErrProtocol, "hello header: "+err.Error())
+	}
+
+	if hdr.Kind != protocol.KindControl || hdr.Code != protocol.CodeHello {
+		return nil, wrapErr(ErrProtocol, "expected HELLO")
+	}
+
+	hello, err := protocol.DecodeHello(buf[protocol.HeaderSize:n])
+	if err != nil {
+		if errors.Is(err, protocol.ErrBadLayout) &&
+			helloLayoutIncompatible(buf[protocol.HeaderSize:n]) {
+			sendRejection(protocol.StatusIncompatible)
+			return nil, ErrIncompatible
+		}
+		return nil, wrapErr(ErrProtocol, "hello payload: "+err.Error())
+	}
+
+	intersection := hello.SupportedProfiles & sProfiles
 
 	if intersection == 0 {
 		sendRejection(protocol.StatusUnsupported)

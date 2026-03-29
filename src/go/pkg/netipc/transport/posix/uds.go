@@ -10,6 +10,7 @@
 package posix
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -52,6 +53,7 @@ var (
 	ErrHandshake      = errors.New("handshake protocol error")
 	ErrAuthFailed     = errors.New("authentication token rejected")
 	ErrNoProfile      = errors.New("no common transport profile")
+	ErrIncompatible   = errors.New("protocol or layout version mismatch")
 	ErrProtocol       = errors.New("wire protocol violation")
 	ErrAddrInUse      = errors.New("address already in use by live server")
 	ErrChunk          = errors.New("chunk header mismatch")
@@ -64,6 +66,26 @@ var (
 // wrapErr creates a descriptive error wrapping a sentinel.
 func wrapErr(sentinel error, detail string) error {
 	return fmt.Errorf("%w: %s", sentinel, detail)
+}
+
+func headerVersionIncompatible(buf []byte, expectedCode uint16) bool {
+	if len(buf) < protocol.HeaderSize {
+		return false
+	}
+
+	return binary.NativeEndian.Uint32(buf[0:4]) == protocol.MagicMsg &&
+		binary.NativeEndian.Uint16(buf[4:6]) != protocol.Version &&
+		binary.NativeEndian.Uint16(buf[6:8]) == protocol.HeaderLen &&
+		binary.NativeEndian.Uint16(buf[8:10]) == protocol.KindControl &&
+		binary.NativeEndian.Uint16(buf[12:14]) == expectedCode
+}
+
+func helloLayoutIncompatible(buf []byte) bool {
+	return len(buf) >= 2 && binary.NativeEndian.Uint16(buf[0:2]) != 1
+}
+
+func helloAckLayoutIncompatible(buf []byte) bool {
+	return len(buf) >= 2 && binary.NativeEndian.Uint16(buf[0:2]) != 1
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +157,13 @@ type Session struct {
 	inflightIDs map[uint64]struct{}
 }
 
+func (s *Session) failAllInflight() {
+	if s.role != RoleClient || len(s.inflightIDs) == 0 {
+		return
+	}
+	clear(s.inflightIDs)
+}
+
 // Fd returns the raw file descriptor for poll/epoll integration.
 func (s *Session) Fd() int {
 	return s.fd
@@ -153,6 +182,7 @@ func (s *Session) Close() {
 	}
 	s.recvBuf = nil
 	s.pktBuf = nil
+	s.failAllInflight()
 }
 
 // Connect establishes a session to a server at {runDir}/{serviceName}.sock.
@@ -208,7 +238,11 @@ func (s *Session) Send(hdr *protocol.Header, payload []byte) error {
 
 	// Rollback: remove message_id from in-flight set on send failure
 	if sendErr != nil && tracked {
-		delete(s.inflightIDs, hdr.MessageID)
+		if errors.Is(sendErr, ErrSend) {
+			s.failAllInflight()
+		} else {
+			delete(s.inflightIDs, hdr.MessageID)
+		}
 	}
 
 	return sendErr
@@ -295,6 +329,9 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 	// Read first packet
 	n, err := rawRecv(s.fd, buf)
 	if err != nil {
+		if errors.Is(err, ErrRecv) {
+			s.failAllInflight()
+		}
 		return protocol.Header{}, nil, err
 	}
 
@@ -397,6 +434,9 @@ func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 	for assembled < int(hdr.PayloadLen) {
 		cn, err := rawRecv(s.fd, pktBuf)
 		if err != nil {
+			if errors.Is(err, ErrRecv) {
+				s.failAllInflight()
+			}
 			return protocol.Header{}, nil, wrapErr(ErrRecv, "continuation recv: "+err.Error())
 		}
 
@@ -800,6 +840,9 @@ func connectAndHandshake(fd int, path string, config *ClientConfig) (*Session, e
 	// Decode outer header
 	ackHdr, err := protocol.DecodeHeader(ackBuf[:an])
 	if err != nil {
+		if errors.Is(err, protocol.ErrBadVersion) {
+			return nil, wrapErr(ErrIncompatible, "ack header version mismatch")
+		}
 		return nil, wrapErr(ErrProtocol, "ack header: "+err.Error())
 	}
 
@@ -814,6 +857,9 @@ func connectAndHandshake(fd int, path string, config *ClientConfig) (*Session, e
 	if ackHdr.TransportStatus == protocol.StatusUnsupported {
 		return nil, ErrNoProfile
 	}
+	if ackHdr.TransportStatus == protocol.StatusIncompatible {
+		return nil, ErrIncompatible
+	}
 	if ackHdr.TransportStatus != protocol.StatusOK {
 		return nil, wrapErr(ErrHandshake, fmt.Sprintf("transport_status=%d", ackHdr.TransportStatus))
 	}
@@ -824,6 +870,10 @@ func connectAndHandshake(fd int, path string, config *ClientConfig) (*Session, e
 	}
 	ack, err := protocol.DecodeHelloAck(ackBuf[protocol.HeaderSize:an])
 	if err != nil {
+		if errors.Is(err, protocol.ErrBadLayout) &&
+			helloAckLayoutIncompatible(ackBuf[protocol.HeaderSize:an]) {
+			return nil, wrapErr(ErrIncompatible, "ack payload layout version mismatch")
+		}
 		return nil, wrapErr(ErrProtocol, "ack payload: "+err.Error())
 	}
 
@@ -861,33 +911,6 @@ func serverHandshake(fd int, config *ServerConfig, sessionID uint64) (*Session, 
 	}
 	sPreferred := config.PreferredProfiles
 
-	// Receive HELLO
-	var buf [128]byte
-	n, _, _, _, err := syscall.Recvmsg(fd, buf[:], nil, 0)
-	if err != nil {
-		return nil, wrapErr(ErrRecv, "hello recv: "+err.Error())
-	}
-	if n == 0 {
-		return nil, wrapErr(ErrRecv, "peer disconnected during handshake")
-	}
-
-	hdr, err := protocol.DecodeHeader(buf[:n])
-	if err != nil {
-		return nil, wrapErr(ErrProtocol, "hello header: "+err.Error())
-	}
-
-	if hdr.Kind != protocol.KindControl || hdr.Code != protocol.CodeHello {
-		return nil, wrapErr(ErrProtocol, "expected HELLO")
-	}
-
-	hello, err := protocol.DecodeHello(buf[protocol.HeaderSize:n])
-	if err != nil {
-		return nil, wrapErr(ErrProtocol, "hello payload: "+err.Error())
-	}
-
-	// Compute intersection
-	intersection := hello.SupportedProfiles & sProfiles
-
 	// Helper: send rejection ACK
 	sendRejection := func(status uint16) {
 		ack := protocol.HelloAck{LayoutVersion: 1}
@@ -911,6 +934,43 @@ func serverHandshake(fd int, config *ServerConfig, sessionID uint64) (*Session, 
 		// Best effort send
 		syscall.SendmsgN(fd, pkt[:], nil, nil, 0) //nolint:errcheck
 	}
+
+	// Receive HELLO
+	var buf [128]byte
+	n, _, _, _, err := syscall.Recvmsg(fd, buf[:], nil, 0)
+	if err != nil {
+		return nil, wrapErr(ErrRecv, "hello recv: "+err.Error())
+	}
+	if n == 0 {
+		return nil, wrapErr(ErrRecv, "peer disconnected during handshake")
+	}
+
+	hdr, err := protocol.DecodeHeader(buf[:n])
+	if err != nil {
+		if errors.Is(err, protocol.ErrBadVersion) &&
+			headerVersionIncompatible(buf[:n], protocol.CodeHello) {
+			sendRejection(protocol.StatusIncompatible)
+			return nil, ErrIncompatible
+		}
+		return nil, wrapErr(ErrProtocol, "hello header: "+err.Error())
+	}
+
+	if hdr.Kind != protocol.KindControl || hdr.Code != protocol.CodeHello {
+		return nil, wrapErr(ErrProtocol, "expected HELLO")
+	}
+
+	hello, err := protocol.DecodeHello(buf[protocol.HeaderSize:n])
+	if err != nil {
+		if errors.Is(err, protocol.ErrBadLayout) &&
+			helloLayoutIncompatible(buf[protocol.HeaderSize:n]) {
+			sendRejection(protocol.StatusIncompatible)
+			return nil, ErrIncompatible
+		}
+		return nil, wrapErr(ErrProtocol, "hello payload: "+err.Error())
+	}
+
+	// Compute intersection
+	intersection := hello.SupportedProfiles & sProfiles
 
 	// Check intersection
 	if intersection == 0 {

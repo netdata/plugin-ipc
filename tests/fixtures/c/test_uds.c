@@ -106,8 +106,11 @@ typedef struct {
 
 typedef enum {
     MALFORMED_ACK_SHORT = 1,
+    MALFORMED_ACK_BAD_VERSION,
     MALFORMED_ACK_WRONG_KIND,
     MALFORMED_ACK_BAD_STATUS,
+    MALFORMED_ACK_INCOMPATIBLE_STATUS,
+    MALFORMED_ACK_BAD_LAYOUT,
     MALFORMED_ACK_BAD_PAYLOAD,
 } malformed_ack_mode_t;
 
@@ -239,6 +242,26 @@ static void *malformed_ack_server_thread(void *arg)
                 send(cfd, short_buf, sizeof(short_buf), MSG_NOSIGNAL);
                 break;
             }
+            case MALFORMED_ACK_BAD_VERSION: {
+                nipc_hello_ack_t ack = { .layout_version = 1 };
+                uint8_t ack_buf[48];
+                uint8_t pkt[NIPC_HEADER_LEN + sizeof(ack_buf)];
+                nipc_header_t hdr = {
+                    .magic = NIPC_MAGIC_MSG,
+                    .version = NIPC_VERSION + 1,
+                    .header_len = NIPC_HEADER_LEN,
+                    .kind = NIPC_KIND_CONTROL,
+                    .code = NIPC_CODE_HELLO_ACK,
+                    .transport_status = NIPC_STATUS_OK,
+                    .payload_len = sizeof(ack_buf),
+                    .item_count = 1,
+                };
+                nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
+                nipc_header_encode(&hdr, pkt, sizeof(pkt));
+                memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
+                send(cfd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+                break;
+            }
             case MALFORMED_ACK_WRONG_KIND: {
                 nipc_hello_ack_t ack = { .layout_version = 1 };
                 uint8_t ack_buf[48];
@@ -270,6 +293,46 @@ static void *malformed_ack_server_thread(void *arg)
                     .kind = NIPC_KIND_CONTROL,
                     .code = NIPC_CODE_HELLO_ACK,
                     .transport_status = NIPC_STATUS_INTERNAL_ERROR,
+                    .payload_len = sizeof(ack_buf),
+                    .item_count = 1,
+                };
+                nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
+                nipc_header_encode(&hdr, pkt, sizeof(pkt));
+                memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
+                send(cfd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+                break;
+            }
+            case MALFORMED_ACK_INCOMPATIBLE_STATUS: {
+                nipc_hello_ack_t ack = { .layout_version = 1 };
+                uint8_t ack_buf[48];
+                uint8_t pkt[NIPC_HEADER_LEN + sizeof(ack_buf)];
+                nipc_header_t hdr = {
+                    .magic = NIPC_MAGIC_MSG,
+                    .version = NIPC_VERSION,
+                    .header_len = NIPC_HEADER_LEN,
+                    .kind = NIPC_KIND_CONTROL,
+                    .code = NIPC_CODE_HELLO_ACK,
+                    .transport_status = NIPC_STATUS_INCOMPATIBLE,
+                    .payload_len = sizeof(ack_buf),
+                    .item_count = 1,
+                };
+                nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
+                nipc_header_encode(&hdr, pkt, sizeof(pkt));
+                memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
+                send(cfd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+                break;
+            }
+            case MALFORMED_ACK_BAD_LAYOUT: {
+                nipc_hello_ack_t ack = { .layout_version = 2 };
+                uint8_t ack_buf[48];
+                uint8_t pkt[NIPC_HEADER_LEN + sizeof(ack_buf)];
+                nipc_header_t hdr = {
+                    .magic = NIPC_MAGIC_MSG,
+                    .version = NIPC_VERSION,
+                    .header_len = NIPC_HEADER_LEN,
+                    .kind = NIPC_KIND_CONTROL,
+                    .code = NIPC_CODE_HELLO_ACK,
+                    .transport_status = NIPC_STATUS_OK,
                     .payload_len = sizeof(ack_buf),
                     .item_count = 1,
                 };
@@ -1045,6 +1108,11 @@ static void test_disconnect_inflight(void)
             .item_count = 1, .message_id = 99,
         };
         nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+        check("client tracks first in-flight request", session.inflight_count == 1);
+        check("client has spare in-flight capacity", session.inflight_capacity >= 2);
+        if (session.inflight_capacity >= 2) {
+            session.inflight_ids[session.inflight_count++] = 100;
+        }
 
         /* Try to receive -- server will disconnect */
         uint8_t rbuf[4096];
@@ -1054,6 +1122,7 @@ static void test_disconnect_inflight(void)
         err = nipc_uds_receive(&session, rbuf, sizeof(rbuf),
                                 &rhdr, &rp, &rlen);
         check("receive fails on disconnect", err != NIPC_UDS_OK);
+        check("disconnect clears all in-flight requests", session.inflight_count == 0);
 
         nipc_uds_close_session(&session);
     }
@@ -2306,10 +2375,17 @@ static void test_connect_malformed_hello_ack(void)
     const malformed_ack_case_t cases[] = {
         { "test_ack_short", MALFORMED_ACK_SHORT, NIPC_UDS_ERR_PROTOCOL,
           "short HELLO_ACK rejected" },
+        { "test_ack_bad_version", MALFORMED_ACK_BAD_VERSION, NIPC_UDS_ERR_INCOMPATIBLE,
+          "bad-version HELLO_ACK rejected as incompatible" },
         { "test_ack_kind", MALFORMED_ACK_WRONG_KIND, NIPC_UDS_ERR_PROTOCOL,
           "wrong-kind HELLO_ACK rejected" },
         { "test_ack_status", MALFORMED_ACK_BAD_STATUS, NIPC_UDS_ERR_HANDSHAKE,
           "bad-status HELLO_ACK rejected" },
+        { "test_ack_incompatible_status", MALFORMED_ACK_INCOMPATIBLE_STATUS,
+          NIPC_UDS_ERR_INCOMPATIBLE,
+          "incompatible-status HELLO_ACK rejected as incompatible" },
+        { "test_ack_layout", MALFORMED_ACK_BAD_LAYOUT, NIPC_UDS_ERR_INCOMPATIBLE,
+          "bad-layout HELLO_ACK rejected as incompatible" },
         { "test_ack_payload", MALFORMED_ACK_BAD_PAYLOAD, NIPC_UDS_ERR_PROTOCOL,
           "truncated HELLO_ACK payload rejected" },
     };
@@ -2408,6 +2484,152 @@ static void test_accept_malformed_hello_payload(void)
     pthread_join(tid, NULL);
     check("malformed HELLO payload rejected",
           sctx.accept_err == NIPC_UDS_ERR_PROTOCOL);
+    cleanup_socket(svc);
+}
+
+static void test_accept_incompatible_hello_version(void)
+{
+    printf("Test: Accept rejects incompatible HELLO header version\n");
+    const char *svc = "test_bad_hello_version";
+    cleanup_socket(svc);
+
+    accept_result_server_ctx_t sctx = {
+        .service = svc,
+        .config = default_server_config(),
+        .accept_err = NIPC_UDS_OK,
+        .ready = 0,
+        .done = 0,
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, accept_result_server_thread, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("accept-result server ready",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    char path[256];
+    build_socket_path(path, sizeof(path), svc);
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    check("raw client socket created", fd >= 0);
+
+    if (fd >= 0) {
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+        int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+        check("raw client connect", rc == 0);
+
+        if (rc == 0) {
+            uint8_t pkt[NIPC_HEADER_LEN + NIPC_HELLO_WIRE_SIZE] = {0};
+            uint8_t payload[NIPC_HELLO_WIRE_SIZE] = {0};
+            nipc_hello_t hello = {
+                .layout_version = 1,
+                .supported_profiles = NIPC_PROFILE_BASELINE,
+                .max_request_payload_bytes = 4096,
+                .max_request_batch_items = 16,
+                .max_response_payload_bytes = 4096,
+                .max_response_batch_items = 16,
+                .auth_token = AUTH_TOKEN,
+                .packet_size = 65536,
+            };
+            nipc_header_t hdr = {
+                .magic = NIPC_MAGIC_MSG,
+                .version = NIPC_VERSION + 1,
+                .header_len = NIPC_HEADER_LEN,
+                .kind = NIPC_KIND_CONTROL,
+                .code = NIPC_CODE_HELLO,
+                .payload_len = NIPC_HELLO_WIRE_SIZE,
+                .item_count = 1,
+            };
+            nipc_hello_encode(&hello, payload, sizeof(payload));
+            nipc_header_encode(&hdr, pkt, sizeof(pkt));
+            memcpy(pkt + NIPC_HEADER_LEN, payload, sizeof(payload));
+            send(fd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+        }
+        close(fd);
+    }
+
+    pthread_join(tid, NULL);
+    check("incompatible HELLO version rejected",
+          sctx.accept_err == NIPC_UDS_ERR_INCOMPATIBLE);
+    cleanup_socket(svc);
+}
+
+static void test_accept_incompatible_hello_layout(void)
+{
+    printf("Test: Accept rejects incompatible HELLO payload layout\n");
+    const char *svc = "test_bad_hello_layout";
+    cleanup_socket(svc);
+
+    accept_result_server_ctx_t sctx = {
+        .service = svc,
+        .config = default_server_config(),
+        .accept_err = NIPC_UDS_OK,
+        .ready = 0,
+        .done = 0,
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, accept_result_server_thread, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("accept-result server ready",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    char path[256];
+    build_socket_path(path, sizeof(path), svc);
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    check("raw client socket created", fd >= 0);
+
+    if (fd >= 0) {
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+        int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+        check("raw client connect", rc == 0);
+
+        if (rc == 0) {
+            uint8_t pkt[NIPC_HEADER_LEN + NIPC_HELLO_WIRE_SIZE] = {0};
+            uint8_t payload[NIPC_HELLO_WIRE_SIZE] = {0};
+            nipc_hello_t hello = {
+                .layout_version = 2,
+                .supported_profiles = NIPC_PROFILE_BASELINE,
+                .max_request_payload_bytes = 4096,
+                .max_request_batch_items = 16,
+                .max_response_payload_bytes = 4096,
+                .max_response_batch_items = 16,
+                .auth_token = AUTH_TOKEN,
+                .packet_size = 65536,
+            };
+            nipc_header_t hdr = {
+                .magic = NIPC_MAGIC_MSG,
+                .version = NIPC_VERSION,
+                .header_len = NIPC_HEADER_LEN,
+                .kind = NIPC_KIND_CONTROL,
+                .code = NIPC_CODE_HELLO,
+                .payload_len = NIPC_HELLO_WIRE_SIZE,
+                .item_count = 1,
+            };
+            nipc_hello_encode(&hello, payload, sizeof(payload));
+            nipc_header_encode(&hdr, pkt, sizeof(pkt));
+            memcpy(pkt + NIPC_HEADER_LEN, payload, sizeof(payload));
+            send(fd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+        }
+        close(fd);
+    }
+
+    pthread_join(tid, NULL);
+    check("incompatible HELLO layout rejected",
+          sctx.accept_err == NIPC_UDS_ERR_INCOMPATIBLE);
     cleanup_socket(svc);
 }
 
@@ -2838,6 +3060,8 @@ int main(void)
     test_batch_corrupt_dir();      printf("\n");
     test_connect_malformed_hello_ack(); printf("\n");
     test_accept_malformed_hello_payload(); printf("\n");
+    test_accept_incompatible_hello_version(); printf("\n");
+    test_accept_incompatible_hello_layout(); printf("\n");
     test_receive_short_packet_protocol(); printf("\n");
     test_receive_batch_dir_too_short(); printf("\n");
     test_receive_short_continuation_packet(); printf("\n");

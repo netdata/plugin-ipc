@@ -146,6 +146,14 @@ func TestCacheRoundTripWindows(t *testing.T) {
 	cache := NewCache(testWinRunDir, service, testWinClientConfig())
 	defer cache.Close()
 
+	if cache.Ready() {
+		t.Fatal("cache unexpectedly ready before refresh")
+	}
+	status0 := cache.Status()
+	if status0.Populated || status0.ItemCount != 0 || status0.RefreshSuccessCount != 0 || status0.RefreshFailureCount != 0 || status0.ConnectionState != StateDisconnected || status0.LastRefreshTs != 0 {
+		t.Fatalf("unexpected initial cache status: %+v", status0)
+	}
+
 	var updated bool
 	for i := 0; i < 200; i++ {
 		if cache.Refresh() {
@@ -157,9 +165,16 @@ func TestCacheRoundTripWindows(t *testing.T) {
 	if !updated {
 		t.Fatal("Refresh never succeeded")
 	}
+	if !cache.Ready() {
+		t.Fatal("cache not ready after refresh")
+	}
 	item, ok := cache.Lookup(1001, "docker-abc123")
 	if !ok || item.Path != "/sys/fs/cgroup/docker/abc123" {
 		t.Fatalf("unexpected cache item: %+v ok=%v", item, ok)
+	}
+	status1 := cache.Status()
+	if !status1.Populated || status1.ItemCount != 3 || status1.SystemdEnabled != 1 || status1.Generation != 42 || status1.RefreshSuccessCount != 1 || status1.RefreshFailureCount != 0 || status1.ConnectionState != StateReady || status1.LastRefreshTs < 0 {
+		t.Fatalf("unexpected refreshed cache status: %+v", status1)
 	}
 }
 
@@ -168,7 +183,49 @@ func TestClientNotReadyReturnsErrorWindows(t *testing.T) {
 	client := NewClient(testWinRunDir, service, testWinClientConfig())
 	defer client.Close()
 
+	status := client.Status()
+	if status.State != StateDisconnected || status.ConnectCount != 0 || status.ReconnectCount != 0 || status.CallCount != 0 || status.ErrorCount != 0 {
+		t.Fatalf("unexpected initial client status: %+v", status)
+	}
+
 	if _, err := client.CallSnapshot(); err != protocol.ErrBadLayout {
 		t.Fatalf("CallSnapshot err = %v, want %v", err, protocol.ErrBadLayout)
+	}
+
+	status = client.Status()
+	if status.State != StateDisconnected || status.ErrorCount != 1 {
+		t.Fatalf("unexpected error-path client status: %+v", status)
+	}
+}
+
+func TestClientStatusWindows(t *testing.T) {
+	service := uniqueWinService("status")
+	ts := startWinTestServer(t, service)
+	defer ts.stop()
+
+	client := NewClient(testWinRunDir, service, testWinClientConfig())
+	defer client.Close()
+	connectReadyWin(t, client)
+
+	status0 := client.Status()
+	if status0.State != StateReady || status0.ConnectCount != 1 || status0.ReconnectCount != 0 || status0.CallCount != 0 || status0.ErrorCount != 0 {
+		t.Fatalf("unexpected ready client status: %+v", status0)
+	}
+
+	if _, err := client.CallSnapshot(); err != nil {
+		t.Fatalf("CallSnapshot failed: %v", err)
+	}
+
+	status1 := client.Status()
+	if status1.State != StateReady || status1.ConnectCount != 1 || status1.ReconnectCount != 0 || status1.CallCount != 1 || status1.ErrorCount != 0 {
+		t.Fatalf("unexpected post-call client status: %+v", status1)
+	}
+}
+
+func TestNewServerWithWorkersWindows(t *testing.T) {
+	service := uniqueWinService("workers")
+	server := NewServerWithWorkers(testWinRunDir, service, testWinServerConfig(), testWinHandler(), 3)
+	if server == nil || server.inner == nil {
+		t.Fatal("NewServerWithWorkers returned nil")
 	}
 }

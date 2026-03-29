@@ -92,6 +92,16 @@ mod ffi {
         pub fn CloseHandle(hObject: HANDLE) -> BOOL;
 
         pub fn GetLastError() -> DWORD;
+        pub fn PeekNamedPipe(
+            hNamedPipe: HANDLE,
+            lpBuffer: LPVOID,
+            nBufferSize: DWORD,
+            lpBytesRead: LPDWORD,
+            lpTotalBytesAvail: LPDWORD,
+            lpBytesLeftThisMessage: LPDWORD,
+        ) -> BOOL;
+
+        pub fn SwitchToThread() -> BOOL;
 
         pub fn SetNamedPipeHandleState(
             hNamedPipe: HANDLE,
@@ -142,6 +152,8 @@ pub enum NpError {
     AuthFailed,
     /// No common profile.
     NoProfile,
+    /// Protocol or layout version mismatch.
+    Incompatible(String),
     /// Wire protocol violation.
     Protocol(String),
     /// Pipe name already in use by live server.
@@ -174,6 +186,7 @@ impl std::fmt::Display for NpError {
             NpError::Handshake(s) => write!(f, "handshake error: {s}"),
             NpError::AuthFailed => write!(f, "authentication token rejected"),
             NpError::NoProfile => write!(f, "no common transport profile"),
+            NpError::Incompatible(s) => write!(f, "incompatible protocol: {s}"),
             NpError::Protocol(s) => write!(f, "protocol violation: {s}"),
             NpError::AddrInUse => write!(f, "pipe name already in use by live server"),
             NpError::Chunk(s) => write!(f, "chunk error: {s}"),
@@ -185,6 +198,32 @@ impl std::fmt::Display for NpError {
             NpError::Disconnected => write!(f, "peer disconnected"),
         }
     }
+}
+
+fn header_version_incompatible(buf: &[u8], expected_code: u16) -> bool {
+    if buf.len() < HEADER_SIZE {
+        return false;
+    }
+
+    let magic = u32::from_ne_bytes(buf[0..4].try_into().unwrap());
+    let version = u16::from_ne_bytes(buf[4..6].try_into().unwrap());
+    let header_len = u16::from_ne_bytes(buf[6..8].try_into().unwrap());
+    let kind = u16::from_ne_bytes(buf[8..10].try_into().unwrap());
+    let code = u16::from_ne_bytes(buf[12..14].try_into().unwrap());
+
+    magic == MAGIC_MSG
+        && version != VERSION
+        && header_len == protocol::HEADER_LEN
+        && kind == protocol::KIND_CONTROL
+        && code == expected_code
+}
+
+fn hello_layout_incompatible(buf: &[u8]) -> bool {
+    buf.len() >= 2 && u16::from_ne_bytes(buf[0..2].try_into().unwrap()) != 1
+}
+
+fn hello_ack_layout_incompatible(buf: &[u8]) -> bool {
+    buf.len() >= 2 && u16::from_ne_bytes(buf[0..2].try_into().unwrap()) != 1
 }
 
 impl std::error::Error for NpError {}
@@ -348,6 +387,17 @@ fn max_u32(a: u32, b: u32) -> u32 {
     a.max(b)
 }
 
+#[cfg(windows)]
+fn pipe_buffer_size(packet_size: u32) -> u32 {
+    // The protocol packet size controls logical framing and chunk size. The
+    // underlying pipe quota must stay large enough for full-duplex pipelining
+    // even when tests force a tiny protocol packet size.
+    max_u32(
+        apply_default(packet_size, DEFAULT_PIPE_BUF_SIZE),
+        DEFAULT_PIPE_BUF_SIZE,
+    )
+}
+
 fn highest_bit(mask: u32) -> u32 {
     if mask == 0 {
         return 0;
@@ -482,6 +532,12 @@ pub struct NpSession {
 
 #[cfg(windows)]
 impl NpSession {
+    fn fail_all_inflight(&mut self) {
+        if self.role == Role::Client {
+            self.inflight_ids.clear();
+        }
+    }
+
     /// Get the raw HANDLE for WaitForSingleObject integration.
     pub fn handle(&self) -> ffi::HANDLE {
         self.handle
@@ -490,6 +546,81 @@ impl NpSession {
     /// Get the session role.
     pub fn role(&self) -> Role {
         self.role
+    }
+
+    /// Wait until the pipe becomes readable or the timeout expires.
+    pub fn wait_readable(&self, timeout_ms: u32) -> Result<bool, NpError> {
+        if self.handle == ffi::INVALID_HANDLE_VALUE || self.handle == 0 {
+            return Err(NpError::BadParam("session closed".into()));
+        }
+
+        let start = std::time::Instant::now();
+        let mut yielded = false;
+        loop {
+            let mut available: u32 = 0;
+            let ok = unsafe {
+                ffi::PeekNamedPipe(
+                    self.handle,
+                    ptr::null_mut(),
+                    0,
+                    ptr::null_mut(),
+                    &mut available,
+                    ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                let err = last_error();
+                if is_disconnect_error(err) {
+                    return Err(NpError::Disconnected);
+                }
+                return Err(NpError::Recv(err));
+            }
+            if available > 0 {
+                return Ok(true);
+            }
+
+            if start.elapsed() >= std::time::Duration::from_millis(timeout_ms as u64) {
+                return Ok(false);
+            }
+
+            if !yielded {
+                yielded = true;
+                for _ in 0..256 {
+                    unsafe {
+                        ffi::SwitchToThread();
+                    }
+
+                    let mut yielded_available: u32 = 0;
+                    let yielded_ok = unsafe {
+                        ffi::PeekNamedPipe(
+                            self.handle,
+                            ptr::null_mut(),
+                            0,
+                            ptr::null_mut(),
+                            &mut yielded_available,
+                            ptr::null_mut(),
+                        )
+                    };
+                    if yielded_ok == 0 {
+                        let err = last_error();
+                        if is_disconnect_error(err) {
+                            return Err(NpError::Disconnected);
+                        }
+                        return Err(NpError::Recv(err));
+                    }
+                    if yielded_available > 0 {
+                        return Ok(true);
+                    }
+
+                    if start.elapsed() >= std::time::Duration::from_millis(timeout_ms as u64) {
+                        return Ok(false);
+                    }
+                }
+                continue;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     /// Return the most recently reassembled payload stored in the internal
@@ -565,8 +696,15 @@ impl NpSession {
 
         let result = self.send_inner(hdr, payload);
 
-        if result.is_err() && tracked {
-            self.inflight_ids.remove(&msg_id);
+        if let Err(err) = &result {
+            if tracked {
+                match err {
+                    NpError::Send(_) | NpError::Disconnected => self.fail_all_inflight(),
+                    _ => {
+                        self.inflight_ids.remove(&msg_id);
+                    }
+                }
+            }
         }
 
         result
@@ -647,7 +785,13 @@ impl NpSession {
             return Err(NpError::BadParam("session closed".into()));
         }
 
-        let n = raw_recv(self.handle, buf)?;
+        let n = match raw_recv(self.handle, buf) {
+            Ok(n) => n,
+            Err(err) => {
+                self.fail_all_inflight();
+                return Err(err);
+            }
+        };
 
         if n < HEADER_SIZE {
             return Err(NpError::Protocol("packet too short for header".into()));
@@ -735,7 +879,13 @@ impl NpSession {
 
         let mut ci: u32 = 1;
         while assembled < hdr.payload_len as usize {
-            let cn = raw_recv(self.handle, &mut self.pkt_buf)?;
+            let cn = match raw_recv(self.handle, &mut self.pkt_buf) {
+                Ok(n) => n,
+                Err(err) => {
+                    self.fail_all_inflight();
+                    return Err(err);
+                }
+            };
 
             if cn < HEADER_SIZE {
                 return Err(NpError::Chunk("continuation too short".into()));
@@ -806,6 +956,7 @@ impl NpSession {
             close_handle(self.handle);
             self.handle = ffi::INVALID_HANDLE_VALUE;
         }
+        self.fail_all_inflight();
         self.recv_buf.clear();
     }
 }
@@ -835,7 +986,7 @@ impl NpListener {
     /// Create a listener on a Named Pipe derived from run_dir + service_name.
     pub fn bind(run_dir: &str, service_name: &str, config: ServerConfig) -> Result<Self, NpError> {
         let pipe_name = build_pipe_name(run_dir, service_name)?;
-        let buf_size = apply_default(config.packet_size, DEFAULT_PIPE_BUF_SIZE);
+        let buf_size = pipe_buffer_size(config.packet_size);
 
         // Create first instance with FILE_FLAG_FIRST_PIPE_INSTANCE
         let handle = create_pipe_instance(&pipe_name, buf_size, true)?;
@@ -877,7 +1028,7 @@ impl NpListener {
         let session_handle = self.handle;
 
         // Create new pipe instance for next client
-        let buf_size = apply_default(self.config.packet_size, DEFAULT_PIPE_BUF_SIZE);
+        let buf_size = pipe_buffer_size(self.config.packet_size);
         let next = create_pipe_instance(&self.pipe_name, buf_size, false)?;
         self.handle = next;
 
@@ -1010,8 +1161,13 @@ fn client_handshake(handle: ffi::HANDLE, config: &ClientConfig) -> Result<NpSess
     let mut ack_buf = [0u8; 128];
     let n = raw_recv(handle, &mut ack_buf)?;
 
-    let ack_hdr =
-        Header::decode(&ack_buf[..n]).map_err(|e| NpError::Protocol(format!("ack header: {e}")))?;
+    let ack_hdr = match Header::decode(&ack_buf[..n]) {
+        Ok(hdr) => hdr,
+        Err(crate::protocol::NipcError::BadVersion) => {
+            return Err(NpError::Incompatible("ack header version mismatch".into()))
+        }
+        Err(e) => return Err(NpError::Protocol(format!("ack header: {e}"))),
+    };
 
     if ack_hdr.kind != protocol::KIND_CONTROL || ack_hdr.code != protocol::CODE_HELLO_ACK {
         return Err(NpError::Protocol("expected HELLO_ACK".into()));
@@ -1022,6 +1178,11 @@ fn client_handshake(handle: ffi::HANDLE, config: &ClientConfig) -> Result<NpSess
     }
     if ack_hdr.transport_status == protocol::STATUS_UNSUPPORTED {
         return Err(NpError::NoProfile);
+    }
+    if ack_hdr.transport_status == protocol::STATUS_INCOMPATIBLE {
+        return Err(NpError::Incompatible(
+            "ack transport_status incompatible".into(),
+        ));
     }
     if ack_hdr.transport_status != protocol::STATUS_OK {
         return Err(NpError::Handshake(format!(
@@ -1034,8 +1195,17 @@ fn client_handshake(handle: ffi::HANDLE, config: &ClientConfig) -> Result<NpSess
         return Err(NpError::Protocol("ack payload truncated".into()));
     }
 
-    let ack = HelloAck::decode(&ack_buf[HEADER_SIZE..n])
-        .map_err(|e| NpError::Protocol(format!("ack payload: {e}")))?;
+    let ack = match HelloAck::decode(&ack_buf[HEADER_SIZE..n]) {
+        Ok(ack) => ack,
+        Err(crate::protocol::NipcError::BadLayout)
+            if hello_ack_layout_incompatible(&ack_buf[HEADER_SIZE..n]) =>
+        {
+            return Err(NpError::Incompatible(
+                "ack payload layout version mismatch".into(),
+            ))
+        }
+        Err(e) => return Err(NpError::Protocol(format!("ack payload: {e}"))),
+    };
 
     Ok(NpSession {
         handle,
@@ -1076,23 +1246,6 @@ fn server_handshake(
     };
     let s_preferred = config.preferred_profiles;
 
-    // Receive HELLO
-    let mut buf = [0u8; 128];
-    let n = raw_recv(handle, &mut buf)?;
-
-    let hdr =
-        Header::decode(&buf[..n]).map_err(|e| NpError::Protocol(format!("hello header: {e}")))?;
-
-    if hdr.kind != protocol::KIND_CONTROL || hdr.code != protocol::CODE_HELLO {
-        return Err(NpError::Protocol("expected HELLO".into()));
-    }
-
-    let hello = Hello::decode(&buf[HEADER_SIZE..n])
-        .map_err(|e| NpError::Protocol(format!("hello payload: {e}")))?;
-
-    let intersection = hello.supported_profiles & s_profiles;
-
-    // Helper: send rejection
     let send_rejection = |status: u16| {
         let ack = HelloAck {
             layout_version: 1,
@@ -1119,6 +1272,42 @@ fn server_handshake(
         pkt[HEADER_SIZE..].copy_from_slice(&ack_buf);
         let _ = raw_write(handle, &pkt);
     };
+
+    // Receive HELLO
+    let mut buf = [0u8; 128];
+    let n = raw_recv(handle, &mut buf)?;
+
+    let hdr = match Header::decode(&buf[..n]) {
+        Ok(hdr) => hdr,
+        Err(crate::protocol::NipcError::BadVersion)
+            if header_version_incompatible(&buf[..n], protocol::CODE_HELLO) =>
+        {
+            send_rejection(protocol::STATUS_INCOMPATIBLE);
+            return Err(NpError::Incompatible(
+                "hello header version mismatch".into(),
+            ));
+        }
+        Err(e) => return Err(NpError::Protocol(format!("hello header: {e}"))),
+    };
+
+    if hdr.kind != protocol::KIND_CONTROL || hdr.code != protocol::CODE_HELLO {
+        return Err(NpError::Protocol("expected HELLO".into()));
+    }
+
+    let hello = match Hello::decode(&buf[HEADER_SIZE..n]) {
+        Ok(hello) => hello,
+        Err(crate::protocol::NipcError::BadLayout)
+            if hello_layout_incompatible(&buf[HEADER_SIZE..n]) =>
+        {
+            send_rejection(protocol::STATUS_INCOMPATIBLE);
+            return Err(NpError::Incompatible(
+                "hello payload layout version mismatch".into(),
+            ));
+        }
+        Err(e) => return Err(NpError::Protocol(format!("hello payload: {e}"))),
+    };
+
+    let intersection = hello.supported_profiles & s_profiles;
 
     if intersection == 0 {
         send_rejection(protocol::STATUS_UNSUPPORTED);
@@ -1362,6 +1551,10 @@ mod tests {
             (NpError::Handshake("test".into()), "handshake error: test"),
             (NpError::AuthFailed, "authentication token rejected"),
             (NpError::NoProfile, "no common transport profile"),
+            (
+                NpError::Incompatible("version mismatch".into()),
+                "incompatible protocol: version mismatch",
+            ),
             (NpError::Protocol("bad".into()), "protocol violation: bad"),
             (
                 NpError::AddrInUse,
@@ -1382,6 +1575,45 @@ mod tests {
 
         let e: &dyn std::error::Error = &NpError::Disconnected;
         let _ = format!("{e}");
+    }
+
+    #[test]
+    fn test_incompatible_classifiers() {
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION + 1,
+            header_len: protocol::HEADER_LEN,
+            kind: protocol::KIND_CONTROL,
+            flags: 0,
+            code: protocol::CODE_HELLO,
+            transport_status: protocol::STATUS_OK,
+            payload_len: HELLO_PAYLOAD_SIZE as u32,
+            item_count: 1,
+            message_id: 0,
+        };
+        let mut hdr_buf = [0u8; HEADER_SIZE];
+        hdr.encode(&mut hdr_buf);
+        assert!(header_version_incompatible(&hdr_buf, protocol::CODE_HELLO));
+        assert!(!header_version_incompatible(
+            &hdr_buf,
+            protocol::CODE_HELLO_ACK
+        ));
+
+        let hello = Hello {
+            layout_version: 2,
+            ..Hello::default()
+        };
+        let mut hello_buf = [0u8; HELLO_PAYLOAD_SIZE];
+        hello.encode(&mut hello_buf);
+        assert!(hello_layout_incompatible(&hello_buf));
+
+        let ack = HelloAck {
+            layout_version: 2,
+            ..HelloAck::default()
+        };
+        let mut ack_buf = [0u8; HELLO_ACK_PAYLOAD_SIZE];
+        ack.encode(&mut ack_buf);
+        assert!(hello_ack_layout_incompatible(&ack_buf));
     }
 
     #[test]
@@ -1559,6 +1791,69 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn test_pipeline_chunked() {
+        ensure_run_dir();
+        let svc = unique_service("rs_pipe_chunked");
+        let forced_packet_size = 128u32;
+
+        let scfg = ServerConfig {
+            packet_size: forced_packet_size,
+            max_request_payload_bytes: 65536,
+            max_response_payload_bytes: 65536,
+            ..default_server_config()
+        };
+        let mut listener = NpListener::bind(TEST_RUN_DIR, &svc, scfg).expect("bind");
+
+        let server = thread::spawn(move || {
+            let mut session = listener.accept().expect("accept");
+            let mut buf = vec![0u8; forced_packet_size as usize];
+            for _ in 0..5 {
+                let (hdr, payload) = session.receive(&mut buf).expect("recv");
+                let payload = payload.to_vec();
+                let mut resp = hdr;
+                resp.kind = KIND_RESPONSE;
+                resp.transport_status = protocol::STATUS_OK;
+                session.send(&mut resp, &payload).expect("send");
+            }
+            session.close();
+        });
+
+        let ccfg = ClientConfig {
+            packet_size: forced_packet_size,
+            max_request_payload_bytes: 65536,
+            max_response_payload_bytes: 65536,
+            ..default_client_config()
+        };
+        let mut session = NpSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
+
+        let sizes = [200usize, 500, 300, 800, 150];
+        for (i, &sz) in sizes.iter().enumerate() {
+            let payload: Vec<u8> = (0..sz).map(|j| ((i + j) & 0xFF) as u8).collect();
+            let mut hdr = Header {
+                kind: KIND_REQUEST,
+                code: protocol::METHOD_INCREMENT,
+                item_count: 1,
+                message_id: (i + 1) as u64,
+                ..Header::default()
+            };
+            session.send(&mut hdr, &payload).expect("send");
+        }
+
+        let mut rbuf = vec![0u8; forced_packet_size as usize];
+        for (i, &sz) in sizes.iter().enumerate() {
+            let (rhdr, rpayload) = session.receive(&mut rbuf).expect("recv");
+            assert_eq!(rhdr.message_id, (i + 1) as u64, "message_id at {i}");
+            assert_eq!(rpayload.len(), sz, "payload len at {i}");
+            let expected: Vec<u8> = (0..sz).map(|j| ((i + j) & 0xFF) as u8).collect();
+            assert_eq!(rpayload, expected, "payload data at {i}");
+        }
+
+        session.close();
+        server.join().expect("server join");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn test_duplicate_message_id() {
         ensure_run_dir();
         let svc = unique_service("rs_dupmsg");
@@ -1636,6 +1931,48 @@ mod tests {
         assert_eq!(session.max_request_batch_items, 16);
         assert_eq!(session.max_response_payload_bytes, 8192);
         assert_eq!(session.max_response_batch_items, 32);
+
+        session.close();
+        server.join().expect("server join");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_disconnect_clears_all_inflight() {
+        ensure_run_dir();
+        let svc = unique_service("rs_disc");
+        let mut listener =
+            NpListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("bind");
+
+        let server = thread::spawn(move || {
+            let mut session = listener.accept().expect("accept");
+            let mut buf = [0u8; 256];
+            let _ = session.receive(&mut buf).expect("recv request");
+            session.close();
+        });
+
+        let mut session =
+            NpSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
+
+        let mut hdr = Header {
+            kind: KIND_REQUEST,
+            code: protocol::METHOD_INCREMENT,
+            item_count: 1,
+            message_id: 99,
+            ..Header::default()
+        };
+        session.send(&mut hdr, &[0xFF]).expect("send");
+        session.inflight_ids.insert(100);
+
+        let mut rbuf = [0u8; 256];
+        assert!(matches!(
+            session.receive(&mut rbuf),
+            Err(NpError::Disconnected)
+        ));
+        assert!(
+            session.inflight_ids.is_empty(),
+            "disconnect must fail every in-flight request on the session"
+        );
 
         session.close();
         server.join().expect("server join");

@@ -22,7 +22,6 @@ NC='\033[0m'
 PASS=0
 FAIL=0
 SKIP=0
-RUN_DIR="/tmp/nipc_shm_interop_test"
 TIMEOUT=10
 
 # Resolve binary paths
@@ -45,6 +44,8 @@ HAS_GO=0
 if [[ -x "$INTEROP_SHM_GO" ]]; then
     HAS_GO=1
 fi
+
+RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nipc_shm_interop.XXXXXX")"
 
 cleanup() {
     local pids
@@ -96,7 +97,8 @@ run_test() {
 
     # Start server in background, wait for READY
     local server_pid
-    "$server_bin" server "$RUN_DIR" "$service" > /tmp/nipc_shm_server_out_$$ 2>&1 &
+    local server_log="${RUN_DIR}/${service}.server.log"
+    "$server_bin" server "$RUN_DIR" "$service" > "$server_log" 2>&1 &
     server_pid=$!
 
     # Wait for READY line
@@ -104,12 +106,11 @@ run_test() {
     while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
         if ! kill -0 "$server_pid" 2>/dev/null; then
             echo -e "${RED}FAIL${NC} (server exited early)"
-            cat /tmp/nipc_shm_server_out_$$ >&2 || true
+            cat "$server_log" >&2 || true
             FAIL=$((FAIL + 1))
-            rm -f /tmp/nipc_shm_server_out_$$
             return
         fi
-        if grep -q "^READY$" /tmp/nipc_shm_server_out_$$ 2>/dev/null; then
+        if grep -q "^READY$" "$server_log" 2>/dev/null; then
             break
         fi
         sleep 0.1
@@ -121,7 +122,6 @@ run_test() {
         kill "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
         FAIL=$((FAIL + 1))
-        rm -f /tmp/nipc_shm_server_out_$$
         return
     fi
 
@@ -142,7 +142,6 @@ run_test() {
 
     # Wait for server to exit
     wait "$server_pid" 2>/dev/null || true
-    rm -f /tmp/nipc_shm_server_out_$$
 }
 
 main() {

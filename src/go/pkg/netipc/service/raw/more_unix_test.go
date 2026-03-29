@@ -27,6 +27,109 @@ type unixRawSessionServer struct {
 	doneCh chan error
 }
 
+type unixHelloAckServer struct {
+	doneCh   chan error
+	accepted atomic.Uint32
+}
+
+func encodeHelloAckPacketWithVersion(version uint16, status uint16, layoutVersion uint16) []byte {
+	ack := protocol.HelloAck{
+		LayoutVersion:                 layoutVersion,
+		Flags:                         0,
+		ServerSupportedProfiles:       protocol.ProfileBaseline,
+		IntersectionProfiles:          protocol.ProfileBaseline,
+		SelectedProfile:               protocol.ProfileBaseline,
+		AgreedMaxRequestPayloadBytes:  protocol.MaxPayloadDefault,
+		AgreedMaxRequestBatchItems:    1,
+		AgreedMaxResponsePayloadBytes: responseBufSize,
+		AgreedMaxResponseBatchItems:   1,
+		AgreedPacketSize:              0,
+		SessionID:                     77,
+	}
+
+	payload := make([]byte, 48)
+	n := ack.Encode(payload)
+	payload = payload[:n]
+
+	hdr := protocol.Header{
+		Magic:           protocol.MagicMsg,
+		Version:         version,
+		HeaderLen:       protocol.HeaderSize,
+		Kind:            protocol.KindControl,
+		Code:            protocol.CodeHelloAck,
+		TransportStatus: status,
+		PayloadLen:      uint32(len(payload)),
+		ItemCount:       1,
+		MessageID:       0,
+	}
+
+	pkt := make([]byte, protocol.HeaderSize+len(payload))
+	hdr.Encode(pkt[:protocol.HeaderSize])
+	copy(pkt[protocol.HeaderSize:], payload)
+	return pkt
+}
+
+func startRawPosixHelloAckServer(t *testing.T, service string, packet []byte) *unixHelloAckServer {
+	t.Helper()
+
+	ensureRunDir()
+	cleanupAll(service)
+
+	path := filepath.Join(testRunDir, service+".sock")
+	_ = os.Remove(path)
+
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+	if err != nil {
+		t.Fatalf("socket failed: %v", err)
+	}
+
+	addr := &syscall.SockaddrUnix{Name: path}
+	if err := syscall.Bind(fd, addr); err != nil {
+		_ = syscall.Close(fd)
+		t.Fatalf("bind failed: %v", err)
+	}
+	if err := syscall.Listen(fd, 4); err != nil {
+		_ = syscall.Close(fd)
+		t.Fatalf("listen failed: %v", err)
+	}
+
+	srv := &unixHelloAckServer{doneCh: make(chan error, 1)}
+	go func() {
+		defer close(srv.doneCh)
+		defer syscall.Close(fd)
+
+		connFD, _, err := syscall.Accept(fd)
+		if err != nil {
+			srv.doneCh <- err
+			return
+		}
+		srv.accepted.Store(1)
+		defer syscall.Close(connFD)
+
+		buf := make([]byte, protocol.HeaderSize+128)
+		if _, err := syscall.Read(connFD, buf); err != nil {
+			srv.doneCh <- err
+			return
+		}
+		if _, err := syscall.Write(connFD, packet); err != nil {
+			srv.doneCh <- err
+			return
+		}
+
+		srv.doneCh <- nil
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	return srv
+}
+
+func (s *unixHelloAckServer) wait(t *testing.T) {
+	t.Helper()
+	if err := <-s.doneCh; err != nil {
+		t.Fatalf("raw unix hello-ack server failed: %v", err)
+	}
+}
+
 func startRawPosixSessionServerN(
 	t *testing.T,
 	service string,

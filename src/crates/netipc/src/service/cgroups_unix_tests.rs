@@ -2,6 +2,7 @@ use super::*;
 #[cfg(target_os = "linux")]
 use crate::protocol::PROFILE_SHM_FUTEX;
 use crate::protocol::{CgroupsBuilder, NipcError, PROFILE_BASELINE};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -32,6 +33,22 @@ fn unique_service(prefix: &str) -> String {
 
 fn cleanup_all(service: &str) {
     let _ = std::fs::remove_file(format!("{TEST_RUN_DIR}/{service}.sock"));
+}
+
+fn socket_path(service: &str) -> PathBuf {
+    PathBuf::from(format!("{TEST_RUN_DIR}/{service}.sock"))
+}
+
+fn wait_for_listener_bind(service: &str) {
+    let sock = socket_path(service);
+    for _ in 0..2000 {
+        if sock.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_micros(500));
+    }
+
+    panic!("listener did not bind for service {service}");
 }
 
 fn server_config() -> ServerConfig {
@@ -166,7 +183,7 @@ impl TestServer {
             }
             thread::sleep(Duration::from_micros(500));
         }
-        thread::sleep(Duration::from_millis(50));
+        wait_for_listener_bind(service);
 
         Self {
             stop_flag,

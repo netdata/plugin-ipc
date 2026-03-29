@@ -224,7 +224,8 @@ The client context tracks its connection state with the following states:
 - **READY**: connected, handshake completed, calls can proceed.
 - **NOT_FOUND**: the service endpoint does not exist.
 - **AUTH_FAILED**: handshake auth verification failed.
-- **INCOMPATIBLE**: handshake profile or limit negotiation failed.
+- **INCOMPATIBLE**: handshake profile mismatch, protocol/layout version
+  mismatch, or limit negotiation failed.
 - **BROKEN**: the connection was previously READY but has broken.
 
 `ready(ctx)` returns true only for READY.

@@ -117,6 +117,30 @@ const OFF_RESP_SEQ: usize = 72;
 const FNV1A_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV1A_PRIME: u64 = 0x00000100000001B3;
 
+#[cfg(all(test, windows))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WinShmFaultSite {
+    CreateFileMapping,
+    OpenFileMapping,
+    MapViewOfFile,
+    CreateEvent,
+    OpenEvent,
+}
+
+#[cfg(all(test, windows))]
+#[derive(Debug, Clone, Copy)]
+struct WinShmFaultHook {
+    site: WinShmFaultSite,
+    error: u32,
+    skip_matches: u32,
+}
+
+#[cfg(all(test, windows))]
+thread_local! {
+    static WIN_SHM_FAULT_HOOK: std::cell::RefCell<Option<WinShmFaultHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 // ---------------------------------------------------------------------------
 //  Errors
 // ---------------------------------------------------------------------------
@@ -199,6 +223,119 @@ const _: () = assert!(OFF_REQ_SEQ == 64);
 const _: () = assert!(OFF_RESP_SEQ == 72);
 const _: () = assert!(HEADER_LEN == 128);
 
+#[cfg(all(test, windows))]
+fn install_fault_hook(site: WinShmFaultSite, error: u32, skip_matches: u32) {
+    WIN_SHM_FAULT_HOOK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(slot.is_none(), "win_shm fault hook already installed");
+        *slot = Some(WinShmFaultHook {
+            site,
+            error,
+            skip_matches,
+        });
+    });
+}
+
+#[cfg(all(test, windows))]
+fn clear_fault_hook() {
+    WIN_SHM_FAULT_HOOK.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+}
+
+#[cfg(all(test, windows))]
+fn take_fault_hook(site: WinShmFaultSite) -> Option<u32> {
+    WIN_SHM_FAULT_HOOK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        match *slot {
+            Some(mut hook) if hook.site == site => {
+                if hook.skip_matches > 0 {
+                    hook.skip_matches -= 1;
+                    *slot = Some(hook);
+                    None
+                } else {
+                    *slot = None;
+                    Some(hook.error)
+                }
+            }
+            _ => None,
+        }
+    })
+}
+
+#[cfg(windows)]
+unsafe fn create_file_mapping(
+    h_file: ffi::HANDLE,
+    attrs: *const core::ffi::c_void,
+    protect: u32,
+    size_high: u32,
+    size_low: u32,
+    name: *const u16,
+) -> ffi::HANDLE {
+    #[cfg(test)]
+    if let Some(error) = take_fault_hook(WinShmFaultSite::CreateFileMapping) {
+        ffi::SetLastError(error);
+        return 0;
+    }
+
+    ffi::CreateFileMappingW(h_file, attrs, protect, size_high, size_low, name)
+}
+
+#[cfg(windows)]
+unsafe fn open_file_mapping(access: u32, inherit: i32, name: *const u16) -> ffi::HANDLE {
+    #[cfg(test)]
+    if let Some(error) = take_fault_hook(WinShmFaultSite::OpenFileMapping) {
+        ffi::SetLastError(error);
+        return 0;
+    }
+
+    ffi::OpenFileMappingW(access, inherit, name)
+}
+
+#[cfg(windows)]
+unsafe fn map_view_of_file(
+    mapping: ffi::HANDLE,
+    access: u32,
+    offset_high: u32,
+    offset_low: u32,
+    bytes: usize,
+) -> *mut core::ffi::c_void {
+    #[cfg(test)]
+    if let Some(error) = take_fault_hook(WinShmFaultSite::MapViewOfFile) {
+        ffi::SetLastError(error);
+        return std::ptr::null_mut();
+    }
+
+    ffi::MapViewOfFile(mapping, access, offset_high, offset_low, bytes)
+}
+
+#[cfg(windows)]
+unsafe fn create_event(
+    attrs: *const core::ffi::c_void,
+    manual_reset: i32,
+    initial_state: i32,
+    name: *const u16,
+) -> ffi::HANDLE {
+    #[cfg(test)]
+    if let Some(error) = take_fault_hook(WinShmFaultSite::CreateEvent) {
+        ffi::SetLastError(error);
+        return 0;
+    }
+
+    ffi::CreateEventW(attrs, manual_reset, initial_state, name)
+}
+
+#[cfg(windows)]
+unsafe fn open_event(access: u32, inherit: i32, name: *const u16) -> ffi::HANDLE {
+    #[cfg(test)]
+    if let Some(error) = take_fault_hook(WinShmFaultSite::OpenEvent) {
+        ffi::SetLastError(error);
+        return 0;
+    }
+
+    ffi::OpenEventW(access, inherit, name)
+}
+
 // ---------------------------------------------------------------------------
 //  Context
 // ---------------------------------------------------------------------------
@@ -259,7 +396,7 @@ impl WinShmContext {
         // Create page-file backed mapping
         unsafe { ffi::SetLastError(0) };
         let mapping = unsafe {
-            ffi::CreateFileMappingW(
+            create_file_mapping(
                 ffi::INVALID_HANDLE_VALUE,
                 std::ptr::null(),
                 ffi::PAGE_READWRITE,
@@ -278,7 +415,7 @@ impl WinShmContext {
         }
 
         let base =
-            unsafe { ffi::MapViewOfFile(mapping, ffi::FILE_MAP_ALL_ACCESS, 0, 0, region_size) };
+            unsafe { map_view_of_file(mapping, ffi::FILE_MAP_ALL_ACCESS, 0, 0, region_size) };
         if base.is_null() {
             let e = last_error();
             unsafe { ffi::CloseHandle(mapping) };
@@ -307,7 +444,7 @@ impl WinShmContext {
         let (req_event, resp_event) = if profile == PROFILE_HYBRID {
             let re_name = build_object_name(hash, service_name, profile, session_id, "req_event")?;
             unsafe { ffi::SetLastError(0) };
-            let re = unsafe { ffi::CreateEventW(std::ptr::null(), 0, 0, re_name.as_ptr()) };
+            let re = unsafe { create_event(std::ptr::null(), 0, 0, re_name.as_ptr()) };
             if re == 0 {
                 let e = last_error();
                 unsafe {
@@ -328,7 +465,7 @@ impl WinShmContext {
             let rsp_name =
                 build_object_name(hash, service_name, profile, session_id, "resp_event")?;
             unsafe { ffi::SetLastError(0) };
-            let rsp = unsafe { ffi::CreateEventW(std::ptr::null(), 0, 0, rsp_name.as_ptr()) };
+            let rsp = unsafe { create_event(std::ptr::null(), 0, 0, rsp_name.as_ptr()) };
             if rsp == 0 {
                 let e = last_error();
                 unsafe {
@@ -385,12 +522,12 @@ impl WinShmContext {
         let mapping_name = build_object_name(hash, service_name, profile, session_id, "mapping")?;
 
         let mapping =
-            unsafe { ffi::OpenFileMappingW(ffi::FILE_MAP_ALL_ACCESS, 0, mapping_name.as_ptr()) };
+            unsafe { open_file_mapping(ffi::FILE_MAP_ALL_ACCESS, 0, mapping_name.as_ptr()) };
         if mapping == 0 {
             return Err(WinShmError::OpenMapping(last_error()));
         }
 
-        let base = unsafe { ffi::MapViewOfFile(mapping, ffi::FILE_MAP_ALL_ACCESS, 0, 0, 0) };
+        let base = unsafe { map_view_of_file(mapping, ffi::FILE_MAP_ALL_ACCESS, 0, 0, 0) };
         if base.is_null() {
             let e = last_error();
             unsafe { ffi::CloseHandle(mapping) };
@@ -453,7 +590,7 @@ impl WinShmContext {
         let (req_event, resp_event) = if profile == PROFILE_HYBRID {
             let re_name = build_object_name(hash, service_name, profile, session_id, "req_event")?;
             let re = unsafe {
-                ffi::OpenEventW(
+                open_event(
                     ffi::EVENT_MODIFY_STATE | ffi::SYNCHRONIZE,
                     0,
                     re_name.as_ptr(),
@@ -471,7 +608,7 @@ impl WinShmContext {
             let rsp_name =
                 build_object_name(hash, service_name, profile, session_id, "resp_event")?;
             let rsp = unsafe {
-                ffi::OpenEventW(
+                open_event(
                     ffi::EVENT_MODIFY_STATE | ffi::SYNCHRONIZE,
                     0,
                     rsp_name.as_ptr(),
@@ -994,6 +1131,29 @@ mod tests {
         )
     }
 
+    #[cfg(windows)]
+    struct FaultHookGuard;
+
+    #[cfg(windows)]
+    impl FaultHookGuard {
+        fn install(site: WinShmFaultSite, error: u32) -> Self {
+            install_fault_hook(site, error, 0);
+            Self
+        }
+
+        fn install_after(site: WinShmFaultSite, error: u32, skip_matches: u32) -> Self {
+            install_fault_hook(site, error, skip_matches);
+            Self
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for FaultHookGuard {
+        fn drop(&mut self) {
+            clear_fault_hook();
+        }
+    }
+
     #[test]
     fn test_fnv1a_64_deterministic() {
         let h1 = fnv1a_64(b"C:\\Temp\\netdata\ncgroups-snapshot\n12345");
@@ -1040,6 +1200,53 @@ mod tests {
             .collect();
         assert!(narrow.starts_with("Local\\netipc-"));
         assert!(narrow.contains("-test-svc-p2-s0000000000000042-mapping"));
+    }
+
+    #[test]
+    fn test_error_display_variants() {
+        let cases = [
+            (WinShmError::BadParam("oops".into()), "bad parameter: oops"),
+            (
+                WinShmError::CreateMapping(5),
+                "CreateFileMappingW failed: 5",
+            ),
+            (WinShmError::OpenMapping(6), "OpenFileMappingW failed: 6"),
+            (WinShmError::MapView(7), "MapViewOfFile failed: 7"),
+            (WinShmError::CreateEvent(8), "CreateEventW failed: 8"),
+            (WinShmError::OpenEvent(9), "OpenEventW failed: 9"),
+            (
+                WinShmError::AddrInUse,
+                "Windows SHM object name already in use by live server",
+            ),
+            (WinShmError::BadMagic, "SHM header magic mismatch"),
+            (WinShmError::BadVersion, "SHM header version mismatch"),
+            (WinShmError::BadHeader, "SHM header_len mismatch"),
+            (WinShmError::BadProfile, "SHM profile mismatch"),
+            (
+                WinShmError::MsgTooLarge,
+                "message exceeds SHM area capacity",
+            ),
+            (WinShmError::Timeout, "SHM wait timed out"),
+            (WinShmError::Disconnected, "peer closed SHM session"),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn test_build_object_name_too_long() {
+        let long_service = "a".repeat(240);
+        let err = build_object_name(0xDEADBEEF, &long_service, PROFILE_HYBRID, 1, "mapping")
+            .expect_err("object name should be rejected");
+        assert_eq!(err, WinShmError::BadParam("object name too long".into()));
+    }
+
+    #[test]
+    fn test_validate_profile_rejects_invalid() {
+        let err = validate_profile(0).expect_err("invalid profile should fail");
+        assert_eq!(err, WinShmError::BadParam("invalid profile: 0".into()));
     }
 
     #[cfg(windows)]
@@ -1109,6 +1316,62 @@ mod tests {
             Err(err) => err,
         };
         assert_eq!(err, WinShmError::AddrInUse);
+
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_role_send_and_receive_guards_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_guards");
+        let auth_token: u64 = 0xabcdef;
+        let session_id: u64 = 31;
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            128,
+            128,
+        )
+        .expect("server_create");
+        assert_eq!(server.role(), WinShmRole::Server);
+
+        let mut client = WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        )
+        .expect("client_attach");
+        assert_eq!(client.role(), WinShmRole::Client);
+
+        let empty_send = client.send(&[]).expect_err("empty send must fail");
+        assert_eq!(
+            empty_send,
+            WinShmError::BadParam("null context or empty message".into())
+        );
+
+        let oversize = vec![0u8; 256];
+        let oversize_err = client.send(&oversize).expect_err("oversize send must fail");
+        assert_eq!(oversize_err, WinShmError::MsgTooLarge);
+
+        let empty_buf_err = server
+            .receive(&mut [], 10)
+            .expect_err("empty receive buffer must fail");
+        assert_eq!(empty_buf_err, WinShmError::BadParam("empty buffer".into()));
+
+        client.close();
+
+        let mut buf = [0u8; 16];
+        let null_ctx_err = client
+            .receive(&mut buf, 10)
+            .expect_err("closed client must reject receive");
+        assert_eq!(null_ctx_err, WinShmError::BadParam("null context".into()));
 
         server.destroy();
     }
@@ -1338,6 +1601,334 @@ mod tests {
             Err(_) => panic!("receiver thread still holds the SHM server"),
         };
         let mut server = mutex.into_inner().expect("mutex");
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_server_create_fault_create_mapping_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_fault_create_mapping");
+        let auth_token: u64 = 0x5511;
+        let session_id: u64 = 41;
+
+        let _fault = FaultHookGuard::install(WinShmFaultSite::CreateFileMapping, 5);
+        let err = match WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        ) {
+            Ok(_) => panic!("CreateFileMappingW fault must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, WinShmError::CreateMapping(5));
+        drop(_fault);
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create after CreateFileMappingW fault");
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_server_create_fault_map_view_releases_mapping_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_fault_map_view");
+        let auth_token: u64 = 0x5512;
+        let session_id: u64 = 42;
+
+        let _fault = FaultHookGuard::install(WinShmFaultSite::MapViewOfFile, 6);
+        let err = match WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        ) {
+            Ok(_) => panic!("MapViewOfFile fault must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, WinShmError::MapView(6));
+        drop(_fault);
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create after MapViewOfFile fault");
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_server_create_fault_req_event_releases_mapping_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_fault_req_event");
+        let auth_token: u64 = 0x5513;
+        let session_id: u64 = 43;
+
+        let _fault = FaultHookGuard::install(WinShmFaultSite::CreateEvent, 7);
+        let err = match WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        ) {
+            Ok(_) => panic!("req_event CreateEventW fault must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, WinShmError::CreateEvent(7));
+        drop(_fault);
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create after req_event fault");
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_server_create_fault_resp_event_releases_partial_objects_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_fault_resp_event");
+        let auth_token: u64 = 0x5514;
+        let session_id: u64 = 44;
+
+        let _fault = FaultHookGuard::install_after(WinShmFaultSite::CreateEvent, 8, 1);
+        let err = match WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        ) {
+            Ok(_) => panic!("second CreateEventW fault must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, WinShmError::CreateEvent(8));
+        drop(_fault);
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create after resp_event fault");
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_client_attach_fault_open_mapping_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_fault_open_mapping");
+        let auth_token: u64 = 0x6611;
+        let session_id: u64 = 51;
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create");
+
+        let _fault = FaultHookGuard::install(WinShmFaultSite::OpenFileMapping, 9);
+        let err = match WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        ) {
+            Ok(_) => panic!("OpenFileMappingW fault must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, WinShmError::OpenMapping(9));
+        drop(_fault);
+
+        let mut client = WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        )
+        .expect("client_attach after OpenFileMappingW fault");
+        client.close();
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_client_attach_fault_map_view_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_fault_attach_map_view");
+        let auth_token: u64 = 0x6612;
+        let session_id: u64 = 52;
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create");
+
+        let _fault = FaultHookGuard::install(WinShmFaultSite::MapViewOfFile, 10);
+        let err = match WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        ) {
+            Ok(_) => panic!("MapViewOfFile attach fault must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, WinShmError::MapView(10));
+        drop(_fault);
+
+        let mut client = WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        )
+        .expect("client_attach after MapViewOfFile fault");
+        client.close();
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_client_attach_fault_req_event_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_fault_req_open_event");
+        let auth_token: u64 = 0x6613;
+        let session_id: u64 = 53;
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create");
+
+        let _fault = FaultHookGuard::install(WinShmFaultSite::OpenEvent, 11);
+        let err = match WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        ) {
+            Ok(_) => panic!("req_event OpenEventW fault must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, WinShmError::OpenEvent(11));
+        drop(_fault);
+
+        let mut client = WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        )
+        .expect("client_attach after req_event OpenEventW fault");
+        client.close();
+        server.destroy();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_client_attach_fault_resp_event_windows() {
+        let run_dir = test_run_dir();
+        let service = unique_service("rs_win_shm_fault_resp_open_event");
+        let auth_token: u64 = 0x6614;
+        let session_id: u64 = 54;
+
+        let mut server = WinShmContext::server_create(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+            4096,
+            4096,
+        )
+        .expect("server_create");
+
+        let _fault = FaultHookGuard::install_after(WinShmFaultSite::OpenEvent, 12, 1);
+        let err = match WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        ) {
+            Ok(_) => panic!("resp_event OpenEventW fault must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err, WinShmError::OpenEvent(12));
+        drop(_fault);
+
+        let mut client = WinShmContext::client_attach(
+            &run_dir,
+            &service,
+            auth_token,
+            session_id,
+            PROFILE_HYBRID,
+        )
+        .expect("client_attach after resp_event OpenEventW fault");
+        client.close();
         server.destroy();
     }
 }

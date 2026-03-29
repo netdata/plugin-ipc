@@ -252,6 +252,22 @@ nipc_win_shm_error_t nipc_win_shm_receive(
     size_t *msg_len_out,
     uint32_t timeout_ms);
 
+#ifdef NIPC_INTERNAL_TESTING
+typedef enum {
+    NIPC_WIN_SHM_TEST_FAULT_NONE = 0,
+    NIPC_WIN_SHM_TEST_FAULT_CREATE_MAPPING,
+    NIPC_WIN_SHM_TEST_FAULT_OPEN_MAPPING,
+    NIPC_WIN_SHM_TEST_FAULT_MAP_VIEW,
+    NIPC_WIN_SHM_TEST_FAULT_CREATE_EVENT,
+    NIPC_WIN_SHM_TEST_FAULT_OPEN_EVENT,
+} nipc_win_shm_test_fault_site_t;
+
+void nipc_win_shm_test_fault_set(nipc_win_shm_test_fault_site_t site,
+                                 DWORD error_code,
+                                 uint32_t skip_matches);
+void nipc_win_shm_test_fault_clear(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

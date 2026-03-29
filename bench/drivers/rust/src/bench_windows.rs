@@ -82,9 +82,17 @@ mod ffi {
             lpUserTime: *mut u64,
         ) -> i32;
         pub fn GetCurrentProcess() -> HANDLE;
+        pub fn GetCurrentThread() -> HANDLE;
         pub fn GetTickCount64() -> u64;
+        pub fn SetPriorityClass(hProcess: HANDLE, dwPriorityClass: u32) -> i32;
+        pub fn SetThreadPriority(hThread: HANDLE, nPriority: i32) -> i32;
     }
 }
+
+#[cfg(windows)]
+const HIGH_PRIORITY_CLASS: u32 = 0x00000080;
+#[cfg(windows)]
+const THREAD_PRIORITY_HIGHEST: i32 = 2;
 
 /// Cheap deadline check using GetTickCount64 (~1ms resolution).
 /// Avoids QPC overhead in hot loops.
@@ -124,6 +132,25 @@ fn cpu_ns() -> u64 {
     }
     // FILETIME is in 100ns intervals
     (kernel + user) * 100
+}
+
+#[cfg(windows)]
+fn elevate_bench_priority() {
+    unsafe {
+        if ffi::SetPriorityClass(ffi::GetCurrentProcess(), HIGH_PRIORITY_CLASS) == 0 {
+            eprintln!(
+                "warn: SetPriorityClass(HIGH_PRIORITY_CLASS) failed: {:?}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        if ffi::SetThreadPriority(ffi::GetCurrentThread(), THREAD_PRIORITY_HIGHEST) == 0 {
+            eprintln!(
+                "warn: SetThreadPriority(THREAD_PRIORITY_HIGHEST) failed: {:?}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -191,9 +218,20 @@ impl RateLimiter {
 
     fn wait(&mut self) {
         if let Some(interval) = self.interval {
-            let now = Instant::now();
-            if now < self.next {
-                std::thread::sleep(self.next - now);
+            let mut now = Instant::now();
+            while now < self.next {
+                let remaining = self.next - now;
+                if remaining >= Duration::from_millis(2) {
+                    std::thread::sleep(remaining - Duration::from_millis(1));
+                } else if remaining >= Duration::from_micros(100) {
+                    std::thread::yield_now();
+                } else {
+                    while Instant::now() < self.next {
+                        std::hint::spin_loop();
+                    }
+                    break;
+                }
+                now = Instant::now();
             }
             self.next += interval;
         }
@@ -413,7 +451,13 @@ fn run_server(
     let cpu_start = cpu_ns();
 
     let stop_flag = server.running_flag();
-    spawn_server_stop_waker(run_dir, service, client_config(profiles), stop_flag, duration_sec);
+    spawn_server_stop_waker(
+        run_dir,
+        service,
+        client_config(profiles),
+        stop_flag,
+        duration_sec,
+    );
 
     let _ = server.run();
 
@@ -1457,6 +1501,7 @@ fn run_lookup_bench(duration_sec: u32) -> i32 {
 
 #[cfg(windows)]
 fn main() {
+    elevate_bench_priority();
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!(

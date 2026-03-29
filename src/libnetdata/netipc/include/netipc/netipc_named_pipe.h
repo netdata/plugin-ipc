@@ -58,6 +58,7 @@ typedef enum {
     NIPC_NP_ERR_HANDSHAKE,          /* handshake protocol error */
     NIPC_NP_ERR_AUTH_FAILED,        /* auth token rejected */
     NIPC_NP_ERR_NO_PROFILE,         /* no common profile */
+    NIPC_NP_ERR_INCOMPATIBLE,       /* protocol/layout version mismatch */
     NIPC_NP_ERR_PROTOCOL,           /* wire protocol violation */
     NIPC_NP_ERR_ADDR_IN_USE,        /* pipe name already in use */
     NIPC_NP_ERR_CHUNK,              /* chunk header mismatch */
@@ -242,6 +243,20 @@ nipc_np_error_t nipc_np_receive(nipc_np_session_t *session,
                                  nipc_header_t *hdr_out,
                                  const void **payload_out,
                                  size_t *payload_len_out);
+
+/*
+ * Poll until a session becomes readable or the timeout expires.
+ *
+ * On success:
+ *   - returns NIPC_NP_OK
+ *   - sets *readable_out to true if bytes are available
+ *   - sets *readable_out to false on timeout with no pending bytes
+ *
+ * Returns NIPC_NP_ERR_DISCONNECTED if the peer has gone away while waiting.
+ */
+nipc_np_error_t nipc_np_wait_readable(nipc_np_session_t *session,
+                                       uint32_t timeout_ms,
+                                       bool *readable_out);
 
 /* ------------------------------------------------------------------ */
 /*  Utility                                                            */

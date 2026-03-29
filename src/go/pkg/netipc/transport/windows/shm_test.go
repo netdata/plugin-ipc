@@ -18,6 +18,23 @@ type shmReceiveResult struct {
 	err     error
 }
 
+func installWinShmOneShotFault(t *testing.T, target *winShmProcCall, failOnCall int, errno syscall.Errno) {
+	t.Helper()
+
+	orig := *target
+	callCount := 0
+	*target = func(a ...uintptr) (uintptr, uintptr, error) {
+		callCount++
+		if callCount == failOnCall {
+			return 0, 0, errno
+		}
+		return orig(a...)
+	}
+	t.Cleanup(func() {
+		*target = orig
+	})
+}
+
 func TestWinShmHelpers(t *testing.T) {
 	if got := winShmAlignCacheline(1); got != 64 {
 		t.Fatalf("winShmAlignCacheline(1) = %d, want 64", got)
@@ -261,6 +278,146 @@ func TestWinShmClientAttachFailsWhenEventsAreMissing(t *testing.T) {
 			t.Fatalf("WinShmClientAttach missing resp_event = %v, want ErrWinShmOpenEvent", err)
 		}
 	})
+}
+
+func TestWinShmServerCreateWin32Failures(t *testing.T) {
+	cases := []struct {
+		name       string
+		target     *winShmProcCall
+		failOnCall int
+		errno      syscall.Errno
+		wantErr    error
+		wantText   string
+	}{
+		{
+			name:       "CreateFileMappingW",
+			target:     &winShmCreateFileMappingW,
+			failOnCall: 1,
+			errno:      syscall.Errno(5),
+			wantErr:    ErrWinShmCreateMapping,
+		},
+		{
+			name:       "MapViewOfFile",
+			target:     &winShmMapViewOfFile,
+			failOnCall: 1,
+			errno:      syscall.Errno(6),
+			wantErr:    ErrWinShmMapView,
+		},
+		{
+			name:       "CreateEventW req_event",
+			target:     &winShmCreateEventW,
+			failOnCall: 1,
+			errno:      syscall.Errno(7),
+			wantErr:    ErrWinShmCreateEvent,
+			wantText:   "req_event",
+		},
+		{
+			name:       "CreateEventW resp_event",
+			target:     &winShmCreateEventW,
+			failOnCall: 2,
+			errno:      syscall.Errno(8),
+			wantErr:    ErrWinShmCreateEvent,
+			wantText:   "resp_event",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runDir := t.TempDir()
+			service := "fault-create"
+			const authToken uint64 = 0x7711
+			const sessionID uint64 = 61
+
+			installWinShmOneShotFault(t, tc.target, tc.failOnCall, tc.errno)
+
+			_, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileHybrid, 4096, 4096)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("WinShmServerCreate injected fault = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantText != "" && !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("WinShmServerCreate error %q does not mention %q", err, tc.wantText)
+			}
+
+			server, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileHybrid, 4096, 4096)
+			if err != nil {
+				t.Fatalf("WinShmServerCreate recovery failed: %v", err)
+			}
+			server.WinShmDestroy()
+		})
+	}
+}
+
+func TestWinShmClientAttachWin32Failures(t *testing.T) {
+	cases := []struct {
+		name       string
+		target     *winShmProcCall
+		failOnCall int
+		errno      syscall.Errno
+		wantErr    error
+		wantText   string
+	}{
+		{
+			name:       "OpenFileMappingW",
+			target:     &winShmOpenFileMappingW,
+			failOnCall: 1,
+			errno:      syscall.Errno(9),
+			wantErr:    ErrWinShmOpenMapping,
+		},
+		{
+			name:       "MapViewOfFile",
+			target:     &winShmMapViewOfFile,
+			failOnCall: 1,
+			errno:      syscall.Errno(10),
+			wantErr:    ErrWinShmMapView,
+		},
+		{
+			name:       "OpenEventW req_event",
+			target:     &winShmOpenEventW,
+			failOnCall: 1,
+			errno:      syscall.Errno(11),
+			wantErr:    ErrWinShmOpenEvent,
+			wantText:   "req_event",
+		},
+		{
+			name:       "OpenEventW resp_event",
+			target:     &winShmOpenEventW,
+			failOnCall: 2,
+			errno:      syscall.Errno(12),
+			wantErr:    ErrWinShmOpenEvent,
+			wantText:   "resp_event",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runDir := t.TempDir()
+			service := "fault-attach"
+			const authToken uint64 = 0x7712
+			const sessionID uint64 = 62
+
+			server, err := WinShmServerCreate(runDir, service, authToken, sessionID, WinShmProfileHybrid, 4096, 4096)
+			if err != nil {
+				t.Fatalf("WinShmServerCreate failed: %v", err)
+			}
+			defer server.WinShmDestroy()
+
+			installWinShmOneShotFault(t, tc.target, tc.failOnCall, tc.errno)
+
+			_, err = WinShmClientAttach(runDir, service, authToken, sessionID, WinShmProfileHybrid)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("WinShmClientAttach injected fault = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantText != "" && !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("WinShmClientAttach error %q does not mention %q", err, tc.wantText)
+			}
+
+			client, err := WinShmClientAttach(runDir, service, authToken, sessionID, WinShmProfileHybrid)
+			if err != nil {
+				t.Fatalf("WinShmClientAttach recovery failed: %v", err)
+			}
+			client.WinShmClose()
+		})
+	}
 }
 
 func TestWinShmSendReceiveValidation(t *testing.T) {

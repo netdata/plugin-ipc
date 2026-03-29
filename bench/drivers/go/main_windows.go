@@ -76,6 +76,14 @@ var (
 	procQueryPerformanceCounter   = kernel32.NewProc("QueryPerformanceCounter")
 	procGetProcessTimes           = kernel32.NewProc("GetProcessTimes")
 	procGetTickCount64            = kernel32.NewProc("GetTickCount64")
+	procGetCurrentThread          = kernel32.NewProc("GetCurrentThread")
+	procSetPriorityClass          = kernel32.NewProc("SetPriorityClass")
+	procSetThreadPriority         = kernel32.NewProc("SetThreadPriority")
+)
+
+const (
+	highPriorityClassWin  = 0x00000080
+	threadPriorityHighest = 2
 )
 
 func nowNS() uint64 {
@@ -109,6 +117,20 @@ func cpuNSWin() uint64 {
 func tickMSWin() uint64 {
 	ret, _, _ := syscall.Syscall(procGetTickCount64.Addr(), 0, 0, 0, 0)
 	return uint64(ret)
+}
+
+func elevateBenchPriorityWin() {
+	process, _ := syscall.GetCurrentProcess()
+	if r1, _, err := syscall.Syscall(procSetPriorityClass.Addr(), 2,
+		uintptr(process), uintptr(highPriorityClassWin), 0); r1 == 0 {
+		fmt.Fprintf(os.Stderr, "warn: SetPriorityClass(HIGH_PRIORITY_CLASS) failed: %v\n", err)
+	}
+
+	thread, _, _ := syscall.Syscall(procGetCurrentThread.Addr(), 0, 0, 0, 0)
+	if r1, _, err := syscall.Syscall(procSetThreadPriority.Addr(), 2,
+		thread, uintptr(threadPriorityHighest), 0); r1 == 0 {
+		fmt.Fprintf(os.Stderr, "warn: SetThreadPriority(THREAD_PRIORITY_HIGHEST) failed: %v\n", err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -191,8 +213,18 @@ func (rl *rateLimiterWin) wait() {
 		return
 	}
 	now := time.Now()
-	if now.Before(rl.next) {
-		time.Sleep(rl.next.Sub(now))
+	for now.Before(rl.next) {
+		remaining := rl.next.Sub(now)
+		if remaining >= 2*time.Millisecond {
+			time.Sleep(remaining - time.Millisecond)
+		} else if remaining >= 100*time.Microsecond {
+			runtime.Gosched()
+		} else {
+			for time.Now().Before(rl.next) {
+			}
+			break
+		}
+		now = time.Now()
 	}
 	rl.next = rl.next.Add(rl.interval)
 }
@@ -1305,6 +1337,7 @@ func runLookupBenchWin(durationSec int) int {
 // ---------------------------------------------------------------------------
 
 func main() {
+	elevateBenchPriorityWin()
 	runtime.GOMAXPROCS(1)
 
 	if len(os.Args) < 2 {

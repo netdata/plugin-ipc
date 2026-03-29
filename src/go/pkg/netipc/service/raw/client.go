@@ -15,6 +15,9 @@ import (
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
 )
 
+const clientShmAttachRetryInterval = 5 * time.Millisecond
+const clientShmAttachRetryTimeout = 5 * time.Second
+
 // ---------------------------------------------------------------------------
 //  Client context
 // ---------------------------------------------------------------------------
@@ -503,7 +506,7 @@ func (c *Client) tryConnect() ClientState {
 			return StateNotFound
 		case isAuthError(err):
 			return StateAuthFailed
-		case isProfileError(err):
+		case isIncompatibleError(err):
 			return StateIncompatible
 		default:
 			return StateDisconnected
@@ -515,13 +518,17 @@ func (c *Client) tryConnect() ClientState {
 		session.SelectedProfile == protocol.ProfileSHMFutex {
 		// Retry attach: server creates the SHM region after
 		// the UDS handshake, so it may not exist yet.
-		for i := 0; i < 200; i++ {
+		deadline := time.Now().Add(clientShmAttachRetryTimeout)
+		for {
 			shm, serr := posix.ShmClientAttach(c.runDir, c.serviceName, session.SessionID)
 			if serr == nil {
 				c.shm = shm
 				break
 			}
-			time.Sleep(5 * time.Millisecond)
+			if !time.Now().Before(deadline) {
+				break
+			}
+			time.Sleep(clientShmAttachRetryInterval)
 		}
 		if c.shm == nil {
 			// SHM attach failed. Fail the session to avoid transport desync.
@@ -629,8 +636,8 @@ func isAuthError(err error) bool {
 	return errors.Is(err, posix.ErrAuthFailed)
 }
 
-func isProfileError(err error) bool {
-	return errors.Is(err, posix.ErrNoProfile)
+func isIncompatibleError(err error) bool {
+	return errors.Is(err, posix.ErrNoProfile) || errors.Is(err, posix.ErrIncompatible)
 }
 
 // ---------------------------------------------------------------------------

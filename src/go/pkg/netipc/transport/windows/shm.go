@@ -88,6 +88,26 @@ var (
 	procGetTickCount64     = modkernel32.NewProc("GetTickCount64")
 )
 
+type winShmProcCall func(a ...uintptr) (uintptr, uintptr, error)
+
+func callCreateFileMappingW(a ...uintptr) (uintptr, uintptr, error) {
+	return procCreateFileMappingW.Call(a...)
+}
+func callOpenFileMappingW(a ...uintptr) (uintptr, uintptr, error) {
+	return procOpenFileMappingW.Call(a...)
+}
+func callMapViewOfFile(a ...uintptr) (uintptr, uintptr, error) { return procMapViewOfFile.Call(a...) }
+func callCreateEventW(a ...uintptr) (uintptr, uintptr, error)  { return procCreateEventW.Call(a...) }
+func callOpenEventW(a ...uintptr) (uintptr, uintptr, error)    { return procOpenEventW.Call(a...) }
+
+var (
+	winShmCreateFileMappingW winShmProcCall = callCreateFileMappingW
+	winShmOpenFileMappingW   winShmProcCall = callOpenFileMappingW
+	winShmMapViewOfFile      winShmProcCall = callMapViewOfFile
+	winShmCreateEventW       winShmProcCall = callCreateEventW
+	winShmOpenEventW         winShmProcCall = callOpenEventW
+)
+
 const (
 	_PAGE_READWRITE       = 0x04
 	_FILE_MAP_ALL_ACCESS  = 0x000F001F
@@ -171,7 +191,7 @@ func WinShmServerCreate(runDir, serviceName string, authToken, sessionID uint64,
 	regionSize := uintptr(respOff + respCap)
 
 	// Create page-file backed mapping
-	r, _, callErr := procCreateFileMappingW.Call(
+	r, _, callErr := winShmCreateFileMappingW(
 		uintptr(syscall.InvalidHandle), // page file
 		0,                              // NULL security
 		uintptr(_PAGE_READWRITE),
@@ -189,7 +209,7 @@ func WinShmServerCreate(runDir, serviceName string, authToken, sessionID uint64,
 	}
 
 	// Map view
-	base, _, callErr := procMapViewOfFile.Call(
+	base, _, callErr := winShmMapViewOfFile(
 		uintptr(mapping),
 		uintptr(_FILE_MAP_ALL_ACCESS),
 		0, 0,
@@ -233,7 +253,7 @@ func WinShmServerCreate(runDir, serviceName string, authToken, sessionID uint64,
 			return nil, err
 		}
 
-		r, _, callErr := procCreateEventW.Call(0, 0, 0,
+		r, _, callErr := winShmCreateEventW(0, 0, 0,
 			uintptr(unsafe.Pointer(&reqEventName[0])))
 		if r == 0 {
 			procUnmapViewOfFile.Call(base)
@@ -256,7 +276,7 @@ func WinShmServerCreate(runDir, serviceName string, authToken, sessionID uint64,
 			return nil, err
 		}
 
-		r, _, callErr = procCreateEventW.Call(0, 0, 0,
+		r, _, callErr = winShmCreateEventW(0, 0, 0,
 			uintptr(unsafe.Pointer(&respEventName[0])))
 		if r == 0 {
 			syscall.CloseHandle(reqEvent)
@@ -327,7 +347,7 @@ func WinShmClientAttach(runDir, serviceName string, authToken, sessionID uint64,
 		return nil, err
 	}
 
-	r, _, callErr := procOpenFileMappingW.Call(
+	r, _, callErr := winShmOpenFileMappingW(
 		uintptr(_FILE_MAP_ALL_ACCESS),
 		0,
 		uintptr(unsafe.Pointer(&mappingName[0])),
@@ -337,7 +357,7 @@ func WinShmClientAttach(runDir, serviceName string, authToken, sessionID uint64,
 		return nil, fmt.Errorf("%w: %v", ErrWinShmOpenMapping, callErr)
 	}
 
-	base, _, callErr := procMapViewOfFile.Call(
+	base, _, callErr := winShmMapViewOfFile(
 		uintptr(mapping),
 		uintptr(_FILE_MAP_ALL_ACCESS),
 		0, 0, 0,
@@ -406,7 +426,7 @@ func WinShmClientAttach(runDir, serviceName string, authToken, sessionID uint64,
 			return nil, err
 		}
 
-		r, _, callErr := procOpenEventW.Call(
+		r, _, callErr := winShmOpenEventW(
 			uintptr(_EVENT_MODIFY_STATE|_SYNCHRONIZE),
 			0,
 			uintptr(unsafe.Pointer(&reqEventName[0])),
@@ -426,7 +446,7 @@ func WinShmClientAttach(runDir, serviceName string, authToken, sessionID uint64,
 			return nil, err
 		}
 
-		r, _, callErr = procOpenEventW.Call(
+		r, _, callErr = winShmOpenEventW(
 			uintptr(_EVENT_MODIFY_STATE|_SYNCHRONIZE),
 			0,
 			uintptr(unsafe.Pointer(&respEventName[0])),

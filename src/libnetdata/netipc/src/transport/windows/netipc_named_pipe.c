@@ -48,6 +48,76 @@ static inline uint32_t apply_default(uint32_t val, uint32_t def)
     return val == 0 ? def : val;
 }
 
+static inline uint32_t pipe_buffer_size(uint32_t packet_size)
+{
+    /* The protocol packet size controls logical framing and chunk size. The
+     * underlying pipe quota must stay large enough for full-duplex pipelining
+     * even when tests force a tiny protocol packet size. */
+    return max_u32(apply_default(packet_size, NIPC_NP_DEFAULT_PIPE_BUF_SIZE),
+                   NIPC_NP_DEFAULT_PIPE_BUF_SIZE);
+}
+
+static bool header_version_incompatible(const void *buf, size_t buf_len,
+                                        uint16_t expected_code)
+{
+    if (buf_len < NIPC_HEADER_LEN)
+        return false;
+
+    nipc_header_t hdr;
+    memcpy(&hdr, buf, sizeof(hdr));
+    return hdr.magic == NIPC_MAGIC_MSG &&
+           hdr.version != NIPC_VERSION &&
+           hdr.header_len == NIPC_HEADER_LEN &&
+           hdr.kind == NIPC_KIND_CONTROL &&
+           hdr.code == expected_code;
+}
+
+static bool hello_layout_incompatible(const void *buf, size_t buf_len)
+{
+    if (buf_len < sizeof(uint16_t))
+        return false;
+
+    nipc_hello_t hello;
+    memset(&hello, 0, sizeof(hello));
+    memcpy(&hello, buf, sizeof(uint16_t));
+    return hello.layout_version != 1;
+}
+
+static bool hello_ack_layout_incompatible(const void *buf, size_t buf_len)
+{
+    if (buf_len < sizeof(uint16_t))
+        return false;
+
+    nipc_hello_ack_t ack;
+    memset(&ack, 0, sizeof(ack));
+    memcpy(&ack, buf, sizeof(uint16_t));
+    return ack.layout_version != 1;
+}
+
+static nipc_np_error_t raw_send(HANDLE pipe, const void *data, size_t len);
+
+static void send_rejection_ack(HANDLE pipe, uint16_t status)
+{
+    nipc_hello_ack_t ack = { .layout_version = 1 };
+    uint8_t ack_buf[48];
+    uint8_t pkt[80];
+    nipc_header_t ack_hdr = {
+        .magic = NIPC_MAGIC_MSG,
+        .version = NIPC_VERSION,
+        .header_len = NIPC_HEADER_LEN,
+        .kind = NIPC_KIND_CONTROL,
+        .code = NIPC_CODE_HELLO_ACK,
+        .transport_status = status,
+        .payload_len = sizeof(ack_buf),
+        .item_count = 1,
+    };
+
+    nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
+    nipc_header_encode(&ack_hdr, pkt, sizeof(pkt));
+    memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
+    raw_send(pipe, pkt, NIPC_HEADER_LEN + sizeof(ack_buf));
+}
+
 /* Highest set bit in a bitmask (0 if empty). */
 static uint32_t highest_bit(uint32_t mask)
 {
@@ -243,6 +313,68 @@ static int raw_recv(HANDLE pipe, void *buf, size_t buf_len, DWORD *bytes_read)
     return 1; /* success */
 }
 
+/* Poll a synchronous pipe handle until bytes are available. Go/Rust already
+ * use PeekNamedPipe here; waiting on the pipe HANDLE itself is not reliable
+ * for request readability. */
+static nipc_np_error_t wait_readable(HANDLE pipe,
+                                      uint32_t timeout_ms,
+                                      bool *readable_out)
+{
+    ULONGLONG deadline = GetTickCount64() + timeout_ms;
+    int yielded = 0;
+
+    if (readable_out)
+        *readable_out = false;
+
+    for (;;) {
+        DWORD available = 0;
+        BOOL ok = PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL);
+        if (!ok) {
+            DWORD err = GetLastError();
+            if (is_disconnect_error(err))
+                return NIPC_NP_ERR_DISCONNECTED;
+            return NIPC_NP_ERR_RECV;
+        }
+
+        if (available > 0) {
+            if (readable_out)
+                *readable_out = true;
+            return NIPC_NP_OK;
+        }
+
+        if (GetTickCount64() >= deadline)
+            return NIPC_NP_OK;
+
+        if (!yielded) {
+            yielded = 1;
+            for (int i = 0; i < 256; i++) {
+                SwitchToThread();
+
+                available = 0;
+                ok = PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL);
+                if (!ok) {
+                    DWORD err = GetLastError();
+                    if (is_disconnect_error(err))
+                        return NIPC_NP_ERR_DISCONNECTED;
+                    return NIPC_NP_ERR_RECV;
+                }
+
+                if (available > 0) {
+                    if (readable_out)
+                        *readable_out = true;
+                    return NIPC_NP_OK;
+                }
+
+                if (GetTickCount64() >= deadline)
+                    return NIPC_NP_OK;
+            }
+            continue;
+        }
+
+        Sleep(1);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /*  In-flight message_id tracking (client side)                        */
 /* ------------------------------------------------------------------ */
@@ -275,6 +407,15 @@ static int inflight_remove(nipc_np_session_t *s, uint64_t id)
         }
     }
     return -1; /* not found */
+}
+
+static void inflight_fail_all(nipc_np_session_t *s)
+{
+    if (!s || s->role != NIPC_NP_ROLE_CLIENT)
+        return;
+
+    /* A broken session invalidates every in-flight request on it. */
+    s->inflight_count = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -337,6 +478,8 @@ static nipc_np_error_t client_handshake(HANDLE pipe,
     /* Decode outer header */
     nipc_header_t ack_hdr;
     nipc_error_t perr = nipc_header_decode(buf, (size_t)bytes_read, &ack_hdr);
+    if (perr == NIPC_ERR_BAD_VERSION)
+        return NIPC_NP_ERR_INCOMPATIBLE;
     if (perr != NIPC_OK)
         return NIPC_NP_ERR_PROTOCOL;
 
@@ -348,6 +491,8 @@ static nipc_np_error_t client_handshake(HANDLE pipe,
         return NIPC_NP_ERR_AUTH_FAILED;
     if (ack_hdr.transport_status == NIPC_STATUS_UNSUPPORTED)
         return NIPC_NP_ERR_NO_PROFILE;
+    if (ack_hdr.transport_status == NIPC_STATUS_INCOMPATIBLE)
+        return NIPC_NP_ERR_INCOMPATIBLE;
     if (ack_hdr.transport_status != NIPC_STATUS_OK)
         return NIPC_NP_ERR_HANDSHAKE;
 
@@ -355,6 +500,10 @@ static nipc_np_error_t client_handshake(HANDLE pipe,
     nipc_hello_ack_t ack;
     perr = nipc_hello_ack_decode(buf + NIPC_HEADER_LEN,
                                   (size_t)bytes_read - NIPC_HEADER_LEN, &ack);
+    if (perr == NIPC_ERR_BAD_LAYOUT &&
+        hello_ack_layout_incompatible(buf + NIPC_HEADER_LEN,
+                                      (size_t)bytes_read - NIPC_HEADER_LEN))
+        return NIPC_NP_ERR_INCOMPATIBLE;
     if (perr != NIPC_OK)
         return NIPC_NP_ERR_PROTOCOL;
 
@@ -402,6 +551,11 @@ static nipc_np_error_t server_handshake(HANDLE pipe,
 
     nipc_header_t hdr;
     nipc_error_t perr = nipc_header_decode(buf, (size_t)bytes_read, &hdr);
+    if (perr == NIPC_ERR_BAD_VERSION &&
+        header_version_incompatible(buf, (size_t)bytes_read, NIPC_CODE_HELLO)) {
+        send_rejection_ack(pipe, NIPC_STATUS_INCOMPATIBLE);
+        return NIPC_NP_ERR_INCOMPATIBLE;
+    }
     if (perr != NIPC_OK)
         return NIPC_NP_ERR_PROTOCOL;
 
@@ -411,43 +565,29 @@ static nipc_np_error_t server_handshake(HANDLE pipe,
     nipc_hello_t hello;
     perr = nipc_hello_decode(buf + NIPC_HEADER_LEN,
                               (size_t)bytes_read - NIPC_HEADER_LEN, &hello);
+    if (perr == NIPC_ERR_BAD_LAYOUT &&
+        hello_layout_incompatible(buf + NIPC_HEADER_LEN,
+                                  (size_t)bytes_read - NIPC_HEADER_LEN)) {
+        send_rejection_ack(pipe, NIPC_STATUS_INCOMPATIBLE);
+        return NIPC_NP_ERR_INCOMPATIBLE;
+    }
     if (perr != NIPC_OK)
         return NIPC_NP_ERR_PROTOCOL;
 
     /* Compute intersection */
     uint32_t intersection = hello.supported_profiles & s_profiles;
 
-    /* Helper: send rejection HELLO_ACK */
-    #define SEND_REJECTION(status_code) do {                                     \
-        nipc_hello_ack_t _ack = { .layout_version = 1 };                         \
-        uint8_t _ack_buf[48];                                                    \
-        nipc_hello_ack_encode(&_ack, _ack_buf, sizeof(_ack_buf));                \
-        nipc_header_t _ack_hdr = {                                               \
-            .magic = NIPC_MAGIC_MSG, .version = NIPC_VERSION,                    \
-            .header_len = NIPC_HEADER_LEN, .kind = NIPC_KIND_CONTROL,            \
-            .code = NIPC_CODE_HELLO_ACK,                                         \
-            .transport_status = (status_code),                                   \
-            .payload_len = sizeof(_ack_buf), .item_count = 1,                    \
-        };                                                                       \
-        uint8_t _pkt[80];                                                        \
-        nipc_header_encode(&_ack_hdr, _pkt, sizeof(_pkt));                       \
-        memcpy(_pkt + NIPC_HEADER_LEN, _ack_buf, sizeof(_ack_buf));              \
-        raw_send(pipe, _pkt, NIPC_HEADER_LEN + sizeof(_ack_buf));                \
-    } while (0)
-
     /* Check intersection */
     if (intersection == 0) {
-        SEND_REJECTION(NIPC_STATUS_UNSUPPORTED);
+        send_rejection_ack(pipe, NIPC_STATUS_UNSUPPORTED);
         return NIPC_NP_ERR_NO_PROFILE;
     }
 
     /* Check auth */
     if (hello.auth_token != cfg->auth_token) {
-        SEND_REJECTION(NIPC_STATUS_AUTH_FAILED);
+        send_rejection_ack(pipe, NIPC_STATUS_AUTH_FAILED);
         return NIPC_NP_ERR_AUTH_FAILED;
     }
-
-    #undef SEND_REJECTION
 
     /* Select profile */
     uint32_t preferred_intersection = intersection &
@@ -542,7 +682,7 @@ nipc_np_error_t nipc_np_listen(const char *run_dir,
         return NIPC_NP_ERR_BAD_PARAM;
 
     /* Determine buffer size */
-    uint32_t buf_size = apply_default(config->packet_size, NIPC_NP_DEFAULT_PIPE_BUF_SIZE);
+    uint32_t buf_size = pipe_buffer_size(config->packet_size);
 
     /* Create first pipe instance with FILE_FLAG_FIRST_PIPE_INSTANCE
      * to detect if another server already owns this pipe name. */
@@ -570,6 +710,8 @@ nipc_np_error_t nipc_np_accept(nipc_np_listener_t *listener,
 {
     if (!listener || !out)
         return NIPC_NP_ERR_BAD_PARAM;
+    if (listener->pipe == INVALID_HANDLE_VALUE || listener->pipe == NULL)
+        return NIPC_NP_ERR_ACCEPT;
 
     memset(out, 0, sizeof(*out));
     out->pipe = INVALID_HANDLE_VALUE;
@@ -589,8 +731,7 @@ nipc_np_error_t nipc_np_accept(nipc_np_listener_t *listener,
     HANDLE session_pipe = listener->pipe;
 
     /* Create a new pipe instance for the next client. */
-    uint32_t buf_size = apply_default(listener->config.packet_size,
-                                       NIPC_NP_DEFAULT_PIPE_BUF_SIZE);
+    uint32_t buf_size = pipe_buffer_size(listener->config.packet_size);
     HANDLE next = create_pipe_instance(listener->pipe_name, buf_size, FALSE);
     if (next == INVALID_HANDLE_VALUE) {
         /* Cannot create next instance — close the session pipe too. */
@@ -683,8 +824,8 @@ void nipc_np_close_session(nipc_np_session_t *session)
             DisconnectNamedPipe(session->pipe);
         }
         CloseHandle(session->pipe);
-        session->pipe = INVALID_HANDLE_VALUE;
     }
+    session->pipe = INVALID_HANDLE_VALUE;
 
     free(session->recv_buf);
     session->recv_buf = NULL;
@@ -717,8 +858,8 @@ void nipc_np_close_listener(nipc_np_listener_t *listener)
                 CloseHandle(wake);
         }
         CloseHandle(listener->pipe);
-        listener->pipe = INVALID_HANDLE_VALUE;
     }
+    listener->pipe = INVALID_HANDLE_VALUE;
 }
 
 /* ------------------------------------------------------------------ */
@@ -759,8 +900,12 @@ nipc_np_error_t nipc_np_send(nipc_np_session_t *session,
         nipc_header_encode(hdr, hdr_buf, sizeof(hdr_buf));
         nipc_np_error_t err = raw_send_msg(session->pipe, hdr_buf,
                                             NIPC_HEADER_LEN, payload, payload_len);
-        if (err != NIPC_NP_OK && tracked)
-            inflight_remove(session, hdr->message_id);
+        if (err != NIPC_NP_OK && tracked) {
+            if (err == NIPC_NP_ERR_SEND || err == NIPC_NP_ERR_DISCONNECTED)
+                inflight_fail_all(session);
+            else
+                inflight_remove(session, hdr->message_id);
+        }
         return err;
     }
 
@@ -790,7 +935,12 @@ nipc_np_error_t nipc_np_send(nipc_np_session_t *session,
     nipc_np_error_t err = raw_send_msg(session->pipe, hdr_buf, NIPC_HEADER_LEN,
                                         payload, first_chunk_payload);
     if (err != NIPC_NP_OK) {
-        if (tracked) inflight_remove(session, hdr->message_id);
+        if (tracked) {
+            if (err == NIPC_NP_ERR_SEND || err == NIPC_NP_ERR_DISCONNECTED)
+                inflight_fail_all(session);
+            else
+                inflight_remove(session, hdr->message_id);
+        }
         return err;
     }
 
@@ -819,7 +969,12 @@ nipc_np_error_t nipc_np_send(nipc_np_session_t *session,
         err = raw_send_msg(session->pipe, chk_buf, NIPC_HEADER_LEN,
                            src, this_chunk);
         if (err != NIPC_NP_OK) {
-            if (tracked) inflight_remove(session, hdr->message_id);
+            if (tracked) {
+                if (err == NIPC_NP_ERR_SEND || err == NIPC_NP_ERR_DISCONNECTED)
+                    inflight_fail_all(session);
+                else
+                    inflight_remove(session, hdr->message_id);
+            }
             return err;
         }
 
@@ -881,8 +1036,10 @@ nipc_np_error_t nipc_np_receive(nipc_np_session_t *session,
     /* Read first message */
     DWORD bytes_read = 0;
     int rc = raw_recv(session->pipe, buf, buf_size, &bytes_read);
-    if (rc <= 0)
+    if (rc <= 0) {
+        inflight_fail_all(session);
         return NIPC_NP_ERR_RECV;
+    }
 
     size_t n = (size_t)bytes_read;
     if (n < NIPC_HEADER_LEN)
@@ -962,6 +1119,7 @@ nipc_np_error_t nipc_np_receive(nipc_np_session_t *session,
         int crc = raw_recv(session->pipe, pkt_buf, pkt_buf_size, &cn);
         if (crc <= 0) {
             free(pkt_buf);
+            inflight_fail_all(session);
             return NIPC_NP_ERR_RECV;
         }
 
@@ -1012,6 +1170,18 @@ nipc_np_error_t nipc_np_receive(nipc_np_session_t *session,
         return berr;
 
     return NIPC_NP_OK;
+}
+
+nipc_np_error_t nipc_np_wait_readable(nipc_np_session_t *session,
+                                       uint32_t timeout_ms,
+                                       bool *readable_out)
+{
+    if (!session || !readable_out || session->pipe == INVALID_HANDLE_VALUE)
+        return NIPC_NP_ERR_BAD_PARAM;
+    nipc_np_error_t err = wait_readable(session->pipe, timeout_ms, readable_out);
+    if (err == NIPC_NP_ERR_DISCONNECTED || err == NIPC_NP_ERR_RECV)
+        inflight_fail_all(session);
+    return err;
 }
 
 #endif /* _WIN32 */

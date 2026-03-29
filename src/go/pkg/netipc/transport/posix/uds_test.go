@@ -548,6 +548,38 @@ func TestHandshakeProfileMismatch(t *testing.T) {
 	}
 }
 
+func TestHandshakeIncompatibleClassifierHelpers(t *testing.T) {
+	hdr := protocol.Header{
+		Magic:     protocol.MagicMsg,
+		Version:   protocol.Version + 1,
+		HeaderLen: protocol.HeaderLen,
+		Kind:      protocol.KindControl,
+		Code:      protocol.CodeHello,
+	}
+	hdrBuf := make([]byte, protocol.HeaderSize)
+	hdr.Encode(hdrBuf)
+	if !headerVersionIncompatible(hdrBuf, protocol.CodeHello) {
+		t.Fatal("headerVersionIncompatible should detect bad HELLO version")
+	}
+	if headerVersionIncompatible(hdrBuf, protocol.CodeHelloAck) {
+		t.Fatal("headerVersionIncompatible should respect expected code")
+	}
+
+	hello := protocol.Hello{LayoutVersion: 2}
+	helloBuf := make([]byte, 44)
+	hello.Encode(helloBuf)
+	if !helloLayoutIncompatible(helloBuf) {
+		t.Fatal("helloLayoutIncompatible should detect bad layout_version")
+	}
+
+	ack := protocol.HelloAck{LayoutVersion: 2}
+	ackBuf := make([]byte, 48)
+	ack.Encode(ackBuf)
+	if !helloAckLayoutIncompatible(ackBuf) {
+		t.Fatal("helloAckLayoutIncompatible should detect bad layout_version")
+	}
+}
+
 // ---------------------------------------------------------------------------
 //  Test: Stale socket recovery
 // ---------------------------------------------------------------------------

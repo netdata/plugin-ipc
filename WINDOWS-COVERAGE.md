@@ -8,63 +8,37 @@ It does not claim generic MSVC/CI support that has not been exercised here.
 
 ## Current Verified Results
 
-Verified on `2026-03-24`:
+Verified on `2026-03-28`:
 
 - `ctest --test-dir build --output-on-failure -j4`: `28/28` passing on `win11`
 - Windows C coverage on the latest clean `win11` coverage build:
   - the bounded direct coverage executables pass:
-    - `test_win_service_guards.exe`: `134 passed, 0 failed`
+    - `test_win_service_guards.exe`: `198 passed, 0 failed`
     - `test_win_service_guards_extra.exe`: `93 passed, 0 failed`
-    - `test_win_service_extra.exe`: `81 passed, 0 failed`
+    - `test_win_service_extra.exe`: `165 passed, 0 failed`
   - the remaining Windows C interop / stress subset then passes one-by-one under `ctest --timeout 60`
   - the raw `bash tests/run-coverage-c-windows.sh 90` flow completed end to end
-  - measured total coverage result: `93.9%`
+  - measured total coverage result: `93.2%`
   - per-file:
-    - `netipc_service_win.c`: `92.0%`
-    - `netipc_named_pipe.c`: `95.3%`
-    - `netipc_win_shm.c`: `95.9%`
+    - `netipc_service_win.c`: `90.2%`
+    - `netipc_named_pipe.c`: `95.4%`
+    - `netipc_win_shm.c`: `97.2%`
   - current status:
     - measured Windows C remains above the Linux-matching per-file and total `90%` gates
-    - the previous first-run coverage instability in `test_win_service_guards.exe` is fixed by splitting the late dispatch / cache / drain cases into `test_win_service_guards_extra.exe`
     - the aggregate Windows C script is trustworthy again on the validated `win11` flow
   - latest ordinary Windows C service gains came from:
-    - hybrid client send-buffer guard coverage at `netipc_service_win.c:147`
-    - hybrid receive-error mapping coverage at `netipc_service_win.c:179`
-    - negotiated SHM-capacity overflow coverage at `netipc_service_win.c:159`
-    - hybrid batch-send failure mapping coverage at `netipc_service_win.c:534`
-    - hybrid batch-receive failure mapping coverage at `netipc_service_win.c:543`
-    - hybrid string raw-call failure propagation at `netipc_service_win.c:611`
-    - the already-established split coverage-only service-guard executables
-  - latest targeted clean `win11` service-file follow-up on the same coverage flow:
-    - `test_win_service_guards.exe`: `194 passed, 0 failed`
-    - direct `gcov` on `netipc_service_win.c` proved:
-      - `netipc_service_win.c:534`
-      - `netipc_service_win.c:543`
-      - `netipc_service_win.c:611`
-    - targeted service-file summary:
-      - `netipc_service_win.c`: `92.04%` of `779`
-    - honesty note:
-      - this is a narrower targeted proof than the last full clean aggregate Windows C measurement above
-      - it improves the service-file evidence without claiming a fresh full aggregate rerun
+    - NULL config default coverage for typed client/server init
+    - minimum response-buffer growth coverage
+    - deterministic client-side buffer and SHM-context allocation faults
+    - deterministic server-side SHM create and cache allocation faults
+    - typed hybrid malformed SHM reply coverage on the real `nipc_client_call_cgroups_snapshot()` path
+    - typed hybrid `LIMIT_EXCEEDED` / `UNSUPPORTED` response-status coverage
   - latest ordinary Windows C transport gains came from:
     - manual HYBRID mapping setup to reach the client-attach event-name overflow branch honestly
     - deterministic HYBRID and BUSYWAIT receive timeout / disconnect tests
     - client-side oversized-response `MSG_TOO_LARGE` coverage for WinSHM
     - second chunked round-trip coverage proving client receive-buffer reuse on the same session
     - deterministic fake-server continuation-packet tests now covering the chunked receive error cluster in `netipc_named_pipe.c`
-  - latest targeted clean `win11` Named Pipe follow-up on the same coverage flow:
-    - `test_named_pipe.exe`: `195 passed, 0 failed`
-    - direct `gcov` on `netipc_named_pipe.c` proved:
-      - `netipc_named_pipe.c:959-960`
-      - `netipc_named_pipe.c:964-965`
-      - `netipc_named_pipe.c:971-972`
-      - `netipc_named_pipe.c:986-987`
-      - `netipc_named_pipe.c:991-992`
-    - targeted transport-file summary:
-      - `netipc_named_pipe.c`: `95.35%` of `473`
-    - honesty note:
-      - this is a narrower targeted proof than the last full clean aggregate Windows C measurement above
-      - it improves the transport-file evidence without claiming a fresh full aggregate rerun
 - `bash tests/run-coverage-c-windows.sh 90`:
   - script still configures and builds correctly
   - the script now runs three bounded direct executables before the generic `ctest` loop:
@@ -72,27 +46,35 @@ Verified on `2026-03-24`:
     - `build-windows-coverage-c/bin/test_win_service_guards_extra.exe`
     - `build-windows-coverage-c/bin/test_win_service_extra.exe`
   - script detail:
-    - `test_win_service_guards.exe`, `test_win_service_guards_extra.exe`, and `test_win_service_extra.exe` now run under `timeout 120`
+    - `test_win_service_guards.exe` and `test_win_service_guards_extra.exe` now run under `timeout 120`
+    - `test_win_service_extra.exe` now runs under `timeout 600`
     - the generic Windows C subset no longer relies on `test_win_service_extra` inside the unordered `ctest` loop
     - every remaining `ctest` item now uses `--timeout 60`
 - `bash tests/run-coverage-go-windows.sh 90`:
   - script prints valid coverage results on `win11`
-  - total coverage result: `96.7%`
-  - package coverage:
-    - `service/cgroups`: `96.5%`
-    - `transport/windows`: `95.2%`
+  - total coverage result: `95.4%`
   - selected key files:
-    - `service/cgroups/client_windows.go`: `96.7%`
-    - `service/cgroups/types.go`: `100.0%`
-    - `transport/windows/pipe.go`: `97.1%`
-    - `transport/windows/shm.go`: `92.9%`
+    - `service/cgroups/cache_windows.go`: `100.0%`
+    - `service/cgroups/client_windows.go`: `100.0%`
+    - `transport/windows/pipe.go`: `92.1%`
+    - `transport/windows/shm.go`: `94.2%`
   - current status:
     - reported above the Linux-matching `90%` target
     - Windows Go service/cache tests are now also wired into `ctest`
-    - latest WinSHM service tests, direct raw WinSHM L2 tests, batch failure/recovery tests, and the listener shutdown fix materially raised both the weak Windows client paths and the Windows transport package
+    - latest public typed cgroups wrapper tests now cover:
+      - `Cache.Ready()`
+      - `Cache.Status()`
+      - `Client.Status()`
+      - `NewServerWithWorkers()`
+    - removing the dead private `Handler.snapshotMaxItems()` helper also eliminated a fake `types.go` denominator from the Windows Go typed-service package
+    - latest WinSHM service tests, direct raw WinSHM L2 tests, batch failure/recovery tests, and the listener shutdown fix materially raised both the Windows client paths and the Windows transport package
     - malformed raw WinSHM request tests now also cover the real SHM server-side teardown / reconnect path
     - the latest create / attach edge tests materially raised the remaining ordinary Windows Go transport file
-    - the latest raw I/O, handshake, `Listen()`, chunked batch, and disconnect tests pushed `pipe.go` above `97%` and Windows Go total to `96.7%`
+    - the remaining ordinary Windows Go work is now concentrated in low-level transport branches such as:
+      - `peekNamedPipeAvailable`
+      - `WaitReadable()`
+      - `SetPayloadLimits()`
+      - short write / zero-byte read / next-pipe-creation failures
 - `bash tests/run-coverage-rust-windows.sh 90`:
   - script works on `win11`
   - workflow:
@@ -100,14 +82,31 @@ Verified on `2026-03-24`:
     - `rustup component add llvm-tools-preview`
     - Windows-native Rust L2/L3 unit tests
     - Windows Rust interop ctests
-  - current threshold policy: same total `90%` gate as Linux Rust coverage
+  - current threshold policy:
+    - total Windows Rust line coverage must stay above `90%`
+    - critical Windows runtime files must each stay above `90%` line coverage:
+      - `service\cgroups.rs`
+      - `transport\windows.rs`
+      - `transport\win_shm.rs`
   - current measured result after excluding Rust bin / benchmark noise from the report:
-    - `service/cgroups.rs`: `83.83%` line coverage
-    - `transport/windows.rs`: `94.43%` line coverage
-    - `transport/win_shm.rs`: `88.27%` line coverage
-    - total line coverage: `93.68%`
-  - current caveat:
-    - `test_retry_on_failure_windows` is intentionally ignored because Windows managed-server shutdown/reconnect still needs a dedicated investigation
+    - `service/cgroups.rs`: `92.74%` line coverage
+    - `transport/windows.rs`: `94.74%` line coverage
+    - `transport/win_shm.rs`: `95.76%` line coverage
+    - total line coverage: `92.08%`
+  - current status:
+    - the old ignored Windows retry/shutdown test is gone
+    - `test_retry_on_failure_windows` now runs in the normal Windows Rust suite
+    - the stricter per-file runtime gate now passes on a fresh native `win11` run
+    - Phase 1 deterministic Win32 fault injection now covers forced failure and
+      recovery for:
+      - `CreateFileMappingW`
+      - `OpenFileMappingW`
+      - `MapViewOfFile`
+      - `CreateEventW`
+      - `OpenEventW`
+    - the current `transport/win_shm.rs` result is backed by native cleanup-
+      sensitive fault tests, not only by ordinary happy-path / malformed-header
+      coverage
 
 Brutal truth:
 
@@ -116,13 +115,12 @@ Brutal truth:
 - Windows C is no longer below the Linux-matching `90%` gate.
 - The old Windows C coverage-script instability was real.
 - The current validated layout fixes it by keeping the early HYBRID / malformed-request guards in `test_win_service_guards.exe` and the late dispatch / cache / drain / worker-limit cases in `test_win_service_guards_extra.exe`.
-- That means the current trustworthy Windows C baseline is the full script result above: `93.9%` total, with every tracked file above `90%`.
+- That means the current trustworthy Windows C baseline is the full script result above: `93.2%` total, with every tracked file above `90%`.
 - The Windows Go script reliability issue is fixed.
 - The recent Rust Windows coverage work materially raised `service/cgroups.rs` and `win_shm.rs`.
 - The recent Windows named-pipe transport tests materially raised `transport/windows.rs`.
-- The current weakest Windows Rust file is now `service/cgroups.rs`, but it is above the current `90%` threshold.
-- The remaining Windows Go work is no longer a named-pipe transport coverage problem.
-- The ordinary `client_windows.go` targets are largely exhausted.
+- The current weakest critical Windows Rust runtime file is `service/cgroups.rs`, and it is already above the per-file `90%` gate at `92.74%`.
+- The remaining Windows Go work is no longer a public typed-wrapper coverage problem.
 - The remaining Windows Go work is now mostly:
   - the tiny remaining low-level `pipe.go` branches:
     - short write
@@ -131,8 +129,6 @@ Brutal truth:
     - defensive nil-map checks
     - `Accept()` / next-pipe-creation failure paths
   - any still-honest residual `transport/windows/shm.go` gap after the create / attach edge tests
-  - fixed-size encode / defensive server branches in `client_windows.go`
-  - the deferred Windows managed-server retry/shutdown behavior
 - Some malformed named-pipe response cases do not reach Go L2 coverage points because the Windows session layer rejects them first.
 - Direct raw WinSHM tests now cover the Windows-only L2 branches that named pipes cannot reach honestly.
 - One transient `test_protocol_rust` failure was observed once under parallel `ctest`, but it did not reproduce on immediate isolated or full reruns. This is not a confirmed active blocker.
@@ -186,10 +182,12 @@ Facts:
 - `src/crates/netipc/src/transport/win_shm.rs`
 - `src/crates/netipc/src/service/cgroups.rs`
 - Linux coverage runs do not execute these Windows modules.
-- The current validated Windows Rust workflow enforces the same total `90%` threshold policy as Linux Rust coverage.
+- The current validated Windows Rust workflow enforces:
+  - the same total `90%` line threshold as Linux Rust coverage
+  - plus per-file `90%` line gates for the three critical Windows Rust runtime files above
 - It now produces meaningful Windows Rust service coverage on `win11`.
 - It now also produces strong Windows named-pipe transport coverage on `win11`.
-- The remaining Windows Rust caveat is the ignored retry/shutdown test that belongs to the separate managed-server investigation.
+- There is no longer an ignored Windows Rust retry/shutdown caveat in the normal suite.
 
 ## win11 environment
 
@@ -236,6 +234,12 @@ bash tests/run-coverage-go-windows.sh 90
 bash tests/run-coverage-rust-windows.sh 90
 ```
 
+### Application Verifier + PageHeap
+
+```bash
+bash tests/run-verifier-windows.sh
+```
+
 ## Current limitations
 
 ### Native Windows execution is required
@@ -248,9 +252,9 @@ Reasons:
 - Windows-only Go files are behind `//go:build windows`
 - Rust Windows transport modules are behind `#[cfg(windows)]`
 
-### 100% Windows coverage is not realistic without extra infrastructure
+### Ordinary tests are not enough for the last Windows gaps
 
-Some branches require:
+Some remaining branches require extra infrastructure such as:
 
 - allocation failure injection
 - Win32 API fault injection
@@ -264,13 +268,33 @@ Examples:
 - overlapped or wait-related timeout/error branches
 - low-memory allocation failures in the Windows L2 layer
 
-### Rust Windows coverage is threshold-enforced, but not coverage-complete
+The repository now includes a first-class verifier entrypoint for the core
+Windows C executables:
+
+- `tests/run-verifier-windows.sh`
+
+It enables:
+
+- Application Verifier layers:
+  - `Handles`
+  - `Heaps`
+  - `Locks`
+- full PageHeap via `gflags /p /enable ... /full`
+
+Default validated targets:
+
+- `test_named_pipe.exe`
+- `test_win_shm.exe`
+- `test_win_service.exe`
+- `test_win_service_extra.exe`
+
+### Rust Windows coverage is threshold-enforced and stable
 
 This repository now has validated Windows C, Go, and Rust coverage entrypoints.
 Rust Windows coverage still needs:
 
-- more test work for the lower-coverage transport files
-- the deferred retry/shutdown investigation to be resolved separately from the normal coverage gate
+- more deterministic OS-failure and low-resource validation
+- verifier and long-runtime evidence beyond line coverage
 
 ### Windows stress scope is intentionally narrow in default `ctest`
 

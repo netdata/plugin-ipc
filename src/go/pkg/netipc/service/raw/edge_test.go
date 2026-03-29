@@ -131,6 +131,41 @@ func TestClientRefreshFromIncompatible(t *testing.T) {
 	cleanupAll(svc)
 }
 
+func TestClientRefreshFromProtocolVersionMismatch(t *testing.T) {
+	svc := uniqueUnixService("go_edge_proto_incompat")
+	packet := encodeHelloAckPacketWithVersion(protocol.Version+1, protocol.StatusOK, 1)
+	srv := startRawPosixHelloAckServer(t, svc, packet)
+
+	client := NewSnapshotClient(testRunDir, svc, testClientConfig())
+	defer client.Close()
+
+	changed := client.Refresh()
+	if !changed {
+		t.Fatal("Refresh should move client into StateIncompatible")
+	}
+	if client.state != StateIncompatible {
+		t.Fatalf("expected StateIncompatible, got %d", client.state)
+	}
+	if client.Ready() {
+		t.Fatal("client should not be ready after protocol version mismatch")
+	}
+
+	srv.wait(t)
+	if srv.accepted.Load() != 1 {
+		t.Fatalf("expected exactly one raw handshake attempt, got %d", srv.accepted.Load())
+	}
+
+	changed = client.Refresh()
+	if changed {
+		t.Fatal("Refresh from StateIncompatible should be a no-op after protocol mismatch")
+	}
+	if client.state != StateIncompatible {
+		t.Fatalf("expected StateIncompatible after second refresh, got %d", client.state)
+	}
+
+	cleanupAll(svc)
+}
+
 func TestClientRefreshFromBroken(t *testing.T) {
 	svc := "go_edge_broken"
 	ensureRunDir()
@@ -472,14 +507,17 @@ func TestIsAuthError(t *testing.T) {
 	}
 }
 
-func TestIsProfileError(t *testing.T) {
-	if !isProfileError(posix.ErrNoProfile) {
+func TestIsIncompatibleError(t *testing.T) {
+	if !isIncompatibleError(posix.ErrNoProfile) {
 		t.Error("should match ErrNoProfile")
 	}
-	if isProfileError(posix.ErrAuthFailed) {
+	if !isIncompatibleError(posix.ErrIncompatible) {
+		t.Error("should match ErrIncompatible")
+	}
+	if isIncompatibleError(posix.ErrAuthFailed) {
 		t.Error("should not match ErrAuthFailed")
 	}
-	if isProfileError(nil) {
+	if isIncompatibleError(nil) {
 		t.Error("should not match nil")
 	}
 }

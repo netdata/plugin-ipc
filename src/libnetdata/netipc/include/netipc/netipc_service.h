@@ -279,6 +279,7 @@ struct nipc_managed_server {
     /* State — use __atomic builtins (POSIX) or Interlocked* (Windows) */
 #ifdef _WIN32
     volatile LONG running;
+    volatile LONG accept_loop_active;
 #else
     bool running;
 #endif
@@ -338,6 +339,46 @@ nipc_error_t nipc_server_init_raw_for_tests(
     uint16_t expected_method_code,
     nipc_server_handler_fn handler,
     void *user);
+
+#ifdef _WIN32
+typedef enum {
+    NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_RESPONSE_BUF_REALLOC = 1,
+    NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC,
+    NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_SHM_CTX_CALLOC,
+    NIPC_WIN_SERVICE_TEST_FAULT_SERVER_SHM_CTX_CALLOC,
+    NIPC_WIN_SERVICE_TEST_FAULT_SERVER_RECV_BUF_MALLOC,
+    NIPC_WIN_SERVICE_TEST_FAULT_SERVER_RESP_BUF_MALLOC,
+    NIPC_WIN_SERVICE_TEST_FAULT_SERVER_SESSIONS_CALLOC,
+    NIPC_WIN_SERVICE_TEST_FAULT_SERVER_SESSION_CTX_CALLOC,
+    NIPC_WIN_SERVICE_TEST_FAULT_SERVER_THREAD_CREATE,
+    NIPC_WIN_SERVICE_TEST_FAULT_CACHE_BUCKETS_CALLOC,
+    NIPC_WIN_SERVICE_TEST_FAULT_CACHE_ITEMS_CALLOC,
+    NIPC_WIN_SERVICE_TEST_FAULT_CACHE_ITEM_NAME_MALLOC,
+    NIPC_WIN_SERVICE_TEST_FAULT_CACHE_ITEM_PATH_MALLOC,
+} nipc_win_service_test_fault_site_t;
+
+void nipc_win_service_test_fault_set(int site, uint32_t skip_matches);
+void nipc_win_service_test_fault_clear(void);
+#else
+typedef enum {
+    NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_RESPONSE_BUF_REALLOC = 1,
+    NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC,
+    NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_SHM_CTX_CALLOC,
+    NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_SHM_CTX_CALLOC,
+    NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_RECV_BUF_MALLOC,
+    NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_RESP_BUF_MALLOC,
+    NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_SESSIONS_CALLOC,
+    NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_SESSION_CTX_CALLOC,
+    NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_THREAD_CREATE,
+    NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_BUCKETS_CALLOC,
+    NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_ITEMS_CALLOC,
+    NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_ITEM_NAME_MALLOC,
+    NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_ITEM_PATH_MALLOC,
+} nipc_posix_service_test_fault_site_t;
+
+void nipc_posix_service_test_fault_set(int site, uint32_t skip_matches);
+void nipc_posix_service_test_fault_clear(void);
+#endif
 
 #define nipc_server_init nipc_server_init_raw_for_tests
 #endif

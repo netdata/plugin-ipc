@@ -25,6 +25,105 @@
 /* Poll timeout for server loops: 100ms between shutdown checks */
 #define SERVER_POLL_TIMEOUT_MS 100
 #define NIPC_CLIENT_BUF_DEFAULT 65536u
+#define CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS 5u
+#define CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS 5000u
+
+enum {
+    NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_RESPONSE_BUF_REALLOC_INTERNAL = 1,
+    NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC_INTERNAL,
+    NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_SHM_CTX_CALLOC_INTERNAL,
+    NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_SHM_CTX_CALLOC_INTERNAL,
+    NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_RECV_BUF_MALLOC_INTERNAL,
+    NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_RESP_BUF_MALLOC_INTERNAL,
+    NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_SESSIONS_CALLOC_INTERNAL,
+    NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_SESSION_CTX_CALLOC_INTERNAL,
+    NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_THREAD_CREATE_INTERNAL,
+    NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_BUCKETS_CALLOC_INTERNAL,
+    NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_ITEMS_CALLOC_INTERNAL,
+    NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_ITEM_NAME_MALLOC_INTERNAL,
+    NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_ITEM_PATH_MALLOC_INTERNAL,
+};
+
+static uint64_t g_posix_service_test_fault_state = 0;
+
+static uint64_t posix_service_fault_state_make(int site, uint32_t skip_matches)
+{
+    return ((uint64_t)skip_matches << 32) | (uint32_t)site;
+}
+
+void nipc_posix_service_test_fault_set(int site, uint32_t skip_matches)
+{
+    __atomic_store_n(&g_posix_service_test_fault_state,
+                     posix_service_fault_state_make(site, skip_matches),
+                     __ATOMIC_RELEASE);
+}
+
+void nipc_posix_service_test_fault_clear(void)
+{
+    __atomic_store_n(&g_posix_service_test_fault_state, 0, __ATOMIC_RELEASE);
+}
+
+static bool service_test_should_fail(int site)
+{
+    for (;;) {
+        uint64_t state = __atomic_load_n(&g_posix_service_test_fault_state,
+                                         __ATOMIC_ACQUIRE);
+        uint32_t current_site = (uint32_t)state;
+        uint32_t current_skip = (uint32_t)(state >> 32);
+        uint64_t next_state;
+
+        if (current_site != (uint32_t)site)
+            return false;
+
+        if (current_skip > 0)
+            next_state = posix_service_fault_state_make(site, current_skip - 1u);
+        else
+            next_state = 0;
+
+        if (__atomic_compare_exchange_n(&g_posix_service_test_fault_state,
+                                        &state, next_state, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return current_skip == 0;
+    }
+}
+
+static void *service_malloc(size_t size, int fault_site)
+{
+    if (service_test_should_fail(fault_site))
+        return NULL;
+    return malloc(size);
+}
+
+static void *service_calloc(size_t count, size_t size, int fault_site)
+{
+    if (service_test_should_fail(fault_site))
+        return NULL;
+    return calloc(count, size);
+}
+
+static void *service_realloc(void *ptr, size_t size, int fault_site)
+{
+    if (service_test_should_fail(fault_site))
+        return NULL;
+    return realloc(ptr, size);
+}
+
+static int service_pthread_create(pthread_t *thread,
+                                  const pthread_attr_t *attr,
+                                  void *(*start_routine)(void *),
+                                  void *arg)
+{
+    if (service_test_should_fail(NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_THREAD_CREATE_INTERNAL))
+        return EAGAIN;
+    return pthread_create(thread, attr, start_routine, arg);
+}
+
+static uint64_t monotonic_time_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
 
 static uint32_t next_power_of_2_u32(uint32_t n)
 {
@@ -39,12 +138,12 @@ static uint32_t next_power_of_2_u32(uint32_t n)
     return n + 1;
 }
 
-static bool ensure_buffer(uint8_t **buf, size_t *buf_size, size_t need)
+static bool ensure_buffer(uint8_t **buf, size_t *buf_size, size_t need, int fault_site)
 {
     if (*buf && *buf_size >= need)
         return true;
 
-    uint8_t *new_buf = realloc(*buf, need);
+    uint8_t *new_buf = service_realloc(*buf, need, fault_site);
     if (!new_buf)
         return false;
 
@@ -73,13 +172,15 @@ static bool client_prepare_session_buffers(nipc_client_ctx_t *ctx)
     if (response_need < NIPC_HEADER_LEN + 1024u)
         response_need = NIPC_HEADER_LEN + 1024u;
 
-    if (!ensure_buffer(&ctx->response_buf, &ctx->response_buf_size, response_need))
+    if (!ensure_buffer(&ctx->response_buf, &ctx->response_buf_size, response_need,
+                       NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_RESPONSE_BUF_REALLOC_INTERNAL))
         return false;
 
     if (ctx->session.selected_profile == NIPC_PROFILE_SHM_HYBRID ||
         ctx->session.selected_profile == NIPC_PROFILE_SHM_FUTEX) {
         size_t send_need = (size_t)ctx->session.max_request_payload_bytes + NIPC_HEADER_LEN;
-        if (!ensure_buffer(&ctx->send_buf, &ctx->send_buf_size, send_need))
+        if (!ensure_buffer(&ctx->send_buf, &ctx->send_buf_size, send_need,
+                           NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC_INTERNAL))
             return false;
     }
 
@@ -173,6 +274,7 @@ static nipc_client_state_t client_try_connect(nipc_client_ctx_t *ctx)
     case NIPC_UDS_ERR_AUTH_FAILED:
         return NIPC_CLIENT_AUTH_FAILED;
     case NIPC_UDS_ERR_NO_PROFILE:
+    case NIPC_UDS_ERR_INCOMPATIBLE:
         return NIPC_CLIENT_INCOMPATIBLE;
     default:
         return NIPC_CLIENT_DISCONNECTED;
@@ -191,23 +293,32 @@ static nipc_client_state_t client_try_connect(nipc_client_ctx_t *ctx)
     if (session.selected_profile == NIPC_PROFILE_SHM_HYBRID ||
         session.selected_profile == NIPC_PROFILE_SHM_FUTEX) {
 
-        nipc_shm_ctx_t *shm = calloc(1, sizeof(nipc_shm_ctx_t));
-        if (shm) {
+        nipc_shm_ctx_t *shm = service_calloc(
+            1, sizeof(nipc_shm_ctx_t),
+            NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_SHM_CTX_CALLOC_INTERNAL);
+        if (!shm) {
+            nipc_uds_close_session(&ctx->session);
+            ctx->session_valid = false;
+            return NIPC_CLIENT_DISCONNECTED;
+        }
+        {
             /* Retry attach: server creates the SHM region after
              * the UDS handshake, so it may not exist yet. */
             nipc_shm_error_t serr = NIPC_SHM_ERR_NOT_READY;
-            for (int i = 0; i < 200; i++) {
+            uint64_t deadline_ms = monotonic_time_ms() + CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS;
+            for (;;) {
                 serr = nipc_shm_client_attach(
                     ctx->run_dir, ctx->service_name,
                     session.session_id, shm);
                 if (serr == NIPC_SHM_OK)
                     break;
-                if (serr == NIPC_SHM_ERR_NOT_READY ||
-                    serr == NIPC_SHM_ERR_OPEN ||
-                    serr == NIPC_SHM_ERR_BAD_MAGIC)
-                    usleep(5000); /* 5ms retry */
-                else
+                if (serr != NIPC_SHM_ERR_NOT_READY &&
+                    serr != NIPC_SHM_ERR_OPEN &&
+                    serr != NIPC_SHM_ERR_BAD_MAGIC)
                     break;
+                if (monotonic_time_ms() >= deadline_ms)
+                    break;
+                usleep(CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS * 1000u);
             }
 
             if (serr == NIPC_SHM_OK) {
@@ -697,7 +808,8 @@ static void server_handle_session(nipc_managed_server_t *server,
     size_t recv_size = NIPC_HEADER_LEN + session->max_request_payload_bytes;
     if (recv_size < NIPC_HEADER_LEN + 1024u)
         recv_size = NIPC_HEADER_LEN + 1024u;
-    uint8_t *recv_buf = malloc(recv_size);
+    uint8_t *recv_buf = service_malloc(
+        recv_size, NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_RECV_BUF_MALLOC_INTERNAL);
     if (!recv_buf)
         return;
 
@@ -851,7 +963,8 @@ static void server_handle_session(nipc_managed_server_t *server,
 
             /* Use a stack buffer for small responses, heap for large ones */
             uint8_t stack_msg[4096];
-            uint8_t *msg = (msg_len <= sizeof(stack_msg)) ? stack_msg : malloc(msg_len);
+            uint8_t *msg = (msg_len <= sizeof(stack_msg)) ? stack_msg :
+                service_malloc(msg_len, NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_RESP_BUF_MALLOC_INTERNAL);
             if (!msg)
                 break;
 
@@ -892,7 +1005,8 @@ static void *session_handler_thread(void *arg)
     size_t resp_size = (size_t)sctx->session.max_response_payload_bytes;
     if (resp_size < 1024u)
         resp_size = 1024u;
-    uint8_t *resp_buf = malloc(resp_size);
+    uint8_t *resp_buf = service_malloc(
+        resp_size, NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_RESP_BUF_MALLOC_INTERNAL);
     if (resp_buf) {
         server_handle_session(server, &sctx->session, sctx->shm,
                               resp_buf, resp_size);
@@ -993,8 +1107,9 @@ static nipc_error_t server_init_raw(nipc_managed_server_t *server,
     server->session_capacity = worker_count * 2; /* room for slots being reaped */
     if (server->session_capacity < 16)
         server->session_capacity = 16;
-    server->sessions = calloc((size_t)server->session_capacity,
-                              sizeof(nipc_session_ctx_t *));
+    server->sessions = service_calloc((size_t)server->session_capacity,
+                              sizeof(nipc_session_ctx_t *),
+                              NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_SESSIONS_CALLOC_INTERNAL);
     if (!server->sessions)
         return NIPC_ERR_OVERFLOW;
     server->session_count = 0;
@@ -1108,7 +1223,9 @@ void nipc_server_run(nipc_managed_server_t *server)
         if (session.selected_profile == NIPC_PROFILE_SHM_HYBRID ||
             session.selected_profile == NIPC_PROFILE_SHM_FUTEX) {
 
-            nipc_shm_ctx_t *s = calloc(1, sizeof(nipc_shm_ctx_t));
+            nipc_shm_ctx_t *s = service_calloc(
+                1, sizeof(nipc_shm_ctx_t),
+                NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_SHM_CTX_CALLOC_INTERNAL);
             if (s) {
                 nipc_shm_error_t serr = nipc_shm_server_create(
                     server->run_dir, server->service_name,
@@ -1126,11 +1243,17 @@ void nipc_server_run(nipc_managed_server_t *server)
                     nipc_uds_close_session(&session);
                     continue;
                 }
+            } else {
+                pthread_mutex_unlock(&server->sessions_lock);
+                nipc_uds_close_session(&session);
+                continue;
             }
         }
 
         /* Create session context */
-        nipc_session_ctx_t *sctx = calloc(1, sizeof(nipc_session_ctx_t));
+        nipc_session_ctx_t *sctx = service_calloc(
+            1, sizeof(nipc_session_ctx_t),
+            NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_SESSION_CTX_CALLOC_INTERNAL);
         if (!sctx) {
             if (shm) { nipc_shm_destroy(shm); free(shm); }
             pthread_mutex_unlock(&server->sessions_lock);
@@ -1144,29 +1267,12 @@ void nipc_server_run(nipc_managed_server_t *server)
         sctx->id = server->next_session_id++;
         __atomic_store_n(&sctx->active, true, __ATOMIC_RELAXED);
 
-        /* Grow session array if needed */
-        if (server->session_count >= server->session_capacity) {
-            int new_cap = server->session_capacity * 2;
-            nipc_session_ctx_t **new_arr = realloc(
-                server->sessions,
-                (size_t)new_cap * sizeof(nipc_session_ctx_t *));
-            if (!new_arr) {
-                if (shm) { nipc_shm_destroy(shm); free(shm); }
-                pthread_mutex_unlock(&server->sessions_lock);
-                nipc_uds_close_session(&session);
-                free(sctx);
-                continue;
-            }
-            server->sessions = new_arr;
-            server->session_capacity = new_cap;
-        }
-
         server->sessions[server->session_count++] = sctx;
         pthread_mutex_unlock(&server->sessions_lock);
 
         /* Spawn handler thread for this session */
-        int rc = pthread_create(&sctx->thread, NULL,
-                                session_handler_thread, sctx);
+        int rc = service_pthread_create(&sctx->thread, NULL,
+                                        session_handler_thread, sctx);
         if (rc != 0) {
             /* Thread creation failed: clean up */
             pthread_mutex_lock(&server->sessions_lock);
@@ -1356,8 +1462,9 @@ static bool cache_build_hashtable(nipc_cgroups_cache_t *cache)
         return true;
 
     uint32_t bcount = next_power_of_2(cache->item_count * 2);
-    nipc_cgroups_hash_bucket_t *buckets = calloc(bcount,
-        sizeof(nipc_cgroups_hash_bucket_t));
+    nipc_cgroups_hash_bucket_t *buckets = service_calloc(bcount,
+        sizeof(nipc_cgroups_hash_bucket_t),
+        NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_BUCKETS_CALLOC_INTERNAL);
     if (!buckets)
         return false;
 
@@ -1396,7 +1503,9 @@ static nipc_cgroups_cache_item_t *cache_build_items(
     if (n == 0)
         return NULL; /* empty snapshot is valid */
 
-    nipc_cgroups_cache_item_t *items = calloc(n, sizeof(nipc_cgroups_cache_item_t));
+    nipc_cgroups_cache_item_t *items = service_calloc(
+        n, sizeof(nipc_cgroups_cache_item_t),
+        NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_ITEMS_CALLOC_INTERNAL);
     if (!items)
         return NULL;
 
@@ -1414,7 +1523,8 @@ static nipc_cgroups_cache_item_t *cache_build_items(
         items[i].enabled = iv.enabled;
 
         /* Copy name (add NUL terminator) */
-        items[i].name = malloc(iv.name.len + 1);
+        items[i].name = service_malloc(
+            iv.name.len + 1, NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_ITEM_NAME_MALLOC_INTERNAL);
         if (!items[i].name) {
             cache_free_items(items, i);
             return NULL;
@@ -1424,7 +1534,8 @@ static nipc_cgroups_cache_item_t *cache_build_items(
         items[i].name[iv.name.len] = '\0';
 
         /* Copy path (add NUL terminator) */
-        items[i].path = malloc(iv.path.len + 1);
+        items[i].path = service_malloc(
+            iv.path.len + 1, NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_ITEM_PATH_MALLOC_INTERNAL);
         if (!items[i].path) {
             free(items[i].name);
             cache_free_items(items, i);

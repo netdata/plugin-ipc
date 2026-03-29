@@ -284,9 +284,9 @@ Windows (`win11`):
 
 - build: passing
 - `ctest`: `28/28` passing
-- C coverage: `93.9%`
-- Go coverage: `96.7%`
-- Rust coverage: `93.68%`
+- C coverage: `93.2%`
+- Go coverage: `95.4%`
+- Rust coverage: `92.08%`
 
 Important honesty point:
 
@@ -356,6 +356,12 @@ Coverage:
 bash tests/run-coverage-c-windows.sh
 bash tests/run-coverage-go-windows.sh
 bash tests/run-coverage-rust-windows.sh
+```
+
+Verifier:
+
+```bash
+bash tests/run-verifier-windows.sh
 ```
 
 For practical Windows workflow details, see:

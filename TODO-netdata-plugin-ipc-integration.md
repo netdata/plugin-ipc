@@ -1869,6 +1869,9 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       - user-approved follow-up after the successful one-shot rerun:
         - commit the Windows artifact refresh and the TODO update as a separate git commit
         - do not include unrelated dirty files from the broader worktree
+      - user-approved follow-up after the local commit:
+        - push commit `768cca3` to `origin/main`
+        - do not include any of the remaining unrelated dirty files
       - implication:
         - the remaining "assembled artifact" caveat is now removed
         - the checked-in Windows artifacts now come from a single clean one-shot full rerun on `win11`

@@ -106,6 +106,67 @@ static inline uint32_t apply_default(uint32_t val, uint32_t def)
     return val == 0 ? def : val;
 }
 
+static nipc_uds_error_t raw_send(int fd, const void *data, size_t len);
+
+static bool header_version_incompatible(const void *buf, size_t buf_len,
+                                        uint16_t expected_code)
+{
+    if (buf_len < NIPC_HEADER_LEN)
+        return false;
+
+    nipc_header_t hdr;
+    memcpy(&hdr, buf, sizeof(hdr));
+    return hdr.magic == NIPC_MAGIC_MSG &&
+           hdr.version != NIPC_VERSION &&
+           hdr.header_len == NIPC_HEADER_LEN &&
+           hdr.kind == NIPC_KIND_CONTROL &&
+           hdr.code == expected_code;
+}
+
+static bool hello_layout_incompatible(const void *buf, size_t buf_len)
+{
+    if (buf_len < sizeof(uint16_t))
+        return false;
+
+    nipc_hello_t hello;
+    memset(&hello, 0, sizeof(hello));
+    memcpy(&hello, buf, sizeof(uint16_t));
+    return hello.layout_version != 1;
+}
+
+static bool hello_ack_layout_incompatible(const void *buf, size_t buf_len)
+{
+    if (buf_len < sizeof(uint16_t))
+        return false;
+
+    nipc_hello_ack_t ack;
+    memset(&ack, 0, sizeof(ack));
+    memcpy(&ack, buf, sizeof(uint16_t));
+    return ack.layout_version != 1;
+}
+
+static void send_rejection_ack(int fd, uint16_t status)
+{
+    nipc_hello_ack_t ack = { .layout_version = 1 };
+    uint8_t ack_buf[48];
+    uint8_t pkt[80];
+    nipc_header_t ack_hdr = {
+        .magic = NIPC_MAGIC_MSG,
+        .version = NIPC_VERSION,
+        .header_len = NIPC_HEADER_LEN,
+        .kind = NIPC_KIND_CONTROL,
+        .code = NIPC_CODE_HELLO_ACK,
+        .transport_status = status,
+        .payload_len = sizeof(ack_buf),
+        .item_count = 1,
+    };
+
+    nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
+    nipc_header_encode(&ack_hdr, pkt, sizeof(pkt));
+    memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
+    raw_send(fd, pkt, NIPC_HEADER_LEN + sizeof(ack_buf));
+}
+
 /* ------------------------------------------------------------------ */
 /*  Low-level send/recv (one SEQPACKET datagram)                       */
 /* ------------------------------------------------------------------ */
@@ -221,6 +282,8 @@ static nipc_uds_error_t client_handshake(int fd,
     /* Decode outer header */
     nipc_header_t ack_hdr;
     nipc_error_t perr = nipc_header_decode(buf, (size_t)n, &ack_hdr);
+    if (perr == NIPC_ERR_BAD_VERSION)
+        return NIPC_UDS_ERR_INCOMPATIBLE;
     if (perr != NIPC_OK)
         return NIPC_UDS_ERR_PROTOCOL;
 
@@ -232,6 +295,8 @@ static nipc_uds_error_t client_handshake(int fd,
         return NIPC_UDS_ERR_AUTH_FAILED;
     if (ack_hdr.transport_status == NIPC_STATUS_UNSUPPORTED)
         return NIPC_UDS_ERR_NO_PROFILE;
+    if (ack_hdr.transport_status == NIPC_STATUS_INCOMPATIBLE)
+        return NIPC_UDS_ERR_INCOMPATIBLE;
     if (ack_hdr.transport_status != NIPC_STATUS_OK)
         return NIPC_UDS_ERR_HANDSHAKE;
 
@@ -239,6 +304,10 @@ static nipc_uds_error_t client_handshake(int fd,
     nipc_hello_ack_t ack;
     perr = nipc_hello_ack_decode(buf + NIPC_HEADER_LEN,
                                   (size_t)n - NIPC_HEADER_LEN, &ack);
+    if (perr == NIPC_ERR_BAD_LAYOUT &&
+        hello_ack_layout_incompatible(buf + NIPC_HEADER_LEN,
+                                      (size_t)n - NIPC_HEADER_LEN))
+        return NIPC_UDS_ERR_INCOMPATIBLE;
     if (perr != NIPC_OK)
         return NIPC_UDS_ERR_PROTOCOL;
 
@@ -289,6 +358,11 @@ static nipc_uds_error_t server_handshake(int fd,
 
     nipc_header_t hdr;
     nipc_error_t perr = nipc_header_decode(buf, (size_t)n, &hdr);
+    if (perr == NIPC_ERR_BAD_VERSION &&
+        header_version_incompatible(buf, (size_t)n, NIPC_CODE_HELLO)) {
+        send_rejection_ack(fd, NIPC_STATUS_INCOMPATIBLE);
+        return NIPC_UDS_ERR_INCOMPATIBLE;
+    }
     if (perr != NIPC_OK)
         return NIPC_UDS_ERR_PROTOCOL;
 
@@ -298,53 +372,27 @@ static nipc_uds_error_t server_handshake(int fd,
     nipc_hello_t hello;
     perr = nipc_hello_decode(buf + NIPC_HEADER_LEN,
                               (size_t)n - NIPC_HEADER_LEN, &hello);
+    if (perr == NIPC_ERR_BAD_LAYOUT &&
+        hello_layout_incompatible(buf + NIPC_HEADER_LEN,
+                                  (size_t)n - NIPC_HEADER_LEN)) {
+        send_rejection_ack(fd, NIPC_STATUS_INCOMPATIBLE);
+        return NIPC_UDS_ERR_INCOMPATIBLE;
+    }
     if (perr != NIPC_OK)
         return NIPC_UDS_ERR_PROTOCOL;
 
     /* Compute intersection */
     uint32_t intersection = hello.supported_profiles & s_profiles;
 
-    /* Build rejection helper */
-    nipc_uds_error_t send_ack_err;
-
     /* Check intersection */
     if (intersection == 0) {
-        /* Send rejection */
-        nipc_hello_ack_t ack = { .layout_version = 1 };
-        uint8_t ack_buf[48];
-        nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
-
-        nipc_header_t ack_hdr = {
-            .magic = NIPC_MAGIC_MSG, .version = NIPC_VERSION,
-            .header_len = NIPC_HEADER_LEN, .kind = NIPC_KIND_CONTROL,
-            .code = NIPC_CODE_HELLO_ACK,
-            .transport_status = NIPC_STATUS_UNSUPPORTED,
-            .payload_len = sizeof(ack_buf), .item_count = 1,
-        };
-        uint8_t pkt[80];
-        nipc_header_encode(&ack_hdr, pkt, sizeof(pkt));
-        memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
-        raw_send(fd, pkt, NIPC_HEADER_LEN + sizeof(ack_buf));
+        send_rejection_ack(fd, NIPC_STATUS_UNSUPPORTED);
         return NIPC_UDS_ERR_NO_PROFILE;
     }
 
     /* Check auth */
     if (hello.auth_token != cfg->auth_token) {
-        nipc_hello_ack_t ack = { .layout_version = 1 };
-        uint8_t ack_buf[48];
-        nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
-
-        nipc_header_t ack_hdr = {
-            .magic = NIPC_MAGIC_MSG, .version = NIPC_VERSION,
-            .header_len = NIPC_HEADER_LEN, .kind = NIPC_KIND_CONTROL,
-            .code = NIPC_CODE_HELLO_ACK,
-            .transport_status = NIPC_STATUS_AUTH_FAILED,
-            .payload_len = sizeof(ack_buf), .item_count = 1,
-        };
-        uint8_t pkt[80];
-        nipc_header_encode(&ack_hdr, pkt, sizeof(pkt));
-        memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
-        raw_send(fd, pkt, NIPC_HEADER_LEN + sizeof(ack_buf));
+        send_rejection_ack(fd, NIPC_STATUS_AUTH_FAILED);
         return NIPC_UDS_ERR_AUTH_FAILED;
     }
 
@@ -399,7 +447,7 @@ static nipc_uds_error_t server_handshake(int fd,
     nipc_header_encode(&ack_hdr, pkt, sizeof(pkt));
     memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
 
-    send_ack_err = raw_send(fd, pkt, NIPC_HEADER_LEN + sizeof(ack_buf));
+    nipc_uds_error_t send_ack_err = raw_send(fd, pkt, NIPC_HEADER_LEN + sizeof(ack_buf));
     if (send_ack_err != NIPC_UDS_OK)
         return send_ack_err;
 
@@ -659,6 +707,15 @@ static int inflight_remove(nipc_uds_session_t *s, uint64_t id)
     return -1; /* not found */
 }
 
+static void inflight_fail_all(nipc_uds_session_t *s)
+{
+    if (!s || s->role != NIPC_UDS_ROLE_CLIENT)
+        return;
+
+    /* A broken session invalidates every in-flight request on it. */
+    s->inflight_count = 0;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Public API: send                                                   */
 /* ------------------------------------------------------------------ */
@@ -697,10 +754,12 @@ nipc_uds_error_t nipc_uds_send(nipc_uds_session_t *session,
         nipc_uds_error_t send_err = raw_send_iov(session->fd, hdr_buf, NIPC_HEADER_LEN,
                             payload, payload_len);
         if (send_err != NIPC_UDS_OK) {
-            /* Rollback: remove message_id from in-flight set */
             if (session->role == NIPC_UDS_ROLE_CLIENT &&
                 hdr->kind == NIPC_KIND_REQUEST) {
-                inflight_remove(session, hdr->message_id);
+                if (send_err == NIPC_UDS_ERR_SEND)
+                    inflight_fail_all(session);
+                else
+                    inflight_remove(session, hdr->message_id);
             }
         }
         return send_err;
@@ -734,10 +793,12 @@ nipc_uds_error_t nipc_uds_send(nipc_uds_session_t *session,
     nipc_uds_error_t err = raw_send_iov(session->fd, hdr_buf, NIPC_HEADER_LEN,
                                          payload, first_chunk_payload);
     if (err != NIPC_UDS_OK) {
-        /* Rollback: remove message_id from in-flight set */
         if (session->role == NIPC_UDS_ROLE_CLIENT &&
             hdr->kind == NIPC_KIND_REQUEST) {
-            inflight_remove(session, hdr->message_id);
+            if (err == NIPC_UDS_ERR_SEND)
+                inflight_fail_all(session);
+            else
+                inflight_remove(session, hdr->message_id);
         }
         return err;
     }
@@ -767,10 +828,12 @@ nipc_uds_error_t nipc_uds_send(nipc_uds_session_t *session,
         err = raw_send_iov(session->fd, chk_buf, NIPC_HEADER_LEN,
                            src, this_chunk);
         if (err != NIPC_UDS_OK) {
-            /* Rollback: remove message_id from in-flight set */
             if (session->role == NIPC_UDS_ROLE_CLIENT &&
                 hdr->kind == NIPC_KIND_REQUEST) {
-                inflight_remove(session, hdr->message_id);
+                if (err == NIPC_UDS_ERR_SEND)
+                    inflight_fail_all(session);
+                else
+                    inflight_remove(session, hdr->message_id);
             }
             return err;
         }
@@ -833,8 +896,10 @@ nipc_uds_error_t nipc_uds_receive(nipc_uds_session_t *session,
 
     /* Read first packet into the caller's buffer */
     ssize_t n = raw_recv(session->fd, buf, buf_size);
-    if (n <= 0)
+    if (n <= 0) {
+        inflight_fail_all(session);
         return NIPC_UDS_ERR_RECV;
+    }
 
     if ((size_t)n < NIPC_HEADER_LEN)
         return NIPC_UDS_ERR_PROTOCOL;
@@ -916,6 +981,7 @@ nipc_uds_error_t nipc_uds_receive(nipc_uds_session_t *session,
         ssize_t cn = raw_recv(session->fd, pkt_buf, pkt_buf_size);
         if (cn <= 0) {
             free(pkt_buf);
+            inflight_fail_all(session);
             return NIPC_UDS_ERR_RECV;
         }
 

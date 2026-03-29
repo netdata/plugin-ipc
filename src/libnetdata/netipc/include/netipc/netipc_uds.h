@@ -32,6 +32,7 @@ typedef enum {
     NIPC_UDS_ERR_HANDSHAKE,         /* handshake protocol error */
     NIPC_UDS_ERR_AUTH_FAILED,       /* auth token rejected */
     NIPC_UDS_ERR_NO_PROFILE,        /* no common profile */
+    NIPC_UDS_ERR_INCOMPATIBLE,      /* protocol/layout version mismatch */
     NIPC_UDS_ERR_PROTOCOL,          /* wire protocol violation */
     NIPC_UDS_ERR_ADDR_IN_USE,       /* live server on the socket path */
     NIPC_UDS_ERR_CHUNK,             /* chunk header mismatch */

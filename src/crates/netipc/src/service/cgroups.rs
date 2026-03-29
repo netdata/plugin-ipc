@@ -8,10 +8,14 @@ use super::raw;
 use crate::protocol::{CgroupsResponseView, NipcError, METHOD_CGROUPS_SNAPSHOT, PROFILE_BASELINE};
 
 #[cfg(unix)]
-use crate::transport::posix::{ClientConfig as TransportClientConfig, ServerConfig as TransportServerConfig};
+use crate::transport::posix::{
+    ClientConfig as TransportClientConfig, ServerConfig as TransportServerConfig,
+};
 
 #[cfg(windows)]
-use crate::transport::windows::{ClientConfig as TransportClientConfig, ServerConfig as TransportServerConfig};
+use crate::transport::windows::{
+    ClientConfig as TransportClientConfig, ServerConfig as TransportServerConfig,
+};
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;

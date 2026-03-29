@@ -50,6 +50,8 @@ pub enum UdsError {
     AuthFailed,
     /// No common profile between client and server.
     NoProfile,
+    /// Protocol or layout version mismatch.
+    Incompatible(String),
     /// Wire protocol violation.
     Protocol(String),
     /// A live server already owns this socket path.
@@ -80,6 +82,7 @@ impl std::fmt::Display for UdsError {
             UdsError::Handshake(s) => write!(f, "handshake error: {s}"),
             UdsError::AuthFailed => write!(f, "authentication token rejected"),
             UdsError::NoProfile => write!(f, "no common transport profile"),
+            UdsError::Incompatible(s) => write!(f, "incompatible protocol: {s}"),
             UdsError::Protocol(s) => write!(f, "protocol violation: {s}"),
             UdsError::AddrInUse => write!(f, "address already in use by live server"),
             UdsError::Chunk(s) => write!(f, "chunk error: {s}"),
@@ -90,6 +93,32 @@ impl std::fmt::Display for UdsError {
             UdsError::UnknownMsgId(id) => write!(f, "unknown response message_id: {id}"),
         }
     }
+}
+
+fn header_version_incompatible(buf: &[u8], expected_code: u16) -> bool {
+    if buf.len() < HEADER_SIZE {
+        return false;
+    }
+
+    let magic = u32::from_ne_bytes(buf[0..4].try_into().unwrap());
+    let version = u16::from_ne_bytes(buf[4..6].try_into().unwrap());
+    let header_len = u16::from_ne_bytes(buf[6..8].try_into().unwrap());
+    let kind = u16::from_ne_bytes(buf[8..10].try_into().unwrap());
+    let code = u16::from_ne_bytes(buf[12..14].try_into().unwrap());
+
+    magic == MAGIC_MSG
+        && version != VERSION
+        && header_len == protocol::HEADER_LEN
+        && kind == protocol::KIND_CONTROL
+        && code == expected_code
+}
+
+fn hello_layout_incompatible(buf: &[u8]) -> bool {
+    buf.len() >= 2 && u16::from_ne_bytes(buf[0..2].try_into().unwrap()) != 1
+}
+
+fn hello_ack_layout_incompatible(buf: &[u8]) -> bool {
+    buf.len() >= 2 && u16::from_ne_bytes(buf[0..2].try_into().unwrap()) != 1
 }
 
 impl std::error::Error for UdsError {}
@@ -196,6 +225,12 @@ pub struct UdsSession {
 }
 
 impl UdsSession {
+    fn fail_all_inflight(&mut self) {
+        if self.role == Role::Client {
+            self.inflight_ids.clear();
+        }
+    }
+
     /// Get the raw fd for poll/epoll integration.
     pub fn fd(&self) -> RawFd {
         self.fd
@@ -264,9 +299,15 @@ impl UdsSession {
 
         let result = self.send_inner(hdr, payload);
 
-        // Rollback: remove message_id from in-flight set on send failure
-        if result.is_err() && tracked {
-            self.inflight_ids.remove(&msg_id);
+        if let Err(err) = &result {
+            if tracked {
+                match err {
+                    UdsError::Send(_) => self.fail_all_inflight(),
+                    _ => {
+                        self.inflight_ids.remove(&msg_id);
+                    }
+                }
+            }
         }
 
         result
@@ -341,7 +382,13 @@ impl UdsSession {
         }
 
         // Read first packet
-        let n = raw_recv(self.fd, buf)?;
+        let n = match raw_recv(self.fd, buf) {
+            Ok(n) => n,
+            Err(err) => {
+                self.fail_all_inflight();
+                return Err(err);
+            }
+        };
 
         if n < HEADER_SIZE {
             return Err(UdsError::Protocol("packet too short for header".into()));
@@ -434,7 +481,13 @@ impl UdsSession {
 
         let mut ci = 1u32;
         while assembled < hdr.payload_len as usize {
-            let cn = raw_recv(self.fd, &mut self.pkt_buf)?;
+            let cn = match raw_recv(self.fd, &mut self.pkt_buf) {
+                Ok(n) => n,
+                Err(err) => {
+                    self.fail_all_inflight();
+                    return Err(err);
+                }
+            };
 
             if cn < HEADER_SIZE {
                 return Err(UdsError::Chunk("continuation too short".into()));
@@ -933,8 +986,13 @@ fn connect_and_handshake(
     let n = raw_recv(fd, &mut buf)?;
 
     // Decode outer header
-    let ack_hdr =
-        Header::decode(&buf[..n]).map_err(|e| UdsError::Protocol(format!("ack header: {e}")))?;
+    let ack_hdr = match Header::decode(&buf[..n]) {
+        Ok(hdr) => hdr,
+        Err(crate::protocol::NipcError::BadVersion) => {
+            return Err(UdsError::Incompatible("ack header version mismatch".into()))
+        }
+        Err(e) => return Err(UdsError::Protocol(format!("ack header: {e}"))),
+    };
 
     if ack_hdr.kind != protocol::KIND_CONTROL || ack_hdr.code != protocol::CODE_HELLO_ACK {
         return Err(UdsError::Protocol("expected HELLO_ACK".into()));
@@ -947,6 +1005,11 @@ fn connect_and_handshake(
     if ack_hdr.transport_status == protocol::STATUS_UNSUPPORTED {
         return Err(UdsError::NoProfile);
     }
+    if ack_hdr.transport_status == protocol::STATUS_INCOMPATIBLE {
+        return Err(UdsError::Incompatible(
+            "ack transport_status incompatible".into(),
+        ));
+    }
     if ack_hdr.transport_status != protocol::STATUS_OK {
         return Err(UdsError::Handshake(format!(
             "transport_status={}",
@@ -958,8 +1021,17 @@ fn connect_and_handshake(
     if n < HEADER_SIZE + HELLO_ACK_PAYLOAD_SIZE {
         return Err(UdsError::Protocol("ack payload truncated".into()));
     }
-    let ack = HelloAck::decode(&buf[HEADER_SIZE..n])
-        .map_err(|e| UdsError::Protocol(format!("ack payload: {e}")))?;
+    let ack = match HelloAck::decode(&buf[HEADER_SIZE..n]) {
+        Ok(ack) => ack,
+        Err(crate::protocol::NipcError::BadLayout)
+            if hello_ack_layout_incompatible(&buf[HEADER_SIZE..n]) =>
+        {
+            return Err(UdsError::Incompatible(
+                "ack payload layout version mismatch".into(),
+            ))
+        }
+        Err(e) => return Err(UdsError::Protocol(format!("ack payload: {e}"))),
+    };
 
     Ok(UdsSession {
         fd,
@@ -1003,24 +1075,6 @@ fn server_handshake(
     };
     let s_preferred = config.preferred_profiles;
 
-    // Receive HELLO
-    let mut buf = [0u8; 128];
-    let n = raw_recv(fd, &mut buf)?;
-
-    let hdr =
-        Header::decode(&buf[..n]).map_err(|e| UdsError::Protocol(format!("hello header: {e}")))?;
-
-    if hdr.kind != protocol::KIND_CONTROL || hdr.code != protocol::CODE_HELLO {
-        return Err(UdsError::Protocol("expected HELLO".into()));
-    }
-
-    let hello = Hello::decode(&buf[HEADER_SIZE..n])
-        .map_err(|e| UdsError::Protocol(format!("hello payload: {e}")))?;
-
-    // Compute intersection
-    let intersection = hello.supported_profiles & s_profiles;
-
-    // Helper: send rejection ACK
     let send_rejection = |status: u16| -> Result<(), UdsError> {
         let ack = HelloAck {
             layout_version: 1,
@@ -1048,6 +1102,43 @@ fn server_handshake(
         let _ = raw_send(fd, &pkt);
         Ok(())
     };
+
+    // Receive HELLO
+    let mut buf = [0u8; 128];
+    let n = raw_recv(fd, &mut buf)?;
+
+    let hdr = match Header::decode(&buf[..n]) {
+        Ok(hdr) => hdr,
+        Err(crate::protocol::NipcError::BadVersion)
+            if header_version_incompatible(&buf[..n], protocol::CODE_HELLO) =>
+        {
+            send_rejection(protocol::STATUS_INCOMPATIBLE)?;
+            return Err(UdsError::Incompatible(
+                "hello header version mismatch".into(),
+            ));
+        }
+        Err(e) => return Err(UdsError::Protocol(format!("hello header: {e}"))),
+    };
+
+    if hdr.kind != protocol::KIND_CONTROL || hdr.code != protocol::CODE_HELLO {
+        return Err(UdsError::Protocol("expected HELLO".into()));
+    }
+
+    let hello = match Hello::decode(&buf[HEADER_SIZE..n]) {
+        Ok(hello) => hello,
+        Err(crate::protocol::NipcError::BadLayout)
+            if hello_layout_incompatible(&buf[HEADER_SIZE..n]) =>
+        {
+            send_rejection(protocol::STATUS_INCOMPATIBLE)?;
+            return Err(UdsError::Incompatible(
+                "hello payload layout version mismatch".into(),
+            ));
+        }
+        Err(e) => return Err(UdsError::Protocol(format!("hello payload: {e}"))),
+    };
+
+    // Compute intersection
+    let intersection = hello.supported_profiles & s_profiles;
 
     // Check intersection
     if intersection == 0 {

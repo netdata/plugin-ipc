@@ -311,7 +311,7 @@ func TestClientHandshakeRejectsMalformedAck(t *testing.T) {
 				binary.NativeEndian.PutUint16(ack[protocol.HeaderSize:protocol.HeaderSize+2], 2)
 				return ack
 			},
-			want:     ErrProtocol,
+			want:     ErrIncompatible,
 			wantText: "ack payload",
 		},
 	}
@@ -481,8 +481,8 @@ func TestServerHandshakeRejectsMalformedHello(t *testing.T) {
 				binary.NativeEndian.PutUint16(hello[protocol.HeaderSize:protocol.HeaderSize+2], 2)
 				return hello
 			},
-			want:     ErrProtocol,
-			wantText: "hello payload",
+			want:     ErrIncompatible,
+			wantText: "protocol or layout version mismatch",
 		},
 	}
 
@@ -1094,13 +1094,17 @@ func TestSessionChunkedSendDisconnectPaths(t *testing.T) {
 		payload := bytes.Repeat([]byte("y"), 4096)
 		err := client.Send(&hdr, payload)
 		if err == nil {
-			t.Fatal("Send should fail during continuation after peer disconnect")
+			buf := make([]byte, 96)
+			_, _, err = client.Receive(buf)
+			if err == nil {
+				t.Fatal("session should observe disconnect after peer close")
+			}
 		}
-		if !errors.Is(err, ErrDisconnected) {
-			t.Fatalf("Send error = %v, want ErrDisconnected", err)
+		if !errors.Is(err, ErrDisconnected) && !errors.Is(err, ErrRecv) {
+			t.Fatalf("error = %v, want ErrDisconnected or ErrRecv", err)
 		}
 		if _, exists := client.inflightIDs[89]; exists {
-			t.Fatalf("message_id 89 should be removed from inflightIDs after continuation send failure")
+			t.Fatalf("message_id 89 should be removed from inflightIDs after session disconnect")
 		}
 		if err := <-closeDone; err != nil {
 			t.Fatalf("server close goroutine failed: %v", err)

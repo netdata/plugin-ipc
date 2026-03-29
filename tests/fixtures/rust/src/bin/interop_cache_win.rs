@@ -120,7 +120,14 @@ fn run_client(run_dir: &str, service: &str) -> i32 {
 
     let mut cache = CgroupsCache::new(run_dir, service, config);
 
-    let updated = cache.refresh();
+    let mut updated = false;
+    for _ in 0..200 {
+        if cache.refresh() {
+            updated = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     if !updated || !cache.ready() {
         eprintln!("client: cache not ready after refresh");
         cache.close();

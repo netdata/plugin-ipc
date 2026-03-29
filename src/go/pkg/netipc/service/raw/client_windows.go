@@ -20,6 +20,9 @@ import (
 	windows "github.com/netdata/plugin-ipc/go/pkg/netipc/transport/windows"
 )
 
+const clientShmAttachRetryInterval = 5 * time.Millisecond
+const clientShmAttachRetryTimeout = 5 * time.Second
+
 // ---------------------------------------------------------------------------
 //  Client context
 // ---------------------------------------------------------------------------
@@ -499,7 +502,7 @@ func (c *Client) tryConnect() ClientState {
 			return StateNotFound
 		case isAuthError(err):
 			return StateAuthFailed
-		case isProfileError(err):
+		case isIncompatibleError(err):
 			return StateIncompatible
 		default:
 			return StateDisconnected
@@ -509,7 +512,8 @@ func (c *Client) tryConnect() ClientState {
 	// Win SHM upgrade if negotiated
 	if session.SelectedProfile == windows.WinShmProfileHybrid ||
 		session.SelectedProfile == windows.WinShmProfileBusywait {
-		for i := 0; i < 200; i++ {
+		deadline := time.Now().Add(clientShmAttachRetryTimeout)
+		for {
 			shm, serr := windows.WinShmClientAttach(
 				c.runDir, c.serviceName,
 				c.config.AuthToken,
@@ -520,7 +524,10 @@ func (c *Client) tryConnect() ClientState {
 				c.shm = shm
 				break
 			}
-			time.Sleep(5 * time.Millisecond)
+			if !time.Now().Before(deadline) {
+				break
+			}
+			time.Sleep(clientShmAttachRetryInterval)
 		}
 		if c.shm == nil {
 			// SHM attach failed. Fail the session to avoid transport desync.
@@ -626,8 +633,8 @@ func isAuthError(err error) bool {
 	return errors.Is(err, windows.ErrAuthFailed)
 }
 
-func isProfileError(err error) bool {
-	return errors.Is(err, windows.ErrNoProfile)
+func isIncompatibleError(err error) bool {
+	return errors.Is(err, windows.ErrNoProfile) || errors.Is(err, windows.ErrIncompatible)
 }
 
 // ---------------------------------------------------------------------------
@@ -832,6 +839,13 @@ func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmCont
 			payload = recvBuf[protocol.HeaderSize:mlen]
 		} else {
 			// Named Pipe path
+			ready, waitErr := session.WaitReadable(serverPollTimeoutMs)
+			if waitErr != nil {
+				return
+			}
+			if !ready {
+				continue
+			}
 			h, p, err := session.Receive(recvBuf)
 			if err != nil {
 				return

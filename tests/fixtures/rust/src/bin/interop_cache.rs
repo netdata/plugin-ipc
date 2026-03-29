@@ -118,7 +118,14 @@ mod posix_only {
         let mut cache = CgroupsCache::new(run_dir, service, client_config());
 
         // Refresh to populate cache
-        let updated = cache.refresh();
+        let mut updated = false;
+        for _ in 0..200 {
+            if cache.refresh() {
+                updated = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         if !updated || !cache.ready() {
             return Err("cache not ready after refresh".into());
         }

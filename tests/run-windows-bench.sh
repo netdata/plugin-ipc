@@ -153,6 +153,7 @@ build_jobs() {
 ensure_bench_build() {
     local cache="${BUILD_DIR}/CMakeCache.txt"
     local current_type=""
+    local rust_manifest="${ROOT_DIR}/src/crates/netipc/Cargo.toml"
 
     setup_windows_toolchain
 
@@ -170,6 +171,12 @@ ensure_bench_build() {
 
     log "Building benchmark binaries in ${BUILD_DIR}"
     run cmake --build "$BUILD_DIR" --target bench_windows_c bench_windows_go -j"$(build_jobs)"
+
+    log "Building Rust Windows benchmark binary"
+    (
+        cd "$ROOT_DIR"
+        run cargo build --release --manifest-path "$rust_manifest" --bin bench_windows
+    )
 }
 
 err() {
@@ -840,10 +847,21 @@ run_repeated_measurement() {
         return 1
     fi
 
-    if ! throughput_ratio_is_acceptable "$raw_ratio" "$MAX_THROUGHPUT_RATIO" && [ "$trimmed_each_side" -gt 0 ]; then
-        warn "  Ignored one low and one high throughput sample for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
-        warn "  raw_min=${raw_min} raw_max=${raw_max} raw_ratio=${raw_ratio}"
-        warn "  stable_min=${stable_min} stable_max=${stable_max} stable_ratio=${stable_ratio}"
+    if ! throughput_ratio_is_acceptable "$raw_ratio" "$MAX_THROUGHPUT_RATIO"; then
+        LAST_MEASUREMENT_STATUS="failed"
+        LAST_MEASUREMENT_REASON="raw_ratio_exceeded"
+        warn "  Unstable repeated throughput for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
+        warn "  raw_min=${raw_min} raw_max=${raw_max} raw_ratio=${raw_ratio} (max ${MAX_THROUGHPUT_RATIO})"
+        if [ "$trimmed_each_side" -gt 0 ]; then
+            warn "  stable_min=${stable_min} stable_max=${stable_max} stable_ratio=${stable_ratio}"
+            warn "  Diagnostic note: the trimmed stable core is no longer publishable when raw throughput is unstable"
+        fi
+        warn "  Per-repeat samples: ${sample_file}"
+        export NIPC_KEEP_RUN_DIR=1
+        maybe_diagnose_failed_measurement \
+            "$scenario" "$client_lang" "$server_lang" "$target_rps" "$duration" "$sample_file" \
+            "$measure_fn" "$@"
+        return 1
     fi
 
     LAST_MEASUREMENT_STATUS="success"

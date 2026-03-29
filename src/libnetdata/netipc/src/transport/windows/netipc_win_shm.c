@@ -21,6 +21,114 @@
 /*  Internal helpers                                                   */
 /* ------------------------------------------------------------------ */
 
+typedef enum {
+    NIPC_WIN_SHM_TEST_FAULT_NONE = 0,
+    NIPC_WIN_SHM_TEST_FAULT_CREATE_MAPPING,
+    NIPC_WIN_SHM_TEST_FAULT_OPEN_MAPPING,
+    NIPC_WIN_SHM_TEST_FAULT_MAP_VIEW,
+    NIPC_WIN_SHM_TEST_FAULT_CREATE_EVENT,
+    NIPC_WIN_SHM_TEST_FAULT_OPEN_EVENT,
+} nipc_win_shm_test_fault_site_t_internal;
+
+typedef struct {
+    nipc_win_shm_test_fault_site_t_internal site;
+    DWORD error_code;
+    uint32_t skip_matches;
+} nipc_win_shm_test_fault_t;
+
+static nipc_win_shm_test_fault_t g_win_shm_test_fault = {
+    .site = NIPC_WIN_SHM_TEST_FAULT_NONE,
+    .error_code = ERROR_SUCCESS,
+    .skip_matches = 0,
+};
+
+void nipc_win_shm_test_fault_set(int site,
+                                 DWORD error_code,
+                                 uint32_t skip_matches)
+{
+    g_win_shm_test_fault.site = (nipc_win_shm_test_fault_site_t_internal)site;
+    g_win_shm_test_fault.error_code = error_code;
+    g_win_shm_test_fault.skip_matches = skip_matches;
+}
+
+void nipc_win_shm_test_fault_clear(void)
+{
+    g_win_shm_test_fault.site = NIPC_WIN_SHM_TEST_FAULT_NONE;
+    g_win_shm_test_fault.error_code = ERROR_SUCCESS;
+    g_win_shm_test_fault.skip_matches = 0;
+}
+
+static int should_inject_fault(nipc_win_shm_test_fault_site_t_internal site)
+{
+    if (g_win_shm_test_fault.site != site)
+        return 0;
+
+    if (g_win_shm_test_fault.skip_matches > 0) {
+        g_win_shm_test_fault.skip_matches--;
+        return 0;
+    }
+
+    SetLastError(g_win_shm_test_fault.error_code);
+    g_win_shm_test_fault.site = NIPC_WIN_SHM_TEST_FAULT_NONE;
+    return 1;
+}
+
+static HANDLE test_create_file_mapping(HANDLE file,
+                                       LPSECURITY_ATTRIBUTES attrs,
+                                       DWORD protect,
+                                       DWORD size_high,
+                                       DWORD size_low,
+                                       LPCWSTR name)
+{
+    if (should_inject_fault(NIPC_WIN_SHM_TEST_FAULT_CREATE_MAPPING))
+        return NULL;
+
+    return CreateFileMappingW(file, attrs, protect, size_high, size_low, name);
+}
+
+static HANDLE test_open_file_mapping(DWORD access,
+                                     BOOL inherit,
+                                     LPCWSTR name)
+{
+    if (should_inject_fault(NIPC_WIN_SHM_TEST_FAULT_OPEN_MAPPING))
+        return NULL;
+
+    return OpenFileMappingW(access, inherit, name);
+}
+
+static void *test_map_view_of_file(HANDLE mapping,
+                                   DWORD access,
+                                   DWORD offset_high,
+                                   DWORD offset_low,
+                                   SIZE_T bytes)
+{
+    if (should_inject_fault(NIPC_WIN_SHM_TEST_FAULT_MAP_VIEW))
+        return NULL;
+
+    return MapViewOfFile(mapping, access, offset_high, offset_low, bytes);
+}
+
+static HANDLE test_create_event(LPSECURITY_ATTRIBUTES attrs,
+                                BOOL manual_reset,
+                                BOOL initial_state,
+                                LPCWSTR name)
+{
+    if (should_inject_fault(NIPC_WIN_SHM_TEST_FAULT_CREATE_EVENT))
+        return NULL;
+
+    return CreateEventW(attrs, manual_reset, initial_state, name);
+}
+
+static HANDLE test_open_event(DWORD access,
+                              BOOL inherit,
+                              LPCWSTR name)
+{
+    if (should_inject_fault(NIPC_WIN_SHM_TEST_FAULT_OPEN_EVENT))
+        return NULL;
+
+    return OpenEventW(access, inherit, name);
+}
+
 /* Round up to 64-byte cache-line alignment. */
 static inline uint32_t align_cacheline(uint32_t v)
 {
@@ -196,7 +304,7 @@ nipc_win_shm_error_t nipc_win_shm_server_create(
 
     /* Create file mapping backed by page file */
     SetLastError(ERROR_SUCCESS);
-    HANDLE mapping = CreateFileMappingW(
+    HANDLE mapping = test_create_file_mapping(
         INVALID_HANDLE_VALUE,   /* page file backed */
         NULL,                   /* default security */
         PAGE_READWRITE,
@@ -211,7 +319,7 @@ nipc_win_shm_error_t nipc_win_shm_server_create(
     }
 
     /* Map the view */
-    void *base = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, region_size);
+    void *base = test_map_view_of_file(mapping, FILE_MAP_ALL_ACCESS, 0, 0, region_size);
     if (!base) {
         CloseHandle(mapping);
         return NIPC_WIN_SHM_ERR_MAP_VIEW;
@@ -256,7 +364,7 @@ nipc_win_shm_error_t nipc_win_shm_server_create(
 
         /* Auto-reset events (bManualReset = FALSE) */
         SetLastError(ERROR_SUCCESS);
-        req_event = CreateEventW(NULL, FALSE, FALSE, req_event_name);
+        req_event = test_create_event(NULL, FALSE, FALSE, req_event_name);
         if (!req_event) {
             UnmapViewOfFile(base);
             CloseHandle(mapping);
@@ -270,7 +378,7 @@ nipc_win_shm_error_t nipc_win_shm_server_create(
         }
 
         SetLastError(ERROR_SUCCESS);
-        resp_event = CreateEventW(NULL, FALSE, FALSE, resp_event_name);
+        resp_event = test_create_event(NULL, FALSE, FALSE, resp_event_name);
         if (!resp_event) {
             CloseHandle(req_event);
             UnmapViewOfFile(base);
@@ -389,12 +497,12 @@ nipc_win_shm_error_t nipc_win_shm_client_attach(
         return NIPC_WIN_SHM_ERR_BAD_PARAM;
 
     /* Open existing file mapping */
-    HANDLE mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, mapping_name);
+    HANDLE mapping = test_open_file_mapping(FILE_MAP_ALL_ACCESS, FALSE, mapping_name);
     if (!mapping)
         return NIPC_WIN_SHM_ERR_OPEN_MAPPING;
 
     /* Map the view -- map header first to read region size */
-    void *base = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+    void *base = test_map_view_of_file(mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0);
     if (!base) {
         CloseHandle(mapping);
         return NIPC_WIN_SHM_ERR_MAP_VIEW;
@@ -465,14 +573,14 @@ nipc_win_shm_error_t nipc_win_shm_client_attach(
             return NIPC_WIN_SHM_ERR_BAD_PARAM;
         }
 
-        req_event = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, req_event_name);
+        req_event = test_open_event(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, req_event_name);
         if (!req_event) {
             UnmapViewOfFile(base);
             CloseHandle(mapping);
             return NIPC_WIN_SHM_ERR_OPEN_EVENT;
         }
 
-        resp_event = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, resp_event_name);
+        resp_event = test_open_event(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, resp_event_name);
         if (!resp_event) {
             CloseHandle(req_event);
             UnmapViewOfFile(base);

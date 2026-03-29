@@ -2,12 +2,16 @@ use super::*;
 #[cfg(target_os = "linux")]
 use crate::protocol::PROFILE_SHM_FUTEX;
 use crate::protocol::{increment_encode, BatchBuilder, CgroupsBuilder, PROFILE_BASELINE};
+use std::os::fd::RawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
 const TEST_RUN_DIR: &str = "/tmp/nipc_svc_rust_test";
 const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;
 const RESPONSE_BUF_SIZE: usize = 65536;
+static RAW_SERVICE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn ensure_run_dir() {
     let _ = std::fs::create_dir_all(TEST_RUN_DIR);
@@ -17,6 +21,31 @@ fn cleanup_all(service: &str) {
     let _ = std::fs::remove_file(format!("{TEST_RUN_DIR}/{service}.sock"));
     #[cfg(target_os = "linux")]
     crate::transport::shm::cleanup_stale(TEST_RUN_DIR, service);
+}
+
+fn socket_path(service: &str) -> PathBuf {
+    PathBuf::from(format!("{TEST_RUN_DIR}/{service}.sock"))
+}
+
+fn unique_service(prefix: &str) -> String {
+    format!(
+        "{}_{}_{}",
+        prefix,
+        std::process::id(),
+        RAW_SERVICE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+    )
+}
+
+fn wait_for_listener_bind(service: &str) {
+    let sock = socket_path(service);
+    for _ in 0..2000 {
+        if sock.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_micros(500));
+    }
+
+    panic!("listener did not bind for service {service}");
 }
 
 fn server_config() -> ServerConfig {
@@ -317,8 +346,7 @@ impl TestServer {
             }
             thread::sleep(Duration::from_micros(500));
         }
-        // Extra settle time for listener bind
-        thread::sleep(Duration::from_millis(50));
+        wait_for_listener_bind(service);
 
         TestServer {
             stop_flag,
@@ -357,7 +385,7 @@ impl TestServer {
             }
             thread::sleep(Duration::from_micros(500));
         }
-        thread::sleep(Duration::from_millis(50));
+        wait_for_listener_bind(service);
 
         TestServer {
             stop_flag,
@@ -381,6 +409,153 @@ impl Drop for TestServer {
 
 struct RawSessionServer {
     thread: Option<thread::JoinHandle<Result<(), String>>>,
+}
+
+struct RawHelloAckServer {
+    thread: Option<thread::JoinHandle<Result<(), String>>>,
+}
+
+fn raw_listener_fd_for_service(service: &str) -> RawFd {
+    let path = socket_path(service);
+    let path_bytes = path.as_os_str().as_bytes();
+    assert!(
+        path_bytes.len() < std::mem::size_of::<libc::sockaddr_un>() - 2,
+        "socket path too long"
+    );
+
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+    assert!(
+        fd >= 0,
+        "socket failed: {}",
+        std::io::Error::last_os_error()
+    );
+
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (idx, byte) in path_bytes.iter().enumerate() {
+        addr.sun_path[idx] = *byte as libc::c_char;
+    }
+
+    let rc = unsafe {
+        libc::bind(
+            fd,
+            &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(rc, 0, "bind failed: {}", std::io::Error::last_os_error());
+
+    let rc = unsafe { libc::listen(fd, 4) };
+    assert_eq!(rc, 0, "listen failed: {}", std::io::Error::last_os_error());
+    fd
+}
+
+fn hello_ack_packet_with_version(version: u16, status: u16, layout_version: u16) -> Vec<u8> {
+    let ack = crate::protocol::HelloAck {
+        layout_version,
+        flags: 0,
+        server_supported_profiles: crate::protocol::PROFILE_BASELINE,
+        intersection_profiles: crate::protocol::PROFILE_BASELINE,
+        selected_profile: crate::protocol::PROFILE_BASELINE,
+        agreed_max_request_payload_bytes: crate::protocol::MAX_PAYLOAD_DEFAULT,
+        agreed_max_request_batch_items: 1,
+        agreed_max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
+        agreed_max_response_batch_items: 1,
+        agreed_packet_size: 0,
+        session_id: 77,
+    };
+
+    let mut payload = vec![0u8; 48];
+    let payload_len = ack.encode(&mut payload);
+    payload.truncate(payload_len);
+
+    let hdr = crate::protocol::Header {
+        magic: crate::protocol::MAGIC_MSG,
+        version,
+        header_len: crate::protocol::HEADER_LEN,
+        kind: crate::protocol::KIND_CONTROL,
+        flags: 0,
+        code: crate::protocol::CODE_HELLO_ACK,
+        transport_status: status,
+        payload_len: payload.len() as u32,
+        item_count: 1,
+        message_id: 0,
+    };
+
+    let mut pkt = vec![0u8; crate::protocol::HEADER_SIZE + payload.len()];
+    hdr.encode(&mut pkt[..crate::protocol::HEADER_SIZE]);
+    pkt[crate::protocol::HEADER_SIZE..].copy_from_slice(&payload);
+    pkt
+}
+
+fn start_raw_hello_ack_server(service: &str, packet: Vec<u8>) -> RawHelloAckServer {
+    ensure_run_dir();
+    cleanup_all(service);
+
+    let svc = service.to_string();
+    let thread = thread::spawn(move || {
+        let fd = raw_listener_fd_for_service(&svc);
+        let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        if client_fd < 0 {
+            unsafe { libc::close(fd) };
+            return Err(format!("accept: {}", std::io::Error::last_os_error()));
+        }
+
+        let mut hello_buf = [0u8; crate::protocol::HEADER_SIZE + 128];
+        let n = unsafe {
+            libc::recv(
+                client_fd,
+                hello_buf.as_mut_ptr() as *mut libc::c_void,
+                hello_buf.len(),
+                0,
+            )
+        };
+        if n < 0 {
+            unsafe {
+                libc::close(client_fd);
+                libc::close(fd);
+            }
+            return Err(format!("recv: {}", std::io::Error::last_os_error()));
+        }
+
+        let wrote = unsafe {
+            libc::send(
+                client_fd,
+                packet.as_ptr() as *const libc::c_void,
+                packet.len(),
+                0,
+            )
+        };
+        unsafe {
+            libc::close(client_fd);
+            libc::close(fd);
+        }
+        if wrote != packet.len() as isize {
+            return Err(format!(
+                "send short write: wrote {wrote}, want {}",
+                packet.len()
+            ));
+        }
+
+        Ok(())
+    });
+
+    thread::sleep(Duration::from_millis(50));
+    RawHelloAckServer {
+        thread: Some(thread),
+    }
+}
+
+impl RawHelloAckServer {
+    fn wait(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            match thread.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => panic!("raw hello-ack server failed: {err}"),
+                Err(_) => panic!("raw hello-ack server panicked"),
+            }
+        }
+    }
 }
 
 fn start_raw_session_server<F>(service: &str, cfg: ServerConfig, handler: F) -> RawSessionServer
@@ -2615,7 +2790,9 @@ fn test_stress_rapid_connect_disconnect() {
         let mut client = snapshot_client(svc, client_config());
 
         let mut connected = false;
-        for _ in 0..50 {
+        /* Under full ctest -j load, a freshly spawned server may need a
+         * slightly longer connect window than the hot-path unit tests. */
+        for _ in 0..200 {
             client.refresh();
             if client.ready() {
                 connected = true;
@@ -3037,6 +3214,32 @@ fn test_client_incompatible() {
     client.close();
     server.stop();
     cleanup_all(svc);
+}
+
+#[test]
+fn test_client_protocol_version_incompatible() {
+    let svc = unique_service("rs_svc_proto_incompat");
+    ensure_run_dir();
+    cleanup_all(&svc);
+
+    let packet =
+        hello_ack_packet_with_version(crate::protocol::VERSION + 1, crate::protocol::STATUS_OK, 1);
+    let mut server = start_raw_hello_ack_server(&svc, packet);
+
+    let mut client = snapshot_client(&svc, client_config());
+    let changed = client.refresh();
+    assert!(changed, "refresh should move client into INCOMPATIBLE");
+    assert_eq!(client.state, ClientState::Incompatible);
+    assert!(!client.ready());
+
+    server.wait();
+
+    let changed = client.refresh();
+    assert!(!changed, "refresh from incompatible should be a no-op");
+    assert_eq!(client.state, ClientState::Incompatible);
+
+    client.close();
+    cleanup_all(&svc);
 }
 
 // ---------------------------------------------------------------

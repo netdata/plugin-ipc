@@ -13,9 +13,12 @@
 
 #include <pthread.h>
 #include <signal.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -303,6 +306,119 @@ static void stop_server(server_thread_ctx_t *sctx, pthread_t tid)
 {
     nipc_server_stop(&sctx->server);
     pthread_join(tid, NULL);
+}
+
+typedef struct {
+    const char *service;
+    int ready;
+    int done;
+    int accepted;
+} raw_hello_ack_server_ctx_t;
+
+static void build_socket_path(char *dst, size_t dst_len, const char *service)
+{
+    snprintf(dst, dst_len, "%s/%s.sock", TEST_RUN_DIR, service);
+}
+
+static void *raw_hello_ack_version_server_thread(void *arg)
+{
+    raw_hello_ack_server_ctx_t *ctx = (raw_hello_ack_server_ctx_t *)arg;
+    int fd = -1;
+    int cfd = -1;
+    char path[256];
+    struct sockaddr_un addr;
+
+    build_socket_path(path, sizeof(path), ctx->service);
+    unlink(path);
+
+    fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    if (fd < 0)
+        goto out;
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+        goto out;
+    if (listen(fd, 4) != 0)
+        goto out;
+
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+
+    cfd = accept(fd, NULL, NULL);
+    if (cfd < 0)
+        goto out;
+
+    __atomic_store_n(&ctx->accepted, 1, __ATOMIC_RELEASE);
+
+    {
+        uint8_t hello_buf[128];
+        ssize_t n = recv(cfd, hello_buf, sizeof(hello_buf), 0);
+        if (n <= 0)
+            goto out;
+    }
+
+    {
+        nipc_hello_ack_t ack = {
+            .layout_version = 1,
+            .flags = 0,
+            .server_supported_profiles = NIPC_PROFILE_BASELINE,
+            .intersection_profiles = NIPC_PROFILE_BASELINE,
+            .selected_profile = NIPC_PROFILE_BASELINE,
+            .agreed_max_request_payload_bytes = NIPC_MAX_PAYLOAD_DEFAULT,
+            .agreed_max_request_batch_items = 1,
+            .agreed_max_response_payload_bytes = RESPONSE_BUF_SIZE,
+            .agreed_max_response_batch_items = 1,
+            .agreed_packet_size = 0,
+            ._reserved = 0,
+            .session_id = 77,
+        };
+        uint8_t payload[sizeof(ack)];
+        uint8_t packet[NIPC_HEADER_LEN + sizeof(ack)];
+        nipc_header_t hdr = {
+            .magic = NIPC_MAGIC_MSG,
+            .version = NIPC_VERSION + 1u,
+            .header_len = NIPC_HEADER_LEN,
+            .kind = NIPC_KIND_CONTROL,
+            .flags = 0,
+            .code = NIPC_CODE_HELLO_ACK,
+            .transport_status = NIPC_STATUS_OK,
+            .payload_len = (uint32_t)sizeof(ack),
+            .item_count = 1,
+            .message_id = 0,
+        };
+
+        if (nipc_hello_ack_encode(&ack, payload, sizeof(payload)) != sizeof(payload))
+            goto out;
+        if (nipc_header_encode(&hdr, packet, sizeof(packet)) != NIPC_HEADER_LEN)
+            goto out;
+        memcpy(packet + NIPC_HEADER_LEN, payload, sizeof(payload));
+        if (send(cfd, packet, sizeof(packet), 0) != (ssize_t)sizeof(packet))
+            goto out;
+    }
+
+out:
+    if (cfd >= 0)
+        close(cfd);
+    if (fd >= 0)
+        close(fd);
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void start_raw_hello_ack_version_server(raw_hello_ack_server_ctx_t *ctx,
+                                               const char *service,
+                                               pthread_t *tid)
+{
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->service = service;
+    pthread_create(tid, NULL, raw_hello_ack_version_server_thread, ctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1673,6 +1789,41 @@ static void test_client_incompatible(void)
     cleanup_all(svc);
 }
 
+static void test_client_protocol_version_incompatible(void)
+{
+    printf("Test: Client protocol version mismatch maps to INCOMPATIBLE\n");
+    const char *svc = "svc_proto_incompat";
+    cleanup_all(svc);
+
+    raw_hello_ack_server_ctx_t sctx;
+    pthread_t tid;
+    start_raw_hello_ack_version_server(&sctx, svc, &tid);
+    check("raw hello_ack server started",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_client_ctx_t client;
+    nipc_client_config_t ccfg = default_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+
+    bool changed = nipc_client_refresh(&client);
+    check("refresh changed state", changed);
+    check("state is INCOMPATIBLE after protocol mismatch",
+          client.state == NIPC_CLIENT_INCOMPATIBLE);
+    check("client not ready after protocol mismatch", !nipc_client_ready(&client));
+
+    pthread_join(tid, NULL);
+    check("raw hello_ack server accepted exactly one client",
+          __atomic_load_n(&sctx.accepted, __ATOMIC_ACQUIRE) == 1);
+
+    changed = nipc_client_refresh(&client);
+    check("refresh from INCOMPATIBLE is no-op", !changed);
+    check("state remains INCOMPATIBLE",
+          client.state == NIPC_CLIENT_INCOMPATIBLE);
+
+    nipc_client_close(&client);
+    cleanup_all(svc);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Coverage: client BROKEN state refresh                               */
 /* ------------------------------------------------------------------ */
@@ -2213,6 +2364,7 @@ int main(void)
     /* Coverage gap tests */
     test_client_auth_failure();         printf("\n");
     test_client_incompatible();         printf("\n");
+    test_client_protocol_version_incompatible(); printf("\n");
     test_client_broken_refresh();       printf("\n");
     test_server_rejects_wrong_request_kind(); printf("\n");
     test_server_init_null();            printf("\n");

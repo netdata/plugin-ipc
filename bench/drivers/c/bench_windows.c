@@ -90,6 +90,17 @@ static inline uint64_t cpu_ns(void)
     return (k + u) * 100;
 }
 
+static void elevate_bench_priority(void)
+{
+    if (!SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS))
+        fprintf(stderr, "warn: SetPriorityClass(HIGH_PRIORITY_CLASS) failed: %lu\n",
+                (unsigned long)GetLastError());
+
+    if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST))
+        fprintf(stderr, "warn: SetThreadPriority(THREAD_PRIORITY_HIGHEST) failed: %lu\n",
+                (unsigned long)GetLastError());
+}
+
 /* ------------------------------------------------------------------ */
 /*  Latency recording                                                  */
 /* ------------------------------------------------------------------ */
@@ -166,11 +177,27 @@ static void rate_limiter_wait(rate_limiter_t *rl)
         return;
 
     uint64_t current = now_ns();
-    if (current < rl->next_send_ns) {
-        uint64_t wait_us = (rl->next_send_ns - current) / 1000;
-        if (wait_us > 0)
-            Sleep((DWORD)((wait_us + 999) / 1000));
+    while (current < rl->next_send_ns) {
+        uint64_t wait_ns = rl->next_send_ns - current;
+
+        if (wait_ns >= 2000000ULL) {
+            DWORD sleep_ms = (DWORD)(wait_ns / 1000000ULL);
+            if (sleep_ms > 1)
+                Sleep(sleep_ms - 1);
+            else
+                SwitchToThread();
+        } else if (wait_ns >= 100000ULL) {
+            SwitchToThread();
+        } else {
+            current = now_ns();
+            while (current < rl->next_send_ns)
+                current = now_ns();
+            break;
+        }
+
+        current = now_ns();
     }
+
     rl->next_send_ns += rl->target_interval_ns;
 }
 
@@ -1111,6 +1138,7 @@ static void usage(const char *prog)
 int main(int argc, char **argv)
 {
     QueryPerformanceFrequency(&qpc_freq);
+    elevate_bench_priority();
 
     if (argc < 2) {
         usage(argv[0]);

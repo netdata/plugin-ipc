@@ -10,6 +10,7 @@
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_service.h"
+#include "netipc/netipc_win_shm.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +20,7 @@
 static int g_pass = 0;
 static int g_fail = 0;
 static volatile LONG g_service_counter = 0;
+static const char *g_test_filter = NULL;
 
 #define AUTH_TOKEN        0xDEADBEEFCAFEBABEull
 #define TEST_RUN_DIR      "C:\\Temp\\nipc_win_service_extra"
@@ -35,6 +37,20 @@ static void check(const char *name, int cond)
     }
     fflush(stdout);
 }
+
+static int should_run_test(const char *name)
+{
+    if (!g_test_filter || !*g_test_filter)
+        return 1;
+
+    return strstr(name, g_test_filter) != NULL;
+}
+
+#define RUN_TEST(fn)                                                         \
+    do {                                                                     \
+        if (should_run_test(#fn))                                            \
+            fn();                                                            \
+    } while (0)
 
 static void unique_service(char *buf, size_t len, const char *prefix)
 {
@@ -81,6 +97,22 @@ static nipc_client_config_t default_client_config(void)
         .max_response_batch_items   = 16,
         .auth_token                 = AUTH_TOKEN,
     };
+}
+
+static nipc_server_config_t default_typed_hybrid_server_config(void)
+{
+    nipc_server_config_t cfg = default_typed_server_config();
+    cfg.supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID;
+    cfg.preferred_profiles = NIPC_PROFILE_SHM_HYBRID;
+    return cfg;
+}
+
+static nipc_client_config_t default_typed_hybrid_client_config(void)
+{
+    nipc_client_config_t cfg = default_client_config();
+    cfg.supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID;
+    cfg.preferred_profiles = NIPC_PROFILE_SHM_HYBRID;
+    return cfg;
 }
 
 static nipc_error_t raw_noop_handler(void *user,
@@ -269,6 +301,27 @@ static bool refresh_until_ready(nipc_client_ctx_t *client, int max_tries, DWORD 
     return false;
 }
 
+static bool refresh_until_state(nipc_client_ctx_t *client,
+                                nipc_client_state_t target_state,
+                                int max_tries,
+                                DWORD sleep_ms)
+{
+    for (int i = 0; i < max_tries; i++) {
+        nipc_client_refresh(client);
+        if (client->state == target_state)
+            return true;
+        Sleep(sleep_ms);
+    }
+
+    return client->state == target_state;
+}
+
+static void clear_test_faults(void)
+{
+    nipc_win_service_test_fault_clear();
+    nipc_win_shm_test_fault_clear();
+}
+
 static void test_client_init_defaults_and_truncation(void)
 {
     printf("--- Client init defaults / truncation ---\n");
@@ -292,6 +345,25 @@ static void test_client_init_defaults_and_truncation(void)
     check("service_name truncated", strlen(client.service_name) == sizeof(client.service_name) - 1);
     check("run_dir NUL-terminated", client.run_dir[sizeof(client.run_dir) - 1] == '\0');
     check("service_name NUL-terminated", client.service_name[sizeof(client.service_name) - 1] == '\0');
+
+    nipc_client_close(&client);
+}
+
+static void test_client_init_null_config_defaults(void)
+{
+    printf("--- Client init NULL config defaults ---\n");
+
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, "svc_client_null_cfg", NULL);
+
+    check("NULL config request payload default max",
+          client.transport_config.max_request_payload_bytes == 16u);
+    check("NULL config response payload default max",
+          client.transport_config.max_response_payload_bytes == 65536u);
+    check("NULL config supported_profiles default",
+          client.transport_config.supported_profiles == 0u);
+    check("NULL config preferred_profiles default",
+          client.transport_config.preferred_profiles == 0u);
 
     nipc_client_close(&client);
 }
@@ -351,6 +423,160 @@ static void test_server_init_worker_count_clamp(void)
         check("session_capacity minimum 16", server.session_capacity == 16);
         nipc_server_destroy(&server);
     }
+}
+
+static void test_server_init_null_config_defaults(void)
+{
+    printf("--- Server init NULL config defaults ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_server_null_cfg");
+
+    nipc_managed_server_t server;
+    nipc_error_t err = nipc_server_init_typed(&server, TEST_RUN_DIR, service,
+                                              NULL, 0, &full_service_handler);
+    check("typed init with NULL config succeeds", err == NIPC_OK);
+    if (err == NIPC_OK) {
+        check("typed NULL config request default max",
+              server.learned_request_payload_bytes == 16u);
+        check("typed NULL config response default max",
+              server.learned_response_payload_bytes == 65536u);
+        check("typed NULL config worker_count clamped",
+              server.worker_count == 1);
+        nipc_server_destroy(&server);
+    }
+}
+
+static void test_client_response_buffer_minimum(void)
+{
+    printf("--- Client response buffer minimum ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_client_resp_min");
+
+    server_thread_ctx_t sctx;
+    nipc_server_config_t scfg = default_typed_server_config();
+    scfg.max_response_payload_bytes = 1;
+    HANDLE server_thread = start_server_named(&sctx, service, 4, &scfg, &full_service_handler);
+    if (!server_thread)
+        return;
+
+    nipc_client_ctx_t client;
+    nipc_client_config_t ccfg = default_client_config();
+    ccfg.max_response_payload_bytes = 1;
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+
+    check("small response client reaches READY", refresh_until_ready(&client, 100, 10));
+    check("small response client buffer rounded up to minimum",
+          client.response_buf_size >= NIPC_HEADER_LEN + 1024u);
+
+    nipc_client_close(&client);
+    stop_server_drain(&sctx, server_thread);
+}
+
+static void test_client_fault_injection_disconnects_and_recovers(void)
+{
+    printf("--- Client fault injection disconnects / recovers ---\n");
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_client_resp_fault");
+
+        server_thread_ctx_t sctx;
+        HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
+        if (!server_thread)
+            return;
+
+        nipc_client_ctx_t client;
+        nipc_client_config_t ccfg = default_client_config();
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+
+        nipc_win_service_test_fault_set(
+            NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_RESPONSE_BUF_REALLOC, 0);
+        check("response buffer alloc fault disconnects client",
+              refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 20, 10));
+        check("response buffer alloc fault leaves client not ready",
+              !nipc_client_ready(&client));
+        clear_test_faults();
+        check("response buffer alloc fault recovers",
+              refresh_until_ready(&client, 100, 10));
+
+        nipc_client_close(&client);
+        stop_server_drain(&sctx, server_thread);
+    }
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_client_send_fault");
+
+        server_thread_ctx_t sctx;
+        nipc_server_config_t scfg = default_typed_hybrid_server_config();
+        HANDLE server_thread = start_server_named(&sctx, service, 4, &scfg, &full_service_handler);
+        if (!server_thread)
+            return;
+
+        nipc_client_ctx_t client;
+        nipc_client_config_t ccfg = default_typed_hybrid_client_config();
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+
+        nipc_win_service_test_fault_set(
+            NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC, 0);
+        check("send buffer alloc fault disconnects hybrid client",
+              refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 20, 10));
+        clear_test_faults();
+        check("send buffer alloc fault recovers",
+              refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+
+        nipc_client_close(&client);
+        stop_server_drain(&sctx, server_thread);
+    }
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_client_shm_ctx_fault");
+
+        server_thread_ctx_t sctx;
+        nipc_server_config_t scfg = default_typed_hybrid_server_config();
+        HANDLE server_thread = start_server_named(&sctx, service, 4, &scfg, &full_service_handler);
+        if (!server_thread)
+            return;
+
+        nipc_client_ctx_t client;
+        nipc_client_config_t ccfg = default_typed_hybrid_client_config();
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+
+        nipc_win_service_test_fault_set(
+            NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_SHM_CTX_CALLOC, 0);
+        check("client SHM ctx alloc fault disconnects hybrid client",
+              refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 20, 10));
+        check("client SHM ctx alloc fault leaves session invalid",
+              !client.session_valid);
+        clear_test_faults();
+        check("client SHM ctx alloc fault recovers",
+              refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+
+        nipc_client_close(&client);
+        stop_server_drain(&sctx, server_thread);
+    }
+}
+
+static void test_server_init_fault_injection(void)
+{
+    printf("--- Server init fault injection ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_server_init_fault");
+
+    nipc_managed_server_t server;
+    nipc_server_config_t scfg = default_typed_server_config();
+
+    nipc_win_service_test_fault_set(
+        NIPC_WIN_SERVICE_TEST_FAULT_SERVER_SESSIONS_CALLOC, 0);
+    check("server session array alloc fault returns overflow",
+          nipc_server_init_typed(&server, TEST_RUN_DIR, service,
+                                 &scfg, 4, &full_service_handler)
+          == NIPC_ERR_OVERFLOW);
+    clear_test_faults();
 }
 
 static void test_refresh_from_broken_state(void)
@@ -595,22 +821,117 @@ static void test_cache_empty_snapshot(void)
     stop_server_drain(&sctx, server_thread);
 }
 
+static void test_server_shm_create_fault_disconnects_and_recovers(void)
+{
+    printf("--- Server SHM create fault disconnects / recovers ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_server_shm_fault");
+
+    server_thread_ctx_t sctx;
+    nipc_server_config_t scfg = default_typed_hybrid_server_config();
+    HANDLE server_thread = start_server_named(&sctx, service, 4, &scfg, &full_service_handler);
+    if (!server_thread)
+        return;
+
+    nipc_client_ctx_t client;
+    nipc_client_config_t ccfg = default_typed_hybrid_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+
+    nipc_win_shm_test_fault_set(NIPC_WIN_SHM_TEST_FAULT_CREATE_MAPPING,
+                                ERROR_ACCESS_DENIED, 0);
+    check("server SHM create fault disconnects hybrid client",
+          refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 40, 10));
+    clear_test_faults();
+    check("server SHM create fault recovers",
+          refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+
+    nipc_client_close(&client);
+    stop_server_drain(&sctx, server_thread);
+}
+
+static void test_cache_fault_injection(void)
+{
+    struct {
+        int site;
+        const char *label;
+        bool expect_refresh_ok;
+    } cases[] = {
+        { NIPC_WIN_SERVICE_TEST_FAULT_CACHE_ITEMS_CALLOC,
+          "cache items alloc fault fails refresh", false },
+        { NIPC_WIN_SERVICE_TEST_FAULT_CACHE_ITEM_NAME_MALLOC,
+          "cache item name alloc fault fails refresh", false },
+        { NIPC_WIN_SERVICE_TEST_FAULT_CACHE_ITEM_PATH_MALLOC,
+          "cache item path alloc fault fails refresh", false },
+        { NIPC_WIN_SERVICE_TEST_FAULT_CACHE_BUCKETS_CALLOC,
+          "cache bucket alloc fault falls back to linear lookup", true },
+    };
+
+    printf("--- Cache fault injection ---\n");
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_cache_fault");
+
+        server_thread_ctx_t sctx;
+        HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
+        if (!server_thread)
+            return;
+
+        nipc_cgroups_cache_t cache;
+        nipc_client_config_t ccfg = default_client_config();
+        nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, service, &ccfg);
+
+        nipc_win_service_test_fault_set(cases[i].site, 0);
+        bool ok = nipc_cgroups_cache_refresh(&cache);
+        check(cases[i].label, ok == cases[i].expect_refresh_ok);
+        if (cases[i].expect_refresh_ok) {
+            check("cache bucket fault leaves buckets NULL",
+                  cache.buckets == NULL && cache.bucket_count == 0);
+            check("cache bucket fault still serves lookup",
+                  nipc_cgroups_cache_lookup(&cache, 2002, "k8s-pod-xyz") != NULL);
+        } else {
+            nipc_cgroups_cache_status_t status;
+            nipc_cgroups_cache_status(&cache, &status);
+            check("cache allocation fault increments failure_count",
+                  status.refresh_failure_count == 1);
+        }
+
+        clear_test_faults();
+        check("cache refresh recovers after fault",
+              nipc_cgroups_cache_refresh(&cache));
+        check("cache refresh recovery lookup works",
+              nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+
+        nipc_cgroups_cache_close(&cache);
+        stop_server_drain(&sctx, server_thread);
+    }
+}
+
 int main(void)
 {
     printf("=== Windows Service Extra Tests ===\n\n");
     CreateDirectoryA(TEST_RUN_DIR, NULL);
+    g_test_filter = getenv("NIPC_TEST_FILTER");
 
-    test_client_init_defaults_and_truncation();
-    test_server_init_argument_validation();
-    test_server_init_worker_count_clamp();
-    test_refresh_from_broken_state();
-    test_retry_on_broken_session();
-    test_handler_failure();
-    test_client_auth_failure();
-    test_client_incompatible();
-    test_cache_refresh_without_server();
-    test_cache_refresh_rebuilds_and_linear_lookup();
-    test_cache_empty_snapshot();
+    RUN_TEST(test_client_init_defaults_and_truncation);
+    RUN_TEST(test_client_init_null_config_defaults);
+    RUN_TEST(test_server_init_argument_validation);
+    RUN_TEST(test_server_init_worker_count_clamp);
+    RUN_TEST(test_server_init_null_config_defaults);
+    RUN_TEST(test_client_response_buffer_minimum);
+    RUN_TEST(test_client_fault_injection_disconnects_and_recovers);
+    RUN_TEST(test_server_init_fault_injection);
+    RUN_TEST(test_refresh_from_broken_state);
+    RUN_TEST(test_retry_on_broken_session);
+    RUN_TEST(test_handler_failure);
+    RUN_TEST(test_client_auth_failure);
+    RUN_TEST(test_client_incompatible);
+    RUN_TEST(test_cache_refresh_without_server);
+    RUN_TEST(test_cache_refresh_rebuilds_and_linear_lookup);
+    RUN_TEST(test_cache_empty_snapshot);
+    RUN_TEST(test_server_shm_create_fault_disconnects_and_recovers);
+    RUN_TEST(test_cache_fault_injection);
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

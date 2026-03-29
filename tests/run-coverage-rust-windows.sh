@@ -1,7 +1,7 @@
 #!/bin/bash
 # Windows Rust coverage measurement using cargo-llvm-cov.
-# Enforces the same total line-coverage threshold policy as the Linux Rust
-# coverage script, while still collecting Windows-native Rust code paths.
+# Enforces a Windows-native total line-coverage threshold plus per-file line
+# gates for the critical Windows runtime modules.
 
 set -euo pipefail
 
@@ -20,6 +20,34 @@ REPORT_LOG="$BUILD_DIR/rust-coverage-summary.txt"
 INTEROP_REGEX='^(test_named_pipe_interop|test_win_shm_interop|test_service_win_interop|test_service_win_shm_interop|test_cache_win_interop|test_cache_win_shm_interop)$'
 IGNORE_REGEX='(src[\\/]+bin[\\/]|tests[\\/]+fixtures[\\/]+rust[\\/]+src[\\/]+bin[\\/]|bench[\\/]+drivers[\\/]+rust[\\/]+src[\\/])'
 THRESHOLD=${1:-90}
+CRITICAL_FILES=(
+    'service\cgroups.rs'
+    'transport\windows.rs'
+    'transport\win_shm.rs'
+)
+
+extract_last_pct() {
+    local pattern=$1
+    local line
+    line=$(grep -F "$pattern" "$REPORT_LOG" | head -n 1 || true)
+    [[ -n "$line" ]] || return 0
+    awk '
+        {
+            for (i = NF; i >= 1; i--) {
+                if ($i ~ /^[0-9]+\.[0-9]+%$/) {
+                    print $i
+                    exit
+                }
+            }
+        }
+    ' <<<"$line"
+}
+
+pct_meets_threshold() {
+    local pct=$1
+    local threshold=$2
+    awk -v pct="${pct%%%}" -v threshold="$threshold" 'BEGIN { exit !((pct + 0.0) >= threshold) }'
+}
 
 run() {
     printf >&2 "${GRAY}$(pwd) >${NC} "
@@ -132,14 +160,31 @@ if [[ -z "$total_pct" ]]; then
 fi
 
 echo
-total_pct_num=$(echo "$total_pct" | tr -d '%')
-total_pct_int=${total_pct_num%.*}
-
-if [[ $total_pct_int -ge $THRESHOLD ]]; then
-    echo -e "${GREEN}Windows Rust coverage ${total_pct} meets threshold ${THRESHOLD}%.${NC}"
-    echo -e "${GRAY}Note: one retry/shutdown test is still intentionally ignored and tracked separately from this normal coverage gate.${NC}"
-    exit 0
+if ! pct_meets_threshold "$total_pct" "$THRESHOLD"; then
+    echo -e "${RED}Windows Rust total line coverage ${total_pct} is below threshold ${THRESHOLD}%.${NC}"
+    exit 1
 fi
 
-echo -e "${RED}Windows Rust coverage ${total_pct} is below threshold ${THRESHOLD}%.${NC}"
-exit 1
+critical_fail=0
+for pattern in "${CRITICAL_FILES[@]}"; do
+    file_pct=$(extract_last_pct "$pattern")
+    if [[ -z "$file_pct" ]]; then
+        echo -e "${RED}ERROR:${NC} Failed to parse critical file coverage for pattern: $pattern"
+        exit 1
+    fi
+
+    if pct_meets_threshold "$file_pct" "$THRESHOLD"; then
+        printf "%bCritical Rust file %s line coverage %s meets threshold %s%%.%b\n" \
+            "$GREEN" "$pattern" "$file_pct" "$THRESHOLD" "$NC"
+    else
+        printf "%bCritical Rust file %s line coverage %s is below threshold %s%%.%b\n" \
+            "$RED" "$pattern" "$file_pct" "$THRESHOLD" "$NC"
+        critical_fail=1
+    fi
+done
+
+if [[ $critical_fail -ne 0 ]]; then
+    exit 1
+fi
+
+echo -e "${GREEN}Windows Rust total line coverage ${total_pct} meets threshold ${THRESHOLD}%.${NC}"

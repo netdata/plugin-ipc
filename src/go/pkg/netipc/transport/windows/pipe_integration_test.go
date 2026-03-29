@@ -439,6 +439,38 @@ func TestPipeHandshakeProfileMismatch(t *testing.T) {
 	}
 }
 
+func TestPipeHandshakeIncompatibleClassifierHelpers(t *testing.T) {
+	hdr := protocol.Header{
+		Magic:     protocol.MagicMsg,
+		Version:   protocol.Version + 1,
+		HeaderLen: protocol.HeaderLen,
+		Kind:      protocol.KindControl,
+		Code:      protocol.CodeHello,
+	}
+	hdrBuf := make([]byte, protocol.HeaderSize)
+	hdr.Encode(hdrBuf)
+	if !headerVersionIncompatible(hdrBuf, protocol.CodeHello) {
+		t.Fatal("headerVersionIncompatible should detect bad HELLO version")
+	}
+	if headerVersionIncompatible(hdrBuf, protocol.CodeHelloAck) {
+		t.Fatal("headerVersionIncompatible should respect expected code")
+	}
+
+	hello := protocol.Hello{LayoutVersion: 2}
+	helloBuf := make([]byte, 44)
+	hello.Encode(helloBuf)
+	if !helloLayoutIncompatible(helloBuf) {
+		t.Fatal("helloLayoutIncompatible should detect bad layout_version")
+	}
+
+	ack := protocol.HelloAck{LayoutVersion: 2}
+	ackBuf := make([]byte, 48)
+	ack.Encode(ackBuf)
+	if !helloAckLayoutIncompatible(ackBuf) {
+		t.Fatal("helloAckLayoutIncompatible should detect bad layout_version")
+	}
+}
+
 func TestPipeAddrInUse(t *testing.T) {
 	service := uniquePipeService(t)
 	listener := startListener(t, testPipeRunDir, service, defaultServerConfig())
@@ -480,12 +512,12 @@ func TestPipeDirectionalLimitNegotiation(t *testing.T) {
 	server := sr.session
 	defer server.Close()
 
-    if client.MaxRequestPayloadBytes != 4096 || client.MaxRequestBatchItems != 16 || client.MaxResponsePayloadBytes != 8192 || client.MaxResponseBatchItems != 32 {
-        t.Fatalf("unexpected negotiated client limits: %+v", client)
-    }
-    if server.MaxRequestPayloadBytes != client.MaxRequestPayloadBytes || server.MaxResponsePayloadBytes != client.MaxResponsePayloadBytes {
-        t.Fatalf("server/client negotiation mismatch: server=%+v client=%+v", server, client)
-    }
+	if client.MaxRequestPayloadBytes != 4096 || client.MaxRequestBatchItems != 16 || client.MaxResponsePayloadBytes != 8192 || client.MaxResponseBatchItems != 32 {
+		t.Fatalf("unexpected negotiated client limits: %+v", client)
+	}
+	if server.MaxRequestPayloadBytes != client.MaxRequestPayloadBytes || server.MaxResponsePayloadBytes != client.MaxResponsePayloadBytes {
+		t.Fatalf("server/client negotiation mismatch: server=%+v client=%+v", server, client)
+	}
 }
 
 func TestPipeProfileSelection(t *testing.T) {
@@ -969,8 +1001,6 @@ func TestPipeHandleAndRole(t *testing.T) {
 }
 
 func TestPipePipelineChunked(t *testing.T) {
-	t.Skip("Windows named pipes use packet_size as the pipe buffer here; chunked full-duplex pipelining deadlocks under the current single-session API")
-
 	service := uniquePipeService(t)
 	const forcedPacketSize = 128
 
@@ -1000,14 +1030,72 @@ func TestPipePipelineChunked(t *testing.T) {
 	server := sr.session
 	defer server.Close()
 
-	_ = service
-	_ = forcedPacketSize
-	_ = listener
-	_ = acceptCh
-	_ = cCfg
-	_ = client
-	_ = sr
-	_ = server
+	sizes := []int{200, 500, 300, 800, 150}
+	count := len(sizes)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, forcedPacketSize)
+		for i := 0; i < count; i++ {
+			rHdr, rPayload, err := server.Receive(buf)
+			if err != nil {
+				t.Errorf("server Receive[%d]: %v", i, err)
+				return
+			}
+			resp := protocol.Header{
+				Kind:      protocol.KindResponse,
+				Code:      rHdr.Code,
+				ItemCount: 1,
+				MessageID: rHdr.MessageID,
+			}
+			if err := server.Send(&resp, rPayload); err != nil {
+				t.Errorf("server Send[%d]: %v", i, err)
+				return
+			}
+		}
+	}()
+
+	for i, sz := range sizes {
+		payload := make([]byte, sz)
+		for j := range payload {
+			payload[j] = byte((i + j) & 0xFF)
+		}
+		hdr := protocol.Header{
+			Kind:      protocol.KindRequest,
+			Code:      protocol.MethodIncrement,
+			ItemCount: 1,
+			MessageID: uint64(i + 1),
+		}
+		if err := client.Send(&hdr, payload); err != nil {
+			t.Fatalf("client Send[%d]: %v", i, err)
+		}
+	}
+
+	buf := make([]byte, forcedPacketSize)
+	for i, sz := range sizes {
+		rHdr, rPayload, err := client.Receive(buf)
+		if err != nil {
+			t.Fatalf("client Receive[%d]: %v", i, err)
+		}
+		if rHdr.MessageID != uint64(i+1) {
+			t.Errorf("[%d] message_id = %d, want %d", i, rHdr.MessageID, i+1)
+		}
+		if len(rPayload) != sz {
+			t.Errorf("[%d] payload len = %d, want %d", i, len(rPayload), sz)
+			continue
+		}
+		expected := make([]byte, sz)
+		for j := range expected {
+			expected[j] = byte((i + j) & 0xFF)
+		}
+		if !bytes.Equal(rPayload, expected) {
+			t.Errorf("[%d] chunked payload data mismatch", i)
+		}
+	}
+
+	wg.Wait()
 }
 
 func TestPipeBatchRoundTrip(t *testing.T) {

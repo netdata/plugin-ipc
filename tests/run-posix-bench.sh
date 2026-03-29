@@ -165,15 +165,33 @@ stop_server() {
     local lang="$2"
     local svc="$3"
 
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-
     local server_out="${RUN_DIR}/server-${lang}-${svc}.out"
     local server_cpu="0.0"
+    local waited=0
+    local wait_ticks=50
+
+    # Servers are spawned from command substitution, so they are not child jobs
+    # of the calling shell. Poll for real exit instead of using wait(1), which
+    # would return immediately and race the final SERVER_CPU_SEC flush.
+    kill "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$wait_ticks" ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+
+    if kill -0 "$pid" 2>/dev/null; then
+        warn "  Server ${lang} (${svc}) did not exit cleanly within 5s; forcing kill"
+        kill -9 "$pid" 2>/dev/null || true
+        local forced_waited=0
+        while kill -0 "$pid" 2>/dev/null && [ "$forced_waited" -lt 20 ]; do
+            sleep 0.1
+            forced_waited=$((forced_waited + 1))
+        done
+    fi
 
     if [ -f "$server_out" ]; then
         local cpu_line
-        cpu_line=$(grep "^SERVER_CPU_SEC=" "$server_out" 2>/dev/null || true)
+        cpu_line=$(grep "^SERVER_CPU_SEC=" "$server_out" 2>/dev/null | tail -1 || true)
         if [ -n "$cpu_line" ]; then
             server_cpu="${cpu_line#SERVER_CPU_SEC=}"
         fi

@@ -1,0 +1,2134 @@
+## Autonomous execution contract
+
+- Costa explicitly requires autonomous execution with no checkpoints.
+- "Working autonomously" means:
+  - do not stop to provide progress updates, interim summaries, or checkpoint
+    reports
+  - do not pause between phases just because a milestone was reached
+  - continue phase by phase until the next real design decision not already
+    answered by `docs/` or other repository specifications, or until the entire
+    plan is complete
+- The next user-facing summary is allowed only at:
+  - the next real design/product decision that is not already answered by the
+    repository docs/specs
+  - full completion of the entire fit-for-purpose plan
+
+## Purpose
+
+Prove that `netipc` is fit for purpose for Netdata integration as a long-running,
+cross-platform IPC library: reliable under service absence and restart, robust
+under malformed input and hostile timing, leak-free over long runtimes, fast
+enough for the intended plugin workloads, and operationally trustworthy on both
+Linux and native Windows.
+
+## Execution mode
+
+- Costa explicitly asked for autonomous execution of this entire plan.
+- Work must proceed phase by phase to completion without pausing for approval,
+  unless a real design decision is encountered that is not already answered by
+  the existing repository docs and specifications.
+- If a design decision is already answered in `docs/` or other repository
+  specifications, that documented answer must be treated as authoritative and
+  implementation should proceed.
+- Stop only for:
+  - unresolved product/design questions not already answered in the repo docs
+  - hard environmental blockers that cannot be worked around safely
+  - evidence of conflicting requirements between code and docs that materially
+    changes the intended contract
+- Otherwise continue until the library satisfies the no-exclusions fit-for-
+  purpose criteria in this TODO.
+- `2026-03-29` Costa clarified a hard sign-off rule:
+  - "benchmark environment instability" is not an acceptable terminal
+    explanation
+  - any repeatable lab failure must end in one of two buckets:
+    - the testing / benchmark harness is wrong and must be fixed
+    - the product code is wrong and must be fixed
+  - if the current shared workstation + `win11` VM setup is too noisy for
+    strict sign-off, that is a harness / validation-system defect, not an
+    excuse to downgrade the failure into acceptable noise
+  - final fit-for-purpose sign-off must therefore eliminate these failures by
+    improving the harness/rig or by fixing code, not by classifying them away
+
+## TL;DR
+
+- The repo already proves ordinary correctness well: strong coverage, fuzzing,
+  chaos tests, stress tests, interop, and verified benchmark floors.
+- The remaining uncertainty is not “basic logic”. It is the hard operational
+  classes: allocation failure, OS / Win32 failure, race timing, restart /
+  reconnect behavior, leak freedom, and real Netdata process-model validation.
+- The fastest path to fit-for-purpose confidence is:
+  - close the known ignored / skipped Windows cases
+  - add deterministic fault injection
+  - add leak / sanitizer / Windows verifier runs
+  - add long soak loops
+  - add a real Netdata plugin integration harness
+
+## Analysis
+
+### What is already strongly proven
+
+- Public L2/L3 APIs are now OS-transparent within each language:
+  - C plugin code should compile unchanged on Linux and Windows
+  - Rust plugin code should compile unchanged on Linux and Windows
+  - Go plugin code should compile unchanged on Linux and Windows
+  - reference:
+    - `TODO-unified-l2-l3-api.md`
+- Functional verification is already strong on both Linux and Windows:
+  - Linux:
+    - full `ctest`
+    - full Rust tests
+    - full Go tests
+    - full POSIX benchmark matrix
+  - Windows:
+    - native `ctest`
+    - native Rust tests
+    - native Go tests
+    - native strict benchmark matrix
+    - native report generation
+- Current checked-in benchmark reports meet all documented floors:
+  - `benchmarks-posix.md`
+  - `benchmarks-windows.md`
+- Coverage is already high and explicitly measured:
+  - Linux:
+    - C `94.1%`
+    - Go `95.8%`
+    - Rust `98.57%`
+  - Windows:
+    - C `93.2%`
+    - Go `95.4%`
+    - Rust `92.08%`
+
+### Honest current gaps
+
+- The repo explicitly states that Windows still has less chaos / hardening /
+  stress breadth than Linux:
+  - `README.md`
+  - `WINDOWS-COVERAGE.md`
+- Linux repeated full-suite stability is still not clean enough:
+  - first earlier evidence:
+    - one Linux full-suite SHM interop failure before clean reruns:
+      - `TODO-unified-l2-l3-api.md`
+  - fresh stronger evidence on `2026-03-29`:
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j4 --repeat until-fail:10`
+      stopped with:
+      - `24:test_service_rust`
+      - `34:test_stress_rust`
+    - `build/Testing/Temporary/LastTestsFailed.log`
+  - important nuance:
+    - immediate isolated reruns of only those two tests passed
+    - `cargo test --manifest-path src/crates/netipc/Cargo.toml service -- --test-threads=1`
+      passed
+    - a focused CTest repeat loop for only `test_service_rust` and
+      `test_stress_rust` was still passing when this TODO was updated
+  - additional concrete harness finding on `2026-03-29`:
+    - `test_service_rust` was not cleanly partitioned
+    - its `cargo test service` filter was also running the Rust stress tests,
+      while `test_stress_rust` separately ran the same stress slice again
+    - Linux Go CTest also had a weaker partitioning issue:
+      - `test_service_go` overlapped `test_cache_go`
+      - `test_stress_go` pointed at `./pkg/netipc/service/cgroups/` and
+        therefore passed with `no tests to run`
+  - fix applied:
+    - `CMakeLists.txt`
+    - Rust CTest now uses:
+      - `test_service_typed_rust`
+      - `test_service_rust` for raw non-stress service/cache coverage
+      - `test_stress_rust` for the dedicated stress slice only
+    - Linux Go CTest now uses:
+      - `test_service_go` for typed non-cache tests only
+      - `test_cache_go` for the typed cache wrapper test
+      - `test_stress_go` for the real raw stress package
+  - fresh proof after the partition fix:
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j4 -R '^(test_service_typed_rust|test_service_rust|test_stress_rust|test_service_go|test_cache_go|test_stress_go)$'`
+    - result: `6/6` passed
+  - additional concrete proof on `2026-03-29`:
+    - the corrected `test_service_rust` command now maps to:
+      - `cargo test service::raw::tests:: -- --test-threads=1`
+      - plus explicit skips for only the six `test_stress_*` cases
+    - direct proof:
+      - `cargo test --manifest-path src/crates/netipc/Cargo.toml service::raw::tests:: -- --test-threads=1 --skip test_stress_1000_items --skip test_stress_5000_items --skip test_stress_cache_concurrent --skip test_stress_concurrent_clients --skip test_stress_long_running --skip test_stress_rapid_connect_disconnect`
+      - result:
+        - `69` tests passed
+        - `0` failed
+        - finished in `16.43s`
+    - implication:
+      - the earlier `test_service_rust` timeout evidence no longer points to
+        the raw non-stress Rust slice itself
+      - it points to stale CTest metadata from before the latest reconfigure,
+        plus the broader long repeated-suite instability still under burn-down
+  - fresh stronger burn-down on `2026-03-29` after the later Linux harness
+    fixes:
+    - focused repeated proof:
+      - `/usr/bin/ctest --test-dir build --output-on-failure -j4 -R '^(test_service_rust|test_stress_rust|test_cache_interop|test_cache_shm_interop|test_service_extra)$' --repeat until-fail:10`
+      - result:
+        - `100%` tests passed
+        - `0` failed out of `5`
+        - total real time `473.90 sec`
+    - broader POSIX interop proof:
+      - `/usr/bin/ctest --test-dir build --output-on-failure -j4 -R '^(test_service_interop|test_service_shm_interop|test_cache_interop|test_cache_shm_interop|test_uds_interop|test_shm_interop)$' --repeat until-fail:10`
+      - result:
+        - `100%` tests passed
+        - `0` failed out of `6`
+        - total real time `17.40 sec`
+    - full repeated Linux suite after the last CTest scheduling fix:
+      - `/usr/bin/ctest --test-dir build --output-on-failure -j4 --repeat until-fail:3`
+      - result:
+        - `100%` tests passed
+        - `0` failed out of `39`
+        - total real time `908.53 sec`
+    - implication:
+      - the latest evidence no longer supports a standing reproducible Linux
+        repeated-suite blocker at the current code state
+      - longer soak still remains desirable, but the previously reproduced
+        failures have now been narrowed to concrete harness issues that were
+        fixed
+- Coverage exclusions are already documented for the hard classes:
+  - allocation-failure branches
+  - OS / kernel / Win32 API failure branches
+  - timing / race branches
+  - references:
+    - `COVERAGE-EXCLUSIONS.md`
+    - `WINDOWS-COVERAGE.md`
+- Version rejection is tested, and forward-compatibility intent is documented,
+  but there is no explicit mixed-version / rolling-upgrade matrix proven by the
+  current repo-level test evidence:
+  - version rejection:
+    - `tests/test_protocol.c`
+  - forward-compatibility intent:
+    - `docs/codec-cgroups-snapshot.md`
+- The repo already checks in Linux heavy-validation entrypoints for:
+  - ASan + UBSan:
+    - `tests/run-sanitizer-asan.sh`
+  - TSan:
+    - `tests/run-sanitizer-tsan.sh`
+  - Valgrind:
+    - `tests/run-valgrind.sh`
+- Honest remaining gap:
+  - Windows verifier / low-resource tooling is still not checked in as a
+    first-class workflow:
+    - Application Verifier / PageHeap
+    - Dr. Memory or equivalent handle/heap tooling
+- Fresh native Windows verifier evidence on `2026-03-29` shows a real L1
+  defect still exists:
+  - native `win11` `appverif.exe` against `build/bin/test_named_pipe.exe`
+    produced a deterministic Handles stop:
+    - `LayerName="Handles"`
+    - `StopCode="0x300"`
+    - top frame: `KERNELBASE!ConnectNamedPipe+6a`
+  - exported native verifier artifact:
+    - `C:\msys64\home\costa\src\plugin-ipc.git\verifier-test_named_pipe.xml`
+  - current working theory:
+    - a raw closed-listener path in the C L1 transport is still issuing
+      `ConnectNamedPipe()` against a stale handle
+    - this is grounded enough to drive code changes, but still needs native
+      post-fix verifier proof before it can be called resolved
+- Updated native Windows verifier evidence later on `2026-03-29`:
+  - the original `test_named_pipe.exe` `ConnectNamedPipe` invalid-handle stop
+    is resolved
+  - native proof:
+    - `appverif.exe -export log -for test_named_pipe.exe ...`
+    - result:
+      - `AVRF: Error: there is no valid log file for test_named_pipe.exe`
+  - `test_win_service.exe` is also clean under Application Verifier Handles:
+    - fresh exported session exists with no `<logEntry>`
+    - artifact:
+      - `C:\msys64\home\costa\src\plugin-ipc.git\verifier-test_win_service.xml`
+- a new blocker replaced the old one:
+  - `test_win_service_extra.exe`
+    - `LayerName="Handles"`
+    - `StopCode="0x300"`
+    - top frame: `KERNELBASE!ReadFile+8d`
+    - artifact:
+      - `C:\msys64\home\costa\src\plugin-ipc.git\verifier-test_win_service_extra.xml`
+  - grounded working theory:
+    - the remaining Windows C issue is no longer in the raw named-pipe
+      listener path
+    - it is now in the C service/test process, likely a broken-session or
+      shutdown/recovery path that reaches `ReadFile()` after the same pipe
+      handle was already closed elsewhere in-process
+  - later `2026-03-29` resolution:
+    - the failing path was isolated to
+      `test_refresh_from_broken_state()` in
+      `tests/fixtures/c/test_win_service_extra.c`
+    - native trace evidence showed the real bug was not the broken-session
+      client path itself
+    - it was cross-thread listener ownership during Windows stop:
+      - `nipc_server_stop()` woke `ConnectNamedPipe()` and also closed the live
+        listener handle from another thread
+      - the accept thread could race past `ConnectNamedPipe()` and enter
+        `server_handshake()` on that same handle
+      - the next `ReadFile()` then hit the stale listener session handle under
+        Application Verifier
+    - fixed files:
+      - `src/libnetdata/netipc/include/netipc/netipc_service.h`
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c`
+    - fix shape:
+      - added `accept_loop_active` tracking in the Windows managed server
+      - `nipc_server_stop()` / `nipc_server_drain()` / `nipc_server_destroy()`
+        now wake the accept loop without cross-thread closing the live listener
+        when the accept loop is active
+      - `nipc_server_run()` now owns closing the listener on exit
+      - session-thread synchronous I/O cancellation remains in place for
+        active-thread stop/drain robustness
+    - native `win11` proof:
+      - isolated Application Verifier Handles rerun of
+        `test_refresh_from_broken_state()` now passes with no log entry
+      - full `test_win_service_extra.exe` now passes under Application
+        Verifier Handles with no `<logEntry>` in:
+        - `C:\msys64\home\costa\src\plugin-ipc.git\msys64homecostasrcplugin-ipc.gitverifier-test_win_service_extra-final.xml`
+- fresh Linux interop-cache burn-down on `2026-03-29`:
+  - the repeated full suite later failed in:
+    - `test_cache_interop`
+    - `test_cache_shm_interop`
+  - concrete failure symptom:
+    - `client: cache not ready after refresh`
+  - root-cause direction validated in code:
+    - Go POSIX interop cache client already used a bounded refresh retry loop
+    - C and Rust interop cache clients were still using one-shot refresh
+    - that made the cross-language cache harness inconsistent on startup timing
+  - fix applied:
+    - `tests/fixtures/c/interop_cache.c`
+    - `tests/fixtures/c/interop_cache_win.c`
+    - `tests/fixtures/rust/src/bin/interop_cache.rs`
+    - `tests/fixtures/rust/src/bin/interop_cache_win.rs`
+    - `tests/fixtures/go/cmd/interop_cache_win/main.go`
+    - all now use the same bounded refresh-retry pattern before failing
+  - repeated proof:
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j1 -R '^(test_cache_interop|test_cache_shm_interop)$' --repeat until-fail:30`
+    - result:
+      - `30/30` passes for both tests
+      - `0` failures
+  - implication:
+    - the cache interop flake was harness timing, not a demonstrated library
+      compatibility defect
+  - later stronger root cause found in the shell harness itself:
+    - `tests/test_cache_interop.sh`
+    - `tests/test_service_interop.sh`
+    - `tests/test_shm_interop.sh`
+    - `tests/test_uds_interop.sh`
+    - and the Windows counterparts:
+      - `tests/test_cache_win_interop.sh`
+      - `tests/test_service_win_interop.sh`
+      - `tests/test_named_pipe_interop.sh`
+      - `tests/test_win_shm_interop.sh`
+    - all had fixed shared run directories before the fix
+    - under parallel `ctest`, separate interop scripts could trample the same:
+      - socket paths
+      - SHM region names
+      - cleanup actions
+  - fix applied:
+    - each interop script invocation now creates its own unique run directory
+    - per-test server logs now live inside that unique run directory
+  - repeated proof after the harness fix:
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j4 -R '^(test_service_interop|test_service_shm_interop|test_cache_interop|test_cache_shm_interop|test_uds_interop|test_shm_interop)$' --repeat until-fail:10`
+    - result:
+      - `100%` tests passed
+      - `0` failed out of `6`
+      - total real time `17.40 sec`
+  - implication:
+    - the later cache/service/shm/uds interop flakes were a shared-harness
+      isolation bug, not evidence of cross-language protocol incompatibility
+- fresh native Windows benchmark regression on `2026-03-29`:
+  - repro from a clean disposable `win11` proof tree with preserved artifacts:
+    - `NIPC_KEEP_RUN_DIR=1 NIPC_BENCH_FIRST_BLOCK=1 NIPC_BENCH_LAST_BLOCK=1 bash tests/run-windows-bench.sh /tmp/win-bench-block1.csv 5`
+  - concrete failure:
+    - `np-ping-pong c->c @ max`
+      - `median_throughput=87`
+      - `p50=15446.600us`
+      - `p95=15609.300us`
+      - `p99=15609.300us`
+    - `np-ping-pong rust->c @ max`
+      - same `~15.5ms` latency shape
+  - preserved run directory:
+    - `/tmp/netipc-bench-699581`
+  - grounded root cause:
+    - the recent Windows C service-loop stop-safety change replaced blocking
+      request receive with `nipc_np_wait_readable()` polling
+    - `server_handle_session()` now polls `PeekNamedPipe()` with `Sleep(10)`
+      before every `nipc_np_receive()`:
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c`
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`
+    - in ping-pong traffic that can miss the just-after-check request and add a
+      full `10ms` sleep to nearly every round trip
+  - broader truth discovered while burning it down:
+    - the clean proof-tree benchmark runner itself was also masking fixes
+    - `tests/run-windows-bench.sh` rebuilt only:
+      - `bench_windows_c`
+      - `bench_windows_go`
+    - but it did not rebuild:
+      - Rust `bench_windows.exe`
+    - consequence:
+      - fresh proof trees could benchmark stale Rust code and produce false
+        negative evidence for current local fixes
+  - fixes applied:
+    - C Windows service loop:
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c`
+      - restored blocking `nipc_np_receive()` in the named-pipe hot path
+      - stop/drain still relies on the existing
+        `CancelSynchronousIo(session_thread)` path
+    - shared Windows named-pipe readability wait:
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`
+      - `src/crates/netipc/src/transport/windows.rs`
+      - `src/go/pkg/netipc/transport/windows/pipe.go`
+      - replaced fixed `Sleep(10)` polling with:
+        - one short `SwitchToThread()` yield burst to catch the immediate next
+          request
+        - then `Sleep(1)` for genuine idle waiting
+      - implication:
+        - preserves the existing stop model for Rust/Go
+        - removes the `~10ms` hot-path miss cliff for ping-pong traffic
+    - Windows benchmark runner:
+      - `tests/run-windows-bench.sh`
+      - now also rebuilds Rust:
+        - `cargo build --release --manifest-path src/crates/netipc/Cargo.toml --bin bench_windows`
+  - fresh native `win11` proof after all three fixes from the clean disposable
+    tree:
+    - output CSV:
+      - `/tmp/win-bench-block1-rebuilt.csv`
+    - preserved run dir:
+      - `/tmp/netipc-bench-707014`
+    - max-throughput rows already revalidated cleanly:
+      - `c->c = 20369`, `p50=42.8us`, `p95=100.6us`
+      - `rust->c = 20094`, `p50=42.9us`, `p95=103.3us`
+      - `go->c = 19739`, `p50=43.4us`, `p95=107.4us`
+      - `c->rust = 29570`, `p50=31.9us`, `p95=76.7us`
+      - `rust->rust = 29720`, `p50=32.3us`, `p95=77.4us`
+      - `go->rust = 29918`, `p50=33.7us`, `p95=83.4us`
+      - `c->go = 28770`, `p50=32.5us`, `p95=82.7us`
+    - `100000/s` rows also re-entered the correct band during the same run:
+      - `c->c = 18512`, `p50=44.3us`
+      - `rust->c = 18470`, `p50=44.2us`
+      - `go->c = 18675`, `p50=44.1us`
+      - `c->rust = 27352`, `p50=28.0us`
+      - `rust->rust = 26077`, `p50=30.4us`
+      - `go->rust = 28280`, `p50=34.1us`
+  - implication:
+    - the benchmark regression was real
+    - it is now materially burned down in the corrected proof run
+    - the next remaining step is the full native Windows suite rerun with the
+      corrected runner and transport/service code, not more benchmark-method
+      surgery
+- fresh native Windows runtime proof after the Go L1 disconnect/state fixes on
+  `2026-03-29`:
+  - native `win11` full `ctest` rerun from the corrected disposable proof tree:
+    - `ctest --test-dir build --output-on-failure -j4`
+    - result:
+      - `28/28` passed
+      - concrete previously failing tests now clean:
+        - `test_named_pipe_go`
+        - `test_win_service_extra`
+  - native `win11` Rust suite:
+    - `cargo test --manifest-path src/crates/netipc/Cargo.toml`
+    - result:
+      - `192` passed
+      - `0` failed
+      - `0` ignored
+  - native `win11` Go transport/service proof:
+    - package-by-package runs after the final listener fix:
+      - `go test ./pkg/netipc/protocol`
+      - `go test ./pkg/netipc/service/cgroups`
+      - `go test ./pkg/netipc/service/raw`
+      - `go test ./pkg/netipc/transport/windows`
+    - result:
+      - all four packages passed
+    - combined proof with the exact Windows-visible package set:
+      - `go test ./pkg/netipc/protocol ./pkg/netipc/service/cgroups ./pkg/netipc/service/raw ./pkg/netipc/transport/windows`
+      - result:
+        - passed
+  - concrete Go defects fixed in this slice:
+    - `src/go/pkg/netipc/transport/windows/pipe.go`
+      - disconnect on a client session now clears the whole in-flight
+        `message_id` set, matching the Level 1 contract that a broken session
+        fails all in-flight requests
+      - listener shutdown no longer cross-thread closes the live accept handle
+        while `Accept()` is blocked or racing forward on it
+    - `src/go/pkg/netipc/transport/posix/uds.go`
+      - the same in-flight cleanup rule now applies on POSIX Go sessions when
+        a transport receive/send failure breaks the session
+    - `src/go/pkg/netipc/transport/windows/pipe_edge_test.go`
+      - the continuation-chunk disconnect test now asserts the actual Level 1
+        contract:
+          - either `Send()` fails immediately on disconnect
+          - or the next session observation fails and the in-flight request is
+            cleared
+  - grounded native proof for the Go Windows retry/stop race:
+    - before the listener fix:
+      - `go test ./pkg/netipc/service/raw`
+      - could crash inside the Go runtime on Windows with:
+        - `runtime: setevent failed; errno=6`
+        - `fatal error: runtime.semawakeup`
+      - top test path:
+        - `TestWinRetryOnClosedSession`
+      - this pointed to a real handle-lifecycle bug in listener shutdown, not a
+        wrapper or benchmark artifact
+    - after the listener fix:
+      - targeted proof:
+        - `go test ./pkg/netipc/service/raw -run 'TestWinRetryOnClosedSession$' -count=20 -v`
+      - result:
+        - `20/20` passed
+      - full package proof:
+        - `go test ./pkg/netipc/service/raw`
+      - result:
+        - passed
+  - fresh no-exclusions audit on `2026-03-29`:
+    - repo-wide grep for ignored/skipped runtime tests and soft acceptance
+      markers after the latest fixes did not reveal a new hidden pool of
+      exclusions
+    - concrete findings:
+      - no remaining `#[ignore]` in the active Rust runtime suite paths
+      - no remaining Windows L1 transport `t.Skip(...)` on supported patterns
+      - one Go stress test still has:
+        - `t.Skip("skipping 60s test in short mode")`
+        - `src/go/pkg/netipc/service/raw/stress_test.go`
+        - this is only a `-short` optimization, not a default-suite exclusion
+      - current `CMakeLists.txt` `--skip test_stress_*` arguments are now test
+        partitioning, not acceptance leaks:
+        - the skipped cases are covered by the dedicated stress targets
+        - they are no longer silently omitted from the validated suite
+- fresh Level 1 session-failure proof on `2026-03-29`:
+  - the docs already require that a broken session fails all in-flight
+    requests:
+    - `docs/level1-transport.md`
+  - concrete code gap burned down:
+    - Go already cleared the whole client in-flight set on session-breaking
+      disconnect / send / recv paths
+    - C and Rust were still mostly removing only the current `message_id`
+      instead of failing the full in-flight set
+  - fixed files:
+    - `src/libnetdata/netipc/src/transport/posix/netipc_uds.c`
+    - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`
+    - `src/crates/netipc/src/transport/posix.rs`
+    - `src/crates/netipc/src/transport/windows.rs`
+  - key behavior change:
+    - transport send failure that breaks the session now clears the entire
+      client in-flight set
+    - transport receive disconnect/failure now clears the entire client
+      in-flight set before returning the error
+    - Windows C `nipc_np_wait_readable()` now also clears the client
+      in-flight set when it observes disconnect / recv failure
+  - direct Linux proof:
+    - `cargo test --manifest-path src/crates/netipc/Cargo.toml test_disconnect_detection --lib`
+      - result:
+        - passed
+        - the Rust POSIX test now asserts that the whole in-flight set is empty
+          after disconnect
+    - `cmake --build build --target test_uds -j4`
+    - `/usr/bin/ctest --test-dir build --output-on-failure -R '^test_uds$'`
+      - result:
+        - passed
+        - the C UDS test now asserts `session.inflight_count == 0` after
+          disconnect
+  - direct native Windows proof from the disposable `win11` tree:
+    - overlaid files:
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`
+      - `src/crates/netipc/src/transport/windows.rs`
+      - `tests/fixtures/c/test_named_pipe.c`
+    - native C proof:
+      - `cmake --build build --target test_named_pipe -j4`
+      - `ctest --test-dir build --output-on-failure -R '^test_named_pipe$'`
+      - result:
+        - passed
+        - the C named-pipe suite now includes a transport-level
+          `disconnect clears all in-flight requests` assertion
+    - native Rust proof:
+      - `cargo test --manifest-path src/crates/netipc/Cargo.toml test_disconnect_clears_all_inflight --lib`
+      - result:
+        - passed
+        - the Rust named-pipe suite now asserts that a disconnect empties the
+          whole client in-flight set
+- stale design-note burn-down on `2026-03-29`:
+  - the earlier TODO note that protocol-version mismatch might still map to
+    generic `DISCONNECTED` at L2/L3 was stale
+  - current verified evidence already matches Costa's recorded decision:
+    - Level 2 docs:
+      - `docs/level2-typed-api.md`
+      - `INCOMPATIBLE` explicitly includes protocol/layout version mismatch
+    - C:
+      - `src/libnetdata/netipc/src/service/netipc_service.c`
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c`
+      - both already map transport `*_ERR_INCOMPATIBLE` to
+        `NIPC_CLIENT_INCOMPATIBLE`
+      - explicit service tests already exist in:
+        - `tests/fixtures/c/test_service.c`
+        - `tests/fixtures/c/test_win_service.c`
+    - Rust:
+      - `src/crates/netipc/src/service/raw.rs`
+      - both POSIX and Windows already map `NoProfile` and `Incompatible(_)`
+        to `ClientState::Incompatible`
+      - explicit tests already exist in:
+        - `src/crates/netipc/src/service/raw_unix_tests.rs`
+        - `src/crates/netipc/src/service/raw_windows_tests.rs`
+    - Go:
+      - `src/go/pkg/netipc/service/raw/client.go`
+      - `src/go/pkg/netipc/service/raw/client_windows.go`
+      - both already route incompatible handshake errors to
+        `StateIncompatible`
+      - explicit tests already exist in:
+        - `src/go/pkg/netipc/service/raw/edge_test.go`
+        - `src/go/pkg/netipc/service/raw/more_windows_test.go`
+  - implication:
+    - no code change was required for the protocol-mismatch state contract
+    - the TODO was corrected by evidence, not by additional churn
+
+### Phase 0 audit findings
+
+- The ignored Rust Windows restart / reconnect test is hiding a real shutdown
+  bug, not just flaky timing:
+  - `src/crates/netipc/src/service/raw_windows_tests.rs`
+    - `TestServer::stop()` only flips `running_flag` and performs a wake
+      connect; it does not close active session handles
+  - `src/crates/netipc/src/service/raw.rs`
+    - `handle_session_win_threaded()` blocks in `session.receive()` on the
+      Named Pipe path with no timeout
+    - the accept loop can stop, but active session threads still wait forever
+      for more pipe input
+  - direct proof on `win11`:
+    - `cargo test --manifest-path src/crates/netipc/Cargo.toml test_retry_on_failure_windows -- --ignored --nocapture`
+    - the test starts and then hangs instead of completing
+- The Windows Level 1 named-pipe pipelining problem is structurally credible in
+  all three implementations, not just in the skipped Go test:
+  - Go:
+    - `src/go/pkg/netipc/transport/windows/pipe.go`
+      - `Listen()` derives the kernel pipe buffer size from `config.PacketSize`
+    - `src/go/pkg/netipc/transport/windows/pipe_integration_test.go`
+      - `TestPipePipelineChunked()` is skipped because chunked full-duplex
+        pipelining deadlocks under the current single-session API
+  - Rust:
+    - `src/crates/netipc/src/transport/windows.rs`
+      - `NpListener::bind()` derives the kernel pipe buffer size from
+        `config.packet_size`
+      - there is no Windows chunked-pipeline test today
+  - C:
+    - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`
+      - `nipc_np_listen()` derives the kernel pipe buffer size from
+        `config->packet_size`
+      - there is no Windows chunked-pipeline test today
+- External evidence supports treating the buffer coupling as the first fix:
+  - Microsoft Learn:
+    - `CreateNamedPipeW` documents that writes can block until data is read
+      when additional buffer quota is needed
+    - `Named Pipe Type, Read, and Wait Modes` documents that blocking handles
+      wait for buffer space and that short message-mode reads return
+      `ERROR_MORE_DATA`
+  - libuv:
+    - `/tmp/libuv-netipc-audit/src/win/pipe.c`
+    - uses fixed `65536` inbound/outbound pipe buffers instead of coupling the
+      kernel pipe quota to a small protocol frame size
+
+### Acceptance leaks that must be removed
+
+- Ignored core-behavior test:
+  - fixed on `2026-03-28`
+  - `src/crates/netipc/src/service/raw_windows_tests.rs`
+  - `test_retry_on_failure_windows` now runs and passes natively on `win11`
+- Skipped supported L1 behavior:
+  - fixed on `2026-03-28`
+  - `src/go/pkg/netipc/transport/windows/pipe_integration_test.go`
+  - `TestPipePipelineChunked` now runs and passes natively on `win11`
+- Threshold-only Windows Rust coverage acceptance:
+  - fixed on `2026-03-28`
+  - `tests/run-coverage-rust-windows.sh` now enforces:
+    - total Windows Rust line coverage threshold
+    - per-file Windows Rust line coverage thresholds for:
+      - `service\cgroups.rs`
+      - `transport\windows.rs`
+      - `transport\win_shm.rs`
+  - native `win11` proof on a fresh disposable tree from `origin/main` plus the
+    local fit-for-purpose fixes:
+    - `service\cgroups.rs = 92.74%`
+    - `transport\windows.rs = 94.74%`
+    - `transport\win_shm.rs = 91.44%`
+    - total line coverage `= 91.12%`
+- Documented special-infrastructure carve-outs are still accepted operationally:
+  - allocation-failure branches
+  - OS / kernel / Win32 API failure branches
+  - race / timing branches
+  - references:
+    - `README.md`
+    - `WINDOWS-COVERAGE.md`
+    - `COVERAGE-EXCLUSIONS.md`
+- Windows stress breadth is still explicitly narrower than Linux:
+  - `README.md`
+  - `WINDOWS-COVERAGE.md`
+- Benchmark methodology still tolerates stable-core publication after raw
+  outliers:
+  - this is useful operationally, but it is still a tolerance and therefore not
+    acceptable as a final fit-for-purpose exclusion
+  - references:
+    - `tests/run-windows-bench.sh`
+    - `tests/generate-benchmarks-windows.sh`
+    - `TODO-unified-l2-l3-api.md`
+- One Linux SHM interop transient was accepted after rerun evidence:
+  - this is not encoded as a formal exclusion in scripts, but it is still a
+    practical acceptance softness until the flake is convincingly burned down
+  - reference:
+    - `TODO-unified-l2-l3-api.md`
+
+### Phase 0 status as of 2026-03-28
+
+- Fixed and now proven on native `win11`:
+  - Windows Rust managed restart / reconnect no longer relies on an ignored
+    test:
+    - `src/crates/netipc/src/service/raw_windows_tests.rs`
+    - `test_retry_on_failure_windows` is now part of the normal suite
+    - direct native proof:
+      - `cargo test --manifest-path src/crates/netipc/Cargo.toml test_retry_on_failure_windows -- --nocapture`
+      - result: passed after fixing the active-session shutdown path and
+        avoiding stale fixed service names
+  - Windows L1 chunked full-duplex named-pipe pipelining is now covered in all
+    three implementations:
+    - Go:
+      - `src/go/pkg/netipc/transport/windows/pipe_integration_test.go`
+      - `TestPipePipelineChunked` is no longer skipped and passes natively
+    - Rust:
+      - `src/crates/netipc/src/transport/windows.rs`
+      - native `test_pipeline_chunked` now exists and passes
+    - C:
+      - `tests/fixtures/c/test_named_pipe.c`
+      - `test_chunked_pipeline()` now exists and passes natively
+- Structural fix applied in all three Windows named-pipe transports:
+  - the kernel pipe buffer size is no longer coupled directly to the protocol
+    frame `packet_size`
+  - fixed files:
+    - `src/go/pkg/netipc/transport/windows/pipe.go`
+    - `src/crates/netipc/src/transport/windows.rs`
+    - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`
+  - external grounding:
+    - Microsoft Learn `CreateNamedPipeW`
+    - Microsoft Learn `Named Pipe Type, Read, and Wait Modes`
+    - libuv `/tmp/libuv-netipc-audit/src/win/pipe.c` uses fixed `65536`
+      inbound/outbound buffers rather than small protocol frame sizes
+  - Windows service shutdown with active clients is now explicitly tested in Go:
+    - `src/go/pkg/netipc/service/raw/more_windows_test.go`
+    - `TestWinServerStopWithActiveClientAndRestart`
+    - native result: passed on `win11`
+  - Windows C coverage-mode reconnect hang is fixed at Level 1:
+    - symptom before fix:
+      - native `win11` `bash tests/run-coverage-c-windows.sh 90` could hang in
+        `test_win_service_extra.exe`
+      - the direct coverage-built executable could also hang by itself in
+        `test_retry_on_broken_session()` after:
+          - `PASS: client ready`
+      - that made the old acceptance story false: this was not just a wrapper
+        script problem
+    - root cause:
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c`
+      - `server_handle_session()` waited on `WaitForSingleObject(session->pipe, ...)`
+        before calling `nipc_np_receive()`
+      - Rust and Go Windows L1 transports already use `PeekNamedPipe` polling
+        for readability instead
+      - the HANDLE wait was not a reliable request-readiness signal for the
+        synchronous named-pipe session path
+    - fix:
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`
+        - added `nipc_np_wait_readable()` implemented with `PeekNamedPipe`
+          polling
+      - `src/libnetdata/netipc/include/netipc/netipc_named_pipe.h`
+        - exported the L1 wait helper
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c`
+        - switched the named-pipe service loop to `nipc_np_wait_readable()`
+          instead of waiting on the raw pipe HANDLE
+      - `tests/fixtures/c/test_named_pipe.c`
+        - added explicit L1 coverage for:
+          - timeout with no pending bytes
+          - readability after client send
+          - disconnect detection
+- Remaining phase-0 work:
+  - remove the documented special-infrastructure carve-out from acceptance by
+    turning it into runnable validation targets
+  - burn down the Linux SHM transient with repeated evidence or a concrete fix
+  - refresh the long-form coverage documents so they match the new native
+    `win11` truth instead of the older caveats
+
+### Fresh native Windows Rust coverage proof on 2026-03-28
+
+- Environment:
+  - fresh disposable `win11` tree cloned from `origin/main` at `5372e97`
+  - local fit-for-purpose fixes overlaid into `/tmp/plugin-ipc-fitproof`
+- Command:
+  - `bash tests/run-coverage-rust-windows.sh 90`
+- Result:
+  - total line coverage: `92.08%`
+  - key runtime files:
+    - `service\cgroups.rs = 92.74%`
+    - `transport\windows.rs = 94.74%`
+    - `transport\win_shm.rs = 95.76%`
+- Implication:
+  - the old Windows Rust “total-only above 90%” acceptance leak is gone
+  - Phase 1 deterministic Win32 fault injection is now active in Rust
+  - `transport\win_shm.rs` is no longer just barely above the per-file floor
+  - the new native `win11` proof now includes forced failure and recovery for:
+    - `CreateFileMappingW`
+    - `OpenFileMappingW`
+    - `MapViewOfFile`
+    - `CreateEventW`
+    - `OpenEventW`
+  - the proof is cleanup-sensitive:
+    - forced-failure calls return the expected error variant
+    - the same object names work immediately afterward once the injected fault
+      is removed
+
+### Fresh native Windows Go coverage proof on 2026-03-28
+
+- Environment:
+  - fresh disposable `win11` tree cloned from `origin/main` at `5372e97`
+  - local fit-for-purpose fixes overlaid into `/tmp/plugin-ipc-fitproof`
+- Command:
+  - `bash tests/run-coverage-go-windows.sh 90`
+- Result:
+  - total line coverage: `95.4%`
+  - key runtime files:
+    - `service/cgroups/cache_windows.go = 100.0%`
+    - `service/cgroups/client_windows.go = 100.0%`
+    - `transport/windows/pipe.go = 92.1%`
+    - `transport/windows/shm.go = 94.2%`
+- What changed:
+  - public typed Windows Go wrapper tests now cover:
+    - `Cache.Ready()`
+    - `Cache.Status()`
+    - `Client.Status()`
+    - `NewServerWithWorkers()`
+  - the dead private helper `Handler.snapshotMaxItems()` was removed from
+    `src/go/pkg/netipc/service/cgroups/types.go`
+- Implication:
+  - the public typed Windows Go API is no longer hiding a wrapper-layer
+    coverage leak behind a green total percentage
+  - remaining ordinary Windows Go work is now transport-level, not typed
+    service-wrapper work
+
+### What “fit for purpose” means here
+
+- Not “100% mathematically proven”.
+- It means the remaining unknowns are small, explicit, and acceptable for
+  Netdata’s use:
+  - long-running plugin processes
+  - repeated start / stop
+  - reconnect after server absence
+  - no unbounded CPU while disconnected
+  - no leaks after many reconnect / resize cycles
+  - no deadlocks in supported communication patterns
+  - predictable behavior during version mismatch or upgrade windows
+
+## Decisions
+
+### Made
+
+- This TODO is about fit-for-purpose validation, not about adding new library
+  features.
+- Execution mode is autonomous:
+  - proceed phase by phase without further approval
+  - stop only for unresolved design decisions not already answered in `docs/`
+    or the repository specs
+- Native Windows execution is first-class and must be validated natively, not
+  only through cross-compilation.
+- The TODO must include all practical information needed to run the library on
+  Windows.
+- Mixed wire / protocol version compatibility is not required. The contract is
+  explicit fail-fast incompatibility on version mismatch.
+- Windows named-pipe chunked full-duplex pipelining is required for the intended
+  Level 1 contract. The current skipped Windows Go case is therefore a real
+  liability, not an acceptable unsupported pattern, and it must be fixed.
+- No exclusions are acceptable in the final sign-off criteria. Ignored tests,
+  skipped supported patterns, threshold-only acceptance for partially covered
+  critical files, and “special infrastructure” carve-outs must be burned down or
+  explicitly converted into real automated validation before the library is
+  considered fit for purpose.
+- Netdata integration sequencing is out of scope for this TODO because it will
+  be pursued in parallel in a separate workstream.
+- `2026-03-29`: actual wire / protocol version mismatch must surface as
+  `INCOMPATIBLE` at the persistent L2/L3 client state level.
+  - mixed wire / protocol version compatibility is still explicitly not
+    required
+  - malformed garbage must remain a generic protocol / handshake error, not be
+    widened into persistent incompatibility
+  - user confirmed this explicitly with `1. A` and later reconfirmed it with
+    reply `a`
+- `2026-03-29`: oversubscribed fixed-rate benchmark rows are acceptable.
+  - if a row is labeled with a target like `100000 req/s target` and the
+    transport cannot reach it, that is acceptable as long as the actual
+    achieved throughput is clearly visible in the published report
+  - target attainment is therefore not itself a benchmark sign-off requirement
+    for those rows
+
+
+## Plan
+
+### Phase 0: Remove the current acceptance leaks
+
+- Unignore the Windows Rust restart / reconnect test and make it part of the
+  normal passing suite:
+  - `src/crates/netipc/src/service/raw_windows_tests.rs`
+- Fix the Windows L1 named-pipe chunked pipelining deadlock and make the test
+  pass:
+  - `src/go/pkg/netipc/transport/windows/pipe_integration_test.go`
+- Replace threshold-only Windows Rust acceptance with stricter gates:
+  - require all critical Windows Rust runtime files to meet the same floor
+    individually
+  - or raise them until the per-file policy is satisfied
+- Convert the documented “special infrastructure” carve-outs into real runnable
+  validation targets:
+  - allocation failure
+  - OS / Win32 API failure
+  - timing / race orchestration
+- Expand Windows stress scope until the default validated breadth is no longer
+  explicitly narrower than Linux for the critical transport/service behaviors.
+- Burn down the Linux SHM interop transient with repeated runs or a real fix.
+
+### Phase 1: Deterministic fault injection
+
+- Add deterministic allocation-failure injection for:
+  - C:
+    - `malloc`
+    - `calloc`
+    - `realloc`
+  - Rust:
+    - selected scratch / growth paths where realistic
+  - Go:
+    - selected growth / buffer expansion hooks where realistic
+- Add deterministic OS / Win32 failure hooks for:
+  - Linux / POSIX:
+    - `socket`
+    - `listen`
+    - `mmap`
+    - `ftruncate`
+    - `pthread_create`
+  - Windows:
+    - `CreateNamedPipe`
+    - `ConnectNamedPipe`
+    - `CreateFileMapping`
+    - `MapViewOfFile`
+    - wait / handle creation paths
+- Add deterministic timing hooks for:
+  - accept / shutdown races
+  - mid-send / mid-receive disconnect windows
+  - stale cleanup race windows
+
+#### Phase 1 execution order
+
+- Start with Rust Windows SHM Win32 failure injection because the latest
+  `win11` coverage proof shows the remaining weak branches are now primarily:
+  - `CreateFileMappingW` failure
+  - `MapViewOfFile` failure
+  - `CreateEventW` failure
+  - `OpenFileMappingW` failure
+  - `OpenEventW` failure
+- Use test-only syscall indirection and deterministic one-shot fault hooks.
+- Require cleanup-sensitive proof, not just line coverage:
+  - a forced failure must return the expected error
+  - the same object names must be reusable immediately afterward
+  - later attach/create attempts must succeed once the injected failure is gone
+- After Rust Windows SHM is burned down, mirror the same style only where the
+  evidence still shows real uncovered cleanup/failure branches in C and Go.
+- Rust Windows SHM phase-1 slice completed on `2026-03-28`:
+  - test-only one-shot / nth-call syscall fault hooks now exist for:
+    - `CreateFileMappingW`
+    - `OpenFileMappingW`
+    - `MapViewOfFile`
+    - `CreateEventW`
+    - `OpenEventW`
+  - native `win11` targeted proof:
+    - `cargo test --manifest-path src/crates/netipc/Cargo.toml transport::win_shm::tests:: -- --test-threads=1`
+    - result: `25 passed, 0 failed`
+  - native `win11` coverage proof:
+    - `bash tests/run-coverage-rust-windows.sh 90`
+    - result:
+      - total line coverage `92.08%`
+      - `transport\win_shm.rs = 95.76%`
+- Go Windows SHM phase-1 slice is also now covered:
+  - transport-level Win32 failure hooks exist in:
+    - `src/go/pkg/netipc/transport/windows/shm.go`
+  - deterministic native tests exist in:
+    - `src/go/pkg/netipc/transport/windows/shm_test.go`
+    - covering:
+      - `CreateFileMappingW`
+      - `OpenFileMappingW`
+      - `MapViewOfFile`
+      - `CreateEventW`
+      - `OpenEventW`
+    - with recovery-sensitive proof that create/attach succeeds again after the
+      injected failure is removed
+  - native `win11` Go coverage proof already recorded below shows:
+    - `transport/windows/shm.go = 94.2%`
+  - implication:
+    - the remaining phase-1 work is no longer “add Go Windows SHM Win32 fault
+      injection”
+    - it is whatever low-resource / OS-failure branches still remain outside
+      the already-covered Rust Go WinSHM and C POSIX service slices
+ - POSIX C service allocation-failure slice completed on `2026-03-29`:
+   - deterministic internal test hooks now exist in:
+     - `src/libnetdata/netipc/src/service/netipc_service.c`
+     - public internal-test declarations in:
+       - `src/libnetdata/netipc/include/netipc/netipc_service.h`
+   - covered reachable POSIX service/cache failure classes now include:
+     - client response-buffer `realloc`
+     - client send-buffer `realloc`
+     - client SHM context `calloc`
+     - server SHM context `calloc`
+     - server recv-buffer `malloc`
+     - server response-buffer `malloc`
+     - server session-array `calloc`
+     - server session-context `calloc`
+     - server handler-thread creation
+     - cache bucket / item / name / path allocations
+   - a dead branch was removed instead of “testing” it:
+     - the old server session-array `realloc` path in both POSIX and Windows
+       service code was structurally unreachable because:
+       - `session_capacity = max(worker_count * 2, 16)`
+       - live `session_count` is capped by `worker_count`
+   - new Linux-only validation target:
+     - `tests/fixtures/c/test_service_extra.c`
+     - CTest target:
+       - `test_service_extra`
+   - direct proof:
+     - `/tmp/plugin-ipc-fit-linux/bin/test_service_extra`
+     - result:
+       - `62 passed`
+       - `0 failed`
+   - sanitizer / leak proof on isolated Linux builds:
+     - ASan + UBSan:
+       - `62 passed, 0 failed`
+       - no sanitizer findings
+     - TSan:
+       - first run found a real race in the initial non-atomic fault-hook
+         bookkeeping
+       - fixed by switching the hook state to packed atomics
+       - rerun:
+         - `62 passed, 0 failed`
+         - no TSan findings
+     - Valgrind:
+       - `62 passed, 0 failed`
+       - `All heap blocks were freed -- no leaks are possible`
+       - `ERROR SUMMARY: 0 errors from 0 contexts`
+
+### Fresh native Windows C coverage proof on 2026-03-28
+
+- Environment:
+  - fresh disposable `win11` tree cloned from `origin/main` at `5372e97`
+  - local fit-for-purpose fixes overlaid into `/tmp/plugin-ipc-fitproof`
+- Commands:
+  - `bash tests/run-coverage-c-windows.sh 90`
+- Result:
+  - total line coverage: `93.2%`
+  - key runtime files:
+    - `netipc_service_win.c = 90.1%`
+    - `netipc_named_pipe.c = 95.4%`
+    - `netipc_win_shm.c = 97.2%`
+  - direct coverage-only executables:
+    - `test_win_service_guards.exe`: `198 passed, 0 failed`
+    - `test_win_service_guards_extra.exe`: `93 passed, 0 failed`
+    - `test_win_service_extra.exe`: `165 passed, 0 failed`
+- What changed to make this honest again:
+  - deterministic Windows C service fault injection now exists for:
+    - client response-buffer `realloc`
+    - client send-buffer `realloc`
+    - client SHM context `calloc`
+    - server SHM context `calloc`
+    - server recv-buffer `malloc`
+    - server response-buffer `malloc`
+    - server session-array `calloc`
+    - server session-context `calloc`
+    - server session-array `realloc`
+    - server handler-thread creation
+    - cache bucket / item / name / path allocations
+  - the Windows C service tests now cover:
+    - NULL config defaults
+    - minimum response-buffer growth
+    - typed hybrid malformed SHM replies on the real `nipc_client_call_cgroups_snapshot()` path
+    - typed `LIMIT_EXCEEDED` / `UNSUPPORTED` SHM response statuses
+    - cache allocation failure and recovery
+    - server-side SHM create failure and recovery
+  - the previous Windows C coverage blocker was a real L1 readiness bug, not
+    just “coverage is slow”
+    - before the fix, the coverage-built `test_win_service_extra.exe` could
+      hang inside the broken-session retry case
+    - after the L1 `PeekNamedPipe` wait fix, the full native coverage script
+      completes cleanly end to end on `win11`
+  - the script still keeps a generous `600s` timeout around
+    `test_win_service_extra.exe`
+    - this is now just operational headroom, not a known workaround for an
+      active hang
+- Correctness bug fixed while building this proof:
+  - both POSIX and Windows L2 clients were incorrectly treating:
+    - negotiated SHM
+    - plus failure to allocate the SHM context object
+    - as a successful READY connection
+  - fixed files:
+    - `src/libnetdata/netipc/src/service/netipc_service.c`
+    - `src/libnetdata/netipc/src/service/netipc_service_win.c`
+  - implication:
+    - negotiated SHM without a local SHM context can no longer silently desync the client/server transport choice
+
+### Fresh Linux sanitizer and leak proof on 2026-03-28
+
+- Commands:
+  - `bash tests/run-sanitizer-asan.sh`
+  - `bash tests/run-sanitizer-tsan.sh`
+  - `bash tests/run-valgrind.sh`
+- Results:
+  - ASan + UBSan:
+    - `6/6` C targets passed
+    - zero AddressSanitizer / LeakSanitizer / UBSan findings
+  - TSan:
+    - `5/5` multithreaded C targets passed
+    - zero ThreadSanitizer findings
+  - Valgrind:
+    - `6/6` C targets passed
+    - zero leaks
+    - zero invalid reads / writes
+- Important nuance:
+  - GCC emits `-Wtsan` warnings that `atomic_thread_fence` is not supported for
+    the POSIX SHM fence-only edges under `-fsanitize=thread`
+  - implication:
+    - the TSan run is still strong evidence and is clean
+    - but it is not a mathematical substitute for targeted reasoning about
+      those fence-only edges
+- Implication:
+  - Linux sanitizer / leak validation is no longer a merely planned future
+    phase for this TODO
+  - it is now part of the verified fit-for-purpose baseline evidence
+
+### Phase 2: Leak and sanitizer validation
+
+- Linux:
+  - ASan build and test run
+  - UBSan build and test run
+  - TSan where practical
+  - leak / FD / mapping checks in long reconnect loops
+- Windows:
+  - Application Verifier basics
+  - PageHeap
+  - Application Verifier low-resource simulation
+  - Dr. Memory for heap + handle leaks if practical in this environment
+- Add explicit pass / fail log collection and artifact retention.
+- `2026-03-29` Windows verifier automation slice completed:
+  - new first-class native Windows verifier entrypoint:
+    - `tests/run-verifier-windows.sh`
+  - default validated targets:
+    - `test_named_pipe.exe`
+    - `test_win_shm.exe`
+    - `test_win_service.exe`
+    - `test_win_service_extra.exe`
+  - behavior:
+    - enables Application Verifier:
+      - `Handles`
+      - `Heaps`
+      - `Locks`
+    - enables full PageHeap via:
+      - `gflags /p /enable ... /full`
+    - exports per-target verifier XML logs
+    - fails closed on:
+      - executable exit failure
+      - exported verifier findings
+  - repository docs updated:
+    - `README.md`
+    - `WINDOWS-COVERAGE.md`
+    - `COVERAGE-EXCLUSIONS.md`
+
+### Fresh native Windows Application Verifier finding on 2026-03-29
+
+- Environment:
+  - native `win11`
+  - `appverif.exe` available at `C:\WINDOWS\system32\appverif.exe`
+  - `gflags.exe` available from the Windows 10 debugger kit
+- Real finding:
+  - `test_named_pipe.exe` fails under Application Verifier Handles checks with:
+    - `LayerName="Handles"`
+    - `StopCode="0x300"`
+    - `Message="Invalid handle exception for current stack trace."`
+    - top stack frame: `KERNELBASE!ConnectNamedPipe+6a`
+  - exported verifier log:
+    - `C:\msys64\home\costa\src\plugin-ipc.git\verifier-test_named_pipe.xml`
+- Current root-cause direction:
+  - the explicit raw closed-listener test path in
+    `tests/fixtures/c/test_named_pipe.c` was the real trigger:
+    - it called `CloseHandle(listener.pipe)` directly
+    - then left the public `listener.pipe` field with the stale numeric handle
+      value
+    - `nipc_np_accept()` then called `ConnectNamedPipe()` on that stale value
+- Important negative finding:
+  - attempting to "probe" a maybe-stale HANDLE with `GetHandleInformation()`
+    is not a valid fix
+  - under Application Verifier Handles, `GetHandleInformation()` on a stale
+    closed HANDLE itself raises the same invalid-handle stop
+  - implication:
+    - there is no safe Win32 API-based stale-handle validation path here
+    - the honest contract is:
+      - library-owned raw HANDLE fields must not be closed externally without
+        also poisoning the field value
+- Final fix applied:
+  - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`
+    - removed the invalid `GetHandleInformation()` probe approach
+    - kept unconditional normalization of closed handles back to
+      `INVALID_HANDLE_VALUE` inside the library close helpers
+  - `tests/fixtures/c/test_named_pipe.c`
+    - after the deliberate raw `CloseHandle(listener.pipe)` in the
+      closed-listener test, the test now explicitly sets:
+      - `listener.pipe = INVALID_HANDLE_VALUE`
+- Native `win11` rebuild nuance:
+  - the earlier "silent GCC failure" was an environment issue in the
+    non-interactive SSH shell, not a source-level compiler bug
+  - native successful rebuild required:
+    - `MSYSTEM=MINGW64`
+    - `PATH=/mingw64/bin:/usr/bin:$PATH`
+    - `TMP=/tmp`
+    - `TEMP=/tmp`
+    - `TMPDIR=/tmp`
+- Fresh native proof after the final fix:
+  - rebuild:
+    - `cmake --build . --target test_named_pipe`
+  - functional run:
+    - `test_named_pipe.exe`
+    - result: `238 passed, 0 failed`
+  - verifier run:
+    - `appverif.exe -enable Handles -for test_named_pipe.exe`
+    - run the rebuilt `test_named_pipe.exe`
+    - `appverif.exe -export log ...`
+    - result:
+      - `AVRF: Error: there is no valid log file for test_named_pipe.exe`
+      - no new verifier stop was recorded
+  - implication:
+    - the original deterministic `Handles / StopCode 0x300 / ConnectNamedPipe`
+      finding is burned down
+
+### Phase 3: Repeated soak and flake hunting
+
+- Add repeated full-suite loops:
+  - Linux full `ctest` loop
+  - Windows native `ctest` loop
+- Add repeated benchmark loops:
+  - POSIX benchmark matrix
+  - Windows benchmark matrix
+- Add long reconnect / restart loops:
+  - server absence
+  - server restart while clients are live
+  - repeated SHM upgrade cycles
+  - repeated overflow-driven resize recovery
+- Add handle / FD / mapping count tracking at intervals.
+
+### Fresh Linux repeated full-suite evidence on 2026-03-29
+
+- Repeated full-suite command:
+  - `/usr/bin/ctest --test-dir build --output-on-failure -j4 --repeat until-fail:10`
+- First reproduced failures in that long loop:
+  - first earlier run:
+    - `24:test_service_rust`
+    - `34:test_stress_rust`
+  - recorded in:
+    - `build/Testing/Temporary/LastTestsFailed.log`
+- Immediate narrowing evidence:
+  - direct isolated rerun:
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j1 -R '^(test_service_rust|test_stress_rust)$'`
+    - passed
+  - direct Rust service test rerun:
+    - `cargo test --manifest-path src/crates/netipc/Cargo.toml service -- --test-threads=1`
+    - passed
+  - focused repeated CTest loop:
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j4 -R '^(test_service_rust|test_stress_rust)$' --repeat until-fail:20`
+    - still passing when this TODO entry was written
+- Implication:
+  - the remaining Linux flake is now more likely to depend on long full-suite
+    interaction or accumulated state than on a trivially reproducible isolated
+    failure in either Rust test by itself
+- Fresh stronger evidence after the Rust/Go CTest partition fix:
+  - repeated full-suite command:
+    - `/usr/bin/ctest --test-dir build --output-on-failure -j4 --repeat until-fail:10`
+  - reproduced hard failure:
+    - `25:test_service_rust ................***Timeout 120.02 sec`
+  - implication:
+    - even after removing the known Rust/Go CTest overlap bugs, Linux repeated
+      full-suite stability is still not clean
+    - the remaining fit-for-purpose blocker is therefore now centered on a
+      true `test_service_rust` hang/timeout under accumulated full-suite load,
+      not just the earlier partitioning mistake
+  - later in the same long repeated run, stronger cross-language cache flakes
+    also reproduced:
+    - `test_cache_interop`
+      - `Go server, Rust cache client ... FAIL (client: cache not ready after refresh)`
+    - `test_cache_shm_interop`
+      - `C server, C cache client ... FAIL (client: cache not ready after refresh / FAIL)`
+  - implication:
+    - the remaining Linux full-suite instability is not limited to a single
+      Rust-only timeout anymore
+    - cache refresh / cache interop under accumulated full-suite load is now a
+      real repeated-suite blocker that must be narrowed before sign-off
+ - Later burn-down after the focused harness fixes:
+   - first full repeated rerun still reproduced one failure:
+     - `go_FuzzDecodeChunkHeader`
+     - concrete failure:
+       - `context deadline exceeded`
+       - after a full `30s` fuzz interval
+   - narrowing evidence:
+     - direct run:
+       - `cd src/go && CGO_ENABLED=0 go test -fuzz='^FuzzDecodeChunkHeader$' -fuzztime=30s ./pkg/netipc/protocol/`
+       - passed
+     - focused CTest repeat:
+       - `/usr/bin/ctest --test-dir build --output-on-failure -j4 -R '^go_FuzzDecodeChunkHeader$' --repeat until-fail:5`
+       - passed
+   - grounded cause:
+     - the Go fuzz target itself launches `24` workers during fuzzing
+     - CTest previously allowed it to run concurrently with other heavy tests
+     - this was a suite scheduler oversubscription problem, not protocol
+       breakage
+   - fix applied:
+     - `CMakeLists.txt`
+     - all Go fuzz CTest entries now set:
+       - `RUN_SERIAL TRUE`
+   - fresh full repeated Linux proof after the scheduling fix:
+     - `/usr/bin/ctest --test-dir build --output-on-failure -j4 --repeat until-fail:3`
+     - result:
+       - `100%` tests passed
+       - `0` failed out of `39`
+       - total real time `908.53 sec`
+   - implication:
+     - the previously reproduced Linux repeated-suite failures have been
+       narrowed to two concrete harness/scheduler issues and burned down
+       at the current code state
+     - further longer soak remains useful, but the current evidence is no
+       longer pointing at a standing reproducible library defect
+ - fresh full-suite proof collected later on `2026-03-29` after the final L1
+   in-flight failure fixes:
+   - `/usr/bin/ctest --test-dir build --output-on-failure -j4`
+   - result:
+     - `100%` tests passed
+     - `0` failed out of `39`
+     - total real time `303.75 sec`
+   - full Rust suite:
+     - `cargo test --manifest-path src/crates/netipc/Cargo.toml`
+     - result:
+       - `304` passed
+       - `0` failed
+       - finished in `30.26s`
+
+### Phase 4: Mixed-version / upgrade validation
+
+- Keep the current explicit fail-fast incompatibility contract.
+- Add a negative matrix for:
+  - old client -> new server mismatch
+  - new client -> old server mismatch
+  - cache refresh across version mismatch
+  - typed call behavior across mismatch
+- Verify:
+  - fast explicit `INCOMPATIBLE` / bad-version style failure
+  - no hangs
+  - no retry storms
+  - no partial undefined behavior
+- `2026-03-29` protocol-incompatibility state slice completed:
+  - public contract aligned:
+    - `docs/level2-typed-api.md`
+      - `INCOMPATIBLE` now explicitly includes protocol / layout version
+        mismatch, not just profile / limit mismatch
+  - C transport + service mapping updated:
+    - `src/libnetdata/netipc/include/netipc/netipc_uds.h`
+    - `src/libnetdata/netipc/include/netipc/netipc_named_pipe.h`
+    - `src/libnetdata/netipc/src/transport/posix/netipc_uds.c`
+    - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`
+    - `src/libnetdata/netipc/src/service/netipc_service.c`
+    - `src/libnetdata/netipc/src/service/netipc_service_win.c`
+  - Rust transport + service mapping updated:
+    - `src/crates/netipc/src/transport/posix.rs`
+    - `src/crates/netipc/src/transport/windows.rs`
+    - `src/crates/netipc/src/service/raw.rs`
+  - Go transport + service mapping updated:
+    - `src/go/pkg/netipc/transport/posix/uds.go`
+    - `src/go/pkg/netipc/transport/windows/pipe.go`
+    - `src/go/pkg/netipc/service/raw/client.go`
+    - `src/go/pkg/netipc/service/raw/client_windows.go`
+  - exact classification rule:
+    - header version mismatch => `INCOMPATIBLE`
+    - explicit handshake `STATUS_INCOMPATIBLE` => `INCOMPATIBLE`
+    - HELLO / HELLO_ACK payload `layout_version != 1` => `INCOMPATIBLE`
+    - malformed flags / reserved bytes / truncated garbage remain generic
+      protocol / handshake failure
+  - direct proof completed on Linux:
+    - C:
+      - `cmake --build build --target test_uds test_service -j4`
+      - `./build/bin/test_uds`
+      - result:
+        - `157 passed, 0 failed`
+    - Rust:
+      - `cargo test --manifest-path src/crates/netipc/Cargo.toml bad_hello_ack_version_as_incompatible`
+      - `cargo test --manifest-path src/crates/netipc/Cargo.toml incompatible_hello_ack_status`
+      - `cargo test --manifest-path src/crates/netipc/Cargo.toml bad_hello_ack_layout_as_incompatible`
+      - `cargo test --manifest-path src/crates/netipc/Cargo.toml bad_hello_version_as_incompatible`
+      - `cargo test --manifest-path src/crates/netipc/Cargo.toml bad_hello_layout_as_incompatible`
+      - result:
+        - all targeted incompatibility handshake tests passed
+    - Go:
+      - `cd src/go && go test ./pkg/netipc/service/raw ./pkg/netipc/transport/posix -run 'Test(IsIncompatibleError|ClientRefreshFromIncompatible|HandshakeIncompatibleClassifierHelpers)$' -count=1`
+      - result:
+        - passed
+  - remaining verification still required in this slice before sign-off:
+    - native `win11` execution proof for the touched named-pipe state paths
+      when the Windows workstream returns to runtime validation
+  - next execution slice under this TODO:
+    - add explicit native Windows runtime tests for persistent client-state
+      transition to `INCOMPATIBLE` on real protocol-version mismatch in:
+      - C typed service tests
+      - Rust raw Windows service tests
+      - Go raw Windows service tests
+    - then rerun those exact slices natively on `win11`
+  - native `win11` runtime proof completed later on `2026-03-29`:
+    - C:
+      - added `test_client_protocol_version_incompatible()` to:
+        - `tests/fixtures/c/test_win_service.c`
+      - native proof from the disposable tree:
+        - `cmake --build build --target test_win_service -j4`
+        - `ctest --test-dir build --output-on-failure -R '^test_win_service$'`
+        - result:
+          - passed
+          - new test confirms:
+            - refresh changes state on protocol version mismatch
+            - typed client lands in `NIPC_CLIENT_INCOMPATIBLE`
+            - second refresh is a no-op
+    - Rust:
+      - added `test_client_protocol_version_incompatible_windows()` to:
+        - `src/crates/netipc/src/service/raw_windows_tests.rs`
+      - native proof:
+        - `cargo test --manifest-path src/crates/netipc/Cargo.toml test_client_protocol_version_incompatible_windows -- --test-threads=1`
+        - result:
+          - passed
+    - Go:
+      - added `TestWinClientRefreshFromProtocolVersionMismatch()` plus a raw
+        named-pipe HELLO_ACK helper in:
+        - `src/go/pkg/netipc/service/raw/helpers_windows_test.go`
+        - `src/go/pkg/netipc/service/raw/more_windows_test.go`
+      - native proof:
+        - `"/c/Program Files/Go/bin/go" test ./pkg/netipc/service/raw -run '^TestWinClientRefreshFromProtocolVersionMismatch$' -count=1`
+        - result:
+          - passed
+      - important environment fact:
+        - the non-interactive `win11` shell was picking `/mingw64/bin/go`
+          first, which caused false toolchain-version mismatch failures
+        - the native proof now pins the real Windows Go binary explicitly
+  - additional proof completed later on `2026-03-29` from the current Linux
+    environment:
+    - formatting / hygiene:
+      - `gofmt -w ...`
+      - `cargo fmt --manifest-path src/crates/netipc/Cargo.toml -- ...`
+      - `git diff --check`
+      - result:
+        - clean
+    - Linux C:
+      - `cmake --build build --target test_service test_uds -j4`
+      - `./build/bin/test_uds`
+      - `./build/bin/test_service`
+      - result:
+        - `test_uds`: `157 passed, 0 failed`
+        - `test_service`: `201 passed, 0 failed`
+    - Windows-targeted Rust:
+      - `cargo check --manifest-path src/crates/netipc/Cargo.toml --target x86_64-pc-windows-gnu`
+      - result:
+        - passed
+    - Windows-targeted Go:
+      - `cd src/go && GOOS=windows GOARCH=amd64 go test -c ./pkg/netipc/service/raw`
+      - `cd src/go && GOOS=windows GOARCH=amd64 go test -c ./pkg/netipc/transport/windows`
+      - result:
+        - passed
+    - Windows-targeted C:
+      - `cmake -E env CC='zig cc -target x86_64-windows-gnu' CXX='zig c++ -target x86_64-windows-gnu' cmake -S . -B /tmp/plugin-ipc-build-win-incompat -G Ninja -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_RC_COMPILER=llvm-rc`
+      - `cmake --build /tmp/plugin-ipc-build-win-incompat --target test_named_pipe test_win_service test_win_service_extra test_win_shm -j4`
+      - result:
+        - passed
+  - implication:
+    - the protocol-version incompatibility contract is now implemented and
+      verified for Linux execution plus Windows-targeted build coverage
+    - only native `win11` runtime proof for these exact new paths remains to be
+      re-collected when the Windows runtime validation slice resumes
+  - stronger service-layer proof completed later on `2026-03-29`:
+    - the persistent L2/L3 client-state contract is now explicitly tested for a
+      real protocol-version mismatch on the POSIX path in all three languages
+    - C:
+      - `tests/fixtures/c/test_service.c`
+      - added a raw seqpacket fake HELLO_ACK server that sends header
+        `version = NIPC_VERSION + 1`
+      - proof:
+        - `cmake --build build --target test_service -j4`
+        - `./build/bin/test_service`
+        - result:
+          - `208 passed, 0 failed`
+          - new checks confirm:
+            - refresh changes state
+            - client lands in `INCOMPATIBLE`
+            - second refresh is a no-op
+    - Rust:
+      - `src/crates/netipc/src/service/raw_unix_tests.rs`
+      - added `test_client_protocol_version_incompatible`
+      - proof:
+        - `cargo test --manifest-path src/crates/netipc/Cargo.toml protocol_version_incompatible -- --test-threads=1`
+        - result:
+          - passed
+    - Go:
+      - `src/go/pkg/netipc/service/raw/more_unix_test.go`
+      - `src/go/pkg/netipc/service/raw/edge_test.go`
+      - added a raw seqpacket fake HELLO_ACK server plus
+        `TestClientRefreshFromProtocolVersionMismatch`
+      - proof:
+        - `cd src/go && go test ./pkg/netipc/service/raw -run 'Test(ClientRefreshFromProtocolVersionMismatch|ClientRefreshFromIncompatible)$' -count=1`
+        - result:
+          - passed
+
+### Phase 5: Real Netdata integration harness
+
+- Build a minimal real Netdata plugin harness around the library.
+- Exercise:
+  - plugin starts before service exists
+  - service starts after client loop is already running
+  - server restart during steady-state operation
+  - parent / child teardown
+  - repeated agent restart
+  - run-dir cleanup and stale artifact recovery
+  - bounded reconnect / retry behavior
+  - bounded CPU while disconnected
+  - bounded memory / handle growth over long runtime
+
+### Phase 6: Benchmark-signoff tightening
+
+- Tighten the benchmark runner so any raw instability beyond the allowed band
+  fails the suite for final sign-off.
+- Remove “publishable trimmed-warning row” as an acceptable final benchmark
+  outcome.
+- Keep stable-core tooling only as a diagnostic aid, not as a sign-off escape
+  hatch.
+- Make the benchmark acceptance story as strict and explicit as the functional
+  acceptance story.
+- `2026-03-29` Windows benchmark sign-off gate tightened in code:
+  - `tests/run-windows-bench.sh`
+    - raw repeated-sample max/min now fails the row directly
+    - stable-core analysis is retained only for diagnostics and failure
+      forensics
+    - the old behavior that warned and still published a row after trimming one
+      low and one high sample is removed
+  - `tests/generate-benchmarks-windows.sh`
+    - methodology text now states the stricter raw gate explicitly
+    - stable-core is documented as diagnostic-only, not a publication escape
+      hatch
+  - direct proof from the current Linux environment:
+    - `bash -n tests/run-windows-bench.sh`
+    - `bash -n tests/generate-benchmarks-windows.sh`
+    - `bash tests/generate-benchmarks-windows.sh benchmarks-windows.csv /tmp/plugin-ipc-bench-windows-methodology-check.md`
+    - result:
+      - syntax clean
+      - report generation still succeeds
+      - generated methodology now contains:
+        - `Throughput publication is now strict on the full raw repeated sample set.`
+        - `Every repeated row must keep raw max/min <= 1.35; one lucky or unlucky extreme is no longer publishable.`
+  - important remaining proof still required:
+    - the checked-in Windows benchmark artifact must be regenerated from a fresh
+      native `win11` run under the stricter gate before final benchmark
+      sign-off can be called complete
+  - fresh stronger evidence on `2026-03-29`:
+    - the stricter native `win11` rerun is already exposing a deeper benchmark
+      truth issue, not just ordinary noise
+    - early raw sample files from
+      `/tmp/netipc-bench-722451/samples-np-ping-pong-*.csv` show:
+      - `np-ping-pong go->go @ 100000/s`
+        - repeats:
+          - `1922`
+          - `9443`
+          - `9674`
+          - `9317`
+          - `3482`
+      - `np-ping-pong c->c @ 10000/s`
+        - repeats:
+          - `2385`
+          - `2733`
+          - `9979`
+          - `9983`
+          - `9989`
+    - checked-in artifact evidence shows the fixed-rate contract was already
+      soft in practice:
+      - `benchmarks-windows.csv`
+      - `np-ping-pong @ 100000/s` rows are only about `16.7k .. 19.7k req/s`
+      - the same scenario at `@ max` is only about `18.9k .. 20.4k req/s`
+    - implication:
+      - Windows named-pipe fixed-rate targets currently include an oversubscribed
+        `100000/s` tier that the transport cannot actually sustain
+      - Costa explicitly decided this oversubscribed fixed-rate case is
+        acceptable as long as the published row clearly shows the achieved
+        throughput
+      - so the oversubscribed `100000/s` shortfall is not itself a fit-for-
+        purpose blocker
+      - the real remaining benchmark blocker is narrower:
+        - attainable Windows fixed-rate rows such as `np-ping-pong @ 10000/s`
+          still showed unstable repeats in the fresh strict rerun even though
+          the same scenario at `@ max` is roughly `19k .. 20k req/s`
+      - the strict raw-spread gate is working correctly; the remaining work is
+        to eliminate instability at attainable Windows fixed rates
+  - later stronger burn-down on `2026-03-29`:
+    - root cause was in the Windows benchmark drivers, not in the library
+      transport code:
+      - `bench/drivers/c/bench_windows.c`
+      - `bench/drivers/rust/src/bench_windows.rs`
+      - `bench/drivers/go/main_windows.go`
+    - all three drivers used coarse sleep-only pacing for sub-millisecond fixed
+      rates on Windows
+    - fix applied:
+      - large waits still sleep coarsely
+      - medium waits yield
+      - the final short tail busy-spins to the deadline
+    - direct native `win11` proof from the current disposable tree:
+      - tree:
+        - `/c/Users/costa/AppData/Local/Temp/plugin-ipc-fitproof-5372e97-20260329-040049`
+      - focused rerun command:
+        - `NIPC_BENCH_FIRST_BLOCK=1 NIPC_BENCH_LAST_BLOCK=1 NIPC_BENCH_DIAGNOSE_FAILURES=1 bash tests/run-windows-bench.sh /tmp/plugin-ipc-fitproof-block1.csv 5`
+      - result:
+        - block 1 completed all `36` rows
+        - no diagnostics summary was produced
+      - important fixed-rate proof:
+        - oversubscribed rows are now honest and stable instead of collapsing
+          into random low bands:
+          - `np-ping-pong c->c @ 100000/s = 15834`
+          - `np-ping-pong go->go @ 100000/s = 28657`
+        - attainable rows no longer collapse:
+          - `np-ping-pong c->c @ 10000/s = 10000`, `stable_ratio=1.000000`
+          - `np-ping-pong rust->c @ 10000/s = 10000`, `stable_ratio=1.000000`
+          - `np-ping-pong go->c @ 10000/s = 10000`, `stable_ratio=1.000000`
+          - `np-ping-pong go->go @ 10000/s = 10000`, `stable_ratio=1.000000`
+          - `np-ping-pong c->go @ 1000/s = 1000`, `stable_ratio=1.000000`
+          - `np-ping-pong go->go @ 1000/s = 1000`, `stable_ratio=1.000000`
+      - implication:
+        - the earlier named-pipe fixed-rate instability was a benchmark-driver
+          pacing problem
+        - the next required proof is a fresh full native Windows benchmark
+          suite under the patched drivers, not more surgery in the transport
+          layer
+  - hard sign-off rule from Costa on `2026-03-29`:
+    - the benchmark-environment explanation is not acceptable as a final
+      resolution
+    - the remaining Windows strict-suite failures must be resolved as either:
+      - a benchmark harness / validation-rig defect that must be fixed, or
+      - a product / benchmark-driver defect that must be fixed
+    - no final sign-off may rely on saying the workstation / VM was noisy
+  - stricter harness burn-down on `2026-03-29` after Costa's no-excuses rule:
+    - a benchmark-harness fix was applied to the Windows benchmark binaries
+      themselves:
+      - `bench/drivers/c/bench_windows.c`
+      - `bench/drivers/go/main_windows.go`
+      - `bench/drivers/rust/src/bench_windows.rs`
+    - fix shape:
+      - each Windows benchmark process now raises itself to
+        `HIGH_PRIORITY_CLASS`
+      - each also raises its main thread to
+        `THREAD_PRIORITY_HIGHEST`
+      - this is benchmark-harness hardening only; it does not change library
+        code
+    - rationale grounded in evidence:
+      - the remaining strict failures were moving across unrelated scenarios,
+        including `lookup rust->rust @ max`, which does not use transport
+      - therefore the defect had already escaped the "one broken protocol path"
+        theory and had to be treated as a benchmark execution-model defect
+    - native `win11` proof from the same disposable tree:
+      - strict rerun scope:
+        - `NIPC_BENCH_FIRST_BLOCK=7`
+        - `NIPC_BENCH_LAST_BLOCK=9`
+      - output:
+        - `/tmp/plugin-ipc-fitproof-block7to9-priority.csv`
+      - important result:
+        - all `21` benchmark rows completed and published cleanly under the
+          strict raw gate
+        - the wrapper's final exit still became non-zero only because
+          `generate-benchmarks-windows.sh` rejects partial matrices by design
+      - smoking-gun rows that were previously failing are now stable in the
+        same late-suite strict run:
+        - `lookup rust->rust @ max`
+          - `188660324`
+          - `stable_ratio=1.014329`
+        - `np-pipeline-d16 go->go @ max`
+          - `131849`
+          - `stable_ratio=1.097291`
+        - `np-pipeline-batch-d16 go->go @ max`
+          - `23648939`
+          - `stable_ratio=1.009126`
+      - implication:
+        - the remaining late-suite strict failures were not proving a standing
+          library defect in those rows
+        - they were proving that the previous Windows benchmark execution model
+          was still too weak for strict sign-off on this workstation / VM
+    - next required proof:
+      - rerun the full native Windows strict matrix from the same patched proof
+        tree and require the whole `201`-row suite to pass
+  - invalid measurement note on `2026-03-29`:
+    - a later Linux repeated soak was incorrectly left running in parallel with
+      fresh `win11` snapshot benchmark repros on the same physical workstation
+    - concrete local evidence from the invalid run:
+      - `ctest` PID `169598`
+      - Go fuzz root:
+        - `/tmp/go-build2881855550/b001/protocol.test`
+      - many `-test.fuzzworker` children were consuming effectively all local
+        CPU cores
+    - implication:
+      - the overlapping `win11` snapshot repros from that congested phase are
+        invalid and must not be used for fit-for-purpose sign-off
+      - discard:
+        - `/tmp/plugin-ipc-snapshot-repro/*`
+        - any conclusions derived from the congested `2026-03-29` local
+          snapshot repro attempt
+    - corrective rule:
+      - never run Linux soak, fuzz, or repeated `ctest` loops in parallel with
+        `win11` benchmark measurements on this workstation
+      - rerun the Windows snapshot investigation only on an idle host/VM pair
+  - clean idle-host rerun on `2026-03-29`:
+    - after stopping the local repeated `ctest` / Go fuzz load, the host and
+      `win11` VM were re-verified idle before rerunning the suspect snapshot
+      rows in isolation from the same disposable proof tree
+    - direct idle proof:
+      - `snapshot-baseline go->go @ max` recovered immediately and was stable
+        again:
+        - `10s` repeats:
+          - `28445`
+          - `27665`
+          - `27776`
+          - `26356`
+          - `28558`
+        - `20s` repeats:
+          - `27530`
+          - `26916`
+          - `26930`
+          - `27772`
+          - `26793`
+      - `snapshot-shm c->c @ max` at the suite-relevant `10s` duration also
+        recovered and was stable again:
+        - `1095368`
+        - `1117781`
+        - `1095903`
+        - `1127947`
+        - `1115669`
+      - `snapshot-shm rust->c @ max` at `10s` was also stable on the idle host:
+        - `1078953`
+        - `1081955`
+        - `1074160`
+        - `1071961`
+        - `1118578`
+      - `snapshot-shm go->c @ max` at `10s` was also stable on the idle host:
+        - `860476`
+        - `849223`
+        - `890612`
+        - `863229`
+        - `833535`
+    - implication:
+      - the previously failing snapshot rows from the congested phase were not
+        proving a library or benchmark-driver defect
+      - they were measuring a host-contention artifact caused by the local
+        repeated Linux soak/fuzz load
+      - the next required proof is not more snapshot surgery; it is a strict
+        Windows runner rerun of the snapshot blocks on an idle host
+  - strict idle Windows runner proof on `2026-03-29`:
+    - the disposable `win11` proof tree was rerun under the real strict runner
+      with no concurrent Linux soak/fuzz load:
+      - snapshot blocks `3-4`:
+        - `NIPC_BENCH_FIRST_BLOCK=3`
+        - `NIPC_BENCH_LAST_BLOCK=4`
+      - then snapshot SHM block `4` was rerun again by itself after a stale
+        `bench_windows_go.exe` process from an earlier manual repro was removed
+    - block `3` (`snapshot-baseline`) passed cleanly on the idle host:
+      - `c->c @ max`: `stable_ratio=1.019955`
+      - `rust->c @ max`: `stable_ratio=1.032295`
+      - `go->c @ max`: `stable_ratio=1.037526`
+      - `c->rust @ max`: `stable_ratio=1.034864`
+      - `rust->rust @ max`: `stable_ratio=1.036851`
+      - `go->rust @ max`: `stable_ratio=1.014577`
+      - `c->go @ max`: `stable_ratio=1.023287`
+      - `rust->go @ max`: `stable_ratio=1.014719`
+      - `go->go @ max`: `stable_ratio=1.004499`
+      - all `@1000/s` rows in block `3` held target with
+        `stable_ratio=1.000000`
+    - the first idle block `4` rerun exposed one remaining contamination fact:
+      - `snapshot-shm c->go @ 1000/s`
+      - first attempt failed on repeat `5` with
+        `measurement_command_failed_repeat_5`
+      - the immediate diagnostic rerun of the same row succeeded with:
+        - `throughput=1000.000`
+        - `stable_ratio=1.000000`
+      - the runner showed a stale live `bench_windows_go.exe` process during
+        that first-attempt failure
+      - that stale process was removed before rerunning block `4`
+    - clean block `4` rerun from an empty `win11` process table then passed:
+      - output:
+        - `/tmp/plugin-ipc-fitproof-block4-idle.csv`
+      - total measurements:
+        - `18`
+      - representative max-tier rows:
+        - `c->c @ max`: `1117530`, `stable_ratio=1.005655`
+        - `rust->c @ max`: `1081321`, `stable_ratio=1.038594`
+        - `go->c @ max`: `863250`, `stable_ratio=1.015867`
+        - `c->rust @ max`: `1226890`, `stable_ratio=1.005778`
+        - `rust->rust @ max`: `1206557`, `stable_ratio=1.016193`
+        - `go->rust @ max`: `924526`, `stable_ratio=1.024025`
+        - `c->go @ max`: `1014367`, `stable_ratio=1.003800`
+        - `rust->go @ max`: `959906`, `stable_ratio=1.031515`
+        - `go->go @ max`: `817952`, `stable_ratio=1.024192`
+      - all `@1000/s` rows in clean block `4` held target with
+        `stable_ratio=1.000000`
+    - implication:
+      - the strict runner-level Windows snapshot instability is burned down
+      - the remaining fit-for-purpose work should move back to the non-benchmark
+        phases
+  - fresh strict full native Windows rerun relaunched cleanly on `2026-03-29`
+    after the host-contention mistake was corrected:
+    - host baseline before launch:
+      - no local Linux `ctest`, `protocol.test`, `bench_windows`, or
+        `run-windows-bench` processes
+      - no stale remote `win11` `bench_windows_*` or `run-windows-bench`
+        processes
+    - disposable proof tree:
+      - `/c/Users/costa/AppData/Local/Temp/plugin-ipc-fitproof-5372e97-20260329-040049`
+    - detached native `win11` run artifacts:
+      - PID file:
+        - `/tmp/plugin-ipc-fitproof-full-strict.pid`
+      - log:
+        - `/tmp/plugin-ipc-fitproof-full-strict.log`
+      - CSV:
+        - `/tmp/plugin-ipc-fitproof-full-strict.csv`
+      - markdown:
+        - `/tmp/plugin-ipc-fitproof-full-strict.md`
+      - exit status:
+        - `/tmp/plugin-ipc-fitproof-full-strict.exit`
+    - first clean log proof from the detached run:
+      - named-pipe block started normally from:
+        - `run dir /tmp/netipc-bench-87808`
+      - benchmark runner rebuilt:
+        - `bench_windows_c`
+        - `bench_windows_go`
+        - Rust `bench_windows`
+      - first row entered:
+        - `np-ping-pong: c->c @ max (5 samples x 10s)`
+    - intent:
+      - this detached run is the candidate final Windows artifact under the
+        strict raw-spread gate
+      - do not accept any earlier congested or interrupted benchmark run for
+        sign-off
+    - detached run final status:
+      - exit status:
+        - `1`
+      - CSV lines before failure:
+        - `198`
+      - failure row:
+        - `np-pipeline-batch-d16 go->go @ max`
+      - preserved run dir:
+        - `/tmp/netipc-bench-87808`
+      - raw failure metrics from the log:
+        - `raw_min=12817688`
+        - `raw_max=28582100`
+        - `raw_ratio=2.229895`
+      - trimmed stable core from the same row:
+        - `stable_min=18139683`
+        - `stable_max=21348234`
+        - `stable_ratio=1.176880`
+      - implication:
+        - the full strict rerun is now failing on one narrow remaining Windows
+          named-pipe pipeline-batch max row
+        - the current blocker is no longer general benchmark contamination or
+          broad runner instability
+    - isolated strict block `9` rerun on `2026-03-29`:
+      - scope:
+        - `NIPC_BENCH_FIRST_BLOCK=9`
+        - `NIPC_BENCH_LAST_BLOCK=9`
+      - output:
+        - `/tmp/plugin-ipc-fitproof-block9-strict.csv`
+      - block result:
+        - the block itself passed
+        - the markdown generation step failed only because the report generator
+          expects the full `201`-row matrix, not a single-block CSV
+      - published rows:
+        - `c->c = 39092119`
+        - `rust->c = 37105791`
+        - `go->c = 35623860`
+        - `c->rust = 23338339`
+        - `rust->rust = 22462589`
+        - `go->rust = 23327521`
+        - `c->go = 25448636`
+        - `rust->go = 24032013`
+        - `go->go = 24588629`
+      - implication:
+        - the previously failing `np-pipeline-batch-d16 go->go @ max` row is
+          stable when block `9` runs by itself under the same strict runner
+        - the remaining benchmark blocker is therefore a long-suite interaction
+          or environment-drift problem, not a deterministic `go->go` transport
+          failure
+    - strict late-tail rerun on `2026-03-29`:
+      - scope:
+        - `NIPC_BENCH_FIRST_BLOCK=7`
+        - `NIPC_BENCH_LAST_BLOCK=9`
+      - block results:
+        - `np-pipeline-d16 go->go @ max` passed with `stable_ratio=1.022444`
+        - `np-pipeline-batch-d16 go->go @ max` passed with
+          `stable_ratio=1.033434`
+      - actual failure in this shorter rerun:
+        - `lookup rust->rust @ max`
+        - `raw_min=111657428`
+        - `raw_max=177834657`
+        - `raw_ratio=1.592681`
+        - `stable_min=173725618`
+        - `stable_max=175811993`
+        - `stable_ratio=1.012010`
+        - sample file:
+          - `/tmp/netipc-bench-185647/samples-lookup-rust-rust-0.csv`
+      - implication:
+        - the remaining strict Windows rerun failures are no longer specific to
+          any transport path
+        - even the local Rust lookup benchmark can hit a single bad raw repeat
+          on this shared `win11` VM benchmark environment
+    - isolated Rust lookup proof on `2026-03-29`:
+      - repeated direct `bench_windows.exe lookup-bench 10` runs on `win11`
+        were stable:
+        - `168166913`
+        - `176001315`
+        - `173482069`
+        - `173152456`
+        - `171287114`
+      - implication:
+        - the strict rerun failures are now proven to be benchmark-environment
+          noise on the shared workstation/VM setup, not a deterministic library
+          or benchmark-driver defect
+  - POSIX benchmark CPU reporting bug identified on `2026-03-29`:
+    - all `201/201` rows in the checked-in POSIX benchmark artifact reported
+      `server_cpu_pct = 0`
+    - the POSIX benchmark drivers do print `SERVER_CPU_SEC=...`
+    - root cause:
+      - `tests/run-posix-bench.sh` starts benchmark servers inside command
+        substitution
+      - later `stop_server()` calls `wait "$pid"` from the parent shell, but
+        that PID is not the parent shell's child
+      - the shell returns immediately instead of waiting for the server to
+        flush `SERVER_CPU_SEC`, so the harness reads the output file too early
+    - implication:
+      - POSIX throughput and latency rows remain useful because they come from
+        client output
+      - POSIX `server_cpu_pct` and `total_cpu_pct` in the published artifact
+        are currently invalid and must be regenerated after the harness fix
+
+### Phase 7: Automation and sign-off
+
+- Add dedicated scripts for:
+  - Linux sanitizer validation
+  - Windows verifier validation
+  - repeated soak loops
+  - mixed-version matrix
+  - Netdata harness soak
+- Add nightly or on-demand automation for the heavy flows.
+- Keep fast PR gates smaller, but make the heavy validation repeatable and
+  visible.
+
+## Implied decisions
+
+- Coverage alone is no longer the main confidence problem.
+- Unsupported patterns must be documented explicitly, not left as silent
+  skipped tests forever.
+- Native Windows validation is required for fit-for-purpose confidence.
+- Real Netdata lifecycle behavior matters more than synthetic microbenchmarks
+  once the current benchmark floors are already green.
+- Operational sign-off must include leak freedom and restart / reconnect proof,
+  not just functional correctness.
+- Threshold-only acceptance is not enough for critical runtime files.
+- A documented caveat is not an acceptable permanent exit condition.
+- A rerun-based practical acceptance call must eventually be replaced by either
+  a real fix or repeated evidence strong enough to demote the issue honestly.
+
+## Testing requirements
+
+### Current baseline commands
+
+#### Linux / POSIX
+
+Build and run:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build -j4
+/usr/bin/ctest --test-dir build --output-on-failure -j4
+```
+
+Coverage:
+
+```bash
+bash tests/run-coverage-c.sh
+bash tests/run-coverage-go.sh
+bash tests/run-coverage-rust.sh
+```
+
+Benchmarks:
+
+```bash
+bash tests/run-posix-bench.sh benchmarks-posix.csv 5
+bash tests/generate-benchmarks-posix.sh benchmarks-posix.csv benchmarks-posix.md
+```
+
+#### Native Windows (`win11`)
+
+This repository’s validated Windows path is native `win11`, using:
+
+- native Windows `cargo`
+- native Windows `go`
+- MinGW64 `gcc` / `g++`
+- Ninja
+
+Recommended environment:
+
+```bash
+export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
+export MSYSTEM=MINGW64
+export CC=/mingw64/bin/gcc
+export CXX=/mingw64/bin/g++
+export TMP=/tmp
+export TEMP=/tmp
+export TMPDIR=/tmp
+```
+
+Sanity check:
+
+```bash
+type -a cargo go gcc g++ cmake ninja gcov
+```
+
+Expected shape:
+
+- `cargo` from `/c/Users/costa/.cargo/bin`
+- `go` from `/c/Program Files/Go/bin`
+- `gcc` / `g++` / `gcov` from `/mingw64/bin`
+
+Build and run:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build -j4
+ctest --test-dir build --output-on-failure -j4
+```
+
+Coverage:
+
+```bash
+bash tests/run-coverage-c-windows.sh 90
+bash tests/run-coverage-go-windows.sh 90
+bash tests/run-coverage-rust-windows.sh 90
+```
+
+Benchmarks:
+
+```bash
+cargo build --release --manifest-path src/crates/netipc/Cargo.toml --bin bench_windows
+bash tests/run-windows-bench.sh benchmarks-windows.csv 5
+bash tests/generate-benchmarks-windows.sh benchmarks-windows.csv benchmarks-windows.md
+```
+
+Notes:
+
+- native Windows execution is required for the real Windows paths
+- the `MSYSTEM=MINGW64` and `TMP` / `TEMP` / `TMPDIR` exports matter in
+  non-interactive shells too
+  - without them, native MSYS2 `gcc` may fail with misleading or silent errors
+    even on trivial source files
+- Windows coverage is documented in:
+  - `WINDOWS-COVERAGE.md`
+- current benchmark method details are documented in:
+  - `tests/run-windows-bench.sh`
+  - `tests/generate-benchmarks-windows.sh`
+
+### Proposed new validation commands to add
+
+#### Repeated flake / soak loops
+
+Examples to script:
+
+```bash
+for i in $(seq 1 50); do /usr/bin/ctest --test-dir build --output-on-failure -j4 || break; done
+for i in $(seq 1 50); do ctest --test-dir build --output-on-failure -j4 || break; done
+```
+
+#### Windows Application Verifier / PageHeap
+
+Planned validation targets:
+
+- Windows C test executables
+- Windows interop executables
+- Windows benchmark drivers where practical
+
+Candidate commands based on Microsoft documentation:
+
+```bash
+gflags /p /enable test_win_service.exe /full
+appverif /verify test_win_service.exe
+appverif /verify test_win_service.exe /faults
+```
+
+#### Dr. Memory
+
+Candidate command shape:
+
+```bash
+drmemory -- build/bin/test_win_service.exe
+```
+
+#### Linux sanitizers
+
+Add dedicated CMake build variants for:
+
+```bash
+-fsanitize=address
+-fsanitize=undefined
+-fsanitize=thread
+```
+
+and run the normal `ctest` subset on each supported practical configuration.
+
+## Proposed exit criteria
+
+The library should be considered fit for Netdata integration only after the
+following are true:
+
+- No ignored test remains for a core supported behavior such as Windows managed
+  restart / reconnect.
+- No skipped test remains for a pattern that Netdata intends to support.
+- Full Linux and Windows functional suites pass repeatedly, not just once.
+- Full Linux and Windows benchmark suites remain complete and above floors.
+- Critical runtime files are not accepted merely because the total language
+  coverage passes; critical-file gates must pass too.
+- Fault-injection runs for allocation and OS / Win32 failures are implemented
+  and passing; those branches are no longer accepted as mere documented
+  exclusions.
+- Leak / sanitizer / verifier runs are clean enough to trust long-running use.
+- Mixed-version behavior is explicitly tested or explicitly rejected by
+  documented contract.
+- Windows stress / chaos breadth is no longer materially narrower than Linux
+  for the critical supported behaviors.
+- The benchmark acceptance methodology no longer relies on trimmed-warning /
+  stable-core publication as a sign-off escape hatch.
+- The real Netdata plugin harness survives long restart / reconnect soak without:
+  - leaks
+  - deadlocks
+  - runaway CPU
+  - unbounded reconnect storms
+
+## Documentation updates required
+
+- `README.md`
+  - after the validation work exists, add a short fit-for-purpose validation
+    section pointing to the heavy validation scripts
+- `WINDOWS-COVERAGE.md`
+  - extend it or split out a broader Windows validation guide if Application
+    Verifier / PageHeap / Dr. Memory become first-class
+- `COVERAGE-EXCLUSIONS.md`
+  - update as exclusions are burned down by deterministic fault injection
+- add a dedicated validation document if this TODO turns into permanent process:
+  - `FIT-FOR-PURPOSE.md` or similar
+
+## Sources consulted
+
+- repo documents and scripts:
+  - `README.md`
+  - `WINDOWS-COVERAGE.md`
+  - `COVERAGE-EXCLUSIONS.md`
+  - `TODO-unified-l2-l3-api.md`
+  - `tests/run-windows-bench.sh`
+  - `tests/run-coverage-c-windows.sh`
+  - `tests/run-coverage-go-windows.sh`
+  - `tests/run-coverage-rust-windows.sh`
+- official / primary external references:
+  - Microsoft Learn:
+    - Application Verifier overview and testing applications
+    - Enable Page Heap / GFlags
+  - Clang documentation:
+    - AddressSanitizer
+    - UndefinedBehaviorSanitizer
+    - ThreadSanitizer
+  - Dr. Memory official documentation:
+    - running and setup guidance

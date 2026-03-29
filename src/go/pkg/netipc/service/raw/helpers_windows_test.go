@@ -6,11 +6,28 @@ import (
 	"fmt"
 	"os"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	windows "github.com/netdata/plugin-ipc/go/pkg/netipc/transport/windows"
+)
+
+const (
+	rawPipeAccessDuplex   = 0x00000003
+	rawPipeTypeMessage    = 0x00000004
+	rawPipeReadModeMsg    = 0x00000002
+	rawPipeWait           = 0x00000000
+	rawErrorPipeConnected = 535
+	rawPipeBufSize        = 65536
+)
+
+var (
+	rawKernel32         = syscall.NewLazyDLL("kernel32.dll")
+	rawCreateNamedPipeW = rawKernel32.NewProc("CreateNamedPipeW")
+	rawConnectNamedPipe = rawKernel32.NewProc("ConnectNamedPipe")
 )
 
 var winServiceCounter atomic.Uint64
@@ -154,6 +171,161 @@ func encodeWinIncrementBatchPayload(t *testing.T, values ...uint64) []byte {
 type winRawSessionServer struct {
 	listener *windows.Listener
 	doneCh   chan error
+}
+
+type winHelloAckServer struct {
+	doneCh   chan error
+	accepted atomic.Uint32
+}
+
+func encodeHelloAckPacketWithVersion(version uint16, status uint16, layoutVersion uint16) []byte {
+	ack := protocol.HelloAck{
+		LayoutVersion:                 layoutVersion,
+		Flags:                         0,
+		ServerSupportedProfiles:       protocol.ProfileBaseline,
+		IntersectionProfiles:          protocol.ProfileBaseline,
+		SelectedProfile:               protocol.ProfileBaseline,
+		AgreedMaxRequestPayloadBytes:  protocol.MaxPayloadDefault,
+		AgreedMaxRequestBatchItems:    1,
+		AgreedMaxResponsePayloadBytes: winResponseBufSize,
+		AgreedMaxResponseBatchItems:   1,
+		AgreedPacketSize:              0,
+		SessionID:                     77,
+	}
+
+	payload := make([]byte, 48)
+	n := ack.Encode(payload)
+	payload = payload[:n]
+
+	hdr := protocol.Header{
+		Magic:           protocol.MagicMsg,
+		Version:         version,
+		HeaderLen:       protocol.HeaderSize,
+		Kind:            protocol.KindControl,
+		Code:            protocol.CodeHelloAck,
+		TransportStatus: status,
+		PayloadLen:      uint32(len(payload)),
+		ItemCount:       1,
+		MessageID:       0,
+	}
+
+	pkt := make([]byte, protocol.HeaderSize+len(payload))
+	hdr.Encode(pkt[:protocol.HeaderSize])
+	copy(pkt[protocol.HeaderSize:], payload)
+	return pkt
+}
+
+func startRawWinHelloAckServer(t *testing.T, service string, packet []byte) *winHelloAckServer {
+	t.Helper()
+
+	if err := os.MkdirAll(winTestRunDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	pipeName, err := windows.BuildPipeName(winTestRunDir, service)
+	if err != nil {
+		t.Fatalf("BuildPipeName failed: %v", err)
+	}
+
+	pipe, err := createRawNamedPipe(
+		&pipeName[0],
+		rawPipeAccessDuplex,
+		rawPipeTypeMessage|rawPipeReadModeMsg|rawPipeWait,
+		1,
+		rawPipeBufSize,
+		rawPipeBufSize,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("CreateNamedPipe failed: %v", err)
+	}
+
+	srv := &winHelloAckServer{
+		doneCh: make(chan error, 1),
+	}
+
+	go func() {
+		defer close(srv.doneCh)
+		defer syscall.CloseHandle(pipe)
+
+		err := connectRawNamedPipe(pipe)
+		if err != nil && err != syscall.Errno(rawErrorPipeConnected) {
+			srv.doneCh <- fmt.Errorf("ConnectNamedPipe failed: %w", err)
+			return
+		}
+
+		srv.accepted.Store(1)
+
+		helloBuf := make([]byte, 256)
+		var helloN uint32
+		if err := syscall.ReadFile(pipe, helloBuf, &helloN, nil); err != nil {
+			srv.doneCh <- fmt.Errorf("ReadFile failed: %w", err)
+			return
+		}
+		if helloN == 0 {
+			srv.doneCh <- fmt.Errorf("ReadFile returned zero bytes")
+			return
+		}
+
+		var written uint32
+		if err := syscall.WriteFile(pipe, packet, &written, nil); err != nil {
+			srv.doneCh <- fmt.Errorf("WriteFile failed: %w", err)
+			return
+		}
+		if int(written) != len(packet) {
+			srv.doneCh <- fmt.Errorf("short write: %d/%d", written, len(packet))
+			return
+		}
+
+		srv.doneCh <- nil
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	return srv
+}
+
+func createRawNamedPipe(name *uint16, openMode uint32, pipeMode uint32, maxInstances uint32,
+	outBufferSize uint32, inBufferSize uint32, defaultTimeout uint32) (syscall.Handle, error) {
+	r0, _, e1 := rawCreateNamedPipeW.Call(
+		uintptr(unsafe.Pointer(name)),
+		uintptr(openMode),
+		uintptr(pipeMode),
+		uintptr(maxInstances),
+		uintptr(outBufferSize),
+		uintptr(inBufferSize),
+		uintptr(defaultTimeout),
+		0,
+	)
+	handle := syscall.Handle(r0)
+	if handle == syscall.InvalidHandle {
+		if e1 != syscall.Errno(0) {
+			return syscall.InvalidHandle, e1
+		}
+		return syscall.InvalidHandle, syscall.EINVAL
+	}
+	return handle, nil
+}
+
+func connectRawNamedPipe(handle syscall.Handle) error {
+	r1, _, e1 := rawConnectNamedPipe.Call(uintptr(handle), 0)
+	if r1 != 0 {
+		return nil
+	}
+	if e1 != syscall.Errno(0) {
+		return e1
+	}
+	return syscall.EINVAL
+}
+
+func (s *winHelloAckServer) wait(t *testing.T) {
+	t.Helper()
+
+	if err := <-s.doneCh; err != nil {
+		t.Fatalf("raw windows hello_ack server failed: %v", err)
+	}
+	if got := s.accepted.Load(); got != 1 {
+		t.Fatalf("expected exactly one raw handshake accept, got %d", got)
+	}
 }
 
 func startRawWinSessionServer(t *testing.T, service string, cfg windows.ServerConfig,
