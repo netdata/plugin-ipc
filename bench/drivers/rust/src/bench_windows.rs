@@ -48,7 +48,11 @@ const AUTH_TOKEN: u64 = 0xBE4C400000C0FFEE;
 #[cfg(windows)]
 const RESPONSE_BUF_SIZE: usize = 65536;
 #[cfg(windows)]
-const MAX_LATENCY_SAMPLES: usize = 10_000_000;
+const MAX_LATENCY_SAMPLES: usize = 500_000;
+#[cfg(windows)]
+const LATENCY_SAMPLE_STRIDE: u64 = 64;
+#[cfg(windows)]
+const LATENCY_SAMPLE_SLACK: usize = 4096;
 #[cfg(windows)]
 const DEFAULT_DURATION: u32 = 30;
 
@@ -191,6 +195,18 @@ impl LatencyRecorder {
         let idx = idx.min(self.samples.len() - 1);
         self.samples[idx]
     }
+}
+
+#[cfg(windows)]
+fn latency_sparse_cap(target_rps: u64, duration_sec: u32) -> usize {
+    if target_rps == 0 {
+        return MAX_LATENCY_SAMPLES;
+    }
+
+    let estimated = ((target_rps + LATENCY_SAMPLE_STRIDE - 1) / LATENCY_SAMPLE_STRIDE)
+        .saturating_mul(duration_sec as u64)
+        .saturating_add(LATENCY_SAMPLE_SLACK as u64);
+    estimated.min(MAX_LATENCY_SAMPLES as u64) as usize
 }
 
 // ---------------------------------------------------------------------------
@@ -564,12 +580,7 @@ fn run_ping_pong_client(
 
     let mut shm = try_shm_upgrade(run_dir, service, &session);
 
-    let est_samples = if target_rps == 0 {
-        5_000_000
-    } else {
-        (target_rps * duration_sec as u64) as usize
-    };
-    let mut lr = LatencyRecorder::new(est_samples);
+    let mut lr = LatencyRecorder::new(latency_sparse_cap(target_rps, duration_sec));
     let mut rl = RateLimiter::new(target_rps);
 
     let mut counter: u64 = 0;
@@ -740,12 +751,7 @@ fn run_snapshot_client(
         return 1;
     }
 
-    let est_samples = if target_rps == 0 {
-        5_000_000
-    } else {
-        (target_rps * duration_sec as u64) as usize
-    };
-    let mut lr = LatencyRecorder::new(est_samples);
+    let mut lr = LatencyRecorder::new(latency_sparse_cap(target_rps, duration_sec));
     let mut rl = RateLimiter::new(target_rps);
 
     let mut requests: u64 = 0;
@@ -842,12 +848,7 @@ fn run_batch_ping_pong_client(
         }
     };
 
-    let est_samples = if target_rps == 0 {
-        2_000_000
-    } else {
-        (target_rps * duration_sec as u64) as usize
-    };
-    let mut lr = LatencyRecorder::new(est_samples);
+    let mut lr = LatencyRecorder::new(latency_sparse_cap(target_rps, duration_sec));
     let mut rl = RateLimiter::new(target_rps);
     let mut rng = XorShift32::new();
 
@@ -1067,17 +1068,13 @@ fn run_pipeline_client(
         }
     };
 
-    let est_samples = if target_rps == 0 {
-        5_000_000
-    } else {
-        (target_rps * duration_sec as u64) as usize
-    };
-    let mut lr = LatencyRecorder::new(est_samples);
+    let mut lr = LatencyRecorder::new(latency_sparse_cap(target_rps, duration_sec));
     let mut rl = RateLimiter::new(target_rps);
 
     let mut counter: u64 = 0;
     let mut requests: u64 = 0;
     let mut errors: u64 = 0;
+    let mut recv_buf = vec![0u8; 256];
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
@@ -1120,7 +1117,6 @@ fn run_pipeline_client(
         }
 
         // Receive `depth` responses
-        let mut recv_buf = vec![0u8; 256];
         for d in 0..depth {
             match session.receive(&mut recv_buf) {
                 Ok((_resp_hdr, payload)) => {
@@ -1220,7 +1216,7 @@ fn run_pipeline_batch_client(
         }
     };
 
-    let mut lr = LatencyRecorder::new(2_000_000);
+    let mut lr = LatencyRecorder::new(latency_sparse_cap(target_rps, duration_sec));
     let mut rl = RateLimiter::new(target_rps);
     let mut rng = XorShift32::new();
 

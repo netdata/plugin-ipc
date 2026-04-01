@@ -679,6 +679,7 @@ mod posix_only {
         let mut counter: u64 = 0;
         let mut requests: u64 = 0;
         let mut errors: u64 = 0;
+        let mut recv_buf = vec![0u8; 256];
 
         let cpu_start = cpu_ns();
         let wall_start = Instant::now();
@@ -717,7 +718,6 @@ mod posix_only {
             }
 
             // Receive `depth` responses
-            let mut recv_buf = vec![0u8; 256];
             for d in 0..depth {
                 match session.receive(&mut recv_buf) {
                     Ok((_resp_hdr, payload)) => {

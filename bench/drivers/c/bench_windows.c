@@ -48,7 +48,9 @@
 
 #define AUTH_TOKEN          0xBE4C400000C0FFEEull
 #define RESPONSE_BUF_SIZE  65536
-#define MAX_LATENCY_SAMPLES (10 * 1000 * 1000)
+#define MAX_LATENCY_SAMPLES (500 * 1000)
+#define LATENCY_SAMPLE_STRIDE 64ULL
+#define LATENCY_SAMPLE_SLACK  4096ULL
 #define DEFAULT_DURATION   30
 
 /* Profiles */
@@ -118,6 +120,19 @@ static void latency_init(latency_recorder_t *lr, size_t cap)
     lr->samples = malloc(cap * sizeof(uint64_t));
     lr->count = 0;
     lr->capacity = cap;
+}
+
+static size_t latency_sparse_cap(uint64_t target_rps, uint32_t duration_sec)
+{
+    if (target_rps == 0)
+        return MAX_LATENCY_SAMPLES;
+
+    uint64_t estimated = (target_rps * (uint64_t)duration_sec + LATENCY_SAMPLE_STRIDE - 1ULL) /
+                         LATENCY_SAMPLE_STRIDE;
+    estimated += LATENCY_SAMPLE_SLACK;
+    if (estimated > MAX_LATENCY_SAMPLES)
+        estimated = MAX_LATENCY_SAMPLES;
+    return (size_t)estimated;
 }
 
 static inline void latency_record(latency_recorder_t *lr, uint64_t ns)
@@ -533,9 +548,7 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
     }
 
     latency_recorder_t lr;
-    size_t est_samples = (target_rps == 0) ? 2000000 :
-                         (size_t)(target_rps * (uint64_t)duration_sec);
-    latency_init(&lr, est_samples);
+    latency_init(&lr, latency_sparse_cap(target_rps, (uint32_t)duration_sec));
 
     rate_limiter_t rl;
     rate_limiter_init(&rl, target_rps);
@@ -790,9 +803,7 @@ static int run_ping_pong_client(const char *run_dir, const char *service,
     }
 
     latency_recorder_t lr;
-    size_t est_samples = (target_rps == 0) ? 5000000 :
-                         (size_t)(target_rps * (uint64_t)duration_sec);
-    latency_init(&lr, est_samples);
+    latency_init(&lr, latency_sparse_cap(target_rps, (uint32_t)duration_sec));
 
     rate_limiter_t rl;
     rate_limiter_init(&rl, target_rps);
@@ -970,9 +981,7 @@ static int run_snapshot_client(const char *run_dir, const char *service,
     }
 
     latency_recorder_t lr;
-    size_t est_samples = (target_rps == 0) ? 5000000 :
-                         (size_t)(target_rps * (uint64_t)duration_sec);
-    latency_init(&lr, est_samples);
+    latency_init(&lr, latency_sparse_cap(target_rps, (uint32_t)duration_sec));
 
     rate_limiter_t rl;
     rate_limiter_init(&rl, target_rps);
@@ -1350,9 +1359,7 @@ int main(int argc, char **argv)
         }
 
         latency_recorder_t lr;
-        size_t est_samples = (target_rps == 0) ? 5000000 :
-                             (size_t)(target_rps * (uint64_t)duration);
-        latency_init(&lr, est_samples);
+        latency_init(&lr, latency_sparse_cap(target_rps, (uint32_t)duration));
 
         rate_limiter_t rl;
         rate_limiter_init(&rl, target_rps);
@@ -1506,7 +1513,7 @@ int main(int argc, char **argv)
         }
 
         latency_recorder_t lr;
-        latency_init(&lr, 2000000);
+        latency_init(&lr, latency_sparse_cap(target_rps, (uint32_t)duration));
         rate_limiter_t rl;
         rate_limiter_init(&rl, target_rps);
 

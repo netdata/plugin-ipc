@@ -353,15 +353,23 @@ type BatchBuilder struct {
 	dataOffset int // current offset within the packed data area (relative)
 }
 
+// Reset reinitializes a batch builder against a caller-provided buffer.
+// This lets hot paths reuse stack-allocated builders instead of allocating
+// a fresh helper object for every request.
+func (b *BatchBuilder) Reset(buf []byte, maxItems uint32) {
+	b.buf = buf
+	b.itemCount = 0
+	b.maxItems = maxItems
+	b.dirEnd = Align8(int(maxItems) * 8)
+	b.dataOffset = 0
+}
+
 // NewBatchBuilder creates a new batch builder. buf must be large enough for
 // maxItems*8 (directory) + packed data.
 func NewBatchBuilder(buf []byte, maxItems uint32) *BatchBuilder {
-	dirEnd := Align8(int(maxItems) * 8)
-	return &BatchBuilder{
-		buf:      buf,
-		maxItems: maxItems,
-		dirEnd:   dirEnd,
-	}
+	b := &BatchBuilder{}
+	b.Reset(buf, maxItems)
+	return b
 }
 
 // Add appends an item payload. Handles alignment padding.
@@ -545,4 +553,3 @@ func DecodeHelloAck(buf []byte) (HelloAck, error) {
 	}
 	return h, nil
 }
-

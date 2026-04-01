@@ -35,7 +35,9 @@ import (
 const (
 	authTokenWin         = uint64(0xBE4C400000C0FFEE)
 	responseBufSizeWin   = 65536
-	maxLatencySamplesWin = 10_000_000
+	maxLatencySamplesWin = 500_000
+	latencySampleStride  = 64
+	latencySampleSlack   = 4096
 	defaultDurationWin   = 30
 	profileNP            = protocol.ProfileBaseline
 	profileWinSHM        = protocol.ProfileBaseline | 0x02 // PROFILE_SHM_HYBRID
@@ -150,6 +152,18 @@ func newLatencyRecorderWin(cap int) *latencyRecorderWin {
 		samples: make([]uint64, 0, cap),
 		cap:     cap,
 	}
+}
+
+func latencySparseCapWin(targetRPS uint64, durationSec int) int {
+	if targetRPS == 0 {
+		return maxLatencySamplesWin
+	}
+	estimated := int((targetRPS+latencySampleStride-1)/latencySampleStride) * durationSec
+	estimated += latencySampleSlack
+	if estimated > maxLatencySamplesWin {
+		estimated = maxLatencySamplesWin
+	}
+	return estimated
 }
 
 func (lr *latencyRecorderWin) record(ns uint64) {
@@ -368,6 +382,8 @@ func runServerWin(runDir, service string, profiles uint32, durationSec int, hand
 			runDir, service, serverConfigWin(profiles), protocol.MethodIncrement, pingPongDispatchWin(),
 		)
 
+		// Benchmark only steady-state work, not one-off startup garbage.
+		runtime.GC()
 		fmt.Println("READY")
 
 		cpuStart := cpuNSWin()
@@ -389,6 +405,8 @@ func runServerWin(runDir, service string, profiles uint32, durationSec int, hand
 	case "snapshot":
 		server := cgroups.NewServer(runDir, service, typedServerConfigWin(profiles), snapshotHandlerWin())
 
+		// Benchmark only steady-state work, not one-off startup garbage.
+		runtime.GC()
 		fmt.Println("READY")
 
 		cpuStart := cpuNSWin()
@@ -425,6 +443,8 @@ func runBatchServerWin(runDir, service string, profiles uint32, durationSec int)
 		runDir, service, cfg, protocol.MethodIncrement, pingPongDispatchWin(),
 	)
 
+	// Benchmark only steady-state work, not one-off startup garbage.
+	runtime.GC()
 	fmt.Println("READY")
 
 	cpuStart := cpuNSWin()
@@ -483,11 +503,7 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 		defer shm.WinShmClose()
 	}
 
-	estSamples := 2_000_000
-	if targetRPS > 0 {
-		estSamples = int(targetRPS) * durationSec
-	}
-	lr := newLatencyRecorderWin(estSamples)
+	lr := newLatencyRecorderWin(latencySparseCapWin(targetRPS, durationSec))
 	rl := newRateLimiterWin(targetRPS)
 
 	reqBuf := make([]byte, batchBufSizeWin)
@@ -508,8 +524,9 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 		// Random batch size 2-1000 (server treats itemCount==1 as non-batch)
 		batchSize := uint32(rand.Intn(maxBatchItemsWin-1) + 2)
 
-		// Build batch request
-		bb := protocol.NewBatchBuilder(reqBuf, batchSize)
+		// Reuse a stack builder to avoid a heap object per request.
+		var bb protocol.BatchBuilder
+		bb.Reset(reqBuf, batchSize)
 
 		buildOK := true
 		for i := uint32(0); i < batchSize; i++ {
@@ -720,14 +737,7 @@ func runPipelineClientWin(runDir, service string, durationSec int, targetRPS uin
 	}
 	defer session.Close()
 
-	estSamples := maxLatencySamplesWin
-	if targetRPS > 0 {
-		estSamples = int(targetRPS) * durationSec
-	}
-	if estSamples > maxLatencySamplesWin {
-		estSamples = maxLatencySamplesWin
-	}
-	lr := newLatencyRecorderWin(estSamples)
+	lr := newLatencyRecorderWin(latencySparseCapWin(targetRPS, durationSec))
 	rl := newRateLimiterWin(targetRPS)
 
 	var counter, requests, errors, msgSeq uint64
@@ -853,7 +863,7 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 	}
 	defer session.Close()
 
-	lr := newLatencyRecorderWin(2_000_000)
+	lr := newLatencyRecorderWin(latencySparseCapWin(targetRPS, durationSec))
 	rl := newRateLimiterWin(targetRPS)
 
 	// Pre-allocate per-depth buffers
@@ -891,7 +901,8 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 				slot := sent
 				bs := uint32(rand.Intn(maxBatchItemsWin-1) + 2)
 
-				bb := protocol.NewBatchBuilder(reqBufs[slot], bs)
+				var bb protocol.BatchBuilder
+				bb.Reset(reqBufs[slot], bs)
 
 				for i := uint32(0); i < bs; i++ {
 					protocol.IncrementEncode(counter+uint64(i), itemBuf)
@@ -1057,14 +1068,7 @@ func runPingPongClientWin(runDir, service string, profiles uint32, durationSec i
 		defer shm.WinShmClose()
 	}
 
-	estSamples := maxLatencySamplesWin
-	if targetRPS > 0 {
-		estSamples = int(targetRPS) * durationSec
-	}
-	if estSamples > maxLatencySamplesWin {
-		estSamples = maxLatencySamplesWin
-	}
-	lr := newLatencyRecorderWin(estSamples)
+	lr := newLatencyRecorderWin(latencySparseCapWin(targetRPS, durationSec))
 	rl := newRateLimiterWin(targetRPS)
 
 	var counter, requests, errors uint64
@@ -1188,14 +1192,7 @@ func runSnapshotClientWin(runDir, service string, profiles uint32, durationSec i
 		return 1
 	}
 
-	estSamples := maxLatencySamplesWin
-	if targetRPS > 0 {
-		estSamples = int(targetRPS) * durationSec
-	}
-	if estSamples > maxLatencySamplesWin {
-		estSamples = maxLatencySamplesWin
-	}
-	lr := newLatencyRecorderWin(estSamples)
+	lr := newLatencyRecorderWin(latencySparseCapWin(targetRPS, durationSec))
 	rl := newRateLimiterWin(targetRPS)
 
 	var requests, errors uint64
@@ -1338,7 +1335,6 @@ func runLookupBenchWin(durationSec int) int {
 
 func main() {
 	elevateBenchPriorityWin()
-	runtime.GOMAXPROCS(1)
 
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr,
@@ -1353,6 +1349,17 @@ func main() {
 
 	cmd := os.Args[1]
 	rc := 0
+
+	switch cmd {
+	case "np-ping-pong-client", "shm-ping-pong-client",
+		"np-batch-ping-pong-client", "shm-batch-ping-pong-client",
+		"snapshot-client", "snapshot-shm-client",
+		"np-pipeline-client", "np-pipeline-batch-client",
+		"lookup-bench":
+		// Keep benchmark clients single-threaded for fair cross-language
+		// comparison, but leave servers at the runtime default.
+		runtime.GOMAXPROCS(1)
+	}
 
 	switch cmd {
 	case "np-ping-pong-server", "shm-ping-pong-server",

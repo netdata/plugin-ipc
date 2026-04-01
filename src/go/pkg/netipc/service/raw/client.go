@@ -923,7 +923,8 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 				responseLen = 0
 			}
 		} else {
-			bb := protocol.NewBatchBuilder(respBuf, hdr.ItemCount)
+			var bb protocol.BatchBuilder
+			bb.Reset(respBuf, hdr.ItemCount)
 
 			for i := uint32(0); i < hdr.ItemCount && dispatchErr == nil; i++ {
 				itemData, gerr := protocol.BatchItemGet(payload, hdr.ItemCount, i)

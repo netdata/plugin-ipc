@@ -277,6 +277,8 @@ func runServer(runDir, service string, profiles uint32, durationSec int, handler
 			runDir, service, serverConfig(profiles), protocol.MethodIncrement, pingPongDispatch(),
 		)
 
+		// Benchmark only steady-state work, not one-off startup garbage.
+		runtime.GC()
 		fmt.Println("READY")
 
 		cpuStart := cpuNS()
@@ -298,6 +300,8 @@ func runServer(runDir, service string, profiles uint32, durationSec int, handler
 	case "snapshot":
 		server := cgroups.NewServer(runDir, service, typedServerConfig(profiles), snapshotHandler())
 
+		// Benchmark only steady-state work, not one-off startup garbage.
+		runtime.GC()
 		fmt.Println("READY")
 
 		cpuStart := cpuNS()
@@ -334,6 +338,8 @@ func runBatchServer(runDir, service string, profiles uint32, durationSec int) in
 		runDir, service, cfg, protocol.MethodIncrement, pingPongDispatch(), 4,
 	)
 
+	// Benchmark only steady-state work, not one-off startup garbage.
+	runtime.GC()
 	fmt.Println("READY")
 
 	cpuStart := cpuNS()
@@ -423,8 +429,9 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 		// Random batch size 2-1000 (server treats itemCount==1 as non-batch)
 		batchSize := uint32(rand.Intn(maxBatchItems-1) + 2)
 
-		// Build batch request
-		bb := protocol.NewBatchBuilder(reqBuf, batchSize)
+		// Reuse a stack builder to avoid a heap object per request.
+		var bb protocol.BatchBuilder
+		bb.Reset(reqBuf, batchSize)
 
 		buildOK := true
 		for i := uint32(0); i < batchSize; i++ {
@@ -788,7 +795,8 @@ func runPipelineBatchClient(runDir, service string, durationSec int, targetRPS u
 			bs := uint32(rand.Intn(maxBatchItems-1) + 2)
 			batchSizes[d] = bs
 
-			bb := protocol.NewBatchBuilder(reqBufs[d], bs)
+			var bb protocol.BatchBuilder
+			bb.Reset(reqBufs[d], bs)
 
 			for i := uint32(0); i < bs; i++ {
 				protocol.IncrementEncode(counter+uint64(i), itemBuf)
@@ -1188,7 +1196,6 @@ func runLookupBench(durationSec int) int {
 // ---------------------------------------------------------------------------
 
 func main() {
-	runtime.GOMAXPROCS(1) // single-threaded client for fair comparison
 	signal.Ignore(syscall.SIGPIPE)
 
 	if len(os.Args) < 2 {
@@ -1204,6 +1211,17 @@ func main() {
 
 	cmd := os.Args[1]
 	rc := 0
+
+	switch cmd {
+	case "uds-ping-pong-client", "shm-ping-pong-client",
+		"uds-batch-ping-pong-client", "shm-batch-ping-pong-client",
+		"snapshot-client", "snapshot-shm-client",
+		"uds-pipeline-client", "uds-pipeline-batch-client",
+		"lookup-bench":
+		// Keep benchmark clients single-threaded for fair cross-language
+		// comparison, but leave servers at the runtime default.
+		runtime.GOMAXPROCS(1)
+	}
 
 	switch cmd {
 	case "uds-ping-pong-server", "shm-ping-pong-server",

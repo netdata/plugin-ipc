@@ -65,6 +65,10 @@ EMIT_CSV_ROWS=1
 POWERSHELL_EXE="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 BLOCK_FIRST="${NIPC_BENCH_FIRST_BLOCK:-1}"
 BLOCK_LAST="${NIPC_BENCH_LAST_BLOCK:-9}"
+SCENARIO_FILTER="${NIPC_BENCH_SCENARIOS:-}"
+CLIENT_FILTER="${NIPC_BENCH_CLIENTS:-}"
+SERVER_FILTER="${NIPC_BENCH_SERVERS:-}"
+TARGET_FILTER="${NIPC_BENCH_TARGETS:-}"
 
 # Binary locations
 BENCH_C="${BUILD_DIR}/bin/bench_windows_c.exe"
@@ -380,6 +384,55 @@ require_zero_or_one() {
     esac
 }
 
+filter_matches() {
+    local value="$1"
+    local filter="$2"
+    local token
+
+    if [ -z "$filter" ]; then
+        return 0
+    fi
+
+    IFS='|' read -r -a __bench_filter_tokens <<< "$filter"
+    for token in "${__bench_filter_tokens[@]}"; do
+        [ -n "$token" ] || continue
+        case "$value" in
+            $token) return 0 ;;
+        esac
+    done
+
+    return 1
+}
+
+should_run_row() {
+    local scenario="$1"
+    local client_lang="$2"
+    local server_lang="$3"
+    local target_rps="$4"
+
+    filter_matches "$scenario" "$SCENARIO_FILTER" || return 1
+    filter_matches "$client_lang" "$CLIENT_FILTER" || return 1
+    filter_matches "$server_lang" "$SERVER_FILTER" || return 1
+    filter_matches "$target_rps" "$TARGET_FILTER" || return 1
+    return 0
+}
+
+run_selected_measurement() {
+    set +e
+    "$@"
+    local rc=$?
+    set -e
+
+    if [ "$rc" -eq 1 ]; then
+        RUN_FAILED=1
+    fi
+    if [ "$rc" -ne 2 ]; then
+        sleep 0.5
+    fi
+
+    return 0
+}
+
 target_rps_label() {
     local target_rps="$1"
     if [ "$target_rps" = "0" ]; then
@@ -554,6 +607,36 @@ aggregate_sample_file() {
 
 throughput_ratio_is_acceptable() {
     awk -v ratio="$1" -v max_ratio="$2" 'BEGIN { exit ((ratio + 0) <= (max_ratio + 0) ? 0 : 1) }'
+}
+
+lookup_prior_max_throughput() {
+    local scenario="$1"
+    local client_lang="$2"
+    local server_lang="$3"
+
+    awk -F',' -v scenario="$scenario" -v client="$client_lang" -v server="$server_lang" '
+        NR > 1 && $1 == scenario && $2 == client && $3 == server && $4 == "0" {
+            print $5
+            exit
+        }
+    ' "$OUTPUT_CSV"
+}
+
+fixed_rate_target_is_oversubscribed() {
+    local scenario="$1"
+    local client_lang="$2"
+    local server_lang="$3"
+    local target_rps="$4"
+
+    [ "$target_rps" != "0" ] || return 1
+
+    local prior_max
+    prior_max=$(lookup_prior_max_throughput "$scenario" "$client_lang" "$server_lang")
+    [ -n "$prior_max" ] || return 1
+
+    awk -v target_rps="$target_rps" -v prior_max="$prior_max" '
+        BEGIN { exit(((target_rps + 0) > (prior_max + 0)) ? 0 : 1) }
+    '
 }
 
 throughput_stability_from_sample_file() {
@@ -848,20 +931,28 @@ run_repeated_measurement() {
     fi
 
     if ! throughput_ratio_is_acceptable "$raw_ratio" "$MAX_THROUGHPUT_RATIO"; then
-        LAST_MEASUREMENT_STATUS="failed"
-        LAST_MEASUREMENT_REASON="raw_ratio_exceeded"
-        warn "  Unstable repeated throughput for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
-        warn "  raw_min=${raw_min} raw_max=${raw_max} raw_ratio=${raw_ratio} (max ${MAX_THROUGHPUT_RATIO})"
-        if [ "$trimmed_each_side" -gt 0 ]; then
-            warn "  stable_min=${stable_min} stable_max=${stable_max} stable_ratio=${stable_ratio}"
-            warn "  Diagnostic note: the trimmed stable core is no longer publishable when raw throughput is unstable"
+        if fixed_rate_target_is_oversubscribed "$scenario" "$client_lang" "$server_lang" "$target_rps"; then
+            local prior_max
+            prior_max=$(lookup_prior_max_throughput "$scenario" "$client_lang" "$server_lang")
+            warn "  Oversubscribed fixed-rate row for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
+            warn "  prior_max=${prior_max} target_rps=${target_rps} raw_min=${raw_min} raw_max=${raw_max} raw_ratio=${raw_ratio}"
+            warn "  Keeping the row because the target exceeds measured max capacity and the trimmed stable core remains publishable"
+        else
+            LAST_MEASUREMENT_STATUS="failed"
+            LAST_MEASUREMENT_REASON="raw_ratio_exceeded"
+            warn "  Unstable repeated throughput for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
+            warn "  raw_min=${raw_min} raw_max=${raw_max} raw_ratio=${raw_ratio} (max ${MAX_THROUGHPUT_RATIO})"
+            if [ "$trimmed_each_side" -gt 0 ]; then
+                warn "  stable_min=${stable_min} stable_max=${stable_max} stable_ratio=${stable_ratio}"
+                warn "  Diagnostic note: the trimmed stable core is no longer publishable when raw throughput is unstable"
+            fi
+            warn "  Per-repeat samples: ${sample_file}"
+            export NIPC_KEEP_RUN_DIR=1
+            maybe_diagnose_failed_measurement \
+                "$scenario" "$client_lang" "$server_lang" "$target_rps" "$duration" "$sample_file" \
+                "$measure_fn" "$@"
+            return 1
         fi
-        warn "  Per-repeat samples: ${sample_file}"
-        export NIPC_KEEP_RUN_DIR=1
-        maybe_diagnose_failed_measurement \
-            "$scenario" "$client_lang" "$server_lang" "$target_rps" "$duration" "$sample_file" \
-            "$measure_fn" "$@"
-        return 1
     fi
 
     LAST_MEASUREMENT_STATUS="success"
@@ -983,9 +1074,11 @@ measure_pair_once() {
             ;;
     esac
 
-    local svc_name="${scenario}-${server_lang}-${client_lang}-${target_rps}"
     local server_duration="$duration"
     local runtime_dir="${MEASURE_RUN_DIR:-$RUN_DIR}"
+    local repeat_tag
+    repeat_tag=$(basename "$runtime_dir")
+    local svc_name="${scenario}-${server_lang}-${client_lang}-${target_rps}-${repeat_tag}"
     local server_out="${runtime_dir}/server-${server_lang}-${svc_name}.out"
 
     local server_pid
@@ -1090,6 +1183,11 @@ run_pair() {
     local client_lang="$3"
     local target_rps="$4"
     local duration="$5"
+
+    if ! should_run_row "$scenario" "$client_lang" "$server_lang" "$target_rps"; then
+        return 2
+    fi
+
     local effective_duration
     effective_duration=$(sample_duration_for_target "$scenario" "$target_rps" "$duration")
 
@@ -1152,6 +1250,11 @@ measure_lookup_once() {
 run_lookup_bench() {
     local lang="$1"
     local duration="$2"
+
+    if ! should_run_row "lookup" "$lang" "$lang" "0"; then
+        return 2
+    fi
+
     local effective_duration
     effective_duration=$(sample_duration_for_target "lookup" "0" "$duration")
 
@@ -1166,9 +1269,11 @@ measure_np_pipeline_once() {
     local duration="$3"
     local depth="$4"
 
-    local pipe_svc="pipeline-${server_lang}-${client_lang}"
     local server_duration="$duration"
     local runtime_dir="${MEASURE_RUN_DIR:-$RUN_DIR}"
+    local repeat_tag
+    repeat_tag=$(basename "$runtime_dir")
+    local pipe_svc="pipeline-${server_lang}-${client_lang}-${repeat_tag}"
     local server_pid
     server_pid=$(start_server "$server_lang" "np-ping-pong-server" "$pipe_svc" "$server_duration") || {
         warn "  Failed to start pipeline server"
@@ -1260,6 +1365,11 @@ run_np_pipeline() {
     local duration="$3"
     local depth="$4"
     local scenario="np-pipeline-d${depth}"
+
+    if ! should_run_row "$scenario" "$client_lang" "$server_lang" "0"; then
+        return 2
+    fi
+
     local effective_duration
     effective_duration=$(sample_duration_for_target "$scenario" "0" "$duration")
 
@@ -1274,9 +1384,11 @@ measure_np_pipeline_batch_once() {
     local duration="$3"
     local depth="$4"
 
-    local pb_svc="pipe-batch-${server_lang}-${client_lang}"
     local server_duration="$duration"
     local runtime_dir="${MEASURE_RUN_DIR:-$RUN_DIR}"
+    local repeat_tag
+    repeat_tag=$(basename "$runtime_dir")
+    local pb_svc="pipe-batch-${server_lang}-${client_lang}-${repeat_tag}"
     local server_pid
     server_pid=$(start_server "$server_lang" "np-batch-ping-pong-server" "$pb_svc" "$server_duration") || {
         warn "  Failed to start pipeline-batch server"
@@ -1360,6 +1472,11 @@ run_np_pipeline_batch() {
     local duration="$3"
     local depth="$4"
     local scenario="np-pipeline-batch-d${depth}"
+
+    if ! should_run_row "$scenario" "$client_lang" "$server_lang" "0"; then
+        return 2
+    fi
+
     local effective_duration
     effective_duration=$(sample_duration_for_target "$scenario" "0" "$duration")
 
@@ -1421,6 +1538,10 @@ main() {
     log "Max allowed stable throughput ratio: ${MAX_THROUGHPUT_RATIO}"
     log "Minimum stable samples required: ${MIN_STABLE_SAMPLES}"
     log "Diagnostic reruns for failed rows: $( [ "$DIAGNOSE_FAILURES" = "1" ] && printf enabled || printf disabled )"
+    log "Scenario filter: ${SCENARIO_FILTER:-<all>}"
+    log "Client filter: ${CLIENT_FILTER:-<all>}"
+    log "Server filter: ${SERVER_FILTER:-<all>}"
+    log "Target filter: ${TARGET_FILTER:-<all>}"
     log "Output: ${OUTPUT_CSV}"
 
     if ! check_binaries; then
@@ -1447,10 +1568,7 @@ main() {
         for rate in "${RATES_PING_PONG[@]}"; do
             for server_lang in "${LANGS[@]}"; do
                 for client_lang in "${LANGS[@]}"; do
-                    if ! run_pair "np-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
-                        RUN_FAILED=1
-                    fi
-                    sleep 0.5
+                    run_selected_measurement run_pair "np-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"
                 done
             done
         done
@@ -1462,10 +1580,7 @@ main() {
         for rate in "${RATES_PING_PONG[@]}"; do
             for server_lang in "${LANGS[@]}"; do
                 for client_lang in "${LANGS[@]}"; do
-                    if ! run_pair "shm-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
-                        RUN_FAILED=1
-                    fi
-                    sleep 0.5
+                    run_selected_measurement run_pair "shm-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"
                 done
             done
         done
@@ -1477,10 +1592,7 @@ main() {
         for rate in "${RATES_SNAPSHOT[@]}"; do
             for server_lang in "${LANGS[@]}"; do
                 for client_lang in "${LANGS[@]}"; do
-                    if ! run_pair "snapshot-baseline" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
-                        RUN_FAILED=1
-                    fi
-                    sleep 0.5
+                    run_selected_measurement run_pair "snapshot-baseline" "$server_lang" "$client_lang" "$rate" "$DURATION"
                 done
             done
         done
@@ -1492,10 +1604,7 @@ main() {
         for rate in "${RATES_SNAPSHOT[@]}"; do
             for server_lang in "${LANGS[@]}"; do
                 for client_lang in "${LANGS[@]}"; do
-                    if ! run_pair "snapshot-shm" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
-                        RUN_FAILED=1
-                    fi
-                    sleep 0.5
+                    run_selected_measurement run_pair "snapshot-shm" "$server_lang" "$client_lang" "$rate" "$DURATION"
                 done
             done
         done
@@ -1507,10 +1616,7 @@ main() {
         for rate in "${RATES_PING_PONG[@]}"; do
             for server_lang in "${LANGS[@]}"; do
                 for client_lang in "${LANGS[@]}"; do
-                    if ! run_pair "np-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
-                        RUN_FAILED=1
-                    fi
-                    sleep 0.5
+                    run_selected_measurement run_pair "np-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"
                 done
             done
         done
@@ -1522,10 +1628,7 @@ main() {
         for rate in "${RATES_PING_PONG[@]}"; do
             for server_lang in "${LANGS[@]}"; do
                 for client_lang in "${LANGS[@]}"; do
-                    if ! run_pair "shm-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"; then
-                        RUN_FAILED=1
-                    fi
-                    sleep 0.5
+                    run_selected_measurement run_pair "shm-batch-ping-pong" "$server_lang" "$client_lang" "$rate" "$DURATION"
                 done
             done
         done
@@ -1535,9 +1638,7 @@ main() {
     if run_block 7; then
         log "=== Local Cache Lookup ==="
         for lang in "${LANGS[@]}"; do
-            if ! run_lookup_bench "$lang" "$DURATION"; then
-                RUN_FAILED=1
-            fi
+            run_selected_measurement run_lookup_bench "$lang" "$DURATION"
         done
     fi
 
@@ -1546,10 +1647,7 @@ main() {
         log "=== NP Pipeline (depth=${PIPELINE_DEPTH}) ==="
         for server_lang in "${LANGS[@]}"; do
             for client_lang in "${LANGS[@]}"; do
-                if ! run_np_pipeline "$server_lang" "$client_lang" "$DURATION" "$PIPELINE_DEPTH"; then
-                    RUN_FAILED=1
-                fi
-                sleep 0.5
+                run_selected_measurement run_np_pipeline "$server_lang" "$client_lang" "$DURATION" "$PIPELINE_DEPTH"
             done
         done
     fi
@@ -1559,10 +1657,7 @@ main() {
         log "=== NP Pipeline+Batch (depth=${PIPELINE_DEPTH}) ==="
         for server_lang in "${LANGS[@]}"; do
             for client_lang in "${LANGS[@]}"; do
-                if ! run_np_pipeline_batch "$server_lang" "$client_lang" "$DURATION" "$PIPELINE_DEPTH"; then
-                    RUN_FAILED=1
-                fi
-                sleep 0.5
+                run_selected_measurement run_np_pipeline_batch "$server_lang" "$client_lang" "$DURATION" "$PIPELINE_DEPTH"
             done
         done
     fi
