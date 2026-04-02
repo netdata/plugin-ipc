@@ -48,6 +48,11 @@ Linux and native Windows.
     excuse to downgrade the failure into acceptable noise
   - final fit-for-purpose sign-off must therefore eliminate these failures by
     improving the harness/rig or by fixing code, not by classifying them away
+- `2026-04-02` Costa decision:
+  - checkpoint the current Windows benchmark harness fix immediately
+  - commit and push the local runner/TODO changes
+  - rerun the full strict native Windows benchmark suite from the pushed state
+    before treating the fix as signed off
 
 ## TL;DR
 
@@ -2660,6 +2665,322 @@ Linux and native Windows.
       - implication:
         - the staged loop is now back at the final gate
         - the next required proof is the full strict native Windows suite
+    - latest full strict native Windows rerun after the canary pass:
+      - native `win11` full strict suite finished with exit `1`:
+        - `/tmp/plugin-ipc-fitproof-full-postgc.exit`
+        - `/tmp/plugin-ipc-fitproof-full-postgc.log`
+        - `/tmp/plugin-ipc-fitproof-full-postgc.csv`
+      - markdown was not generated
+      - published rows before failure:
+        - `163` CSV lines total
+      - preserved run dir:
+        - `/tmp/netipc-bench-603715`
+      - the active smoking guns moved again:
+        - `np-pipeline-d16 go->go @ max`
+          - `raw_min=36416`
+          - `raw_max=84772`
+          - `raw_ratio=2.327878`
+          - `stable_ratio=1.003467`
+          - samples:
+            - `/tmp/netipc-bench-603715/samples-np-pipeline-d16-go-go-0.csv`
+        - `np-pipeline-batch-d16 c->go @ max`
+          - `raw_min=11467524`
+          - `raw_max=16141662`
+          - `raw_ratio=1.407598`
+          - `stable_ratio=1.056037`
+          - samples:
+            - `/tmp/netipc-bench-603715/samples-np-pipeline-batch-d16-c-go-0.csv`
+      - implication:
+        - the previously fixed Go named-pipe ping-pong `server=go` instability
+          is no longer the active blocker
+        - the remaining blockers now live in the named-pipe pipeline and
+          pipeline-batch families
+        - the next work must start from these exact two rows, not from another
+          blind full-suite rerun
+    - concrete next staged loop for the current blockers:
+      - promote the two latest smoking guns into the Windows canary set:
+        - `np-pipeline-d16 go->go @ max`
+        - `np-pipeline-batch-d16 c->go @ max`
+      - run exact-row loops for both rows until one reproduces quickly
+      - add per-repeat Go runtime diagnostics for benchmark processes:
+        - GC count delta
+        - pause time delta
+        - heap alloc / heap objects delta
+      - use those diagnostics only to classify the defect:
+        - benchmark-driver/runtime problem
+        - or transport/library problem
+      - only after exact-row and block proofs are clean rerun canary
+      - only after canary is clean rerun the full strict Windows suite
+    - fresh exact-row proof for the two latest full-run blockers:
+      - native `win11` exact-row reruns for
+        `np-pipeline-d16 go->go @ max` passed `3/3`:
+        - `95952`
+        - `94005`
+        - `103350`
+      - native `win11` exact-row reruns for
+        `np-pipeline-batch-d16 c->go @ max` also passed `3/3`:
+        - `17859407`
+        - `15669538`
+        - `16620381`
+      - implication:
+        - neither current blocker is a trivially always-failing exact row
+        - the remaining defects are context-dependent inside the later pipeline
+          and pipeline-batch blocks
+        - the next staged proof is reduced block-context reruns for the
+          `server=go` rows in:
+          - block `8` (`np-pipeline-d16`)
+          - block `9` (`np-pipeline-batch-d16`)
+    - reduced block `8` proof for `np-pipeline-d16` with `server=go`:
+      - native `win11` reduced block rerun passed cleanly:
+        - `/tmp/plugin-ipc-fitproof-pipeline-d16-go-server.csv`
+      - published rows:
+        - `c->go = 101446`, `stable_ratio=1.098939`
+        - `rust->go = 97334`, `stable_ratio=1.110064`
+        - `go->go = 101783`, `stable_ratio=1.100146`
+      - implication:
+        - the `np-pipeline-d16 go->go @ max` smoking gun requires more context
+          than the reduced block-`8` `server=go` sequence
+    - reduced block `9` proof for `np-pipeline-batch-d16` with `server=go`:
+      - native `win11` reduced block rerun passed cleanly:
+        - `/tmp/plugin-ipc-fitproof-pipeline-batch-d16-go-server.csv`
+      - published rows:
+        - `c->go = 15577190`, `stable_ratio=1.100216`
+        - `rust->go = 15729056`, `stable_ratio=1.087208`
+        - `go->go = 16699811`, `stable_ratio=1.036816`
+      - implication:
+        - the `np-pipeline-batch-d16 c->go @ max` smoking gun also requires
+          more context than the reduced block-`9` `server=go` sequence
+        - both remaining Windows full-run blockers are now proven to need
+          wider context than:
+          - exact-row reruns
+          - reduced `server=go` block reruns
+        - the next staged loop must widen context one step at a time rather
+          than jumping back to another blind full-suite rerun
+    - Windows benchmark harness defect found while widening context:
+      - `tests/run-windows-bench.sh` computes `HAS_RUST=0` before
+        `check_binaries()` calls `ensure_bench_build()`
+      - implication:
+        - on a clean Windows proof tree the script can build
+          `src/crates/netipc/target/release/bench_windows.exe` and still skip
+          all Rust rows in the same invocation
+        - reduced reproductions that start from a clean tree can therefore be
+          invalid unless the Rust bench binary already existed before the run
+      - native `win11` proof:
+        - manual `cargo build --release --manifest-path src/crates/netipc/Cargo.toml --bin bench_windows`
+          succeeded and produced:
+          - `src/crates/netipc/target/release/bench_windows.exe`
+        - but the already-running reduced block `8` invocation still logged:
+          - `Rust benchmark binary not found: /tmp/plugin-ipc-fitproof/src/crates/netipc/target/release/bench_windows.exe (Rust tests will be skipped)`
+      - required fix:
+        - re-evaluate Rust benchmark availability after `ensure_bench_build()`
+          instead of caching it only once before the build step
+    - stale `win11` proof tree discovered after the Rust-availability fix:
+      - local repo head:
+        - `9932bac netipc: tighten Windows benchmark validation loop`
+      - `win11` proof tree `/tmp/plugin-ipc-fitproof` head:
+        - `5372e97 netipc: unify Linux and Windows L2/L3 APIs`
+      - concrete missing benchmark-driver fixes on the stale tree:
+        - `bench/drivers/go/main.go` still had:
+          - `runtime.GOMAXPROCS(1)` in the main path
+        - `bench/drivers/go/main_windows.go` still had:
+          - `runtime.GOMAXPROCS(1)` in the main path
+      - implication:
+        - any post-reboot reduced reproductions that used the stale
+          `/tmp/plugin-ipc-fitproof` tree are invalid for the current
+          benchmark investigation
+        - the unexpectedly low post-reboot `np-pipeline-d16` widened results
+          were explained by using pre-fix benchmark drivers, not by a newly
+          discovered protocol regression
+      - required next step:
+        - rebuild the Windows staged loop from a fresh proof tree copied from
+          the current local repo state before continuing the exact-row /
+          reduced-block investigation
+    - fresh-tree reduced block `8` proof for `np-pipeline-d16` with
+      `client=go`:
+      - native `win11` reduced block rerun from
+        `/tmp/plugin-ipc-fitproof-20260402` passed cleanly:
+        - `/tmp/plugin-ipc-fitproof-20260402-pipeline-d16-go-client.csv`
+      - published rows:
+        - `go->c = 152629`, `stable_ratio=1.021740`
+        - `go->rust = 55155`, `stable_ratio=1.124327`
+        - `go->go = 93350`, `stable_ratio=1.066220`
+      - implication:
+        - the current `np-pipeline-d16 go->go @ max` smoking gun requires
+          wider context than:
+          - exact-row reruns
+          - reduced `server=go` block `8`
+          - reduced `client=go` block `8`
+    - fresh-tree reduced block `9` proof for `np-pipeline-batch-d16` with
+      `client=c`:
+      - native `win11` reduced block rerun from
+        `/tmp/plugin-ipc-fitproof-20260402` passed cleanly:
+        - `/tmp/plugin-ipc-fitproof-20260402-pipeline-batch-d16-c-client.csv`
+      - published rows:
+        - `c->c = 25080707`, `stable_ratio=1.101288`
+        - `c->rust = 14751173`, `stable_ratio=1.056894`
+        - `c->go = 18158157`, `stable_ratio=1.030445`
+      - implication:
+        - the current `np-pipeline-batch-d16 c->go @ max` smoking gun
+          requires wider context than:
+          - exact-row reruns
+          - reduced `server=go` block `9`
+          - reduced `client=c` block `9`
+        - the next staged step should be a broadened late-tail canary from the
+          fresh tree, not another blind full-suite rerun
+    - expanded fresh-tree Windows canary result:
+      - fresh-tree canary failed with exactly one smoking gun:
+        - `np-pipeline-d16 go->go @ max`
+      - the newly promoted pipeline-batch blocker passed inside the same canary:
+        - `np-pipeline-batch-d16 c->go @ max = 15723346`,
+          `stable_ratio=1.048763`
+      - canary evidence:
+        - `/tmp/plugin-ipc-fitproof-20260402-canary.log`
+        - `/tmp/netipc-bench-13187/samples-np-pipeline-d16-go-go-0.csv`
+      - failing repeats:
+        - `84262`
+        - `94245`
+        - `118626`
+        - `102081`
+        - `93628`
+      - implication:
+        - `np-pipeline-d16 go->go @ max` is now the only reproduced Windows
+          blocker in the fresh-tree canary
+        - `np-pipeline-batch-d16 c->go @ max` no longer reproduces in the
+          expanded canary and should not be chased further unless it reappears
+          in a later full strict run
+    - sequence reduction for the remaining blocker:
+      - exact `go->go` row on the fresh tree passed cleanly:
+        - `/tmp/netipc-bench-15130/samples-np-pipeline-d16-go-go-0.csv`
+      - `rust->go` then `go->go` passed
+      - `lookup` then `rust->go` then `go->go` passed
+      - `np-ping-pong go->rust` then `rust->go` then `go->go` passed
+      - `np-ping-pong go->rust` then `lookup rust->rust` then `go->go`
+        reproduced the failure:
+        - `/tmp/netipc-bench-20231/samples-np-pipeline-d16-go-go-0.csv`
+      - reduced failing repeats:
+        - `101347`
+        - `51467`
+        - `94650`
+        - `102957`
+        - `102807`
+      - exact-row comparison:
+        - the isolated exact row had no comparable collapse:
+          - `109714`
+          - `104369`
+          - `99404`
+          - `99282`
+          - `107525`
+      - implication:
+        - the remaining issue is benchmark-case cross-contamination, not a
+          trivially broken `go->go` row
+        - the minimal known reproducer now needs only:
+          - `np-ping-pong go->rust @ max`
+          - `lookup rust->rust @ max`
+          - `np-pipeline-d16 go->go @ max`
+    - barrier evidence for the remaining blocker:
+      - adding `ps -W | grep ...` snapshots between the reduced reproducer
+        cases made the previously failing sequence pass
+      - those snapshots showed no lingering `bench_windows_*` processes before
+        the final `go->go` row started
+      - adding a plain `sleep 1` before the final `go->go` row also made the
+        reduced reproducer pass:
+        - `/tmp/plugin-ipc-fitproof-20260402-seq-sleep-step3.log`
+      - current harness fact:
+        - `tests/run-windows-bench.sh` already sleeps only `0.5` seconds after
+          each executed row inside a single full-suite run
+      - working conclusion:
+        - the Windows benchmark harness needs a stronger explicit row/case
+          settle barrier than the current `0.5s`
+    - fresh-tree harness fix and canary rerun:
+      - local fixes applied:
+        - `tests/run-windows-bench.sh`
+          - refresh Rust benchmark availability after `ensure_bench_build()`
+          - add configurable `NIPC_BENCH_ROW_SETTLE_SEC`
+          - raise the default row settle barrier from the old hard-coded
+            `0.5s` to `1s`
+        - `tests/run-windows-bench-canary.sh`
+          - add configurable `NIPC_BENCH_ROW_SETTLE_SEC`
+          - sleep between canary cases with the same settle barrier
+      - fresh-tree expanded canary rerun with the `1s` barrier:
+        - `/tmp/plugin-ipc-fitproof-20260402-canary-after-settle.log`
+      - rows that passed cleanly in the same canary:
+        - `np-pipeline-d16 go->go @ max = 97241`, `stable_ratio=1.042765`
+        - `np-pipeline-batch-d16 c->rust @ max = 18418029`,
+          `stable_ratio=1.073245`
+        - `np-pipeline-batch-d16 go->go @ max = 17655065`,
+          `stable_ratio=1.109179`
+      - the canary still failed overall, but only on:
+        - `np-pipeline-batch-d16 c->go @ max`
+      - fresh failing evidence:
+        - `/tmp/netipc-bench-25179/samples-np-pipeline-batch-d16-c-go-0.csv`
+      - fresh failing repeats:
+        - `19403580`
+        - `18971482`
+        - `19861948`
+        - `14403578`
+        - `15190288`
+      - fresh failing ratios:
+        - `raw_ratio=1.378959`
+        - `stable_ratio=1.277367`
+      - implication:
+        - the `1s` settle-barrier fix was real and removed the old
+          `np-pipeline-d16 go->go @ max` smoking gun from the canary
+        - the remaining fresh blocker is now only
+          `np-pipeline-batch-d16 c->go @ max`
+    - fresh sequence reduction for `np-pipeline-batch-d16 c->go @ max`:
+      - exact row with the `1s` settle barrier still passed cleanly when run
+        after only `c->rust`:
+        - `/tmp/plugin-ipc-fitproof-seq-c-go.csv`
+        - `c->go = 16464214`, `stable_ratio=1.099430`
+      - wider reduced sequence also passed cleanly:
+        - `rust->go np-pipeline`
+        - `go->go np-pipeline`
+        - `c->rust np-pipeline-batch`
+        - `c->go np-pipeline-batch`
+        - published proof:
+          - `/tmp/plugin-ipc-fitproof-seq4-c-go.csv`
+          - `c->go = 18484251`, `stable_ratio=1.083666`
+      - another widened reduced sequence also passed cleanly:
+        - `go->rust np-ping-pong`
+        - `lookup rust->rust`
+        - `c->rust np-pipeline-batch`
+        - `c->go np-pipeline-batch`
+        - published proof:
+          - `/tmp/plugin-ipc-fitproof-seq4b-c-go.csv`
+          - `c->go = 17635027`, `stable_ratio=1.011348`
+      - implication:
+        - the remaining `c->go` smoking gun does not reproduce in the obvious
+          shorter sequences
+        - the current evidence points to a longer cumulative late-canary / late
+          suite interaction, not a trivially broken exact row
+        - the next staged proof should test a longer settle barrier on the
+          full bounded canary before attempting another full strict Windows
+          suite
+    - fresh-tree bounded canary rerun with the `2s` barrier:
+      - native `win11` canary rerun passed cleanly end-to-end:
+        - `/tmp/plugin-ipc-fitproof-20260402-canary-settle2.log`
+      - published rows:
+        - `np-ping-pong go->rust @ max = 22548`, `stable_ratio=1.122327`
+        - `lookup rust->rust @ max = 177174182`,
+          `stable_ratio=1.014596`
+        - `np-pipeline-d16 rust->go @ max = 109987`,
+          `stable_ratio=1.023027`
+        - `np-pipeline-d16 go->go @ max = 110310`,
+          `stable_ratio=1.024639`
+        - `np-pipeline-batch-d16 c->rust @ max = 17733290`,
+          `stable_ratio=1.065935`
+        - `np-pipeline-batch-d16 c->go @ max = 18830588`,
+          `stable_ratio=1.060557`
+        - `np-pipeline-batch-d16 go->go @ max = 18868139`,
+          `stable_ratio=1.057706`
+      - implication:
+        - the remaining fresh-tree Windows canary blockers were caused by an
+          insufficient post-row settle barrier in the Windows benchmark
+          harness, not by a still-broken benchmark scenario
+        - the proven fix is to promote the default Windows settle barrier from
+          `1s` to `2s` in both the full runner and the canary wrapper
+        - the next required proof is a fresh full strict native Windows suite
+          from the fresh proof tree with the new `2s` default
 - Required evaluation before any implementation:
   - verify which non-max tiers are actually gentle in practice
   - verify whether the current harness, service naming, CPU accounting,

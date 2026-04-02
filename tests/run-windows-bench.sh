@@ -54,6 +54,7 @@ PIPELINE_BATCH_MAX_DURATION="${NIPC_BENCH_PIPELINE_BATCH_MAX_DURATION:-20}"
 MAX_THROUGHPUT_RATIO="${NIPC_BENCH_MAX_THROUGHPUT_RATIO:-1.35}"
 MIN_STABLE_SAMPLES="${NIPC_BENCH_MIN_STABLE_SAMPLES:-3}"
 SERVER_STOP_GRACE_SEC="${NIPC_BENCH_SERVER_STOP_GRACE_SEC:-10}"
+ROW_SETTLE_SEC="${NIPC_BENCH_ROW_SETTLE_SEC:-2}"
 DIAGNOSE_FAILURES="${NIPC_BENCH_DIAGNOSE_FAILURES:-0}"
 RUN_DIR="${TEMP:-/tmp}/netipc-bench-$$"
 ROOT_RUN_DIR="$RUN_DIR"
@@ -427,7 +428,7 @@ run_selected_measurement() {
         RUN_FAILED=1
     fi
     if [ "$rc" -ne 2 ]; then
-        sleep 0.5
+        sleep "$ROW_SETTLE_SEC"
     fi
 
     return 0
@@ -1490,14 +1491,20 @@ run_np_pipeline_batch() {
 # ---------------------------------------------------------------------------
 
 HAS_RUST=0
-if [ -x "$BENCH_RS" ]; then
-    HAS_RUST=1
-fi
+
+refresh_rust_bench_availability() {
+    if [ -x "$BENCH_RS" ]; then
+        HAS_RUST=1
+    else
+        HAS_RUST=0
+    fi
+}
 
 check_binaries() {
     local ok=0
 
     ensure_bench_build
+    refresh_rust_bench_availability
 
     if [ ! -x "$BENCH_C" ]; then
         err "C benchmark binary not found after build: $BENCH_C"
@@ -1528,6 +1535,7 @@ main() {
     require_positive_integer "NIPC_BENCH_MIN_STABLE_SAMPLES" "$MIN_STABLE_SAMPLES"
     require_positive_integer "NIPC_BENCH_SERVER_STOP_GRACE_SEC" "$SERVER_STOP_GRACE_SEC"
     require_positive_number "NIPC_BENCH_MAX_THROUGHPUT_RATIO" "$MAX_THROUGHPUT_RATIO"
+    require_positive_number "NIPC_BENCH_ROW_SETTLE_SEC" "$ROW_SETTLE_SEC"
     require_zero_or_one "NIPC_BENCH_DIAGNOSE_FAILURES" "$DIAGNOSE_FAILURES"
     log "Windows Benchmark Suite"
     log "Duration per fixed-rate sample: ${DURATION}s"
@@ -1535,6 +1543,7 @@ main() {
     log "Duration per pipeline-batch max-tier sample: ${PIPELINE_BATCH_MAX_DURATION}s"
     log "Samples per published row: ${REPETITIONS}"
     log "Server stop grace before forced kill: ${SERVER_STOP_GRACE_SEC}s"
+    log "Row settle barrier: ${ROW_SETTLE_SEC}s"
     log "Max allowed stable throughput ratio: ${MAX_THROUGHPUT_RATIO}"
     log "Minimum stable samples required: ${MIN_STABLE_SAMPLES}"
     log "Diagnostic reruns for failed rows: $( [ "$DIAGNOSE_FAILURES" = "1" ] && printf enabled || printf disabled )"

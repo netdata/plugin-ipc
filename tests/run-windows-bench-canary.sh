@@ -13,6 +13,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUNNER="${ROOT_DIR}/tests/run-windows-bench.sh"
 OUT_DIR="${1:-${TEMP:-/tmp}/netipc-bench-canary}"
 DURATION="${2:-5}"
+ROW_SETTLE_SEC="${NIPC_BENCH_ROW_SETTLE_SEC:-2}"
 
 run() {
   printf >&2 "${GRAY}%s >${NC} " "$(pwd)"
@@ -32,7 +33,9 @@ CANARY_CASES=(
   "1 np-ping-pong go rust 0 np-ping-pong-go-rust-max"
   "7 lookup rust rust 0 lookup-rust-rust-max"
   "8 np-pipeline-d16 rust go 0 np-pipeline-d16-rust-go-max"
+  "8 np-pipeline-d16 go go 0 np-pipeline-d16-go-go-max"
   "9 np-pipeline-batch-d16 c rust 0 np-pipeline-batch-d16-c-rust-max"
+  "9 np-pipeline-batch-d16 c go 0 np-pipeline-batch-d16-c-go-max"
   "9 np-pipeline-batch-d16 go go 0 np-pipeline-batch-d16-go-go-max"
 )
 
@@ -52,6 +55,7 @@ for case_def in "${CANARY_CASES[@]}"; do
       bash "$RUNNER" "$csv" "$DURATION"; then
     failures=$((failures + 1))
   fi
+  sleep "$ROW_SETTLE_SEC"
 done
 
 if [ "$failures" -ne 0 ]; then
