@@ -1,6 +1,16 @@
 ## Autonomous execution contract
 
 - Costa explicitly requires autonomous execution with no checkpoints.
+- Windows work must use exactly one checkout on `win11`:
+  - `~/src/plugin-ipc.git`
+- Cross-machine sync workflow is fixed:
+  - commit in `/home/costa/src/plugin-ipc.git`
+  - push from `/home/costa/src/plugin-ipc.git`
+  - pull in `win11:~/src/plugin-ipc.git`
+  - and vice versa for Windows-originated commits
+- No disposable Windows git clones or worktrees under `/tmp` are allowed.
+- Historical `/tmp/...` paths kept below are evidence artifact locations only,
+  not valid working directories.
 - "Working autonomously" means:
   - do not stop to provide progress updates, interim summaries, or checkpoint
     reports
@@ -3223,9 +3233,21 @@ bash tests/run-posix-bench.sh benchmarks-posix.csv 5
 bash tests/generate-benchmarks-posix.sh benchmarks-posix.csv benchmarks-posix.md
 ```
 
-#### Native Windows (`win11`)
+#### Native Windows (`win11:~/src/plugin-ipc.git`)
 
-This repository’s validated Windows path is native `win11`, using:
+All active Windows work must run from the single persistent checkout:
+
+- `win11:~/src/plugin-ipc.git`
+
+Sync rule for this checkout:
+
+- commit locally in `/home/costa/src/plugin-ipc.git`, push, then pull in
+  `win11:~/src/plugin-ipc.git`
+- for Windows-originated changes, commit in `win11:~/src/plugin-ipc.git`,
+  push, then pull back into `/home/costa/src/plugin-ipc.git`
+- do not create or use disposable Windows repo clones under `/tmp`
+
+This repository’s validated Windows toolchain path is native `win11`, using:
 
 - native Windows `cargo`
 - native Windows `go`
