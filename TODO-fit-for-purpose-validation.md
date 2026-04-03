@@ -11,6 +11,9 @@
 - No disposable Windows git clones or worktrees under `/tmp` are allowed.
 - Historical `/tmp/...` paths kept below are evidence artifact locations only,
   not valid working directories.
+- Unless a line explicitly says it is a historical artifact path, every `win11`
+  reference in this TODO means the persistent checkout at:
+  - `win11:~/src/plugin-ipc.git`
 - "Working autonomously" means:
   - do not stop to provide progress updates, interim summaries, or checkpoint
     reports
