@@ -36,6 +36,8 @@
 #include "netipc/netipc_win_shm.h"
 
 #include <math.h>
+#include <io.h>
+#include <process.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,6 +102,36 @@ static void elevate_bench_priority(void)
 
     if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST))
         fprintf(stderr, "warn: SetThreadPriority(THREAD_PRIORITY_HIGHEST) failed: %lu\n",
+                (unsigned long)GetLastError());
+}
+
+static void pin_bench_affinity(void)
+{
+    DWORD_PTR process_mask = 0, system_mask = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask)) {
+        fprintf(stderr, "warn: GetProcessAffinityMask failed: %lu\n",
+                (unsigned long)GetLastError());
+        return;
+    }
+
+    if (!process_mask)
+        return;
+
+    DWORD_PTR pin_mask = 0;
+    for (DWORD_PTR bit = 1; bit; bit <<= 1) {
+        if (process_mask & bit)
+            pin_mask = bit;
+    }
+
+    if (!pin_mask)
+        return;
+
+    if (!SetProcessAffinityMask(GetCurrentProcess(), pin_mask))
+        fprintf(stderr, "warn: SetProcessAffinityMask failed: %lu\n",
+                (unsigned long)GetLastError());
+
+    if (!SetThreadAffinityMask(GetCurrentThread(), pin_mask))
+        fprintf(stderr, "warn: SetThreadAffinityMask failed: %lu\n",
                 (unsigned long)GetLastError());
 }
 
@@ -385,6 +417,84 @@ static DWORD WINAPI timer_thread(LPVOID arg)
     return 0;
 }
 
+typedef struct {
+    nipc_managed_server_t *server;
+} bench_server_thread_ctx_t;
+
+static DWORD WINAPI bench_server_thread(LPVOID arg)
+{
+    bench_server_thread_ctx_t *ctx = (bench_server_thread_ctx_t *)arg;
+    nipc_server_run(ctx->server);
+    return 0;
+}
+
+static int warm_server_from_env(const char *run_dir, const char *service)
+{
+    char *warmup_bin = getenv("NIPC_BENCH_SERVER_WARMUP_BIN");
+    char *warmup_subcmd = getenv("NIPC_BENCH_SERVER_WARMUP_SUBCMD");
+    char *warmup_duration = getenv("NIPC_BENCH_SERVER_WARMUP_DURATION_SEC");
+    char *warmup_target = getenv("NIPC_BENCH_SERVER_WARMUP_TARGET_RPS");
+    char *warmup_depth = getenv("NIPC_BENCH_SERVER_WARMUP_DEPTH");
+
+    if (!warmup_bin || !*warmup_bin ||
+        !warmup_subcmd || !*warmup_subcmd ||
+        !warmup_duration || !*warmup_duration)
+        return 0;
+
+    const char *argv[8];
+    int argc = 0;
+    argv[argc++] = warmup_bin;
+    argv[argc++] = warmup_subcmd;
+    argv[argc++] = run_dir;
+    argv[argc++] = service;
+    argv[argc++] = warmup_duration;
+    if (warmup_target && *warmup_target)
+        argv[argc++] = warmup_target;
+    if (warmup_depth && *warmup_depth)
+        argv[argc++] = warmup_depth;
+    argv[argc] = NULL;
+
+    FILE *nul = fopen("NUL", "w");
+    if (!nul) {
+        fprintf(stderr, "server warmup: failed to open NUL: %lu\n",
+                (unsigned long)GetLastError());
+        return -1;
+    }
+
+    int saved_stdout = _dup(_fileno(stdout));
+    if (saved_stdout < 0) {
+        fprintf(stderr, "server warmup: failed to dup stdout\n");
+        fclose(nul);
+        return -1;
+    }
+
+    fflush(stdout);
+    if (_dup2(_fileno(nul), _fileno(stdout)) < 0) {
+        fprintf(stderr, "server warmup: failed to redirect stdout\n");
+        _close(saved_stdout);
+        fclose(nul);
+        return -1;
+    }
+
+    intptr_t rc = _spawnv(_P_WAIT, warmup_bin, argv);
+
+    fflush(stdout);
+    (void)_dup2(saved_stdout, _fileno(stdout));
+    _close(saved_stdout);
+    fclose(nul);
+
+    if (rc == -1) {
+        fprintf(stderr, "server warmup: spawn failed for %s\n", warmup_bin);
+        return -1;
+    }
+    if (rc != 0) {
+        fprintf(stderr, "server warmup client failed with status %ld\n", (long)rc);
+        return -1;
+    }
+
+    return 0;
+}
+
 static int run_server(const char *run_dir, const char *service,
                       uint32_t profiles, int duration_sec,
                       uint16_t expected_method_code,
@@ -411,20 +521,40 @@ static int run_server(const char *run_dir, const char *service,
     }
 
     g_server = &server;
+    SetConsoleCtrlHandler(console_handler, TRUE);
+
+    bench_server_thread_ctx_t thread_ctx = {
+        .server = &server,
+    };
+    HANDLE server_thread = CreateThread(NULL, 0, bench_server_thread, &thread_ctx, 0, NULL);
+    if (!server_thread) {
+        fprintf(stderr, "server thread create failed: %lu\n", (unsigned long)GetLastError());
+        g_server = NULL;
+        nipc_server_destroy(&server);
+        return 1;
+    }
+
+    if (warm_server_from_env(run_dir, service) != 0) {
+        nipc_server_stop(&server);
+        WaitForSingleObject(server_thread, INFINITE);
+        CloseHandle(server_thread);
+        g_server = NULL;
+        nipc_server_destroy(&server);
+        return 1;
+    }
 
     printf("READY\n");
     fflush(stdout);
 
     uint64_t cpu_start = cpu_ns();
 
-    SetConsoleCtrlHandler(console_handler, TRUE);
-
     HANDLE timer = NULL;
     if (duration_sec > 0) {
         timer = CreateThread(NULL, 0, timer_thread, &duration_sec, 0, NULL);
     }
 
-    nipc_server_run(&server);
+    WaitForSingleObject(server_thread, INFINITE);
+    CloseHandle(server_thread);
 
     if (timer) {
         WaitForSingleObject(timer, INFINITE);
@@ -472,20 +602,41 @@ static int run_server_batch(const char *run_dir, const char *service,
     }
 
     g_server = &server;
+    SetConsoleCtrlHandler(console_handler, TRUE);
+
+    bench_server_thread_ctx_t thread_ctx = {
+        .server = &server,
+    };
+    HANDLE server_thread = CreateThread(NULL, 0, bench_server_thread, &thread_ctx, 0, NULL);
+    if (!server_thread) {
+        fprintf(stderr, "batch server thread create failed: %lu\n",
+                (unsigned long)GetLastError());
+        g_server = NULL;
+        nipc_server_destroy(&server);
+        return 1;
+    }
+
+    if (warm_server_from_env(run_dir, service) != 0) {
+        nipc_server_stop(&server);
+        WaitForSingleObject(server_thread, INFINITE);
+        CloseHandle(server_thread);
+        g_server = NULL;
+        nipc_server_destroy(&server);
+        return 1;
+    }
 
     printf("READY\n");
     fflush(stdout);
 
     uint64_t cpu_start = cpu_ns();
 
-    SetConsoleCtrlHandler(console_handler, TRUE);
-
     HANDLE timer = NULL;
     if (duration_sec > 0) {
         timer = CreateThread(NULL, 0, timer_thread, &duration_sec, 0, NULL);
     }
 
-    nipc_server_run(&server);
+    WaitForSingleObject(server_thread, INFINITE);
+    CloseHandle(server_thread);
 
     if (timer) {
         WaitForSingleObject(timer, INFINITE);
@@ -1148,6 +1299,7 @@ int main(int argc, char **argv)
 {
     QueryPerformanceFrequency(&qpc_freq);
     elevate_bench_priority();
+    pin_bench_affinity();
 
     if (argc < 2) {
         usage(argv[0]);

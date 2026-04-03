@@ -70,6 +70,7 @@ SCENARIO_FILTER="${NIPC_BENCH_SCENARIOS:-}"
 CLIENT_FILTER="${NIPC_BENCH_CLIENTS:-}"
 SERVER_FILTER="${NIPC_BENCH_SERVERS:-}"
 TARGET_FILTER="${NIPC_BENCH_TARGETS:-}"
+SERVER_WARMUP_DURATION_SEC="${NIPC_BENCH_SERVER_WARMUP_DURATION_SEC:-2}"
 
 # Binary locations
 BENCH_C="${BUILD_DIR}/bin/bench_windows_c.exe"
@@ -416,6 +417,49 @@ should_run_row() {
     filter_matches "$server_lang" "$SERVER_FILTER" || return 1
     filter_matches "$target_rps" "$TARGET_FILTER" || return 1
     return 0
+}
+
+start_server_with_warmup() {
+    local warmup_bin="$1"
+    local warmup_subcmd="$2"
+    local warmup_target="$3"
+    local warmup_depth="$4"
+    shift 4
+
+    local prev_bin="${NIPC_BENCH_SERVER_WARMUP_BIN-__UNSET__}"
+    local prev_subcmd="${NIPC_BENCH_SERVER_WARMUP_SUBCMD-__UNSET__}"
+    local prev_duration="${NIPC_BENCH_SERVER_WARMUP_DURATION_SEC-__UNSET__}"
+    local prev_target="${NIPC_BENCH_SERVER_WARMUP_TARGET_RPS-__UNSET__}"
+    local prev_depth="${NIPC_BENCH_SERVER_WARMUP_DEPTH-__UNSET__}"
+
+    export NIPC_BENCH_SERVER_WARMUP_BIN="$warmup_bin"
+    export NIPC_BENCH_SERVER_WARMUP_SUBCMD="$warmup_subcmd"
+    export NIPC_BENCH_SERVER_WARMUP_DURATION_SEC="$SERVER_WARMUP_DURATION_SEC"
+    if [ -n "$warmup_target" ]; then
+        export NIPC_BENCH_SERVER_WARMUP_TARGET_RPS="$warmup_target"
+    else
+        unset NIPC_BENCH_SERVER_WARMUP_TARGET_RPS
+    fi
+    if [ -n "$warmup_depth" ]; then
+        export NIPC_BENCH_SERVER_WARMUP_DEPTH="$warmup_depth"
+    else
+        unset NIPC_BENCH_SERVER_WARMUP_DEPTH
+    fi
+
+    local pid rc
+    set +e
+    pid=$(start_server "$@")
+    rc=$?
+    set -e
+
+    if [ "$prev_bin" = "__UNSET__" ]; then unset NIPC_BENCH_SERVER_WARMUP_BIN; else export NIPC_BENCH_SERVER_WARMUP_BIN="$prev_bin"; fi
+    if [ "$prev_subcmd" = "__UNSET__" ]; then unset NIPC_BENCH_SERVER_WARMUP_SUBCMD; else export NIPC_BENCH_SERVER_WARMUP_SUBCMD="$prev_subcmd"; fi
+    if [ "$prev_duration" = "__UNSET__" ]; then unset NIPC_BENCH_SERVER_WARMUP_DURATION_SEC; else export NIPC_BENCH_SERVER_WARMUP_DURATION_SEC="$prev_duration"; fi
+    if [ "$prev_target" = "__UNSET__" ]; then unset NIPC_BENCH_SERVER_WARMUP_TARGET_RPS; else export NIPC_BENCH_SERVER_WARMUP_TARGET_RPS="$prev_target"; fi
+    if [ "$prev_depth" = "__UNSET__" ]; then unset NIPC_BENCH_SERVER_WARMUP_DEPTH; else export NIPC_BENCH_SERVER_WARMUP_DEPTH="$prev_depth"; fi
+
+    [ "$rc" -eq 0 ] || return "$rc"
+    printf '%s\n' "$pid"
 }
 
 run_selected_measurement() {
@@ -1081,14 +1125,27 @@ measure_pair_once() {
     repeat_tag=$(basename "$runtime_dir")
     local svc_name="${scenario}-${server_lang}-${client_lang}-${target_rps}-${repeat_tag}"
     local server_out="${runtime_dir}/server-${server_lang}-${svc_name}.out"
-
-    local server_pid
-    server_pid=$(start_server "$server_lang" "$server_subcmd" "$svc_name" "$server_duration") || return 1
-
-    sleep 0.2
-
     local client_bin
     client_bin="$(bench_bin "$client_lang")"
+
+    local server_pid
+    if [ "$scenario" = "np-batch-ping-pong" ] || [ "$scenario" = "np-ping-pong" ]; then
+        server_pid=$(
+            start_server_with_warmup \
+                "$client_bin" \
+                "$client_subcmd" \
+                "$target_rps" \
+                "" \
+                "$server_lang" \
+                "$server_subcmd" \
+                "$svc_name" \
+                "$server_duration"
+        ) || return 1
+    else
+        server_pid=$(start_server "$server_lang" "$server_subcmd" "$svc_name" "$server_duration") || return 1
+    fi
+
+    sleep 0.2
 
     local client_timeout=$((duration + 15))
     local client_output
@@ -1275,16 +1332,26 @@ measure_np_pipeline_once() {
     local repeat_tag
     repeat_tag=$(basename "$runtime_dir")
     local pipe_svc="pipeline-${server_lang}-${client_lang}-${repeat_tag}"
+    local client_bin
+    client_bin="$(bench_bin "$client_lang")"
     local server_pid
-    server_pid=$(start_server "$server_lang" "np-ping-pong-server" "$pipe_svc" "$server_duration") || {
+    server_pid=$(
+        start_server_with_warmup \
+            "$client_bin" \
+            "np-pipeline-client" \
+            "0" \
+            "$depth" \
+            "$server_lang" \
+            "np-ping-pong-server" \
+            "$pipe_svc" \
+            "$server_duration"
+    ) || {
         warn "  Failed to start pipeline server"
         return 1
     }
 
     sleep 0.2
 
-    local client_bin
-    client_bin="$(bench_bin "$client_lang")"
     local client_timeout=$((duration + 15))
     local client_output
     local client_status
@@ -1391,15 +1458,25 @@ measure_np_pipeline_batch_once() {
     repeat_tag=$(basename "$runtime_dir")
     local pb_svc="pipe-batch-${server_lang}-${client_lang}-${repeat_tag}"
     local server_pid
-    server_pid=$(start_server "$server_lang" "np-batch-ping-pong-server" "$pb_svc" "$server_duration") || {
+    local client_bin
+    client_bin="$(bench_bin "$client_lang")"
+    server_pid=$(
+        start_server_with_warmup \
+            "$client_bin" \
+            "np-pipeline-batch-client" \
+            "0" \
+            "$depth" \
+            "$server_lang" \
+            "np-batch-ping-pong-server" \
+            "$pb_svc" \
+            "$server_duration"
+    ) || {
         warn "  Failed to start pipeline-batch server"
         return 1
     }
 
     sleep 0.2
 
-    local client_bin
-    client_bin="$(bench_bin "$client_lang")"
     local client_timeout=$((duration + 15))
     local client_output
     local client_status

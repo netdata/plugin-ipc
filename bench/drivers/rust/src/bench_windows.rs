@@ -38,6 +38,8 @@ use netipc::transport::windows::{ClientConfig, NpSession, ServerConfig};
 use std::sync::{atomic::Ordering, OnceLock};
 #[cfg(windows)]
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use std::{env, process::Command};
 
 // ---------------------------------------------------------------------------
 //  Constants
@@ -55,6 +57,8 @@ const LATENCY_SAMPLE_STRIDE: u64 = 64;
 const LATENCY_SAMPLE_SLACK: usize = 4096;
 #[cfg(windows)]
 const DEFAULT_DURATION: u32 = 30;
+#[cfg(windows)]
+const LOOKUP_WARMUP_SEC: u32 = 2;
 
 #[cfg(windows)]
 const PROFILE_NP: u32 = PROFILE_BASELINE;
@@ -66,7 +70,6 @@ const PROFILE_SHM: u32 = PROFILE_BASELINE | WIN_SHM_PROFILE_HYBRID;
 const BENCH_MAX_BATCH_ITEMS: u32 = 1000;
 #[cfg(windows)]
 const BENCH_BATCH_BUF_SIZE: usize = BENCH_MAX_BATCH_ITEMS as usize * 48 + 4096;
-
 // ---------------------------------------------------------------------------
 //  Win32 FFI for timing
 // ---------------------------------------------------------------------------
@@ -88,6 +91,13 @@ mod ffi {
         pub fn GetCurrentProcess() -> HANDLE;
         pub fn GetCurrentThread() -> HANDLE;
         pub fn GetTickCount64() -> u64;
+        pub fn GetProcessAffinityMask(
+            hProcess: HANDLE,
+            lpProcessAffinityMask: *mut usize,
+            lpSystemAffinityMask: *mut usize,
+        ) -> i32;
+        pub fn SetProcessAffinityMask(hProcess: HANDLE, dwProcessAffinityMask: usize) -> i32;
+        pub fn SetThreadAffinityMask(hThread: HANDLE, dwThreadAffinityMask: usize) -> usize;
         pub fn SetPriorityClass(hProcess: HANDLE, dwPriorityClass: u32) -> i32;
         pub fn SetThreadPriority(hThread: HANDLE, nPriority: i32) -> i32;
     }
@@ -151,6 +161,56 @@ fn elevate_bench_priority() {
         if ffi::SetThreadPriority(ffi::GetCurrentThread(), THREAD_PRIORITY_HIGHEST) == 0 {
             eprintln!(
                 "warn: SetThreadPriority(THREAD_PRIORITY_HIGHEST) failed: {:?}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+fn pin_bench_affinity() {
+    unsafe {
+        let mut process_mask: usize = 0;
+        let mut system_mask: usize = 0;
+        if ffi::GetProcessAffinityMask(
+            ffi::GetCurrentProcess(),
+            &mut process_mask,
+            &mut system_mask,
+        ) == 0
+        {
+            eprintln!(
+                "warn: GetProcessAffinityMask failed: {:?}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+
+        if process_mask == 0 {
+            return;
+        }
+
+        let mut pin_mask = 0usize;
+        let mut bit = 1usize;
+        while bit != 0 {
+            if process_mask & bit != 0 {
+                pin_mask = bit;
+            }
+            bit = bit.wrapping_shl(1);
+        }
+        if pin_mask == 0 {
+            return;
+        }
+
+        if ffi::SetProcessAffinityMask(ffi::GetCurrentProcess(), pin_mask) == 0 {
+            eprintln!(
+                "warn: SetProcessAffinityMask failed: {:?}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        if ffi::SetThreadAffinityMask(ffi::GetCurrentThread(), pin_mask) == 0 {
+            eprintln!(
+                "warn: SetThreadAffinityMask failed: {:?}",
                 std::io::Error::last_os_error()
             );
         }
@@ -371,6 +431,17 @@ fn spawn_server_stop_waker(
     });
 }
 
+#[cfg(windows)]
+fn wake_server_stop(
+    run_dir: &str,
+    service: &str,
+    wake_config: &ClientConfig,
+    stop_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    stop_flag.store(false, Ordering::Release);
+    let _ = NpSession::connect(run_dir, service, wake_config);
+}
+
 // ---------------------------------------------------------------------------
 //  Ping-pong handler (INCREMENT method)
 // ---------------------------------------------------------------------------
@@ -462,20 +533,32 @@ fn run_server(
         handler,
     );
 
+    let stop_flag = server.running_flag();
+    let wake_config = client_config(profiles);
+    let server_thread = std::thread::spawn(move || server.run().err().map(|e| e.to_string()));
+
+    if let Err(err) = warm_server_from_env(run_dir, service) {
+        wake_server_stop(run_dir, service, &wake_config, &stop_flag);
+        if let Ok(Some(run_err)) = server_thread.join() {
+            eprintln!("server: {run_err}");
+        }
+        eprintln!("server warmup: {err}");
+        return 1;
+    }
+
     println!("READY");
 
     let cpu_start = cpu_ns();
 
-    let stop_flag = server.running_flag();
-    spawn_server_stop_waker(
-        run_dir,
-        service,
-        client_config(profiles),
-        stop_flag,
-        duration_sec,
-    );
+    spawn_server_stop_waker(run_dir, service, wake_config, stop_flag, duration_sec);
 
-    let _ = server.run();
+    let run_err = match server_thread.join() {
+        Ok(err) => err,
+        Err(_) => Some("server thread panicked".to_string()),
+    };
+    if let Some(err) = run_err {
+        eprintln!("server: {err}");
+    }
 
     let cpu_end = cpu_ns();
     let cpu_sec = (cpu_end - cpu_start) as f64 / 1e9;
@@ -483,6 +566,53 @@ fn run_server(
     println!("SERVER_CPU_SEC={:.6}", cpu_sec);
 
     0
+}
+
+// ---------------------------------------------------------------------------
+//  Hidden warmup client helper
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+fn warm_server_from_env(run_dir: &str, service: &str) -> Result<(), String> {
+    let warmup_bin = env::var("NIPC_BENCH_SERVER_WARMUP_BIN").unwrap_or_default();
+    let warmup_subcmd = env::var("NIPC_BENCH_SERVER_WARMUP_SUBCMD").unwrap_or_default();
+    let warmup_duration = env::var("NIPC_BENCH_SERVER_WARMUP_DURATION_SEC").unwrap_or_default();
+    let warmup_target = env::var("NIPC_BENCH_SERVER_WARMUP_TARGET_RPS").unwrap_or_default();
+    let warmup_depth = env::var("NIPC_BENCH_SERVER_WARMUP_DEPTH").unwrap_or_default();
+
+    if warmup_bin.is_empty() || warmup_subcmd.is_empty() || warmup_duration.is_empty() {
+        return Ok(());
+    }
+
+    let mut cmd = Command::new(warmup_bin);
+    cmd.arg(warmup_subcmd)
+        .arg(run_dir)
+        .arg(service)
+        .arg(warmup_duration);
+    if !warmup_target.is_empty() {
+        cmd.arg(warmup_target);
+    }
+    if !warmup_depth.is_empty() {
+        cmd.arg(warmup_depth);
+    }
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("server warmup spawn failed: {e}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        Err(format!("server warmup client failed with status {}", output.status))
+    } else {
+        Err(format!(
+            "server warmup client failed with status {}: {}",
+            output.status, stderr
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -499,20 +629,32 @@ fn run_batch_server(run_dir: &str, service: &str, profiles: u32, duration_sec: u
         Some(ping_pong_handler()),
     );
 
+    let stop_flag = server.running_flag();
+    let wake_config = batch_client_config(profiles);
+    let server_thread = std::thread::spawn(move || server.run().err().map(|e| e.to_string()));
+
+    if let Err(err) = warm_server_from_env(run_dir, service) {
+        wake_server_stop(run_dir, service, &wake_config, &stop_flag);
+        if let Ok(Some(run_err)) = server_thread.join() {
+            eprintln!("batch server: {run_err}");
+        }
+        eprintln!("batch server warmup: {err}");
+        return 1;
+    }
+
     println!("READY");
 
     let cpu_start = cpu_ns();
 
-    let stop_flag = server.running_flag();
-    spawn_server_stop_waker(
-        run_dir,
-        service,
-        batch_client_config(profiles),
-        stop_flag,
-        duration_sec,
-    );
+    spawn_server_stop_waker(run_dir, service, wake_config, stop_flag, duration_sec);
 
-    let _ = server.run();
+    let run_err = match server_thread.join() {
+        Ok(err) => err,
+        Err(_) => Some("batch server thread panicked".to_string()),
+    };
+    if let Some(err) = run_err {
+        eprintln!("batch server: {err}");
+    }
 
     let cpu_end = cpu_ns();
     let cpu_sec = (cpu_end - cpu_start) as f64 / 1e9;
@@ -589,6 +731,15 @@ fn run_ping_pong_client(
     let mut msg_buf = vec![0u8; HEADER_SIZE + 8];
     let mut resp_buf = vec![0u8; HEADER_SIZE + 64];
     let mut recv_buf = vec![0u8; 256];
+
+    if let Err(err) = warm_ping_pong_client(&mut session, shm.as_mut(), &mut msg_buf, &mut resp_buf, &mut recv_buf) {
+        eprintln!("ping-pong warmup: {err}");
+        if let Some(mut shm_ctx) = shm {
+            shm_ctx.close();
+        }
+        drop(session);
+        return 1;
+    }
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
@@ -720,6 +871,76 @@ fn run_ping_pong_client(
     } else {
         0
     }
+}
+
+#[cfg(windows)]
+fn warm_ping_pong_client(
+    session: &mut NpSession,
+    mut shm: Option<&mut WinShmContext>,
+    msg_buf: &mut [u8],
+    resp_buf: &mut [u8],
+    recv_buf: &mut [u8],
+) -> Result<(), String> {
+    let req_payload = 0u64.to_ne_bytes();
+
+    let mut hdr = Header {
+        kind: KIND_REQUEST,
+        code: METHOD_INCREMENT,
+        flags: 0,
+        item_count: 1,
+        message_id: 1,
+        transport_status: STATUS_OK,
+        ..Header::default()
+    };
+
+    if let Some(ref mut shm_ctx) = shm {
+        let msg_len = HEADER_SIZE + 8;
+        let msg = &mut msg_buf[..msg_len];
+        hdr.magic = MAGIC_MSG;
+        hdr.version = VERSION;
+        hdr.header_len = protocol::HEADER_LEN;
+        hdr.payload_len = 8;
+        hdr.encode(&mut msg[..HEADER_SIZE]);
+        msg[HEADER_SIZE..].copy_from_slice(&req_payload);
+
+        shm_ctx
+            .send(&msg)
+            .map_err(|e| format!("send failed: {e}"))?;
+
+        let resp_len = shm_ctx
+            .receive(resp_buf, 30000)
+            .map_err(|e| format!("recv failed: {e}"))?;
+        if resp_len < HEADER_SIZE + 8 {
+            return Err("short shm response".to_string());
+        }
+
+        let resp_val =
+            u64::from_ne_bytes(resp_buf[HEADER_SIZE..HEADER_SIZE + 8].try_into().unwrap());
+        if resp_val != 1 {
+            return Err(format!(
+                "counter chain broken: expected 1, got {resp_val}"
+            ));
+        }
+    } else {
+        session
+            .send(&mut hdr, &req_payload)
+            .map_err(|e| format!("send failed: {e}"))?;
+        let (_resp_hdr, payload) = session
+            .receive(recv_buf)
+            .map_err(|e| format!("recv failed: {e}"))?;
+        if payload.len() < 8 {
+            return Err("short np response".to_string());
+        }
+
+        let resp_val = u64::from_ne_bytes(payload[..8].try_into().unwrap());
+        if resp_val != 1 {
+            return Err(format!(
+                "counter chain broken: expected 1, got {resp_val}"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,6 +1297,12 @@ fn run_pipeline_client(
     let mut errors: u64 = 0;
     let mut recv_buf = vec![0u8; 256];
 
+    if let Err(err) = warm_pipeline_client(&mut session, &mut recv_buf, depth) {
+        eprintln!("pipeline warmup: {err}");
+        drop(session);
+        return 1;
+    }
+
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
     let tick_deadline = TickDeadline::new(duration_sec);
@@ -1174,6 +1401,51 @@ fn run_pipeline_client(
     } else {
         0
     }
+}
+
+#[cfg(windows)]
+fn warm_pipeline_client(
+    session: &mut NpSession,
+    recv_buf: &mut [u8],
+    depth: u32,
+) -> Result<(), String> {
+    for d in 0..depth {
+        let val = d as u64;
+        let req_payload = val.to_ne_bytes();
+
+        let mut hdr = Header {
+            kind: KIND_REQUEST,
+            code: METHOD_INCREMENT,
+            flags: 0,
+            item_count: 1,
+            message_id: val + 1,
+            transport_status: STATUS_OK,
+            ..Header::default()
+        };
+
+        session
+            .send(&mut hdr, &req_payload)
+            .map_err(|e| format!("send failed: {e}"))?;
+    }
+
+    for d in 0..depth {
+        let (_resp_hdr, payload) = session
+            .receive(recv_buf)
+            .map_err(|e| format!("recv failed: {e}"))?;
+        if payload.len() < 8 {
+            return Err("short np response".to_string());
+        }
+
+        let resp_val = u64::from_ne_bytes(payload[..8].try_into().unwrap());
+        let expected = d as u64 + 1;
+        if resp_val != expected {
+            return Err(format!(
+                "pipeline chain broken at depth {d}: expected {expected}, got {resp_val}"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1449,6 +1721,20 @@ fn run_lookup_bench(duration_sec: u32) -> i32 {
     let mut lookups: u64 = 0;
     let mut hits: u64 = 0;
 
+    let warmup_deadline = TickDeadline::new(LOOKUP_WARMUP_SEC);
+    while !warmup_deadline.expired() {
+        for item in &items {
+            let mut slot = (item.hash ^ hash_name(&item.name)) & mask;
+            while lookup_index[slot as usize].used {
+                let bucket_item = &items[lookup_index[slot as usize].index];
+                if bucket_item.hash == item.hash && bucket_item.name == item.name {
+                    break;
+                }
+                slot = (slot + 1) & mask;
+            }
+        }
+    }
+
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
     let tick_deadline = TickDeadline::new(duration_sec);
@@ -1498,6 +1784,7 @@ fn run_lookup_bench(duration_sec: u32) -> i32 {
 #[cfg(windows)]
 fn main() {
     elevate_bench_priority();
+    pin_bench_affinity();
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!(

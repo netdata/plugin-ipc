@@ -10,13 +10,17 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
+	"os/exec"
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -78,7 +82,10 @@ var (
 	procQueryPerformanceCounter   = kernel32.NewProc("QueryPerformanceCounter")
 	procGetProcessTimes           = kernel32.NewProc("GetProcessTimes")
 	procGetTickCount64            = kernel32.NewProc("GetTickCount64")
+	procGetProcessAffinityMask    = kernel32.NewProc("GetProcessAffinityMask")
 	procGetCurrentThread          = kernel32.NewProc("GetCurrentThread")
+	procSetProcessAffinityMask    = kernel32.NewProc("SetProcessAffinityMask")
+	procSetThreadAffinityMask     = kernel32.NewProc("SetThreadAffinityMask")
 	procSetPriorityClass          = kernel32.NewProc("SetPriorityClass")
 	procSetThreadPriority         = kernel32.NewProc("SetThreadPriority")
 )
@@ -132,6 +139,45 @@ func elevateBenchPriorityWin() {
 	if r1, _, err := syscall.Syscall(procSetThreadPriority.Addr(), 2,
 		thread, uintptr(threadPriorityHighest), 0); r1 == 0 {
 		fmt.Fprintf(os.Stderr, "warn: SetThreadPriority(THREAD_PRIORITY_HIGHEST) failed: %v\n", err)
+	}
+}
+
+func pinBenchAffinityWin() {
+	process, _ := syscall.GetCurrentProcess()
+
+	var processMask uintptr
+	var systemMask uintptr
+	if r1, _, err := syscall.Syscall(procGetProcessAffinityMask.Addr(), 3,
+		uintptr(process),
+		uintptr(unsafe.Pointer(&processMask)),
+		uintptr(unsafe.Pointer(&systemMask))); r1 == 0 {
+		fmt.Fprintf(os.Stderr, "warn: GetProcessAffinityMask failed: %v\n", err)
+		return
+	}
+
+	if processMask == 0 {
+		return
+	}
+
+	var pinMask uintptr
+	for bit := uintptr(1); bit != 0; bit <<= 1 {
+		if processMask&bit != 0 {
+			pinMask = bit
+		}
+	}
+	if pinMask == 0 {
+		return
+	}
+
+	if r1, _, err := syscall.Syscall(procSetProcessAffinityMask.Addr(), 2,
+		uintptr(process), pinMask, 0); r1 == 0 {
+		fmt.Fprintf(os.Stderr, "warn: SetProcessAffinityMask failed: %v\n", err)
+	}
+
+	thread, _, _ := syscall.Syscall(procGetCurrentThread.Addr(), 0, 0, 0, 0)
+	if r1, _, err := syscall.Syscall(procSetThreadAffinityMask.Addr(), 2,
+		thread, pinMask, 0); r1 == 0 {
+		fmt.Fprintf(os.Stderr, "warn: SetThreadAffinityMask failed: %v\n", err)
 	}
 }
 
@@ -384,16 +430,33 @@ func runServerWin(runDir, service string, profiles uint32, durationSec int, hand
 
 		// Benchmark only steady-state work, not one-off startup garbage.
 		runtime.GC()
-		fmt.Println("READY")
+		serverErr := make(chan error, 1)
+		go func() {
+			serverErr <- server.Run()
+		}()
 
-		cpuStart := cpuNSWin()
+		if err := warmServerWin(runDir, service); err != nil {
+			server.Stop()
+			if runErr := <-serverErr; runErr != nil {
+				fmt.Fprintf(os.Stderr, "server: %v\n", runErr)
+			}
+			fmt.Fprintf(os.Stderr, "server warmup: %v\n", err)
+			return 1
+		}
+
+		// Clear allocations created by the hidden warmup before the measured window.
+		runtime.GC()
 
 		go func() {
 			time.Sleep(time.Duration(durationSec+3) * time.Second)
 			server.Stop()
 		}()
 
-		if err := server.Run(); err != nil {
+		fmt.Println("READY")
+
+		cpuStart := cpuNSWin()
+
+		if err := <-serverErr; err != nil {
 			fmt.Fprintf(os.Stderr, "server: %v\n", err)
 		}
 
@@ -407,16 +470,33 @@ func runServerWin(runDir, service string, profiles uint32, durationSec int, hand
 
 		// Benchmark only steady-state work, not one-off startup garbage.
 		runtime.GC()
-		fmt.Println("READY")
+		serverErr := make(chan error, 1)
+		go func() {
+			serverErr <- server.Run()
+		}()
 
-		cpuStart := cpuNSWin()
+		if err := warmServerWin(runDir, service); err != nil {
+			server.Stop()
+			if runErr := <-serverErr; runErr != nil {
+				fmt.Fprintf(os.Stderr, "server: %v\n", runErr)
+			}
+			fmt.Fprintf(os.Stderr, "server warmup: %v\n", err)
+			return 1
+		}
+
+		// Clear allocations created by the hidden warmup before the measured window.
+		runtime.GC()
 
 		go func() {
 			time.Sleep(time.Duration(durationSec+3) * time.Second)
 			server.Stop()
 		}()
 
-		if err := server.Run(); err != nil {
+		fmt.Println("READY")
+
+		cpuStart := cpuNSWin()
+
+		if err := <-serverErr; err != nil {
 			fmt.Fprintf(os.Stderr, "server: %v\n", err)
 		}
 
@@ -429,6 +509,46 @@ func runServerWin(runDir, service string, profiles uint32, durationSec int, hand
 		fmt.Fprintf(os.Stderr, "unknown handler type: %s\n", handlerType)
 		return 1
 	}
+}
+
+// ---------------------------------------------------------------------------
+//  Hidden warmup client helper
+// ---------------------------------------------------------------------------
+
+func warmServerWin(runDir, service string) error {
+	warmupBin := os.Getenv("NIPC_BENCH_SERVER_WARMUP_BIN")
+	warmupSubcmd := os.Getenv("NIPC_BENCH_SERVER_WARMUP_SUBCMD")
+	warmupDuration := os.Getenv("NIPC_BENCH_SERVER_WARMUP_DURATION_SEC")
+	warmupTarget := os.Getenv("NIPC_BENCH_SERVER_WARMUP_TARGET_RPS")
+	warmupDepth := os.Getenv("NIPC_BENCH_SERVER_WARMUP_DEPTH")
+
+	if warmupBin == "" || warmupSubcmd == "" || warmupDuration == "" {
+		return nil
+	}
+
+	args := []string{warmupSubcmd, runDir, service, warmupDuration}
+	if warmupTarget != "" {
+		args = append(args, warmupTarget)
+	}
+	if warmupDepth != "" {
+		args = append(args, warmupDepth)
+	}
+
+	cmd := exec.Command(warmupBin, args...)
+	cmd.Stdout = io.Discard
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return fmt.Errorf("server warmup client failed: %w: %s", err, msg)
+		}
+		return fmt.Errorf("server warmup client failed: %w", err)
+	}
+
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -445,16 +565,33 @@ func runBatchServerWin(runDir, service string, profiles uint32, durationSec int)
 
 	// Benchmark only steady-state work, not one-off startup garbage.
 	runtime.GC()
-	fmt.Println("READY")
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.Run()
+	}()
 
-	cpuStart := cpuNSWin()
+	if err := warmServerWin(runDir, service); err != nil {
+		server.Stop()
+		if runErr := <-serverErr; runErr != nil {
+			fmt.Fprintf(os.Stderr, "batch server: %v\n", runErr)
+		}
+		fmt.Fprintf(os.Stderr, "batch server warmup: %v\n", err)
+		return 1
+	}
+
+	// Clear allocations created by the hidden warmup before the measured window.
+	runtime.GC()
 
 	go func() {
 		time.Sleep(time.Duration(durationSec+3) * time.Second)
 		server.Stop()
 	}()
 
-	if err := server.Run(); err != nil {
+	fmt.Println("READY")
+
+	cpuStart := cpuNSWin()
+
+	if err := <-serverErr; err != nil {
 		fmt.Fprintf(os.Stderr, "batch server: %v\n", err)
 	}
 
@@ -749,6 +886,13 @@ func runPipelineClientWin(runDir, service string, durationSec int, targetRPS uin
 	recvBuf := make([]byte, 256)
 	var reqPayload [8]byte
 
+	if err := warmPipelineClientWin(session, recvBuf, &reqPayload, depth); err != nil {
+		fmt.Fprintf(os.Stderr, "pipeline warmup: %v\n", err)
+		return 1
+	}
+
+	runtime.GC()
+
 	for tickMSWin() < tickDeadline {
 		rl.wait()
 
@@ -827,6 +971,51 @@ func runPipelineClientWin(runDir, service string, durationSec int, targetRPS uin
 	return 0
 }
 
+func warmPipelineClientWin(session *windows.Session, recvBuf []byte, reqPayload *[8]byte, depth int) error {
+	var msgSeq uint64
+
+	for d := 0; d < depth; d++ {
+		binary.NativeEndian.PutUint64(reqPayload[:], uint64(d))
+
+		msgSeq++
+		hdr := protocol.Header{
+			Kind:            protocol.KindRequest,
+			Code:            protocol.MethodIncrement,
+			ItemCount:       1,
+			MessageID:       msgSeq,
+			TransportStatus: protocol.StatusOK,
+			PayloadLen:      8,
+		}
+
+		if err := session.Send(&hdr, reqPayload[:]); err != nil {
+			return fmt.Errorf("pipeline warmup send: %w", err)
+		}
+	}
+
+	for d := 0; d < depth; d++ {
+		_, payload, err := session.Receive(recvBuf)
+		if err != nil {
+			return fmt.Errorf("pipeline warmup recv: %w", err)
+		}
+		if len(payload) < 8 {
+			return fmt.Errorf("pipeline warmup short payload")
+		}
+
+		respVal := binary.NativeEndian.Uint64(payload[:8])
+		expected := uint64(d + 1)
+		if respVal != expected {
+			return fmt.Errorf(
+				"pipeline warmup chain broken at depth %d: expected %d, got %d",
+				d,
+				expected,
+				respVal,
+			)
+		}
+	}
+
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 //  Pipeline+batch client (sends depth batch msgs, reads depth responses)
 // ---------------------------------------------------------------------------
@@ -836,6 +1025,109 @@ type pipelineBatchSlotWin struct {
 	batchSize     uint32
 	inflightBytes uint64
 	active        bool
+}
+
+func warmPipelineBatchClientWin(session *windows.Session, reqBufs [][]byte, recvBuf []byte, itemBuf []byte, depth int) error {
+	slots := make([]pipelineBatchSlotWin, depth)
+	var counter, msgSeq uint64
+	inflightBudget := uint64(session.PacketSize) * 2
+
+	sent := 0
+	received := 0
+	outstanding := 0
+	inflightBytes := uint64(0)
+
+	for received < depth {
+		if sent < depth {
+			slot := sent
+			bs := uint32(maxBatchItemsWin)
+
+			var bb protocol.BatchBuilder
+			bb.Reset(reqBufs[slot], bs)
+
+			for i := uint32(0); i < bs; i++ {
+				protocol.IncrementEncode(counter+uint64(i), itemBuf)
+				if err := bb.Add(itemBuf); err != nil {
+					return fmt.Errorf("pipeline-batch warmup build: %w", err)
+				}
+			}
+
+			reqLen, _ := bb.Finish()
+
+			msgSeq++
+			hdr := protocol.Header{
+				Kind:            protocol.KindRequest,
+				Code:            protocol.MethodIncrement,
+				Flags:           protocol.FlagBatch,
+				ItemCount:       bs,
+				MessageID:       msgSeq,
+				TransportStatus: protocol.StatusOK,
+			}
+
+			slotBytes := uint64((protocol.HeaderSize + reqLen) * 2)
+			for outstanding > 0 && inflightBytes+slotBytes > inflightBudget {
+				respHdr, _, err := session.Receive(recvBuf)
+				if err != nil {
+					return fmt.Errorf("pipeline-batch warmup recv: %w", err)
+				}
+
+				matched := -1
+				for i := range slots {
+					if slots[i].active && slots[i].messageID == respHdr.MessageID {
+						matched = i
+						break
+					}
+				}
+				if matched < 0 {
+					return fmt.Errorf("pipeline-batch warmup unknown response id %d", respHdr.MessageID)
+				}
+
+				inflightBytes -= slots[matched].inflightBytes
+				slots[matched].active = false
+				outstanding--
+				received++
+			}
+
+			if err := session.Send(&hdr, reqBufs[slot][:reqLen]); err != nil {
+				return fmt.Errorf("pipeline-batch warmup send: %w", err)
+			}
+
+			slots[slot] = pipelineBatchSlotWin{
+				messageID:     hdr.MessageID,
+				batchSize:     bs,
+				inflightBytes: slotBytes,
+				active:        true,
+			}
+			inflightBytes += slotBytes
+			outstanding++
+			counter += uint64(bs)
+			sent++
+			continue
+		}
+
+		respHdr, _, err := session.Receive(recvBuf)
+		if err != nil {
+			return fmt.Errorf("pipeline-batch warmup recv: %w", err)
+		}
+
+		matched := -1
+		for i := range slots {
+			if slots[i].active && slots[i].messageID == respHdr.MessageID {
+				matched = i
+				break
+			}
+		}
+		if matched < 0 {
+			return fmt.Errorf("pipeline-batch warmup unknown response id %d", respHdr.MessageID)
+		}
+
+		inflightBytes -= slots[matched].inflightBytes
+		slots[matched].active = false
+		outstanding--
+		received++
+	}
+
+	return nil
 }
 
 func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRPS uint64, depth int, serverLang string) int {
@@ -877,6 +1169,13 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 
 	var counter, totalItems, errors, msgSeq uint64
 	inflightBudget := uint64(session.PacketSize) * 2
+
+	if err := warmPipelineBatchClientWin(session, reqBufs, recvBuf, itemBuf, depth); err != nil {
+		fmt.Fprintf(os.Stderr, "pipeline-batch warmup: %v\n", err)
+		return 1
+	}
+
+	runtime.GC()
 
 	cpuStart := cpuNSWin()
 	wallStart := nowNS()
@@ -1335,6 +1634,7 @@ func runLookupBenchWin(durationSec int) int {
 
 func main() {
 	elevateBenchPriorityWin()
+	pinBenchAffinityWin()
 
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr,

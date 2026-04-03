@@ -2981,6 +2981,209 @@ Linux and native Windows.
           `1s` to `2s` in both the full runner and the canary wrapper
         - the next required proof is a fresh full strict native Windows suite
           from the fresh proof tree with the new `2s` default
+    - pushed-state full strict native Windows rerun on commit `e6cc77a`
+      still failed, but the remaining blockers are now exact-row reproducible:
+      - failed full run:
+        - CSV:
+          - `/tmp/plugin-ipc-fitproof-e6cc77a-S057e0-full.csv`
+        - run dir:
+          - `/tmp/netipc-bench-35271`
+      - exact-row repros on native `win11`:
+        - `np-batch-ping-pong c->go @ 100000/s`
+          - failed in isolation:
+            - `/tmp/repro-np-batch-c-go-100000.csv`
+            - `/tmp/netipc-bench-119667/samples-np-batch-ping-pong-c-go-100000.csv`
+          - per-repeat throughput:
+            - `4435311`
+            - `3027424`
+            - `6155022`
+            - `5015301`
+            - `4217578`
+          - `raw_ratio=2.033089`
+          - `stable_ratio=1.189142`
+        - `np-batch-ping-pong rust->go @ 100000/s`
+          - passed in isolation:
+            - `/tmp/repro-np-batch-rust-go-100000.csv`
+          - `median_throughput=5404415`
+          - `stable_ratio=1.184483`
+        - `np-batch-ping-pong go->go @ 100000/s`
+          - failed in isolation:
+            - `/tmp/repro-np-batch-go-go-100000.csv`
+            - `/tmp/netipc-bench-120490/samples-np-batch-ping-pong-go-go-100000.csv`
+          - per-repeat throughput:
+            - `5758958`
+            - `6174952`
+            - `4054739`
+            - `4445468`
+            - `4614819`
+          - `raw_ratio=1.522898`
+          - `stable_ratio=1.295467`
+        - `np-batch-ping-pong go->go @ 10000/s`
+          - passed in isolation:
+            - `/tmp/repro-np-batch-go-go-10000.csv`
+          - `median_throughput=5013847`
+          - `stable_ratio=1.042624`
+        - `np-pipeline-batch-d16 c->rust @ max`
+          - failed in isolation:
+            - `/tmp/repro-np-pipeline-batch-c-rust-max.csv`
+            - `/tmp/netipc-bench-121344/samples-np-pipeline-batch-d16-c-rust-0.csv`
+          - per-repeat throughput:
+            - `7576215`
+            - `12146717`
+            - `18958115`
+            - `17416102`
+            - `17362999`
+          - visible stable core:
+            - `stable_min=12146717`
+            - `stable_max=17416102`
+            - `stable_ratio=1.433811`
+        - `np-pipeline-batch-d16 rust->rust @ max`
+          - failed in isolation:
+            - `/tmp/repro-np-pipeline-batch-rust-rust-max.csv`
+            - `/tmp/netipc-bench-121804/samples-np-pipeline-batch-d16-rust-rust-0.csv`
+          - per-repeat throughput:
+            - `13813921`
+            - `16234347`
+            - `16769925`
+            - `20528295`
+            - `19877068`
+          - `raw_ratio=1.486059`
+          - `stable_ratio=1.224384`
+      - exact-row classification:
+        - reproducible remaining blockers are now only:
+          - `np-batch-ping-pong c->go @ 100000/s`
+          - `np-batch-ping-pong go->go @ 100000/s`
+          - `np-pipeline-batch-d16 c->rust @ max`
+          - `np-pipeline-batch-d16 rust->rust @ max`
+        - the other two rows from the failed full run are no longer exact-row
+          blockers:
+          - `np-batch-ping-pong rust->go @ 100000/s`
+          - `np-batch-ping-pong go->go @ 10000/s`
+      - grounded working theory:
+        - these are still benchmark-harness defects, not accepted product
+          failures
+        - the reproducible pattern is cold-path behavior inside each repeat:
+          - the Rust pipeline-batch failures are dominated by a slow first
+            repeat and much faster later repeats
+          - the Go batch failures improve immediately when the exact scenario
+            is warmed before the measured window
+      - direct proof that warmup changes the outcome:
+        - manual native `win11` probe for
+          `np-batch-ping-pong c->go @ 100000/s` with:
+          - same Go batch server
+          - `1s` unmeasured warmup client run
+          - then `5s` measured client run
+        - result:
+          - `np-batch-ping-pong,c,c,7319942,47.500,192.800,347.600,30.9,0.0,30.9`
+        - artifact directory:
+          - `/tmp/warm-c-go-t9frpO`
+      - next implementation step:
+        - add an explicit pre-measurement warmup phase for the Windows runner
+          in:
+          - `np-batch-ping-pong`
+          - `np-pipeline-batch-d16`
+        - the warmup must happen before the measured client window so the
+          benchmark still reports only steady-state throughput and latency
+        - after that:
+          - rerun the four exact-row blockers
+          - rerun the Windows canary
+          - rerun the full strict native Windows suite
+    - later exact-row burn-down after the first warmup implementation:
+      - the first server-side warmup attempt used the wrong client path and was
+        insufficient:
+        - `np-batch-ping-pong c->go @ 100000/s` still failed under a
+          same-language Go server warmup
+      - concrete proof:
+        - exact-row rerun with the stale self-warmup still failed:
+          - `/tmp/netipc-bench-123574/samples-np-batch-ping-pong-c-go-100000.csv`
+          - `stable_min=3601732`
+          - `stable_max=6704697`
+          - `stable_ratio=1.861520`
+      - corrected fix:
+        - the Windows runner now tells the batch server exactly which measured
+          client binary and subcommand to run before `READY`
+        - this keeps CPU accounting honest while warming the real path
+      - exact-row proof after the corrected measured-client warmup:
+        - `np-batch-ping-pong c->go @ 100000/s`
+          - `/tmp/repro-after3-np-batch-c-go-100000.csv`
+          - `median_throughput=7314246`
+          - `stable_ratio=1.064080`
+        - `np-batch-ping-pong go->go @ 100000/s`
+          - `/tmp/repro-after3-np-batch-go-go-100000.csv`
+          - `median_throughput=7543224`
+          - `stable_ratio=1.085857`
+      - Rust pipeline-batch required a deeper warmup:
+        - with `1s`, `np-pipeline-batch-d16 c->rust @ max` still failed:
+          - `/tmp/netipc-bench-125651/samples-np-pipeline-batch-d16-c-rust-0.csv`
+          - `raw_ratio=1.394215`
+        - with `2s`, it passed:
+          - `/tmp/repro-after4-np-pipeline-batch-c-rust-max.csv`
+          - `median_throughput=17534301`
+          - `stable_ratio=1.085521`
+        - with `2s`, `np-pipeline-batch-d16 rust->rust @ max` also passed:
+          - `/tmp/repro-after4-np-pipeline-batch-rust-rust-max.csv`
+          - `median_throughput=17215086`
+          - `stable_ratio=1.127446`
+      - new canary blocker after that:
+        - `lookup rust->rust @ max`
+        - sample file:
+          - `/tmp/netipc-bench-127750/samples-lookup-rust-rust-0.csv`
+        - exact pattern was monotonic cold-start:
+          - `112748158`
+          - `128270074`
+          - `132113405`
+          - `140231919`
+          - `152667311`
+        - fix:
+          - add a `2s` local prewarm loop to the Rust Windows lookup benchmark
+        - exact-row proof after the fix:
+          - `/tmp/repro-after5-lookup-rust-rust-max.csv`
+          - `median_throughput=175900967`
+          - `stable_ratio=1.004559`
+      - next canary blocker after lookup was fixed:
+        - `np-pipeline-batch-d16 c->go @ max`
+        - sample file:
+          - `/tmp/netipc-bench-129769/samples-np-pipeline-batch-d16-c-go-0.csv`
+        - exact pattern:
+          - repeats `1-4` were healthy
+          - repeat `5` collapsed to `11556022`
+          - `raw_ratio=1.635542`
+      - grounded working theory:
+        - the remaining Go-only pipeline-batch instability was client-side
+          measured-window warmup / receive-buffer growth, not the server path
+        - evidence:
+          - `c->go` passed after a second `runtime.GC()` on the Go batch server
+            after warmup and before `READY`
+          - `go->go` still failed until the Go pipeline-batch client itself was
+            warmed
+      - rejected theory:
+        - disabling Go GC is not the fix
+        - diagnostic proof:
+          - `GOGC=off` exact-row rerun for
+            `np-pipeline-batch-d16 go->go @ max`
+          - sample file:
+            - `/tmp/netipc-bench-132004/samples-np-pipeline-batch-d16-go-go-0.csv`
+          - repeats `4` and `5` collapsed to:
+            - `3527468`
+            - `4871158`
+      - implemented Go client fix:
+        - the Go pipeline-batch client now runs one max-sized warmup
+          pipeline-batch cycle before timing starts
+        - then runs `runtime.GC()` before the measured window
+      - exact-row proof after the Go client fix:
+        - `np-pipeline-batch-d16 c->go @ max`
+          - `/tmp/repro-after6-np-pipeline-batch-c-go-max.csv`
+          - `median_throughput=23614539`
+          - `stable_ratio=1.016122`
+        - `np-pipeline-batch-d16 go->go @ max`
+          - `/tmp/repro-after7-np-pipeline-batch-go-go-max.csv`
+          - `median_throughput=11940549`
+          - `stable_ratio=1.273560`
+      - current state after these fixes:
+        - the bounded Windows canary must be rerun from the fully updated proof
+          tree
+        - if the fresh canary passes, the next step is the full strict native
+          Windows suite again
 - Required evaluation before any implementation:
   - verify which non-max tiers are actually gentle in practice
   - verify whether the current harness, service naming, CPU accounting,
@@ -3136,6 +3339,346 @@ Add dedicated CMake build variants for:
 ```
 
 and run the normal `ctest` subset on each supported practical configuration.
+
+## Proposed exit criteria
+
+## Latest staged Windows state
+
+- `2026-04-03` important validation hygiene correction:
+  - the still-running canary session that had produced the latest
+    `np-ping-pong go->rust @ max` failure was using the stale proof tree:
+    - `/tmp/plugin-ipc-fitproof-e6cc77a-S057e0`
+  - that tree predates the current local uncommitted benchmark-driver fixes in:
+    - `bench/drivers/go/main_windows.go`
+    - `bench/drivers/rust/src/bench_windows.rs`
+    - `tests/run-windows-bench.sh`
+  - therefore its failures are not valid evidence against the current local
+    state
+  - that stale canary was stopped explicitly
+- current valid Windows evidence source:
+  - a fresh proof tree copied from the current local tracked files:
+    - `/tmp/plugin-ipc-fitproof-current-vdhy97`
+  - detached canary artifacts:
+    - log:
+      - `/tmp/plugin-ipc-fitproof-current-vdhy97-canary.log`
+    - output dir:
+      - `/tmp/plugin-ipc-fitproof-current-vdhy97-canary`
+    - pid file:
+      - `/tmp/plugin-ipc-fitproof-current-vdhy97-canary.pid`
+    - exit marker:
+      - `/tmp/plugin-ipc-fitproof-current-vdhy97-canary.exit`
+  - next trustworthy benchmark conclusions must come only from this fresh-tree
+    canary or from newer proof trees built from the current local state
+  - fresh current-tree staged results after stopping the stale `e6cc77a`
+    canary:
+    - first fresh canary rows already passed on the current proof tree:
+      - `np-ping-pong go->rust @ max`
+        - `/tmp/plugin-ipc-fitproof-current-vdhy97-canary/np-ping-pong-go-rust-max.csv`
+        - `stable_ratio=1.101944`
+      - `lookup rust->rust @ max`
+        - `/tmp/plugin-ipc-fitproof-current-vdhy97-canary/lookup-rust-rust-max.csv`
+        - `stable_ratio=1.041642`
+      - `np-pipeline-d16 go->go @ max`
+        - `/tmp/plugin-ipc-fitproof-current-vdhy97-canary/np-pipeline-d16-go-go-max.csv`
+        - `stable_ratio=1.054481`
+    - the same fresh canary then failed at:
+      - `np-pipeline-batch-d16 c->rust @ max`
+        - `/tmp/netipc-bench-136878/samples-np-pipeline-batch-d16-c-rust-0.csv`
+        - `raw_ratio=1.599078`
+        - `stable_ratio=1.179914`
+    - exact-row classification after stopping that canary:
+      - `np-pipeline-batch-d16 c->rust @ max` passed in isolation on the same
+        proof tree:
+        - `/tmp/repro-current-np-pipeline-batch-c-rust-max.csv`
+        - `stable_ratio=1.055595`
+      - therefore the active defect was context-dependent, not a trivially
+        always-failing exact row
+    - reduced-sequence proof then exposed a better smoking gun:
+      - `np-pipeline-d16 go->go @ max` failed by itself:
+        - `/tmp/netipc-bench-138366/samples-np-pipeline-d16-go-go-0.csv`
+        - repeats:
+          - `47509`
+          - `55551`
+          - `76395`
+          - `94742`
+          - `73346`
+        - `stable_ratio=1.375223`
+      - the monotonic rise across repeats showed the Go Windows pipeline path
+        still warming inside the measured window
+    - fix applied on `2026-04-03`:
+      - `bench/drivers/go/main_windows.go`
+        - Go Windows pipeline client now runs one untimed pipeline cycle before
+          timing starts
+        - then runs `runtime.GC()` before the measured window
+      - `tests/run-windows-bench.sh`
+        - `np-pipeline` server startup now uses the same hidden measured-client
+          warmup path already used for `np-pipeline-batch`
+    - proof after the new pipeline fixes:
+      - exact `go->go` pipeline rerun passed:
+        - `/tmp/repro-current3-np-pipeline-go-go-max.csv`
+        - `stable_ratio=1.013142`
+      - reduced two-row context also passed:
+        - `go->go np-pipeline @ max`
+          - `/tmp/reduce3-go-go-pipeline.csv`
+          - `stable_ratio=1.058589`
+        - immediately followed by `c->rust np-pipeline-batch-d16 @ max`
+          - `/tmp/reduce3-go-go-then-c-rust-pipeline-batch.csv`
+          - `stable_ratio=1.098739`
+    - next required proof:
+      - rerun the bounded Windows canary from the same updated proof tree
+      - if the fresh canary passes, rerun the full strict native Windows suite
+        from that same proof tree
+    - fresh current-tree canary rerun after the Go pipeline fixes still found
+      three remaining strict blockers:
+      - `np-ping-pong go->rust @ max`
+        - `/tmp/netipc-bench-141558/samples-np-ping-pong-go-rust-0.csv`
+        - `raw_ratio=1.357113`
+        - `stable_ratio=1.153365`
+      - `lookup rust->rust @ max`
+        - `/tmp/netipc-bench-142024/samples-lookup-rust-rust-0.csv`
+        - `raw_ratio=1.491001`
+        - `stable_ratio=1.024743`
+      - `np-pipeline-d16 rust->go @ max`
+        - `/tmp/netipc-bench-142326/samples-np-pipeline-d16-rust-go-0.csv`
+        - `stable_ratio=1.889205`
+      - that canary was stopped immediately after the smoking guns were
+        captured, to avoid wasting additional wall-clock time
+    - exact-row proof after the latest Rust-side fixes on `2026-04-03`:
+      - new fixes:
+        - `bench/drivers/rust/src/bench_windows.rs`
+          - Rust Windows `np-ping-pong` client now performs one untimed
+            round-trip warmup before the measured window
+          - Rust Windows `np-pipeline` client now performs one untimed pipeline
+            cycle before the measured window
+        - `tests/run-windows-bench.sh`
+          - `np-ping-pong` rows now use the same hidden measured-client server
+            warmup path already used for `np-batch-ping-pong`
+      - fresh exact-row proofs on the same proof tree:
+        - `np-ping-pong go->rust @ max`
+          - `/tmp/repro-current4-np-ping-go-rust-max.csv`
+          - `stable_ratio=1.038807`
+        - `np-pipeline-d16 rust->go @ max`
+          - `/tmp/repro-current4-np-pipeline-rust-go-max.csv`
+          - `stable_ratio=1.145163`
+        - `lookup rust->rust @ max`
+          - `/tmp/repro-current5-lookup-rust-rust-max.csv`
+          - `stable_ratio=1.026018`
+      - implication:
+        - the three latest fresh-canary blockers are not always-failing exact
+          rows anymore
+        - the next required proof is another bounded canary rerun from the same
+          updated proof tree
+    - current harness defect identified on `2026-04-03` while comparing the
+      exact-row path with the canary wrapper path:
+      - `tests/run-windows-bench.sh` now wraps `np-ping-pong` and
+        `np-pipeline` server startup with `start_server_with_warmup(...)`
+      - but only the Windows batch server subcommands in the benchmark drivers
+        actually consume the `NIPC_BENCH_SERVER_WARMUP_*` environment
+        variables:
+        - `bench/drivers/go/main_windows.go`
+        - `bench/drivers/rust/src/bench_windows.rs`
+      - the normal Windows ping-pong/snapshot servers in C, Rust, and Go still
+        print `READY` and enter the measured CPU window without executing the
+        hidden warmup client
+      - implication:
+        - the runner was assuming hidden server warmup existed for
+          `np-ping-pong` and `np-pipeline`, but those rows were still exposed
+          to cold server/session startup effects
+        - this is a benchmark-harness defect and must be fixed in the drivers,
+          not explained away as acceptable noise
+    - fresh current-tree proof after the server-warmup fixes:
+      - bounded canary rerun still found exactly one remaining blocker:
+        - `np-pipeline-batch-d16 c->go @ max`
+          - `/tmp/netipc-bench-150153/samples-np-pipeline-batch-d16-c-go-0.csv`
+          - repeats:
+            - `19538200`
+            - `18981828`
+            - `14025420`
+            - `18818186`
+            - `16547539`
+          - `raw_ratio=1.393056`
+          - `stable_ratio=1.147109`
+      - exact row on the same proof tree passed:
+        - `/tmp/repro-current6-np-pipeline-batch-c-go-max.csv`
+        - `stable_ratio=1.040609`
+      - reduced late-tail proofs also passed:
+        - `c->rust np-pipeline-batch @ max`
+          - `/tmp/reduce-current7-c-rust.csv`
+          - `stable_ratio=1.129821`
+        - immediately followed by `c->go np-pipeline-batch @ max`
+          - `/tmp/reduce-current7-c-go.csv`
+          - `stable_ratio=1.134260`
+        - `go->go np-pipeline @ max`
+          -> `c->rust np-pipeline-batch @ max`
+          -> `c->go np-pipeline-batch @ max`
+          - `/tmp/reduce-current8-go-go-pipe.csv`
+          - `/tmp/reduce-current8-c-rust-batch.csv`
+          - `/tmp/reduce-current8-c-go-batch.csv`
+          - all passed
+        - `rust->go np-pipeline @ max`
+          -> `go->go np-pipeline @ max`
+          -> `c->rust np-pipeline-batch @ max`
+          -> `c->go np-pipeline-batch @ max`
+          - `/tmp/reduce-current9-rust-go-pipe.csv`
+          - `/tmp/reduce-current9-go-go-pipe.csv`
+          - `/tmp/reduce-current9-c-rust-batch.csv`
+          - `/tmp/reduce-current9-c-go-batch.csv`
+          - all passed
+      - implication:
+        - the remaining blocker was no longer in the late pipeline/batch block
+          itself
+        - the next shortest path had moved earlier to `lookup rust->rust @ max`
+          and then `rust->go np-pipeline @ max`
+    - fresh current-tree reduced repro on `2026-04-03`:
+      - `lookup rust->rust @ max`
+        -> `rust->go np-pipeline @ max`
+      - failed immediately at the lookup row:
+        - `/tmp/netipc-bench-158861/samples-lookup-rust-rust-0.csv`
+        - repeats:
+          - `79622465`
+          - `80934946`
+          - `80718458`
+          - `80717252`
+          - `114102724`
+        - `raw_ratio=1.433047`
+        - `stable_ratio=1.002697`
+      - later reduced proof including the same `lookup` row also failed with a
+        low repeat:
+        - `/tmp/netipc-bench-3884/samples-lookup-rust-rust-0.csv`
+        - repeats:
+          - `168334535`
+          - `175039352`
+          - `173523785`
+          - `116325975`
+          - `171436484`
+        - the low repeat also dropped CPU from `~92%` to `83.3%`
+      - implication:
+        - this smoking gun does not involve IPC at all
+        - the instability was now clearly in the Windows benchmark execution
+          model for single-threaded CPU-bound rows
+    - Windows benchmark affinity hardening on `2026-04-03`:
+      - new fix in all three Windows benchmark drivers:
+        - `bench/drivers/c/bench_windows.c`
+        - `bench/drivers/go/main_windows.go`
+        - `bench/drivers/rust/src/bench_windows.rs`
+      - benchmark processes now:
+        - raise priority
+        - pin process and thread affinity
+      - first attempt pinned to the first available vCPU
+      - evidence after that first pinning:
+        - exact `lookup rust->rust @ max` passed `3/3`:
+          - `/tmp/proof-affinity-lookup-a.csv`
+            - `stable_ratio=1.033657`
+          - `/tmp/proof-affinity-lookup-b.csv`
+            - `stable_ratio=1.073468`
+          - `/tmp/proof-affinity-lookup-c.csv`
+            - `stable_ratio=1.022298`
+        - but a repeated `lookup -> rust->go np-pipeline` sequence still failed
+          later when `lookup` landed on a noisy repeat:
+          - `/tmp/netipc-bench-3884/samples-lookup-rust-rust-0.csv`
+      - working theory:
+        - pinning to the first available vCPU was still wrong on this VM,
+          likely because that CPU is taking more host / interrupt noise
+    - Windows benchmark affinity refinement on `2026-04-03`:
+      - updated all three Windows benchmark drivers again to pin to the highest
+        available vCPU instead of CPU0 / the first available CPU
+      - fresh proof tree:
+        - `/tmp/plugin-ipc-fitproof-affinity-tJh53A`
+      - exact `lookup rust->rust @ max` now passed `3/3` cleanly again on that
+        fresh proof tree:
+        - `/tmp/proof-affinity2-lookup-a.csv`
+          - `stable_ratio=1.023741`
+        - `/tmp/proof-affinity2-lookup-b.csv`
+          - `stable_ratio=1.033138`
+        - `/tmp/proof-affinity2-lookup-c.csv`
+          - `stable_ratio=1.023407`
+      - repeated `lookup -> rust->go np-pipeline` sequences also passed on the
+        same fresh proof tree:
+        - sequence 1:
+          - `/tmp/proof-affinity2-seq1-lookup.csv`
+            - `stable_ratio=1.026724`
+          - `/tmp/proof-affinity2-seq1-rust-go.csv`
+            - `stable_ratio=1.046724`
+        - sequence 2:
+          - `/tmp/proof-affinity2-seq2-lookup.csv`
+            - `stable_ratio=1.016340`
+          - `/tmp/proof-affinity2-seq2-rust-go.csv`
+            - `stable_ratio=1.043912`
+        - sequence 3:
+          - `/tmp/proof-affinity2-seq3-lookup.csv`
+            - `stable_ratio=1.012824`
+          - `/tmp/proof-affinity2-seq3-rust-go.csv`
+            - `stable_ratio=1.023384`
+      - implication:
+        - the current shortest benchmark blocker is gone on the fresh affinity
+          proof tree
+        - the next staged proof is the bounded Windows canary from that same
+          proof tree
+    - bounded Windows canary on the affinity-hardened proof tree:
+      - proof tree:
+        - `/tmp/plugin-ipc-fitproof-affinity-tJh53A`
+      - output dir:
+        - `/tmp/proof-affinity2-canary`
+      - all 7 canary rows published successfully:
+        - `np-ping-pong go->rust @ max`
+          - `22478`
+        - `lookup rust->rust @ max`
+          - `185751948`
+        - `np-pipeline-d16 rust->go @ max`
+          - `44180`
+        - `np-pipeline-d16 go->go @ max`
+          - `151578`
+        - `np-pipeline-batch-d16 c->rust @ max`
+          - `14766999`
+        - `np-pipeline-batch-d16 c->go @ max`
+          - `15553671`
+        - `np-pipeline-batch-d16 go->go @ max`
+          - `23307190`
+      - no benchmark processes remained after the run
+      - implication:
+        - the bounded Windows canary is now green on the fresh
+          affinity-hardened proof tree
+        - the next required proof is the full strict native Windows suite from
+          that same proof tree
+    - full strict native Windows rerun from the affinity-hardened proof tree:
+      - output files:
+        - `/tmp/proof-affinity2-full.csv`
+        - `/tmp/proof-affinity2-full.log`
+      - the run was stopped on user request before completion:
+        - exit marker ended as `143`
+      - before it was stopped, the run had already exposed new strict blockers
+        in `shm-ping-pong` with `server=go`:
+        - `shm-ping-pong go->go @ max`
+          - sample file:
+            - `/tmp/netipc-bench-11730/samples-shm-ping-pong-go-go-0.csv`
+          - repeats:
+            - `5668`
+            - `8863`
+            - `10675`
+            - `10488`
+            - `10521`
+          - `raw_ratio=1.883380`
+          - `stable_ratio=1.187070`
+        - `shm-ping-pong c->go @ 100000/s`
+          - sample file:
+            - `/tmp/netipc-bench-11730/samples-shm-ping-pong-c-go-100000.csv`
+          - `raw_min=8825`
+          - `raw_max=16676`
+          - `raw_ratio=1.889632`
+          - `stable_ratio=1.056997`
+        - `shm-ping-pong rust->go @ 100000/s`
+          - sample file:
+            - `/tmp/netipc-bench-11730/samples-shm-ping-pong-rust-go-100000.csv`
+          - `raw_min=7316`
+          - `raw_max=16516`
+          - `raw_ratio=2.257518`
+          - `stable_ratio=1.037671`
+      - implication:
+        - the earlier pipeline and lookup blockers are no longer the active
+          Windows sign-off issue on the affinity-hardened tree
+        - the next staged work must start from the SHM ping-pong rows with
+          `server=go`, beginning with the exact rows above rather than another
+          blind full-suite rerun
 
 ## Proposed exit criteria
 
