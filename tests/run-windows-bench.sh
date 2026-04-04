@@ -30,6 +30,10 @@
 #     When a row fails, preserve the first-attempt evidence and rerun the
 #     same row in isolation for debugging. Diagnostic reruns never write to
 #     the publish CSV and never turn a failing publish run into a success.
+#   NIPC_WINDOWS_TOOLCHAIN=mingw64|msys
+#     Select the C toolchain lane for the benchmark build. `mingw64` is the
+#     native Windows sign-off default. `msys` is intended for the separate
+#     compatibility / comparison lane.
 
 set -euo pipefail
 
@@ -43,7 +47,19 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUILD_DIR="${NIPC_BENCH_BUILD_DIR:-${ROOT_DIR}/build-bench-windows}"
+WINDOWS_TOOLCHAIN="${NIPC_WINDOWS_TOOLCHAIN:-mingw64}"
+case "$WINDOWS_TOOLCHAIN" in
+    mingw64)
+        DEFAULT_BUILD_DIR="${ROOT_DIR}/build-bench-windows"
+        ;;
+    msys)
+        DEFAULT_BUILD_DIR="${ROOT_DIR}/build-bench-windows-msys"
+        ;;
+    *)
+        DEFAULT_BUILD_DIR="${ROOT_DIR}/build-bench-windows"
+        ;;
+esac
+BUILD_DIR="${NIPC_BENCH_BUILD_DIR:-${DEFAULT_BUILD_DIR}}"
 BENCH_BUILD_TYPE="${NIPC_BENCH_BUILD_TYPE:-Release}"
 
 OUTPUT_CSV="${1:-${ROOT_DIR}/benchmarks-windows.csv}"
@@ -124,8 +140,20 @@ warn() {
 }
 
 setup_windows_toolchain() {
-    export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
-    export MSYSTEM=MINGW64
+    case "$WINDOWS_TOOLCHAIN" in
+        mingw64)
+            export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:/usr/bin:$PATH"
+            export MSYSTEM=MINGW64
+            ;;
+        msys)
+            export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/usr/bin:$PATH"
+            export MSYSTEM=MSYS
+            ;;
+        *)
+            err "Unsupported NIPC_WINDOWS_TOOLCHAIN: ${WINDOWS_TOOLCHAIN} (expected mingw64 or msys)"
+            exit 1
+            ;;
+    esac
 
     for tool in cmake gcc g++ cygpath timeout; do
         if ! command -v "$tool" >/dev/null 2>&1; then
@@ -134,8 +162,21 @@ setup_windows_toolchain() {
         fi
     done
 
-    CC_BIN=$(cygpath -m "$(command -v gcc)")
-    CXX_BIN=$(cygpath -m "$(command -v g++)")
+    CC_BIN="$(command -v gcc)"
+    CXX_BIN="$(command -v g++)"
+}
+
+runtime_dir_for_windows_bin() {
+    local path="$1"
+
+    case "$path" in
+        [A-Za-z]:[\\/]*|\\\\*)
+            printf '%s\n' "$path"
+            ;;
+        *)
+            cygpath -w "$path"
+            ;;
+    esac
 }
 
 run() {
@@ -205,6 +246,8 @@ start_server() {
     local svc="$3"
     local duration_arg="$4"
     local runtime_dir="${MEASURE_RUN_DIR:-$RUN_DIR}"
+    local runtime_dir_bin
+    runtime_dir_bin="$(runtime_dir_for_windows_bin "$runtime_dir")"
 
     local bin
     bin="$(bench_bin "$lang")"
@@ -212,7 +255,7 @@ start_server() {
     mkdir -p "$runtime_dir"
     local server_out="${runtime_dir}/server-${lang}-${svc}.out"
 
-    "$bin" "$subcmd" "$runtime_dir" "$svc" "$duration_arg" > "$server_out" 2>&1 &
+    "$bin" "$subcmd" "$runtime_dir_bin" "$svc" "$duration_arg" > "$server_out" 2>&1 &
     local pid=$!
     SERVER_PIDS+=("$pid")
 
@@ -1121,6 +1164,8 @@ measure_pair_once() {
 
     local server_duration="$duration"
     local runtime_dir="${MEASURE_RUN_DIR:-$RUN_DIR}"
+    local runtime_dir_bin
+    runtime_dir_bin="$(runtime_dir_for_windows_bin "$runtime_dir")"
     local repeat_tag
     repeat_tag=$(basename "$runtime_dir")
     local svc_name="${scenario}-${server_lang}-${client_lang}-${target_rps}-${repeat_tag}"
@@ -1156,7 +1201,7 @@ measure_pair_once() {
     local client_status
     local client_err="${runtime_dir}/client-${scenario}-${server_lang}-${client_lang}-${target_rps}.err"
     set +e
-    client_output=$(timeout "$client_timeout" "$client_bin" "$client_subcmd" "$runtime_dir" "$svc_name" "$duration" "$target_rps" 2>"$client_err")
+    client_output=$(timeout "$client_timeout" "$client_bin" "$client_subcmd" "$runtime_dir_bin" "$svc_name" "$duration" "$target_rps" 2>"$client_err")
     client_status=$?
     set -e
 
@@ -1333,6 +1378,8 @@ measure_np_pipeline_once() {
 
     local server_duration="$duration"
     local runtime_dir="${MEASURE_RUN_DIR:-$RUN_DIR}"
+    local runtime_dir_bin
+    runtime_dir_bin="$(runtime_dir_for_windows_bin "$runtime_dir")"
     local repeat_tag
     repeat_tag=$(basename "$runtime_dir")
     local pipe_svc="pipeline-${server_lang}-${client_lang}-${repeat_tag}"
@@ -1361,7 +1408,7 @@ measure_np_pipeline_once() {
     local client_status
     local client_err="${runtime_dir}/client-np-pipeline-${server_lang}-${client_lang}.err"
     set +e
-    client_output=$(timeout "$client_timeout" "$client_bin" "np-pipeline-client" "$runtime_dir" "$pipe_svc" "$duration" "0" "$depth" 2>"$client_err")
+    client_output=$(timeout "$client_timeout" "$client_bin" "np-pipeline-client" "$runtime_dir_bin" "$pipe_svc" "$duration" "0" "$depth" 2>"$client_err")
     client_status=$?
     set -e
 
@@ -1458,6 +1505,8 @@ measure_np_pipeline_batch_once() {
 
     local server_duration="$duration"
     local runtime_dir="${MEASURE_RUN_DIR:-$RUN_DIR}"
+    local runtime_dir_bin
+    runtime_dir_bin="$(runtime_dir_for_windows_bin "$runtime_dir")"
     local repeat_tag
     repeat_tag=$(basename "$runtime_dir")
     local pb_svc="pipe-batch-${server_lang}-${client_lang}-${repeat_tag}"
@@ -1486,7 +1535,7 @@ measure_np_pipeline_batch_once() {
     local client_status
     local client_err="${runtime_dir}/client-np-pipeline-batch-${server_lang}-${client_lang}.err"
     set +e
-    client_output=$(timeout "$client_timeout" "$client_bin" "np-pipeline-batch-client" "$runtime_dir" "$pb_svc" "$duration" "0" "$depth" 2>"$client_err")
+    client_output=$(timeout "$client_timeout" "$client_bin" "np-pipeline-batch-client" "$runtime_dir_bin" "$pb_svc" "$duration" "0" "$depth" 2>"$client_err")
     client_status=$?
     set -e
 
@@ -1619,6 +1668,7 @@ main() {
     require_positive_number "NIPC_BENCH_ROW_SETTLE_SEC" "$ROW_SETTLE_SEC"
     require_zero_or_one "NIPC_BENCH_DIAGNOSE_FAILURES" "$DIAGNOSE_FAILURES"
     log "Windows Benchmark Suite"
+    log "Windows C toolchain mode: ${WINDOWS_TOOLCHAIN}"
     log "Duration per fixed-rate sample: ${DURATION}s"
     log "Duration per max-tier sample: ${MAX_DURATION}s"
     log "Duration per pipeline-batch max-tier sample: ${PIPELINE_BATCH_MAX_DURATION}s"

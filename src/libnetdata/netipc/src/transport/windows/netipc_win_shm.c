@@ -825,6 +825,9 @@ nipc_win_shm_error_t nipc_win_shm_receive(
 
                 /* No data — check peer close */
                 if (atomic_load_32(peer_closed_ptr) != 0) {
+                    cur = atomic_load_64(seq_ptr);
+                    if (cur >= expected_seq)
+                        break;
                     if (ctx->role == NIPC_WIN_SHM_ROLE_SERVER)
                         ctx->local_req_seq = expected_seq;
                     else
@@ -868,6 +871,13 @@ nipc_win_shm_error_t nipc_win_shm_receive(
 
                 /* Check peer close */
                 if (atomic_load_32(peer_closed_ptr) != 0) {
+                    cur = atomic_load_64(seq_ptr);
+                    if (cur >= expected_seq) {
+                        mlen = atomic_load_32(len_ptr);
+                        if (mlen > 0 && (size_t)mlen <= max_copy)
+                            memcpy(buf, data_ptr, (size_t)mlen);
+                        break;
+                    }
                     if (ctx->role == NIPC_WIN_SHM_ROLE_SERVER)
                         ctx->local_req_seq = expected_seq;
                     else

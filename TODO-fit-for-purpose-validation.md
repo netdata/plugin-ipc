@@ -3305,9 +3305,18 @@ bash tests/run-windows-bench.sh benchmarks-windows.csv 5
 bash tests/generate-benchmarks-windows.sh benchmarks-windows.csv benchmarks-windows.md
 ```
 
+MSYS transition validation:
+
+```bash
+bash tests/run-windows-msys-validation.sh
+```
+
 Notes:
 
 - native Windows execution is required for the real Windows paths
+- native `mingw64` remains the Windows sign-off lane
+- `tests/run-windows-msys-validation.sh` is a separate compatibility lane for
+  the MSYS-built C path plus bounded native-vs-MSYS benchmark comparison
 - the `MSYSTEM=MINGW64` and `TMP` / `TEMP` / `TMPDIR` exports matter in
   non-interactive shells too
   - without them, native MSYS2 `gcc` may fail with misleading or silent errors
@@ -3317,6 +3326,28 @@ Notes:
 - current benchmark method details are documented in:
   - `tests/run-windows-bench.sh`
   - `tests/generate-benchmarks-windows.sh`
+
+Latest MSYS validation evidence (2026-04-04):
+
+- `bash tests/run-windows-msys-validation.sh /tmp/proof-msys-validation-20260404 3`
+  passed
+- summary:
+  - `/tmp/proof-msys-validation-20260404/summary.txt`
+- comparison join:
+  - `/tmp/proof-msys-validation-20260404/bench-compare/joined.csv`
+- functional slice passed, including `test_win_shm` repeated 10x in the MSYS
+  lane
+- fixes needed to make the lane reliable:
+  - pass a Windows-form runtime directory to Windows benchmark binaries even
+    when the harness itself is running from MSYS paths
+  - treat a final published SHM message as valid even if the peer closes
+    immediately after publishing it
+- current performance takeaway from that validation run:
+  - named-pipe C<->C was near parity or better than the current native
+    `mingw64` run set
+  - SHM ping-pong C<->C stayed near parity
+  - SHM snapshot with the MSYS-built C side acting as server remained the main
+    penalty, about 42.5% slower than native `mingw64` in the mixed Rust->C row
 
 ### Proposed new validation commands to add
 

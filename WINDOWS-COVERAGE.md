@@ -214,6 +214,18 @@ Expected shape:
 - `go` from `/c/Program Files/Go/bin`
 - `gcc` / `g++` / `gcov` from `/mingw64/bin`
 
+This remains the authoritative Windows coverage / sign-off environment. The
+separate MSYS transition lane is:
+
+```bash
+bash tests/run-windows-msys-validation.sh
+```
+
+That script validates the MSYS-built C path with targeted functional tests,
+repeats `test_win_shm`, and runs bounded native-vs-MSYS benchmark
+comparisons. It is a compatibility lane, not a replacement for the native
+MinGW64 coverage flow below.
+
 ## Commands
 
 ### C coverage

@@ -672,6 +672,10 @@ func (c *WinShmContext) WinShmReceive(buf []byte, timeoutMs uint32) (int, error)
 				}
 
 				if atomic.LoadInt32((*int32)(unsafe.Pointer(&data[peerClosedOff]))) != 0 {
+					cur = atomic.LoadInt64((*int64)(unsafe.Pointer(&data[seqOff])))
+					if cur >= expectedSeq {
+						break
+					}
 					c.advanceSeq(expectedSeq)
 					return 0, ErrWinShmDisconnected
 				}
@@ -707,6 +711,14 @@ func (c *WinShmContext) WinShmReceive(buf []byte, timeoutMs uint32) (int, error)
 				}
 
 				if atomic.LoadInt32((*int32)(unsafe.Pointer(&data[peerClosedOff]))) != 0 {
+					cur := atomic.LoadInt64((*int64)(unsafe.Pointer(&data[seqOff])))
+					if cur >= expectedSeq {
+						mlen = atomic.LoadInt32((*int32)(unsafe.Pointer(&data[lenOff])))
+						if mlen > 0 && int(mlen) <= maxCopy {
+							copy(buf[:mlen], data[areaOff:areaOff+uint32(mlen)])
+						}
+						break
+					}
 					c.advanceSeq(expectedSeq)
 					return 0, ErrWinShmDisconnected
 				}

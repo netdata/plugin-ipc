@@ -819,6 +819,10 @@ impl WinShmContext {
 
                     // No data — check peer close
                     if interlocked_read_i32(self.base, peer_closed_off) != 0 {
+                        let cur = interlocked_read_i64(self.base, seq_off);
+                        if cur >= expected_seq {
+                            break;
+                        }
                         self.advance_seq(expected_seq);
                         return Err(WinShmError::Disconnected);
                     }
@@ -869,6 +873,20 @@ impl WinShmContext {
                     }
 
                     if interlocked_read_i32(self.base, peer_closed_off) != 0 {
+                        let cur = interlocked_read_i64(self.base, seq_off);
+                        if cur >= expected_seq {
+                            mlen = interlocked_read_i32(self.base, len_off);
+                            if mlen > 0 && (mlen as usize) <= max_copy {
+                                unsafe {
+                                    std::ptr::copy_nonoverlapping(
+                                        self.base.add(area_off as usize),
+                                        buf.as_mut_ptr(),
+                                        mlen as usize,
+                                    );
+                                }
+                            }
+                            break;
+                        }
                         self.advance_seq(expected_seq);
                         return Err(WinShmError::Disconnected);
                     }
