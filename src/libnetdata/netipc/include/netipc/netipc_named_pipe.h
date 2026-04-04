@@ -12,7 +12,7 @@
 #ifndef NETIPC_NAMED_PIPE_H
 #define NETIPC_NAMED_PIPE_H
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
 
 #include "netipc_protocol.h"
 #include <stdbool.h>
@@ -275,6 +275,6 @@ static inline HANDLE nipc_np_listener_handle(const nipc_np_listener_t *l) {
 }
 #endif
 
-#endif /* _WIN32 */
+#endif /* _WIN32 || __MSYS__ */
 
 #endif /* NETIPC_NAMED_PIPE_H */

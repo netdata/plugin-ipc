@@ -1,4 +1,4 @@
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
 
 #ifndef TEST_WIN_RAW_CLIENT_HELPERS_H
 #define TEST_WIN_RAW_CLIENT_HELPERS_H
@@ -437,4 +437,4 @@ static nipc_error_t test_win_client_call_increment_batch_raw(
 
 #endif /* TEST_WIN_RAW_CLIENT_HELPERS_H */
 
-#endif /* _WIN32 */
+#endif /* _WIN32 || __MSYS__ */

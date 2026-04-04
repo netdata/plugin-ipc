@@ -6,7 +6,7 @@
  * gcov-instrumented Windows runs than one large all-in-one guard binary.
  */
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
 
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_protocol.h"

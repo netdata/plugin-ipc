@@ -10,7 +10,7 @@
  *     Connects, performs a snapshot call, verifies results, prints PASS/FAIL.
  */
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
 
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_protocol.h"
@@ -24,6 +24,11 @@
 
 #define AUTH_TOKEN 0xDEADBEEFCAFEBABEull
 #define RESPONSE_BUF_SIZE 65536
+
+typedef struct {
+    nipc_managed_server_t server;
+    volatile LONG request_count;
+} test_server_state_t;
 
 static nipc_error_t handle_cgroups(const uint8_t *request_payload, size_t request_len,
                                    uint8_t *response_buf, size_t response_buf_size,
@@ -72,11 +77,14 @@ static nipc_error_t test_handler(void *user,
                                  size_t response_buf_size,
                                  size_t *response_len_out)
 {
-    (void)user;
+    test_server_state_t *state = (test_server_state_t *)user;
     (void)request_hdr;
-    return handle_cgroups(request_payload, request_len,
-                          response_buf, response_buf_size,
-                          response_len_out);
+    nipc_error_t err = handle_cgroups(request_payload, request_len,
+                                      response_buf, response_buf_size,
+                                      response_len_out);
+    if (err == NIPC_OK)
+        InterlockedIncrement(&state->request_count);
+    return err;
 }
 
 /* ------------------------------------------------------------------ */
@@ -93,6 +101,32 @@ static uint32_t detect_profiles(void)
     return NIPC_PROFILE_BASELINE;
 }
 
+static DWORD WINAPI server_thread_main(LPVOID arg)
+{
+    test_server_state_t *state = (test_server_state_t *)arg;
+    nipc_server_run(&state->server);
+    return 0;
+}
+
+static bool server_has_active_sessions(nipc_managed_server_t *server)
+{
+    bool active = false;
+
+    EnterCriticalSection(&server->sessions_lock);
+    for (int i = 0; i < server->session_count; i++) {
+        nipc_session_ctx_t *session = server->sessions[i];
+        if (!session)
+            continue;
+        if (InterlockedCompareExchange((volatile LONG *)&session->active, 0, 0)) {
+            active = true;
+            break;
+        }
+    }
+    LeaveCriticalSection(&server->sessions_lock);
+
+    return active;
+}
+
 static int run_server(const char *run_dir, const char *service)
 {
     uint32_t profiles = detect_profiles();
@@ -104,20 +138,56 @@ static int run_server(const char *run_dir, const char *service)
     scfg.max_response_batch_items  = 16;
     scfg.auth_token                = AUTH_TOKEN;
 
-    nipc_managed_server_t server;
-    nipc_error_t err = nipc_server_init(&server, run_dir, service, &scfg,
-                                          1, NIPC_METHOD_CGROUPS_SNAPSHOT,
-                                          test_handler, NULL);
+    test_server_state_t state;
+    memset(&state, 0, sizeof(state));
+
+    nipc_error_t err = nipc_server_init(&state.server, run_dir, service, &scfg,
+                                        1, NIPC_METHOD_CGROUPS_SNAPSHOT,
+                                        test_handler, &state);
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed: %d\n", err);
+        return 1;
+    }
+
+    HANDLE server_thread = CreateThread(NULL, 0, server_thread_main, &state, 0, NULL);
+    if (!server_thread) {
+        fprintf(stderr, "server thread create failed: %lu\n", (unsigned long)GetLastError());
+        nipc_server_destroy(&state.server);
         return 1;
     }
 
     printf("READY\n");
     fflush(stdout);
 
-    nipc_server_run(&server);
-    nipc_server_destroy(&server);
+    for (;;) {
+        DWORD wait_rc = WaitForSingleObject(server_thread, 50);
+        if (wait_rc == WAIT_OBJECT_0) {
+            fprintf(stderr, "server thread exited before serving a request\n");
+            CloseHandle(server_thread);
+            nipc_server_destroy(&state.server);
+            return 1;
+        }
+        if (InterlockedCompareExchange(&state.request_count, 0, 0) > 0)
+            break;
+    }
+
+    while (server_has_active_sessions(&state.server)) {
+        DWORD wait_rc = WaitForSingleObject(server_thread, 50);
+        if (wait_rc == WAIT_OBJECT_0)
+            break;
+    }
+
+    nipc_server_stop(&state.server);
+
+    if (WaitForSingleObject(server_thread, 10000) != WAIT_OBJECT_0) {
+        fprintf(stderr, "server thread did not stop cleanly\n");
+        CloseHandle(server_thread);
+        nipc_server_destroy(&state.server);
+        return 1;
+    }
+
+    CloseHandle(server_thread);
+    nipc_server_destroy(&state.server);
     return 0;
 }
 

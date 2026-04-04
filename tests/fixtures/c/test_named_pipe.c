@@ -5,7 +5,7 @@
  * Returns 0 on all-pass.
  */
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
 
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_protocol.h"
@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 #include <windows.h>
 
 /* ------------------------------------------------------------------ */
@@ -2695,7 +2696,7 @@ int main(void)
     return g_fail ? 1 : 0;
 }
 
-#else /* !_WIN32 */
+#else /* !(_WIN32 || __MSYS__) */
 
 #include <stdio.h>
 int main(void)
@@ -2704,4 +2705,4 @@ int main(void)
     return 0;
 }
 
-#endif /* _WIN32 */
+#endif /* _WIN32 || __MSYS__ */

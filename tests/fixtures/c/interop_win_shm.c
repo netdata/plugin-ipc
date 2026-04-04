@@ -9,7 +9,7 @@
  *     Attaches to SHM, sends 1 message, verifies echo, exits 0 on success.
  */
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
 
 #include "netipc/netipc_win_shm.h"
 #include "netipc/netipc_named_pipe.h"
@@ -202,7 +202,7 @@ int main(int argc, char **argv)
     }
 }
 
-#else /* !_WIN32 */
+#else /* !(_WIN32 || __MSYS__) */
 
 #include <stdio.h>
 int main(int argc, char **argv)
@@ -212,4 +212,4 @@ int main(int argc, char **argv)
     return 1;
 }
 
-#endif /* _WIN32 */
+#endif /* _WIN32 || __MSYS__ */

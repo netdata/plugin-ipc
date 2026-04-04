@@ -9,7 +9,7 @@
  * Managed server handles accept, read, dispatch, respond.
  */
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
 
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_protocol.h"
@@ -116,8 +116,23 @@ static uintptr_t service_beginthreadex(void *security,
 {
     if (service_test_should_fail(NIPC_WIN_SERVICE_TEST_FAULT_SERVER_THREAD_CREATE_INTERNAL))
         return 0;
+#ifdef __MSYS__
+    {
+        DWORD thread_id = 0;
+        HANDLE thread = CreateThread((LPSECURITY_ATTRIBUTES)security,
+                                     (SIZE_T)stack_size,
+                                     (LPTHREAD_START_ROUTINE)start_address,
+                                     arglist,
+                                     (DWORD)initflag,
+                                     &thread_id);
+        if (thrdaddr)
+            *thrdaddr = (unsigned)thread_id;
+        return (uintptr_t)thread;
+    }
+#else
     return _beginthreadex(security, stack_size, start_address,
                           arglist, initflag, thrdaddr);
+#endif
 }
 
 static uint32_t next_power_of_2_u32(uint32_t n)
@@ -1659,4 +1674,4 @@ void nipc_cgroups_cache_close(nipc_cgroups_cache_t *cache)
     nipc_client_close(&cache->client);
 }
 
-#endif /* _WIN32 */
+#endif /* _WIN32 || __MSYS__ */

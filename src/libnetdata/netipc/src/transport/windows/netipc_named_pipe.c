@@ -6,7 +6,7 @@
  * message mode. Wire-compatible with all language implementations.
  */
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
 
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_protocol.h"
@@ -1184,4 +1184,4 @@ nipc_np_error_t nipc_np_wait_readable(nipc_np_session_t *session,
     return err;
 }
 
-#endif /* _WIN32 */
+#endif /* _WIN32 || __MSYS__ */

@@ -8,7 +8,7 @@
  * Wire-compatible with all language implementations.
  */
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
 
 #include "netipc/netipc_win_shm.h"
 #include "netipc/netipc_named_pipe.h" /* nipc_fnv1a_64 */
@@ -914,4 +914,4 @@ void nipc_win_shm_cleanup_stale(const char *run_dir, const char *service_name)
     (void)service_name;
 }
 
-#endif /* _WIN32 */
+#endif /* _WIN32 || __MSYS__ */

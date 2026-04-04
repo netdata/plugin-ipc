@@ -14,7 +14,7 @@
 #ifndef NETIPC_WIN_SHM_H
 #define NETIPC_WIN_SHM_H
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
 
 #include "netipc_protocol.h"
 #include <stdbool.h>
@@ -272,6 +272,6 @@ void nipc_win_shm_test_fault_clear(void);
 }
 #endif
 
-#endif /* _WIN32 */
+#endif /* _WIN32 || __MSYS__ */
 
 #endif /* NETIPC_WIN_SHM_H */

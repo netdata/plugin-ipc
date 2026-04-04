@@ -49,12 +49,53 @@ cleanup() {
     local pids
     pids=$(jobs -p 2>/dev/null) || true
     if [[ -n "$pids" ]]; then
-        kill $pids 2>/dev/null || true
-        wait $pids 2>/dev/null || true
+        for pid in $pids; do
+            stop_server "$pid" >/dev/null 2>&1 || true
+        done
     fi
     rm -rf "$RUN_DIR_HOST"
 }
 trap cleanup EXIT
+
+stop_server() {
+    local server_pid="$1"
+    local waited=0
+
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+        wait "$server_pid" 2>/dev/null || true
+        return 0
+    fi
+
+    kill "$server_pid" 2>/dev/null || true
+
+    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
+        if ! kill -0 "$server_pid" 2>/dev/null; then
+            wait "$server_pid" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+
+    if command -v taskkill.exe >/dev/null 2>&1; then
+        taskkill.exe /PID "$server_pid" /T /F >/dev/null 2>&1 || true
+    elif command -v taskkill >/dev/null 2>&1; then
+        taskkill /PID "$server_pid" /T /F >/dev/null 2>&1 || true
+    fi
+
+    waited=0
+    while [[ $waited -lt 50 ]]; do
+        if ! kill -0 "$server_pid" 2>/dev/null; then
+            wait "$server_pid" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+
+    wait "$server_pid" 2>/dev/null || true
+    return 1
+}
 
 check_binaries() {
     local missing=0
@@ -118,21 +159,37 @@ run_test() {
     fi
 
     local client_out
+    local test_ok=1
+    local fail_reason=""
     if client_out=$(env NIPC_PROFILE="${NIPC_PROFILE:-}" "$client_bin" client "$RUN_DIR" "$service" 2>&1); then
         if echo "$client_out" | grep -q "^PASS$"; then
-            echo -e "${GREEN}PASS${NC}"
-            PASS=$((PASS + 1))
+            :
         else
-            echo -e "${RED}FAIL${NC} (client output: $client_out)"
-            FAIL=$((FAIL + 1))
+            test_ok=0
+            fail_reason="client output: $client_out"
         fi
     else
-        echo -e "${RED}FAIL${NC} (client exit code $?, output: $client_out)"
-        FAIL=$((FAIL + 1))
+        test_ok=0
+        fail_reason="client exit code $?, output: $client_out"
     fi
 
-    kill "$server_pid" 2>/dev/null || true
-    wait "$server_pid" 2>/dev/null || true
+    if ! stop_server "$server_pid"; then
+        test_ok=0
+        if [[ -n "$fail_reason" ]]; then
+            fail_reason="${fail_reason}; server did not exit cleanly"
+        else
+            fail_reason="server did not exit cleanly"
+        fi
+    fi
+
+    if [[ $test_ok -eq 0 ]]; then
+        echo -e "${RED}FAIL${NC} (${fail_reason})"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+
+    echo -e "${GREEN}PASS${NC}"
+    PASS=$((PASS + 1))
 }
 
 main() {

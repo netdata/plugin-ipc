@@ -24,7 +24,7 @@
 
 #include "netipc_protocol.h"
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
 #include "netipc_named_pipe.h"
 #include "netipc_win_shm.h"
 #include <windows.h>
@@ -120,7 +120,7 @@ typedef struct {
     char run_dir[256];
     char service_name[128];
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
     nipc_np_client_config_t transport_config;
 
     /* Connection (managed internally) */
@@ -244,7 +244,7 @@ typedef struct nipc_managed_server nipc_managed_server_t;
 /* Per-session context for multi-client server */
 typedef struct nipc_session_ctx {
     nipc_managed_server_t *server;   /* back-pointer */
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
     nipc_np_session_t session;
     nipc_win_shm_ctx_t *shm;        /* non-NULL if SHM negotiated */
     HANDLE thread;
@@ -259,7 +259,7 @@ typedef struct nipc_session_ctx {
 
 struct nipc_managed_server {
     /* Listener */
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
     nipc_np_listener_t listener;
 #else
     nipc_uds_listener_t listener;
@@ -277,7 +277,7 @@ struct nipc_managed_server {
     uint32_t learned_response_payload_bytes;
 
     /* State — use __atomic builtins (POSIX) or Interlocked* (Windows) */
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
     volatile LONG running;
     volatile LONG accept_loop_active;
 #else
@@ -289,7 +289,7 @@ struct nipc_managed_server {
     int session_count;               /* current active session count */
     int session_capacity;            /* allocated slots */
     uint64_t next_session_id;        /* monotonic session ID counter */
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
     CRITICAL_SECTION sessions_lock;  /* protects session array + count */
 #else
     pthread_mutex_t sessions_lock;   /* protects session array + count */
@@ -301,7 +301,7 @@ struct nipc_managed_server {
     char run_dir[256];
     char service_name[128];
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
     /* Auth token needed for SHM kernel object naming */
     uint64_t auth_token;
 #endif
@@ -330,7 +330,7 @@ nipc_error_t nipc_server_init_raw_for_tests(
     nipc_managed_server_t *server,
     const char *run_dir,
     const char *service_name,
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
     const nipc_np_server_config_t *config,
 #else
     const nipc_uds_server_config_t *config,
@@ -340,7 +340,7 @@ nipc_error_t nipc_server_init_raw_for_tests(
     nipc_server_handler_fn handler,
     void *user);
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
 typedef enum {
     NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_RESPONSE_BUF_REALLOC = 1,
     NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC,
