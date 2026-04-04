@@ -54,6 +54,7 @@
 #define LATENCY_SAMPLE_STRIDE 64ULL
 #define LATENCY_SAMPLE_SLACK  4096ULL
 #define DEFAULT_DURATION   30
+#define CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS 5000ULL
 
 /* Profiles */
 #define BENCH_PROFILE_NP   NIPC_PROFILE_BASELINE
@@ -105,7 +106,46 @@ static void elevate_bench_priority(void)
                 (unsigned long)GetLastError());
 }
 
-static void pin_bench_affinity(void)
+static int bench_affinity_slot(const char *cmd)
+{
+    char *slot_env = getenv("NIPC_BENCH_AFFINITY_SLOT");
+    if (slot_env && *slot_env) {
+        char *end = NULL;
+        long parsed = strtol(slot_env, &end, 10);
+        if (end && *end == '\0' && parsed >= 0)
+            return (int)parsed;
+    }
+
+    if (cmd && strcmp(cmd, "lookup-bench") == 0)
+        return 0;
+    if (cmd && strstr(cmd, "client") != NULL)
+        return 1;
+    return 0;
+}
+
+static DWORD_PTR select_bench_affinity_mask(DWORD_PTR process_mask, int slot)
+{
+    if (!process_mask)
+        return 0;
+    if (slot < 0)
+        slot = 0;
+
+    DWORD_PTR available[sizeof(DWORD_PTR) * 8];
+    size_t count = 0;
+    for (DWORD_PTR bit = 1; bit; bit <<= 1) {
+        if (process_mask & bit)
+            available[count++] = bit;
+    }
+
+    if (!count)
+        return 0;
+    if ((size_t)slot >= count)
+        slot = (int)count - 1;
+
+    return available[count - 1 - (size_t)slot];
+}
+
+static void pin_bench_affinity(const char *cmd)
 {
     DWORD_PTR process_mask = 0, system_mask = 0;
     if (!GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask)) {
@@ -117,12 +157,8 @@ static void pin_bench_affinity(void)
     if (!process_mask)
         return;
 
-    DWORD_PTR pin_mask = 0;
-    for (DWORD_PTR bit = 1; bit; bit <<= 1) {
-        if (process_mask & bit)
-            pin_mask = bit;
-    }
-
+    DWORD_PTR pin_mask = select_bench_affinity_mask(process_mask,
+                                                    bench_affinity_slot(cmd));
     if (!pin_mask)
         return;
 
@@ -201,6 +237,50 @@ static void latency_free(latency_recorder_t *lr)
     free(lr->samples);
     lr->samples = NULL;
     lr->count = 0;
+}
+
+static int attach_bench_shm(const char *run_dir, const char *service,
+                            const nipc_np_session_t *session,
+                            nipc_win_shm_ctx_t **shm_out)
+{
+    if (!(session->selected_profile & NIPC_WIN_SHM_PROFILE_HYBRID)) {
+        fprintf(stderr, "client: expected Windows SHM profile, negotiated %u\n",
+                session->selected_profile);
+        return -1;
+    }
+
+    nipc_win_shm_ctx_t *shm = calloc(1, sizeof(*shm));
+    if (!shm) {
+        fprintf(stderr, "client: SHM context alloc failed\n");
+        return -1;
+    }
+
+    ULONGLONG deadline = GetTickCount64() + CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS;
+    nipc_win_shm_error_t last_err = NIPC_WIN_SHM_ERR_BAD_PARAM;
+
+    while (1) {
+        nipc_win_shm_error_t serr = nipc_win_shm_client_attach(
+            run_dir, service, AUTH_TOKEN,
+            session->session_id,
+            session->selected_profile,
+            shm);
+        if (serr == NIPC_WIN_SHM_OK) {
+            *shm_out = shm;
+            return 0;
+        }
+
+        last_err = serr;
+        if (GetTickCount64() >= deadline)
+            break;
+
+        Sleep(5);
+    }
+
+    fprintf(stderr, "client: Windows SHM attach failed after %llums (err=%d)\n",
+            (unsigned long long)CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS,
+            (int)last_err);
+    free(shm);
+    return -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -896,6 +976,97 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
 /*  Ping-pong client (Named Pipe or SHM)                               */
 /* ------------------------------------------------------------------ */
 
+static int warm_ping_pong_client(nipc_np_session_t *session,
+                                 nipc_win_shm_ctx_t *shm)
+{
+    uint64_t counter = 0;
+    uint8_t req_payload[8];
+    memcpy(req_payload, &counter, sizeof(req_payload));
+
+    nipc_header_t hdr = {0};
+    hdr.kind = NIPC_KIND_REQUEST;
+    hdr.code = NIPC_METHOD_INCREMENT;
+    hdr.item_count = 1;
+    hdr.message_id = 1;
+    hdr.transport_status = NIPC_STATUS_OK;
+    hdr.payload_len = sizeof(req_payload);
+
+    if (shm) {
+        uint8_t msg[NIPC_HEADER_LEN + sizeof(req_payload)];
+        size_t msg_len = sizeof(msg);
+        hdr.magic = NIPC_MAGIC_MSG;
+        hdr.version = NIPC_VERSION;
+        hdr.header_len = NIPC_HEADER_LEN;
+        nipc_header_encode(&hdr, msg, NIPC_HEADER_LEN);
+        memcpy(msg + NIPC_HEADER_LEN, req_payload, sizeof(req_payload));
+
+        nipc_win_shm_error_t serr = nipc_win_shm_send(shm, msg, msg_len);
+        if (serr != NIPC_WIN_SHM_OK) {
+            fprintf(stderr, "client warmup: send failed: %d\n", (int)serr);
+            return -1;
+        }
+
+        uint8_t resp_msg[NIPC_HEADER_LEN + 64];
+        size_t resp_len = 0;
+        serr = nipc_win_shm_receive(shm, resp_msg, sizeof(resp_msg),
+                                    &resp_len, 30000);
+        if (serr != NIPC_WIN_SHM_OK) {
+            fprintf(stderr, "client warmup: receive failed: %d\n", (int)serr);
+            return -1;
+        }
+        if (resp_len < NIPC_HEADER_LEN + sizeof(uint64_t)) {
+            fprintf(stderr, "client warmup: short SHM response: %zu bytes\n",
+                    resp_len);
+            return -1;
+        }
+
+        uint64_t resp_val = 0;
+        memcpy(&resp_val, resp_msg + NIPC_HEADER_LEN, sizeof(resp_val));
+        if (resp_val != counter + 1) {
+            fprintf(stderr,
+                    "client warmup: counter mismatch: expected %llu, got %llu\n",
+                    (unsigned long long)(counter + 1),
+                    (unsigned long long)resp_val);
+            return -1;
+        }
+        return 0;
+    }
+
+    nipc_np_error_t uerr = nipc_np_send(session, &hdr, req_payload,
+                                        sizeof(req_payload));
+    if (uerr != NIPC_NP_OK) {
+        fprintf(stderr, "client warmup: send failed: %d\n", (int)uerr);
+        return -1;
+    }
+
+    nipc_header_t resp_hdr;
+    const void *resp_payload;
+    size_t resp_len;
+    uint8_t recv_buf[256];
+    uerr = nipc_np_receive(session, recv_buf, sizeof(recv_buf),
+                           &resp_hdr, &resp_payload, &resp_len);
+    if (uerr != NIPC_NP_OK) {
+        fprintf(stderr, "client warmup: receive failed: %d\n", (int)uerr);
+        return -1;
+    }
+    if (resp_len < sizeof(uint64_t)) {
+        fprintf(stderr, "client warmup: short NP response: %zu bytes\n", resp_len);
+        return -1;
+    }
+
+    uint64_t resp_val = 0;
+    memcpy(&resp_val, resp_payload, sizeof(resp_val));
+    if (resp_val != counter + 1) {
+        fprintf(stderr,
+                "client warmup: counter mismatch: expected %llu, got %llu\n",
+                (unsigned long long)(counter + 1),
+                (unsigned long long)resp_val);
+        return -1;
+    }
+
+    return 0;
+}
+
 static int run_ping_pong_client(const char *run_dir, const char *service,
                                  uint32_t profiles, int duration_sec,
                                  uint64_t target_rps,
@@ -931,26 +1102,21 @@ static int run_ping_pong_client(const char *run_dir, const char *service,
         return 1;
     }
 
-    /* SHM upgrade if negotiated */
     nipc_win_shm_ctx_t *shm = NULL;
-    if (session.selected_profile & NIPC_WIN_SHM_PROFILE_HYBRID) {
-        shm = calloc(1, sizeof(nipc_win_shm_ctx_t));
-        int attached = 0;
-        for (int i = 0; i < 200; i++) {
-            nipc_win_shm_error_t serr = nipc_win_shm_client_attach(
-                run_dir, service, AUTH_TOKEN,
-                session.session_id,
-                NIPC_WIN_SHM_PROFILE_HYBRID, shm);
-            if (serr == NIPC_WIN_SHM_OK) {
-                attached = 1;
-                break;
-            }
-            Sleep(5);
+    if (profiles & (NIPC_WIN_SHM_PROFILE_HYBRID | NIPC_WIN_SHM_PROFILE_BUSYWAIT)) {
+        if (attach_bench_shm(run_dir, service, &session, &shm) != 0) {
+            nipc_np_close_session(&session);
+            return 1;
         }
-        if (!attached) {
+    }
+
+    if (warm_ping_pong_client(&session, shm) != 0) {
+        if (shm) {
+            nipc_win_shm_close(shm);
             free(shm);
-            shm = NULL;
         }
+        nipc_np_close_session(&session);
+        return 1;
     }
 
     latency_recorder_t lr;
@@ -1299,7 +1465,6 @@ int main(int argc, char **argv)
 {
     QueryPerformanceFrequency(&qpc_freq);
     elevate_bench_priority();
-    pin_bench_affinity();
 
     if (argc < 2) {
         usage(argv[0]);
@@ -1307,6 +1472,7 @@ int main(int argc, char **argv)
     }
 
     const char *cmd = argv[1];
+    pin_bench_affinity(cmd);
 
     /* Single-item server subcommands */
     if (strcmp(cmd, "np-ping-pong-server") == 0 ||

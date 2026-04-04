@@ -59,6 +59,8 @@ const LATENCY_SAMPLE_SLACK: usize = 4096;
 const DEFAULT_DURATION: u32 = 30;
 #[cfg(windows)]
 const LOOKUP_WARMUP_SEC: u32 = 2;
+#[cfg(windows)]
+const SHM_ATTACH_RETRY_TIMEOUT_SEC: u64 = 5;
 
 #[cfg(windows)]
 const PROFILE_NP: u32 = PROFILE_BASELINE;
@@ -168,7 +170,47 @@ fn elevate_bench_priority() {
 }
 
 #[cfg(windows)]
-fn pin_bench_affinity() {
+fn bench_affinity_slot(cmd: &str) -> usize {
+    if let Ok(raw) = std::env::var("NIPC_BENCH_AFFINITY_SLOT") {
+        if let Ok(parsed) = raw.parse::<usize>() {
+            return parsed;
+        }
+    }
+
+    if cmd == "lookup-bench" {
+        return 0;
+    }
+    if cmd.contains("client") {
+        return 1;
+    }
+    0
+}
+
+#[cfg(windows)]
+fn select_bench_affinity_mask(process_mask: usize, slot: usize) -> usize {
+    if process_mask == 0 {
+        return 0;
+    }
+
+    let mut available = Vec::with_capacity(usize::BITS as usize);
+    let mut bit = 1usize;
+    while bit != 0 {
+        if process_mask & bit != 0 {
+            available.push(bit);
+        }
+        bit = bit.wrapping_shl(1);
+    }
+
+    if available.is_empty() {
+        return 0;
+    }
+
+    let slot = slot.min(available.len() - 1);
+    available[available.len() - 1 - slot]
+}
+
+#[cfg(windows)]
+fn pin_bench_affinity(cmd: &str) {
     unsafe {
         let mut process_mask: usize = 0;
         let mut system_mask: usize = 0;
@@ -189,14 +231,7 @@ fn pin_bench_affinity() {
             return;
         }
 
-        let mut pin_mask = 0usize;
-        let mut bit = 1usize;
-        while bit != 0 {
-            if process_mask & bit != 0 {
-                pin_mask = bit;
-            }
-            bit = bit.wrapping_shl(1);
-        }
+        let pin_mask = select_bench_affinity_mask(process_mask, bench_affinity_slot(cmd));
         if pin_mask == 0 {
             return;
         }
@@ -606,7 +641,10 @@ fn warm_server_from_env(run_dir: &str, service: &str) -> Result<(), String> {
 
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if stderr.is_empty() {
-        Err(format!("server warmup client failed with status {}", output.status))
+        Err(format!(
+            "server warmup client failed with status {}",
+            output.status
+        ))
     } else {
         Err(format!(
             "server warmup client failed with status {}: {}",
@@ -669,11 +707,20 @@ fn run_batch_server(run_dir: &str, service: &str, profiles: u32, duration_sec: u
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-fn try_shm_upgrade(run_dir: &str, service: &str, session: &NpSession) -> Option<WinShmContext> {
+fn try_shm_upgrade(
+    run_dir: &str,
+    service: &str,
+    session: &NpSession,
+) -> Result<Option<WinShmContext>, String> {
     if session.selected_profile & WIN_SHM_PROFILE_HYBRID == 0 {
-        return None;
+        return Err(format!(
+            "expected Windows SHM profile, negotiated {}",
+            session.selected_profile
+        ));
     }
-    for _ in 0..200 {
+
+    let deadline = Instant::now() + Duration::from_secs(SHM_ATTACH_RETRY_TIMEOUT_SEC);
+    loop {
         match WinShmContext::client_attach(
             run_dir,
             service,
@@ -681,11 +728,18 @@ fn try_shm_upgrade(run_dir: &str, service: &str, session: &NpSession) -> Option<
             session.session_id,
             WIN_SHM_PROFILE_HYBRID,
         ) {
-            Ok(ctx) => return Some(ctx),
-            Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            Ok(ctx) => return Ok(Some(ctx)),
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "Windows SHM attach failed after {}s: {}",
+                        SHM_ATTACH_RETRY_TIMEOUT_SEC, err
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
     }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -720,7 +774,18 @@ fn run_ping_pong_client(
         }
     };
 
-    let mut shm = try_shm_upgrade(run_dir, service, &session);
+    let mut shm = if profiles & WIN_SHM_PROFILE_HYBRID != 0 {
+        match try_shm_upgrade(run_dir, service, &session) {
+            Ok(shm) => shm,
+            Err(err) => {
+                eprintln!("client: {err}");
+                drop(session);
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
 
     let mut lr = LatencyRecorder::new(latency_sparse_cap(target_rps, duration_sec));
     let mut rl = RateLimiter::new(target_rps);
@@ -732,7 +797,13 @@ fn run_ping_pong_client(
     let mut resp_buf = vec![0u8; HEADER_SIZE + 64];
     let mut recv_buf = vec![0u8; 256];
 
-    if let Err(err) = warm_ping_pong_client(&mut session, shm.as_mut(), &mut msg_buf, &mut resp_buf, &mut recv_buf) {
+    if let Err(err) = warm_ping_pong_client(
+        &mut session,
+        shm.as_mut(),
+        &mut msg_buf,
+        &mut resp_buf,
+        &mut recv_buf,
+    ) {
         eprintln!("ping-pong warmup: {err}");
         if let Some(mut shm_ctx) = shm {
             shm_ctx.close();
@@ -917,9 +988,7 @@ fn warm_ping_pong_client(
         let resp_val =
             u64::from_ne_bytes(resp_buf[HEADER_SIZE..HEADER_SIZE + 8].try_into().unwrap());
         if resp_val != 1 {
-            return Err(format!(
-                "counter chain broken: expected 1, got {resp_val}"
-            ));
+            return Err(format!("counter chain broken: expected 1, got {resp_val}"));
         }
     } else {
         session
@@ -934,9 +1003,7 @@ fn warm_ping_pong_client(
 
         let resp_val = u64::from_ne_bytes(payload[..8].try_into().unwrap());
         if resp_val != 1 {
-            return Err(format!(
-                "counter chain broken: expected 1, got {resp_val}"
-            ));
+            return Err(format!("counter chain broken: expected 1, got {resp_val}"));
         }
     }
 
@@ -1083,7 +1150,18 @@ fn run_batch_ping_pong_client(
     let mut expected = vec![0u64; BENCH_MAX_BATCH_ITEMS as usize];
 
     // SHM upgrade if negotiated
-    let mut shm = try_shm_upgrade(run_dir, service, &session);
+    let mut shm = if profiles & WIN_SHM_PROFILE_HYBRID != 0 {
+        match try_shm_upgrade(run_dir, service, &session) {
+            Ok(shm) => shm,
+            Err(err) => {
+                eprintln!("batch client: {err}");
+                drop(session);
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
@@ -1784,7 +1862,6 @@ fn run_lookup_bench(duration_sec: u32) -> i32 {
 #[cfg(windows)]
 fn main() {
     elevate_bench_priority();
-    pin_bench_affinity();
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!(
@@ -1801,6 +1878,7 @@ fn main() {
     }
 
     let cmd = &args[1];
+    pin_bench_affinity(cmd);
 
     let rc = match cmd.as_str() {
         // --- Server subcommands ---

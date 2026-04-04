@@ -70,7 +70,7 @@ SCENARIO_FILTER="${NIPC_BENCH_SCENARIOS:-}"
 CLIENT_FILTER="${NIPC_BENCH_CLIENTS:-}"
 SERVER_FILTER="${NIPC_BENCH_SERVERS:-}"
 TARGET_FILTER="${NIPC_BENCH_TARGETS:-}"
-SERVER_WARMUP_DURATION_SEC="${NIPC_BENCH_SERVER_WARMUP_DURATION_SEC:-2}"
+SERVER_WARMUP_DURATION_SEC="${NIPC_BENCH_SERVER_WARMUP_DURATION_SEC:-1}"
 
 # Binary locations
 BENCH_C="${BUILD_DIR}/bin/bench_windows_c.exe"
@@ -1129,7 +1129,11 @@ measure_pair_once() {
     client_bin="$(bench_bin "$client_lang")"
 
     local server_pid
-    if [ "$scenario" = "np-batch-ping-pong" ] || [ "$scenario" = "np-ping-pong" ]; then
+    if [ "$scenario" = "np-ping-pong" ] || \
+       [ "$scenario" = "shm-ping-pong" ] || \
+       [ "$scenario" = "np-batch-ping-pong" ] || \
+       [ "$scenario" = "snapshot-baseline" ] || \
+       [ "$scenario" = "snapshot-shm" ]; then
         server_pid=$(
             start_server_with_warmup \
                 "$client_bin" \

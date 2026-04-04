@@ -49,6 +49,9 @@ const (
 	// Batch scenario limits (mirrors C driver / POSIX Go driver).
 	maxBatchItemsWin = 1000
 	batchBufSizeWin  = maxBatchItemsWin*48 + 4096 // 52096
+
+	clientShmAttachRetryIntervalWin = 5 * time.Millisecond
+	clientShmAttachRetryTimeoutWin  = 5 * time.Second
 )
 
 type cacheBucketWin struct {
@@ -142,7 +145,47 @@ func elevateBenchPriorityWin() {
 	}
 }
 
-func pinBenchAffinityWin() {
+func benchAffinitySlotWin(cmd string) int {
+	if raw := os.Getenv("NIPC_BENCH_AFFINITY_SLOT"); raw != "" {
+		if slot, err := strconv.Atoi(raw); err == nil && slot >= 0 {
+			return slot
+		}
+	}
+
+	if cmd == "lookup-bench" {
+		return 0
+	}
+	if strings.Contains(cmd, "client") {
+		return 1
+	}
+	return 0
+}
+
+func selectBenchAffinityMaskWin(processMask uintptr, slot int) uintptr {
+	if processMask == 0 {
+		return 0
+	}
+	if slot < 0 {
+		slot = 0
+	}
+
+	available := make([]uintptr, 0, unsafe.Sizeof(processMask)*8)
+	for bit := uintptr(1); bit != 0; bit <<= 1 {
+		if processMask&bit != 0 {
+			available = append(available, bit)
+		}
+	}
+	if len(available) == 0 {
+		return 0
+	}
+	if slot >= len(available) {
+		slot = len(available) - 1
+	}
+
+	return available[len(available)-1-slot]
+}
+
+func pinBenchAffinityWin(cmd string) {
 	process, _ := syscall.GetCurrentProcess()
 
 	var processMask uintptr
@@ -159,12 +202,7 @@ func pinBenchAffinityWin() {
 		return
 	}
 
-	var pinMask uintptr
-	for bit := uintptr(1); bit != 0; bit <<= 1 {
-		if processMask&bit != 0 {
-			pinMask = bit
-		}
-	}
+	pinMask := selectBenchAffinityMaskWin(processMask, benchAffinitySlotWin(cmd))
 	if pinMask == 0 {
 		return
 	}
@@ -363,6 +401,36 @@ func typedClientConfigWin(profiles uint32) cgroups.ClientConfig {
 		MaxResponseBatchItems:   1,
 		AuthToken:               authTokenWin,
 	}
+}
+
+func attachBenchShmWin(runDir, service string, session *windows.Session) (*windows.WinShmContext, error) {
+	if session.SelectedProfile != windows.WinShmProfileHybrid &&
+		session.SelectedProfile != windows.WinShmProfileBusywait {
+		return nil, fmt.Errorf("expected Windows SHM profile, negotiated %d", session.SelectedProfile)
+	}
+
+	deadline := time.Now().Add(clientShmAttachRetryTimeoutWin)
+	var lastErr error
+	for {
+		shm, err := windows.WinShmClientAttach(
+			runDir,
+			service,
+			authTokenWin,
+			session.SessionID,
+			session.SelectedProfile,
+		)
+		if err == nil {
+			return shm, nil
+		}
+
+		lastErr = err
+		if !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(clientShmAttachRetryIntervalWin)
+	}
+
+	return nil, fmt.Errorf("Windows SHM attach failed after %s: %w", clientShmAttachRetryTimeoutWin, lastErr)
 }
 
 // ---------------------------------------------------------------------------
@@ -606,6 +674,107 @@ func runBatchServerWin(runDir, service string, profiles uint32, durationSec int)
 //  Batch ping-pong client (random 2-1000 items per batch)
 // ---------------------------------------------------------------------------
 
+func warmBatchPingPongClientWin(session *windows.Session, shm *windows.WinShmContext, reqBuf, respBuf, msgBuf []byte, expected []uint64, itemBuf []byte) error {
+	const warmBatchSize = 8
+
+	var bb protocol.BatchBuilder
+	bb.Reset(reqBuf, warmBatchSize)
+
+	for i := uint32(0); i < warmBatchSize; i++ {
+		protocol.IncrementEncode(uint64(i), itemBuf)
+		expected[i] = uint64(i) + 1
+		if err := bb.Add(itemBuf); err != nil {
+			return fmt.Errorf("warmup build: %w", err)
+		}
+	}
+
+	reqLen, _ := bb.Finish()
+	hdr := protocol.Header{
+		Kind:            protocol.KindRequest,
+		Code:            protocol.MethodIncrement,
+		Flags:           protocol.FlagBatch,
+		ItemCount:       warmBatchSize,
+		MessageID:       1,
+		TransportStatus: protocol.StatusOK,
+	}
+
+	if shm != nil {
+		msgLen := protocol.HeaderSize + reqLen
+		msg := msgBuf[:msgLen]
+		hdr.Magic = protocol.MagicMsg
+		hdr.Version = protocol.Version
+		hdr.HeaderLen = protocol.HeaderLen
+		hdr.PayloadLen = uint32(reqLen)
+		hdr.Encode(msg[:protocol.HeaderSize])
+		copy(msg[protocol.HeaderSize:], reqBuf[:reqLen])
+
+		if err := shm.WinShmSend(msg); err != nil {
+			return fmt.Errorf("warmup send: %w", err)
+		}
+
+		respLen, err := shm.WinShmReceive(respBuf, 30000)
+		if err != nil {
+			return fmt.Errorf("warmup receive: %w", err)
+		}
+		if respLen < protocol.HeaderSize {
+			return fmt.Errorf("warmup short shm response")
+		}
+
+		respHdr, err := protocol.DecodeHeader(respBuf[:protocol.HeaderSize])
+		if err != nil {
+			return fmt.Errorf("warmup decode header: %w", err)
+		}
+		payload := respBuf[protocol.HeaderSize:respLen]
+		if respHdr.ItemCount != warmBatchSize {
+			return fmt.Errorf("warmup item count mismatch: got %d want %d", respHdr.ItemCount, warmBatchSize)
+		}
+
+		for i := uint32(0); i < warmBatchSize; i++ {
+			itemPayload, itemErr := protocol.BatchItemGet(payload, respHdr.ItemCount, i)
+			if itemErr != nil {
+				return fmt.Errorf("warmup batch item %d: %w", i, itemErr)
+			}
+			value, decodeErr := protocol.IncrementDecode(itemPayload)
+			if decodeErr != nil {
+				return fmt.Errorf("warmup decode item %d: %w", i, decodeErr)
+			}
+			if value != expected[i] {
+				return fmt.Errorf("warmup item %d mismatch: got %d want %d", i, value, expected[i])
+			}
+		}
+
+		return nil
+	}
+
+	if err := session.Send(&hdr, reqBuf[:reqLen]); err != nil {
+		return fmt.Errorf("warmup send: %w", err)
+	}
+
+	respHdr, payload, err := session.Receive(respBuf)
+	if err != nil {
+		return fmt.Errorf("warmup receive: %w", err)
+	}
+	if respHdr.ItemCount != warmBatchSize {
+		return fmt.Errorf("warmup item count mismatch: got %d want %d", respHdr.ItemCount, warmBatchSize)
+	}
+
+	for i := uint32(0); i < warmBatchSize; i++ {
+		itemPayload, itemErr := protocol.BatchItemGet(payload, respHdr.ItemCount, i)
+		if itemErr != nil {
+			return fmt.Errorf("warmup batch item %d: %w", i, itemErr)
+		}
+		value, decodeErr := protocol.IncrementDecode(itemPayload)
+		if decodeErr != nil {
+			return fmt.Errorf("warmup decode item %d: %w", i, decodeErr)
+		}
+		if value != expected[i] {
+			return fmt.Errorf("warmup item %d mismatch: got %d want %d", i, value, expected[i])
+		}
+	}
+
+	return nil
+}
+
 func runBatchPingPongClientWin(runDir, service string, profiles uint32, durationSec int, targetRPS uint64, scenario, serverLang string) int {
 	cfg := batchClientConfigWin(profiles)
 	var session *windows.Session
@@ -624,16 +793,12 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 	}
 	defer session.Close()
 
-	// Win SHM upgrade if negotiated
 	var shm *windows.WinShmContext
-	if session.SelectedProfile&0x02 != 0 { // PROFILE_SHM_HYBRID
-		for i := 0; i < 200; i++ {
-			shmCtx, serr := windows.WinShmClientAttach(runDir, service, authTokenWin, session.SessionID, 0x02)
-			if serr == nil {
-				shm = shmCtx
-				break
-			}
-			time.Sleep(5 * time.Millisecond)
+	if profiles&(windows.WinShmProfileHybrid|windows.WinShmProfileBusywait) != 0 {
+		shm, err = attachBenchShmWin(runDir, service, session)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "batch client: %v\n", err)
+			return 1
 		}
 	}
 	if shm != nil {
@@ -645,11 +810,18 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 
 	reqBuf := make([]byte, batchBufSizeWin)
 	respBuf := make([]byte, batchBufSizeWin+protocol.HeaderSize)
+	msgBuf := make([]byte, batchBufSizeWin+protocol.HeaderSize)
 	expected := make([]uint64, maxBatchItemsWin)
 	itemBuf := make([]byte, protocol.IncrementPayloadSize)
-	msgBuf := make([]byte, batchBufSizeWin+protocol.HeaderSize)
 
 	var counter, totalItems, errors, msgSeq uint64
+
+	if err := warmBatchPingPongClientWin(session, shm, reqBuf, respBuf, msgBuf, expected, itemBuf); err != nil {
+		fmt.Fprintf(os.Stderr, "batch client warmup: %v\n", err)
+		return 1
+	}
+
+	runtime.GC()
 
 	cpuStart := cpuNSWin()
 	wallStart := nowNS()
@@ -1333,6 +1505,68 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 //  Ping-pong client
 // ---------------------------------------------------------------------------
 
+func warmPingPongClientWin(session *windows.Session, shm *windows.WinShmContext, msgBuf, respBuf, recvBuf []byte) error {
+	var reqPayload [8]byte
+	binary.NativeEndian.PutUint64(reqPayload[:], 0)
+
+	hdr := protocol.Header{
+		Kind:            protocol.KindRequest,
+		Code:            protocol.MethodIncrement,
+		Flags:           0,
+		ItemCount:       1,
+		MessageID:       1,
+		TransportStatus: protocol.StatusOK,
+		PayloadLen:      8,
+	}
+
+	if shm != nil {
+		msgLen := protocol.HeaderSize + len(reqPayload)
+		msg := msgBuf[:msgLen]
+		hdr.Magic = protocol.MagicMsg
+		hdr.Version = protocol.Version
+		hdr.HeaderLen = protocol.HeaderLen
+		hdr.Encode(msg[:protocol.HeaderSize])
+		copy(msg[protocol.HeaderSize:], reqPayload[:])
+
+		if err := shm.WinShmSend(msg); err != nil {
+			return fmt.Errorf("warmup send: %w", err)
+		}
+
+		respLen, err := shm.WinShmReceive(respBuf, 30000)
+		if err != nil {
+			return fmt.Errorf("warmup receive: %w", err)
+		}
+		if respLen < protocol.HeaderSize+8 {
+			return fmt.Errorf("warmup short shm response")
+		}
+
+		value := binary.NativeEndian.Uint64(respBuf[protocol.HeaderSize : protocol.HeaderSize+8])
+		if value != 1 {
+			return fmt.Errorf("warmup counter mismatch: got %d want 1", value)
+		}
+		return nil
+	}
+
+	if err := session.Send(&hdr, reqPayload[:]); err != nil {
+		return fmt.Errorf("warmup send: %w", err)
+	}
+
+	_, payload, err := session.Receive(recvBuf)
+	if err != nil {
+		return fmt.Errorf("warmup receive: %w", err)
+	}
+	if len(payload) < 8 {
+		return fmt.Errorf("warmup short response")
+	}
+
+	value := binary.NativeEndian.Uint64(payload[:8])
+	if value != 1 {
+		return fmt.Errorf("warmup counter mismatch: got %d want 1", value)
+	}
+
+	return nil
+}
+
 func runPingPongClientWin(runDir, service string, profiles uint32, durationSec int, targetRPS uint64, scenario, serverLang string) int {
 	cfg := clientConfigWin(profiles)
 	var session *windows.Session
@@ -1351,16 +1585,12 @@ func runPingPongClientWin(runDir, service string, profiles uint32, durationSec i
 	}
 	defer session.Close()
 
-	// Win SHM upgrade if negotiated
 	var shm *windows.WinShmContext
-	if session.SelectedProfile&0x02 != 0 { // PROFILE_SHM_HYBRID
-		for i := 0; i < 200; i++ {
-			shmCtx, serr := windows.WinShmClientAttach(runDir, service, authTokenWin, session.SessionID, 0x02)
-			if serr == nil {
-				shm = shmCtx
-				break
-			}
-			time.Sleep(5 * time.Millisecond)
+	if profiles&(windows.WinShmProfileHybrid|windows.WinShmProfileBusywait) != 0 {
+		shm, err = attachBenchShmWin(runDir, service, session)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "client: %v\n", err)
+			return 1
 		}
 	}
 	if shm != nil {
@@ -1375,6 +1605,13 @@ func runPingPongClientWin(runDir, service string, profiles uint32, durationSec i
 	msgBuf := make([]byte, protocol.HeaderSize+8)
 	respBuf := make([]byte, protocol.HeaderSize+64)
 	recvBuf := make([]byte, 256)
+
+	if err := warmPingPongClientWin(session, shm, msgBuf, respBuf, recvBuf); err != nil {
+		fmt.Fprintf(os.Stderr, "client warmup: %v\n", err)
+		return 1
+	}
+
+	runtime.GC()
 
 	cpuStart := cpuNSWin()
 	wallStart := nowNS()
@@ -1634,7 +1871,6 @@ func runLookupBenchWin(durationSec int) int {
 
 func main() {
 	elevateBenchPriorityWin()
-	pinBenchAffinityWin()
 
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr,
@@ -1648,6 +1884,7 @@ func main() {
 	}
 
 	cmd := os.Args[1]
+	pinBenchAffinityWin(cmd)
 	rc := 0
 
 	switch cmd {

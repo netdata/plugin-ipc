@@ -3704,6 +3704,128 @@ and run the normal `ctest` subset on each supported practical configuration.
         - the next staged work must start from the SHM ping-pong rows with
           `server=go`, beginning with the exact rows above rather than another
           blind full-suite rerun
+    - targeted Windows benchmark burn-down refinement on `2026-04-03`:
+      - the base runner already supported exact-row selection through:
+        - `NIPC_BENCH_SCENARIOS`
+        - `NIPC_BENCH_CLIENTS`
+        - `NIPC_BENCH_SERVERS`
+        - `NIPC_BENCH_TARGETS`
+      - but that workflow was still too easy to use incorrectly during
+        repeated burn-down, because it relied on manually rebuilding the filter
+        tuple every time
+      - new harness wrapper:
+        - `tests/run-windows-bench-targeted.sh`
+      - the wrapper accepts either:
+        - explicit row specs:
+          - `scenario,client,server,target`
+        - or a prior `diagnostics-summary.txt` emitted by
+          `tests/run-windows-bench.sh` with `NIPC_BENCH_DIAGNOSE_FAILURES=1`
+      - intended Windows sign-off loop is now explicit:
+        - rerun only the exact failing rows until they are stable
+        - rerun canary after the exact rows are clean
+        - rerun the full strict suite only for final sign-off, not after every
+          narrow fix
+    - fresh exact-row proof on the current checkout after the latest Windows
+      benchmark fixes:
+      - `src/go/pkg/netipc/transport/windows/shm_pause.go`
+        now uses `SwitchToThread()` instead of `runtime.Gosched()` for the Go
+        SHM spin pause
+      - Windows benchmark client warmups now exist in:
+        - `bench/drivers/go/main_windows.go`
+        - `bench/drivers/c/bench_windows.c`
+      - fresh exact-row rerun for the previously failing Go-server SHM rows
+        passed:
+        - output:
+          - `/tmp/shm-go-targeted-after2.csv`
+        - run dir:
+          - `/tmp/netipc-bench-50134`
+      - fresh exact-row rerun for the later remaining strict row
+        `np-ping-pong c->rust` also passed:
+        - output:
+          - `/tmp/proof-c-rust-ping-after-warm.csv`
+        - run dir:
+          - `/tmp/netipc-bench-260301`
+        - published rows:
+          - `np-ping-pong c->rust @ max = 39389`, `stable_ratio=1.051175`
+          - `np-ping-pong c->rust @ 100000/s = 35136`, `stable_ratio=1.009913`
+      - implication:
+        - exact-row iteration no longer requires another blind full strict run
+          after each narrow harness or benchmark-driver fix
+        - the only remaining reason to run the entire strict suite is final
+          cross-row sign-off once the narrowed blockers and canary are clean
+    - final native Windows benchmark sign-off hardening on `2026-04-04`:
+      - new runner fixes:
+        - `tests/run-windows-bench.sh`
+          - the hidden measured-client warmup window is now also applied to:
+            - `shm-ping-pong`
+            - `snapshot-baseline`
+            - `snapshot-shm`
+          - default hidden warmup duration was reduced from `2s` to `1s`
+            so the broader coverage does not add another long full-suite tax
+        - `tests/run-windows-bench-canary.sh`
+          - the bounded canary now explicitly covers the snapshot rows that the
+            earlier canary missed:
+            - `snapshot-baseline c->rust @ max`
+            - `snapshot-baseline rust->rust @ max`
+            - `snapshot-baseline rust->go @ max`
+            - `snapshot-shm c->rust @ max`
+      - grounded reason:
+        - after the affinity split fix, the remaining full-suite failures were
+          no longer broad transport defects
+        - they were cold-start / readiness variance leaking into the measured
+          window for non-batch pair rows, especially the Rust snapshot server
+          rows and one earlier Go-server SHM row
+      - exact-row proof after the warmup expansion:
+        - the rows extracted from
+          `/tmp/netipc-bench-294062/diagnostics-summary.txt`
+          all reran clean on the current checkout, including:
+          - `shm-ping-pong rust->go @ 100000/s`
+            - `stable_ratio=1.000020`
+          - `snapshot-baseline c->rust @ max`
+            - `stable_ratio=1.050087`
+          - `snapshot-baseline rust->rust @ max`
+            - `stable_ratio=1.048834`
+          - `snapshot-baseline rust->go @ max`
+            - `stable_ratio=1.061767`
+          - `snapshot-shm c->rust @ max`
+            - `stable_ratio=1.025204`
+      - bounded canary proof after the warmup expansion:
+        - output dir:
+          - `/tmp/proof-current-canary-after-snapshot-warmup`
+        - result:
+          - all `14` canary rows passed
+        - key previously failing rows were now clean:
+          - `snapshot-baseline c->rust @ max`
+            - `39148`
+            - `stable_ratio=1.085785`
+          - `snapshot-baseline rust->rust @ max`
+            - `38975`
+          - `snapshot-baseline rust->go @ max`
+            - `61259`
+          - `snapshot-shm c->rust @ max`
+            - `1346982`
+          - `shm-ping-pong rust->go @ 100000/s`
+            - `100010`
+            - `stable_ratio=1.003180`
+          - `np-pipeline-batch-d16 go->go @ max`
+            - `29682220`
+            - `stable_ratio=1.027887`
+      - final full strict native Windows suite on the current checkout:
+        - command:
+          - `NIPC_KEEP_RUN_DIR=1 NIPC_BENCH_DIAGNOSE_FAILURES=1 tests/run-windows-bench.sh /tmp/proof-full-current-warmup-affinity.csv 5`
+        - output:
+          - `/tmp/proof-full-current-warmup-affinity.csv`
+        - preserved run dir:
+          - `/tmp/netipc-bench-404141`
+        - result:
+          - exit `0`
+          - `201` published rows
+          - no diagnostic reruns were needed for sign-off
+      - implication:
+        - the strict native Windows benchmark matrix is now green on the
+          current checkout
+        - the earlier remaining failures were benchmark-harness defects, and
+          they are now fixed rather than explained away
 
 ## Proposed exit criteria
 

@@ -31,6 +31,13 @@ mkdir -p "$OUT_DIR"
 
 CANARY_CASES=(
   "1 np-ping-pong go rust 0 np-ping-pong-go-rust-max"
+  "2 shm-ping-pong go go 0 shm-ping-pong-go-go-max"
+  "2 shm-ping-pong c go 100000 shm-ping-pong-c-go-100000"
+  "2 shm-ping-pong rust go 100000 shm-ping-pong-rust-go-100000"
+  "3 snapshot-baseline c rust 0 snapshot-baseline-c-rust-max"
+  "3 snapshot-baseline rust rust 0 snapshot-baseline-rust-rust-max"
+  "3 snapshot-baseline rust go 0 snapshot-baseline-rust-go-max"
+  "4 snapshot-shm c rust 0 snapshot-shm-c-rust-max"
   "7 lookup rust rust 0 lookup-rust-rust-max"
   "8 np-pipeline-d16 rust go 0 np-pipeline-d16-rust-go-max"
   "8 np-pipeline-d16 go go 0 np-pipeline-d16-go-go-max"

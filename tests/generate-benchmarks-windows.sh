@@ -263,7 +263,7 @@ emit_methodology() {
     echo "- Every repeated row must keep raw max/min <= ${RUNNER_DEFAULT_MAX_THROUGHPUT_RATIO}; one lucky or unlucky extreme is no longer publishable."
     echo "- With 5 samples, the runner still computes the trimmed stable core for diagnostics."
     echo "- Oversubscribed fixed-rate rows are the one exception: when the requested target is above the same pair's already-measured @ max capacity, the row may still publish if the trimmed stable core contains at least ${RUNNER_DEFAULT_MIN_STABLE_SAMPLES} samples and stays within max/min <= ${RUNNER_DEFAULT_MAX_THROUGHPUT_RATIO}."
-    echo "- This keeps the Windows `100000/s` saturation-style rows visible without pretending they are attainable fixed-rate commitments."
+    echo '- This keeps the Windows `100000/s` saturation-style rows visible without pretending they are attainable fixed-rate commitments.'
     echo '- The script CLI duration still controls the fixed-rate rows; `NIPC_BENCH_MAX_DURATION` controls most max-tier rows; `NIPC_BENCH_PIPELINE_BATCH_MAX_DURATION` controls `np-pipeline-batch-d16 @ max`.'
     echo ""
 }

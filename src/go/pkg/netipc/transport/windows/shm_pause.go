@@ -2,10 +2,8 @@
 
 package windows
 
-import "runtime"
-
-// spinPause yields briefly during spin loops. On Windows, Gosched is
-// the closest portable equivalent to a CPU pause hint in pure Go.
+// spinPause yields the current Windows thread during spin loops without
+// involving the Go scheduler's heavier goroutine handoff path.
 func spinPause() {
-	runtime.Gosched()
+	procSwitchToThread.Call()
 }
