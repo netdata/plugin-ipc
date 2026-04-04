@@ -28,7 +28,7 @@
  *   scenario,client,server,throughput,p50_us,p95_us,p99_us,client_cpu_pct,server_cpu_pct,total_cpu_pct
  */
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__MSYS__)
 
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_protocol.h"
@@ -43,6 +43,31 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+
+#ifdef __MSYS__
+#include <unistd.h>
+#ifndef _dup
+#define _dup dup
+#endif
+#ifndef _dup2
+#define _dup2 dup2
+#endif
+#ifndef _close
+#define _close close
+#endif
+#ifndef _fileno
+#define _fileno fileno
+#endif
+#ifndef _spawnv
+#define _spawnv spawnv
+#endif
+#ifndef _P_WAIT
+#define _P_WAIT P_WAIT
+#endif
+#ifndef _strdup
+#define _strdup strdup
+#endif
+#endif
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -2057,4 +2082,4 @@ int main(int argc, char **argv)
     return 1;
 }
 
-#endif /* _WIN32 */
+#endif /* _WIN32 || __MSYS__ */
