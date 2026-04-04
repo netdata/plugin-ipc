@@ -13,12 +13,15 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGETED_RUNNER="${ROOT_DIR}/tests/run-windows-bench-targeted.sh"
 OUT_DIR="${1:-${TEMP:-/tmp}/netipc-windows-toolchain-compare}"
 DURATION="${2:-3}"
-REPETITIONS="${NIPC_BENCH_COMPARE_REPETITIONS:-3}"
+REPETITIONS="${NIPC_BENCH_COMPARE_REPETITIONS:-5}"
 ROW_SETTLE_SEC="${NIPC_BENCH_COMPARE_ROW_SETTLE_SEC:-1}"
 MAX_DURATION="${NIPC_BENCH_COMPARE_MAX_DURATION:-${DURATION}}"
 PIPELINE_BATCH_MAX_DURATION="${NIPC_BENCH_COMPARE_PIPELINE_BATCH_MAX_DURATION:-${DURATION}}"
+MAX_THROUGHPUT_RATIO="${NIPC_BENCH_COMPARE_MAX_THROUGHPUT_RATIO:-2.00}"
+ENFORCE_POLICY="${NIPC_BENCH_COMPARE_ENFORCE_POLICY:-1}"
 SUMMARY_CSV="${OUT_DIR}/summary.csv"
 JOINED_CSV="${OUT_DIR}/joined.csv"
+POLICY_CSV="${OUT_DIR}/policy.csv"
 
 COMPARE_CASES=(
   "np-max|np-ping-pong|c|c|0"
@@ -121,6 +124,57 @@ float_slowdown_pct() {
   }'
 }
 
+pct_meets_floor() {
+  local actual_pct="$1"
+  local min_pct="$2"
+  awk -v actual="$actual_pct" -v min="$min_pct" 'BEGIN {
+    exit ((actual + 0) >= (min + 0) ? 0 : 1)
+  }'
+}
+
+min_msys_pct_for_label() {
+  local label="$1"
+
+  case "$label" in
+    np-max)
+      printf '%s\n' "${NIPC_BENCH_COMPARE_MIN_PCT_NP_MAX:-70.0}"
+      ;;
+    np-100k)
+      printf '%s\n' "${NIPC_BENCH_COMPARE_MIN_PCT_NP_100K:-70.0}"
+      ;;
+    shm-max)
+      printf '%s\n' "${NIPC_BENCH_COMPARE_MIN_PCT_SHM_MAX:-85.0}"
+      ;;
+    shm-100k)
+      printf '%s\n' "${NIPC_BENCH_COMPARE_MIN_PCT_SHM_100K:-95.0}"
+      ;;
+    snapshot-np)
+      printf '%s\n' "${NIPC_BENCH_COMPARE_MIN_PCT_SNAPSHOT_NP:-80.0}"
+      ;;
+    snapshot-shm)
+      printf '%s\n' "${NIPC_BENCH_COMPARE_MIN_PCT_SNAPSHOT_SHM_BOTH:-50.0}"
+      ;;
+    lookup)
+      printf '%s\n' "${NIPC_BENCH_COMPARE_MIN_PCT_LOOKUP:-60.0}"
+      ;;
+    shm-max-c-client-vs-rust-server)
+      printf '%s\n' "${NIPC_BENCH_COMPARE_MIN_PCT_SHM_MAX_C_CLIENT:-85.0}"
+      ;;
+    shm-max-rust-client-vs-c-server)
+      printf '%s\n' "${NIPC_BENCH_COMPARE_MIN_PCT_SHM_MAX_C_SERVER:-85.0}"
+      ;;
+    snapshot-shm-c-client-vs-rust-server)
+      printf '%s\n' "${NIPC_BENCH_COMPARE_MIN_PCT_SNAPSHOT_SHM_C_CLIENT:-80.0}"
+      ;;
+    snapshot-shm-rust-client-vs-c-server)
+      printf '%s\n' "${NIPC_BENCH_COMPARE_MIN_PCT_SNAPSHOT_SHM_C_SERVER:-50.0}"
+      ;;
+    *)
+      printf '0.0\n'
+      ;;
+  esac
+}
+
 run_toolchain_cases() {
   local toolchain="$1"
   local toolchain_out="${OUT_DIR}/${toolchain}"
@@ -141,6 +195,7 @@ run_toolchain_cases() {
     NIPC_BENCH_ROW_SETTLE_SEC="$ROW_SETTLE_SEC" \
     NIPC_BENCH_MAX_DURATION="$MAX_DURATION" \
     NIPC_BENCH_PIPELINE_BATCH_MAX_DURATION="$PIPELINE_BATCH_MAX_DURATION" \
+    NIPC_BENCH_MAX_THROUGHPUT_RATIO="$MAX_THROUGHPUT_RATIO" \
     bash "$TARGETED_RUNNER" --out-dir "$toolchain_out" --duration "$DURATION" "${row_args[@]}"
 }
 
@@ -207,6 +262,46 @@ print_joined_table() {
   ' "$JOINED_CSV"
 }
 
+write_policy_csv() {
+  local label scenario client server target_rps c_role
+  local mingw64_throughput msys_throughput msys_pct throughput_slowdown mingw64_p95 msys_p95 p95_delta
+  local mingw64_client_cpu msys_client_cpu min_pct status
+  local failures=0
+
+  printf 'label,scenario,client,server,target_rps,c_role,min_msys_pct_of_mingw64,actual_msys_pct_of_mingw64,status\n' > "$POLICY_CSV"
+
+  while IFS=',' read -r label scenario client server target_rps c_role \
+    mingw64_throughput msys_throughput msys_pct throughput_slowdown \
+    mingw64_p95 msys_p95 p95_delta mingw64_client_cpu msys_client_cpu; do
+
+    [ "$label" = "label" ] && continue
+
+    min_pct="$(min_msys_pct_for_label "$label")"
+    status="pass"
+    if ! pct_meets_floor "$msys_pct" "$min_pct"; then
+      status="fail"
+      failures=$((failures + 1))
+      err "Policy failed for ${label}: msys=${msys_pct}% of mingw64, required >= ${min_pct}%"
+    fi
+
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+      "$label" "$scenario" "$client" "$server" "$target_rps" "$c_role" \
+      "$min_pct" "$msys_pct" "$status" >> "$POLICY_CSV"
+  done < "$JOINED_CSV"
+
+  if [ "$ENFORCE_POLICY" != "1" ]; then
+    log "Benchmark comparison policy not enforced (NIPC_BENCH_COMPARE_ENFORCE_POLICY=${ENFORCE_POLICY})"
+    return 0
+  fi
+
+  if [ "$failures" -ne 0 ]; then
+    err "MSYS comparison policy failed (${failures} row(s)); see ${POLICY_CSV}"
+    return 1
+  fi
+
+  log "MSYS comparison policy passed"
+}
+
 main() {
   mkdir -p "$OUT_DIR"
 
@@ -215,6 +310,7 @@ main() {
 
   write_summary_csv
   write_joined_csv
+  write_policy_csv
 
   log "Joined comparison:"
   printf "${CYAN}%-38s %-17s %-8s %12s %12s %8s %8s %9s${NC}\n" \
@@ -223,6 +319,7 @@ main() {
 
   log "Summary CSV: ${SUMMARY_CSV}"
   log "Joined CSV: ${JOINED_CSV}"
+  log "Policy CSV: ${POLICY_CSV}"
 }
 
 main "$@"

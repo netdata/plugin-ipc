@@ -3317,6 +3317,8 @@ Notes:
 - native `mingw64` remains the Windows sign-off lane
 - `tests/run-windows-msys-validation.sh` is a separate compatibility lane for
   the MSYS-built C path plus bounded native-vs-MSYS benchmark comparison
+  - that lane now enforces explicit per-scenario throughput floors so a large
+    regression fails the validation run instead of only being reported
 - the `MSYSTEM=MINGW64` and `TMP` / `TEMP` / `TMPDIR` exports matter in
   non-interactive shells too
   - without them, native MSYS2 `gcc` may fail with misleading or silent errors
@@ -3329,12 +3331,14 @@ Notes:
 
 Latest MSYS validation evidence (2026-04-04):
 
-- `bash tests/run-windows-msys-validation.sh /tmp/proof-msys-validation-20260404 3`
+- `bash tests/run-windows-msys-validation.sh /tmp/proof-msys-validation-20260404-policy 3`
   passed
 - summary:
-  - `/tmp/proof-msys-validation-20260404/summary.txt`
+  - `/tmp/proof-msys-validation-20260404-policy/summary.txt`
 - comparison join:
-  - `/tmp/proof-msys-validation-20260404/bench-compare/joined.csv`
+  - `/tmp/proof-msys-validation-20260404-policy/bench-compare/joined.csv`
+- comparison policy:
+  - `/tmp/proof-msys-validation-20260404-policy/bench-compare/policy.csv`
 - functional slice passed, including `test_win_shm` repeated 10x in the MSYS
   lane
 - fixes needed to make the lane reliable:

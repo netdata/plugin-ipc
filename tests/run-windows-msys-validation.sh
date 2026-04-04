@@ -14,7 +14,7 @@ COMPARE_SCRIPT="${ROOT_DIR}/tests/compare-windows-bench-toolchains.sh"
 BUILD_DIR="${NIPC_MSYS_VALIDATION_BUILD_DIR:-${ROOT_DIR}/build-msys-validation}"
 OUT_DIR="${1:-${TEMP:-/tmp}/netipc-msys-validation}"
 BENCH_DURATION="${2:-3}"
-BENCH_REPETITIONS="${NIPC_BENCH_COMPARE_REPETITIONS:-3}"
+BENCH_REPETITIONS="${NIPC_BENCH_COMPARE_REPETITIONS:-5}"
 COMPARE_OUT_DIR="${OUT_DIR}/bench-compare"
 SUMMARY_FILE="${OUT_DIR}/summary.txt"
 
@@ -154,6 +154,7 @@ write_summary() {
     printf '\n'
     printf 'benchmark_compare_summary=%s\n' "${COMPARE_OUT_DIR}/summary.csv"
     printf 'benchmark_compare_joined=%s\n' "${COMPARE_OUT_DIR}/joined.csv"
+    printf 'benchmark_compare_policy=%s\n' "${COMPARE_OUT_DIR}/policy.csv"
   } > "$SUMMARY_FILE"
 
   log "Validation summary: ${SUMMARY_FILE}"

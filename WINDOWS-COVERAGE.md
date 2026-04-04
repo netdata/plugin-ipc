@@ -223,8 +223,8 @@ bash tests/run-windows-msys-validation.sh
 
 That script validates the MSYS-built C path with targeted functional tests,
 repeats `test_win_shm`, and runs bounded native-vs-MSYS benchmark
-comparisons. It is a compatibility lane, not a replacement for the native
-MinGW64 coverage flow below.
+comparisons with explicit throughput floors per scenario. It is a compatibility
+lane, not a replacement for the native MinGW64 coverage flow below.
 
 ## Commands
 

@@ -358,8 +358,8 @@ bash tests/run-windows-msys-validation.sh
 
 That lane builds the C artifacts with `/usr/bin/gcc`, runs the targeted
 Windows functional/interoperability slice, repeats `test_win_shm`, and compares
-a bounded benchmark subset against the native `mingw64` lane. It does not
-replace native Windows sign-off.
+a bounded benchmark subset against the native `mingw64` lane with explicit
+throughput floors per scenario. It does not replace native Windows sign-off.
 
 Coverage:
 
