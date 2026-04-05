@@ -370,7 +370,7 @@ static nipc_error_t ping_pong_handler(void *user,
     if (!request_hdr || request_hdr->code != NIPC_METHOD_INCREMENT)
         return NIPC_ERR_BAD_LAYOUT;
 
-    if ((request_hdr->flags & NIPC_FLAG_BATCH) && request_hdr->item_count > 1) {
+    if ((request_hdr->flags & NIPC_FLAG_BATCH) && request_hdr->item_count >= 1) {
         nipc_batch_builder_t builder;
         nipc_batch_builder_init(&builder, response_buf, response_buf_size,
                                 request_hdr->item_count);

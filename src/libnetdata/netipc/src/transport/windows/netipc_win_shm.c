@@ -849,7 +849,7 @@ nipc_win_shm_error_t nipc_win_shm_receive(
 
         } else {
             /* SHM_BUSYWAIT: spin indefinitely with periodic deadline checks */
-            DWORD start = GetTickCount();
+            ULONGLONG start = GetTickCount64();
             for (;;) {
                 LONG64 cur = atomic_load_64(seq_ptr);
                 if (cur >= expected_seq) {
@@ -860,11 +860,8 @@ nipc_win_shm_error_t nipc_win_shm_receive(
                 }
 
                 /* Periodic timeout check */
-                if ((GetTickCount() - start) & NIPC_WIN_SHM_BUSYWAIT_POLL_MASK) {
-                    /* Only check timeout every POLL_MASK+1 iterations */
-                }
                 if (timeout_ms > 0) {
-                    DWORD elapsed = GetTickCount() - start;
+                    ULONGLONG elapsed = GetTickCount64() - start;
                     if (elapsed >= timeout_ms)
                         return NIPC_WIN_SHM_ERR_TIMEOUT;
                 }

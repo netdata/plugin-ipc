@@ -139,8 +139,8 @@ The caller calls refresh periodically from its own loop. Refresh:
 Refresh will reconnect and retry if previously READY (inherited from
 Level 2's at-least-once semantics). On ordinary failures this is one
 reconnect attempt. On overflow-driven resize recovery it may reconnect
-more than once while negotiated capacities grow. If recovery still
-fails, the previous cache is preserved.
+more than once while negotiated capacities grow (up to 8 overflow
+retries). If recovery still fails, the previous cache is preserved.
 
 This is intentional:
 

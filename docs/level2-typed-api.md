@@ -157,12 +157,19 @@ There are two important cases:
 - For overflow-driven resize recovery, Level 2 may reconnect more than
   once while negotiated request/response capacities grow. Recovery stops
   when the call succeeds, reconnect fails, a non-overflow error occurs,
-  or a reconnect no longer increases the relevant negotiated capacities.
+  a reconnect no longer increases the relevant negotiated capacities,
+  or 8 overflow retries have been exhausted. Payloads grow by powers of
+  2, so 8 retries allows ~256x growth from the initial negotiated size.
 
 If the session was NOT previously READY, the call fails immediately
 without attempting reconnection.
 
 If recovery fails, Level 2 reports failure to the caller.
+
+Learned payload capacities are capped at 256 MB. This prevents a
+compromised or buggy peer from forcing excessive memory allocation
+via inflated negotiation values. The cap is enforced before the
+learned value is stored, so it applies to all subsequent sessions.
 
 ### 6. No hidden background threads (client)
 
@@ -331,7 +338,11 @@ The managed server internally:
 1. Creates a Level 1 listener for the service endpoint
 2. Runs an acceptor loop that accepts incoming Level 1 sessions
 3. Spawns a thread (C, Rust) or goroutine (Go) per accepted session,
-   up to the configured maximum concurrent sessions
+   up to the configured maximum concurrent sessions. In Go, each
+   session goroutine recovers from panics so that a single malformed
+   request cannot crash the entire server process. In Rust, thread
+   panics are contained by default — a panicking session thread dies
+   but the server continues accepting new sessions.
 4. Each session thread reads one Level 1 message at a time into internal
    reusable per-session storage
 5. Level 2 decodes the request for that service kind, invokes the typed

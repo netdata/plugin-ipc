@@ -152,6 +152,9 @@ func (c *Client) sessionMaxResponsePayloadBytes() uint32 {
 
 func (c *Client) noteRequestCapacity(payloadLen uint32) {
 	grown := nextPowerOf2U32(payloadLen)
+	if grown > protocol.MaxPayloadCap {
+		grown = protocol.MaxPayloadCap
+	}
 	if grown > c.config.MaxRequestPayloadBytes {
 		c.config.MaxRequestPayloadBytes = grown
 	}
@@ -159,6 +162,9 @@ func (c *Client) noteRequestCapacity(payloadLen uint32) {
 
 func (c *Client) noteResponseCapacity(payloadLen uint32) {
 	grown := nextPowerOf2U32(payloadLen)
+	if grown > protocol.MaxPayloadCap {
+		grown = protocol.MaxPayloadCap
+	}
 	if grown > c.config.MaxResponsePayloadBytes {
 		c.config.MaxResponsePayloadBytes = grown
 	}
@@ -784,6 +790,9 @@ func (s *Server) Run() error {
 		s.wg.Add(1)
 		go func(sess *windows.Session, shmCtx *windows.WinShmContext) {
 			defer func() {
+				if r := recover(); r != nil {
+					// Session handler panicked; log but don't crash the server
+				}
 				<-sem
 				s.wg.Done()
 			}()
