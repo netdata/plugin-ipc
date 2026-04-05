@@ -116,7 +116,9 @@ and therefore a different SHM file path.
 - Server checks if the socket path exists before bind.
 - If it exists: attempt to connect to it. If connection succeeds, a
   live server owns it — fail with address-in-use. If connection fails
-  (refused/no listener), the socket is stale — unlink and recreate.
+  with ECONNREFUSED or ENOENT, the socket is stale — unlink and
+  recreate. Other connect errors (EACCES, EPERM, etc.) are not treated
+  as stale — the file is left in place and the server fails.
 
 ### SHM file
 
@@ -125,7 +127,8 @@ and therefore a different SHM file path.
 - If the owner PID is alive and the generation matches, the region is
   active — fail with address-in-use.
 - If the owner PID is dead or the region is invalid/undersized, the
-  region is stale — unlink and recreate.
+  region is stale — unlink and recreate. If the file cannot be opened
+  due to permission errors (EACCES, EPERM), it is left in place.
 - Clients that open an undersized/unpopulated SHM file (server has
   created it but not yet initialized the header) treat it as a
   retryable protocol-not-ready condition.

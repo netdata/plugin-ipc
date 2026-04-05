@@ -201,8 +201,10 @@ Directional semantics:
 
 - Requests are sender-driven.
   The operational request limits come from the larger of the client and server
-  advertised request capacities, so long-lived sessions can learn and retain a
-  larger request envelope when batching grows.
+  advertised request capacities, capped at 256 MB (NIPC_MAX_PAYLOAD_CAP), so
+  long-lived sessions can learn and retain a larger request envelope when
+  batching grows. The cap prevents a compromised peer from forcing excessive
+  memory allocation.
 - Responses are server-driven.
   The operational response limits come from the server's currently learned
   response capacities, so later clients inherit the service's learned steady

@@ -217,7 +217,8 @@ establishes:
 - **Packet size negotiation**: the client advertises its transport packet size.
   The server responds with the negotiated packet size (minimum of client and
   server). Both sides use this single negotiated packet size for chunking on
-  the connection.
+  the connection. The negotiated packet size must be strictly greater than the
+  header size (32 bytes); if it is not, the server rejects the handshake.
 
 ### Message framing
 

@@ -122,10 +122,12 @@ signal word.
 2. If the sequence has not advanced after spinning, block on
    `futex(FUTEX_WAIT)` on `req_signal` with a timeout.
 3. Once `req_seq` has advanced, read `req_len` (atomic acquire).
-4. Validate `req_len` against `request_capacity`. If `req_len` exceeds
+4. If `req_len` is 0, report a protocol error — `send` rejects
+   zero-length messages, so this indicates SHM corruption.
+5. Validate `req_len` against `request_capacity`. If `req_len` exceeds
    the capacity, discard the message and report an error. This prevents
    out-of-bounds reads from a malicious or buggy peer.
-5. Read the message bytes from the request area.
+6. Read the message bytes from the request area.
 
 ### Server sends a response
 
@@ -143,7 +145,8 @@ signal word.
 2. If the sequence has not advanced after spinning, block on
    `futex(FUTEX_WAIT)` on `resp_signal` with a timeout.
 3. Once `resp_seq` has advanced, read `resp_len` (atomic acquire).
-4. Validate `resp_len` against `response_capacity`. If `resp_len`
+4. If `resp_len` is 0, report a protocol error (SHM corruption).
+5. Validate `resp_len` against `response_capacity`. If `resp_len`
    exceeds the capacity, discard the message and report an error.
 5. Read the message bytes from the response area.
 
@@ -243,7 +246,9 @@ When a session closes (graceful or broken):
 Both `server_create` (per-session) and `cleanup_stale` (startup scan)
 use the same stale detection logic:
 
-1. Open the file and mmap the header.
+1. Open the file and mmap the header. If `open()` fails with a
+   permission error (EACCES, EPERM), the file is left in place — it
+   may belong to another user or process.
 2. Validate magic. If invalid or file is undersized: stale — unlink.
 3. Check `owner_pid` and `owner_generation`:
    - If `owner_pid` is alive AND `owner_generation` is non-zero:

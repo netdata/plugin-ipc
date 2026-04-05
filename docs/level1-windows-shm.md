@@ -143,11 +143,12 @@ Uses two named kernel events (`req_event`, `resp_event`) created via
    once more (avoid race), then `WaitForSingleObject(req_event,
    timeout)`.
 3. Clear `req_server_waiting` after waking.
-4. Read `req_len`. Validate `req_len` against `request_capacity`. If
-   `req_len` exceeds the capacity, discard the message and report an
-   error. This prevents out-of-bounds reads from a malicious or buggy
-   peer.
-5. Read the message bytes from the request area.
+4. Read `req_len`. If `req_len` is 0, report a protocol error — `send`
+   rejects zero-length messages, so this indicates SHM corruption.
+5. Validate `req_len` against `request_capacity`. If `req_len` exceeds
+   the capacity, discard the message and report an error. This prevents
+   out-of-bounds reads from a malicious or buggy peer.
+6. Read the message bytes from the request area.
 
 #### Server sends a response
 
@@ -162,10 +163,11 @@ Uses two named kernel events (`req_event`, `resp_event`) created via
 2. If not advanced: set `resp_client_waiting = 1`, check `resp_seq`
    once more, then `WaitForSingleObject(resp_event, timeout)`.
 3. Clear `resp_client_waiting` after waking.
-4. Read `resp_len`. Validate `resp_len` against `response_capacity`.
-   If `resp_len` exceeds the capacity, discard the message and report
-   an error.
-5. Read the message bytes from the response area.
+4. Read `resp_len`. If `resp_len` is 0, report a protocol error
+   (SHM corruption).
+5. Validate `resp_len` against `response_capacity`. If `resp_len`
+   exceeds the capacity, discard the message and report an error.
+6. Read the message bytes from the response area.
 
 ### SHM_BUSYWAIT (pure spin, no kernel events)
 
