@@ -826,6 +826,9 @@ static void test_server_shm_create_fault_disconnects_and_recovers(void)
 
     server_thread_ctx_t sctx;
     nipc_server_config_t scfg = default_typed_hybrid_server_config();
+
+    nipc_win_shm_test_fault_set(NIPC_WIN_SHM_TEST_FAULT_CREATE_MAPPING,
+                                ERROR_ACCESS_DENIED, 0);
     HANDLE server_thread = start_server_named(&sctx, service, 4, &scfg, &full_service_handler);
     if (!server_thread)
         return;
@@ -834,8 +837,6 @@ static void test_server_shm_create_fault_disconnects_and_recovers(void)
     nipc_client_config_t ccfg = default_typed_hybrid_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
 
-    nipc_win_shm_test_fault_set(NIPC_WIN_SHM_TEST_FAULT_CREATE_MAPPING,
-                                ERROR_ACCESS_DENIED, 0);
     check("server SHM create fault reaches READY via baseline",
           refresh_until_ready(&client, 40, 10));
     check("server SHM create fault keeps client ready",

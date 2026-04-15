@@ -290,14 +290,20 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
     - implication:
       - the tree is not yet green on native Windows
       - these are behavioral/runtime regressions, not more stale API field references
-  - local follow-up on 2026-04-15:
-    - both remaining failures were patched as stale test expectations, not runtime/library logic changes:
+    - local follow-up on 2026-04-15:
+      - both remaining failures were patched as stale test expectations, not runtime/library logic changes:
       - `src/go/pkg/netipc/transport/windows/pipe_edge_test.go`
         - `TestSessionSendRejectsTooSmallPacketSize` now expects handshake rejection with `ErrIncompatible`
       - `tests/fixtures/c/test_win_service_extra.c`
-        - `test_server_shm_create_fault_disconnects_and_recovers` now expects:
-          - baseline `READY` with `client.shm == NULL` while SHM create is faulted
-          - explicit reconnect after fault clear before recovering to SHM
+        - first patch attempt was only partially correct:
+          - the reconnect expectation was right
+          - but the fault was armed too late to guarantee baseline fallback on the first session
+        - verified root cause:
+          - `start_server_named()` returns after setting the ready event, and the server thread can immediately enter `nipc_server_run()`
+          - `nipc_server_run()` pre-creates SHM in `server_prepare_accept_config()` before any client connect
+          - so arming `NIPC_WIN_SHM_TEST_FAULT_CREATE_MAPPING` after `start_server_named()` races with the already-prepared first session
+        - implication:
+          - the test must arm the create-mapping fault before starting the server thread if it wants deterministic baseline fallback on the first handshake
     - local Linux verification after these patches:
       - `cmake --build build -j4`
       - `/usr/bin/ctest --test-dir build --output-on-failure -j4`
