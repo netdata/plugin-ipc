@@ -254,6 +254,15 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
     - implication:
       - the cleanup must be type-aware
       - Windows-only white-box overflow tests that used the removed public request-payload field need manual rewriting so overflow-reconnect remains covered without reintroducing the public knob
+  - next full-suite obstacle discovered on 2026-04-15 during the first native Windows rebuild from commit `b4a44fa`:
+    - Windows-only Rust typed-L2 helpers still reference removed public cgroups config fields
+    - concrete failing files:
+      - `tests/fixtures/rust/src/bin/interop_service_win.rs`
+      - `tests/fixtures/rust/src/bin/interop_cache_win.rs`
+      - `bench/drivers/rust/src/bench_windows.rs`
+    - important nuance:
+      - the stale fields are only on typed `netipc::service::cgroups::{ClientConfig, ServerConfig}`
+      - raw transport configs in `interop_named_pipe.rs`, `interop_uds.rs`, and the Windows transport client helpers remain valid and must not be changed
 
 ## Current Handshake Audit (2026-04-14)
 

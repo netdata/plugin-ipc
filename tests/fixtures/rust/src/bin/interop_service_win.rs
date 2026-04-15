@@ -72,10 +72,8 @@ fn run_server(run_dir: &str, service: &str) -> i32 {
     let profiles = detect_profiles();
     let config = ServerConfig {
         supported_profiles: profiles,
-        max_request_payload_bytes: 4096,
         max_request_batch_items: 16,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-        max_response_batch_items: 16,
         auth_token: AUTH_TOKEN,
         ..ServerConfig::default()
     };
@@ -86,10 +84,8 @@ fn run_server(run_dir: &str, service: &str) -> i32 {
     let wake_service = service.to_string();
     let wake_config = ClientConfig {
         supported_profiles: profiles,
-        max_request_payload_bytes: 4096,
         max_request_batch_items: 16,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-        max_response_batch_items: 16,
         auth_token: AUTH_TOKEN,
         ..ClientConfig::default()
     };
@@ -114,10 +110,8 @@ fn run_client(run_dir: &str, service: &str) -> i32 {
     let profiles = detect_profiles();
     let config = ClientConfig {
         supported_profiles: profiles,
-        max_request_payload_bytes: 4096,
         max_request_batch_items: 16,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-        max_response_batch_items: 16,
         auth_token: AUTH_TOKEN,
         ..ClientConfig::default()
     };
