@@ -496,7 +496,37 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       - direct test confirmed MSYS argument conversion changed `/p` into `P:/`
     - fix:
       - call `gflags.exe` through `env MSYS2_ARG_CONV_EXCL='*'`
-    - Windows verification still pending in this fix pass
+    - Windows verification:
+      - `bash tests/run-verifier-windows.sh test_named_pipe.exe`
+      - result: passed
+  - C transport outbound limit enforcement:
+    - evidence:
+      - Windows C guard tests still failed the request-overflow reconnect cases after the first fix
+      - debugger evidence on `test_win_service_guards.exe` showed:
+        - first batch request payload was `32` bytes
+        - session request limit was `8`
+        - final error remained `NIPC_ERR_OVERFLOW`
+        - client request capacity stayed `8`
+      - source evidence:
+        - C `nipc_np_send()` and `nipc_uds_send()` did not validate outgoing payload size against the negotiated directional payload limit before writing
+        - the receiver returned `LIMIT_EXCEEDED`, so the client learned response capacity instead of request capacity
+    - fix:
+      - C POSIX UDS send now rejects over-limit outbound request/response payloads before writing
+      - C Windows named-pipe send now rejects over-limit outbound request/response payloads before writing
+      - the client can now learn request overflow locally and reconnect with a larger request proposal
+  - Managed SHM pre-handshake request capacity:
+    - evidence:
+      - Windows C hybrid guard tests failed the request-overflow reconnect cases
+      - SHM regions are created before the server reads `HELLO`
+      - with the approved handshake contract, the server may echo any client request proposal up to `1 MiB`
+      - therefore a SHM request segment sized from the server's current learned request value can be smaller than the request size the handshake just accepted
+    - fix:
+      - POSIX and Windows managed servers now pre-create SHM request segments at `NIPC_MAX_PAYLOAD_CAP + NIPC_HEADER_LEN`
+      - response segments remain server-sized because response capacity is server-owned
+    - local verification:
+      - `cmake --build build -j4`
+      - `/usr/bin/ctest --test-dir build --output-on-failure -R '^(test_uds|test_shm|test_service|test_service_extra|test_cache|test_ping_pong)$'`
+      - result: passed
   - next full-suite obstacle discovered on 2026-04-15 during the first native Windows rebuild from commit `b4a44fa`:
     - Windows-only Rust typed-L2 helpers still reference removed public cgroups config fields
     - concrete failing files:

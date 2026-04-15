@@ -755,14 +755,35 @@ nipc_uds_error_t nipc_uds_send(nipc_uds_session_t *session,
     if (!session || session->fd < 0)
         return NIPC_UDS_ERR_BAD_PARAM;
 
+    int tracked = (session->role == NIPC_UDS_ROLE_CLIENT &&
+                   hdr->kind == NIPC_KIND_REQUEST);
+
     /* Client-side: track in-flight message_ids for requests */
-    if (session->role == NIPC_UDS_ROLE_CLIENT &&
-        hdr->kind == NIPC_KIND_REQUEST) {
+    if (tracked) {
         int rc = inflight_add(session, hdr->message_id);
         if (rc == -1)
             return NIPC_UDS_ERR_DUPLICATE_MSG_ID;
         if (rc == -2)
             return NIPC_UDS_ERR_LIMIT_EXCEEDED;
+    }
+
+    uint32_t max_payload = 0;
+    uint32_t max_batch = 0;
+    if (session->role == NIPC_UDS_ROLE_CLIENT &&
+        hdr->kind == NIPC_KIND_REQUEST) {
+        max_payload = session->max_request_payload_bytes;
+        max_batch = session->max_request_batch_items;
+    } else if (session->role == NIPC_UDS_ROLE_SERVER &&
+               hdr->kind == NIPC_KIND_RESPONSE) {
+        max_payload = session->max_response_payload_bytes;
+        max_batch = session->max_response_batch_items;
+    }
+    if (payload_len > UINT32_MAX ||
+        (max_payload > 0 && payload_len > max_payload) ||
+        (max_batch > 0 && hdr->item_count > max_batch)) {
+        if (tracked)
+            inflight_remove(session, hdr->message_id);
+        return NIPC_UDS_ERR_LIMIT_EXCEEDED;
     }
 
     /* Fill envelope fields the caller shouldn't set */

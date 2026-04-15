@@ -319,8 +319,8 @@ static nipc_client_state_t client_try_connect(nipc_client_ctx_t *ctx)
             return NIPC_CLIENT_DISCONNECTED;
         }
         {
-            /* Retry attach: server creates the SHM region after
-             * the NP handshake, so it may not exist yet. */
+            /* Retry attach: the server prepares SHM before accepting the
+             * handshake, but filesystem/object visibility may lag briefly. */
             nipc_win_shm_error_t serr = NIPC_WIN_SHM_ERR_OPEN_MAPPING;
             ULONGLONG deadline_ms = GetTickCount64() + CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS;
             for (;;) {
@@ -1105,12 +1105,14 @@ static bool server_prepare_accept_config(nipc_managed_server_t *server,
         if (!ctx)
             continue;
 
+        /* HELLO has not been read yet, so the request segment must cover any
+         * client proposal the handshake may legally echo back. */
         nipc_win_shm_error_t serr = nipc_win_shm_server_create(
             server->run_dir, server->service_name,
             server->auth_token,
             sid,
             profile,
-            cfg_out->max_request_payload_bytes + NIPC_HEADER_LEN,
+            NIPC_MAX_PAYLOAD_CAP + NIPC_HEADER_LEN,
             cfg_out->max_response_payload_bytes + NIPC_HEADER_LEN,
             ctx);
         if (serr == NIPC_WIN_SHM_OK) {

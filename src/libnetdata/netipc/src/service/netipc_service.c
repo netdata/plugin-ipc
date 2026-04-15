@@ -1096,10 +1096,12 @@ static bool server_prepare_accept_config(nipc_managed_server_t *server,
     if (!shm)
         return false;
 
+    /* HELLO has not been read yet, so the request segment must cover any
+     * client proposal the handshake may legally echo back. */
     nipc_shm_error_t serr = nipc_shm_server_create(
         server->run_dir, server->service_name,
         sid,
-        cfg_out->max_request_payload_bytes + NIPC_HEADER_LEN,
+        NIPC_MAX_PAYLOAD_CAP + NIPC_HEADER_LEN,
         cfg_out->max_response_payload_bytes + NIPC_HEADER_LEN,
         shm);
     if (serr == NIPC_SHM_OK) {
