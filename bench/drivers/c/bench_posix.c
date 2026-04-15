@@ -319,6 +319,12 @@ static void *timer_thread(void *arg)
     return NULL;
 }
 
+static void stop_timer_thread(pthread_t timer_tid)
+{
+    (void)pthread_cancel(timer_tid);
+    (void)pthread_join(timer_tid, NULL);
+}
+
 static int run_server(const char *run_dir, const char *service,
                       uint32_t profiles, int duration_sec,
                       uint16_t expected_method_code,
@@ -359,15 +365,21 @@ static int run_server(const char *run_dir, const char *service,
 
     /* Timer-driven shutdown after duration */
     pthread_t timer_tid = 0;
+    int timer_failed = 0;
     if (duration_sec > 0) {
-        pthread_create(&timer_tid, NULL, timer_thread, &duration_sec);
+        int rc = pthread_create(&timer_tid, NULL, timer_thread, &duration_sec);
+        if (rc != 0) {
+            fprintf(stderr, "timer thread create failed: %s\n", strerror(rc));
+            timer_failed = 1;
+            nipc_server_stop(&server);
+        }
     }
 
     /* Blocking: runs until nipc_server_stop() is called */
     nipc_server_run(&server);
 
     if (timer_tid)
-        pthread_join(timer_tid, NULL);
+        stop_timer_thread(timer_tid);
 
     uint64_t cpu_end = cpu_ns();
     double cpu_sec = (double)(cpu_end - cpu_start) / 1e9;
@@ -378,7 +390,7 @@ static int run_server(const char *run_dir, const char *service,
 
     g_server = NULL;
     nipc_server_destroy(&server);
-    return 0;
+    return timer_failed ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -428,14 +440,20 @@ static int run_server_batch(const char *run_dir, const char *service,
     signal(SIGINT, sighandler);
 
     pthread_t timer_tid = 0;
+    int timer_failed = 0;
     if (duration_sec > 0) {
-        pthread_create(&timer_tid, NULL, timer_thread, &duration_sec);
+        int rc = pthread_create(&timer_tid, NULL, timer_thread, &duration_sec);
+        if (rc != 0) {
+            fprintf(stderr, "batch timer thread create failed: %s\n", strerror(rc));
+            timer_failed = 1;
+            nipc_server_stop(&server);
+        }
     }
 
     nipc_server_run(&server);
 
     if (timer_tid)
-        pthread_join(timer_tid, NULL);
+        stop_timer_thread(timer_tid);
 
     uint64_t cpu_end = cpu_ns();
     double cpu_sec = (double)(cpu_end - cpu_start) / 1e9;
@@ -445,7 +463,7 @@ static int run_server_batch(const char *run_dir, const char *service,
 
     g_server = NULL;
     nipc_server_destroy(&server);
-    return 0;
+    return timer_failed ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------ */

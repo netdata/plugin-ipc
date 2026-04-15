@@ -295,6 +295,61 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
     - keep the existing per-row retry and raw-outlier opt-in policy
     - rerun Windows validation after committing and pulling on
       `win11:~/src/plugin-ipc.git`
+- Finding recorded on 2026-04-15 during the full Linux/POSIX benchmark run
+  after commit `1e3da7da60c1923dbd8f436ae6bef35b29066b5c`:
+  - the POSIX benchmark does not fail the performance floors at this point,
+    but the C server rows repeatedly emit:
+    - `Server c (...) did not exit cleanly within 5s; forcing kill`
+  - concrete cause:
+    - `tests/run-posix-bench.sh` gives every server extra lifetime:
+      `server_duration=$((duration + 5))`
+    - `bench/drivers/c/bench_posix.c` starts a timer that sleeps
+      `duration_sec + 3`
+    - `bench/drivers/c/bench_posix.c` then calls `pthread_join(timer_tid, NULL)`
+      after `nipc_server_run()` returns
+    - when the harness sends SIGTERM after the client run completes, the C
+      signal handler stops `nipc_server_run()`, but process exit is still
+      delayed while joining the timer thread
+    - for the normal 5-second benchmark rows this can leave roughly 7-8
+      seconds of timer sleep, while the harness only waits 5 seconds before
+      force-killing
+  - cross-platform audit:
+    - `bench/drivers/c/bench_windows.c` has the same timer-wait pattern with
+      `WaitForSingleObject(timer, INFINITE)` after the server thread exits
+    - the current Windows harness usually avoids the warning because it passes
+      server duration without the POSIX `+5`, but the C driver still has the
+      same shutdown-latency bug
+  - implementation plan:
+    - make the POSIX C benchmark timer cancelable when the server exits before
+      the timer fires
+    - make the Windows C benchmark timer wait on a cancellation event instead
+      of an unconditional sleep
+    - keep timer-driven self-stop behavior unchanged for standalone benchmark
+      server runs
+    - keep harness thresholds and benchmark floors unchanged
+    - rerun affected benchmark validation after committing and pulling on
+      `win11:~/src/plugin-ipc.git`
+  - fix applied locally:
+    - `bench/drivers/c/bench_posix.c`
+      - cancel and join the timer thread when `nipc_server_run()` exits before
+        the timer fires
+      - report timer-thread creation failure instead of silently continuing
+    - `bench/drivers/c/bench_windows.c`
+      - replace unconditional timer sleep with a cancel event
+      - signal the cancel event and join the timer thread when the server
+        thread exits
+      - report timer-thread creation failure instead of silently continuing
+  - targeted local verification:
+    - `cmake --build build-bench-posix --target bench_posix_c -j24`
+      passed
+    - manual `bench_posix_c` C server/client row:
+      - server command: `uds-ping-pong-server ... 10`
+      - client command: `uds-ping-pong-client ... 1 1000`
+      - after SIGTERM the server exited within the 2-second proof window
+      - server output contained `READY` and `SERVER_CPU_SEC=...`
+      - no forced-kill warning was needed
+    - `git diff --check` passed
+    - `bash tests/test_windows_bench_stability_policy.sh` passed
 
 ## Implementation Status (2026-04-14)
 

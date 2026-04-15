@@ -513,13 +513,48 @@ static BOOL WINAPI console_handler(DWORD type)
     return TRUE;
 }
 
+typedef struct {
+    int duration_sec;
+    HANDLE cancel_event;
+} bench_timer_ctx_t;
+
 static DWORD WINAPI timer_thread(LPVOID arg)
 {
-    int duration_sec = *(int *)arg;
-    Sleep((duration_sec + 3) * 1000);
-    if (g_server)
+    bench_timer_ctx_t *ctx = (bench_timer_ctx_t *)arg;
+    DWORD timeout_ms = (DWORD)(ctx->duration_sec + 3) * 1000u;
+    DWORD wait_status = WaitForSingleObject(ctx->cancel_event, timeout_ms);
+    if (wait_status == WAIT_TIMEOUT && g_server)
         nipc_server_stop(g_server);
     return 0;
+}
+
+static HANDLE start_timer_thread(int duration_sec, bench_timer_ctx_t *ctx)
+{
+    ctx->duration_sec = duration_sec;
+    ctx->cancel_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!ctx->cancel_event)
+        return NULL;
+
+    HANDLE timer = CreateThread(NULL, 0, timer_thread, ctx, 0, NULL);
+    if (!timer) {
+        CloseHandle(ctx->cancel_event);
+        ctx->cancel_event = NULL;
+    }
+    return timer;
+}
+
+static void stop_timer_thread(HANDLE timer, bench_timer_ctx_t *ctx)
+{
+    if (ctx->cancel_event)
+        SetEvent(ctx->cancel_event);
+    if (timer) {
+        WaitForSingleObject(timer, INFINITE);
+        CloseHandle(timer);
+    }
+    if (ctx->cancel_event) {
+        CloseHandle(ctx->cancel_event);
+        ctx->cancel_event = NULL;
+    }
 }
 
 typedef struct {
@@ -654,17 +689,22 @@ static int run_server(const char *run_dir, const char *service,
     uint64_t cpu_start = cpu_ns();
 
     HANDLE timer = NULL;
+    bench_timer_ctx_t timer_ctx = {0};
+    int timer_failed = 0;
     if (duration_sec > 0) {
-        timer = CreateThread(NULL, 0, timer_thread, &duration_sec, 0, NULL);
+        timer = start_timer_thread(duration_sec, &timer_ctx);
+        if (!timer) {
+            fprintf(stderr, "timer thread create failed: %lu\n",
+                    (unsigned long)GetLastError());
+            timer_failed = 1;
+            nipc_server_stop(&server);
+        }
     }
 
     WaitForSingleObject(server_thread, INFINITE);
     CloseHandle(server_thread);
 
-    if (timer) {
-        WaitForSingleObject(timer, INFINITE);
-        CloseHandle(timer);
-    }
+    stop_timer_thread(timer, &timer_ctx);
 
     uint64_t cpu_end = cpu_ns();
     double cpu_sec = (double)(cpu_end - cpu_start) / 1e9;
@@ -674,7 +714,7 @@ static int run_server(const char *run_dir, const char *service,
 
     g_server = NULL;
     nipc_server_destroy(&server);
-    return 0;
+    return timer_failed ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -736,17 +776,22 @@ static int run_server_batch(const char *run_dir, const char *service,
     uint64_t cpu_start = cpu_ns();
 
     HANDLE timer = NULL;
+    bench_timer_ctx_t timer_ctx = {0};
+    int timer_failed = 0;
     if (duration_sec > 0) {
-        timer = CreateThread(NULL, 0, timer_thread, &duration_sec, 0, NULL);
+        timer = start_timer_thread(duration_sec, &timer_ctx);
+        if (!timer) {
+            fprintf(stderr, "batch timer thread create failed: %lu\n",
+                    (unsigned long)GetLastError());
+            timer_failed = 1;
+            nipc_server_stop(&server);
+        }
     }
 
     WaitForSingleObject(server_thread, INFINITE);
     CloseHandle(server_thread);
 
-    if (timer) {
-        WaitForSingleObject(timer, INFINITE);
-        CloseHandle(timer);
-    }
+    stop_timer_thread(timer, &timer_ctx);
 
     uint64_t cpu_end = cpu_ns();
     double cpu_sec = (double)(cpu_end - cpu_start) / 1e9;
@@ -756,7 +801,7 @@ static int run_server_batch(const char *run_dir, const char *service,
 
     g_server = NULL;
     nipc_server_destroy(&server);
-    return 0;
+    return timer_failed ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------ */
