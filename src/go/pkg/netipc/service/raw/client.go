@@ -533,8 +533,8 @@ func (c *Client) tryConnect() ClientState {
 	// SHM upgrade if negotiated
 	if session.SelectedProfile == protocol.ProfileSHMHybrid ||
 		session.SelectedProfile == protocol.ProfileSHMFutex {
-		// Retry attach: server creates the SHM region after
-		// the UDS handshake, so it may not exist yet.
+		// Retry attach: the server prepared SHM before handshake, but the
+		// client may still race slightly with the peer exposing the region.
 		deadline := time.Now().Add(clientShmAttachRetryTimeout)
 		for {
 			shm, serr := posix.ShmClientAttach(c.runDir, c.serviceName, session.SessionID)

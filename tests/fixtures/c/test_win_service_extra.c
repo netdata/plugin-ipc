@@ -817,7 +817,7 @@ static void test_cache_empty_snapshot(void)
     stop_server_drain(&sctx, server_thread);
 }
 
-static void test_server_shm_create_fault_disconnects_and_recovers(void)
+static void test_server_shm_create_fault_falls_back_and_recovers(void)
 {
     printf("--- Server SHM create fault falls back to baseline / recovers ---\n");
 
@@ -934,7 +934,7 @@ int main(void)
     RUN_TEST(test_cache_refresh_without_server);
     RUN_TEST(test_cache_refresh_rebuilds_and_linear_lookup);
     RUN_TEST(test_cache_empty_snapshot);
-    RUN_TEST(test_server_shm_create_fault_disconnects_and_recovers);
+    RUN_TEST(test_server_shm_create_fault_falls_back_and_recovers);
     RUN_TEST(test_cache_fault_injection);
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);

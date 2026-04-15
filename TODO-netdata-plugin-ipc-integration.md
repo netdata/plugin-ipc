@@ -311,6 +311,16 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
         - `100% tests passed, 0 tests failed out of 39`
     - local Windows Go compile verification after these patches:
       - `cd src/go && GOOS=windows GOARCH=amd64 go test -c ./pkg/netipc/transport/windows`
+    - external reviewer round after both Linux and native Windows went green:
+      - useful true findings:
+        - stale Go raw-client SHM attach comment still says the server creates SHM after handshake
+        - stale Windows C test function name still says `disconnects` after the test now verifies baseline fallback
+      - verified false positives:
+        - "Go/Rust lack explicit request-payload over-cap rejection tests"
+        - evidence already exists in:
+          - `src/go/pkg/netipc/transport/posix/uds_test.go`
+          - `src/go/pkg/netipc/transport/windows/pipe_integration_test.go`
+          - `src/crates/netipc/src/transport/posix_tests.rs`
 
 ## Current Handshake Audit (2026-04-14)
 
