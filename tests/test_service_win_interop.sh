@@ -24,6 +24,7 @@ PASS=0
 FAIL=0
 SKIP=0
 TIMEOUT=10
+CLIENT_FAIL_REASON=""
 
 # Resolve binary paths
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -116,6 +117,44 @@ check_binaries() {
     fi
 }
 
+run_client_with_ready_retry() {
+    local client_bin="$1"
+    local service="$2"
+    local max_attempts=$((TIMEOUT * 10))
+    local attempt
+    local client_out
+    local rc
+
+    CLIENT_FAIL_REASON=""
+
+    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+        set +e
+        client_out=$(env NIPC_PROFILE="${NIPC_PROFILE:-}" "$client_bin" client "$RUN_DIR" "$service" 2>&1)
+        rc=$?
+        set -e
+
+        if [[ $rc -eq 0 ]] && echo "$client_out" | grep -q "^PASS$"; then
+            return 0
+        fi
+
+        if echo "$client_out" | grep -q "^client: not ready$" &&
+           [[ $attempt -lt $max_attempts ]]; then
+            sleep 0.1
+            continue
+        fi
+
+        if [[ $rc -eq 0 ]]; then
+            CLIENT_FAIL_REASON="client output: $client_out"
+        else
+            CLIENT_FAIL_REASON="client exit code $rc, output: $client_out"
+        fi
+        return 1
+    done
+
+    CLIENT_FAIL_REASON="client did not become ready after ${TIMEOUT}s"
+    return 1
+}
+
 run_test() {
     local name="$1"
     local server_bin="$2"
@@ -158,19 +197,12 @@ run_test() {
         return
     fi
 
-    local client_out
     local test_ok=1
     local fail_reason=""
-    if client_out=$(env NIPC_PROFILE="${NIPC_PROFILE:-}" "$client_bin" client "$RUN_DIR" "$service" 2>&1); then
-        if echo "$client_out" | grep -q "^PASS$"; then
-            :
-        else
-            test_ok=0
-            fail_reason="client output: $client_out"
-        fi
-    else
+
+    if ! run_client_with_ready_retry "$client_bin" "$service"; then
         test_ok=0
-        fail_reason="client exit code $?, output: $client_out"
+        fail_reason="$CLIENT_FAIL_REASON"
     fi
 
     if ! stop_server "$server_pid"; then

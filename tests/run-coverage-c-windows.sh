@@ -33,6 +33,7 @@ COVERAGE_TESTS=(
     test_named_pipe_interop
     test_win_shm
     test_win_service
+    test_win_service_payload_limits
     test_win_stress
     test_win_shm_interop
     test_service_win_interop

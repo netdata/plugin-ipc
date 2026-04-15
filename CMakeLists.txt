@@ -765,6 +765,16 @@ if(NETIPC_WINDOWS_RUNTIME)
         RUN_SERIAL TRUE
     )
 
+    add_executable(test_win_service_payload_limits tests/fixtures/c/test_win_service_payload_limits.c)
+    target_link_libraries(test_win_service_payload_limits PRIVATE
+        netipc_service_win netipc_win_shm netipc_named_pipe netipc_protocol
+    )
+    add_test(NAME test_win_service_payload_limits COMMAND test_win_service_payload_limits)
+    set_tests_properties(test_win_service_payload_limits PROPERTIES
+        TIMEOUT 120
+        RUN_SERIAL TRUE
+    )
+
     # Coverage-only Windows C guard executable. It exercises deterministic
     # service-side/client-side guard paths without perturbing the normal
     # non-coverage ctest timing of test_win_service_extra.

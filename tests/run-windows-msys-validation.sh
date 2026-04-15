@@ -22,6 +22,7 @@ FUNCTIONAL_TESTS=(
   test_named_pipe
   test_win_shm
   test_win_service
+  test_win_service_payload_limits
   test_win_service_extra
   test_named_pipe_interop
   test_win_shm_interop
@@ -36,6 +37,7 @@ BUILD_TARGETS=(
   test_named_pipe
   test_win_shm
   test_win_service
+  test_win_service_payload_limits
   test_win_service_extra
   test_win_stress
   interop_named_pipe_c

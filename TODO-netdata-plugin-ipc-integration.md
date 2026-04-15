@@ -190,6 +190,42 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       - `bash tests/run-posix-bench.sh`
       - `bash tests/run-windows-msys-validation.sh`
       - `bash tests/run-windows-bench.sh`
+- Finding recorded on 2026-04-15 during full Windows validation:
+  - Windows C coverage still meets the configured threshold, but gcov showed the new
+    successful-dispatch oversized-response branch in
+    `src/libnetdata/netipc/src/service/netipc_service_win.c` was uncovered:
+    - branch location: `server_handle_session()` `case NIPC_OK`
+    - lines observed uncovered in the run:
+      - `response_len > session->max_response_payload_bytes`
+      - `server_note_response_capacity(...)`
+      - `resp_hdr.transport_status = NIPC_STATUS_LIMIT_EXCEEDED`
+      - `response_len = 0`
+  - This is not acceptable for the spec-compliance bar because Linux has a targeted
+    payload-limit test for this path and Windows must prove the same server behavior.
+  - Implementation plan:
+    - add a small dedicated Windows coverage-only C target for service payload limits
+    - keep it separate from the already oversized `test_win_service_guards.c`
+    - wire it into `tests/run-coverage-c-windows.sh`
+    - rerun Windows C coverage and then rerun the required full validation loop after the fix is committed and pulled on `win11:~/src/plugin-ipc.git`
+- Finding recorded on 2026-04-15 during native Windows/MSYS validation:
+  - The full Windows run reached `tests/run-windows-msys-validation.sh` and failed at:
+    - `test_service_win_shm_interop`
+    - pair: `C server, C client`
+    - observed client output: `client: not ready`
+  - Immediate targeted reproduction on the same `win11:~/src/plugin-ipc.git` checkout
+    passed `test_service_win_shm_interop` 10/10 times, so the failure is intermittent.
+  - Concrete harness issue found:
+    - `tests/test_service_win_interop.sh` gives the server up to `TIMEOUT=10` seconds to
+      print `READY`
+    - the C/Rust/Go Windows service clients each only wait 200 x 10ms = 2 seconds for
+      client readiness
+    - under heavy validation load, one early client attempt can return `client: not ready`
+      even though the same pair passes immediately on repeat
+  - Implementation plan:
+    - harden the Windows service and cache interop shell harnesses so `client: not ready`
+      is retried until the existing `TIMEOUT` budget expires
+    - keep persistent failures visible after the timeout
+    - do not hide real call/decoding failures; only retry the pre-call readiness race
 
 ## Implementation Status (2026-04-14)
 
