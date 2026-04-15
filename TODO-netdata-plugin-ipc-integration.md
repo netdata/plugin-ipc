@@ -155,8 +155,41 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       - `bash tests/run-windows-msys-validation.sh`
       - `bash tests/run-windows-bench.sh`
     - precondition verified before launch:
-      - local `/home/costa/src/plugin-ipc.git` and `win11:~/src/plugin-ipc.git` are both on commit `313f7ed`
+      - local `/home/costa/src/plugin-ipc.git` and `win11:~/src/plugin-ipc.git` are both on commit `50c4a2d21d3009c53520d1b7fc4fac78ce77e876`
+      - `50c4a2d` is a TODO-only validation-matrix commit on top of code commit `313f7ed`
       - no tracked local modifications are present on either host
+- Decision recorded on 2026-04-15:
+  - Expanded validation scope for the baseline pass:
+    - "all possible tests" must include standalone validation entrypoints that are not covered by the basic `ctest` / `cargo test` / `go test` lanes
+    - additional Linux validation entrypoints to run:
+      - `bash tests/run-coverage-c.sh`
+      - `bash tests/run-coverage-go.sh`
+      - `bash tests/run-coverage-rust.sh`
+      - `bash tests/run-sanitizer-asan.sh`
+      - `bash tests/run-sanitizer-tsan.sh`
+      - `bash tests/run-valgrind.sh`
+      - `bash tests/interop_codec.sh`
+      - `bash tests/test_uds_interop.sh`
+      - `bash tests/test_shm_interop.sh`
+      - `bash tests/test_service_interop.sh`
+      - `bash tests/test_service_shm_interop.sh`
+      - `bash tests/test_cache_interop.sh`
+      - `bash tests/test_cache_shm_interop.sh`
+    - additional native Windows validation entrypoints on `win11:~/src/plugin-ipc.git` to run after the strict native benchmark finishes:
+      - `bash tests/run-verifier-windows.sh`
+      - `bash tests/run-coverage-c-windows.sh`
+      - `bash tests/run-coverage-go-windows.sh`
+      - `bash tests/run-coverage-rust-windows.sh`
+      - `bash tests/test_named_pipe_interop.sh`
+      - `bash tests/test_win_shm_interop.sh`
+      - `bash tests/test_service_win_interop.sh`
+      - `bash tests/test_service_win_shm_interop.sh`
+      - `bash tests/test_cache_win_interop.sh`
+      - `bash tests/test_cache_win_shm_interop.sh`
+    - benchmark scope already covered by:
+      - `bash tests/run-posix-bench.sh`
+      - `bash tests/run-windows-msys-validation.sh`
+      - `bash tests/run-windows-bench.sh`
 
 ## Implementation Status (2026-04-14)
 
@@ -278,6 +311,158 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
     - implication:
       - the cleanup must be type-aware
       - Windows-only white-box overflow tests that used the removed public request-payload field need manual rewriting so overflow-reconnect remains covered without reintroducing the public knob
+
+## Baseline Validation Status (2026-04-15)
+
+- Final result of the full baseline pass:
+  - code checkout under test:
+    - Linux: `50c4a2d21d3009c53520d1b7fc4fac78ce77e876`
+    - Windows: `win11:~/src/plugin-ipc.git` at `50c4a2d21d3009c53520d1b7fc4fac78ce77e876`
+    - note: `50c4a2d` is the TODO-only validation-matrix commit on top of code commit `313f7ed`
+  - Linux is not fully green:
+    - first full `ctest` failed once in `go_FuzzDecodeHello` with `context deadline exceeded`
+    - isolated fuzz rerun passed
+    - second full `ctest` passed
+    - C coverage failed the per-file gate because `netipc_service.c` is `87.2%` against a `90%` threshold
+  - native Windows is not fully green:
+    - `go test ./...` failed in `TestWinServerDispatchSingleSnapshotZeroCapacity`
+    - `run-windows-msys-validation.sh` failed 3 targeted comparison rows
+    - `run-verifier-windows.sh` failed because `gflags.exe /p /enable test_named_pipe.exe /full` returned exit code 1
+    - `run-coverage-c-windows.sh` failed in `test_win_service_guards.exe` with 8 failed guard assertions
+  - benchmark floors:
+    - Linux POSIX benchmark generated 202 CSV lines and passed all performance floors
+    - native Windows strict benchmark generated 202 CSV lines and passed all Windows performance floors
+    - MSYS comparison benchmark did not pass because the MSYS validation script failed targeted rows
+- Validation artifacts:
+  - Linux:
+    - `/tmp/plugin-ipc-validate-linux-20260415-045044`
+    - `/tmp/plugin-ipc-validate-linux-extra-20260415-0615`
+    - `/tmp/plugin-ipc-validate-linux-coverage-20260415-0616`
+    - `/tmp/plugin-ipc-validate-linux-coverage-split-20260415-0616`
+    - `/tmp/plugin-ipc-validate-linux-ctest-rerun-20260415-0615`
+  - Windows:
+    - `/tmp/plugin-ipc-validate-windows-20260415-045103`
+    - `/tmp/plugin-ipc-validate-windows-extra-20260415-0622`
+- Linux results:
+  - `cmake --build build -j4`: passed
+  - first `ctest --test-dir build --output-on-failure -j4`:
+    - failed only in `go_FuzzDecodeHello`
+    - exact log:
+      - `FuzzDecodeHello (30.06s)`
+      - `context deadline exceeded`
+    - evidence:
+      - `/tmp/plugin-ipc-validate-linux-20260415-045044/linux-ctest.log`
+  - isolated rerun:
+    - `cd src/go/pkg/netipc/protocol && go test -run=^$ -fuzz=^FuzzDecodeHello$ -fuzztime=30s`
+    - passed
+    - evidence:
+      - `/tmp/plugin-ipc-validate-linux-20260415-045044/linux-fuzzdecodehello-isolated.log`
+  - second full `ctest --test-dir build --output-on-failure -j4`:
+    - passed
+    - evidence:
+      - `/tmp/plugin-ipc-validate-linux-ctest-rerun-20260415-0615/linux-ctest-rerun.log`
+    - meaning:
+      - the first Linux `ctest` failure is currently classified as a flake / scheduling-sensitive failure, not a deterministic regression
+  - `cargo test`: passed
+  - `go test ./...`: passed
+  - `bash tests/run-go-race.sh`: passed
+  - `bash tests/run-extended-fuzz.sh`: passed
+  - `bash tests/run-posix-bench.sh`: passed
+  - `bash tests/generate-benchmarks-posix.sh`: passed
+    - generator confirmed:
+      - `All performance floors met`
+    - CSV rows:
+      - `202`
+  - `bash tests/run-sanitizer-asan.sh`: passed
+  - `bash tests/run-sanitizer-tsan.sh`: passed
+  - `bash tests/run-valgrind.sh`: passed
+  - Linux interop shell tests:
+    - `tests/interop_codec.sh`: passed
+    - `tests/test_uds_interop.sh`: passed
+    - `tests/test_shm_interop.sh`: passed
+    - `tests/test_service_interop.sh`: passed
+    - `tests/test_service_shm_interop.sh`: passed
+    - `tests/test_cache_interop.sh`: passed
+    - `tests/test_cache_shm_interop.sh`: passed
+  - coverage:
+    - `bash tests/run-coverage-go.sh`: passed
+      - total coverage `94.3%`
+    - `bash tests/run-coverage-rust.sh`: passed
+      - total coverage `95.17%`
+    - `bash tests/run-coverage-c.sh`: failed
+      - direct functional rerun of `./build-coverage/bin/test_service` passed with `209 passed, 0 failed`
+      - the script still fails because per-file coverage gate is missed:
+        - `netipc_service.c = 87.2%`
+        - threshold = `90%`
+        - overall total still `90.7%`
+      - this is below the repository's documented Linux/POSIX C coverage baseline:
+        - `COVERAGE-EXCLUSIONS.md` records `netipc_service.c = 92.1%`
+      - evidence:
+        - `/tmp/plugin-ipc-validate-linux-coverage-20260415-0616/linux-coverage-c.log`
+        - `/tmp/plugin-ipc-validate-linux-coverage-20260415-0616/test_service_direct.log`
+- Windows results:
+  - `cmake --build build -j4`: passed
+  - `ctest --test-dir build --output-on-failure -j4`: passed
+  - `cargo test --manifest-path src/crates/netipc/Cargo.toml --lib -- --test-threads=1`: passed
+  - `cd src/go && go test ./...`: failed
+    - exact failing test:
+      - `TestWinServerDispatchSingleSnapshotZeroCapacity`
+    - exact panic:
+      - `CgroupsBuilder buffer too small: need at least 48 bytes, got 0`
+    - evidence:
+      - `/tmp/plugin-ipc-validate-windows-20260415-045103/win-go.log`
+  - `bash tests/run-windows-msys-validation.sh`: failed
+    - exact evidence:
+      - `/tmp/plugin-ipc-validate-windows-20260415-045103/win-msys-validation.log`
+    - concrete failing targeted rows already captured there:
+      - snapshot-baseline `c->c @ 0`
+      - snapshot-shm `c->c @ 0`
+      - shm-ping-pong `c->rust @ 0`
+    - final script summary:
+      - `3 targeted row(s) failed`
+    - refined failing-row evidence:
+      - snapshot-baseline `c->c @ 0`: `stable_ratio=2.332047`, max allowed `2.00`
+      - snapshot-shm `c->c @ 0`: `raw_ratio=2.411989`, max allowed `2.00`
+      - shm-ping-pong `c->rust @ 0`: `raw_ratio=7.526888`, max allowed `2.00`
+  - `bash tests/run-windows-bench.sh`: passed
+    - evidence:
+      - `/tmp/plugin-ipc-validate-windows-20260415-045103/win-bench-native.log`
+      - `/tmp/plugin-ipc-validate-windows-20260415-045103/benchmarks-windows-full.csv`
+      - `/tmp/plugin-ipc-validate-windows-20260415-045103/win-bench-gen-native.log`
+      - `/tmp/plugin-ipc-validate-windows-20260415-045103/benchmarks-windows-full.md`
+    - CSV rows:
+      - `202`
+    - generator confirmed:
+      - `All performance floors met`
+  - `bash tests/run-verifier-windows.sh`: failed
+    - evidence:
+      - `/tmp/plugin-ipc-validate-windows-extra-20260415-0622/win-verifier.log`
+    - exact failure:
+      - `gflags.exe /p /enable test_named_pipe.exe /full`
+      - exit code `1`
+  - `bash tests/run-coverage-c-windows.sh`: failed
+    - evidence:
+      - `/tmp/plugin-ipc-validate-windows-extra-20260415-0622/win-coverage-c.log`
+    - exact summary:
+      - `190 passed, 8 failed`
+    - failing assertions:
+      - `increment batch transparently resizes and succeeds`
+      - `increment batch negotiated request size grows`
+      - `string reverse transparently resizes and succeeds`
+      - `string reverse negotiated request size grows`
+      - `hybrid SHM request overflow transparently recovers`
+      - `hybrid send-capacity resize keeps client READY`
+      - `hybrid batch request overflow transparently recovers`
+      - `hybrid batch resize keeps client READY`
+  - `bash tests/run-coverage-go-windows.sh`: passed
+  - `bash tests/run-coverage-rust-windows.sh`: passed
+  - Windows interop shell tests:
+    - `tests/test_named_pipe_interop.sh`: passed
+    - `tests/test_win_shm_interop.sh`: passed
+    - `tests/test_service_win_interop.sh`: passed
+    - `tests/test_service_win_shm_interop.sh`: passed
+    - `tests/test_cache_win_interop.sh`: passed
+    - `tests/test_cache_win_shm_interop.sh`: passed
   - next full-suite obstacle discovered on 2026-04-15 during the first native Windows rebuild from commit `b4a44fa`:
     - Windows-only Rust typed-L2 helpers still reference removed public cgroups config fields
     - concrete failing files:
