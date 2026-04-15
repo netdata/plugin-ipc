@@ -534,6 +534,14 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       - `test_win_service_extra.exe`: `167 passed, 0 failed`
       - remaining failure: coverage threshold, `netipc_service_win.c` is `88.3%` against required `90%`
       - next fix: add focused Windows service tests for real uncovered branches; do not lower the threshold
+    - Windows verification after commit `aed8e57`:
+      - `bash tests/run-coverage-c-windows.sh`
+      - `test_win_service_guards.exe`: `226 passed, 0 failed`
+      - coverage results:
+        - `netipc_service_win.c`: `90.5%`
+        - `netipc_named_pipe.c`: `92.6%`
+        - `netipc_win_shm.c`: `94.2%`
+      - result: all Windows C files meet the `90%` coverage threshold
   - next full-suite obstacle discovered on 2026-04-15 during the first native Windows rebuild from commit `b4a44fa`:
     - Windows-only Rust typed-L2 helpers still reference removed public cgroups config fields
     - concrete failing files:
