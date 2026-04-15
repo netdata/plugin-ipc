@@ -18,7 +18,9 @@ The library has four layers:
   refresh, cache preservation on failure. Built on L2.
 
 Transports: UDS + SHM (POSIX/Linux), Named Pipe + Win SHM (Windows).
-SHM upgrade is negotiated during handshake and transparent to L2/L3.
+If SHM is selected during handshake, successful `HELLO_ACK` already
+guarantees SHM is ready for that session. This remains transparent to
+L2/L3 callers.
 
 The Level 2 examples below are schematic. They show the intended public
 API shape from the specifications:
@@ -26,6 +28,7 @@ API shape from the specifications:
 - Clients use typed calls only
 - Servers expose one service kind only
 - Request/response scratch buffers remain internal to the library
+- Typed callers do not provide `max_request_payload_bytes`
 
 ## Service-Oriented Discovery
 
@@ -57,12 +60,10 @@ Runtime expectations:
 #include "netipc/netipc_service.h"
 
 nipc_client_config_t cfg = {
-    .supported_profiles        = NIPC_PROFILE_BASELINE,
-    .max_request_payload_bytes = 4096,
-    .max_request_batch_items   = 1,
+    .supported_profiles         = NIPC_PROFILE_BASELINE,
+    .max_request_batch_items    = 1,
     .max_response_payload_bytes = 65536,
-    .max_response_batch_items  = 1,
-    .auth_token                = 0xDEADBEEFCAFEBABE,
+    .auth_token                 = 0xDEADBEEFCAFEBABE,
 };
 
 nipc_client_ctx_t client;
@@ -95,10 +96,8 @@ use netipc::protocol::PROFILE_BASELINE;
 
 let config = ClientConfig {
     supported_profiles: PROFILE_BASELINE,
-    max_request_payload_bytes: 4096,
     max_request_batch_items: 1,
     max_response_payload_bytes: 65536,
-    max_response_batch_items: 1,
     auth_token: 0xDEADBEEFCAFEBABE,
     ..ClientConfig::default()
 };
@@ -130,10 +129,8 @@ import "github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 
 config := cgroups.ClientConfig{
     SupportedProfiles:       protocol.ProfileBaseline,
-    MaxRequestPayloadBytes:  4096,
     MaxRequestBatchItems:    1,
     MaxResponsePayloadBytes: 65536,
-    MaxResponseBatchItems:   1,
     AuthToken:               0xDEADBEEFCAFEBABE,
 }
 
@@ -183,12 +180,10 @@ nipc_cgroups_service_handler_t service_handler = {
 };
 
 nipc_server_config_t scfg = {
-    .supported_profiles        = NIPC_PROFILE_BASELINE,
-    .max_request_payload_bytes = 4096,
-    .max_request_batch_items   = 1,
+    .supported_profiles         = NIPC_PROFILE_BASELINE,
+    .max_request_batch_items    = 1,
     .max_response_payload_bytes = 65536,
-    .max_response_batch_items  = 1,
-    .auth_token                = 0xDEADBEEFCAFEBABE,
+    .auth_token                 = 0xDEADBEEFCAFEBABE,
 };
 
 nipc_managed_server_t server;
@@ -321,10 +316,14 @@ if item, found := cache.Lookup(hash, "docker-abc123"); found {
 - **At-least-once retry**: if a call fails and the client was READY,
   it automatically disconnects, reconnects (full handshake), and
   retries once before returning an error.
+- **Overflow recovery is fallback**: typed callers do not size request
+  payloads manually. The library computes an internal initial request
+  payload proposal and reconnects with a larger one only if that estimate
+  proved too small.
 - **Cache preservation**: on refresh failure, the previous cache is
   preserved. The cache is empty only if no refresh has ever succeeded.
-- **Transport negotiation**: SHM is negotiated during handshake and
-  used transparently if both sides support it.
+- **Transport negotiation**: if SHM is selected during handshake, the
+  successful handshake already guarantees SHM is usable for that session.
 - **Cross-language**: all three implementations produce identical wire
   bytes and pass cross-language interop tests.
 

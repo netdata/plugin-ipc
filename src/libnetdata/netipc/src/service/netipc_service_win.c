@@ -221,10 +221,9 @@ static nipc_np_client_config_t service_client_config_to_transport(
 
     transport.supported_profiles = config->supported_profiles;
     transport.preferred_profiles = config->preferred_profiles;
-    transport.max_request_payload_bytes = config->max_request_payload_bytes;
     transport.max_request_batch_items = config->max_request_batch_items;
     transport.max_response_payload_bytes = config->max_response_payload_bytes;
-    transport.max_response_batch_items = config->max_response_batch_items;
+    transport.max_response_batch_items = config->max_request_batch_items;
     transport.auth_token = config->auth_token;
 
     return transport;
@@ -240,10 +239,9 @@ static nipc_np_server_config_t service_server_config_to_transport(
 
     transport.supported_profiles = config->supported_profiles;
     transport.preferred_profiles = config->preferred_profiles;
-    transport.max_request_payload_bytes = config->max_request_payload_bytes;
     transport.max_request_batch_items = config->max_request_batch_items;
     transport.max_response_payload_bytes = config->max_response_payload_bytes;
-    transport.max_response_batch_items = config->max_response_batch_items;
+    transport.max_response_batch_items = config->max_request_batch_items;
     transport.auth_token = config->auth_token;
 
     return transport;
@@ -1037,6 +1035,100 @@ static void server_reap_sessions_locked(nipc_managed_server_t *server)
 
 }
 
+typedef struct {
+    nipc_win_shm_ctx_t *hybrid;
+    nipc_win_shm_ctx_t *busywait;
+} prepared_win_shm_t;
+
+static void server_destroy_prepared_win_shm(prepared_win_shm_t *prepared)
+{
+    if (!prepared)
+        return;
+    if (prepared->hybrid) {
+        nipc_win_shm_destroy(prepared->hybrid);
+        free(prepared->hybrid);
+        prepared->hybrid = NULL;
+    }
+    if (prepared->busywait) {
+        nipc_win_shm_destroy(prepared->busywait);
+        free(prepared->busywait);
+        prepared->busywait = NULL;
+    }
+}
+
+static nipc_win_shm_ctx_t *server_take_prepared_win_shm(prepared_win_shm_t *prepared,
+                                                        uint32_t profile)
+{
+    if (!prepared)
+        return NULL;
+    if (profile == NIPC_WIN_SHM_PROFILE_HYBRID) {
+        nipc_win_shm_ctx_t *ctx = prepared->hybrid;
+        prepared->hybrid = NULL;
+        return ctx;
+    }
+    if (profile == NIPC_WIN_SHM_PROFILE_BUSYWAIT) {
+        nipc_win_shm_ctx_t *ctx = prepared->busywait;
+        prepared->busywait = NULL;
+        return ctx;
+    }
+    return NULL;
+}
+
+static bool server_prepare_accept_config(nipc_managed_server_t *server,
+                                         uint64_t sid,
+                                         nipc_np_server_config_t *cfg_out,
+                                         prepared_win_shm_t *prepared)
+{
+    *cfg_out = server->base_config;
+    cfg_out->max_request_payload_bytes = server->learned_request_payload_bytes;
+    cfg_out->max_response_payload_bytes = server->learned_response_payload_bytes;
+    memset(prepared, 0, sizeof(*prepared));
+
+    uint32_t shm_profiles = cfg_out->supported_profiles &
+                            (NIPC_WIN_SHM_PROFILE_HYBRID |
+                             NIPC_WIN_SHM_PROFILE_BUSYWAIT);
+    if (shm_profiles == 0)
+        return true;
+
+    const uint32_t profiles[] = {
+        NIPC_WIN_SHM_PROFILE_HYBRID,
+        NIPC_WIN_SHM_PROFILE_BUSYWAIT,
+    };
+    for (size_t i = 0; i < sizeof(profiles) / sizeof(profiles[0]); i++) {
+        uint32_t profile = profiles[i];
+        if (!(cfg_out->supported_profiles & profile))
+            continue;
+
+        nipc_win_shm_ctx_t *ctx = service_calloc(
+            1, sizeof(nipc_win_shm_ctx_t),
+            NIPC_WIN_SERVICE_TEST_FAULT_SERVER_SHM_CTX_CALLOC_INTERNAL);
+        if (!ctx)
+            continue;
+
+        nipc_win_shm_error_t serr = nipc_win_shm_server_create(
+            server->run_dir, server->service_name,
+            server->auth_token,
+            sid,
+            profile,
+            cfg_out->max_request_payload_bytes + NIPC_HEADER_LEN,
+            cfg_out->max_response_payload_bytes + NIPC_HEADER_LEN,
+            ctx);
+        if (serr == NIPC_WIN_SHM_OK) {
+            if (profile == NIPC_WIN_SHM_PROFILE_HYBRID)
+                prepared->hybrid = ctx;
+            else
+                prepared->busywait = ctx;
+            continue;
+        }
+
+        free(ctx);
+        cfg_out->supported_profiles &= ~profile;
+        cfg_out->preferred_profiles &= ~profile;
+    }
+
+    return cfg_out->supported_profiles != 0;
+}
+
 static void server_wake_listener(nipc_managed_server_t *server)
 {
     if (server->listener.pipe == INVALID_HANDLE_VALUE ||
@@ -1116,6 +1208,7 @@ static nipc_error_t server_init_raw(nipc_managed_server_t *server,
     server->handler_user = user;
     server->worker_count = worker_count;
     server->expected_method_code = expected_method_code;
+    server->base_config = *config;
     server->learned_request_payload_bytes =
         (config && config->max_request_payload_bytes > 0)
             ? config->max_request_payload_bytes
@@ -1203,17 +1296,23 @@ void nipc_server_run(nipc_managed_server_t *server)
     InterlockedExchange(&server->running, 1);
 
     while (InterlockedCompareExchange(&server->running, 0, 0)) {
-        server->listener.config.max_request_payload_bytes = server->learned_request_payload_bytes;
-        server->listener.config.max_response_payload_bytes = server->learned_response_payload_bytes;
-
         /* Accept one client via L1 (blocking with internal timeout) */
         nipc_np_session_t session;
         memset(&session, 0, sizeof(session));
         session.pipe = INVALID_HANDLE_VALUE;
 
         uint64_t sid = server->next_session_id++;
+        nipc_np_server_config_t accept_cfg;
+        prepared_win_shm_t prepared_shm;
+        if (!server_prepare_accept_config(server, sid, &accept_cfg, &prepared_shm)) {
+            Sleep(10);
+            continue;
+        }
+
+        server->listener.config = accept_cfg;
         nipc_np_error_t uerr = nipc_np_accept(&server->listener, sid, &session);
         if (uerr != NIPC_NP_OK) {
+            server_destroy_prepared_win_shm(&prepared_shm);
             if (!InterlockedCompareExchange(&server->running, 0, 0))
                 break;
             Sleep(10);
@@ -1230,43 +1329,26 @@ void nipc_server_run(nipc_managed_server_t *server)
         if (server->session_count >= server->worker_count) {
             /* At capacity: reject this client by closing the session */
             LeaveCriticalSection(&server->sessions_lock);
+            server_destroy_prepared_win_shm(&prepared_shm);
             nipc_np_close_session(&session);
             continue;
         }
 
-        /* Win SHM upgrade if negotiated. Each session gets its own
-         * SHM region (per-session kernel objects via session_id). */
+        /* SHM profile guarantee: only negotiate SHM for sessions backed by
+         * prepared per-session kernel objects for the selected profile. */
         nipc_win_shm_ctx_t *shm = NULL;
         if (session.selected_profile == NIPC_WIN_SHM_PROFILE_HYBRID ||
             session.selected_profile == NIPC_WIN_SHM_PROFILE_BUSYWAIT) {
-
-            nipc_win_shm_ctx_t *s = service_calloc(
-                1, sizeof(nipc_win_shm_ctx_t),
-                NIPC_WIN_SERVICE_TEST_FAULT_SERVER_SHM_CTX_CALLOC_INTERNAL);
-            if (s) {
-                nipc_win_shm_error_t serr = nipc_win_shm_server_create(
-                    server->run_dir, server->service_name,
-                    server->auth_token,
-                    session.session_id,
-                    session.selected_profile,
-                    session.max_request_payload_bytes + NIPC_HEADER_LEN,
-                    session.max_response_payload_bytes + NIPC_HEADER_LEN,
-                    s);
-                if (serr == NIPC_WIN_SHM_OK) {
-                    shm = s;
-                } else {
-                    /* SHM create failed for a session that negotiated SHM.
-                     * Reject the session to avoid transport desync. */
-                    free(s);
-                    LeaveCriticalSection(&server->sessions_lock);
-                    nipc_np_close_session(&session);
-                    continue;
-                }
-            } else {
+            shm = server_take_prepared_win_shm(&prepared_shm, session.selected_profile);
+            if (!shm) {
+                server_destroy_prepared_win_shm(&prepared_shm);
                 LeaveCriticalSection(&server->sessions_lock);
                 nipc_np_close_session(&session);
                 continue;
             }
+            server_destroy_prepared_win_shm(&prepared_shm);
+        } else {
+            server_destroy_prepared_win_shm(&prepared_shm);
         }
 
         /* Create session context */

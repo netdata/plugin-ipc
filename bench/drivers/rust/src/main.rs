@@ -135,10 +135,8 @@ mod posix_only {
         ServerConfig {
             supported_profiles: profiles,
             preferred_profiles: profiles,
-            max_request_payload_bytes: 4096,
             max_request_batch_items: 1,
             max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-            max_response_batch_items: 1,
             auth_token: AUTH_TOKEN,
             backlog: 4,
             ..ServerConfig::default()
@@ -149,10 +147,8 @@ mod posix_only {
         ClientConfig {
             supported_profiles: profiles,
             preferred_profiles: profiles,
-            max_request_payload_bytes: 4096,
             max_request_batch_items: 1,
             max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-            max_response_batch_items: 1,
             auth_token: AUTH_TOKEN,
             ..ClientConfig::default()
         }
@@ -162,10 +158,8 @@ mod posix_only {
         TypedClientConfig {
             supported_profiles: profiles,
             preferred_profiles: profiles,
-            max_request_payload_bytes: 4096,
             max_request_batch_items: 1,
             max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-            max_response_batch_items: 1,
             auth_token: AUTH_TOKEN,
             ..TypedClientConfig::default()
         }
@@ -175,10 +169,8 @@ mod posix_only {
         ServerConfig {
             supported_profiles: profiles,
             preferred_profiles: profiles,
-            max_request_payload_bytes: BENCH_BATCH_BUF_SIZE as u32,
             max_request_batch_items: BENCH_MAX_BATCH_ITEMS,
             max_response_payload_bytes: BENCH_BATCH_BUF_SIZE as u32,
-            max_response_batch_items: BENCH_MAX_BATCH_ITEMS,
             auth_token: AUTH_TOKEN,
             backlog: 4,
             ..ServerConfig::default()
@@ -189,10 +181,8 @@ mod posix_only {
         ClientConfig {
             supported_profiles: profiles,
             preferred_profiles: profiles,
-            max_request_payload_bytes: BENCH_BATCH_BUF_SIZE as u32,
             max_request_batch_items: BENCH_MAX_BATCH_ITEMS,
             max_response_payload_bytes: BENCH_BATCH_BUF_SIZE as u32,
-            max_response_batch_items: BENCH_MAX_BATCH_ITEMS,
             auth_token: AUTH_TOKEN,
             ..ClientConfig::default()
         }

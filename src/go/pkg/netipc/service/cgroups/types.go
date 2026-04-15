@@ -34,10 +34,8 @@ type ClientStatus = raw.ClientStatus
 type ClientConfig struct {
 	SupportedProfiles       uint32
 	PreferredProfiles       uint32
-	MaxRequestPayloadBytes  uint32
 	MaxRequestBatchItems    uint32
 	MaxResponsePayloadBytes uint32
-	MaxResponseBatchItems   uint32
 	AuthToken               uint64
 }
 
@@ -48,10 +46,8 @@ type ClientConfig struct {
 type ServerConfig struct {
 	SupportedProfiles       uint32
 	PreferredProfiles       uint32
-	MaxRequestPayloadBytes  uint32
 	MaxRequestBatchItems    uint32
 	MaxResponsePayloadBytes uint32
-	MaxResponseBatchItems   uint32
 	AuthToken               uint64
 }
 

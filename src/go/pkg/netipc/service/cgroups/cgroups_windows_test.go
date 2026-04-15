@@ -36,10 +36,8 @@ func testWinServerConfig() ServerConfig {
 	return ServerConfig{
 		SupportedProfiles:       protocol.ProfileBaseline,
 		PreferredProfiles:       protocol.ProfileBaseline,
-		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: testWinResponseSize,
-		MaxResponseBatchItems:   1,
 		AuthToken:               testWinAuthToken,
 	}
 }
@@ -48,10 +46,8 @@ func testWinClientConfig() ClientConfig {
 	return ClientConfig{
 		SupportedProfiles:       protocol.ProfileBaseline,
 		PreferredProfiles:       protocol.ProfileBaseline,
-		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: testWinResponseSize,
-		MaxResponseBatchItems:   1,
 		AuthToken:               testWinAuthToken,
 	}
 }

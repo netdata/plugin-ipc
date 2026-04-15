@@ -109,6 +109,7 @@ typedef struct {
     nipc_managed_server_t server;
     snapshot_service_ctx_t service_ctx;
     bool started;
+    pthread_t thread;
 } server_ctx_t;
 
 static void *server_thread(void *arg)
@@ -124,10 +125,8 @@ static bool start_server(server_ctx_t *sctx)
 
     nipc_server_config_t scfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = 16,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
 
@@ -146,7 +145,7 @@ static bool start_server(server_ctx_t *sctx)
     pthread_t tid;
     if (pthread_create(&tid, NULL, server_thread, sctx) != 0)
         return false;
-    pthread_detach(tid);
+    sctx->thread = tid;
 
     usleep(50000); /* 50ms for server to start */
     sctx->started = true;
@@ -157,6 +156,7 @@ static void stop_server(server_ctx_t *sctx)
 {
     if (sctx->started) {
         nipc_server_drain(&sctx->server, 2000);
+        pthread_join(sctx->thread, NULL);
         nipc_server_destroy(&sctx->server);
         sctx->started = false;
     }
@@ -177,10 +177,8 @@ static void test_snapshot_ping_pong(void)
 
     nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = 16,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
 
@@ -255,10 +253,8 @@ static void test_snapshot_session_reuse(void)
 
     nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = 16,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
 
@@ -298,10 +294,8 @@ static void test_empty_snapshot(void)
 
     nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = 16,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
 

@@ -127,8 +127,15 @@ Examples of internal reusable state:
 - Batch assembly and batch extraction scratch
 
 These buffers are implementation details. Their sizing is derived from
-the negotiated limits and the service-kind-specific Codec contracts. They are
-never part of the public Level 2 API.
+the negotiated limits and the service-kind-specific Codec contracts. For
+typed requests, the initial request-payload proposal is internal library
+logic derived from:
+
+- the method schema
+- the intended batch size
+- explicit sizing assumptions for dynamic fields
+
+They are never part of the public Level 2 API.
 
 Borrowed typed views returned by Level 2 therefore have explicit
 lifetime rules:
@@ -155,21 +162,22 @@ There are two important cases:
 - For ordinary transport / peer failures, Level 2 reconnects and retries
   once.
 - For overflow-driven resize recovery, Level 2 may reconnect more than
-  once while negotiated request/response capacities grow. Recovery stops
-  when the call succeeds, reconnect fails, a non-overflow error occurs,
-  a reconnect no longer increases the relevant negotiated capacities,
-  or 8 overflow retries have been exhausted. Payloads grow by powers of
-  2, so 8 retries allows ~256x growth from the initial negotiated size.
+  once while negotiated request/response capacities grow. This is a
+  fallback safety net, not the primary sizing strategy for typed APIs.
+  Recovery stops when the call succeeds, reconnect fails, a non-overflow
+  error occurs, a reconnect no longer increases the relevant negotiated
+  capacities, or 8 overflow retries have been exhausted. Payloads grow by
+  powers of 2.
 
 If the session was NOT previously READY, the call fails immediately
 without attempting reconnection.
 
 If recovery fails, Level 2 reports failure to the caller.
 
-Learned payload capacities are capped at 256 MB. This prevents a
-compromised or buggy peer from forcing excessive memory allocation
-via inflated negotiation values. The cap is enforced before the
-learned value is stored, so it applies to all subsequent sessions.
+Negotiated request payload ceilings are capped at 1 MiB. If a peer
+proposes a larger request ceiling, handshake rejects with
+`transport_status = LIMIT_EXCEEDED`. The cap is enforced before the value
+becomes part of the session.
 
 ### 6. No hidden background threads (client)
 
@@ -207,8 +215,11 @@ context at startup and uses it for the lifetime of the process.
 
 - **initialize(service_namespace, service_name, config)**: creates the
   context. Does NOT connect. Does NOT require the server to be running.
-  The config includes: auth token, supported/preferred profiles, directional
-  limits. Returns the context object.
+  The public typed config includes: auth token, supported/preferred
+  profiles, caller batch intent, and any method-specific response sizing
+  hints that remain public. `max_request_payload_bytes` is internal library
+  state and is not a caller-provided typed-L2 knob. Returns the context
+  object.
 
 - **refresh(ctx)**: the caller calls this periodically from its own loop.
   This is where connection attempts and reconnections happen. Returns
@@ -255,6 +266,11 @@ Level 2 exposes service-kind-specific blocking call functions. Each call:
 
 The public call signature is typed. The caller provides typed request
 data only. It does not provide transport scratch buffers.
+
+Typed callers also do not provide `max_request_payload_bytes`. The library
+derives the initial proposal internally from the method schema, intended
+batch size, and sizing assumptions for dynamic fields. Reconnect-on-overflow
+exists only as fallback if that internal estimate was too small.
 
 Response ownership is defined per method type:
 
@@ -324,7 +340,8 @@ The caller provides at initialization:
 
 - Service endpoint identity (namespace + name)
 - Auth token for handshake verification
-- Supported/preferred profiles and directional limits
+- Supported/preferred profiles
+- Public batch intent and any public response sizing hints
 - Maximum concurrent sessions (worker count limit)
 - The typed handler implementation for that one service kind
 
@@ -425,7 +442,15 @@ Level 2 must have:
   dispatch with 1 worker, batch message dispatch with multiple workers,
   response order preservation, mixed single and batch messages.
 - **Typed API boundary tests**: public Level 2 clients and servers never
-  require caller-managed wire buffers or raw payload bytes.
+  require caller-managed wire buffers, raw payload bytes, or
+  caller-provided `max_request_payload_bytes`.
+- **Handshake compliance tests**: each negotiated handshake field is tested
+  individually against the documented contract in all implementations.
+- **Auth failure tests**: every auth failure path is tested individually in
+  all implementations.
+- **Overflow recovery tests**: request/response payload overflow recovery is
+  tested end-to-end, including disconnect, full handshake, reconnect, and
+  retry behavior.
 - **Multi-client tests**: multiple concurrent clients to one managed
   server, independent session failure, correct response routing.
 - **Convenience path tests**: call when ready, call when not ready

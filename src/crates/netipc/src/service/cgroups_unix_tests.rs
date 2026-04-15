@@ -55,10 +55,8 @@ fn server_config() -> ServerConfig {
     ServerConfig {
         supported_profiles: PROFILE_BASELINE,
         preferred_profiles: PROFILE_BASELINE,
-        max_request_payload_bytes: 4096,
         max_request_batch_items: 1,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-        max_response_batch_items: 1,
         auth_token: AUTH_TOKEN,
         ..ServerConfig::default()
     }
@@ -68,10 +66,8 @@ fn client_config() -> ClientConfig {
     ClientConfig {
         supported_profiles: PROFILE_BASELINE,
         preferred_profiles: PROFILE_BASELINE,
-        max_request_payload_bytes: 4096,
         max_request_batch_items: 1,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-        max_response_batch_items: 1,
         auth_token: AUTH_TOKEN,
         ..ClientConfig::default()
     }
@@ -82,10 +78,8 @@ fn shm_server_config() -> ServerConfig {
     ServerConfig {
         supported_profiles: PROFILE_BASELINE | PROFILE_SHM_FUTEX,
         preferred_profiles: PROFILE_SHM_FUTEX,
-        max_request_payload_bytes: 4096,
         max_request_batch_items: 1,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-        max_response_batch_items: 1,
         auth_token: AUTH_TOKEN,
         ..ServerConfig::default()
     }
@@ -96,10 +90,8 @@ fn shm_client_config() -> ClientConfig {
     ClientConfig {
         supported_profiles: PROFILE_BASELINE | PROFILE_SHM_FUTEX,
         preferred_profiles: PROFILE_SHM_FUTEX,
-        max_request_payload_bytes: 4096,
         max_request_batch_items: 1,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-        max_response_batch_items: 1,
         auth_token: AUTH_TOKEN,
         ..ClientConfig::default()
     }

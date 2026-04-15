@@ -565,13 +565,19 @@ func (l *Listener) SetPayloadLimits(maxRequestPayloadBytes, maxResponsePayloadBy
 // Accept accepts one client connection. Performs the full handshake.
 // Blocks until a client connects and the handshake completes.
 func (l *Listener) Accept() (*Session, error) {
+	sessionID := l.nextSessionID.Add(1)
+	return l.AcceptWithConfig(sessionID, l.config)
+}
+
+// AcceptWithConfig accepts one client connection using a caller-provided
+// per-session server config and session ID.
+func (l *Listener) AcceptWithConfig(sessionID uint64, config ServerConfig) (*Session, error) {
 	nfd, _, err := syscall.Accept(l.fd)
 	if err != nil {
 		return nil, wrapErr(ErrAccept, err.Error())
 	}
 
-	sessionID := l.nextSessionID.Add(1)
-	session, herr := serverHandshake(nfd, &l.config, sessionID)
+	session, herr := serverHandshake(nfd, &config, sessionID)
 	if herr != nil {
 		syscall.Close(nfd)
 		return nil, herr
@@ -865,6 +871,9 @@ func connectAndHandshake(fd int, path string, config *ClientConfig) (*Session, e
 	if ackHdr.TransportStatus == protocol.StatusIncompatible {
 		return nil, ErrIncompatible
 	}
+	if ackHdr.TransportStatus == protocol.StatusLimitExceeded {
+		return nil, ErrLimitExceeded
+	}
 	if ackHdr.TransportStatus != protocol.StatusOK {
 		return nil, wrapErr(ErrHandshake, fmt.Sprintf("transport_status=%d", ackHdr.TransportStatus))
 	}
@@ -906,10 +915,7 @@ func serverHandshake(fd int, config *ServerConfig, sessionID uint64) (*Session, 
 		serverPktSize = detectPacketSize(fd)
 	}
 
-	sReqPay := applyDefault(config.MaxRequestPayloadBytes, protocol.MaxPayloadDefault)
-	sReqBat := applyDefault(config.MaxRequestBatchItems, defaultBatchItems)
 	sRespPay := applyDefault(config.MaxResponsePayloadBytes, protocol.MaxPayloadDefault)
-	sRespBat := applyDefault(config.MaxResponseBatchItems, defaultBatchItems)
 	sProfiles := config.SupportedProfiles
 	if sProfiles == 0 {
 		sProfiles = protocol.ProfileBaseline
@@ -998,14 +1004,24 @@ func serverHandshake(fd int, config *ServerConfig, sessionID uint64) (*Session, 
 		selected = highestBit(intersection)
 	}
 
+	if hello.MaxRequestPayloadBytes > protocol.MaxPayloadCap {
+		sendRejection(protocol.StatusLimitExceeded)
+		return nil, ErrLimitExceeded
+	}
+
 	// Negotiate limits:
-	// - requests use the larger of client/server advertised capacities
-	// - responses are server-authoritative
-	agreedReqPay := minU32(maxU32(hello.MaxRequestPayloadBytes, sReqPay), protocol.MaxPayloadCap)
-	agreedReqBat := maxU32(hello.MaxRequestBatchItems, sReqBat)
+	// - request payload and batch size are client-proposed and echoed
+	// - response payload is server-authoritative
+	// - response batch size is symmetric with request batch size
+	agreedReqPay := hello.MaxRequestPayloadBytes
+	agreedReqBat := hello.MaxRequestBatchItems
 	agreedRespPay := sRespPay
-	agreedRespBat := sRespBat
+	agreedRespBat := agreedReqBat
 	agreedPkt := minU32(hello.PacketSize, serverPktSize)
+	if agreedPkt <= protocol.HeaderSize {
+		sendRejection(protocol.StatusIncompatible)
+		return nil, ErrIncompatible
+	}
 
 	// Send HELLO_ACK (success)
 	ack := protocol.HelloAck{

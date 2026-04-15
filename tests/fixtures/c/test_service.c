@@ -151,10 +151,8 @@ static nipc_client_config_t default_client_config(void)
     return (nipc_client_config_t){
         .supported_profiles        = NIPC_PROFILE_BASELINE,
         .preferred_profiles        = 0,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
 }
@@ -1259,10 +1257,8 @@ static void test_shm_l2_service(void)
     nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
         .preferred_profiles        = NIPC_PROFILE_SHM_HYBRID,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
 
@@ -1315,10 +1311,8 @@ static void test_shm_client_rejects_malformed_responses(void)
         nipc_client_config_t ccfg = {
             .supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
             .preferred_profiles = NIPC_PROFILE_SHM_HYBRID,
-            .max_request_payload_bytes = 4096,
             .max_request_batch_items = 1,
             .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-            .max_response_batch_items = 1,
             .auth_token = AUTH_TOKEN,
         };
         nipc_client_ctx_t client;
@@ -1394,10 +1388,8 @@ static void test_shm_server_rejects_malformed_requests(void)
         nipc_client_config_t ccfg = {
             .supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
             .preferred_profiles = NIPC_PROFILE_SHM_HYBRID,
-            .max_request_payload_bytes = 4096,
             .max_request_batch_items = 1,
             .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-            .max_response_batch_items = 1,
             .auth_token = AUTH_TOKEN,
         };
         nipc_client_ctx_t bad_client;
@@ -1475,10 +1467,8 @@ static void test_shm_request_resize_retry(void)
     nipc_client_config_t ccfg = {
         .supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
         .preferred_profiles = NIPC_PROFILE_SHM_HYBRID,
-        .max_request_payload_bytes = 1,
         .max_request_batch_items = 1,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-        .max_response_batch_items = 1,
         .auth_token = AUTH_TOKEN,
     };
     nipc_client_ctx_t client;
@@ -1504,6 +1494,7 @@ static void test_shm_request_resize_retry(void)
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+    client.transport_config.max_request_payload_bytes = 1;
     nipc_client_refresh(&client);
     check("request resize: client negotiated SHM",
           nipc_client_ready(&client) && client.shm != NULL);
@@ -1539,10 +1530,8 @@ static void test_shm_response_resize_retry(void)
     nipc_client_config_t ccfg = {
         .supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
         .preferred_profiles = NIPC_PROFILE_SHM_HYBRID,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items = 1,
         .max_response_payload_bytes = 32,
-        .max_response_batch_items = 1,
         .auth_token = AUTH_TOKEN,
     };
     nipc_client_ctx_t client;
@@ -2284,9 +2273,9 @@ static void test_client_init_defaults_and_truncation(void)
 /*  Coverage: negotiated SHM obstruction rejects the session            */
 /* ------------------------------------------------------------------ */
 
-static void test_shm_negotiation_failure_on_obstructed_region(void)
+static void test_shm_negotiation_falls_back_to_baseline_on_obstructed_region(void)
 {
-    printf("Test: Negotiated SHM obstruction rejects the session\n");
+    printf("Test: Negotiated SHM obstruction falls back to baseline\n");
     const char *svc = "svc_shm_obstruct";
     cleanup_all(svc);
     cleanup_session_shm(svc, 1);
@@ -2308,23 +2297,23 @@ static void test_shm_negotiation_failure_on_obstructed_region(void)
     nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
         .preferred_profiles        = NIPC_PROFILE_SHM_HYBRID,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
 
     nipc_client_ctx_t client;
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
     bool changed = nipc_client_refresh(&client);
-    check("refresh reports no READY transition", !changed);
-    check("client is not ready after obstructed SHM negotiation",
-          !nipc_client_ready(&client));
-    check("client state falls back to DISCONNECTED",
-          client.state == NIPC_CLIENT_DISCONNECTED);
-    check("failed SHM negotiation closes the UDS session",
-          !client.session_valid && client.shm == NULL);
+    check("refresh reports READY transition", changed);
+    check("client is ready after obstructed SHM negotiation",
+          nipc_client_ready(&client));
+    check("client state falls back to READY baseline",
+          client.state == NIPC_CLIENT_READY);
+    check("failed SHM negotiation keeps baseline session",
+          client.session_valid && client.shm == NULL);
+    check("selected profile falls back to baseline",
+          client.session.selected_profile == NIPC_PROFILE_BASELINE);
 
     nipc_client_close(&client);
     nipc_server_stop(&sctx.server);
@@ -2376,7 +2365,7 @@ int main(void)
     test_server_init_long_strings();    printf("\n");
     test_server_init_worker_floor_and_long_run_dir(); printf("\n");
     test_client_init_defaults_and_truncation(); printf("\n");
-    test_shm_negotiation_failure_on_obstructed_region(); printf("\n");
+    test_shm_negotiation_falls_back_to_baseline_on_obstructed_region(); printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

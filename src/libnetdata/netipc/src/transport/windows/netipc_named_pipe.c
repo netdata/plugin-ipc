@@ -493,6 +493,8 @@ static nipc_np_error_t client_handshake(HANDLE pipe,
         return NIPC_NP_ERR_NO_PROFILE;
     if (ack_hdr.transport_status == NIPC_STATUS_INCOMPATIBLE)
         return NIPC_NP_ERR_INCOMPATIBLE;
+    if (ack_hdr.transport_status == NIPC_STATUS_LIMIT_EXCEEDED)
+        return NIPC_NP_ERR_LIMIT_EXCEEDED;
     if (ack_hdr.transport_status != NIPC_STATUS_OK)
         return NIPC_NP_ERR_HANDSHAKE;
 
@@ -598,18 +600,25 @@ static nipc_np_error_t server_handshake(HANDLE pipe,
     else
         selected = highest_bit(intersection);
 
-    /* Negotiate limits — cap at NIPC_MAX_PAYLOAD_CAP to prevent excessive allocation */
-    uint32_t agreed_req_pay  = min_u32(max_u32(hello.max_request_payload_bytes, s_req_pay),
-                                        NIPC_MAX_PAYLOAD_CAP);
-    uint32_t agreed_req_bat  = max_u32(hello.max_request_batch_items, s_req_bat);
+    if (hello.max_request_payload_bytes > NIPC_MAX_PAYLOAD_CAP) {
+        send_rejection_ack(pipe, NIPC_STATUS_LIMIT_EXCEEDED);
+        return NIPC_NP_ERR_LIMIT_EXCEEDED;
+    }
+
+    /* Negotiate limits:
+     * - request payload and batch size are client-proposed and echoed
+     * - response payload is server-authoritative
+     * - response batch size is symmetric with request batch size */
+    uint32_t agreed_req_pay  = hello.max_request_payload_bytes;
+    uint32_t agreed_req_bat  = hello.max_request_batch_items;
     uint32_t agreed_resp_pay = s_resp_pay;
-    uint32_t agreed_resp_bat = s_resp_bat;
+    uint32_t agreed_resp_bat = agreed_req_bat;
     uint32_t agreed_pkt      = min_u32(hello.packet_size, server_pkt_size);
 
-    /* Reject packet sizes too small for a header */
+    /* Reject packet sizes too small for a usable message packet */
     if (agreed_pkt <= NIPC_HEADER_LEN) {
-        send_rejection_ack(pipe, NIPC_STATUS_BAD_ENVELOPE);
-        return NIPC_NP_ERR_HANDSHAKE;
+        send_rejection_ack(pipe, NIPC_STATUS_INCOMPATIBLE);
+        return NIPC_NP_ERR_INCOMPATIBLE;
     }
 
     /* Send HELLO_ACK (success) */

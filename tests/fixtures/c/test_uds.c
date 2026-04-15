@@ -997,12 +997,46 @@ static void test_profile_mismatch(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Test 7: Stale socket recovery                                      */
+/*  Test 7: Handshake failure - request payload proposal over cap      */
+/* ------------------------------------------------------------------ */
+
+static void test_request_payload_over_cap(void)
+{
+    printf("Test 7: Handshake failure - request payload proposal over cap\n");
+    const char *svc = "test_req_payload_over_cap";
+    cleanup_socket(svc);
+
+    server_ctx_t sctx = {
+        .service      = svc,
+        .config       = default_server_config(),
+        .accept_count = 1,
+        .echo_count   = 0,
+    };
+
+    pthread_t tid = start_echo_server(&sctx);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    ccfg.max_request_payload_bytes = NIPC_MAX_PAYLOAD_CAP + 1u;
+
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect fails with limit exceeded", err == NIPC_UDS_ERR_LIMIT_EXCEEDED);
+
+    if (err == NIPC_UDS_OK)
+        nipc_uds_close_session(&session);
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test 8: Stale socket recovery                                      */
 /* ------------------------------------------------------------------ */
 
 static void test_stale_recovery(void)
 {
-    printf("Test 7: Stale socket recovery\n");
+    printf("Test 8: Stale socket recovery\n");
     const char *svc = "test_stale";
     cleanup_socket(svc);
 
@@ -1036,7 +1070,7 @@ static void test_stale_recovery(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Test 8: Disconnect with in-flight request                          */
+/*  Test 9: Disconnect with in-flight request                          */
 /* ------------------------------------------------------------------ */
 
 /* Server that accepts but closes immediately without responding. */
@@ -2042,14 +2076,16 @@ static void test_directional_limit_negotiation(void)
     check("connect", err == NIPC_UDS_OK);
 
     if (err == NIPC_UDS_OK) {
-        check("request payload uses sender-driven size",
+        check("request payload echoes client proposal",
               session.max_request_payload_bytes == 65536);
-        check("request batch uses sender-driven size",
+        check("request batch echoes client proposal",
               session.max_request_batch_items == 16);
-        check("response payload uses server-driven size",
+        check("response payload uses server final value",
               session.max_response_payload_bytes == 65536);
-        check("response batch uses server-driven size",
-              session.max_response_batch_items == 32);
+        check("response batch stays symmetric with request batch",
+              session.max_response_batch_items == 16);
+        check("server returns non-zero session_id",
+              session.session_id != 0);
 
         /* Send a request */
         nipc_header_t hdr = {0};
@@ -3035,6 +3071,7 @@ int main(void)
     test_chunking();               printf("\n");
     test_bad_auth();               printf("\n");
     test_profile_mismatch();       printf("\n");
+    test_request_payload_over_cap(); printf("\n");
     test_stale_recovery();         printf("\n");
     test_disconnect_inflight();    printf("\n");
     test_batch();                  printf("\n");

@@ -204,21 +204,97 @@ establishes:
 - **Profile negotiation**: the client advertises its supported transport
   profiles (bitmask) and preferred profiles. The server selects the best
   mutually supported profile from the intersection. If no intersection exists,
-  the session is rejected. If both peers support an SHM profile, the data
-  plane upgrades to SHM after the handshake completes. The handshake itself
-  always happens on the baseline transport.
+  the session is rejected. The handshake itself always happens on the baseline
+  transport.
 - **Directional limit negotiation**: request and response directions have
   independent size ceilings. The handshake negotiates:
   - max request payload bytes
   - max request batch items
   - max response payload bytes
   - max response batch items
-  - Batch bytes are derived per direction from payload bytes and batch items.
+  The exact rule for every field is defined in the wire envelope spec. There
+  is no blanket formula for all fields.
 - **Packet size negotiation**: the client advertises its transport packet size.
   The server responds with the negotiated packet size (minimum of client and
   server). Both sides use this single negotiated packet size for chunking on
   the connection. The negotiated packet size must be strictly greater than the
   header size (32 bytes); if it is not, the server rejects the handshake.
+
+### Handshake strategy
+
+The handshake is a proposal/result protocol:
+
+- the client sends one `HELLO`
+- the server validates it, decides all final session values, and sends one
+  `HELLO_ACK`
+- the client must operate from the values returned in `HELLO_ACK`, not from
+  the raw values it originally proposed
+
+Successful handshake means:
+
+- `transport_status = OK`
+- the selected transport profile is final and locked for the session
+- all returned limits are final for the session
+- if the selected profile is SHM, SHM is already usable for that session
+
+Rejected handshake means:
+
+- the server sends `HELLO_ACK` with a non-`OK` `transport_status`
+- the server closes the connection after sending the rejection
+- the client learns the rejection class from `transport_status`
+
+The normative field-by-field decision matrix lives in
+`docs/level1-wire-envelope.md`.
+
+### Handshake sequence diagrams
+
+#### Successful baseline handshake
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    C->>S: HELLO(auth_token, supported_profiles,\npreferred_profiles, request limits,\nresponse hints, packet_size)
+    S->>S: Validate HELLO envelope and payload
+    S->>S: Validate auth token
+    S->>S: Compute profile intersection
+    S->>S: Choose selected_profile
+    S->>S: Compute final session limits
+    S->>S: Allocate session_id
+    S-->>C: HELLO_ACK(status=OK,\nselected_profile=BASELINE,\nfinal limits, packet_size, session_id)
+    Note over C,S: Both sides use HELLO_ACK values for the session
+```
+
+#### Successful SHM handshake
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    C->>S: HELLO(...)
+    S->>S: Validate HELLO and auth
+    S->>S: Choose selected_profile = SHM
+    S->>S: Compute final session limits
+    S->>S: Provision SHM resources for this session
+    S->>S: Allocate session_id tied to this SHM session
+    S-->>C: HELLO_ACK(status=OK,\nselected_profile=SHM,\nfinal limits, packet_size, session_id)
+    Note over C,S: Successful HELLO_ACK guarantees SHM is already usable
+```
+
+#### Rejected handshake
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    C->>S: HELLO(...)
+    S->>S: Validate HELLO / auth / profile set / limits
+    S-->>C: HELLO_ACK(status=AUTH_FAILED | UNSUPPORTED | INCOMPATIBLE | LIMIT_EXCEEDED)
+    S-x C: Close connection
+```
 
 ### Message framing
 
@@ -450,7 +526,7 @@ Level 1 must have:
   - Malformed headers
   - Oversized payloads
   - Corrupt chunk sequences
-  - Auth failures
+  - Auth failures, individually
   - Profile mismatches
   - Mid-stream disconnects
   - Stale endpoint recovery
@@ -459,6 +535,19 @@ Level 1 must have:
   - Pipelining correctness with out-of-order responses
   - Batch assembly and extraction edge cases (0 items, 1 item, max items,
     items at the directional size limit)
+- **Handshake compliance coverage**: every negotiated handshake field must be
+  tested individually against the documented contract in all implementations,
+  including:
+  - authorization success/failure
+  - profile intersection and selection
+  - request payload acceptance and `> 1 MiB` rejection
+  - request/response batch-item symmetry
+  - response payload authority
+  - packet-size negotiation
+  - `session_id` allocation
+- **Profile guarantee coverage**: if handshake succeeds with an SHM profile,
+  tests must prove that the selected SHM transport is already usable for that
+  session. No post-handshake fallback is allowed.
 
 No exceptions. Nothing is acceptable for Netdata integration unless Level 1
 can demonstrate that malformed IPC, corner cases, and abnormal situations

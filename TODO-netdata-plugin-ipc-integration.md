@@ -2,6 +2,468 @@
 
 Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Netdata can immediately replace the current Linux `cgroups.plugin` -> `ebpf.plugin` custom metadata transport with typed IPC that is reliable, maintainable, testable, and ready for guarded production rollout.
 
+## User Decisions
+
+- Decision recorded on 2026-04-14:
+  - Limit negotiation contract:
+    - the general contract is:
+      - client proposes
+      - server decides
+      - the final negotiated values are returned by the server in the handshake response
+    - each negotiated field must be specified independently; there is no single universal formula such as always `min()` or always server value
+    - examples explicitly clarified by the user:
+      - request size limit:
+        - client proposes
+        - server decides whether to echo it unchanged or alter it
+        - this must be defined explicitly in the spec, field by field
+      - response size limit:
+        - client may propose
+        - server returns its own value because only the server knows what it may need to send
+      - packet chunking / packet size:
+        - server decides using `min(client, server)` so the session can actually communicate
+    - the specification must be updated to state this explicitly and unambiguously for every negotiated field
+    - all implementations must be reviewed and aligned to this rule field by field
+- Decision recorded on 2026-04-14:
+  - Transport-profile lock after handshake:
+    - the selected transport/profile is negotiated during handshake and locked for the lifetime of that session
+    - no fallback is allowed after transport negotiation has completed
+    - if SHM is negotiated, SHM must be usable for that session
+    - any post-handshake SHM fallback to baseline transport is considered a contract violation and must not be adopted as the upstream fix
+- Decision recorded on 2026-04-14:
+  - Request-direction negotiation policy:
+    - `max_request_payload_bytes`
+      - client proposes the whole-request payload ceiling
+      - server echoes it back unchanged when it is acceptable
+      - hard-cap the field at `1 MiB`
+      - if the client proposes more than `1 MiB`, reject the handshake
+      - do not silently clamp down
+    - `max_request_batch_items`
+      - client proposes the intended batch size
+      - if there is no concrete protocol-level constraint, server echoes it back unchanged
+      - do not invent hypothetical lowering logic without evidence
+- Decision recorded on 2026-04-14:
+  - SHM readiness and profile lock:
+    - the negotiated profile is locked for the lifetime of the session
+    - if SHM is selected, SHM must already be guaranteed usable for that session when the handshake succeeds
+    - no post-handshake fallback is allowed
+    - this requires moving SHM readiness earlier than the current implementation does today
+- Decision recorded on 2026-04-14:
+  - Typed L2 request sizing policy:
+    - the client should proactively propose `max_request_payload_bytes`
+    - it should not rely primarily on overflow/reconnect learning
+    - for typed L2 methods, the library should calculate the initial request payload proposal from:
+      - the method schema
+      - the configured/requested batch size
+      - explicit sizing assumptions for dynamic fields
+    - current approved sizing assumption for strings:
+      - assume strings up to 1024 bytes when deriving request payload ceilings unless a method-specific rule says otherwise
+    - objective:
+      - initial negotiation should already be close to the real need
+      - reconnects due to request overflow should be rare safety-net events, not the normal sizing mechanism
+    - implication:
+      - public typed L2 methods need method-specific sizing rules
+      - opaque raw/internal L2 paths may still need reactive overflow recovery as a fallback because they cannot infer request schema automatically
+- Decision recorded on 2026-04-14:
+  - `max_request_payload_bytes` policy:
+    - hard-cap the negotiated request payload ceiling at `1 MiB`
+    - if the client proposes anything above `1 MiB`, reject the handshake
+    - do not silently clamp down and continue
+    - below `1 MiB`, preferred behavior is to echo the client proposal back unchanged
+- Decision recorded on 2026-04-14:
+  - `max_request_batch_items` policy:
+    - if there is no concrete protocol-level constraint, echo the client proposal back unchanged
+    - do not invent hypothetical lowering logic without evidence
+- Decision recorded on 2026-04-14:
+  - `max_response_batch_items` protocol field:
+    - keep it in the protocol handshake payloads
+    - define it as symmetric with request batch items
+    - the server must return the same effective batch-item ceiling for requests and responses
+    - rationale:
+      - current protocol/method behavior is symmetric by position for batch responses
+      - current implementations mirror request `item_count` into batch response `item_count`
+    - implication:
+      - this is now a semantic contract clarification, not a handshake wire-layout removal
+      - the specs and all implementations must still be aligned so this field is never independently negotiated
+- Decision recorded on 2026-04-14:
+  - Handshake specification deliverable requirements:
+    - before implementation, the docs/specs must contain the full handshake description as an overall process/strategy
+    - the handshake docs/specs must include per-field analysis:
+      - what the client does
+      - what the client sends
+      - what the server does
+      - what the server sends back
+    - the docs/specs must include Mermaid sequence diagrams for the handshake process
+- Decision recorded on 2026-04-14:
+  - Handshake correctness and guarantee requirements:
+    - the negotiated profile must be guaranteed to work after handshake
+    - this guarantee must be explicit in the docs/specs and enforced by implementation/tests
+- Decision recorded on 2026-04-14:
+  - Handshake test requirements:
+    - the handshake process must be fully tested field by field
+    - tests must ensure all implementations comply with the documented handshake semantics 100%
+    - all auth failures must be tested individually
+    - reconnection due to payload overflow must be fully tested
+- Decision recorded on 2026-04-14:
+  - L2 public API requirement:
+    - L2 users must not provide `max_request_payload_bytes`
+    - request payload sizing is internal library logic, not a user-facing L2 knob
+- Decision recorded on 2026-04-14:
+  - Handshake wire evolution for `max_response_batch_items`:
+    - keep the field on the wire
+    - do not introduce a new handshake layout version for this point alone
+    - document and enforce that it is symmetric with `max_request_batch_items`
+- Decision recorded on 2026-04-15:
+  - Cross-machine workflow and completion bar:
+    - the only valid workflow is:
+      - commit and push in `/home/costa/src/plugin-ipc.git`
+      - pull on `win11:~/src/plugin-ipc.git`
+      - if fixes are needed after Windows validation:
+        - fix locally in `/home/costa/src/plugin-ipc.git`
+        - commit and push locally
+        - pull again on `win11:~/src/plugin-ipc.git`
+    - do not leave uncommitted divergence as the way to sync Linux and Windows
+    - the task is not complete until:
+      - the entire relevant Linux test suite is green
+      - the entire relevant native Windows (`win11`) test suite is green
+      - the repository state is judged correct enough to proceed to the Netdata integration PR follow-up
+- Decision recorded on 2026-04-15:
+  - Windows sync cleanup before validation:
+    - `win11:~/src/plugin-ipc.git/benchmarks-windows.csv` may be discarded if locally dirty
+    - rationale:
+      - it is a generated artifact
+      - `win11` must remain a clean validation checkout
+      - the authoritative workflow is commit/push here, pull there
+
+## Implementation Status (2026-04-14)
+
+- Specs/docs updated before implementation:
+  - `docs/level1-wire-envelope.md`
+  - `docs/level1-transport.md`
+  - `docs/level1-posix-uds.md`
+  - `docs/level1-windows-np.md`
+  - `docs/level2-typed-api.md`
+  - `docs/getting-started.md`
+- Implemented in C / Go / Rust:
+  - handshake negotiation aligned to the documented field-by-field contract
+  - `max_request_payload_bytes` hard-capped at `1 MiB`
+  - proposals above `1 MiB` rejected with `LIMIT_EXCEEDED`
+  - `max_request_payload_bytes` echoed unchanged below cap
+  - `max_request_batch_items` echoed unchanged
+  - `max_response_payload_bytes` server-owned
+  - `max_response_batch_items` kept symmetric with request batch items
+  - `packet_size` negotiated as `min(client, server)` and rejected if not usable
+  - typed L2 public configs no longer expose `max_request_payload_bytes`
+  - SHM readiness moved before handshake completion in managed/raw service paths so negotiated SHM is guaranteed for that session
+- Verified test results after implementation:
+  - Rust:
+    - `cd src/crates/netipc && cargo test`
+    - result: `305 passed; 0 failed`
+  - Go POSIX/raw/cgroups/protocol:
+    - `cd src/go && go test ./pkg/netipc/protocol ./pkg/netipc/service/cgroups ./pkg/netipc/service/raw ./pkg/netipc/transport/posix`
+    - result: all passed
+  - Go Windows compile checks:
+    - `GOOS=windows GOARCH=amd64 go test -c ./pkg/netipc/transport/windows`
+    - `GOOS=windows GOARCH=amd64 go test -c ./pkg/netipc/service/raw`
+    - result: both compile successfully
+  - C targeted transport/service tests:
+    - `/usr/bin/ctest --test-dir build --output-on-failure -R '^test_uds$'`
+    - result: passed
+    - `/usr/bin/ctest --test-dir build --output-on-failure -R '^(test_uds|test_service|test_hardening|test_service_extra|test_ping_pong)$'`
+    - result:
+      - `test_uds` passed after fixing C client mapping for `HELLO_ACK transport_status = LIMIT_EXCEEDED`
+      - `test_service` passed
+      - `test_service_extra` passed
+      - `test_hardening` passed
+      - `test_ping_pong` timed out
+- Open obstacle discovered during verification:
+  - `tests/fixtures/c/test_ping_pong.c` hangs in the empty-snapshot case
+  - concrete trace:
+    - running `timeout 20 stdbuf -o0 ./build/bin/test_ping_pong` stalls after:
+      - `Test: empty snapshot is valid for the service kind`
+      - `PASS: server started`
+      - `PASS: client ready`
+    - `strace -ff -o /tmp/test_ping_pong.trace timeout 10 stdbuf -o0 ./build/bin/test_ping_pong` shows:
+      - the server sends a `STATUS_OK` response with `payload_len = 0` for the empty snapshot request
+      - the client then disconnects and reconnects
+      - the server accept loop subsequently polls invalid fds (`0` / `32765`) instead of the listening socket
+  - refined local findings from the reproduction on 2026-04-15:
+    - the earlier "empty snapshot sends zero payload" theory was wrong
+    - debugger evidence showed the empty-snapshot typed dispatch path computes a non-zero typed payload as expected
+    - the real root cause was the test fixture lifecycle:
+      - `tests/fixtures/c/test_ping_pong.c` detached the server accept thread and never joined it
+      - after test teardown, detached accept loops continued polling invalid or reused fds, contaminating later cases
+      - that produced the observed `fd=0` / `fd=32765` evidence and the spurious header-only `UNSUPPORTED` response seen by the third test
+    - evidence:
+      - `tests/fixtures/c/test_ping_pong.c`
+      - `src/libnetdata/netipc/src/service/netipc_service.c`
+      - `gdb` trace on `server_handle_session` showed normal non-zero response sizes for the first two tests and no empty-snapshot dispatch failure
+      - `strace` artifacts:
+        - `/tmp/test_ping_pong.recheck.431492`
+        - `/tmp/test_ping_pong.recheck.431494`
+        - `/tmp/test_ping_pong.recheck.431496`
+  - fix applied on 2026-04-15:
+    - `tests/fixtures/c/test_ping_pong.c`
+      - store the accept thread
+      - stop detaching it
+      - join it during teardown after `nipc_server_drain()`
+  - verification after the fix:
+    - `timeout 20 stdbuf -o0 ./build/bin/test_ping_pong`
+    - result: `20 passed, 0 failed`
+    - `/usr/bin/ctest --test-dir build --output-on-failure -R '^(test_uds|test_service|test_hardening|test_service_extra|test_ping_pong)$'`
+    - result: `100% tests passed, 0 tests failed out of 5`
+
+## Current Handshake Audit (2026-04-14)
+
+- Wire-level negotiated fields are explicit in the protocol payloads:
+  - `supported_profiles`
+  - `preferred_profiles`
+  - `max_request_payload_bytes`
+  - `max_request_batch_items`
+  - `max_response_payload_bytes`
+  - `max_response_batch_items`
+  - `packet_size`
+  - evidence:
+    - `src/libnetdata/netipc/include/netipc/netipc_protocol.h`
+    - `tests/test_protocol.c`
+- The docs are currently too coarse:
+  - they describe request limits generically as sender-driven and response limits generically as server-driven
+  - they do not define a per-field negotiation matrix
+  - evidence:
+    - `docs/level1-wire-envelope.md`
+    - `docs/level1-posix-uds.md`
+    - `docs/level1-windows-np.md`
+    - `docs/level1-transport.md`
+- The current transport implementations are aligned with one hard-coded generic policy:
+  - request payload = `max(client, server)` capped at `MAX_PAYLOAD_CAP`
+  - request batch items = `max(client, server)`
+  - response payload = server value
+  - response batch items = server value
+  - packet size = `min(client, server)`
+  - profile = highest bit from preferred intersection, else highest bit from full intersection
+  - evidence:
+    - C POSIX:
+      - `src/libnetdata/netipc/src/transport/posix/netipc_uds.c`
+    - C Windows:
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`
+    - Go POSIX:
+      - `src/go/pkg/netipc/transport/posix/uds.go`
+    - Go Windows:
+      - `src/go/pkg/netipc/transport/windows/pipe.go`
+    - Rust POSIX:
+      - `src/crates/netipc/src/transport/posix.rs`
+    - Rust Windows:
+      - `src/crates/netipc/src/transport/windows.rs`
+- The tests also encode that same generic request-side `max()` policy today:
+  - C:
+    - `tests/fixtures/c/test_uds.c`
+  - Go POSIX:
+    - `src/go/pkg/netipc/transport/posix/uds_test.go`
+  - Go Windows:
+    - `src/go/pkg/netipc/transport/windows/pipe_integration_test.go`
+  - Rust:
+    - `src/crates/netipc/src/transport/posix_tests.rs`
+- The old request-side `max()` policy is not arbitrary:
+  - L2/L3 clients learn larger request capacities after overflow/reconnect
+  - managed servers remember learned request/response capacities and advertise them to later sessions
+  - this is why the existing transport handshake upgrades later clients to the larger server-advertised request envelope
+  - evidence:
+    - C:
+      - `src/libnetdata/netipc/src/service/netipc_service.c`
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c`
+    - Go:
+      - `src/go/pkg/netipc/service/raw/client.go`
+      - `src/go/pkg/netipc/service/raw/client_windows.go`
+    - Rust:
+      - `src/crates/netipc/src/service/raw.rs`
+- Under the user-approved contract, that is still insufficient:
+  - the protocol contract must be:
+    - client proposes
+    - server decides
+    - server returns final negotiated values in `HELLO_ACK`
+  - but each field must define its own decision rule explicitly
+  - therefore the current generic request-side `max()` rule cannot remain as an undocumented blanket policy
+
+## Current Obstacles For The Requested Handshake Rewrite (2026-04-14)
+
+- Obstacle 1: the current SHM guarantee is false
+  - current docs still say the data plane switches to SHM after the handshake completes
+  - current code still provisions SHM after the handshake-selected profile is already returned
+  - implication:
+    - the requested rule "negotiated profile is guaranteed to work after handshake" requires architectural change, not only docs/tests
+- Obstacle 2: public typed APIs and current docs still treat `max_response_batch_items` as independently tunable
+  - current `HELLO` and `HELLO_ACK` payload layouts still carry it as if it were independently negotiated
+  - current docs and configs still expose it as a separate knob
+  - implication:
+    - the requested contract requires semantic cleanup across docs, APIs, codecs, and tests so it stays symmetric with request batch items
+- Obstacle 3: public typed L2 APIs currently expose internal handshake knobs the user wants removed
+  - public service client/server configs still expose `max_request_payload_bytes`
+  - public configs also still expose `max_response_batch_items`
+  - implication:
+    - the requested contract requires public API cleanup in C / Rust and likely Go typed surfaces, not only handshake docs
+- SHM currently violates the user's transport-lock expectation at the architectural level:
+  - Level 1 handshake already returns `selected_profile = SHM`
+  - but SHM create/attach still happens later in L2 service code
+  - this is why Thiago's PR added post-handshake fallback in vendored POSIX C service code
+  - under the user-approved contract, that fallback must not be adopted as the upstream fix
+  - evidence:
+    - handshake/profile selection:
+      - `docs/level1-transport.md`
+      - `docs/level1-posix-uds.md`
+      - `docs/level1-windows-np.md`
+    - late SHM setup:
+      - `src/libnetdata/netipc/src/service/netipc_service.c`
+      - `src/libnetdata/netipc/src/service/netipc_service_win.c`
+      - `src/go/pkg/netipc/service/raw/client.go`
+      - `src/go/pkg/netipc/service/raw/client_windows.go`
+      - `src/crates/netipc/src/service/raw.rs`
+
+## Negotiated Field Policy Draft (2026-04-14)
+
+- This section is the corrected handshake matrix draft derived from the user's
+  decisions so far.
+- Global rule:
+  - the client sends `HELLO`
+  - the server decides the final session values
+  - the server returns those values in `HELLO_ACK`
+  - every field has its own decision rule
+  - on handshake failure, the server sends `HELLO_ACK` with non-`OK`
+    `transport_status` and then closes
+- Important distinction:
+  - some `HELLO` fields are proposal inputs only
+  - the operational values for the session are the `HELLO_ACK` fields
+
+- `auth_token` -> `transport_status`
+  - client sends:
+    - `auth_token`
+  - server does:
+    - validates exact match
+  - server returns:
+    - no negotiated auth value
+    - only `transport_status`
+  - operational meaning:
+    - `OK` means authorized
+    - `AUTH_FAILED` means handshake rejected before session establishment
+
+- `supported_profiles` + `preferred_profiles` -> `server_supported_profiles` + `intersection_profiles` + `selected_profile`
+  - client sends:
+    - `supported_profiles`
+    - `preferred_profiles`
+  - server does:
+    - computes `intersection = client_supported & server_supported`
+    - if `intersection == 0`, returns `transport_status = UNSUPPORTED`
+    - otherwise selects the final profile
+  - current source-of-truth selection algorithm:
+    - highest bit of `(intersection & client_preferred & server_preferred)`
+    - else highest bit of `intersection`
+  - server returns:
+    - `server_supported_profiles`
+    - `intersection_profiles`
+    - `selected_profile`
+  - operational meaning:
+    - client does not continue using its own `supported_profiles`
+    - both sides use `selected_profile` for the session
+  - user-approved invariant:
+    - once returned by handshake, the profile is locked for the session
+    - if SHM is selected, SHM must already be usable for that session
+
+- `max_request_payload_bytes` -> `agreed_max_request_payload_bytes`
+  - client sends:
+    - proposed request payload ceiling
+  - user direction so far:
+    - typed L2 should proactively compute and propose this from method schema,
+      desired batch size, and dynamic-field assumptions
+    - the server should not increase it
+    - preferred behavior is to echo it back unchanged
+  - concrete current protocol constraint:
+    - source-of-truth currently enforces a hard payload cap of
+      `NIPC_MAX_PAYLOAD_CAP = 256 MB`
+  - evidence:
+      - `src/libnetdata/netipc/include/netipc/netipc_protocol.h`
+      - `src/libnetdata/netipc/src/transport/posix/netipc_uds.c`
+      - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`
+  - server returns:
+    - `agreed_max_request_payload_bytes`
+  - operational meaning:
+    - both sides use `agreed_max_request_payload_bytes` for the session
+  - user decision now recorded:
+    - replace the current `256 MB` hard cap with `1 MiB`
+    - if the client proposes a larger value, reject the handshake
+    - do not silently cap-down
+
+- `max_request_batch_items` -> `agreed_max_request_batch_items`
+  - client sends:
+    - proposed request batch-item ceiling
+  - user direction so far:
+    - client proposes intended batch size
+    - preferred behavior is to echo it back unchanged
+    - if there is no concrete server-side constraint, echo it back unchanged
+  - concrete current evidence:
+    - none found yet for a protocol-level hard maximum analogous to
+      `NIPC_MAX_PAYLOAD_CAP`
+    - current source-of-truth raises this value with `max(client, server)`,
+      but that is existing behavior, not evidence of necessity
+  - server returns:
+    - `agreed_max_request_batch_items`
+  - operational meaning:
+    - both sides use `agreed_max_request_batch_items` for the session
+  - user decision now recorded:
+    - if there is no concrete protocol-level constraint, echo the client
+      proposal back unchanged
+
+- `max_response_payload_bytes` -> `agreed_max_response_payload_bytes`
+  - client sends:
+    - optional hint/current expectation
+  - user-approved direction:
+    - server ignores the client for the final value
+    - server returns the value it will actually use
+  - server returns:
+    - `agreed_max_response_payload_bytes`
+  - operational meaning:
+    - both sides use `agreed_max_response_payload_bytes` for the session
+
+- `max_response_batch_items` -> `agreed_max_response_batch_items`
+  - concrete current evidence:
+    - current typed batch semantics are symmetric by position
+    - docs:
+      - `docs/level1-transport.md` says batch request/response items are
+        correlated by array position
+      - `docs/level2-typed-api.md` says the managed server assembles one batch
+        response preserving request order
+    - implementations:
+      - C sets `resp_hdr.item_count = hdr.item_count` for batch responses
+      - Go sets `resp_hdr.ItemCount = hdr.ItemCount` for batch responses
+      - Rust sets `resp_hdr.item_count = hdr.item_count` for batch responses
+  - user decision now recorded:
+    - keep the field on the wire
+    - require strict symmetry with request batch items
+    - server must return the same effective batch-item ceiling for requests
+      and responses for the session
+  - impact:
+    - no handshake layout removal for this field
+    - docs, APIs, codecs, and tests still need coordinated semantic cleanup so
+      the field is never treated as independently negotiated
+
+- `packet_size` -> `agreed_packet_size`
+  - client sends:
+    - proposed transport packet size
+  - user-approved direction:
+    - server decides with `min(client, server)`
+  - server returns:
+    - `agreed_packet_size`
+  - operational meaning:
+    - both sides use `agreed_packet_size` for chunking in the session
+
+- `session_id`
+  - client sends:
+    - nothing
+  - server does:
+    - allocates a per-session identifier
+  - server returns:
+    - `session_id`
+  - operational meaning:
+    - identifies this session
+    - used in per-session SHM naming/derivation
+
 ## TL;DR
 
 - Analyze how `plugin-ipc` should be integrated into the Netdata repo and build.
@@ -1046,6 +1508,67 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
      - exact daemon init/shutdown points for starting/stopping the `plugin-ipc` cgroups server and for initializing the `ebpf.plugin` client cache
 
 ## Plan
+
+### 2026-04-14 Handshake implementation phase
+
+1. Update the wire-level negotiation implementation in C / Go / Rust transports.
+   - Enforce `max_request_payload_bytes <= 1 MiB` during handshake.
+   - Reject oversized request proposals with handshake `LIMIT_EXCEEDED`.
+   - Stop using request-side `max(client, server)`.
+   - Make `agreed_max_response_batch_items` strictly equal to the effective request batch-item limit.
+   - Evidence:
+     - `src/libnetdata/netipc/src/transport/posix/netipc_uds.c`
+     - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`
+     - `src/go/pkg/netipc/transport/posix/uds.go`
+     - `src/go/pkg/netipc/transport/windows/pipe.go`
+     - `src/crates/netipc/src/transport/posix.rs`
+     - `src/crates/netipc/src/transport/windows.rs`
+
+2. Move SHM readiness earlier so successful handshake guarantees the selected profile is already usable.
+   - The server must not complete successful handshake with `selected_profile = SHM` unless SHM for that session is already ready.
+   - This requires changing the current “accept first, create SHM later” flow.
+   - Evidence:
+     - `src/libnetdata/netipc/src/service/netipc_service.c`
+     - `src/libnetdata/netipc/src/service/netipc_service_win.c`
+     - `src/go/pkg/netipc/service/raw/client.go`
+     - `src/go/pkg/netipc/service/raw/client_windows.go`
+     - `src/crates/netipc/src/service/raw.rs`
+
+3. Remove `max_request_payload_bytes` from the public typed L2 API surfaces.
+   - Keep internal learned sizing / overflow recovery machinery.
+   - Make typed L2 derive initial request sizing internally instead of exposing it publicly.
+   - Evidence:
+     - `src/libnetdata/netipc/include/netipc/netipc_service.h`
+     - `src/go/pkg/netipc/service/cgroups/types.go`
+     - `src/crates/netipc/src/service/cgroups.rs`
+
+4. Keep overflow-driven reconnect as a tested internal fallback.
+   - Preserve the existing recovery model, but align it to the new 1 MiB ceiling and the new public API contract.
+   - Evidence:
+     - `src/libnetdata/netipc/src/service/netipc_service.c`
+     - `src/libnetdata/netipc/src/service/netipc_service_win.c`
+     - `src/go/pkg/netipc/service/raw/client.go`
+     - `src/go/pkg/netipc/service/raw/client_windows.go`
+     - `src/crates/netipc/src/service/raw.rs`
+
+5. Rewrite and extend handshake tests so each negotiated field is validated individually across all implementations.
+   - Include all auth failures individually.
+   - Include explicit request-payload-cap rejection.
+   - Include request/response batch-item symmetry checks.
+   - Include overflow reconnect tests under the new contract.
+   - Evidence:
+     - `tests/fixtures/c/test_uds.c`
+     - `tests/fixtures/c/test_named_pipe.c`
+     - `tests/fixtures/c/test_service.c`
+     - `tests/fixtures/c/test_win_service.c`
+     - `src/go/pkg/netipc/transport/posix/uds_test.go`
+     - `src/go/pkg/netipc/transport/windows/pipe_integration_test.go`
+     - `src/go/pkg/netipc/service/raw/more_unix_test.go`
+     - `src/go/pkg/netipc/service/raw/more_windows_test.go`
+     - `src/crates/netipc/src/transport/posix_tests.rs`
+     - `src/crates/netipc/src/transport/windows.rs`
+     - `src/crates/netipc/src/service/raw_unix_tests.rs`
+     - `src/crates/netipc/src/service/raw_windows_tests.rs`
 
 1. Audit the current implementation surfaces that still encode multi-method service behavior.
 2. Define the replacement public model in code terms:

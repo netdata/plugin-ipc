@@ -39,10 +39,8 @@ func testUnixServerConfig() ServerConfig {
 	return ServerConfig{
 		SupportedProfiles:       protocol.ProfileBaseline,
 		PreferredProfiles:       protocol.ProfileBaseline,
-		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: testResponseSize,
-		MaxResponseBatchItems:   1,
 		AuthToken:               testAuthToken,
 	}
 }
@@ -51,10 +49,8 @@ func testUnixClientConfig() ClientConfig {
 	return ClientConfig{
 		SupportedProfiles:       protocol.ProfileBaseline,
 		PreferredProfiles:       protocol.ProfileBaseline,
-		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: testResponseSize,
-		MaxResponseBatchItems:   1,
 		AuthToken:               testAuthToken,
 	}
 }

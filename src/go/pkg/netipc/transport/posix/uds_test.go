@@ -548,6 +548,28 @@ func TestHandshakeProfileMismatch(t *testing.T) {
 	}
 }
 
+func TestHandshakeRequestPayloadOverCap(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	defer os.Remove(filepath.Join(runDir, service+".sock"))
+
+	listener := startListener(t, runDir, service, defaultServerConfig())
+	defer listener.Close()
+
+	acceptCh := acceptAsync(listener)
+
+	cCfg := defaultClientConfig()
+	cCfg.MaxRequestPayloadBytes = protocol.MaxPayloadCap + 1
+	if _, err := Connect(runDir, service, &cCfg); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("expected ErrLimitExceeded, got %v", err)
+	}
+
+	sr := <-acceptCh
+	if !errors.Is(sr.err, ErrLimitExceeded) {
+		t.Fatalf("server expected ErrLimitExceeded, got %v", sr.err)
+	}
+}
+
 func TestHandshakeIncompatibleClassifierHelpers(t *testing.T) {
 	hdr := protocol.Header{
 		Magic:     protocol.MagicMsg,
@@ -750,28 +772,40 @@ func TestDirectionalLimitNegotiation(t *testing.T) {
 	server := sr.session
 	defer server.Close()
 
-	// Requests are sender-driven, so request-side negotiation uses the larger
-	// value. Responses are server-driven, so response-side negotiation uses the
-	// server's value.
+	// Request-side values are echoed back to the caller, while response payload
+	// size remains server-owned. Response batch size stays symmetric with the
+	// negotiated request batch size.
 	if client.MaxRequestPayloadBytes != 4096 {
-		t.Errorf("req_payload = %d, want 4096", client.MaxRequestPayloadBytes)
+		t.Errorf("request payload = %d, want 4096", client.MaxRequestPayloadBytes)
 	}
 	if client.MaxRequestBatchItems != 16 {
-		t.Errorf("req_batch = %d, want 16", client.MaxRequestBatchItems)
+		t.Errorf("request batch = %d, want 16", client.MaxRequestBatchItems)
 	}
 	if client.MaxResponsePayloadBytes != 8192 {
-		t.Errorf("resp_payload = %d, want 8192", client.MaxResponsePayloadBytes)
+		t.Errorf("response payload = %d, want 8192", client.MaxResponsePayloadBytes)
 	}
-	if client.MaxResponseBatchItems != 32 {
-		t.Errorf("resp_batch = %d, want 32", client.MaxResponseBatchItems)
+	if client.MaxResponseBatchItems != 16 {
+		t.Errorf("response batch = %d, want 16", client.MaxResponseBatchItems)
+	}
+	if client.SessionID == 0 {
+		t.Fatal("session id must be non-zero")
 	}
 
 	// Server should have the same negotiated values
 	if server.MaxRequestPayloadBytes != client.MaxRequestPayloadBytes {
 		t.Errorf("server req_payload = %d, want %d", server.MaxRequestPayloadBytes, client.MaxRequestPayloadBytes)
 	}
+	if server.MaxRequestBatchItems != client.MaxRequestBatchItems {
+		t.Errorf("server req_batch = %d, want %d", server.MaxRequestBatchItems, client.MaxRequestBatchItems)
+	}
 	if server.MaxResponsePayloadBytes != client.MaxResponsePayloadBytes {
 		t.Errorf("server resp_payload = %d, want %d", server.MaxResponsePayloadBytes, client.MaxResponsePayloadBytes)
+	}
+	if server.MaxResponseBatchItems != client.MaxResponseBatchItems {
+		t.Errorf("server resp_batch = %d, want %d", server.MaxResponseBatchItems, client.MaxResponseBatchItems)
+	}
+	if server.SessionID != client.SessionID {
+		t.Errorf("server session_id = %d, want %d", server.SessionID, client.SessionID)
 	}
 }
 

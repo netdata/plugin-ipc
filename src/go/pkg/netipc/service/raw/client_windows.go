@@ -657,6 +657,7 @@ type Server struct {
 	running                     atomic.Bool
 	learnedRequestPayloadBytes  atomic.Uint32
 	learnedResponsePayloadBytes atomic.Uint32
+	nextSessionID               atomic.Uint64
 	workerCount                 int
 	wg                          sync.WaitGroup
 	listener                    *windows.Listener // stored so Stop() can close it
@@ -701,6 +702,8 @@ func NewServerWithWorkers(
 	}
 	s.learnedRequestPayloadBytes.Store(learnedRequest)
 	s.learnedResponsePayloadBytes.Store(learnedResponse)
+	// Session ids are 1-based; prepareAcceptConfig() allocates with Add(1).
+	s.nextSessionID.Store(0)
 	return s
 }
 
@@ -729,6 +732,92 @@ func serverNotePayloadCapacity(target *atomic.Uint32, payloadLen uint32) {
 	}
 }
 
+type preparedWinShm struct {
+	hybrid   *windows.WinShmContext
+	busywait *windows.WinShmContext
+}
+
+func (p *preparedWinShm) take(profile uint32) *windows.WinShmContext {
+	if p == nil {
+		return nil
+	}
+	switch profile {
+	case windows.WinShmProfileHybrid:
+		ctx := p.hybrid
+		p.hybrid = nil
+		return ctx
+	case windows.WinShmProfileBusywait:
+		ctx := p.busywait
+		p.busywait = nil
+		return ctx
+	default:
+		return nil
+	}
+}
+
+func (p *preparedWinShm) destroyAll() {
+	if p == nil {
+		return
+	}
+	if p.hybrid != nil {
+		p.hybrid.WinShmDestroy()
+		p.hybrid = nil
+	}
+	if p.busywait != nil {
+		p.busywait.WinShmDestroy()
+		p.busywait = nil
+	}
+}
+
+const winShmProfiles = windows.WinShmProfileHybrid | windows.WinShmProfileBusywait
+
+func (s *Server) prepareAcceptConfig() (uint64, windows.ServerConfig, *preparedWinShm, bool) {
+	sessionID := s.nextSessionID.Add(1)
+	cfg := s.config
+	cfg.MaxRequestPayloadBytes = s.learnedRequestPayloadBytes.Load()
+	cfg.MaxResponsePayloadBytes = s.learnedResponsePayloadBytes.Load()
+
+	if cfg.SupportedProfiles&winShmProfiles == 0 {
+		return sessionID, cfg, nil, true
+	}
+
+	prepared := &preparedWinShm{}
+	for _, profile := range []uint32{windows.WinShmProfileHybrid, windows.WinShmProfileBusywait} {
+		if cfg.SupportedProfiles&profile == 0 {
+			continue
+		}
+		shm, err := windows.WinShmServerCreate(
+			s.runDir, s.serviceName,
+			cfg.AuthToken,
+			sessionID,
+			profile,
+			cfg.MaxRequestPayloadBytes+uint32(protocol.HeaderSize),
+			cfg.MaxResponsePayloadBytes+uint32(protocol.HeaderSize),
+		)
+		if err != nil {
+			cfg.SupportedProfiles &^= profile
+			cfg.PreferredProfiles &^= profile
+			continue
+		}
+		if profile == windows.WinShmProfileHybrid {
+			prepared.hybrid = shm
+		} else {
+			prepared.busywait = shm
+		}
+	}
+
+	if cfg.SupportedProfiles == 0 {
+		prepared.destroyAll()
+		return sessionID, cfg, nil, false
+	}
+
+	if prepared.hybrid == nil && prepared.busywait == nil {
+		return sessionID, cfg, nil, true
+	}
+
+	return sessionID, cfg, prepared, true
+}
+
 // Run starts the acceptor loop. Blocking.
 func (s *Server) Run() error {
 	listener, err := windows.Listen(s.runDir, s.serviceName, s.config)
@@ -745,13 +834,17 @@ func (s *Server) Run() error {
 	sem := make(chan struct{}, s.workerCount)
 
 	for s.running.Load() {
-		listener.SetPayloadLimits(
-			s.learnedRequestPayloadBytes.Load(),
-			s.learnedResponsePayloadBytes.Load(),
-		)
+		sessionID, acceptCfg, preparedShm, ok := s.prepareAcceptConfig()
+		if !ok {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
 
-		session, err := listener.Accept()
+		session, err := listener.AcceptWithConfig(sessionID, acceptCfg)
 		if err != nil {
+			if preparedShm != nil {
+				preparedShm.destroyAll()
+			}
 			if !s.running.Load() {
 				break
 			}
@@ -762,29 +855,28 @@ func (s *Server) Run() error {
 		select {
 		case sem <- struct{}{}:
 		default:
+			if preparedShm != nil {
+				preparedShm.destroyAll()
+			}
 			session.Close()
 			continue
 		}
 
-		// Win SHM upgrade if negotiated
 		var shm *windows.WinShmContext
 		if session.SelectedProfile == windows.WinShmProfileHybrid ||
 			session.SelectedProfile == windows.WinShmProfileBusywait {
-			shmCtx, serr := windows.WinShmServerCreate(
-				s.runDir, s.serviceName,
-				s.config.AuthToken,
-				session.SessionID,
-				session.SelectedProfile,
-				session.MaxRequestPayloadBytes+uint32(protocol.HeaderSize),
-				session.MaxResponsePayloadBytes+uint32(protocol.HeaderSize),
-			)
-			if serr != nil {
-				// SHM create failed for negotiated SHM — reject session
+			shm = preparedShm.take(session.SelectedProfile)
+			if shm == nil {
+				if preparedShm != nil {
+					preparedShm.destroyAll()
+				}
 				session.Close()
 				<-sem
 				continue
 			}
-			shm = shmCtx
+		}
+		if preparedShm != nil {
+			preparedShm.destroyAll()
 		}
 
 		s.wg.Add(1)

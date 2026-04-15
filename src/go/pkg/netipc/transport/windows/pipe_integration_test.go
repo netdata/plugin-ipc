@@ -439,6 +439,26 @@ func TestPipeHandshakeProfileMismatch(t *testing.T) {
 	}
 }
 
+func TestPipeHandshakeRequestPayloadOverCap(t *testing.T) {
+	service := uniquePipeService(t)
+
+	listener := startListener(t, testPipeRunDir, service, defaultServerConfig())
+	defer listener.Close()
+
+	acceptCh := acceptAsync(listener)
+
+	cCfg := defaultClientConfig()
+	cCfg.MaxRequestPayloadBytes = protocol.MaxPayloadCap + 1
+	if _, err := Connect(testPipeRunDir, service, &cCfg); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("expected ErrLimitExceeded, got %v", err)
+	}
+
+	sr := <-acceptCh
+	if !errors.Is(sr.err, ErrLimitExceeded) {
+		t.Fatalf("server expected ErrLimitExceeded, got %v", sr.err)
+	}
+}
+
 func TestPipeHandshakeIncompatibleClassifierHelpers(t *testing.T) {
 	hdr := protocol.Header{
 		Magic:     protocol.MagicMsg,
@@ -512,10 +532,17 @@ func TestPipeDirectionalLimitNegotiation(t *testing.T) {
 	server := sr.session
 	defer server.Close()
 
-	if client.MaxRequestPayloadBytes != 4096 || client.MaxRequestBatchItems != 16 || client.MaxResponsePayloadBytes != 8192 || client.MaxResponseBatchItems != 32 {
+	if client.MaxRequestPayloadBytes != 4096 || client.MaxRequestBatchItems != 16 || client.MaxResponsePayloadBytes != 8192 || client.MaxResponseBatchItems != 16 {
 		t.Fatalf("unexpected negotiated client limits: %+v", client)
 	}
-	if server.MaxRequestPayloadBytes != client.MaxRequestPayloadBytes || server.MaxResponsePayloadBytes != client.MaxResponsePayloadBytes {
+	if client.SessionID == 0 {
+		t.Fatal("session id must be non-zero")
+	}
+	if server.MaxRequestPayloadBytes != client.MaxRequestPayloadBytes ||
+		server.MaxRequestBatchItems != client.MaxRequestBatchItems ||
+		server.MaxResponsePayloadBytes != client.MaxResponsePayloadBytes ||
+		server.MaxResponseBatchItems != client.MaxResponseBatchItems ||
+		server.SessionID != client.SessionID {
 		t.Fatalf("server/client negotiation mismatch: server=%+v client=%+v", server, client)
 	}
 }

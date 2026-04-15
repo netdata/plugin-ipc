@@ -438,7 +438,7 @@ func TestUnixSingleResponseOverflowRetriesAndRecovers(t *testing.T) {
 	}
 }
 
-func TestUnixShmCreateFailureKeepsServerHealthy(t *testing.T) {
+func TestUnixShmPrepareFailureFallsBackToBaseline(t *testing.T) {
 	svc := uniqueUnixService("go_unix_shm_create_fail")
 	obstruction := unixShmSessionPath(svc, 1)
 
@@ -463,17 +463,20 @@ func TestUnixShmCreateFailureKeepsServerHealthy(t *testing.T) {
 	badClient := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
 	defer badClient.Close()
 
-	if changed := badClient.Refresh(); changed {
-		t.Fatal("Refresh should stay DISCONNECTED when SHM create fails on the server")
+	if changed := badClient.Refresh(); !changed {
+		t.Fatal("Refresh should transition to READY when baseline stays viable")
 	}
-	if badClient.Ready() {
-		t.Fatal("client should not be ready after server SHM create failure")
+	if !badClient.Ready() {
+		t.Fatal("client should stay usable over baseline after server SHM prepare failure")
 	}
-	if badClient.state != StateDisconnected {
-		t.Fatalf("client state after SHM create failure = %d, want DISCONNECTED", badClient.state)
+	if badClient.state != StateReady {
+		t.Fatalf("client state after SHM prepare failure = %d, want READY", badClient.state)
 	}
-	if badClient.shm != nil || badClient.session != nil {
-		t.Fatal("client should not retain transport state after SHM create failure")
+	if badClient.shm != nil {
+		t.Fatalf("fallback baseline session must not attach SHM: selected=%#x session=%+v", badClient.session.SelectedProfile, badClient.session)
+	}
+	if badClient.session == nil || badClient.session.SelectedProfile != protocol.ProfileBaseline {
+		t.Fatalf("selected profile after SHM prepare failure = %#v, want baseline", badClient.session)
 	}
 
 	if _, err := os.Stat(obstruction); err != nil {

@@ -16,10 +16,9 @@ func clientConfigToTransport(config ClientConfig) windows.ClientConfig {
 	return windows.ClientConfig{
 		SupportedProfiles:       config.SupportedProfiles,
 		PreferredProfiles:       config.PreferredProfiles,
-		MaxRequestPayloadBytes:  config.MaxRequestPayloadBytes,
 		MaxRequestBatchItems:    config.MaxRequestBatchItems,
 		MaxResponsePayloadBytes: config.MaxResponsePayloadBytes,
-		MaxResponseBatchItems:   config.MaxResponseBatchItems,
+		MaxResponseBatchItems:   config.MaxRequestBatchItems,
 		AuthToken:               config.AuthToken,
 	}
 }
@@ -28,10 +27,9 @@ func serverConfigToTransport(config ServerConfig) windows.ServerConfig {
 	return windows.ServerConfig{
 		SupportedProfiles:       config.SupportedProfiles,
 		PreferredProfiles:       config.PreferredProfiles,
-		MaxRequestPayloadBytes:  config.MaxRequestPayloadBytes,
 		MaxRequestBatchItems:    config.MaxRequestBatchItems,
 		MaxResponsePayloadBytes: config.MaxResponsePayloadBytes,
-		MaxResponseBatchItems:   config.MaxResponseBatchItems,
+		MaxResponseBatchItems:   config.MaxRequestBatchItems,
 		AuthToken:               config.AuthToken,
 	}
 }

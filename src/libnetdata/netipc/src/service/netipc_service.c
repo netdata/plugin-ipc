@@ -211,10 +211,9 @@ static nipc_uds_client_config_t service_client_config_to_transport(
 
     transport.supported_profiles = config->supported_profiles;
     transport.preferred_profiles = config->preferred_profiles;
-    transport.max_request_payload_bytes = config->max_request_payload_bytes;
     transport.max_request_batch_items = config->max_request_batch_items;
     transport.max_response_payload_bytes = config->max_response_payload_bytes;
-    transport.max_response_batch_items = config->max_response_batch_items;
+    transport.max_response_batch_items = config->max_request_batch_items;
     transport.auth_token = config->auth_token;
 
     return transport;
@@ -230,10 +229,9 @@ static nipc_uds_server_config_t service_server_config_to_transport(
 
     transport.supported_profiles = config->supported_profiles;
     transport.preferred_profiles = config->preferred_profiles;
-    transport.max_request_payload_bytes = config->max_request_payload_bytes;
     transport.max_request_batch_items = config->max_request_batch_items;
     transport.max_response_payload_bytes = config->max_response_payload_bytes;
-    transport.max_response_batch_items = config->max_response_batch_items;
+    transport.max_response_batch_items = config->max_request_batch_items;
     transport.auth_token = config->auth_token;
 
     return transport;
@@ -1066,6 +1064,55 @@ static void server_reap_sessions_locked(nipc_managed_server_t *server)
 
 }
 
+static void server_destroy_precreated_shm(nipc_shm_ctx_t **shm)
+{
+    if (!shm || !*shm)
+        return;
+    nipc_shm_destroy(*shm);
+    free(*shm);
+    *shm = NULL;
+}
+
+static bool server_prepare_accept_config(nipc_managed_server_t *server,
+                                         uint64_t sid,
+                                         nipc_uds_server_config_t *cfg_out,
+                                         nipc_shm_ctx_t **shm_out)
+{
+    *cfg_out = server->base_config;
+    cfg_out->max_request_payload_bytes =
+        __atomic_load_n(&server->learned_request_payload_bytes, __ATOMIC_ACQUIRE);
+    cfg_out->max_response_payload_bytes =
+        __atomic_load_n(&server->learned_response_payload_bytes, __ATOMIC_ACQUIRE);
+    *shm_out = NULL;
+
+    uint32_t shm_profiles = cfg_out->supported_profiles &
+                            (NIPC_PROFILE_SHM_HYBRID | NIPC_PROFILE_SHM_FUTEX);
+    if (shm_profiles == 0)
+        return true;
+
+    nipc_shm_ctx_t *shm = service_calloc(
+        1, sizeof(nipc_shm_ctx_t),
+        NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_SHM_CTX_CALLOC_INTERNAL);
+    if (!shm)
+        return false;
+
+    nipc_shm_error_t serr = nipc_shm_server_create(
+        server->run_dir, server->service_name,
+        sid,
+        cfg_out->max_request_payload_bytes + NIPC_HEADER_LEN,
+        cfg_out->max_response_payload_bytes + NIPC_HEADER_LEN,
+        shm);
+    if (serr == NIPC_SHM_OK) {
+        *shm_out = shm;
+        return true;
+    }
+
+    free(shm);
+    cfg_out->supported_profiles &= ~(NIPC_PROFILE_SHM_HYBRID | NIPC_PROFILE_SHM_FUTEX);
+    cfg_out->preferred_profiles &= ~(NIPC_PROFILE_SHM_HYBRID | NIPC_PROFILE_SHM_FUTEX);
+    return cfg_out->supported_profiles != 0;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Public API: managed server                                         */
 /* ------------------------------------------------------------------ */
@@ -1110,6 +1157,7 @@ static nipc_error_t server_init_raw(nipc_managed_server_t *server,
     server->handler_user = user;
     server->worker_count = worker_count;
     server->expected_method_code = expected_method_code;
+    server->base_config = *config;
     server->learned_request_payload_bytes =
         (config && config->max_request_payload_bytes > 0)
             ? config->max_request_payload_bytes
@@ -1199,20 +1247,24 @@ void nipc_server_run(nipc_managed_server_t *server)
         if (pr <= 0)
             break; /* shutdown or error */
 
-        server->listener.config.max_request_payload_bytes =
-            __atomic_load_n(&server->learned_request_payload_bytes, __ATOMIC_ACQUIRE);
-        server->listener.config.max_response_payload_bytes =
-            __atomic_load_n(&server->learned_response_payload_bytes, __ATOMIC_ACQUIRE);
-
         /* Accept one client via L1 */
         nipc_uds_session_t session;
         memset(&session, 0, sizeof(session));
         session.fd = -1;
 
-        uint64_t sid = server->next_session_id;
+        uint64_t sid = server->next_session_id++;
+        nipc_uds_server_config_t accept_cfg;
+        nipc_shm_ctx_t *prepared_shm = NULL;
+        if (!server_prepare_accept_config(server, sid, &accept_cfg, &prepared_shm)) {
+            usleep(10000);
+            continue;
+        }
+
+        server->listener.config = accept_cfg;
         nipc_uds_error_t uerr = nipc_uds_accept(
             &server->listener, sid, &session);
         if (uerr != NIPC_UDS_OK) {
+            server_destroy_precreated_shm(&prepared_shm);
             if (!__atomic_load_n(&server->running, __ATOMIC_RELAXED))
                 break;
             usleep(10000);
@@ -1229,41 +1281,24 @@ void nipc_server_run(nipc_managed_server_t *server)
         if (server->session_count >= server->worker_count) {
             /* At capacity: reject this client by closing the session */
             pthread_mutex_unlock(&server->sessions_lock);
+            server_destroy_precreated_shm(&prepared_shm);
             nipc_uds_close_session(&session);
             continue;
         }
 
-        /* SHM upgrade if negotiated. Each session gets its own SHM
-         * region (per-session path via session_id). */
-        nipc_shm_ctx_t *shm = NULL;
+        /* SHM profile guarantee: only negotiate SHM for sessions that already
+         * have a prepared per-session SHM region. */
+        nipc_shm_ctx_t *shm = prepared_shm;
         if (session.selected_profile == NIPC_PROFILE_SHM_HYBRID ||
             session.selected_profile == NIPC_PROFILE_SHM_FUTEX) {
-
-            nipc_shm_ctx_t *s = service_calloc(
-                1, sizeof(nipc_shm_ctx_t),
-                NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_SHM_CTX_CALLOC_INTERNAL);
-            if (s) {
-                nipc_shm_error_t serr = nipc_shm_server_create(
-                    server->run_dir, server->service_name,
-                    sid,
-                    session.max_request_payload_bytes + NIPC_HEADER_LEN,
-                    session.max_response_payload_bytes + NIPC_HEADER_LEN,
-                    s);
-                if (serr == NIPC_SHM_OK) {
-                    shm = s;
-                } else {
-                    /* SHM create failed for a session that negotiated SHM.
-                     * Reject the session to avoid transport desync. */
-                    free(s);
-                    pthread_mutex_unlock(&server->sessions_lock);
-                    nipc_uds_close_session(&session);
-                    continue;
-                }
-            } else {
+            if (!shm) {
                 pthread_mutex_unlock(&server->sessions_lock);
                 nipc_uds_close_session(&session);
                 continue;
             }
+        } else {
+            server_destroy_precreated_shm(&prepared_shm);
+            shm = NULL;
         }
 
         /* Create session context */
@@ -1280,7 +1315,7 @@ void nipc_server_run(nipc_managed_server_t *server)
         sctx->server = server;
         sctx->session = session;
         sctx->shm = shm;
-        sctx->id = server->next_session_id++;
+        sctx->id = sid;
         __atomic_store_n(&sctx->active, true, __ATOMIC_RELAXED);
 
         server->sessions[server->session_count++] = sctx;

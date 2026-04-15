@@ -26,10 +26,8 @@ fn unique_service(prefix: &str) -> String {
 fn server_config() -> ServerConfig {
     ServerConfig {
         supported_profiles: PROFILE_BASELINE,
-        max_request_payload_bytes: 4096,
         max_request_batch_items: 1,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-        max_response_batch_items: 1,
         auth_token: AUTH_TOKEN,
         ..ServerConfig::default()
     }
@@ -38,10 +36,8 @@ fn server_config() -> ServerConfig {
 fn client_config() -> ClientConfig {
     ClientConfig {
         supported_profiles: PROFILE_BASELINE,
-        max_request_payload_bytes: 4096,
         max_request_batch_items: 1,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-        max_response_batch_items: 1,
         auth_token: AUTH_TOKEN,
         ..ClientConfig::default()
     }
@@ -50,10 +46,8 @@ fn client_config() -> ClientConfig {
 fn shm_server_config() -> ServerConfig {
     ServerConfig {
         supported_profiles: PROFILE_SHM_HYBRID | PROFILE_BASELINE,
-        max_request_payload_bytes: 4096,
         max_request_batch_items: 1,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-        max_response_batch_items: 1,
         auth_token: AUTH_TOKEN,
         ..ServerConfig::default()
     }
@@ -62,10 +56,8 @@ fn shm_server_config() -> ServerConfig {
 fn shm_client_config() -> ClientConfig {
     ClientConfig {
         supported_profiles: PROFILE_SHM_HYBRID | PROFILE_BASELINE,
-        max_request_payload_bytes: 4096,
         max_request_batch_items: 1,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
-        max_response_batch_items: 1,
         auth_token: AUTH_TOKEN,
         ..ClientConfig::default()
     }
@@ -139,10 +131,8 @@ impl TestServer {
         let wake_config = ClientConfig {
             supported_profiles: config.supported_profiles,
             preferred_profiles: config.preferred_profiles,
-            max_request_payload_bytes: config.max_request_payload_bytes,
             max_request_batch_items: config.max_request_batch_items,
             max_response_payload_bytes: config.max_response_payload_bytes,
-            max_response_batch_items: config.max_response_batch_items,
             auth_token: config.auth_token,
             ..ClientConfig::default()
         };

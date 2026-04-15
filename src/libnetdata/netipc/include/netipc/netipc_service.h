@@ -83,10 +83,8 @@ typedef struct {
 typedef struct {
     uint32_t supported_profiles;
     uint32_t preferred_profiles;
-    uint32_t max_request_payload_bytes;
     uint32_t max_request_batch_items;
     uint32_t max_response_payload_bytes;
-    uint32_t max_response_batch_items;
     uint64_t auth_token;
 } nipc_client_config_t;
 
@@ -101,10 +99,8 @@ typedef struct {
 typedef struct {
     uint32_t supported_profiles;
     uint32_t preferred_profiles;
-    uint32_t max_request_payload_bytes;
     uint32_t max_request_batch_items;
     uint32_t max_response_payload_bytes;
-    uint32_t max_response_batch_items;
     uint64_t auth_token;
 } nipc_server_config_t;
 
@@ -261,8 +257,10 @@ struct nipc_managed_server {
     /* Listener */
 #if defined(_WIN32) || defined(__MSYS__)
     nipc_np_listener_t listener;
+    nipc_np_server_config_t base_config;
 #else
     nipc_uds_listener_t listener;
+    nipc_uds_server_config_t base_config;
 #endif
 
     /* Concurrency control */

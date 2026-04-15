@@ -436,6 +436,39 @@ fn test_profile_mismatch() {
     cleanup_socket(&svc);
 }
 
+#[test]
+fn test_request_payload_over_cap() {
+    ensure_run_dir();
+    let svc = unique_service("rs_reqcap");
+    cleanup_socket(&svc);
+
+    let svc_clone = svc.clone();
+    let ready = Arc::new(AtomicBool::new(false));
+    let ready_clone = ready.clone();
+
+    let server_thread = thread::spawn(move || {
+        let listener =
+            UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
+        ready_clone.store(true, Ordering::Release);
+        let result = listener.accept();
+        assert!(matches!(result, Err(UdsError::LimitExceeded)));
+    });
+
+    while !ready.load(Ordering::Acquire) {
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let ccfg = ClientConfig {
+        max_request_payload_bytes: protocol::MAX_PAYLOAD_CAP + 1,
+        ..default_client_config()
+    };
+    let result = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg);
+    assert!(matches!(result, Err(UdsError::LimitExceeded)));
+
+    server_thread.join().expect("server join");
+    cleanup_socket(&svc);
+}
+
 // -----------------------------------------------------------------------
 //  Test 7: Stale socket recovery
 // -----------------------------------------------------------------------
@@ -1347,7 +1380,8 @@ fn test_directional_limit_negotiation() {
         assert_eq!(session.max_request_payload_bytes, 4096);
         assert_eq!(session.max_request_batch_items, 16);
         assert_eq!(session.max_response_payload_bytes, 8192);
-        assert_eq!(session.max_response_batch_items, 32);
+        assert_eq!(session.max_response_batch_items, 16);
+        assert_ne!(session.session_id, 0);
     });
 
     while !ready.load(Ordering::Acquire) {
@@ -1366,7 +1400,8 @@ fn test_directional_limit_negotiation() {
     assert_eq!(session.max_request_payload_bytes, 4096);
     assert_eq!(session.max_request_batch_items, 16);
     assert_eq!(session.max_response_payload_bytes, 8192);
-    assert_eq!(session.max_response_batch_items, 32);
+    assert_eq!(session.max_response_batch_items, 16);
+    assert_ne!(session.session_id, 0);
 
     drop(session);
     server_thread.join().expect("server join");

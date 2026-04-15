@@ -1033,6 +1033,17 @@ impl NpListener {
 
     /// Accept one client connection. Performs the full handshake.
     pub fn accept(&mut self) -> Result<NpSession, NpError> {
+        let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+        self.accept_with_config(session_id, self.config.clone())
+    }
+
+    /// Accept one client using a caller-provided per-session server config
+    /// and session ID.
+    pub fn accept_with_config(
+        &mut self,
+        session_id: u64,
+        config: ServerConfig,
+    ) -> Result<NpSession, NpError> {
         // Wait for client
         let connected = unsafe { ffi::ConnectNamedPipe(self.handle, ptr::null_mut()) };
         if connected == 0 {
@@ -1062,8 +1073,7 @@ impl NpListener {
         self.handle = next;
 
         // Perform handshake
-        let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
-        match server_handshake(session_handle, &self.config, session_id) {
+        match server_handshake(session_handle, &config, session_id) {
             Ok(session) => Ok(session),
             Err(e) => {
                 unsafe {
@@ -1213,6 +1223,9 @@ fn client_handshake(handle: ffi::HANDLE, config: &ClientConfig) -> Result<NpSess
             "ack transport_status incompatible".into(),
         ));
     }
+    if ack_hdr.transport_status == protocol::STATUS_LIMIT_EXCEEDED {
+        return Err(NpError::LimitExceeded);
+    }
     if ack_hdr.transport_status != protocol::STATUS_OK {
         return Err(NpError::Handshake(format!(
             "transport_status={}",
@@ -1271,10 +1284,7 @@ fn server_handshake(
     session_id: u64,
 ) -> Result<NpSession, NpError> {
     let server_pkt_size = apply_default(config.packet_size, DEFAULT_PACKET_SIZE);
-    let s_req_pay = apply_default(config.max_request_payload_bytes, MAX_PAYLOAD_DEFAULT);
-    let s_req_bat = apply_default(config.max_request_batch_items, DEFAULT_BATCH_ITEMS);
     let s_resp_pay = apply_default(config.max_response_payload_bytes, MAX_PAYLOAD_DEFAULT);
-    let s_resp_bat = apply_default(config.max_response_batch_items, DEFAULT_BATCH_ITEMS);
     let s_profiles = if config.supported_profiles != 0 {
         config.supported_profiles
     } else {
@@ -1363,18 +1373,27 @@ fn server_handshake(
         highest_bit(intersection)
     };
 
-    // Negotiate limits:
-    // - requests use the larger of client/server advertised capacities
-    // - responses are server-authoritative
-    let agreed_req_pay = max_u32(hello.max_request_payload_bytes, s_req_pay).min(MAX_PAYLOAD_CAP);
-    let agreed_req_bat = max_u32(hello.max_request_batch_items, s_req_bat);
-    let agreed_resp_pay = s_resp_pay;
-    let agreed_resp_bat = s_resp_bat;
-    let mut agreed_pkt = min_u32(hello.packet_size, server_pkt_size);
+    if hello.max_request_payload_bytes > MAX_PAYLOAD_CAP {
+        send_rejection(protocol::STATUS_LIMIT_EXCEEDED);
+        return Err(NpError::LimitExceeded);
+    }
 
-    // Reject packet sizes too small for a header
+    // Negotiate limits:
+    // - request payload and batch size are client-proposed and echoed
+    // - response payload is server-authoritative
+    // - response batch size is symmetric with request batch size
+    let agreed_req_pay = hello.max_request_payload_bytes;
+    let agreed_req_bat = hello.max_request_batch_items;
+    let agreed_resp_pay = s_resp_pay;
+    let agreed_resp_bat = agreed_req_bat;
+    let agreed_pkt = min_u32(hello.packet_size, server_pkt_size);
+
+    // Reject packet sizes too small for a usable message packet
     if agreed_pkt <= HEADER_SIZE as u32 {
-        agreed_pkt = server_pkt_size;
+        send_rejection(protocol::STATUS_INCOMPATIBLE);
+        return Err(NpError::Incompatible(
+            "packet size too small for negotiated session".into(),
+        ));
     }
 
     // Send HELLO_ACK
@@ -1956,7 +1975,8 @@ mod tests {
             assert_eq!(session.max_request_payload_bytes, 4096);
             assert_eq!(session.max_request_batch_items, 16);
             assert_eq!(session.max_response_payload_bytes, 8192);
-            assert_eq!(session.max_response_batch_items, 32);
+            assert_eq!(session.max_response_batch_items, 16);
+            assert_ne!(session.session_id, 0);
             session.close();
         });
 
@@ -1971,9 +1991,34 @@ mod tests {
         assert_eq!(session.max_request_payload_bytes, 4096);
         assert_eq!(session.max_request_batch_items, 16);
         assert_eq!(session.max_response_payload_bytes, 8192);
-        assert_eq!(session.max_response_batch_items, 32);
+        assert_eq!(session.max_response_batch_items, 16);
+        assert_ne!(session.session_id, 0);
 
         session.close();
+        server.join().expect("server join");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_request_payload_over_cap() {
+        ensure_run_dir();
+        let svc = unique_service("rs_reqcap");
+
+        let mut listener =
+            NpListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("bind");
+
+        let server = thread::spawn(move || {
+            let result = listener.accept();
+            assert!(matches!(result, Err(NpError::LimitExceeded)));
+        });
+
+        let ccfg = ClientConfig {
+            max_request_payload_bytes: protocol::MAX_PAYLOAD_CAP + 1,
+            ..default_client_config()
+        };
+        let result = NpSession::connect(TEST_RUN_DIR, &svc, &ccfg);
+        assert!(matches!(result, Err(NpError::LimitExceeded)));
+
         server.join().expect("server join");
     }
 

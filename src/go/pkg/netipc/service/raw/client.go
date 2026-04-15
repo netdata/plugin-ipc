@@ -672,6 +672,7 @@ type Server struct {
 	running                     atomic.Bool
 	learnedRequestPayloadBytes  atomic.Uint32
 	learnedResponsePayloadBytes atomic.Uint32
+	nextSessionID               atomic.Uint64
 	workerCount                 int
 	wg                          sync.WaitGroup
 }
@@ -716,6 +717,8 @@ func NewServerWithWorkers(
 	}
 	s.learnedRequestPayloadBytes.Store(learnedRequest)
 	s.learnedResponsePayloadBytes.Store(learnedResponse)
+	// Session ids are 1-based; prepareAcceptConfig() allocates with Add(1).
+	s.nextSessionID.Store(0)
 	return s
 }
 
@@ -742,6 +745,36 @@ func serverNotePayloadCapacity(target *atomic.Uint32, payloadLen uint32) {
 			return
 		}
 	}
+}
+
+const posixShmProfiles = protocol.ProfileSHMHybrid | protocol.ProfileSHMFutex
+
+func (s *Server) prepareAcceptConfig() (uint64, posix.ServerConfig, *posix.ShmContext, bool) {
+	sessionID := s.nextSessionID.Add(1)
+	cfg := s.config
+	cfg.MaxRequestPayloadBytes = s.learnedRequestPayloadBytes.Load()
+	cfg.MaxResponsePayloadBytes = s.learnedResponsePayloadBytes.Load()
+
+	if cfg.SupportedProfiles&posixShmProfiles == 0 {
+		return sessionID, cfg, nil, true
+	}
+
+	shm, err := posix.ShmServerCreate(
+		s.runDir, s.serviceName, sessionID,
+		cfg.MaxRequestPayloadBytes+uint32(protocol.HeaderSize),
+		cfg.MaxResponsePayloadBytes+uint32(protocol.HeaderSize),
+	)
+	if err == nil {
+		return sessionID, cfg, shm, true
+	}
+
+	cfg.SupportedProfiles &^= posixShmProfiles
+	cfg.PreferredProfiles &^= posixShmProfiles
+	if cfg.SupportedProfiles == 0 {
+		return sessionID, cfg, nil, false
+	}
+
+	return sessionID, cfg, nil, true
 }
 
 // Run starts the acceptor loop. Blocking. Accepts clients, spawns a
@@ -771,13 +804,17 @@ func (s *Server) Run() error {
 			continue
 		}
 
-		listener.SetPayloadLimits(
-			s.learnedRequestPayloadBytes.Load(),
-			s.learnedResponsePayloadBytes.Load(),
-		)
+		sessionID, acceptCfg, precreatedShm, ok := s.prepareAcceptConfig()
+		if !ok {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
 
-		session, err := listener.Accept()
+		session, err := listener.AcceptWithConfig(sessionID, acceptCfg)
 		if err != nil {
+			if precreatedShm != nil {
+				precreatedShm.ShmDestroy()
+			}
 			if !s.running.Load() {
 				break
 			}
@@ -791,26 +828,24 @@ func (s *Server) Run() error {
 			// Got a slot
 		default:
 			// At capacity: reject client
+			if precreatedShm != nil {
+				precreatedShm.ShmDestroy()
+			}
 			session.Close()
 			continue
 		}
 
-		// SHM upgrade if negotiated
 		var shm *posix.ShmContext
 		if session.SelectedProfile == protocol.ProfileSHMHybrid ||
 			session.SelectedProfile == protocol.ProfileSHMFutex {
-			shmCtx, serr := posix.ShmServerCreate(
-				s.runDir, s.serviceName, session.SessionID,
-				session.MaxRequestPayloadBytes+uint32(protocol.HeaderSize),
-				session.MaxResponsePayloadBytes+uint32(protocol.HeaderSize),
-			)
-			if serr != nil {
-				// SHM create failed for negotiated SHM — reject session
+			if precreatedShm == nil {
 				session.Close()
-				<-sem // release worker slot
+				<-sem
 				continue
 			}
-			shm = shmCtx
+			shm = precreatedShm
+		} else if precreatedShm != nil {
+			precreatedShm.ShmDestroy()
 		}
 
 		// Handle this session in a goroutine

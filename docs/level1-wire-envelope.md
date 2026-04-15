@@ -166,10 +166,10 @@ Sent by the client as a CONTROL message with `code = HELLO`.
 | 2 | 2 | u16 | flags | Reserved, must be `0` |
 | 4 | 4 | u32 | supported_profiles | Bitmask of client's supported profiles |
 | 8 | 4 | u32 | preferred_profiles | Bitmask of client's preferred profiles |
-| 12 | 4 | u32 | max_request_payload_bytes | Client's request payload ceiling |
-| 16 | 4 | u32 | max_request_batch_items | Client's request batch item ceiling |
-| 20 | 4 | u32 | max_response_payload_bytes | Client's response payload ceiling |
-| 24 | 4 | u32 | max_response_batch_items | Client's response batch item ceiling |
+| 12 | 4 | u32 | max_request_payload_bytes | Client's proposed whole-request payload ceiling |
+| 16 | 4 | u32 | max_request_batch_items | Client's proposed request batch-item ceiling |
+| 20 | 4 | u32 | max_response_payload_bytes | Client hint for response payload ceiling |
+| 24 | 4 | u32 | max_response_batch_items | Client hint for response batch-item ceiling; kept for wire symmetry |
 | 28 | 4 | - | padding | Reserved, must be `0` |
 | 32 | 8 | u64 | auth_token | Caller-supplied authentication token |
 | 40 | 4 | u32 | packet_size | Client's transport packet size |
@@ -187,28 +187,77 @@ Sent by the server as a CONTROL message with `code = HELLO_ACK`.
 | 4 | 4 | u32 | server_supported_profiles | Server's supported profiles |
 | 8 | 4 | u32 | intersection_profiles | AND of client and server support |
 | 12 | 4 | u32 | selected_profile | Profile chosen for this session |
-| 16 | 4 | u32 | agreed_max_request_payload_bytes | Agreed request payload limit, sender-driven |
-| 20 | 4 | u32 | agreed_max_request_batch_items | Agreed request batch item limit, sender-driven |
-| 24 | 4 | u32 | agreed_max_response_payload_bytes | Agreed response payload limit, server-driven |
-| 28 | 4 | u32 | agreed_max_response_batch_items | Agreed response batch item limit, server-driven |
-| 32 | 4 | u32 | agreed_packet_size | Negotiated packet size = min(client, server) |
+| 16 | 4 | u32 | agreed_max_request_payload_bytes | Final request payload limit for this session |
+| 20 | 4 | u32 | agreed_max_request_batch_items | Final request batch-item limit for this session |
+| 24 | 4 | u32 | agreed_max_response_payload_bytes | Final response payload limit for this session |
+| 28 | 4 | u32 | agreed_max_response_batch_items | Final response batch-item limit for this session; symmetric with request batch items |
+| 32 | 4 | u32 | agreed_packet_size | Final packet size for this session |
 | 36 | 4 | - | padding | Reserved, must be `0` |
 | 40 | 8 | u64 | session_id | Server-assigned session identifier |
 
 Total: 48 bytes.
 
-Directional semantics:
+### Handshake contract
 
-- Requests are sender-driven.
-  The operational request limits come from the larger of the client and server
-  advertised request capacities, capped at 256 MB (NIPC_MAX_PAYLOAD_CAP), so
-  long-lived sessions can learn and retain a larger request envelope when
-  batching grows. The cap prevents a compromised peer from forcing excessive
-  memory allocation.
-- Responses are server-driven.
-  The operational response limits come from the server's currently learned
-  response capacities, so later clients inherit the service's learned steady
-  state without having to rediscover it themselves.
+The handshake is a proposal/result protocol:
+
+- the client sends `HELLO`
+- the server validates it, makes all final decisions, and returns `HELLO_ACK`
+- the client uses the values returned in `HELLO_ACK`
+- if the server rejects the handshake, it sends `HELLO_ACK` with a non-`OK`
+  `transport_status` and then closes
+
+The server does not return partial success. A successful handshake means:
+
+- `transport_status = OK`
+- all session-operational fields in `HELLO_ACK` are final for that session
+- `selected_profile` is already guaranteed usable for that session
+
+If `selected_profile` is an SHM profile, the server must not send successful
+`HELLO_ACK` until the SHM resources for that session are already ready. The
+handshake must never claim SHM success and then fall back after the fact.
+
+### Field-by-field negotiation matrix
+
+The following matrix is normative.
+
+| Client input in `HELLO` | Server validation / decision | Server return in `HELLO_ACK` | Session uses |
+|---|---|---|---|
+| `layout_version` | Must be exactly `1`, otherwise reject with `INCOMPATIBLE` | none on failure, or `layout_version = 1` on success | `layout_version = 1` |
+| `flags` | Must be `0`, otherwise reject with `BAD_ENVELOPE` | none on failure, or `flags = 0` on success | `flags = 0` |
+| `auth_token` | Exact-match authorization check | no negotiated auth field; result is carried only in `transport_status` | authorization outcome only |
+| `supported_profiles` + `preferred_profiles` | Compute `intersection = client_supported & server_supported`; if empty reject with `UNSUPPORTED`; otherwise choose one final profile | `server_supported_profiles`, `intersection_profiles`, `selected_profile` | `selected_profile` |
+| `max_request_payload_bytes` | Client proposes the whole request payload ceiling. If proposal exceeds `1 MiB`, reject with `LIMIT_EXCEEDED`. Otherwise echo it unchanged. | `agreed_max_request_payload_bytes` | `agreed_max_request_payload_bytes` |
+| `max_request_batch_items` | Echo unchanged unless a concrete protocol-level constraint is introduced in a future revision | `agreed_max_request_batch_items` | `agreed_max_request_batch_items` |
+| `max_response_payload_bytes` | Treat as a client hint only; server decides the final response payload ceiling it will use | `agreed_max_response_payload_bytes` | `agreed_max_response_payload_bytes` |
+| `max_response_batch_items` | Kept on the wire for symmetry; server must return the same effective batch-item limit as request batching for that session | `agreed_max_response_batch_items` | `agreed_max_response_batch_items`, which must equal `agreed_max_request_batch_items` |
+| `packet_size` | Choose `min(client_packet_size, server_packet_size)`; if result is `<= 32`, reject with `INCOMPATIBLE` | `agreed_packet_size` | `agreed_packet_size` |
+| no client field | Server allocates a fresh session identifier | `session_id` | `session_id` |
+
+Clarifications:
+
+- `max_request_payload_bytes` is the maximum size of the complete Level 1
+  request payload, excluding the 32-byte outer header.
+- For batch requests, this means the entire batch payload:
+  - item directory
+  - alignment padding
+  - all packed item payloads
+- `max_request_batch_items` and `max_response_batch_items` are item-count
+  ceilings, enforced independently from payload-byte ceilings.
+
+### Handshake rejection semantics
+
+On handshake rejection, the server sends `HELLO_ACK` with a non-`OK`
+`transport_status`, then closes the connection.
+
+| Condition | `transport_status` |
+|---|---|
+| auth token mismatch | `AUTH_FAILED` |
+| no mutually supported profile | `UNSUPPORTED` |
+| `layout_version != 1` | `INCOMPATIBLE` |
+| negotiated packet size `<= 32` | `INCOMPATIBLE` |
+| proposed `max_request_payload_bytes > 1 MiB` | `LIMIT_EXCEEDED` |
+| malformed reserved/padding fields | `BAD_ENVELOPE` |
 
 The `session_id` is a server-generated monotonic counter (starting at 1,
 incremented per accepted session). It uniquely identifies this session for
@@ -231,39 +280,27 @@ bit positions where possible:
 
 Bit 0 is always the baseline profile for the platform.
 
-### Handshake negotiation rules
+### Successful handshake rules
 
-1. Client sends HELLO with its supported/preferred profiles, directional
-   limits, auth token, and packet size.
-2. Server computes `intersection = client_supported & server_supported`.
-3. If intersection is empty, server sends HELLO_ACK with
-   `transport_status = UNSUPPORTED` and closes.
-4. If auth token does not match, server sends HELLO_ACK with
-   `transport_status = AUTH_FAILED` and closes.
-5. Server selects a profile deterministically:
-   a. Compute `preferred_intersection = intersection &
-      client_preferred & server_preferred`.
-   b. If `preferred_intersection` is non-zero, select the highest set
-      bit in it.
-   c. Otherwise select the highest set bit in `intersection`.
-   d. Higher bits represent faster/more capable profiles (SHM > baseline).
-      Bit 0 is always the baseline fallback.
-6. Server negotiates directional limits with directional ownership:
-   - request payload and batch limits are sender-driven, so the
-     operational request limits are the larger of the client and server
-     advertised request capacities
-   - response payload and batch limits are server-driven, so the
-     operational response limits come from the server's current learned
-     response capacities
-7. Server computes `agreed_packet_size = min(client_packet_size,
-   server_packet_size)`.
-8. Server sends HELLO_ACK with `transport_status = OK` and all
-   negotiated values.
-9. Both sides use the negotiated values for the remainder of the
-   session. These capacities are fixed for that session. If higher
-   layers later reconnect with larger learned capacities, the next
-   session gets a new `session_id` and a new per-session SHM region /
-   kernel object set.
+1. Client sends `HELLO` with:
+   - authorization token
+   - supported and preferred profiles
+   - request payload and batch-item proposals
+   - response payload and batch-item hints
+   - packet size proposal
+2. Server validates the envelope and `HELLO` payload shape.
+3. Server validates authorization.
+4. Server computes the mutually supported profile set.
+5. Server chooses one final `selected_profile`:
+   - first choice: highest bit in
+     `(intersection & client_preferred & server_preferred)`
+   - fallback choice: highest bit in `intersection`
+6. Server computes the final session limits using the matrix above.
+7. If the final profile is SHM, the server makes SHM for that session ready
+   before sending successful `HELLO_ACK`.
+8. Server allocates `session_id`.
+9. Server sends `HELLO_ACK` with `transport_status = OK`.
+10. Both sides use the returned `HELLO_ACK` values for the rest of the session.
 
 ### Default constants
 

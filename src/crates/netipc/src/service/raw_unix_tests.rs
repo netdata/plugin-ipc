@@ -927,7 +927,7 @@ fn test_refresh_shm_attach_failure_returns_disconnected() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn test_server_rejects_session_when_linux_shm_upgrade_create_fails() {
+fn test_server_falls_back_to_baseline_when_linux_shm_prepare_fails() {
     let svc = "rs_svc_shm_upgrade_fail";
     ensure_run_dir();
     cleanup_all(svc);
@@ -945,9 +945,14 @@ fn test_server_rejects_session_when_linux_shm_upgrade_create_fails() {
     );
     let mut client = increment_client(svc, shm_client_config());
 
-    client.refresh();
-    assert!(!client.ready(), "client should not become READY");
-    assert_eq!(client.state, ClientState::Disconnected);
+    assert!(client.refresh(), "client should transition to READY");
+    assert!(client.ready(), "client should remain usable over baseline");
+    assert_eq!(client.state, ClientState::Ready);
+    assert_eq!(
+        client.session.as_ref().map(|s| s.selected_profile),
+        Some(PROFILE_BASELINE)
+    );
+    assert!(client.shm.is_none(), "fallback session must not attach SHM");
 
     client.close();
     server.stop();

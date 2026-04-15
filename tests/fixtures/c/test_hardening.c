@@ -75,10 +75,8 @@ static nipc_client_config_t default_client_config(void)
     return (nipc_client_config_t){
         .supported_profiles = NIPC_PROFILE_BASELINE,
         .preferred_profiles = 0,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items = 1,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-        .max_response_batch_items = 1,
         .auth_token = AUTH_TOKEN,
     };
 }
@@ -102,10 +100,8 @@ static nipc_server_config_t default_typed_server_config(void)
     return (nipc_server_config_t){
         .supported_profiles = NIPC_PROFILE_BASELINE,
         .preferred_profiles = 0,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items = 1,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-        .max_response_batch_items = 1,
         .auth_token = AUTH_TOKEN,
     };
 }

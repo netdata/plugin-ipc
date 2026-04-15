@@ -59,10 +59,6 @@ This is the Windows baseline profile.
    The handshake determines the session profile, directional limits,
    packet size, and `session_id`.
 
-   Directional limits are not symmetric:
-   - request limits are sender-driven
-   - response limits are server-driven
-
    The negotiated capacities are fixed for that session. If higher
    layers later reconnect with larger learned capacities, the next
    session gets a new `session_id` and therefore a new per-session SHM
@@ -70,8 +66,10 @@ This is the Windows baseline profile.
 
 4. **Data plane**: if the negotiated profile is NAMED_PIPE (bit 0),
    all subsequent messages travel over the same pipe. If a higher
-   profile is negotiated (e.g., SHM_HYBRID), the data plane switches
-   after the handshake — see the Windows SHM transport contract.
+   profile is negotiated (e.g., SHM_HYBRID), the Named Pipe remains open
+   for control/lifecycle coordination, but successful HELLO_ACK already
+   guarantees the SHM resources for that session are ready and usable.
+   There is no post-handshake fallback.
 
 ## Packet size
 
@@ -112,7 +110,8 @@ Where:
 - `session_id` = the server-assigned session identifier from HELLO_ACK
 
 The Named Pipe connection remains open for the session lifetime. The
-data plane switches to the shared memory region. If a later reconnect
+data plane for SHM profiles uses the shared memory region that was
+already made ready before successful HELLO_ACK. If a later reconnect
 learns larger capacities, it establishes a new session with a new
 `session_id` and therefore a different SHM mapping / event name set.
 

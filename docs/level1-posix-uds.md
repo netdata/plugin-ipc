@@ -44,10 +44,6 @@ fallback.
    defined in the wire envelope spec. The handshake determines the
    session profile, directional limits, packet size, and `session_id`.
 
-   Directional limits are not symmetric:
-   - request limits are sender-driven
-   - response limits are server-driven
-
    The negotiated capacities are fixed for that session. If higher
    layers later reconnect with larger learned capacities, the next
    session gets a new `session_id` and therefore a new per-session SHM
@@ -56,7 +52,9 @@ fallback.
 4. **Data plane**: if the negotiated profile is UDS_SEQPACKET (bit 0),
    all subsequent messages travel over the same SEQPACKET connection.
    If a higher profile is negotiated (e.g., SHM), the data plane
-   switches after the handshake — see the SHM transport contracts.
+   still uses the same UDS connection for control/lifecycle coordination,
+   but successful HELLO_ACK already guarantees the SHM resources for that
+   session are ready and usable. There is no post-handshake fallback.
 
 ## Packet size
 
@@ -104,8 +102,9 @@ Each session gets its own SHM region. See the POSIX SHM transport
 contract for full region layout and lifecycle details.
 
 The UDS connection remains open for the session lifetime (it carried
-the handshake and is used for SHM lifecycle coordination). The data
-plane switches to the shared memory region. If a later reconnect learns
+the handshake and is used for SHM lifecycle coordination). For SHM
+profiles, successful HELLO_ACK means the shared memory region is already
+ready for use for that session. If a later reconnect learns
 larger capacities, it establishes a new session with a new `session_id`
 and therefore a different SHM file path.
 

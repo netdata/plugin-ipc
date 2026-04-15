@@ -652,14 +652,24 @@ impl UdsListener {
     /// Accept one client. Performs the full handshake.
     /// Blocks until a client connects and the handshake completes.
     pub fn accept(&self) -> Result<UdsSession, UdsError> {
+        let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+        self.accept_with_config(session_id, self.config.clone())
+    }
+
+    /// Accept one client using a caller-provided per-session server config
+    /// and session ID.
+    pub fn accept_with_config(
+        &self,
+        session_id: u64,
+        config: ServerConfig,
+    ) -> Result<UdsSession, UdsError> {
         let client_fd =
             unsafe { libc::accept(self.fd, std::ptr::null_mut(), std::ptr::null_mut()) };
         if client_fd < 0 {
             return Err(UdsError::Accept(errno()));
         }
 
-        let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
-        match server_handshake(client_fd, &self.config, session_id) {
+        match server_handshake(client_fd, &config, session_id) {
             Ok(session) => Ok(session),
             Err(e) => {
                 unsafe {
@@ -1033,6 +1043,9 @@ fn connect_and_handshake(
             "ack transport_status incompatible".into(),
         ));
     }
+    if ack_hdr.transport_status == protocol::STATUS_LIMIT_EXCEEDED {
+        return Err(UdsError::LimitExceeded);
+    }
     if ack_hdr.transport_status != protocol::STATUS_OK {
         return Err(UdsError::Handshake(format!(
             "transport_status={}",
@@ -1092,10 +1105,7 @@ fn server_handshake(
         config.packet_size
     };
 
-    let s_req_pay = apply_default(config.max_request_payload_bytes, MAX_PAYLOAD_DEFAULT);
-    let s_req_bat = apply_default(config.max_request_batch_items, DEFAULT_BATCH_ITEMS);
     let s_resp_pay = apply_default(config.max_response_payload_bytes, MAX_PAYLOAD_DEFAULT);
-    let s_resp_bat = apply_default(config.max_response_batch_items, DEFAULT_BATCH_ITEMS);
     let s_profiles = if config.supported_profiles == 0 {
         PROFILE_BASELINE
     } else {
@@ -1188,21 +1198,27 @@ fn server_handshake(
         highest_bit(intersection)
     };
 
-    // Negotiate limits:
-    // - requests use the larger of client/server advertised capacities
-    // - responses are server-authoritative
-    let agreed_req_pay = hello
-        .max_request_payload_bytes
-        .max(s_req_pay)
-        .min(MAX_PAYLOAD_CAP);
-    let agreed_req_bat = hello.max_request_batch_items.max(s_req_bat);
-    let agreed_resp_pay = s_resp_pay;
-    let agreed_resp_bat = s_resp_bat;
-    let mut agreed_pkt = hello.packet_size.min(server_pkt_size);
+    if hello.max_request_payload_bytes > MAX_PAYLOAD_CAP {
+        send_rejection(protocol::STATUS_LIMIT_EXCEEDED)?;
+        return Err(UdsError::LimitExceeded);
+    }
 
-    // packet_size must be large enough for at least a header + 1 byte payload
+    // Negotiate limits:
+    // - request payload and batch size are client-proposed and echoed
+    // - response payload is server-authoritative
+    // - response batch size is symmetric with request batch size
+    let agreed_req_pay = hello.max_request_payload_bytes;
+    let agreed_req_bat = hello.max_request_batch_items;
+    let agreed_resp_pay = s_resp_pay;
+    let agreed_resp_bat = agreed_req_bat;
+    let agreed_pkt = hello.packet_size.min(server_pkt_size);
+
+    // packet_size must be large enough for a usable message packet
     if agreed_pkt <= HEADER_SIZE as u32 {
-        agreed_pkt = server_pkt_size;
+        send_rejection(protocol::STATUS_INCOMPATIBLE)?;
+        return Err(UdsError::Incompatible(
+            "packet size too small for negotiated session".into(),
+        ));
     }
 
     // Send HELLO_ACK (success)

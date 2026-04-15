@@ -58,9 +58,9 @@ const (
 	// Defaults.
 	MaxPayloadDefault uint32 = 1024
 
-	// MaxPayloadCap is the hard cap on negotiated payload sizes (256 MB)
-	// to prevent excessive memory allocation from a compromised peer.
-	MaxPayloadCap uint32 = 256 * 1024 * 1024
+	// MaxPayloadCap is the hard cap on negotiated request payload sizes
+	// (1 MiB) to prevent excessive memory allocation from a compromised peer.
+	MaxPayloadCap uint32 = 1024 * 1024
 
 	// Alignment for batch items and cgroups items.
 	Alignment = 8
