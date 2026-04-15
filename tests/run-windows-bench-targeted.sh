@@ -14,6 +14,7 @@ RUNNER="${ROOT_DIR}/tests/run-windows-bench.sh"
 OUT_DIR="${TEMP:-/tmp}/netipc-bench-targeted"
 DURATION=5
 ROW_SETTLE_SEC="${NIPC_BENCH_ROW_SETTLE_SEC:-2}"
+ATTEMPTS="${NIPC_BENCH_TARGETED_ATTEMPTS:-1}"
 DIAGNOSTICS_SUMMARY=""
 
 usage() {
@@ -29,6 +30,8 @@ Options:
   --diagnostics-summary PATH
       Read failed-row tuples from a diagnostics-summary.txt file emitted by
       tests/run-windows-bench.sh when NIPC_BENCH_DIAGNOSE_FAILURES=1.
+  --attempts COUNT
+      Maximum attempts per row. Defaults to NIPC_BENCH_TARGETED_ATTEMPTS or 1.
   --row SPEC
       Explicit row tuple in scenario,client,server,target form.
       ':' separators are also accepted.
@@ -108,6 +111,10 @@ while [ $# -gt 0 ]; do
       DIAGNOSTICS_SUMMARY="$2"
       shift 2
       ;;
+    --attempts)
+      ATTEMPTS="$2"
+      shift 2
+      ;;
     --row)
       ROW_SPECS+=("$2")
       shift 2
@@ -139,6 +146,17 @@ if [ "${#ROW_SPECS[@]}" -eq 0 ]; then
   exit 1
 fi
 
+case "$ATTEMPTS" in
+  ''|*[!0-9]*)
+    err "invalid attempts value: ${ATTEMPTS}"
+    exit 1
+    ;;
+esac
+if [ "$ATTEMPTS" -lt 1 ]; then
+  err "attempts must be >= 1"
+  exit 1
+fi
+
 mkdir -p "$OUT_DIR"
 
 declare -A SEEN_ROWS=()
@@ -163,13 +181,31 @@ for row_spec in "${ROW_SPECS[@]}"; do
   label="$(sanitize_label "${scenario}-${client}-${server}-${target}")"
   csv="${OUT_DIR}/${label}.csv"
 
-  log "Running ${scenario} ${client}->${server} @ ${target}"
-  if ! run env \
-      NIPC_BENCH_SCENARIOS="${scenario}" \
-      NIPC_BENCH_CLIENTS="${client}" \
-      NIPC_BENCH_SERVERS="${server}" \
-      NIPC_BENCH_TARGETS="${target}" \
-      bash "$RUNNER" "$csv" "$DURATION"; then
+  row_ok=0
+  for attempt in $(seq 1 "$ATTEMPTS"); do
+    if [ "$ATTEMPTS" -gt 1 ]; then
+      log "Running ${scenario} ${client}->${server} @ ${target} (attempt ${attempt}/${ATTEMPTS})"
+    else
+      log "Running ${scenario} ${client}->${server} @ ${target}"
+    fi
+
+    if run env \
+        NIPC_BENCH_SCENARIOS="${scenario}" \
+        NIPC_BENCH_CLIENTS="${client}" \
+        NIPC_BENCH_SERVERS="${server}" \
+        NIPC_BENCH_TARGETS="${target}" \
+        bash "$RUNNER" "$csv" "$DURATION"; then
+      row_ok=1
+      break
+    fi
+
+    if [ "$attempt" -lt "$ATTEMPTS" ]; then
+      log "Retrying ${scenario} ${client}->${server} @ ${target} after failed attempt ${attempt}/${ATTEMPTS}"
+      sleep "$ROW_SETTLE_SEC"
+    fi
+  done
+
+  if [ "$row_ok" -ne 1 ]; then
     failures=$((failures + 1))
   fi
 

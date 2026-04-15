@@ -226,6 +226,49 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       is retried until the existing `TIMEOUT` budget expires
     - keep persistent failures visible after the timeout
     - do not hide real call/decoding failures; only retry the pre-call readiness race
+- Finding recorded on 2026-04-15 during full Windows validation after commit
+  `cf5cf8dfdaf223460763bf8287ce55394ab912f0`:
+  - the full run reached the MSYS bounded benchmark comparison and exposed a
+    harness-policy contradiction in the native reference row:
+    - failing row: `snapshot-baseline c->c @ max`
+    - samples path reported by the runner:
+      `/tmp/netipc-bench-143223/samples-snapshot-baseline-c-c-0.csv`
+    - observed raw spread:
+      - `raw_min=5730.000`
+      - `raw_max=22687.000`
+      - `raw_ratio=3.959337`
+      - configured max ratio: `2.00`
+    - observed trimmed stable core:
+      - `stable_min=21620.000`
+      - `stable_max=22637.000`
+      - `stable_ratio=1.047040`
+    - the same stale full run later exposed another compare-lane noisy row:
+      - failing row: `snapshot-shm c->c @ max`
+      - samples path reported by the runner:
+        `/tmp/netipc-bench-143696/samples-snapshot-shm-c-c-0.csv`
+      - observed stable spread:
+        - `stable_min=175040.000`
+        - `stable_max=462863.000`
+        - `stable_ratio=2.644327`
+        - configured max ratio: `2.00`
+    - `tests/compare-windows-bench-toolchains.sh` intentionally runs a
+      bounded comparison with regression floors, but
+      `tests/run-windows-bench.sh` still rejects the whole row when the raw
+      sample set contains an outlier, even if the trimmed stable core is
+      valid.
+  - implementation plan:
+    - keep the normal Windows benchmark publication path fail-closed on raw
+      instability
+    - add an explicit opt-in runner mode for comparison lanes that allows a
+      row with raw outliers only when the trimmed stable core already passed
+      the existing stable-sample and stable-ratio checks
+    - add bounded per-row retry to the targeted runner so compare lanes do not
+      accept rows with unstable trimmed cores; instead, noisy rows must rerun
+      and produce a stable sample set before they are used in the policy CSV
+    - enable that opt-in only from
+      `tests/compare-windows-bench-toolchains.sh`
+    - add a shell policy test for this pure stability decision so the compare
+      lane cannot silently regress back to raw-outlier flapping
 
 ## Implementation Status (2026-04-14)
 

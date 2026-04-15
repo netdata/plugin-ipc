@@ -69,6 +69,7 @@ MAX_DURATION="${NIPC_BENCH_MAX_DURATION:-10}"
 PIPELINE_BATCH_MAX_DURATION="${NIPC_BENCH_PIPELINE_BATCH_MAX_DURATION:-20}"
 MAX_THROUGHPUT_RATIO="${NIPC_BENCH_MAX_THROUGHPUT_RATIO:-1.35}"
 MIN_STABLE_SAMPLES="${NIPC_BENCH_MIN_STABLE_SAMPLES:-3}"
+ALLOW_TRIMMED_UNSTABLE_RAW="${NIPC_BENCH_ALLOW_TRIMMED_UNSTABLE_RAW:-0}"
 SERVER_STOP_GRACE_SEC="${NIPC_BENCH_SERVER_STOP_GRACE_SEC:-10}"
 ROW_SETTLE_SEC="${NIPC_BENCH_ROW_SETTLE_SEC:-2}"
 DIAGNOSE_FAILURES="${NIPC_BENCH_DIAGNOSE_FAILURES:-0}"
@@ -772,6 +773,14 @@ throughput_stability_from_sample_file() {
     '
 }
 
+raw_ratio_outlier_is_publishable() {
+    local trimmed_each_side="$1"
+
+    [ "$ALLOW_TRIMMED_UNSTABLE_RAW" = "1" ] || return 1
+    [ "$trimmed_each_side" -gt 0 ] || return 1
+    return 0
+}
+
 maybe_diagnose_failed_measurement() {
     local scenario="$1"
     local client_lang="$2"
@@ -1025,6 +1034,12 @@ run_repeated_measurement() {
             warn "  Oversubscribed fixed-rate row for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
             warn "  prior_max=${prior_max} target_rps=${target_rps} raw_min=${raw_min} raw_max=${raw_max} raw_ratio=${raw_ratio}"
             warn "  Keeping the row because the target exceeds measured max capacity and the trimmed stable core remains publishable"
+        elif raw_ratio_outlier_is_publishable "$trimmed_each_side"; then
+            warn "  Raw repeated throughput outlier for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
+            warn "  raw_min=${raw_min} raw_max=${raw_max} raw_ratio=${raw_ratio} (max ${MAX_THROUGHPUT_RATIO})"
+            warn "  stable_min=${stable_min} stable_max=${stable_max} stable_ratio=${stable_ratio}"
+            warn "  Keeping the row because NIPC_BENCH_ALLOW_TRIMMED_UNSTABLE_RAW=1 and the trimmed stable core remains publishable"
+            warn "  Per-repeat samples: ${sample_file}"
         else
             LAST_MEASUREMENT_STATUS="failed"
             LAST_MEASUREMENT_REASON="raw_ratio_exceeded"
@@ -1666,6 +1681,7 @@ main() {
     require_positive_integer "NIPC_BENCH_SERVER_STOP_GRACE_SEC" "$SERVER_STOP_GRACE_SEC"
     require_positive_number "NIPC_BENCH_MAX_THROUGHPUT_RATIO" "$MAX_THROUGHPUT_RATIO"
     require_positive_number "NIPC_BENCH_ROW_SETTLE_SEC" "$ROW_SETTLE_SEC"
+    require_zero_or_one "NIPC_BENCH_ALLOW_TRIMMED_UNSTABLE_RAW" "$ALLOW_TRIMMED_UNSTABLE_RAW"
     require_zero_or_one "NIPC_BENCH_DIAGNOSE_FAILURES" "$DIAGNOSE_FAILURES"
     log "Windows Benchmark Suite"
     log "Windows C toolchain mode: ${WINDOWS_TOOLCHAIN}"
@@ -1677,6 +1693,7 @@ main() {
     log "Row settle barrier: ${ROW_SETTLE_SEC}s"
     log "Max allowed stable throughput ratio: ${MAX_THROUGHPUT_RATIO}"
     log "Minimum stable samples required: ${MIN_STABLE_SAMPLES}"
+    log "Allow trimmed raw-outlier publication: $( [ "$ALLOW_TRIMMED_UNSTABLE_RAW" = "1" ] && printf enabled || printf disabled )"
     log "Diagnostic reruns for failed rows: $( [ "$DIAGNOSE_FAILURES" = "1" ] && printf enabled || printf disabled )"
     log "Scenario filter: ${SCENARIO_FILTER:-<all>}"
     log "Client filter: ${CLIENT_FILTER:-<all>}"
@@ -1833,4 +1850,6 @@ main() {
     log "Done. Run tests/generate-benchmarks-windows.sh to generate the markdown report."
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

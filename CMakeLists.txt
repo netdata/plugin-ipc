@@ -154,6 +154,11 @@ add_executable(test_protocol tests/test_protocol.c)
 target_link_libraries(test_protocol PRIVATE netipc_protocol)
 add_test(NAME test_protocol COMMAND test_protocol)
 
+add_test(NAME test_windows_bench_stability_policy
+    COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_windows_bench_stability_policy.sh"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+)
+
 add_executable(interop_codec_c tests/fixtures/c/interop_codec.c)
 target_link_libraries(interop_codec_c PRIVATE netipc_protocol)
 
