@@ -193,10 +193,8 @@ static int run_client(const char *run_dir, const char *service)
     uint32_t profiles = detect_profiles();
     nipc_client_config_t ccfg = {0};
     ccfg.supported_profiles        = profiles;
-    ccfg.max_request_payload_bytes = 4096;
     ccfg.max_request_batch_items   = 1;
     ccfg.max_response_payload_bytes = RESPONSE_BUF_SIZE;
-    ccfg.max_response_batch_items  = 1;
     ccfg.auth_token                = AUTH_TOKEN;
 
     nipc_cgroups_cache_t cache;

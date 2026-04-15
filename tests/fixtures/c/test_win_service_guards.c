@@ -902,9 +902,9 @@ static void test_client_batch_and_string_guards(void)
         uint64_t req[2] = { 7, 11 };
         uint64_t resp[2] = { 0, 0 };
 
-        ccfg.max_request_payload_bytes = 8;
         ccfg.max_request_batch_items = 2;
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        client.transport_config.max_request_payload_bytes = 8;
         check("guard batch-overflow client ready",
               refresh_until_ready(&client, 100, 10));
 
@@ -943,9 +943,9 @@ static void test_client_batch_and_string_guards(void)
         nipc_client_config_t ccfg = default_typed_client_config();
         nipc_string_reverse_view_t view;
 
-        ccfg.max_request_payload_bytes = 16;
         ccfg.max_request_batch_items = 1;
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        client.transport_config.max_request_payload_bytes = 16;
         check("guard string-overflow client ready",
               refresh_until_ready(&client, 100, 10));
 
@@ -1152,8 +1152,8 @@ static void test_hybrid_client_send_capacity_guard(void)
 
     nipc_client_ctx_t client;
     nipc_client_config_t ccfg = default_typed_hybrid_client_config();
-    ccfg.max_request_payload_bytes = 16;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    client.transport_config.max_request_payload_bytes = 16;
     check("hybrid send-capacity client ready",
           refresh_until_ready(&client, 200, 10) && client.shm != NULL);
 
@@ -1193,8 +1193,8 @@ static void test_hybrid_batch_send_capacity_guard(void)
 
     nipc_client_ctx_t client;
     nipc_client_config_t ccfg = default_typed_hybrid_client_config();
-    ccfg.max_request_payload_bytes = 16;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    client.transport_config.max_request_payload_bytes = 16;
     check("hybrid batch send-capacity client ready",
           refresh_until_ready(&client, 200, 10) && client.shm != NULL);
 

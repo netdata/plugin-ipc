@@ -204,10 +204,8 @@ static bool verify_server_alive(const char *service)
 {
     nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
 
@@ -672,10 +670,8 @@ static void test_shm_chaos(void)
         nipc_client_config_t ccfg = {
             .supported_profiles        = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
             .preferred_profiles        = NIPC_PROFILE_SHM_HYBRID,
-            .max_request_payload_bytes = 4096,
             .max_request_batch_items   = 1,
             .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-            .max_response_batch_items  = 1,
             .auth_token                = AUTH_TOKEN,
         };
 

@@ -383,10 +383,8 @@ func typedServerConfigWin(profiles uint32) cgroups.ServerConfig {
 	return cgroups.ServerConfig{
 		SupportedProfiles:       profiles,
 		PreferredProfiles:       profiles,
-		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: responseBufSizeWin,
-		MaxResponseBatchItems:   1,
 		AuthToken:               authTokenWin,
 	}
 }
@@ -395,10 +393,8 @@ func typedClientConfigWin(profiles uint32) cgroups.ClientConfig {
 	return cgroups.ClientConfig{
 		SupportedProfiles:       profiles,
 		PreferredProfiles:       profiles,
-		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: responseBufSizeWin,
-		MaxResponseBatchItems:   1,
 		AuthToken:               authTokenWin,
 	}
 }

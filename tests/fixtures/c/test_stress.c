@@ -324,10 +324,8 @@ static void test_snapshot_1000(void)
 
     nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = BUF_1K,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
     nipc_client_ctx_t client;
@@ -372,10 +370,8 @@ static void test_snapshot_5000(void)
 
     nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = BUF_5K,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
     nipc_client_ctx_t client;
@@ -422,10 +418,8 @@ static void *scale_client_thread_fn(void *arg)
 
     nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = (uint32_t)ctx->resp_buf_size,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
 
@@ -623,10 +617,8 @@ static void test_rapid_connect_disconnect(void)
 
     nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = 65536,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
 
@@ -730,10 +722,8 @@ static void *stability_client_fn(void *arg)
 
     nipc_client_config_t ccfg = {
         .supported_profiles        = NIPC_PROFILE_BASELINE,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = 65536,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
 
@@ -1012,10 +1002,8 @@ static void *mixed_client_fn(void *arg)
     nipc_client_config_t ccfg = {
         .supported_profiles        = ctx->profile,
         .preferred_profiles        = ctx->profile,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = 65536,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
 

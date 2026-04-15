@@ -228,10 +228,8 @@ static nipc_client_config_t default_client_config(uint32_t max_payload)
     nipc_client_config_t cfg = {0};
     cfg.supported_profiles = NIPC_PROFILE_BASELINE;
     cfg.preferred_profiles = 0;
-    cfg.max_request_payload_bytes = max_payload;
     cfg.max_request_batch_items = 16;
     cfg.max_response_payload_bytes = max_payload;
-    cfg.max_response_batch_items = 16;
     cfg.auth_token = AUTH_TOKEN;
     return cfg;
 }

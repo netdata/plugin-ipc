@@ -158,10 +158,8 @@ static int run_client(const char *run_dir, const char *service)
     nipc_client_config_t ccfg = {
         .supported_profiles        = profiles,
         .preferred_profiles        = profiles,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 16,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-        .max_response_batch_items  = 16,
         .auth_token                = AUTH_TOKEN,
     };
 

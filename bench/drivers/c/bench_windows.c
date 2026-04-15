@@ -781,15 +781,14 @@ static int run_batch_ping_pong_client(const char *run_dir, const char *service,
     nipc_client_config_t ccfg = {
         .supported_profiles        = profiles,
         .preferred_profiles        = profiles,
-        .max_request_payload_bytes = BENCH_BATCH_BUF_SIZE,
         .max_request_batch_items   = BENCH_MAX_BATCH_ITEMS,
         .max_response_payload_bytes = BENCH_BATCH_BUF_SIZE,
-        .max_response_batch_items  = BENCH_MAX_BATCH_ITEMS,
         .auth_token                = AUTH_TOKEN,
     };
 
     nipc_client_ctx_t client;
     nipc_client_init(&client, run_dir, service, &ccfg);
+    client.transport_config.max_request_payload_bytes = BENCH_BATCH_BUF_SIZE;
 
     for (int i = 0; i < 200; i++) {
         nipc_client_refresh(&client);
@@ -1300,15 +1299,14 @@ static int run_snapshot_client(const char *run_dir, const char *service,
     nipc_client_config_t ccfg = {
         .supported_profiles        = profiles,
         .preferred_profiles        = profiles,
-        .max_request_payload_bytes = 4096,
         .max_request_batch_items   = 1,
         .max_response_payload_bytes = RESPONSE_BUF_SIZE,
-        .max_response_batch_items  = 1,
         .auth_token                = AUTH_TOKEN,
     };
 
     nipc_client_ctx_t client;
     nipc_client_init(&client, run_dir, service, &ccfg);
+    client.transport_config.max_request_payload_bytes = 4096;
 
     for (int i = 0; i < 200; i++) {
         nipc_client_refresh(&client);

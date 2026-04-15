@@ -42,10 +42,8 @@ func serverConfig() cgroups.ServerConfig {
 	return cgroups.ServerConfig{
 		SupportedProfiles:       profiles,
 		PreferredProfiles:       profiles,
-		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    16,
 		MaxResponsePayloadBytes: responseBufSize,
-		MaxResponseBatchItems:   16,
 		AuthToken:               authToken,
 	}
 }
@@ -55,10 +53,8 @@ func clientConfig() cgroups.ClientConfig {
 	return cgroups.ClientConfig{
 		SupportedProfiles:       profiles,
 		PreferredProfiles:       profiles,
-		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    16,
 		MaxResponsePayloadBytes: responseBufSize,
-		MaxResponseBatchItems:   16,
 		AuthToken:               authToken,
 	}
 }

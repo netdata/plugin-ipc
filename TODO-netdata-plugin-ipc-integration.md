@@ -211,6 +211,49 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
     - result: `20 passed, 0 failed`
     - `/usr/bin/ctest --test-dir build --output-on-failure -R '^(test_uds|test_service|test_hardening|test_service_extra|test_ping_pong)$'`
     - result: `100% tests passed, 0 tests failed out of 5`
+  - next full-suite obstacle discovered on 2026-04-15 after commit `2674826`:
+    - the full Linux/native-Windows validation loop is still blocked by stale Go typed-L2 fixture code in:
+      - `tests/fixtures/go/cmd/interop_service/main.go`
+      - `tests/fixtures/go/cmd/interop_service_win/main.go`
+      - `tests/fixtures/go/cmd/interop_cache/main.go`
+      - `tests/fixtures/go/cmd/interop_cache_win/main.go`
+      - `bench/drivers/go/main.go`
+      - `bench/drivers/go/main_windows.go`
+    - exact build failures:
+      - `unknown field MaxRequestPayloadBytes in struct literal of type cgroups.ServerConfig`
+      - `unknown field MaxResponseBatchItems in struct literal of type cgroups.ServerConfig`
+      - `unknown field MaxRequestPayloadBytes in struct literal of type cgroups.ClientConfig`
+      - `unknown field MaxResponseBatchItems in struct literal of type cgroups.ClientConfig`
+    - meaning:
+      - the public typed L2 API cleanup is correct
+      - several typed Go service/benchmark helpers still reference removed fields and must be aligned before the full Linux and native Windows suites can pass
+  - next full-suite obstacle discovered on 2026-04-15 after aligning the Go typed helpers:
+    - the full Linux/native-Windows validation loop is also blocked by stale C typed-L2 service tests and interop helpers
+    - concrete failing files already observed during the Linux build:
+      - `tests/fixtures/c/test_multi_server.c`
+      - `tests/fixtures/c/interop_service.c`
+    - broader audit shows the same stale public-field pattern in multiple typed C files:
+      - `tests/fixtures/c/interop_cache.c`
+      - `tests/fixtures/c/interop_cache_win.c`
+      - `tests/fixtures/c/interop_service.c`
+      - `tests/fixtures/c/interop_service_win.c`
+      - `tests/fixtures/c/test_cache.c`
+      - `tests/fixtures/c/test_chaos.c`
+      - `tests/fixtures/c/test_hardening.c`
+      - `tests/fixtures/c/test_multi_server.c`
+      - `tests/fixtures/c/test_service.c`
+      - `tests/fixtures/c/test_stress.c`
+      - `tests/fixtures/c/test_win_service.c`
+      - `tests/fixtures/c/test_win_service_extra.c`
+      - `tests/fixtures/c/test_win_service_guards.c`
+      - `tests/fixtures/c/test_win_service_guards_extra.c`
+      - `tests/fixtures/c/test_win_stress.c`
+    - important nuance:
+      - raw transport configs in the same files still legitimately carry `max_request_payload_bytes` and `max_response_batch_items`
+      - only public typed `nipc_client_config_t` / `nipc_server_config_t` uses are stale
+    - implication:
+      - the cleanup must be type-aware
+      - Windows-only white-box overflow tests that used the removed public request-payload field need manual rewriting so overflow-reconnect remains covered without reintroducing the public knob
 
 ## Current Handshake Audit (2026-04-14)
 
