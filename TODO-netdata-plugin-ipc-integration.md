@@ -3709,3 +3709,99 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
     - `bash tests/test_windows_bench_stability_policy.sh`
     - `git diff --check`
     - all passed
+- Validation evidence recorded after commit
+  `bb996c638f6c73cb9f3a8b0aac55d09819548979`:
+  - Linux full validation evidence:
+    - command family:
+      - build, `ctest`, Rust tests, Go tests, Go race, extended fuzz, C/Go/Rust coverage, ASAN, TSAN, Valgrind, all POSIX interop matrices, and POSIX benchmark generation
+    - artifact directory:
+      - `/tmp/plugin-ipc-full-linux-20260415-162222/`
+    - result:
+      - `full-linux.log` ended with `FULL LINUX VALIDATION PASSED`
+      - `ctest`: `100% tests passed, 0 tests failed out of 42`
+      - Rust: `305 passed; 0 failed`
+      - Go: all packages passed
+      - Go race: all packages passed
+      - extended fuzz: `11 passed, 0 failed`
+      - C coverage total: `92.3%`
+      - Go coverage total: `94.3%`
+      - Rust coverage total: `95.17%`
+      - ASAN: `7/7` passed
+      - TSAN: `6/6` passed with no races
+      - Valgrind: `7/7` passed with zero errors/leaks/invalid accesses
+      - POSIX benchmark CSV: `/tmp/plugin-ipc-full-linux-20260415-162222/benchmarks-posix.csv`
+      - POSIX benchmark data rows: `201`
+      - POSIX generator result: all performance floors met
+    - exactness caveat:
+      - this full Linux matrix ran at commit `074a3a5c8f552f15473a0bc929b96da9e71f79b7`
+      - commit `bb996c638f6c73cb9f3a8b0aac55d09819548979` changed only Windows compare/docs/TODO/test files:
+        - `tests/compare-windows-bench-toolchains.sh`
+        - `tests/test_windows_compare_policy_retry.sh`
+        - `README.md`
+        - `WINDOWS-COVERAGE.md`
+        - `TODO-netdata-plugin-ipc-integration.md`
+      - the changed Windows compare test was verified locally after `bb996c6` with:
+        - `bash tests/test_windows_compare_policy_retry.sh`
+        - `bash tests/test_windows_bench_stability_policy.sh`
+  - Native Windows correctness/coverage/interop evidence from the full validation run:
+    - checkout:
+      - `win11:~/src/plugin-ipc.git`
+      - commit `074a3a5c8f552f15473a0bc929b96da9e71f79b7`
+    - artifact directory:
+      - `/tmp/plugin-ipc-full-windows-20260415-162223/`
+    - results before the MSYS bounded-compare failure:
+      - build and `ctest`: `30/30` passed
+      - Rust Windows lib tests: `195 passed; 0 failed`
+      - Go Windows tests: passed
+      - App Verifier/PageHeap: passed
+      - Windows C coverage: all files met the `90%` threshold
+      - Windows Go coverage: `92.0%`
+      - Windows Rust line coverage: `90.46%`
+      - native standalone Windows interop/service/cache matrices: passed
+      - MSYS functional slice: passed, including `test_win_shm` repeated `10/10`
+    - exact failure from that full run:
+      - only the MSYS bounded compare policy failed
+      - failing policy artifact:
+        - `/tmp/plugin-ipc-full-windows-20260415-162223/msys-validation/bench-compare/policy.csv`
+      - failing row:
+        - `np-max,np-ping-pong,c,c,0,both,70.0,44.9,fail`
+      - this is the issue fixed by commit `bb996c6`
+  - MSYS validation evidence after the paired policy-retry fix:
+    - checkout:
+      - `win11:~/src/plugin-ipc.git`
+      - commit `bb996c638f6c73cb9f3a8b0aac55d09819548979`
+    - command:
+      - `bash tests/run-windows-msys-validation.sh /tmp/plugin-ipc-msys-validation-policy-retry-20260415-165830 3`
+    - artifact directory:
+      - `/tmp/plugin-ipc-msys-validation-policy-retry-20260415-165830/`
+    - result:
+      - exited `0`
+      - summary: `/tmp/plugin-ipc-msys-validation-policy-retry-20260415-165830/summary.txt`
+      - policy: `/tmp/plugin-ipc-msys-validation-policy-retry-20260415-165830/bench-compare/policy.csv`
+      - joined comparison: `/tmp/plugin-ipc-msys-validation-policy-retry-20260415-165830/bench-compare/joined.csv`
+      - every configured MSYS-vs-native policy row passed
+  - Strict native Windows benchmark evidence after the paired policy-retry fix:
+    - checkout:
+      - `win11:~/src/plugin-ipc.git`
+      - commit `bb996c638f6c73cb9f3a8b0aac55d09819548979`
+    - command:
+      - `bash tests/run-windows-bench.sh /tmp/plugin-ipc-windows-native-bench-20260415-171700/benchmarks-windows.csv 5`
+      - `bash tests/generate-benchmarks-windows.sh /tmp/plugin-ipc-windows-native-bench-20260415-171700/benchmarks-windows.csv /tmp/plugin-ipc-windows-native-bench-20260415-171700/benchmarks-windows.md`
+    - artifact directory:
+      - `/tmp/plugin-ipc-windows-native-bench-20260415-171700/`
+    - result:
+      - exited `0`
+      - total measurements: `201`
+      - CSV line count including header: `202`
+      - generator result: `All performance floors met`
+      - summary: `/tmp/plugin-ipc-windows-native-bench-20260415-171700/summary.txt`
+      - report: `/tmp/plugin-ipc-windows-native-bench-20260415-171700/benchmarks-windows.md`
+  - Current validation conclusion:
+    - the concrete failures found during the full validation loop were fixed:
+      - C benchmark server lifecycle/timer shutdown fixed in commit `074a3a5`
+      - MSYS bounded compare policy false failure fixed in commit `bb996c6`
+    - no tracked Linux or Windows source divergence is being used as the sync mechanism
+    - next operational step:
+      - commit this evidence update locally
+      - push
+      - pull on `win11:~/src/plugin-ipc.git`
