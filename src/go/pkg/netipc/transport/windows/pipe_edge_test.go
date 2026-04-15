@@ -1118,22 +1118,18 @@ func TestSessionSendRejectsTooSmallPacketSize(t *testing.T) {
 	sCfg.PacketSize = 16
 	cCfg.PacketSize = 16
 
-	client, _ := sessionPair(t, sCfg, cCfg)
+	service := uniquePipeService(t)
+	listener := startListener(t, testPipeRunDir, service, sCfg)
+	defer listener.Close()
 
-	hdr := protocol.Header{
-		Kind:      protocol.KindRequest,
-		Code:      protocol.MethodIncrement,
-		ItemCount: 1,
-		MessageID: 90,
+	acceptCh := acceptAsync(listener)
+
+	if _, err := Connect(testPipeRunDir, service, &cCfg); !errors.Is(err, ErrIncompatible) {
+		t.Fatalf("expected ErrIncompatible, got %v", err)
 	}
-	err := client.Send(&hdr, bytes.Repeat([]byte("z"), 64))
-	if err == nil {
-		t.Fatal("Send should fail when negotiated packet_size is too small")
-	}
-	if !errors.Is(err, ErrBadParam) {
-		t.Fatalf("Send error = %v, want ErrBadParam", err)
-	}
-	if !strings.Contains(err.Error(), "packet_size too small") {
-		t.Fatalf("Send error = %v, want text %q", err, "packet_size too small")
+
+	sr := <-acceptCh
+	if !errors.Is(sr.err, ErrIncompatible) {
+		t.Fatalf("server expected ErrIncompatible, got %v", sr.err)
 	}
 }

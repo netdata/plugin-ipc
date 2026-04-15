@@ -819,7 +819,7 @@ static void test_cache_empty_snapshot(void)
 
 static void test_server_shm_create_fault_disconnects_and_recovers(void)
 {
-    printf("--- Server SHM create fault disconnects / recovers ---\n");
+    printf("--- Server SHM create fault falls back to baseline / recovers ---\n");
 
     char service[64];
     unique_service(service, sizeof(service), "svc_server_shm_fault");
@@ -836,10 +836,17 @@ static void test_server_shm_create_fault_disconnects_and_recovers(void)
 
     nipc_win_shm_test_fault_set(NIPC_WIN_SHM_TEST_FAULT_CREATE_MAPPING,
                                 ERROR_ACCESS_DENIED, 0);
-    check("server SHM create fault disconnects hybrid client",
-          refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 40, 10));
+    check("server SHM create fault reaches READY via baseline",
+          refresh_until_ready(&client, 40, 10));
+    check("server SHM create fault keeps client ready",
+          nipc_client_ready(&client));
+    check("server SHM create fault leaves session on baseline",
+          client.shm == NULL);
     clear_test_faults();
-    check("server SHM create fault recovers",
+
+    nipc_client_close(&client);
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    check("server SHM create fault recovers after reconnect",
           refresh_until_ready(&client, 200, 10) && client.shm != NULL);
 
     nipc_client_close(&client);

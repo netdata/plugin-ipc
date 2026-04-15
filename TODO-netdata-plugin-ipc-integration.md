@@ -263,6 +263,48 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
     - important nuance:
       - the stale fields are only on typed `netipc::service::cgroups::{ClientConfig, ServerConfig}`
       - raw transport configs in `interop_named_pipe.rs`, `interop_uds.rs`, and the Windows transport client helpers remain valid and must not be changed
+  - next native Windows runtime obstacles discovered on 2026-04-15 during full `ctest` on commit `6651ba6`:
+    - `test_named_pipe_go`
+      - failure:
+        - `TestSessionSendRejectsTooSmallPacketSize`
+        - `Connect failed: protocol or layout version mismatch`
+      - source:
+        - `src/go/pkg/netipc/transport/windows/pipe_edge_test.go`
+      - verified root cause:
+        - the test still expects connect success followed by `Send()` rejection for too-small negotiated packet size
+        - current Windows named-pipe handshake rejects unusable packet sizes during `HELLO_ACK` negotiation with `STATUS_INCOMPATIBLE`
+        - evidence:
+          - `src/go/pkg/netipc/transport/windows/pipe_edge_test.go`
+          - `src/go/pkg/netipc/transport/windows/pipe.go`
+    - `test_win_service_extra`
+      - failure:
+        - `server SHM create fault disconnects hybrid client`
+      - source:
+        - `tests/fixtures/c/test_win_service_extra.c`
+      - verified root cause:
+        - the test still expects disconnect when server-side SHM creation fails after the new handshake guarantee work
+        - current Windows managed server now pre-creates SHM before handshake and strips failing SHM profiles from the accept config, so the correct behavior is baseline-ready without SHM, not disconnect
+        - evidence:
+          - `tests/fixtures/c/test_win_service_extra.c`
+          - `src/libnetdata/netipc/src/service/netipc_service_win.c`
+    - implication:
+      - the tree is not yet green on native Windows
+      - these are behavioral/runtime regressions, not more stale API field references
+  - local follow-up on 2026-04-15:
+    - both remaining failures were patched as stale test expectations, not runtime/library logic changes:
+      - `src/go/pkg/netipc/transport/windows/pipe_edge_test.go`
+        - `TestSessionSendRejectsTooSmallPacketSize` now expects handshake rejection with `ErrIncompatible`
+      - `tests/fixtures/c/test_win_service_extra.c`
+        - `test_server_shm_create_fault_disconnects_and_recovers` now expects:
+          - baseline `READY` with `client.shm == NULL` while SHM create is faulted
+          - explicit reconnect after fault clear before recovering to SHM
+    - local Linux verification after these patches:
+      - `cmake --build build -j4`
+      - `/usr/bin/ctest --test-dir build --output-on-failure -j4`
+      - result:
+        - `100% tests passed, 0 tests failed out of 39`
+    - local Windows Go compile verification after these patches:
+      - `cd src/go && GOOS=windows GOARCH=amd64 go test -c ./pkg/netipc/transport/windows`
 
 ## Current Handshake Audit (2026-04-14)
 
