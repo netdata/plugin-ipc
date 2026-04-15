@@ -852,9 +852,17 @@ static void server_handle_session(nipc_managed_server_t *server,
 
         switch (dispatch_err) {
         case NIPC_OK:
-            if (response_len <= UINT32_MAX)
-                server_note_response_capacity(server, (uint32_t)response_len);
-            resp_hdr.transport_status = NIPC_STATUS_OK;
+            if (response_len > session->max_response_payload_bytes) {
+                server_note_response_capacity(
+                    server,
+                    response_len >= UINT32_MAX ? UINT32_MAX : (uint32_t)response_len);
+                resp_hdr.transport_status = NIPC_STATUS_LIMIT_EXCEEDED;
+                response_len = 0;
+            } else {
+                if (response_len <= UINT32_MAX)
+                    server_note_response_capacity(server, (uint32_t)response_len);
+                resp_hdr.transport_status = NIPC_STATUS_OK;
+            }
             break;
         case NIPC_ERR_OVERFLOW:
             if (session->max_response_payload_bytes >= UINT32_MAX / 2u)

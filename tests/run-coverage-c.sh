@@ -74,6 +74,8 @@ TESTS=(
     test_shm
     test_service
     test_service_extra
+    test_service_payload_limits
+    test_service_method_limits
     test_cache
     test_multi_server
     test_chaos

@@ -534,7 +534,7 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       - `test_win_service_extra.exe`: `167 passed, 0 failed`
       - remaining failure: coverage threshold, `netipc_service_win.c` is `88.3%` against required `90%`
       - next fix: add focused Windows service tests for real uncovered branches; do not lower the threshold
-    - Windows verification after commit `aed8e57`:
+  - Windows verification after commit `aed8e57`:
       - `bash tests/run-coverage-c-windows.sh`
       - `test_win_service_guards.exe`: `226 passed, 0 failed`
       - coverage results:
@@ -542,6 +542,58 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
         - `netipc_named_pipe.c`: `92.6%`
         - `netipc_win_shm.c`: `94.2%`
       - result: all Windows C files meet the `90%` coverage threshold
+  - Linux C coverage after commit `1ce2446`:
+    - command: `bash tests/run-coverage-c.sh 90`
+    - all C coverage test binaries passed
+    - remaining failure: `netipc_service.c` is `87.2%` against required `90%`
+    - uncovered branches include the POSIX typed-client request-overflow recovery paths and no-growth overflow guard
+    - next fix: add the POSIX equivalent of the Windows production request-overflow guard tests; do not lower the threshold
+  - Linux C coverage after adding POSIX request-overflow tests:
+    - `test_service_extra`: `90 passed, 0 failed`
+    - `bash tests/run-coverage-c.sh 90`: all C coverage test binaries passed
+    - remaining failure: `netipc_service.c` improved to `88.0%`, still below required `90%`
+    - next fix: add focused POSIX typed response-overflow recovery tests for baseline and hybrid profiles; do not lower the threshold
+  - POSIX response-overflow evidence after adding response-overflow tests:
+    - `test_service_extra`: `109 passed, 0 failed`
+    - `bash tests/run-coverage-c.sh 90`: all C coverage test binaries passed, but `netipc_service.c` stayed at `88.0%`
+    - important finding:
+      - the tests recovered through broken-session retry after the server learned response capacity
+      - the explicit `NIPC_STATUS_LIMIT_EXCEEDED` response path was still uncovered
+      - this means a successful dispatch whose encoded response exceeds the negotiated response cap was reaching transport send as an oversized response instead of being converted into a zero-payload `LIMIT_EXCEEDED` response
+    - fix:
+      - POSIX and Windows service dispatch now convert successful-but-oversized responses into `NIPC_STATUS_LIMIT_EXCEEDED` before transport send
+      - this aligns response-overflow recovery with the negotiated handshake contract instead of relying on transport breakage
+  - Linux C coverage after the response-overflow service fix:
+    - `bash tests/run-coverage-c.sh 90`: all C coverage test binaries passed
+    - `netipc_service.c` improved to `89.0%`, still below required `90%`
+    - next fix: add a focused POSIX managed-server unsupported-method response test to cover the explicit `NIPC_STATUS_UNSUPPORTED` path
+  - Linux C coverage after adding focused POSIX unsupported-method and dispatch-overflow tests:
+    - command: `bash tests/run-coverage-c.sh 90`
+    - all C coverage test binaries passed
+    - coverage results:
+      - `netipc_protocol.c`: `96.3%`
+      - `netipc_uds.c`: `91.7%`
+      - `netipc_shm.c`: `92.6%`
+      - `netipc_service.c`: `90.7%`
+      - total: `92.3%`
+    - result: all POSIX C files now meet the `90%` coverage threshold
+    - added proof covers:
+      - SHM unsupported-method response path after profile negotiation
+      - typed dispatch overflow returning explicit `LIMIT_EXCEEDED`, learning response capacity, reconnecting, and succeeding
+    - test organization:
+      - new payload-limit coverage lives in `tests/fixtures/c/test_service_payload_limits.c`
+      - new method-status coverage lives in `tests/fixtures/c/test_service_method_limits.c`
+      - shared fixture setup lives in `tests/fixtures/c/test_service_limit_helpers.h`
+  - Windows/MSYS validation on `win11:~/src/plugin-ipc.git` before the final POSIX service commit:
+    - command:
+      - `bash tests/run-windows-msys-validation.sh /tmp/netipc-msys-validation-20260415-141321 3`
+    - result: passed
+    - evidence:
+      - summary: `/tmp/netipc-msys-validation-20260415-141321/summary.txt`
+      - policy: `/tmp/netipc-msys-validation-20260415-141321/bench-compare/policy.csv`
+      - joined comparison: `/tmp/netipc-msys-validation-20260415-141321/bench-compare/joined.csv`
+    - caveat:
+      - this was run before the current local service/test changes are committed and pulled to Windows, so affected Windows checks still need to be rerun after sync
   - next full-suite obstacle discovered on 2026-04-15 during the first native Windows rebuild from commit `b4a44fa`:
     - Windows-only Rust typed-L2 helpers still reference removed public cgroups config fields
     - concrete failing files:

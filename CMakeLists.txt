@@ -273,6 +273,22 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     add_test(NAME test_service_extra COMMAND test_service_extra)
     set_tests_properties(test_service_extra PROPERTIES TIMEOUT 120)
 
+    add_executable(test_service_payload_limits tests/fixtures/c/test_service_payload_limits.c)
+    target_link_libraries(test_service_payload_limits PRIVATE
+        netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
+    )
+    target_compile_definitions(test_service_payload_limits PRIVATE NIPC_INTERNAL_TESTING=1)
+    add_test(NAME test_service_payload_limits COMMAND test_service_payload_limits)
+    set_tests_properties(test_service_payload_limits PROPERTIES TIMEOUT 120)
+
+    add_executable(test_service_method_limits tests/fixtures/c/test_service_method_limits.c)
+    target_link_libraries(test_service_method_limits PRIVATE
+        netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
+    )
+    target_compile_definitions(test_service_method_limits PRIVATE NIPC_INTERNAL_TESTING=1)
+    add_test(NAME test_service_method_limits COMMAND test_service_method_limits)
+    set_tests_properties(test_service_method_limits PROPERTIES TIMEOUT 120)
+
     # Multi-client multi-worker server tests
     add_executable(test_multi_server tests/fixtures/c/test_multi_server.c)
     target_link_libraries(test_multi_server PRIVATE
