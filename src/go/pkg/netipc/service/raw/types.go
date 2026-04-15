@@ -124,6 +124,10 @@ func SnapshotDispatch(handle SnapshotHandler, maxItems uint32) DispatchHandler {
 		if itemBudget == 0 {
 			return 0, protocol.ErrOverflow
 		}
+		minRequired, ok := protocol.CgroupsBuilderMinBytes(itemBudget)
+		if !ok || len(responseBuf) < minRequired {
+			return 0, protocol.ErrOverflow
+		}
 		builder := protocol.NewCgroupsBuilder(responseBuf, itemBudget, 0, 0)
 		if !handle(&req, builder) {
 			return 0, errHandlerFailed

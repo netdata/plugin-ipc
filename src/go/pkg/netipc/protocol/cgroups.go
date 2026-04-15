@@ -290,12 +290,12 @@ type CgroupsBuilder struct {
 // NewCgroupsBuilder initializes a cgroups response builder. buf must be
 // caller-owned and large enough for the expected snapshot.
 func NewCgroupsBuilder(buf []byte, maxItems uint32, systemdEnabled uint32, generation uint64) *CgroupsBuilder {
-	minRequired := uint64(cgroupsRespHdr) + uint64(maxItems)*uint64(cgroupsDirEntry)
-	if uint64(len(buf)) < minRequired {
+	minRequired, ok := CgroupsBuilderMinBytes(maxItems)
+	if !ok || len(buf) < minRequired {
 		panic(fmt.Sprintf("CgroupsBuilder buffer too small: need at least %d bytes, got %d",
 			minRequired, len(buf)))
 	}
-	dataOffset := int(minRequired)
+	dataOffset := minRequired
 	return &CgroupsBuilder{
 		buf:            buf,
 		systemdEnabled: systemdEnabled,
@@ -303,6 +303,17 @@ func NewCgroupsBuilder(buf []byte, maxItems uint32, systemdEnabled uint32, gener
 		maxItems:       maxItems,
 		dataOffset:     dataOffset,
 	}
+}
+
+// CgroupsBuilderMinBytes returns the minimum response buffer required to
+// reserve directory slots for maxItems before packed item data is appended.
+func CgroupsBuilderMinBytes(maxItems uint32) (int, bool) {
+	minRequired := uint64(cgroupsRespHdr) + uint64(maxItems)*uint64(cgroupsDirEntry)
+	maxInt := uint64(int(^uint(0) >> 1))
+	if minRequired > maxInt {
+		return 0, false
+	}
+	return int(minRequired), true
 }
 
 // SetHeader updates the response header fields written by Finish().
@@ -437,8 +448,8 @@ func DispatchCgroupsSnapshot(req []byte, resp []byte, maxItems uint32,
 	if err != nil {
 		return 0, false
 	}
-	minRequired := uint64(cgroupsRespHdr) + uint64(maxItems)*uint64(cgroupsDirEntry)
-	if uint64(len(resp)) < minRequired {
+	minRequired, ok := CgroupsBuilderMinBytes(maxItems)
+	if !ok || len(resp) < minRequired {
 		return 0, false
 	}
 	builder := NewCgroupsBuilder(resp, maxItems, 0, 0)

@@ -202,7 +202,8 @@ add_test(NAME fuzz_protocol_30s
 set_tests_properties(fuzz_protocol_30s PROPERTIES TIMEOUT 60)
 
 if(GO_EXECUTABLE)
-    # Go fuzz targets: 30-second runs each.
+    # Go fuzz targets: short runs with timeout headroom. The extended fuzz
+    # script owns longer fuzz coverage; CTest should fail only on real crashes.
     foreach(FUZZ_TARGET
         FuzzDecodeHeader
         FuzzDecodeChunkHeader
@@ -215,7 +216,7 @@ if(GO_EXECUTABLE)
     )
         add_test(NAME go_${FUZZ_TARGET}
             COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
-                ${GO_EXECUTABLE} test -fuzz=^${FUZZ_TARGET}$ -fuzztime=30s
+                ${GO_EXECUTABLE} test -fuzz=^${FUZZ_TARGET}$ -fuzztime=20s
                 ./pkg/netipc/protocol/
             WORKING_DIRECTORY "${NETIPC_GO_PKG_DIR}"
         )

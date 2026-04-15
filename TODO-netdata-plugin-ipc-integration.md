@@ -463,6 +463,40 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
     - `tests/test_service_win_shm_interop.sh`: passed
     - `tests/test_cache_win_interop.sh`: passed
     - `tests/test_cache_win_shm_interop.sh`: passed
+
+## Active Fix Pass (2026-04-15)
+
+- Fixes started after the full baseline pass exposed red lanes:
+  - Go cgroups snapshot dispatch:
+    - evidence:
+      - Windows `go test ./...` panicked in `TestWinServerDispatchSingleSnapshotZeroCapacity`
+      - panic came from `protocol.NewCgroupsBuilder()` with a zero response buffer and explicit `maxItems = 3`
+    - fix:
+      - expose `protocol.CgroupsBuilderMinBytes(maxItems)`
+      - make `SnapshotDispatch()` return `ErrOverflow` before constructing a builder when the response buffer cannot reserve the requested directory slots
+      - also reuse the helper in `DispatchCgroupsSnapshot()`
+    - local verification:
+      - `cd src/go && go test ./pkg/netipc/protocol ./pkg/netipc/service/raw`
+      - result: passed
+  - CTest Go fuzz timeout margin:
+    - evidence:
+      - first full Linux `ctest` failed only in `go_FuzzDecodeHello`
+      - failure was `context deadline exceeded` at approximately the requested `30s` fuzz duration
+      - isolated rerun passed, showing the target is not deterministically crashing
+    - fix:
+      - keep these as short CTest smoke fuzzers, but run `-fuzztime=20s`
+      - longer fuzz coverage remains owned by `tests/run-extended-fuzz.sh`
+    - local verification:
+      - `/usr/bin/ctest --test-dir build --output-on-failure -R '^go_FuzzDecodeHello$'`
+      - `/usr/bin/ctest --test-dir build --output-on-failure -R '^go_FuzzDecodeHelloAck$'`
+      - result: both passed
+  - Windows verifier `gflags.exe` invocation:
+    - evidence:
+      - verifier log showed `GFLAGS: Unexpected argument - 'P:/'`
+      - direct test confirmed MSYS argument conversion changed `/p` into `P:/`
+    - fix:
+      - call `gflags.exe` through `env MSYS2_ARG_CONV_EXCL='*'`
+    - Windows verification still pending in this fix pass
   - next full-suite obstacle discovered on 2026-04-15 during the first native Windows rebuild from commit `b4a44fa`:
     - Windows-only Rust typed-L2 helpers still reference removed public cgroups config fields
     - concrete failing files:

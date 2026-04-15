@@ -53,7 +53,7 @@ cleanup_target() {
     set +e
     "$APPVERIF_BIN" -delete logs -for "$target" >/dev/null 2>&1
     "$APPVERIF_BIN" -delete settings -for "$target" >/dev/null 2>&1
-    "$GFLAGS_BIN" /p /disable "$target" >/dev/null 2>&1
+    env MSYS2_ARG_CONV_EXCL='*' "$GFLAGS_BIN" /p /disable "$target" >/dev/null 2>&1
     set -e
 }
 
@@ -157,7 +157,7 @@ for target in "${TARGETS[@]}"; do
     cleanup_target "$target"
 
     run "$APPVERIF_BIN" -enable "${VERIFIER_LAYER_ARGS[@]}" -for "$target"
-    run "$GFLAGS_BIN" /p /enable "$target" /full
+    run env MSYS2_ARG_CONV_EXCL='*' "$GFLAGS_BIN" /p /enable "$target" /full
 
     printf >&2 "${GRAY}$(pwd) >${NC} "
     printf >&2 "${YELLOW}"
