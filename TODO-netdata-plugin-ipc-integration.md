@@ -133,6 +133,30 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       - it is a generated artifact
       - `win11` must remain a clean validation checkout
       - the authoritative workflow is commit/push here, pull there
+- Decision recorded on 2026-04-15:
+  - Baseline validation pass:
+    - run all practical test suites and benchmark suites on both Linux and native Windows in parallel
+    - objective:
+      - confirm that the handshake rewrite and related fixes did not regress correctness
+      - confirm that the benchmark baselines still hold after the handshake and SHM-readiness changes
+    - Linux validation matrix:
+      - `cmake --build build -j4`
+      - `ctest --test-dir build --output-on-failure -j4`
+      - `cd src/crates/netipc && cargo test`
+      - `cd src/go && go test ./...`
+      - `bash tests/run-go-race.sh`
+      - `bash tests/run-extended-fuzz.sh`
+      - `bash tests/run-posix-bench.sh`
+    - Windows validation matrix on `win11:~/src/plugin-ipc.git`:
+      - `cmake --build build -j4`
+      - `ctest --test-dir build --output-on-failure -j4`
+      - `cargo test --manifest-path src/crates/netipc/Cargo.toml --lib -- --test-threads=1`
+      - `cd src/go && go test ./...`
+      - `bash tests/run-windows-msys-validation.sh`
+      - `bash tests/run-windows-bench.sh`
+    - precondition verified before launch:
+      - local `/home/costa/src/plugin-ipc.git` and `win11:~/src/plugin-ipc.git` are both on commit `313f7ed`
+      - no tracked local modifications are present on either host
 
 ## Implementation Status (2026-04-14)
 
