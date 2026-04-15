@@ -175,20 +175,19 @@ min_msys_pct_for_label() {
   esac
 }
 
-run_toolchain_cases() {
+run_toolchain_case() {
   local toolchain="$1"
+  local label="$2"
+  local scenario="$3"
+  local client="$4"
+  local server="$5"
+  local target="$6"
   local toolchain_out="${OUT_DIR}/${toolchain}"
-  local -a row_args=()
-  local case_def label scenario client server target
+  local row_arg="${scenario},${client},${server},${target}"
 
   mkdir -p "$toolchain_out"
 
-  for case_def in "${COMPARE_CASES[@]}"; do
-    IFS='|' read -r label scenario client server target <<< "$case_def"
-    row_args+=(--row "${scenario},${client},${server},${target}")
-  done
-
-  log "Running targeted comparison rows with toolchain=${toolchain}"
+  log "Running ${label} with toolchain=${toolchain}"
   run env \
     NIPC_WINDOWS_TOOLCHAIN="$toolchain" \
     NIPC_BENCH_REPETITIONS="$REPETITIONS" \
@@ -198,7 +197,18 @@ run_toolchain_cases() {
     NIPC_BENCH_MAX_THROUGHPUT_RATIO="$MAX_THROUGHPUT_RATIO" \
     NIPC_BENCH_ALLOW_TRIMMED_UNSTABLE_RAW=1 \
     NIPC_BENCH_TARGETED_ATTEMPTS="${NIPC_BENCH_COMPARE_TARGETED_ATTEMPTS:-3}" \
-    bash "$TARGETED_RUNNER" --out-dir "$toolchain_out" --duration "$DURATION" "${row_args[@]}"
+    bash "$TARGETED_RUNNER" --out-dir "$toolchain_out" --duration "$DURATION" --row "$row_arg"
+}
+
+run_paired_cases() {
+  local case_def label scenario client server target
+
+  for case_def in "${COMPARE_CASES[@]}"; do
+    IFS='|' read -r label scenario client server target <<< "$case_def"
+    log "Running paired comparison row: ${label}"
+    run_toolchain_case mingw64 "$label" "$scenario" "$client" "$server" "$target"
+    run_toolchain_case msys "$label" "$scenario" "$client" "$server" "$target"
+  done
 }
 
 write_summary_csv() {
@@ -307,8 +317,7 @@ write_policy_csv() {
 main() {
   mkdir -p "$OUT_DIR"
 
-  run_toolchain_cases mingw64
-  run_toolchain_cases msys
+  run_paired_cases
 
   write_summary_csv
   write_joined_csv

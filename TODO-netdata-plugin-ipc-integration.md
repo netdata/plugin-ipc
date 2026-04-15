@@ -269,6 +269,32 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       `tests/compare-windows-bench-toolchains.sh`
     - add a shell policy test for this pure stability decision so the compare
       lane cannot silently regress back to raw-outlier flapping
+- Finding recorded on 2026-04-15 during full Windows validation after commit
+  `d4ff75787743d28ee7f6eedd73e274d0cb608506`:
+  - the full Windows run failed inside `tests/run-windows-msys-validation.sh`
+    before the strict full native Windows benchmark could run
+  - exact failed artifact:
+    - `/tmp/plugin-ipc-full-windows-20260415-153255/msys-validation/bench-compare/policy.csv`
+  - concrete policy failures:
+    - `np-100k`: MSYS `49.5%` of mingw64, required `70.0%`
+    - `shm-max`: MSYS `54.0%` of mingw64, required `85.0%`
+    - `shm-100k`: MSYS `32.7%` of mingw64, required `95.0%`
+    - `snapshot-np`: MSYS `28.3%` of mingw64, required `80.0%`
+  - concrete harness issue:
+    - `tests/compare-windows-bench-toolchains.sh` measures all `mingw64`
+      rows first and all `msys` rows second
+    - this makes the policy ratio vulnerable to cross-phase host-load drift
+      during the requested parallel Linux + Windows validation
+    - the comparison policy is meant to compare paired measurements, not two
+      long phases that may run under different external load
+  - implementation plan:
+    - keep the existing policy floors unchanged
+    - change the compare harness to run each row as an adjacent pair:
+      - `mingw64` measurement for the row
+      - `msys` measurement for the same row
+    - keep the existing per-row retry and raw-outlier opt-in policy
+    - rerun Windows validation after committing and pulling on
+      `win11:~/src/plugin-ipc.git`
 
 ## Implementation Status (2026-04-14)
 
