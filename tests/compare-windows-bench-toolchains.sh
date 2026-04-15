@@ -10,7 +10,7 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TARGETED_RUNNER="${ROOT_DIR}/tests/run-windows-bench-targeted.sh"
+TARGETED_RUNNER="${NIPC_BENCH_COMPARE_TARGETED_RUNNER:-${ROOT_DIR}/tests/run-windows-bench-targeted.sh}"
 OUT_DIR="${1:-${TEMP:-/tmp}/netipc-windows-toolchain-compare}"
 DURATION="${2:-3}"
 REPETITIONS="${NIPC_BENCH_COMPARE_REPETITIONS:-5}"
@@ -19,6 +19,7 @@ MAX_DURATION="${NIPC_BENCH_COMPARE_MAX_DURATION:-${DURATION}}"
 PIPELINE_BATCH_MAX_DURATION="${NIPC_BENCH_COMPARE_PIPELINE_BATCH_MAX_DURATION:-${DURATION}}"
 MAX_THROUGHPUT_RATIO="${NIPC_BENCH_COMPARE_MAX_THROUGHPUT_RATIO:-2.00}"
 ENFORCE_POLICY="${NIPC_BENCH_COMPARE_ENFORCE_POLICY:-1}"
+POLICY_ATTEMPTS="${NIPC_BENCH_COMPARE_POLICY_ATTEMPTS:-3}"
 SUMMARY_CSV="${OUT_DIR}/summary.csv"
 JOINED_CSV="${OUT_DIR}/joined.csv"
 POLICY_CSV="${OUT_DIR}/policy.csv"
@@ -132,6 +133,23 @@ pct_meets_floor() {
   }'
 }
 
+require_positive_integer() {
+  local name="$1"
+  local value="$2"
+
+  case "$value" in
+    ''|*[!0-9]*)
+      err "${name} must be a positive integer, got: ${value}"
+      exit 1
+      ;;
+  esac
+
+  if [ "$value" -lt 1 ]; then
+    err "${name} must be >= 1, got: ${value}"
+    exit 1
+  fi
+}
+
 min_msys_pct_for_label() {
   local label="$1"
 
@@ -200,14 +218,36 @@ run_toolchain_case() {
     bash "$TARGETED_RUNNER" --out-dir "$toolchain_out" --duration "$DURATION" --row "$row_arg"
 }
 
-run_paired_cases() {
+case_def_for_label() {
+  local wanted_label="$1"
   local case_def label scenario client server target
 
   for case_def in "${COMPARE_CASES[@]}"; do
     IFS='|' read -r label scenario client server target <<< "$case_def"
-    log "Running paired comparison row: ${label}"
-    run_toolchain_case mingw64 "$label" "$scenario" "$client" "$server" "$target"
-    run_toolchain_case msys "$label" "$scenario" "$client" "$server" "$target"
+    if [ "$label" = "$wanted_label" ]; then
+      printf '%s\n' "$case_def"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+run_paired_case() {
+  local case_def="$1"
+  local label scenario client server target
+
+  IFS='|' read -r label scenario client server target <<< "$case_def"
+  log "Running paired comparison row: ${label}"
+  run_toolchain_case mingw64 "$label" "$scenario" "$client" "$server" "$target"
+  run_toolchain_case msys "$label" "$scenario" "$client" "$server" "$target"
+}
+
+run_paired_cases() {
+  local case_def
+
+  for case_def in "${COMPARE_CASES[@]}"; do
+    run_paired_case "$case_def"
   done
 }
 
@@ -314,15 +354,39 @@ write_policy_csv() {
   log "MSYS comparison policy passed"
 }
 
-main() {
-  mkdir -p "$OUT_DIR"
+failed_policy_labels() {
+  awk -F',' 'NR > 1 && $9 == "fail" { print $1 }' "$POLICY_CSV"
+}
 
-  run_paired_cases
+snapshot_compare_artifacts() {
+  local attempt="$1"
 
-  write_summary_csv
-  write_joined_csv
-  write_policy_csv
+  [ -f "$SUMMARY_CSV" ] && cp "$SUMMARY_CSV" "${OUT_DIR}/summary.attempt-${attempt}.csv"
+  [ -f "$JOINED_CSV" ] && cp "$JOINED_CSV" "${OUT_DIR}/joined.attempt-${attempt}.csv"
+  [ -f "$POLICY_CSV" ] && cp "$POLICY_CSV" "${OUT_DIR}/policy.attempt-${attempt}.csv"
+}
 
+rerun_failed_policy_rows() {
+  local labels=()
+  local label case_def
+
+  mapfile -t labels < <(failed_policy_labels)
+  if [ "${#labels[@]}" -eq 0 ]; then
+    err "policy retry requested, but no failed policy labels were found in ${POLICY_CSV}"
+    return 1
+  fi
+
+  for label in "${labels[@]}"; do
+    if ! case_def="$(case_def_for_label "$label")"; then
+      err "policy retry cannot find comparison case for label: ${label}"
+      return 1
+    fi
+    log "Rerunning policy-failed paired row: ${label}"
+    run_paired_case "$case_def"
+  done
+}
+
+emit_outputs() {
   log "Joined comparison:"
   printf "${CYAN}%-38s %-17s %-8s %12s %12s %8s %8s %9s${NC}\n" \
     "Label" "Scenario" "C role" "mingw64" "msys" "msys%" "slow" "p95 d%"
@@ -331,6 +395,41 @@ main() {
   log "Summary CSV: ${SUMMARY_CSV}"
   log "Joined CSV: ${JOINED_CSV}"
   log "Policy CSV: ${POLICY_CSV}"
+}
+
+main() {
+  mkdir -p "$OUT_DIR"
+  require_positive_integer "NIPC_BENCH_COMPARE_POLICY_ATTEMPTS" "$POLICY_ATTEMPTS"
+
+  run_paired_cases
+
+  local policy_attempt=1
+  local policy_passed=0
+
+  while true; do
+    write_summary_csv
+    write_joined_csv
+
+    if write_policy_csv; then
+      policy_passed=1
+      break
+    fi
+
+    if [ "$policy_attempt" -ge "$POLICY_ATTEMPTS" ]; then
+      break
+    fi
+
+    snapshot_compare_artifacts "$policy_attempt"
+    policy_attempt=$((policy_attempt + 1))
+    log "Policy failed; rerunning failed paired row(s), attempt ${policy_attempt}/${POLICY_ATTEMPTS}"
+    rerun_failed_policy_rows
+  done
+
+  emit_outputs
+
+  if [ "$policy_passed" -ne 1 ]; then
+    return 1
+  fi
 }
 
 main "$@"

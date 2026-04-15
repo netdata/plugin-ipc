@@ -359,7 +359,9 @@ bash tests/run-windows-msys-validation.sh
 That lane builds the C artifacts with `/usr/bin/gcc`, runs the targeted
 Windows functional/interoperability slice, repeats `test_win_shm`, and compares
 a bounded benchmark subset against the native `mingw64` lane with explicit
-throughput floors per scenario. It does not replace native Windows sign-off.
+throughput floors per scenario. Policy-failed benchmark rows are rerun as paired
+native+MSYS rows before final failure, with prior attempts saved next to the
+final `policy.csv`. It does not replace native Windows sign-off.
 
 Coverage:
 

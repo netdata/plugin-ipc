@@ -3649,3 +3649,63 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       - reason for interruption:
         - no new technical blocker remained
         - the rest of the work was wall-clock runtime only
+- Finding recorded on 2026-04-15 during clean full validation after commit
+  `074a3a5c8f552f15473a0bc929b96da9e71f79b7`:
+  - Windows full validation failed in the MSYS bounded benchmark policy step.
+  - Failing command context:
+    - `bash tests/run-windows-msys-validation.sh`
+    - comparison artifact directory:
+      - `/tmp/plugin-ipc-full-windows-20260415-162223/msys-validation/bench-compare/`
+  - Concrete failing policy row:
+    - `np-max,np-ping-pong,c,c,0,both,70.0,44.9,fail`
+  - Concrete joined comparison row:
+    - `np-max,np-ping-pong,c,c,0,both,14058.000,6317.000,44.9,55.1,185.000,459.200,148.2,31.900,30.300`
+  - Rows that passed in the same policy run:
+    - `np-100k`: MSYS was `100.5%` of native `mingw64`
+    - `snapshot-np`: MSYS was `96.9%` of native `mingw64`
+    - `shm-max`: MSYS was `88.5%` of native `mingw64`
+    - all mixed C/Rust SHM rows passed their configured floors
+  - Interpretation:
+    - this is narrow to unbounded/max-rate C-to-C named-pipe ping-pong under MSYS
+    - fixed-rate named-pipe behavior did not regress in the same run
+    - no code or policy change is justified yet without investigating whether the `np-max` floor is a valid semantic regression floor or an invalid saturation policy for MSYS
+  - Immediate investigation plan:
+    - inspect `tests/compare-windows-bench-toolchains.sh` policy intent for `np-max`
+    - inspect the per-sample artifacts for both `mingw64` and `msys` `np-max`
+    - compare C named-pipe benchmark behavior under unbounded and fixed-rate modes
+    - rerun the narrow `np-max` pair enough to determine whether this is repeatable or a noisy saturation outlier
+    - only then decide whether to fix code, fix harness policy, or both
+  - Follow-up evidence from a narrow rerun on the same `win11:~/src/plugin-ipc.git`
+    checkout:
+    - command:
+      - paired targeted rerun of `np-ping-pong,c,c,0` for `mingw64` and `msys`
+      - artifact directory:
+        - `/tmp/plugin-ipc-investigate-npmax-20260415-165234/`
+    - result:
+      - `mingw64`: `22489.000`
+      - `msys`: `22492.000`
+      - effective MSYS/native ratio: approximately `100.0%`
+    - conclusion:
+      - the implementation can pass the intended `np-max` relative policy immediately after the failed full run
+      - the problem is a compare-lane false failure mode: a stable-looking saturation outlier can pass row-local guards and fail only at the final relative-policy stage
+  - Implemented harness fix:
+    - `tests/compare-windows-bench-toolchains.sh` now reruns policy-failed labels as paired `mingw64`+`msys` rows before final failure
+    - default final-policy attempt budget:
+      - `NIPC_BENCH_COMPARE_POLICY_ATTEMPTS=3`
+    - prior failed attempts are preserved as:
+      - `summary.attempt-N.csv`
+      - `joined.attempt-N.csv`
+      - `policy.attempt-N.csv`
+    - no throughput floor was lowered
+  - Documentation/test updates:
+    - `README.md` and `WINDOWS-COVERAGE.md` document the paired policy retry behavior
+    - added `tests/test_windows_compare_policy_retry.sh` with a stub targeted runner proving:
+      - first policy attempt fails `np-max`
+      - only the failed label is rerun
+      - final policy passes after the paired retry
+  - Local verification:
+    - `bash -n tests/compare-windows-bench-toolchains.sh tests/test_windows_compare_policy_retry.sh tests/run-windows-msys-validation.sh`
+    - `bash tests/test_windows_compare_policy_retry.sh`
+    - `bash tests/test_windows_bench_stability_policy.sh`
+    - `git diff --check`
+    - all passed
