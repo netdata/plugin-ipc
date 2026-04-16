@@ -256,6 +256,14 @@ static void client_disconnect(nipc_client_ctx_t *ctx)
     }
 }
 
+static void client_disable_shm_profiles(nipc_client_ctx_t *ctx)
+{
+    ctx->transport_config.supported_profiles &=
+        ~(NIPC_PROFILE_SHM_HYBRID | NIPC_PROFILE_SHM_FUTEX);
+    ctx->transport_config.preferred_profiles &=
+        ~(NIPC_PROFILE_SHM_HYBRID | NIPC_PROFILE_SHM_FUTEX);
+}
+
 /* Attempt a full connection: UDS connect + handshake, then SHM upgrade
  * if negotiated. Returns the new state. */
 static nipc_client_state_t client_try_connect(nipc_client_ctx_t *ctx)
@@ -326,13 +334,16 @@ static nipc_client_state_t client_try_connect(nipc_client_ctx_t *ctx)
             if (serr == NIPC_SHM_OK) {
                 ctx->shm = shm;
             } else {
-                /* SHM attach failed after retries. The handshake selected
-                 * SHM but we can't use it. Fail the session to avoid
-                 * transport desync (server on SHM, client on UDS). */
+                /* SHM attach failed after negotiation. Close that session,
+                 * blacklist SHM for this client context, and retry
+                 * baseline via a new handshake. */
                 free(shm);
                 nipc_uds_close_session(&ctx->session);
                 ctx->session_valid = false;
-                return NIPC_CLIENT_DISCONNECTED;
+                client_disable_shm_profiles(ctx);
+                if (ctx->transport_config.supported_profiles == 0)
+                    return NIPC_CLIENT_DISCONNECTED;
+                return client_try_connect(ctx);
             }
         }
     }

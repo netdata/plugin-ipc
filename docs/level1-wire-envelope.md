@@ -211,11 +211,14 @@ The server does not return partial success. A successful handshake means:
 
 - `transport_status = OK`
 - all session-operational fields in `HELLO_ACK` are final for that session
-- `selected_profile` is already guaranteed usable for that session
+- `selected_profile` is final and locked for that session
 
 If `selected_profile` is an SHM profile, the server must not send successful
-`HELLO_ACK` until the SHM resources for that session are already ready. The
-handshake must never claim SHM success and then fall back after the fact.
+`HELLO_ACK` until the SHM resources for that session are already ready on the
+server side. If the client later cannot attach the negotiated SHM transport,
+it must close that session and recover only via a new connection and new
+handshake without SHM. The handshake must never claim SHM success and then
+fall back within the same session.
 
 ### Field-by-field negotiation matrix
 

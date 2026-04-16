@@ -179,6 +179,12 @@ proposes a larger request ceiling, handshake rejects with
 `transport_status = LIMIT_EXCEEDED`. The cap is enforced before the value
 becomes part of the session.
 
+If handshake selects an SHM profile and the client cannot attach SHM
+locally, Level 2 must close that session, remove SHM from future transport
+proposals for that client context, reconnect with a new handshake, and
+continue on baseline if that reconnect succeeds. This is not same-session
+fallback; it is recovery through a new session.
+
 ### 6. No hidden background threads (client)
 
 Level 2 clients do not spawn background threads for connection management.

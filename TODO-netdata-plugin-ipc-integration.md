@@ -3805,3 +3805,40 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       - commit this evidence update locally
       - push
       - pull on `win11:~/src/plugin-ipc.git`
+
+## Active Task: Client-Side SHM Attach Fallback
+
+- Goal:
+  - implement the refined transport rule in `plugin-ipc`
+  - if handshake selects SHM and the client cannot attach SHM, the client must
+    close that session, exclude SHM from future proposals for that client
+    context, and reconnect on baseline
+  - no server-side same-session fallback is allowed
+- Scope:
+  - update C, Rust, and Go L2 client reconnect logic
+  - keep L3 behavior inherited from L2
+  - update the handshake/spec docs to describe this exception precisely
+  - add tests for client-side SHM attach failure fallback
+- Implementation status:
+  - done locally in C, Rust, and Go
+  - behavior now is:
+    - handshake may negotiate SHM
+    - if client-side SHM attach fails, that session is closed
+    - the client removes SHM from future proposals in that client context
+    - the client reconnects through a new handshake and falls back to baseline
+    - no same-session fallback is used
+- Linux evidence:
+  - `go test ./pkg/netipc/service/raw -run 'TestUnixShmAttachFailureFallsBackToBaseline|TestUnixShmPrepareFailureFallsBackToBaseline' -count=1 -v`
+    - passed
+  - `cargo test --manifest-path src/crates/netipc/Cargo.toml test_refresh_shm_attach_failure_falls_back_to_baseline -- --nocapture`
+    - passed
+  - `cargo test --manifest-path src/crates/netipc/Cargo.toml test_server_falls_back_to_baseline_when_linux_shm_prepare_fails -- --nocapture`
+    - passed
+  - `cmake --build build --target test_service -j4`
+    - passed
+  - `./build/bin/test_service`
+    - passed, including:
+      - `Test: Client-side SHM attach failure falls back to baseline`
+- Windows follow-up:
+  - the Windows code and Windows-only tests were updated, but they still need to
+    be run in `win11:~/src/plugin-ipc.git`

@@ -764,6 +764,82 @@ fn test_client_auth_failure_windows() {
 }
 
 #[test]
+fn test_refresh_winshm_attach_failure_falls_back_to_baseline() {
+    let svc = unique_service("rs_win_svc_shm_attach_fail");
+    ensure_run_dir();
+    cleanup_all(&svc);
+
+    let ready = Arc::new(AtomicBool::new(false));
+    let ready_clone = ready.clone();
+    let server_svc = svc.clone();
+    let server_thread = thread::spawn(move || -> Result<(), String> {
+        let mut listener = NpListener::bind(TEST_RUN_DIR, &server_svc, shm_server_config())
+            .map_err(|e| format!("bind: {e}"))?;
+        ready_clone.store(true, Ordering::Release);
+
+        let mut first = listener
+            .accept()
+            .map_err(|e| format!("accept first: {e}"))?;
+        if first.selected_profile != PROFILE_SHM_HYBRID {
+            return Err(format!(
+                "first selected profile = {}, want {}",
+                first.selected_profile, PROFILE_SHM_HYBRID
+            ));
+        }
+
+        let mut recv_buf = vec![0u8; RESPONSE_BUF_SIZE];
+        if first.receive(&mut recv_buf).is_ok() {
+            return Err("first SHM-selected session should disconnect after attach failure".into());
+        }
+
+        let mut second = listener
+            .accept()
+            .map_err(|e| format!("accept second: {e}"))?;
+        if second.selected_profile != PROFILE_BASELINE {
+            return Err(format!(
+                "second selected profile = {}, want {}",
+                second.selected_profile, PROFILE_BASELINE
+            ));
+        }
+
+        if second.receive(&mut recv_buf).is_ok() {
+            return Err("second baseline session should close cleanly when client closes".into());
+        }
+
+        Ok(())
+    });
+
+    while !ready.load(Ordering::Acquire) {
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let mut client = increment_client(&svc, shm_client_config());
+    assert!(
+        client.refresh(),
+        "refresh should transition to READY via baseline fallback"
+    );
+    assert_eq!(client.state, ClientState::Ready);
+    assert!(client.ready());
+    assert!(
+        client.shm.is_none(),
+        "fallback session must not attach WinSHM"
+    );
+    assert_eq!(
+        client.session.as_ref().map(|s| s.selected_profile),
+        Some(PROFILE_BASELINE)
+    );
+    assert_eq!(client.transport_config.supported_profiles, PROFILE_BASELINE);
+    assert_eq!(client.transport_config.preferred_profiles, 0);
+
+    client.close();
+    match server_thread.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => panic!("raw win attach-failure server failed: {err}"),
+        Err(_) => panic!("raw win attach-failure server panicked"),
+    }
+}
+
+#[test]
 fn test_client_incompatible_windows() {
     let svc = "rs_win_svc_incompat";
     let mut server = TestServer::start(svc, METHOD_CGROUPS_SNAPSHOT, test_cgroups_dispatch());

@@ -886,7 +886,7 @@ fn test_increment_batch_shm() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn test_refresh_shm_attach_failure_returns_disconnected() {
+fn test_refresh_shm_attach_failure_falls_back_to_baseline() {
     let svc = "rs_svc_shm_attach_fail";
     ensure_run_dir();
     cleanup_all(svc);
@@ -899,8 +899,24 @@ fn test_refresh_shm_attach_failure_returns_disconnected() {
         let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, shm_server_config())
             .expect("bind shm listener");
         ready_clone.store(true, Ordering::Release);
-        let _session = listener.accept().expect("accept negotiated shm session");
-        thread::sleep(Duration::from_millis(1200));
+        let mut first = listener.accept().expect("accept negotiated shm session");
+        assert_eq!(first.selected_profile, PROFILE_SHM_FUTEX);
+
+        let mut recv_buf = vec![0u8; RESPONSE_BUF_SIZE];
+        let first_result = first.receive(&mut recv_buf);
+        assert!(
+            first_result.is_err(),
+            "first SHM-selected session should disconnect after attach failure"
+        );
+
+        let mut second = listener.accept().expect("accept baseline fallback session");
+        assert_eq!(second.selected_profile, PROFILE_BASELINE);
+
+        let second_result = second.receive(&mut recv_buf);
+        assert!(
+            second_result.is_err(),
+            "second baseline session should close cleanly when client closes"
+        );
     });
 
     while !ready.load(Ordering::Acquire) {
@@ -908,17 +924,26 @@ fn test_refresh_shm_attach_failure_returns_disconnected() {
     }
 
     let mut client = snapshot_client(svc, shm_client_config());
-    client.refresh();
-    assert_eq!(client.state, ClientState::Disconnected);
-    assert!(!client.ready());
     assert!(
-        client.session.is_none(),
-        "failed SHM attach should drop the UDS session"
+        client.refresh(),
+        "refresh should transition to READY via baseline fallback"
+    );
+    assert_eq!(client.state, ClientState::Ready);
+    assert!(client.ready());
+    assert!(
+        client.session.is_some(),
+        "attach fallback should end with a live baseline session"
     );
     assert!(
         client.shm.is_none(),
-        "failed SHM attach must not retain SHM state"
+        "fallback session must not retain SHM state"
     );
+    assert_eq!(
+        client.session.as_ref().map(|s| s.selected_profile),
+        Some(PROFILE_BASELINE)
+    );
+    assert_eq!(client.transport_config.supported_profiles, PROFILE_BASELINE);
+    assert_eq!(client.transport_config.preferred_profiles, 0);
 
     client.close();
     server_thread.join().expect("server join");

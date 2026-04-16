@@ -271,6 +271,14 @@ static void client_disconnect(nipc_client_ctx_t *ctx)
     }
 }
 
+static void client_disable_shm_profiles(nipc_client_ctx_t *ctx)
+{
+    ctx->transport_config.supported_profiles &=
+        ~(NIPC_WIN_SHM_PROFILE_HYBRID | NIPC_WIN_SHM_PROFILE_BUSYWAIT);
+    ctx->transport_config.preferred_profiles &=
+        ~(NIPC_WIN_SHM_PROFILE_HYBRID | NIPC_WIN_SHM_PROFILE_BUSYWAIT);
+}
+
 /* Attempt a full connection: Named Pipe connect + handshake, then
  * Win SHM upgrade if negotiated. Returns the new state. */
 static nipc_client_state_t client_try_connect(nipc_client_ctx_t *ctx)
@@ -344,13 +352,16 @@ static nipc_client_state_t client_try_connect(nipc_client_ctx_t *ctx)
             if (serr == NIPC_WIN_SHM_OK) {
                 ctx->shm = shm;
             } else {
-                /* SHM attach failed after retries. The handshake selected
-                 * SHM but we can't use it. Fail the session to avoid
-                 * transport desync (server on SHM, client on NP). */
+                /* WinSHM attach failed after negotiation. Close that
+                 * session, blacklist WinSHM for this client context, and
+                 * retry baseline via a new handshake. */
                 free(shm);
                 nipc_np_close_session(&ctx->session);
                 ctx->session_valid = false;
-                return NIPC_CLIENT_DISCONNECTED;
+                client_disable_shm_profiles(ctx);
+                if (ctx->transport_config.supported_profiles == 0)
+                    return NIPC_CLIENT_DISCONNECTED;
+                return client_try_connect(ctx);
             }
         }
     }

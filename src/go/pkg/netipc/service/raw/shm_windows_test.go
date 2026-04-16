@@ -123,7 +123,7 @@ func TestWinServerRunInvalidServiceName(t *testing.T) {
 	}
 }
 
-func TestWinShmAttachFailureLeavesClientDisconnected(t *testing.T) {
+func TestWinShmAttachFailureFallsBackToBaseline(t *testing.T) {
 	svc := uniqueWinService("go_win_shm_attach_fail")
 	cfg := testWinShmServerConfig()
 
@@ -133,41 +133,86 @@ func TestWinShmAttachFailureLeavesClientDisconnected(t *testing.T) {
 	}
 	defer listener.Close()
 
-	doneCh := make(chan error, 1)
+	type attachFailureResult struct {
+		firstSelected  uint32
+		secondSelected uint32
+		err            error
+	}
+	doneCh := make(chan attachFailureResult, 1)
 	go func() {
-		session, err := listener.Accept()
+		first, err := listener.Accept()
 		if err != nil {
-			doneCh <- err
+			doneCh <- attachFailureResult{err: err}
 			return
 		}
-		defer session.Close()
+		defer first.Close()
+		firstSelected := first.SelectedProfile
 
-		recvBuf := make([]byte, protocol.HeaderSize+int(cfg.MaxRequestPayloadBytes))
-		_, _, err = session.Receive(recvBuf)
-		doneCh <- err
+		recvBuf := make([]byte, protocol.HeaderSize+4096)
+		_, _, err = first.Receive(recvBuf)
+		if err == nil {
+			doneCh <- attachFailureResult{err: errors.New("expected first receive to fail after WinSHM attach fallback disconnect")}
+			return
+		}
+
+		second, err := listener.Accept()
+		if err != nil {
+			doneCh <- attachFailureResult{err: err}
+			return
+		}
+		defer second.Close()
+		secondSelected := second.SelectedProfile
+
+		_, _, err = second.Receive(recvBuf)
+		if err == nil {
+			doneCh <- attachFailureResult{err: errors.New("expected second receive to fail after client close")}
+			return
+		}
+
+		doneCh <- attachFailureResult{
+			firstSelected:  firstSelected,
+			secondSelected: secondSelected,
+		}
 	}()
 
 	client := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
-	defer client.Close()
 
-	if changed := client.Refresh(); changed {
-		t.Fatal("refresh should end back in DISCONNECTED when WinSHM attach never becomes available")
+	if changed := client.Refresh(); !changed {
+		t.Fatal("refresh should transition to READY via baseline fallback after WinSHM attach failure")
 	}
-	if client.Ready() {
-		t.Fatal("client should not be ready after attach failure")
+	if !client.Ready() {
+		t.Fatal("client should be ready after baseline fallback")
 	}
-	if client.state != StateDisconnected {
-		t.Fatalf("client state = %d, want DISCONNECTED", client.state)
+	if client.state != StateReady {
+		t.Fatalf("client state = %d, want READY", client.state)
 	}
 	if client.shm != nil {
-		t.Fatal("expected no WinSHM attachment after attach failure")
+		t.Fatal("expected no WinSHM attachment after fallback")
 	}
-	if client.session != nil {
-		t.Fatal("expected no live session after attach failure")
+	if client.session == nil {
+		t.Fatal("expected live baseline session after fallback")
+	}
+	if client.session.SelectedProfile != protocol.ProfileBaseline {
+		t.Fatalf("selected profile after fallback = %#x, want baseline", client.session.SelectedProfile)
+	}
+	if client.config.SupportedProfiles&windows.WinShmProfileHybrid != 0 {
+		t.Fatalf("supported profiles should drop WinSHM after attach failure, got %#x", client.config.SupportedProfiles)
+	}
+	if client.config.PreferredProfiles&windows.WinShmProfileHybrid != 0 {
+		t.Fatalf("preferred profiles should drop WinSHM after attach failure, got %#x", client.config.PreferredProfiles)
 	}
 
-	if err := <-doneCh; err == nil {
-		t.Fatal("expected raw server receive to fail after attach failure disconnect")
+	client.Close()
+
+	result := <-doneCh
+	if result.err != nil {
+		t.Fatalf("attach-failure fallback server failed: %v", result.err)
+	}
+	if result.firstSelected != windows.WinShmProfileHybrid {
+		t.Fatalf("first selected profile = %#x, want WinSHM hybrid", result.firstSelected)
+	}
+	if result.secondSelected != protocol.ProfileBaseline {
+		t.Fatalf("second selected profile = %#x, want baseline", result.secondSelected)
 	}
 }
 

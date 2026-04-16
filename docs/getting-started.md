@@ -19,7 +19,9 @@ The library has four layers:
 
 Transports: UDS + SHM (POSIX/Linux), Named Pipe + Win SHM (Windows).
 If SHM is selected during handshake, successful `HELLO_ACK` already
-guarantees SHM is ready for that session. This remains transparent to
+guarantees the server has already prepared SHM for that session. If the
+client still cannot attach SHM locally, it closes that session and
+reconnects without SHM. This remains transparent to
 L2/L3 callers.
 
 The Level 2 examples below are schematic. They show the intended public
@@ -323,7 +325,9 @@ if item, found := cache.Lookup(hash, "docker-abc123"); found {
 - **Cache preservation**: on refresh failure, the previous cache is
   preserved. The cache is empty only if no refresh has ever succeeded.
 - **Transport negotiation**: if SHM is selected during handshake, the
-  successful handshake already guarantees SHM is usable for that session.
+  successful handshake means the server already prepared SHM for that
+  session; if client-side attach still fails, recovery is a new baseline
+  session, not same-session fallback.
 - **Cross-language**: all three implementations produce identical wire
   bytes and pass cross-language interop tests.
 

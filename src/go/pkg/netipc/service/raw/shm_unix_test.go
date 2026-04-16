@@ -124,9 +124,11 @@ func TestUnixShmRoundTrip(t *testing.T) {
 	}
 }
 
-func TestUnixShmAttachFailureLeavesClientDisconnected(t *testing.T) {
+func TestUnixShmAttachFailureFallsBackToBaseline(t *testing.T) {
 	svc := uniqueUnixService("go_unix_shm_attach_fail")
 	cfg := testUnixShmServerConfig()
+	ensureRunDir()
+	cleanupAll(svc)
 
 	listener, err := posix.Listen(testRunDir, svc, cfg)
 	if err != nil {
@@ -134,41 +136,86 @@ func TestUnixShmAttachFailureLeavesClientDisconnected(t *testing.T) {
 	}
 	defer listener.Close()
 
-	doneCh := make(chan error, 1)
+	type attachFailureResult struct {
+		firstSelected  uint32
+		secondSelected uint32
+		err            error
+	}
+	doneCh := make(chan attachFailureResult, 1)
 	go func() {
-		session, err := listener.Accept()
+		first, err := listener.Accept()
 		if err != nil {
-			doneCh <- err
+			doneCh <- attachFailureResult{err: err}
 			return
 		}
-		defer session.Close()
+		defer first.Close()
+		firstSelected := first.SelectedProfile
 
-		recvBuf := make([]byte, protocol.HeaderSize+int(cfg.MaxRequestPayloadBytes))
-		_, _, err = session.Receive(recvBuf)
-		doneCh <- err
+		recvBuf := make([]byte, protocol.HeaderSize+4096)
+		_, _, err = first.Receive(recvBuf)
+		if err == nil {
+			doneCh <- attachFailureResult{err: errors.New("expected first receive to fail after SHM attach fallback disconnect")}
+			return
+		}
+
+		second, err := listener.Accept()
+		if err != nil {
+			doneCh <- attachFailureResult{err: err}
+			return
+		}
+		defer second.Close()
+		secondSelected := second.SelectedProfile
+
+		_, _, err = second.Receive(recvBuf)
+		if err == nil {
+			doneCh <- attachFailureResult{err: errors.New("expected second receive to fail after client close")}
+			return
+		}
+
+		doneCh <- attachFailureResult{
+			firstSelected:  firstSelected,
+			secondSelected: secondSelected,
+		}
 	}()
 
 	client := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
-	defer client.Close()
 
-	if changed := client.Refresh(); changed {
-		t.Fatal("refresh should end back in DISCONNECTED when SHM attach never becomes available")
+	if changed := client.Refresh(); !changed {
+		t.Fatal("refresh should transition to READY via baseline fallback after SHM attach failure")
 	}
-	if client.Ready() {
-		t.Fatal("client should not be ready after attach failure")
+	if !client.Ready() {
+		t.Fatal("client should be ready after baseline fallback")
 	}
-	if client.state != StateDisconnected {
-		t.Fatalf("client state = %d, want DISCONNECTED", client.state)
+	if client.state != StateReady {
+		t.Fatalf("client state = %d, want READY", client.state)
 	}
 	if client.shm != nil {
-		t.Fatal("expected no SHM attachment after attach failure")
+		t.Fatal("expected no SHM attachment after fallback")
 	}
-	if client.session != nil {
-		t.Fatal("expected no live session after attach failure")
+	if client.session == nil {
+		t.Fatal("expected live baseline session after fallback")
+	}
+	if client.session.SelectedProfile != protocol.ProfileBaseline {
+		t.Fatalf("selected profile after fallback = %#x, want baseline", client.session.SelectedProfile)
+	}
+	if client.config.SupportedProfiles&protocol.ProfileSHMHybrid != 0 {
+		t.Fatalf("supported profiles should drop SHM after attach failure, got %#x", client.config.SupportedProfiles)
+	}
+	if client.config.PreferredProfiles&protocol.ProfileSHMHybrid != 0 {
+		t.Fatalf("preferred profiles should drop SHM after attach failure, got %#x", client.config.PreferredProfiles)
 	}
 
-	if err := <-doneCh; err == nil {
-		t.Fatal("expected raw server receive to fail after attach failure disconnect")
+	client.Close()
+
+	result := <-doneCh
+	if result.err != nil {
+		t.Fatalf("attach-failure fallback server failed: %v", result.err)
+	}
+	if result.firstSelected != protocol.ProfileSHMHybrid {
+		t.Fatalf("first selected profile = %#x, want SHM hybrid", result.firstSelected)
+	}
+	if result.secondSelected != protocol.ProfileBaseline {
+		t.Fatalf("second selected profile = %#x, want baseline", result.secondSelected)
 	}
 }
 

@@ -67,9 +67,10 @@ This is the Windows baseline profile.
 4. **Data plane**: if the negotiated profile is NAMED_PIPE (bit 0),
    all subsequent messages travel over the same pipe. If a higher
    profile is negotiated (e.g., SHM_HYBRID), the Named Pipe remains open
-   for control/lifecycle coordination, but successful HELLO_ACK already
-   guarantees the SHM resources for that session are ready and usable.
-   There is no post-handshake fallback.
+   for control/lifecycle coordination, and successful HELLO_ACK guarantees
+   the SHM resources for that session are already prepared on the server
+   side. If the client later cannot attach Win SHM locally, it must close
+   that session and reconnect without SHM. There is no same-session fallback.
 
 ## Packet size
 
@@ -111,7 +112,9 @@ Where:
 
 The Named Pipe connection remains open for the session lifetime. The
 data plane for SHM profiles uses the shared memory region that was
-already made ready before successful HELLO_ACK. If a later reconnect
+already created before successful HELLO_ACK. If the client still cannot
+attach it, the client must close that session and reconnect baseline-only.
+If a later reconnect
 learns larger capacities, it establishes a new session with a new
 `session_id` and therefore a different SHM mapping / event name set.
 

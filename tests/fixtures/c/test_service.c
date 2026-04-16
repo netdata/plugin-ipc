@@ -1066,6 +1066,16 @@ typedef struct {
     int done;
 } fake_shm_server_ctx_t;
 
+typedef struct {
+    const char *service;
+    int ready;
+    int done;
+    uint32_t first_selected_profile;
+    uint32_t second_selected_profile;
+    nipc_uds_error_t first_receive_err;
+    nipc_uds_error_t second_receive_err;
+} fake_shm_attach_fallback_ctx_t;
+
 static void *fake_shm_response_server_thread_fn(void *arg)
 {
     fake_shm_server_ctx_t *ctx = (fake_shm_server_ctx_t *)arg;
@@ -1229,6 +1239,78 @@ out:
     nipc_shm_destroy(&shm);
     nipc_uds_close_session(&session);
     nipc_uds_close_listener(&listener);
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static void *fake_shm_attach_fallback_server_thread_fn(void *arg)
+{
+    fake_shm_attach_fallback_ctx_t *ctx = (fake_shm_attach_fallback_ctx_t *)arg;
+    nipc_uds_listener_t listener;
+    nipc_uds_session_t first;
+    nipc_uds_session_t second;
+    nipc_uds_server_config_t scfg = {
+        .supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
+        .preferred_profiles = NIPC_PROFILE_SHM_HYBRID,
+        .max_request_payload_bytes = 4096,
+        .max_request_batch_items = 1,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .max_response_batch_items = 1,
+        .auth_token = AUTH_TOKEN,
+        .backlog = 4,
+    };
+
+    memset(&listener, 0, sizeof(listener));
+    memset(&first, 0, sizeof(first));
+    memset(&second, 0, sizeof(second));
+    listener.fd = -1;
+    first.fd = -1;
+    second.fd = -1;
+    ctx->first_receive_err = NIPC_UDS_ERR_BAD_PARAM;
+    ctx->second_receive_err = NIPC_UDS_ERR_BAD_PARAM;
+
+    if (nipc_uds_listen(TEST_RUN_DIR, ctx->service, &scfg, &listener) != NIPC_UDS_OK) {
+        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        return NULL;
+    }
+
+    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+
+    if (nipc_uds_accept(&listener, 1, &first) != NIPC_UDS_OK)
+        goto out;
+    ctx->first_selected_profile = first.selected_profile;
+
+    {
+        uint8_t recv_buf[4096];
+        nipc_header_t hdr;
+        const void *payload;
+        size_t payload_len;
+        ctx->first_receive_err = nipc_uds_receive(
+            &first, recv_buf, sizeof(recv_buf), &hdr, &payload, &payload_len);
+    }
+    nipc_uds_close_session(&first);
+    first.fd = -1;
+
+    if (nipc_uds_accept(&listener, 2, &second) != NIPC_UDS_OK)
+        goto out;
+    ctx->second_selected_profile = second.selected_profile;
+
+    {
+        uint8_t recv_buf[4096];
+        nipc_header_t hdr;
+        const void *payload;
+        size_t payload_len;
+        ctx->second_receive_err = nipc_uds_receive(
+            &second, recv_buf, sizeof(recv_buf), &hdr, &payload, &payload_len);
+    }
+
+out:
+    if (first.fd != -1)
+        nipc_uds_close_session(&first);
+    if (second.fd != -1)
+        nipc_uds_close_session(&second);
+    if (listener.fd != -1)
+        nipc_uds_close_listener(&listener);
     __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
     return NULL;
 }
@@ -2322,6 +2404,66 @@ static void test_shm_negotiation_falls_back_to_baseline_on_obstructed_region(voi
     cleanup_all(svc);
 }
 
+static void test_client_shm_attach_failure_falls_back_to_baseline(void)
+{
+    printf("Test: Client-side SHM attach failure falls back to baseline\n");
+    const char *svc = "svc_shm_attach_fallback";
+    cleanup_all(svc);
+
+    fake_shm_attach_fallback_ctx_t sctx;
+    memset(&sctx, 0, sizeof(sctx));
+    sctx.service = svc;
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, fake_shm_attach_fallback_server_thread_fn, &sctx);
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("attach-fallback server started",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_client_config_t ccfg = {
+        .supported_profiles         = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
+        .preferred_profiles         = NIPC_PROFILE_SHM_HYBRID,
+        .max_request_batch_items    = 1,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .auth_token                 = AUTH_TOKEN,
+    };
+
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+    bool changed = nipc_client_refresh(&client);
+    check("refresh reports READY transition after attach failure fallback", changed);
+    check("client is ready after attach failure fallback", nipc_client_ready(&client));
+    check("client state is READY after attach failure fallback",
+          client.state == NIPC_CLIENT_READY);
+    check("fallback session keeps no SHM attachment",
+          client.session_valid && client.shm == NULL);
+    check("fallback selected profile is baseline",
+          client.session.selected_profile == NIPC_PROFILE_BASELINE);
+    check("fallback strips SHM from future supported profiles",
+          (client.transport_config.supported_profiles &
+           (NIPC_PROFILE_SHM_HYBRID | NIPC_PROFILE_SHM_FUTEX)) == 0);
+    check("fallback strips SHM from future preferred profiles",
+          (client.transport_config.preferred_profiles &
+           (NIPC_PROFILE_SHM_HYBRID | NIPC_PROFILE_SHM_FUTEX)) == 0);
+
+    nipc_client_close(&client);
+    pthread_join(tid, NULL);
+
+    check("first negotiated profile was SHM hybrid",
+          sctx.first_selected_profile == NIPC_PROFILE_SHM_HYBRID);
+    check("second negotiated profile was baseline",
+          sctx.second_selected_profile == NIPC_PROFILE_BASELINE);
+    check("first session disconnected after SHM attach failure",
+          sctx.first_receive_err != NIPC_UDS_OK);
+    check("second baseline session closed after client shutdown",
+          sctx.second_receive_err != NIPC_UDS_OK);
+
+    cleanup_all(svc);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
@@ -2366,6 +2508,7 @@ int main(void)
     test_server_init_worker_floor_and_long_run_dir(); printf("\n");
     test_client_init_defaults_and_truncation(); printf("\n");
     test_shm_negotiation_falls_back_to_baseline_on_obstructed_region(); printf("\n");
+    test_client_shm_attach_failure_falls_back_to_baseline(); printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

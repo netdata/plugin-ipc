@@ -235,7 +235,10 @@ Successful handshake means:
 - `transport_status = OK`
 - the selected transport profile is final and locked for the session
 - all returned limits are final for the session
-- if the selected profile is SHM, SHM is already usable for that session
+- if the selected profile is SHM, the server has already prepared the SHM
+  resources for that session
+- if the client still cannot attach the negotiated SHM transport locally, it
+  must close that session and recover only via a new handshake without SHM
 
 Rejected handshake means:
 
@@ -280,7 +283,26 @@ sequenceDiagram
     S->>S: Provision SHM resources for this session
     S->>S: Allocate session_id tied to this SHM session
     S-->>C: HELLO_ACK(status=OK,\nselected_profile=SHM,\nfinal limits, packet_size, session_id)
-    Note over C,S: Successful HELLO_ACK guarantees SHM is already usable
+    Note over C,S: Server-side SHM is already prepared for immediate client attach
+```
+
+#### Client-side SHM attach failure recovery
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    C->>S: HELLO(...)
+    S->>S: Validate HELLO and provision SHM
+    S-->>C: HELLO_ACK(status=OK,\nselected_profile=SHM,...)
+    C->>C: Attempt SHM attach
+    C->>C: Attach fails locally
+    C->>S: Close SHM-selected session
+    C->>C: Remove SHM from future proposals\nfor this client context
+    C->>S: New HELLO(...baseline only...)
+    S-->>C: HELLO_ACK(status=OK,\nselected_profile=BASELINE,...)
+    Note over C,S: Recovery is a new session. No same-session fallback.
 ```
 
 #### Rejected handshake
@@ -546,8 +568,9 @@ Level 1 must have:
   - packet-size negotiation
   - `session_id` allocation
 - **Profile guarantee coverage**: if handshake succeeds with an SHM profile,
-  tests must prove that the selected SHM transport is already usable for that
-  session. No post-handshake fallback is allowed.
+  tests must prove that the server prepared SHM before success and that any
+  client-side attach failure closes that session and reconnects without SHM.
+  No same-session fallback is allowed.
 
 No exceptions. Nothing is acceptable for Netdata integration unless Level 1
 can demonstrate that malformed IPC, corner cases, and abnormal situations

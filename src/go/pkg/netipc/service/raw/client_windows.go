@@ -536,9 +536,15 @@ func (c *Client) tryConnect() ClientState {
 			time.Sleep(clientShmAttachRetryInterval)
 		}
 		if c.shm == nil {
-			// SHM attach failed. Fail the session to avoid transport desync.
+			// WinSHM attach failed after negotiation. Close that session,
+			// blacklist WinSHM for this client context, and retry baseline.
 			session.Close()
-			return StateDisconnected
+			c.config.SupportedProfiles &^= winShmProfiles
+			c.config.PreferredProfiles &^= winShmProfiles
+			if c.config.SupportedProfiles == 0 {
+				return StateDisconnected
+			}
+			return c.tryConnect()
 		}
 	}
 

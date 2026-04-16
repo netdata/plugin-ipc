@@ -53,8 +53,10 @@ fallback.
    all subsequent messages travel over the same SEQPACKET connection.
    If a higher profile is negotiated (e.g., SHM), the data plane
    still uses the same UDS connection for control/lifecycle coordination,
-   but successful HELLO_ACK already guarantees the SHM resources for that
-   session are ready and usable. There is no post-handshake fallback.
+   and successful HELLO_ACK guarantees the SHM resources for that session
+   are already prepared on the server side. If the client later cannot
+   attach SHM locally, it must close that session and reconnect without SHM.
+   There is no same-session fallback.
 
 ## Packet size
 
@@ -103,8 +105,9 @@ contract for full region layout and lifecycle details.
 
 The UDS connection remains open for the session lifetime (it carried
 the handshake and is used for SHM lifecycle coordination). For SHM
-profiles, successful HELLO_ACK means the shared memory region is already
-ready for use for that session. If a later reconnect learns
+profiles, successful HELLO_ACK means the shared memory region has already
+been created for that session. If the client still cannot attach it, the
+client must close that session and reconnect baseline-only. If a later reconnect learns
 larger capacities, it establishes a new session with a new `session_id`
 and therefore a different SHM file path.
 

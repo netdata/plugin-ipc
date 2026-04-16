@@ -445,9 +445,17 @@ impl RawClient {
                             }
                         }
                         if !shm_ok {
-                            // SHM attach failed. Fail the session to avoid transport desync.
-                            self.session.take();
-                            return ClientState::Disconnected;
+                            // SHM attach failed after negotiation. Close that session,
+                            // blacklist SHM for this client context, and retry baseline.
+                            drop(session);
+                            self.transport_config.supported_profiles &=
+                                !(PROFILE_SHM_HYBRID | PROFILE_SHM_FUTEX);
+                            self.transport_config.preferred_profiles &=
+                                !(PROFILE_SHM_HYBRID | PROFILE_SHM_FUTEX);
+                            if self.transport_config.supported_profiles == 0 {
+                                return ClientState::Disconnected;
+                            }
+                            return self.try_connect();
                         }
                     }
                 }
@@ -506,9 +514,18 @@ impl RawClient {
                         }
                     }
                     if !shm_ok {
-                        // SHM attach failed. Fail the session to avoid transport desync.
-                        self.session.take();
-                        return ClientState::Disconnected;
+                        // WinSHM attach failed after negotiation. Close that
+                        // session, blacklist WinSHM for this client context,
+                        // and retry baseline.
+                        drop(session);
+                        self.transport_config.supported_profiles &=
+                            !(WIN_SHM_PROFILE_HYBRID | WIN_SHM_PROFILE_BUSYWAIT);
+                        self.transport_config.preferred_profiles &=
+                            !(WIN_SHM_PROFILE_HYBRID | WIN_SHM_PROFILE_BUSYWAIT);
+                        if self.transport_config.supported_profiles == 0 {
+                            return ClientState::Disconnected;
+                        }
+                        return self.try_connect();
                     }
                 }
 

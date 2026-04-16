@@ -504,6 +504,10 @@ typedef struct {
     fake_hybrid_mode_t mode;
     HANDLE ready_event;
     volatile LONG listen_ok;
+    volatile LONG first_selected_profile;
+    volatile LONG second_selected_profile;
+    volatile LONG first_receive_err;
+    volatile LONG second_receive_err;
 } fake_hybrid_server_ctx_t;
 
 typedef struct {
@@ -730,6 +734,10 @@ static DWORD WINAPI fake_hybrid_server_thread(LPVOID arg)
 
     listener.pipe = INVALID_HANDLE_VALUE;
     session.pipe = INVALID_HANDLE_VALUE;
+    InterlockedExchange(&ctx->first_selected_profile, 0);
+    InterlockedExchange(&ctx->second_selected_profile, 0);
+    InterlockedExchange(&ctx->first_receive_err, NIPC_NP_ERR_BAD_PARAM);
+    InterlockedExchange(&ctx->second_receive_err, NIPC_NP_ERR_BAD_PARAM);
 
     if (nipc_np_listen(TEST_RUN_DIR, ctx->service, &scfg, &listener) != NIPC_NP_OK) {
         InterlockedExchange(&ctx->listen_ok, 0);
@@ -746,6 +754,7 @@ static DWORD WINAPI fake_hybrid_server_thread(LPVOID arg)
     if (session.selected_profile != NIPC_WIN_SHM_PROFILE_HYBRID)
         goto out;
 
+    InterlockedExchange(&ctx->first_selected_profile, (LONG)session.selected_profile);
     shm_profile = session.selected_profile;
     if (ctx->mode == FAKE_HYBRID_ATTACH_BAD_PROFILE)
         shm_profile = NIPC_WIN_SHM_PROFILE_BUSYWAIT;
@@ -759,7 +768,27 @@ static DWORD WINAPI fake_hybrid_server_thread(LPVOID arg)
         goto out;
 
     if (ctx->mode == FAKE_HYBRID_ATTACH_BAD_PROFILE) {
-        Sleep(1500);
+        uint8_t recv_buf[4096];
+        nipc_header_t hdr;
+        const void *payload;
+        size_t payload_len;
+
+        InterlockedExchange(&ctx->first_receive_err,
+                            (LONG)nipc_np_receive(&session, recv_buf, sizeof(recv_buf),
+                                                  &hdr, &payload, &payload_len));
+
+        nipc_win_shm_destroy(&shm);
+        memset(&shm, 0, sizeof(shm));
+        nipc_np_close_session(&session);
+        session.pipe = INVALID_HANDLE_VALUE;
+
+        if (nipc_np_accept(&listener, 2, &session) != NIPC_NP_OK)
+            goto out;
+
+        InterlockedExchange(&ctx->second_selected_profile, (LONG)session.selected_profile);
+        InterlockedExchange(&ctx->second_receive_err,
+                            (LONG)nipc_np_receive(&session, recv_buf, sizeof(recv_buf),
+                                                  &hdr, &payload, &payload_len));
         goto out;
     }
 
@@ -966,9 +995,9 @@ static void test_client_batch_and_string_guards(void)
     }
 }
 
-static void test_hybrid_attach_failure_disconnects(void)
+static void test_hybrid_attach_failure_falls_back_to_baseline(void)
 {
-    printf("--- Hybrid attach failure disconnects client ---\n");
+    printf("--- Hybrid attach failure falls back to baseline ---\n");
 
     char service[64];
     unique_service(service, sizeof(service), "svc_hybrid_attach");
@@ -983,16 +1012,37 @@ static void test_hybrid_attach_failure_disconnects(void)
     nipc_client_config_t ccfg = default_typed_hybrid_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
 
-    check("hybrid attach failure eventually reaches DISCONNECTED",
-          refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 5, 10));
-    check("hybrid attach failure leaves client not ready",
-          !nipc_client_ready(&client));
-    check("hybrid attach failure maps to DISCONNECTED",
-          client.state == NIPC_CLIENT_DISCONNECTED);
+    check("hybrid attach failure eventually reaches READY",
+          refresh_until_ready(&client, 50, 10));
+    check("hybrid attach failure leaves client ready on baseline",
+          nipc_client_ready(&client));
+    check("hybrid attach failure maps to READY baseline",
+          client.state == NIPC_CLIENT_READY);
+    check("hybrid attach failure clears SHM attachment",
+          client.shm == NULL);
+    check("hybrid attach failure falls back to baseline session",
+          client.session_valid &&
+          client.session.selected_profile == NIPC_PROFILE_BASELINE);
+    check("hybrid attach failure strips SHM from future supported profiles",
+          (client.transport_config.supported_profiles &
+           (NIPC_PROFILE_SHM_HYBRID | NIPC_PROFILE_SHM_FUTEX)) == 0);
+    check("hybrid attach failure strips SHM from future preferred profiles",
+          (client.transport_config.preferred_profiles &
+           (NIPC_PROFILE_SHM_HYBRID | NIPC_PROFILE_SHM_FUTEX)) == 0);
 
     nipc_client_close(&client);
     check("fake hybrid attach server exited",
           WaitForSingleObject(server_thread, 10000) == WAIT_OBJECT_0);
+    check("first negotiated profile was hybrid",
+          InterlockedCompareExchange(&sctx.first_selected_profile, 0, 0) ==
+          NIPC_WIN_SHM_PROFILE_HYBRID);
+    check("second negotiated profile was baseline",
+          InterlockedCompareExchange(&sctx.second_selected_profile, 0, 0) ==
+          NIPC_PROFILE_BASELINE);
+    check("first hybrid session disconnected after attach failure",
+          InterlockedCompareExchange(&sctx.first_receive_err, 0, 0) != NIPC_NP_OK);
+    check("second baseline session closed after client shutdown",
+          InterlockedCompareExchange(&sctx.second_receive_err, 0, 0) != NIPC_NP_OK);
     CloseHandle(server_thread);
 }
 
@@ -1830,7 +1880,7 @@ int main(void)
     CreateDirectoryA(TEST_RUN_DIR, NULL);
 
     test_client_batch_and_string_guards();
-    test_hybrid_attach_failure_disconnects();
+    test_hybrid_attach_failure_falls_back_to_baseline();
     test_hybrid_client_rejects_malformed_responses();
     test_hybrid_typed_snapshot_response_guards();
     test_hybrid_client_send_buffer_guard();
