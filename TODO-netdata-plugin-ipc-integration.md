@@ -3839,6 +3839,42 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
   - `./build/bin/test_service`
     - passed, including:
       - `Test: Client-side SHM attach failure falls back to baseline`
-- Windows follow-up:
-  - the Windows code and Windows-only tests were updated, but they still need to
-    be run in `win11:~/src/plugin-ipc.git`
+- Windows evidence on `win11:~/src/plugin-ipc.git` after pulling commit `2bca7bb`:
+  - `cd src/go && go test ./pkg/netipc/service/raw -count=1 -run 'TestWinShmAttachFailureFallsBackToBaseline|TestWinShmPrepareFailureFallsBackToBaseline' -v`
+    - passed
+  - `cargo test --manifest-path src/crates/netipc/Cargo.toml test_refresh_winshm_attach_failure_falls_back_to_baseline -- --nocapture`
+    - passed
+  - `bash tests/run-coverage-c-windows.sh`
+    - passed
+    - included:
+      - `test_win_service_guards.exe`
+      - `test_win_service_guards_extra.exe`
+      - `test_win_service_extra.exe`
+      - targeted Windows C interop/service matrix
+    - coverage summary:
+      - `netipc_service_win.c`: `90.6%`
+      - `netipc_named_pipe.c`: `92.4%`
+      - `netipc_win_shm.c`: `94.2%`
+      - total: `91.9%`
+    - included the new guard:
+      - `Hybrid attach failure falls back to baseline`
+  - `bash tests/run-coverage-rust-windows.sh`
+    - passed
+    - total line coverage: `90.54%`
+    - critical-file line coverage:
+      - `service/cgroups.rs`: `92.37%`
+      - `transport/windows.rs`: `91.65%`
+      - `transport/win_shm.rs`: `94.11%`
+  - `bash tests/run-coverage-go-windows.sh`
+    - passed
+    - total coverage: `92.1%`
+  - `NETIPC_BUILD_DIR=\"$HOME/src/plugin-ipc.git/build-windows-coverage-c\" bash tests/run-verifier-windows.sh`
+    - passed
+    - no Application Verifier or PageHeap findings for:
+      - `test_named_pipe.exe`
+      - `test_win_shm.exe`
+      - `test_win_service.exe`
+      - `test_win_service_extra.exe`
+- Sync status:
+  - local `/home/costa/src/plugin-ipc.git` and `win11:~/src/plugin-ipc.git` were
+    synchronized to `2bca7bb` for the validation run
