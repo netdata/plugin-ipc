@@ -4,6 +4,26 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
 
 ## User Decisions
 
+- Decision recorded on 2026-04-18:
+  - PR scope for Thiago's formatter-only `netdata-otel` change:
+    - keep the `netdata-otel` formatting/cosmetic change in the Netdata integration PR
+    - rationale:
+      - it is formatter-driven cosmetic churn
+      - it is harmless
+      - there is no requirement to split it out at this stage
+- Decision recorded on 2026-04-18:
+  - Upstream sync policy for vendored library changes:
+    - every change that touches vendored library code in the Netdata integration PR must be copied back to the upstream `plugin-ipc` repository
+    - rationale:
+      - the Netdata vendoring script will overwrite vendored library trees on the next sync
+      - leaving library-only fixes in Netdata would make them disappear on the next revendor
+    - concrete scope identified from `33ecdf4de..d97e8fa1c`:
+      - `src/crates/netipc/src/protocol/cgroups.rs`
+      - `src/crates/netipc/src/transport/shm.rs`
+      - `src/crates/netipc/src/transport/shm_tests.rs`
+    - implication:
+      - Netdata-only integration files stay in the Netdata PR
+      - vendored `netipc` Rust fixes must be ported upstream before the next vendoring run
 - Decision recorded on 2026-04-14:
   - Limit negotiation contract:
     - the general contract is:
