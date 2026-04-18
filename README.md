@@ -72,6 +72,7 @@ See:
 - [docs/level2-typed-api.md](docs/level2-typed-api.md)
 - [docs/level3-snapshot-api.md](docs/level3-snapshot-api.md)
 - [docs/getting-started.md](docs/getting-started.md)
+- [docs/netipc-integrator-skill.md](docs/netipc-integrator-skill.md)
 
 ## Platforms And Transports
 

@@ -82,6 +82,7 @@ Runtime model:
 | Document | Description |
 |----------|-------------|
 | [level2-typed-api.md](level2-typed-api.md) | Orchestration layer: client context lifecycle, managed server mode, retry policy, typed callback dispatch. |
+| [netipc-integrator-skill.md](netipc-integrator-skill.md) | Practical integration guide for adding new Netdata clients, servers, and typed services using L1/L2/L3 across C, Rust, and Go on Linux and Windows. |
 
 ### Level 3: Snapshot API
 
