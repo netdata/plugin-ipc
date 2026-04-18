@@ -66,6 +66,12 @@ Linux and native Windows.
   - commit and push the local runner/TODO changes
   - rerun the full strict native Windows benchmark suite from the pushed state
     before treating the fix as signed off
+- `2026-04-19` Costa decision:
+  - this task is benchmark-only
+  - do not rerun the non-benchmark test suites on Linux or Windows
+  - refresh only the benchmark artifacts from the latest library state
+  - the Linux published `0%` server CPU report bug must be root-caused and
+    fixed before the refreshed artifacts are accepted
 
 ## TL;DR
 
@@ -80,6 +86,15 @@ Linux and native Windows.
   - add leak / sanitizer / Windows verifier runs
   - add long soak loops
   - add a real Netdata plugin integration harness
+- Immediate benchmark refresh requirement on `2026-04-19`:
+  - run the Linux benchmark suite
+  - run the native Windows benchmark suite
+  - regenerate only:
+    - `benchmarks-posix.csv`
+    - `benchmarks-posix.md`
+    - `benchmarks-windows.csv`
+    - `benchmarks-windows.md`
+  - do not spend time rerunning already-verified non-benchmark tests
 
 ## Analysis
 
@@ -117,6 +132,14 @@ Linux and native Windows.
     - Rust `92.08%`
 
 ### Honest current gaps
+
+- The current checked-in Linux benchmark publication is visibly wrong in at
+  least one field:
+  - Costa reports that the published Linux markdown shows `0%` server CPU
+  - until root-caused, this must be treated as either:
+    - a Linux benchmark measurement bug
+    - a Linux report-generation bug
+  - republishing without fixing that bug would produce untrustworthy evidence
 
 - The repo explicitly states that Windows still has less chaos / hardening /
   stress breadth than Linux:

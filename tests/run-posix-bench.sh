@@ -35,6 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="${NIPC_BENCH_BUILD_DIR:-${ROOT_DIR}/build-bench-posix}"
 BENCH_BUILD_TYPE="${NIPC_BENCH_BUILD_TYPE:-Release}"
+SERVER_STOP_GRACE_SEC="${NIPC_BENCH_SERVER_STOP_GRACE_SEC:-10}"
 
 OUTPUT_CSV="${1:-${ROOT_DIR}/benchmarks-posix.csv}"
 DURATION="${2:-5}"
@@ -166,21 +167,30 @@ stop_server() {
     local svc="$3"
 
     local server_out="${RUN_DIR}/server-${lang}-${svc}.out"
-    local server_cpu="0.0"
+    local server_cpu=""
     local waited=0
-    local wait_ticks=50
+    local wait_ticks=$((SERVER_STOP_GRACE_SEC * 10))
 
-    # Servers are spawned from command substitution, so they are not child jobs
-    # of the calling shell. Poll for real exit instead of using wait(1), which
-    # would return immediately and race the final SERVER_CPU_SEC flush.
-    kill "$pid" 2>/dev/null || true
+    # Bench servers are not child jobs of the calling shell, so wait(1) cannot
+    # be used here. Poll for natural exit first: Go and Rust print
+    # SERVER_CPU_SEC only after their own timer-driven shutdown path.
     while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$wait_ticks" ]; do
         sleep 0.1
         waited=$((waited + 1))
     done
 
     if kill -0 "$pid" 2>/dev/null; then
-        warn "  Server ${lang} (${svc}) did not exit cleanly within 5s; forcing kill"
+        warn "  Server ${lang} (${svc}) did not stop itself within ${SERVER_STOP_GRACE_SEC}s; requesting shutdown"
+        kill "$pid" 2>/dev/null || true
+        local term_waited=0
+        while kill -0 "$pid" 2>/dev/null && [ "$term_waited" -lt 30 ]; do
+            sleep 0.1
+            term_waited=$((term_waited + 1))
+        done
+    fi
+
+    if kill -0 "$pid" 2>/dev/null; then
+        warn "  Server ${lang} (${svc}) did not exit after SIGTERM; forcing kill"
         kill -9 "$pid" 2>/dev/null || true
         local forced_waited=0
         while kill -0 "$pid" 2>/dev/null && [ "$forced_waited" -lt 20 ]; do
@@ -195,6 +205,14 @@ stop_server() {
         if [ -n "$cpu_line" ]; then
             server_cpu="${cpu_line#SERVER_CPU_SEC=}"
         fi
+    fi
+
+    if [ -z "$server_cpu" ]; then
+        warn "  Missing SERVER_CPU_SEC for ${lang} (${svc}); refusing to publish a fake 0%"
+        if [ -f "$server_out" ]; then
+            cat "$server_out" >&2
+        fi
+        return 1
     fi
 
     echo "$server_cpu"
@@ -308,7 +326,9 @@ run_pair() {
 
     # Stop server and get CPU
     local server_cpu_sec
-    server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$svc_name")
+    if ! server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$svc_name"); then
+        return 1
+    fi
 
     # Remove the PID from our tracking array
     local new_pids=()
@@ -573,7 +593,12 @@ main() {
             set -e
 
             local server_cpu_sec
-            server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pipe_svc")
+            if ! server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pipe_svc"); then
+                warn "  Missing server CPU for ${client_lang}->${server_lang} pipeline benchmark"
+                RUN_FAILED=1
+                sleep 0.5
+                continue
+            fi
 
             local new_pids=()
             for p in "${SERVER_PIDS[@]:-}"; do
@@ -661,7 +686,12 @@ main() {
             set -e
 
             local server_cpu_sec
-            server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pipe_batch_svc")
+            if ! server_cpu_sec=$(stop_server "$server_pid" "$server_lang" "$pipe_batch_svc"); then
+                warn "  Missing server CPU for ${client_lang}->${server_lang} pipeline-batch benchmark"
+                RUN_FAILED=1
+                sleep 0.5
+                continue
+            fi
 
             local new_pids=()
             for p in "${SERVER_PIDS[@]:-}"; do
