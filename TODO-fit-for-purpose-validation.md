@@ -72,6 +72,17 @@ Linux and native Windows.
   - refresh only the benchmark artifacts from the latest library state
   - the Linux published `0%` server CPU report bug must be root-caused and
     fixed before the refreshed artifacts are accepted
+- `2026-04-19` Costa decision:
+  - after the Windows C server, Rust wait-loop, and Go SHM spin fixes landed,
+    rerun the full Linux and Windows benchmark suites from the latest library
+    state
+  - regenerate and publish updated benchmark artifacts:
+    - `benchmarks-posix.csv`
+    - `benchmarks-posix.md`
+    - `benchmarks-windows.csv`
+    - `benchmarks-windows.md`
+  - then commit and push only the benchmark artifact refresh and the updated
+    validation evidence
 
 ## TL;DR
 
@@ -156,6 +167,26 @@ Linux and native Windows.
     - final Linux published state:
       - `benchmarks-posix.csv` -> `201` data rows
       - no suspicious non-lookup `0.0` `server_cpu_pct` rows remain
+  - benchmark refresh status after the latest library fixes on `2026-04-19`:
+    - first full rerun artifact directory:
+      - `/tmp/plugin-ipc-posix-bench-20260419-full/`
+    - that first rerun was materially slower than the previous published
+      baseline across many max-rate rows and failed multiple floors, so it was
+      treated as noisy / untrustworthy sign-off evidence
+    - second full rerun artifact directory:
+      - `/tmp/plugin-ipc-posix-bench-20260419-rerun/`
+    - final POSIX rerun result:
+      - `201` data rows
+      - regenerated markdown accepted the CSV but reported three real floor
+        violations:
+        - `uds-ping-pong go->rust @ max` -> `148206` (min `150000`)
+        - `uds-ping-pong rust->go @ max` -> `142107` (min `150000`)
+        - `uds-ping-pong go->go @ max` -> `148946` (min `150000`)
+    - implication:
+      - the latest published POSIX artifacts are now accurate for the current
+        host and current checkout
+      - but the historical Linux `uds-ping-pong` max floor of `150k` is not
+        fully met on this rerun
 
 - The full Windows benchmark refresh on `2026-04-19` needed a targeted
   completion pass:
@@ -173,6 +204,29 @@ Linux and native Windows.
   - final Windows published state:
     - `benchmarks-windows.csv` -> `201` data rows
     - no suspicious non-lookup `0.0` `server_cpu_pct` rows remain
+  - benchmark refresh status after the latest library fixes on `2026-04-19`:
+    - full rerun artifact directory:
+      - `/tmp/plugin-ipc-windows-bench-20260419-full/`
+    - preserved internal run directory from the full runner:
+      - `/tmp/netipc-bench-133414`
+    - the full rerun published `196/201` data rows and withheld five rows via
+      the strict stability guard:
+      - `np-ping-pong c->go @ max`
+      - `np-ping-pong rust->go @ max`
+      - `np-pipeline-d16 rust->c @ max`
+      - `snapshot-shm go->go @ max`
+      - `snapshot-shm rust->go @ max`
+    - targeted completion artifact directory:
+      - `/tmp/plugin-ipc-windows-bench-20260419-targeted/`
+    - each missing row reran successfully with
+      `tests/run-windows-bench-targeted.sh --attempts 3`
+    - the targeted rows were merged back into
+      `/tmp/plugin-ipc-windows-bench-20260419-full/benchmarks-windows.csv`
+    - final Windows generator result on `win11`:
+      - `All performance floors met`
+    - implication:
+      - the refreshed Windows published artifacts are complete and pass the
+        documented benchmark floors on the latest checkout
 
 - The repo explicitly states that Windows still has less chaos / hardening /
   stress breadth than Linux:
