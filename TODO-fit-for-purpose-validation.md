@@ -83,6 +83,20 @@ Linux and native Windows.
     - `benchmarks-windows.md`
   - then commit and push only the benchmark artifact refresh and the updated
     validation evidence
+- `2026-04-19` Costa decision:
+  - after publishing the refreshed benchmark artifacts, investigate the Linux
+    `uds-ping-pong` max floor misses before changing the documented floor
+  - first determine whether there is a credible code-level improvement for the
+    Go-involved POSIX baseline path
+  - only if no justified near-term fix exists, lower the POSIX UDS max floor to
+    a safer value instead of leaving it borderline
+- `2026-04-19` Costa decision:
+  - no justified near-term POSIX code fix is established for the latest Linux
+    `uds-ping-pong` max misses
+  - lower the documented POSIX `uds-ping-pong` max floor from `150k` to
+    `120k req/s`
+  - regenerate the published POSIX markdown so the floor summary matches the
+    new sign-off threshold
 
 ## TL;DR
 
@@ -187,6 +201,24 @@ Linux and native Windows.
         host and current checkout
       - but the historical Linux `uds-ping-pong` max floor of `150k` is not
         fully met on this rerun
+    - comparison to the previous published `uds-ping-pong @ max` rows shows a
+      broad host-wide drop, not a clean isolated regression in one language
+      path:
+      - `c->c`: `188654 -> 169517` (`-10.1%`)
+      - `rust->c`: `188473 -> 160922` (`-14.6%`)
+      - `go->c`: `177572 -> 152991` (`-13.8%`)
+      - `c->rust`: `187646 -> 160525` (`-14.5%`)
+      - `rust->rust`: `187330 -> 155958` (`-16.7%`)
+      - `go->rust`: `180513 -> 148206` (`-17.9%`)
+      - `c->go`: `187116 -> 158192` (`-15.5%`)
+      - `rust->go`: `187747 -> 142107` (`-24.3%`)
+      - `go->go`: `179475 -> 148946` (`-17.0%`)
+    - conclusion:
+      - no concrete near-term POSIX code change was proven to restore the old
+        `150k` floor safely
+      - the floor itself was too tight for the latest verified host rerun
+      - Costa chose to lower the documented POSIX `uds-ping-pong` max floor to
+        `120k req/s` so the sign-off threshold is not borderline
 
 - The full Windows benchmark refresh on `2026-04-19` needed a targeted
   completion pass:

@@ -340,7 +340,7 @@ check_floors() {
     log "Checking performance floors..."
 
     log_floor_violations_min "shm-ping-pong" "0" 1000000 "shm-ping-pong"
-    log_floor_violations_min "uds-ping-pong" "0" 150000 "uds-ping-pong"
+    log_floor_violations_min "uds-ping-pong" "0" 120000 "uds-ping-pong"
     log_floor_violations_min "snapshot-baseline" "0" 100000 "snapshot-baseline"
     log_floor_violations_min "lookup" "0" 10000000 "lookup"
     log_floor_violations_snapshot_shm
@@ -357,7 +357,7 @@ emit_floor_summary() {
     echo "|--------|-------|--------|"
     echo "| SHM ping-pong max | >= 1M req/s | $(floor_status_min "shm-ping-pong" "0" 1000000) |"
     echo "| SHM snapshot refresh max | >= 1M req/s for C/Rust pairs, >= 800k req/s for Go pairs | $(floor_status_snapshot_shm) |"
-    echo "| UDS ping-pong max | >= 150k req/s | $(floor_status_min "uds-ping-pong" "0" 150000) |"
+    echo "| UDS ping-pong max | >= 120k req/s | $(floor_status_min "uds-ping-pong" "0" 120000) |"
     echo "| UDS snapshot refresh max | >= 100k req/s | $(floor_status_min "snapshot-baseline" "0" 100000) |"
     echo "| Local cache lookup | >= 10M lookups/s | $(floor_status_min "lookup" "0" 10000000) |"
     echo ""

@@ -1,6 +1,6 @@
 # POSIX Benchmark Results
 
-Generated: 2026-04-19 15:33:42 UTC
+Generated: 2026-04-19 17:52:39 UTC
 
 Machine: costa-desktop (x86_64, 24 cores)
 
@@ -374,7 +374,7 @@ Complete matrix rows expected: 201
 |--------|-------|--------|
 | SHM ping-pong max | >= 1M req/s | PASS |
 | SHM snapshot refresh max | >= 1M req/s for C/Rust pairs, >= 800k req/s for Go pairs | PASS |
-| UDS ping-pong max | >= 150k req/s | FAIL |
+| UDS ping-pong max | >= 120k req/s | PASS |
 | UDS snapshot refresh max | >= 100k req/s | PASS |
 | Local cache lookup | >= 10M lookups/s | PASS |
 
