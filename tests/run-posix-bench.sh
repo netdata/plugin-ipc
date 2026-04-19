@@ -240,6 +240,22 @@ throughput_is_positive() {
     awk -v value="$1" 'BEGIN { exit ((value + 0) > 0 ? 0 : 1) }'
 }
 
+cpu_pct_for_duration() {
+    awk -v cpu_sec="$1" -v duration_sec="$2" 'BEGIN {
+        if ((duration_sec + 0) <= 0) {
+            print "0.000"
+        } else {
+            printf "%.3f", ((cpu_sec + 0) / (duration_sec + 0)) * 100.0
+        }
+    }'
+}
+
+sum_cpu_pct() {
+    awk -v first="$1" -v second="$2" 'BEGIN {
+        printf "%.3f", (first + 0) + (second + 0)
+    }'
+}
+
 dump_client_error() {
     local err_file="$1"
     if [ -s "$err_file" ]; then
@@ -377,13 +393,8 @@ run_pair() {
 
     # Compute server CPU % and total CPU %
     local server_cpu_pct total_cpu_pct
-    if command -v bc >/dev/null 2>&1; then
-        server_cpu_pct=$(echo "scale=1; ${server_cpu_sec} / ${duration} * 100" | bc 2>/dev/null || echo "0.0")
-        total_cpu_pct=$(echo "scale=1; ${client_cpu} + ${server_cpu_pct}" | bc 2>/dev/null || echo "0.0")
-    else
-        server_cpu_pct="0.0"
-        total_cpu_pct="$client_cpu"
-    fi
+    server_cpu_pct=$(cpu_pct_for_duration "$server_cpu_sec" "$duration")
+    total_cpu_pct=$(sum_cpu_pct "$client_cpu" "$server_cpu_pct")
 
     write_csv_row "$scenario" "$client_lang" "$server_lang" "$target_rps" \
         "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
@@ -630,13 +641,8 @@ main() {
                     fi
 
                     local server_cpu_pct total_cpu_pct
-                    if command -v bc >/dev/null 2>&1; then
-                        server_cpu_pct=$(echo "scale=1; ${server_cpu_sec} / ${DURATION} * 100" | bc 2>/dev/null || echo "0.0")
-                        total_cpu_pct=$(echo "scale=1; ${client_cpu} + ${server_cpu_pct}" | bc 2>/dev/null || echo "0.0")
-                    else
-                        server_cpu_pct="0.0"
-                        total_cpu_pct="$client_cpu"
-                    fi
+                    server_cpu_pct=$(cpu_pct_for_duration "$server_cpu_sec" "$DURATION")
+                    total_cpu_pct=$(sum_cpu_pct "$client_cpu" "$server_cpu_pct")
 
                     write_csv_row "uds-pipeline-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
                         "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
@@ -723,13 +729,8 @@ main() {
                     fi
 
                     local server_cpu_pct total_cpu_pct
-                    if command -v bc >/dev/null 2>&1; then
-                        server_cpu_pct=$(echo "scale=1; ${server_cpu_sec} / ${DURATION} * 100" | bc 2>/dev/null || echo "0.0")
-                        total_cpu_pct=$(echo "scale=1; ${client_cpu} + ${server_cpu_pct}" | bc 2>/dev/null || echo "0.0")
-                    else
-                        server_cpu_pct="0.0"
-                        total_cpu_pct="$client_cpu"
-                    fi
+                    server_cpu_pct=$(cpu_pct_for_duration "$server_cpu_sec" "$DURATION")
+                    total_cpu_pct=$(sum_cpu_pct "$client_cpu" "$server_cpu_pct")
 
                     write_csv_row "uds-pipeline-batch-d${PIPELINE_DEPTH}" "$client_lang" "$server_lang" "0" \
                         "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"

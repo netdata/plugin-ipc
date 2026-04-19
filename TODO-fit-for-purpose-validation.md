@@ -140,6 +140,39 @@ Linux and native Windows.
     - a Linux benchmark measurement bug
     - a Linux report-generation bug
   - republishing without fixing that bug would produce untrustworthy evidence
+  - resolved on `2026-04-19`:
+    - first root cause:
+      - `tests/run-posix-bench.sh` used to kill servers before Go / Rust could
+        print `SERVER_CPU_SEC`
+    - second root cause:
+      - the POSIX runner still formatted CPU with `bc scale=1`, truncating real
+        low-rate CPU below `0.1%` to `0.0`
+    - final POSIX fix:
+      - preserve natural server shutdown long enough to capture
+        `SERVER_CPU_SEC`
+      - compute POSIX CPU percentages with `%.3f` precision
+    - final Linux artifact directory:
+      - `/tmp/plugin-ipc-posix-bench-20260419-024434/`
+    - final Linux published state:
+      - `benchmarks-posix.csv` -> `201` data rows
+      - no suspicious non-lookup `0.0` `server_cpu_pct` rows remain
+
+- The full Windows benchmark refresh on `2026-04-19` needed a targeted
+  completion pass:
+  - first full artifact directory:
+    - `/tmp/plugin-ipc-windows-bench-20260419-013846/`
+  - initial full run produced `198/201` data rows because three strict
+    instability rows were rejected:
+    - `snapshot-baseline,rust,rust,0`
+    - `np-pipeline-d16,rust,rust,0`
+    - `np-pipeline-d16,go,rust,0`
+  - those rows were rerun with `tests/run-windows-bench-targeted.sh`
+  - the rerun rows were merged into a complete `201`-row CSV
+  - final Windows markdown was regenerated on `win11` so the machine header and
+    CSV reference are correct
+  - final Windows published state:
+    - `benchmarks-windows.csv` -> `201` data rows
+    - no suspicious non-lookup `0.0` `server_cpu_pct` rows remain
 
 - The repo explicitly states that Windows still has less chaos / hardening /
   stress breadth than Linux:
