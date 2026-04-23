@@ -125,6 +125,39 @@ diff script so future checks do not depend on ad-hoc manual commands.
   - whether upstream `plugin-ipc` should adopt this `go fix` cleanup as-is, or
     keep the current explicit style
 
+### Validation results on `2026-04-23`
+
+- Backport status:
+  - the 7-file Go cleanup from Netdata commit
+    `9e9d16ac849853fde77269a898b211058da41e99` is now applied upstream
+- Re-run of the normalized vendor diff:
+  - C vendored library diff:
+    - no differences
+  - Rust vendored source diff:
+    - no differences
+  - Go vendored source diff:
+    - no differences
+- Linux validation results:
+  - `/usr/bin/ctest --test-dir build --output-on-failure -j4`
+    - passed
+    - `42/42` tests passed
+  - `cargo test --manifest-path src/crates/netipc/Cargo.toml`
+    - passed
+    - `308` Rust tests passed
+  - `go test ./...` in `src/go`
+    - passed
+- Linux POSIX benchmarks:
+  - `bash tests/run-posix-bench.sh`
+    - passed
+    - completed `201` measurements
+    - strong benchmark signal in the backport run:
+      - `uds-ping-pong c->c @ max = 205438`
+      - `uds-ping-pong go->rust @ max = 199481`
+      - `uds-ping-pong rust->go @ max = 204211`
+  - benchmark output rewrote the local `benchmarks-posix.csv` during validation
+  - that generated artifact was restored to its committed contents afterward so
+    the backport commit stays limited to source and task-tracking files
+
 ### Implications
 
 - A naive raw `diff -rq` is not enough for Go because it overreports expected
@@ -143,6 +176,13 @@ diff script so future checks do not depend on ad-hoc manual commands.
 - Deliverable:
   - create a script that diffs all vendored files
   - run it to identify current differences
+- Costa decision on `2026-04-23`:
+  - backport the Netdata master Go cleanup commit into upstream `plugin-ipc`
+  - validate it in upstream before publishing
+  - run:
+    - the upstream test suite on this Linux checkout
+    - the upstream POSIX benchmark suite on this Linux checkout
+  - then commit locally and push the backport
 
 ### Pending
 
@@ -162,6 +202,12 @@ diff script so future checks do not depend on ad-hoc manual commands.
 4. If Costa wants the Netdata Go cleanup upstreamed, backport commit
    `9e9d16ac849853fde77269a898b211058da41e99` into the upstream Go tree and
    then rerun the diff script to confirm the vendored trees match again.
+5. Run the upstream validation required for this backport:
+   - `ctest --test-dir build --output-on-failure -j4`
+   - `cargo test --manifest-path src/crates/netipc/Cargo.toml`
+   - `cd src/go && go test ./...`
+   - `bash tests/run-posix-bench.sh`
+6. Commit only the backported source files and this TODO update, then push.
 
 ## Implied Decisions
 
