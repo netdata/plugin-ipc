@@ -183,6 +183,13 @@ diff script so future checks do not depend on ad-hoc manual commands.
     - the upstream test suite on this Linux checkout
     - the upstream POSIX benchmark suite on this Linux checkout
   - then commit locally and push the backport
+- Costa decision on `2026-04-23`:
+  - also commit the existing root vendoring helper:
+    - `vendor-to-netdata.sh`
+  - rationale:
+    - the repository now has both directions of the Netdata sync workflow:
+      - `vendor-to-netdata.sh`
+      - `diff-netdata-vendor.sh`
 
 ### Pending
 
