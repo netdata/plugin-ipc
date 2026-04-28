@@ -384,6 +384,12 @@ static void test_server_init_argument_validation(void)
                            raw_noop_handler, NULL)
               == NIPC_ERR_BAD_LAYOUT);
 
+    check("raw init null config",
+          nipc_server_init(&server, TEST_RUN_DIR, "svc_raw_null_config",
+                           NULL, 1, NIPC_METHOD_INCREMENT,
+                           raw_noop_handler, NULL)
+              == NIPC_ERR_BAD_LAYOUT);
+
     check("raw init null handler",
           nipc_server_init(&server, TEST_RUN_DIR, "svc_raw_null_handler",
                            &raw_scfg, 1, NIPC_METHOD_INCREMENT,

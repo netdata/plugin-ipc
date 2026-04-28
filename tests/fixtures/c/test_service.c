@@ -2031,6 +2031,12 @@ static void test_server_init_null(void)
                            NIPC_METHOD_CGROUPS_SNAPSHOT, test_cgroups_handler, NULL)
               != NIPC_OK);
 
+    /* NULL raw config */
+    check("null raw config",
+          nipc_server_init(&server, TEST_RUN_DIR, "svc", NULL, 1,
+                           NIPC_METHOD_CGROUPS_SNAPSHOT, test_cgroups_handler, NULL)
+              == NIPC_ERR_BAD_LAYOUT);
+
     /* NULL handler */
     check("null handler",
           nipc_server_init(&server, TEST_RUN_DIR, "svc", &scfg, 1,

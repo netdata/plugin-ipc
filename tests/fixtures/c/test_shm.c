@@ -1514,6 +1514,44 @@ static void test_stale_bad_magic_file(void)
     cleanup_shm(svc);
 }
 
+static void test_stale_symlink_file_not_unlinked(void)
+{
+    printf("Test: Stale SHM recovery leaves symlinks alone\n");
+    const char *svc = "shm_stale_symlink";
+    cleanup_shm(svc);
+
+    char path[256];
+    char target[256];
+    snprintf(path, sizeof(path), "%s/%s-%016" PRIx64 ".ipcshm",
+             TEST_RUN_DIR, svc, (uint64_t)1);
+    snprintf(target, sizeof(target), "%s/%s-target.tmp", TEST_RUN_DIR, svc);
+    unlink(target);
+
+    int fd = open(target, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) {
+        uint8_t small[10] = {0};
+        write(fd, small, sizeof(small));
+        close(fd);
+    }
+    check("symlink target created", fd >= 0);
+    check("SHM symlink created", symlink(target, path) == 0);
+
+    nipc_shm_ctx_t server;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
+    check("create refuses symlink path", err == NIPC_SHM_ERR_ADDR_IN_USE);
+    if (err == NIPC_SHM_OK)
+        nipc_shm_destroy(&server);
+
+    struct stat st;
+    check("symlink remains after stale probe",
+          lstat(path, &st) == 0 && S_ISLNK(st.st_mode));
+
+    unlink(path);
+    unlink(target);
+    cleanup_shm(svc);
+}
+
 static void test_shm_bad_header_len_file(void)
 {
     printf("Test: Client attach to file with bad header_len\n");
@@ -1677,6 +1715,7 @@ int main(void)
     test_shm_receive_msg_too_large();  printf("\n");
     test_stale_undersized_file();      printf("\n");
     test_stale_bad_magic_file();       printf("\n");
+    test_stale_symlink_file_not_unlinked(); printf("\n");
     test_shm_bad_header_len_file();    printf("\n");
     test_shm_bad_size_alignment_file(); printf("\n");
     test_shm_declared_area_exceeds_file(); printf("\n");

@@ -1069,6 +1069,36 @@ static void test_stale_recovery(void)
     cleanup_socket(svc);
 }
 
+static void test_stale_recovery_does_not_unlink_regular_file(void)
+{
+    printf("Test: Stale socket recovery leaves regular files alone\n");
+    const char *svc = "test_stale_regular";
+    cleanup_socket(svc);
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, svc);
+
+    FILE *f = fopen(path, "w");
+    if (f) {
+        fputs("not a socket\n", f);
+        fclose(f);
+    }
+    check("regular file created at socket path", f != NULL);
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_uds_listener_t listener;
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &listener);
+    check("listen refuses regular file path", err == NIPC_UDS_ERR_ADDR_IN_USE);
+    if (err == NIPC_UDS_OK)
+        nipc_uds_close_listener(&listener);
+
+    struct stat st;
+    check("regular file remains after stale probe",
+          stat(path, &st) == 0 && S_ISREG(st.st_mode));
+
+    cleanup_socket(svc);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Test 9: Disconnect with in-flight request                          */
 /* ------------------------------------------------------------------ */
@@ -3073,6 +3103,7 @@ int main(void)
     test_profile_mismatch();       printf("\n");
     test_request_payload_over_cap(); printf("\n");
     test_stale_recovery();         printf("\n");
+    test_stale_recovery_does_not_unlink_regular_file(); printf("\n");
     test_disconnect_inflight();    printf("\n");
     test_batch();                  printf("\n");
     test_invalid_service_name();   printf("\n");
