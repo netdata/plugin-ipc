@@ -33,8 +33,10 @@
 
 static bool header_payload_len(size_t payload_len, size_t *msg_len_out)
 {
+#if SIZE_MAX <= UINT32_MAX
     if (payload_len > SIZE_MAX - NIPC_HEADER_LEN)
         return false;
+#endif
 
     *msg_len_out = NIPC_HEADER_LEN + payload_len;
     return true;

@@ -274,6 +274,13 @@ minimum safe fixes needed without changing the public protocol contract.
 1. Commit and push the upstream `plugin-ipc.git` Coverity hardening changes.
 2. Pull the pushed commit on `win11:~/src/plugin-ipc.git`.
 3. Run the relevant Windows test coverage from that checkout.
+   - First `win11` run executed the Windows C test suite but failed the
+     coverage threshold because new impossible-on-64-bit `size_t` guard
+     branches reduced `netipc_service_win.c` to `89.6%`.
+   - Follow-up fix:
+     - compile the `size_t` header+payload overflow guard only on platforms
+       where `size_t` can overflow for `uint32_t`-bounded payloads
+     - add Windows tests for the real `uint32_t` SHM capacity overflow guards
 4. Verify C benchmark performance is not regressed:
    - Linux C benchmarks from this checkout.
    - Windows C benchmarks from `win11:~/src/plugin-ipc.git`.

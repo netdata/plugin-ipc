@@ -754,6 +754,34 @@ static void test_client_incompatible(void)
     stop_server_drain(&sctx, server_thread);
 }
 
+static void test_shm_capacity_overflow_rejects_shm_only_client(void)
+{
+    printf("--- SHM capacity overflow rejects SHM-only client ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_shm_cap_overflow");
+
+    nipc_server_config_t scfg = default_typed_hybrid_server_config();
+    scfg.max_response_payload_bytes = UINT32_MAX;
+
+    server_thread_ctx_t sctx;
+    HANDLE server_thread = start_server_named(&sctx, service, 4, &scfg, &full_service_handler);
+    if (!server_thread)
+        return;
+
+    nipc_client_ctx_t client;
+    nipc_client_config_t ccfg = default_typed_hybrid_client_config();
+    ccfg.supported_profiles = NIPC_PROFILE_SHM_HYBRID;
+    ccfg.preferred_profiles = NIPC_PROFILE_SHM_HYBRID;
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    nipc_client_refresh(&client);
+    check("SHM-only client is incompatible after capacity guard",
+          client.state == NIPC_CLIENT_INCOMPATIBLE);
+
+    nipc_client_close(&client);
+    stop_server_drain(&sctx, server_thread);
+}
+
 static void test_cache_refresh_rebuilds_and_linear_lookup(void)
 {
     printf("--- Cache refresh rebuilds / linear lookup ---\n");
@@ -937,6 +965,7 @@ int main(void)
     RUN_TEST(test_handler_failure);
     RUN_TEST(test_client_auth_failure);
     RUN_TEST(test_client_incompatible);
+    RUN_TEST(test_shm_capacity_overflow_rejects_shm_only_client);
     RUN_TEST(test_cache_refresh_without_server);
     RUN_TEST(test_cache_refresh_rebuilds_and_linear_lookup);
     RUN_TEST(test_cache_empty_snapshot);

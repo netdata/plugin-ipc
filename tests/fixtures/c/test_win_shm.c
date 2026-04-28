@@ -1069,6 +1069,37 @@ static void test_server_create_rejects_existing_objects(void)
     nipc_win_shm_destroy(&first);
 }
 
+static void test_server_create_rejects_region_size_overflow(void)
+{
+    printf("--- Server create rejects region size overflow ---\n");
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service));
+
+        nipc_win_shm_ctx_t ctx = {0};
+        nipc_win_shm_error_t err = nipc_win_shm_server_create(
+            TEST_RUN_DIR, service, AUTH_TOKEN, 78,
+            NIPC_WIN_SHM_PROFILE_HYBRID, UINT32_MAX - 126u, 4096, &ctx);
+        check("request capacity overflow rejected", err == NIPC_WIN_SHM_ERR_BAD_PARAM);
+        if (err == NIPC_WIN_SHM_OK)
+            nipc_win_shm_destroy(&ctx);
+    }
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service));
+
+        nipc_win_shm_ctx_t ctx = {0};
+        nipc_win_shm_error_t err = nipc_win_shm_server_create(
+            TEST_RUN_DIR, service, AUTH_TOKEN, 79,
+            NIPC_WIN_SHM_PROFILE_HYBRID, 4096, UINT32_MAX - 4096u, &ctx);
+        check("response capacity overflow rejected", err == NIPC_WIN_SHM_ERR_BAD_PARAM);
+        if (err == NIPC_WIN_SHM_OK)
+            nipc_win_shm_destroy(&ctx);
+    }
+}
+
 static void test_win32_fault_injection(void)
 {
     printf("--- Win32 fault injection ---\n");
@@ -1668,6 +1699,7 @@ int main(void)
     test_header_layout();
     test_service_name_validation();
     test_server_create_rejects_existing_objects();
+    test_server_create_rejects_region_size_overflow();
     test_client_attach_validation();
     test_win32_fault_injection();
     test_hybrid_receive_timeout_and_disconnect();
