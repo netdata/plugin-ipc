@@ -141,6 +141,116 @@ static int fuzz_one(const uint8_t *data, size_t size) {
         }
     }
 
+    /* --- Cgroups lookup request --- */
+    {
+        nipc_cgroups_lookup_req_view_t view;
+        nipc_error_t err = nipc_cgroups_lookup_req_decode(data, size, &view);
+        if (err == NIPC_OK) {
+            uint32_t limit = view.item_count;
+            if (limit > 256)
+                limit = 256;
+            for (uint32_t i = 0; i < limit; i++) {
+                nipc_cgroups_lookup_req_item_t item;
+                if (nipc_cgroups_lookup_req_item(&view, i, &item) == NIPC_OK) {
+                    (void)item.path.ptr;
+                    (void)item.path.len;
+                    if (item.path.len > 0 && item.path.ptr)
+                        (void)item.path.ptr[0];
+                }
+            }
+        }
+    }
+
+    /* --- Cgroups lookup response --- */
+    {
+        nipc_cgroups_lookup_resp_view_t view;
+        nipc_error_t err = nipc_cgroups_lookup_resp_decode(data, size, &view);
+        if (err == NIPC_OK) {
+            (void)view.layout_version;
+            (void)view.flags;
+            (void)view.item_count;
+            (void)view.generation;
+            uint32_t limit = view.item_count;
+            if (limit > 256)
+                limit = 256;
+            for (uint32_t i = 0; i < limit; i++) {
+                nipc_cgroups_lookup_item_view_t item;
+                if (nipc_cgroups_lookup_resp_item(&view, i, &item) == NIPC_OK) {
+                    (void)item.status;
+                    (void)item.orchestrator;
+                    (void)item.path.ptr;
+                    (void)item.name.ptr;
+                    uint32_t label_limit = item.label_count;
+                    if (label_limit > 256)
+                        label_limit = 256;
+                    for (uint32_t j = 0; j < label_limit; j++) {
+                        nipc_lookup_label_view_t label;
+                        if (nipc_cgroups_lookup_item_label(&item, j, &label) == NIPC_OK) {
+                            (void)label.key.ptr;
+                            (void)label.value.ptr;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* --- Apps lookup request --- */
+    {
+        nipc_apps_lookup_req_view_t view;
+        nipc_error_t err = nipc_apps_lookup_req_decode(data, size, &view);
+        if (err == NIPC_OK) {
+            uint32_t limit = view.item_count;
+            if (limit > 256)
+                limit = 256;
+            for (uint32_t i = 0; i < limit; i++) {
+                nipc_apps_lookup_req_item_t item;
+                if (nipc_apps_lookup_req_item(&view, i, &item) == NIPC_OK)
+                    (void)item.pid;
+            }
+        }
+    }
+
+    /* --- Apps lookup response --- */
+    {
+        nipc_apps_lookup_resp_view_t view;
+        nipc_error_t err = nipc_apps_lookup_resp_decode(data, size, &view);
+        if (err == NIPC_OK) {
+            (void)view.layout_version;
+            (void)view.flags;
+            (void)view.item_count;
+            (void)view.generation;
+            uint32_t limit = view.item_count;
+            if (limit > 256)
+                limit = 256;
+            for (uint32_t i = 0; i < limit; i++) {
+                nipc_apps_lookup_item_view_t item;
+                if (nipc_apps_lookup_resp_item(&view, i, &item) == NIPC_OK) {
+                    (void)item.status;
+                    (void)item.orchestrator;
+                    (void)item.cgroup_status;
+                    (void)item.pid;
+                    (void)item.ppid;
+                    (void)item.uid;
+                    (void)item.starttime;
+                    (void)item.comm.ptr;
+                    (void)item.cgroup_path.ptr;
+                    (void)item.cgroup_name.ptr;
+                    uint32_t label_limit = item.label_count;
+                    if (label_limit > 256)
+                        label_limit = 256;
+                    for (uint32_t j = 0; j < label_limit; j++) {
+                        nipc_lookup_label_view_t label;
+                        if (nipc_apps_lookup_item_label(&item, j, &label) == NIPC_OK) {
+                            (void)label.key.ptr;
+                            (void)label.value.ptr;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /* --- Batch directory decode (try small item counts) --- */
     for (uint32_t count = 1; count <= 4 && count * 8 <= size; count++) {
         nipc_batch_entry_t entries[4];

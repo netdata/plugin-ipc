@@ -10,8 +10,9 @@
 #   5. UDS batch ping-pong (9 pairs x 4 rates, random 2-1000 items)
 #   6. SHM batch ping-pong (9 pairs x 4 rates, random 2-1000 items)
 #   7. Local cache lookup (3 languages x 1 rate)
-#   8. UDS pipeline (9 pairs x 1 rate, depth=16)
-#   9. UDS pipeline+batch (9 pairs x 1 rate, depth=16)
+#   8. Lookup method codec+dispatch (8 scenarios x 3 languages x 4 rates)
+#   9. UDS pipeline (9 pairs x 1 rate, depth=16)
+#   10. UDS pipeline+batch (9 pairs x 1 rate, depth=16)
 #
 # Output: CSV file + human-readable summary.
 # CSV columns:
@@ -452,6 +453,17 @@ main() {
     local LANGS=(c rust go)
     local RATES_PING_PONG=(0 100000 10000 1000)
     local RATES_SNAPSHOT=(0 1000)
+    local RATES_LOOKUP_METHOD=(0 100000 10000 1000)
+    local LOOKUP_METHOD_SCENARIOS=(
+        cgroups-lookup-known-16
+        cgroups-lookup-unknown-16
+        cgroups-lookup-mixed-16
+        cgroups-lookup-mixed-256
+        apps-lookup-known-16
+        apps-lookup-unknown-16
+        apps-lookup-mixed-16
+        apps-lookup-mixed-256
+    )
 
     # 1. UDS ping-pong: 9 pairs x 4 rates
     log "=== UDS Ping-Pong ==="
@@ -574,7 +586,54 @@ main() {
         fi
     done
 
-    # 8. UDS pipeline benchmarks (all 9 pairs, max rate, depth=16)
+    # 8. Lookup method codec+dispatch: 8 scenarios x 3 languages x 4 rates
+    log "=== Lookup Methods (codec + dispatch) ==="
+    for rate in "${RATES_LOOKUP_METHOD[@]}"; do
+        for scenario in "${LOOKUP_METHOD_SCENARIOS[@]}"; do
+            for lang in "${LANGS[@]}"; do
+                local bin
+                bin="$(bench_bin "$lang")"
+                log "  ${scenario}: ${lang} @ ${rate}"
+                local line
+                local lookup_status
+                local lookup_err="${RUN_DIR}/${scenario}-${lang}-${rate}.err"
+                set +e
+                line=$("$bin" lookup-method-bench "$DURATION" "$scenario" "$rate" 2>"$lookup_err" | grep "^${scenario}," | head -1)
+                lookup_status=$?
+                set -e
+                if [ "$lookup_status" -ne 0 ]; then
+                    warn "  ${lang} ${scenario} benchmark failed at target ${rate}"
+                    dump_client_error "$lookup_err"
+                    RUN_FAILED=1
+                    continue
+                fi
+                if [ -n "$line" ]; then
+                    local throughput p50 p95 p99 client_cpu server_cpu_pct total_cpu_pct
+                    throughput=$(echo "$line" | cut -d',' -f4)
+                    p50=$(echo "$line" | cut -d',' -f5)
+                    p95=$(echo "$line" | cut -d',' -f6)
+                    p99=$(echo "$line" | cut -d',' -f7)
+                    client_cpu=$(echo "$line" | cut -d',' -f8)
+                    server_cpu_pct=$(echo "$line" | cut -d',' -f9)
+                    total_cpu_pct=$(echo "$line" | cut -d',' -f10)
+                    if ! throughput_is_positive "$throughput"; then
+                        warn "  Invalid zero throughput from ${lang} ${scenario} benchmark at target ${rate}"
+                        dump_client_error "$lookup_err"
+                        RUN_FAILED=1
+                        continue
+                    fi
+                    write_csv_row "$scenario" "$lang" "$lang" "$rate" \
+                        "$throughput" "$p50" "$p95" "$p99" "$client_cpu" "$server_cpu_pct" "$total_cpu_pct"
+                else
+                    warn "  No output from ${lang} ${scenario} benchmark at target ${rate}"
+                    dump_client_error "$lookup_err"
+                    RUN_FAILED=1
+                fi
+            done
+        done
+    done
+
+    # 9. UDS pipeline benchmarks (all 9 pairs, max rate, depth=16)
     log "=== UDS Pipeline (9 pairs, max rate, depth=16) ==="
     local PIPELINE_DEPTH=16
     for server_lang in "${LANGS[@]}"; do
@@ -662,7 +721,7 @@ main() {
         done
     done
 
-    # 9. UDS pipeline+batch benchmarks (9 pairs, max rate, depth=16)
+    # 10. UDS pipeline+batch benchmarks (9 pairs, max rate, depth=16)
     log "=== UDS Pipeline+Batch (9 pairs, max rate, depth=16) ==="
     for server_lang in "${LANGS[@]}"; do
         for client_lang in "${LANGS[@]}"; do

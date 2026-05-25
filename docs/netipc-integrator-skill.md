@@ -23,6 +23,9 @@ authoritative:
 - [docs/level1-wire-envelope.md](level1-wire-envelope.md)
 - [docs/level2-typed-api.md](level2-typed-api.md)
 - [docs/level3-snapshot-api.md](level3-snapshot-api.md)
+- [docs/codec-cgroups-snapshot.md](codec-cgroups-snapshot.md)
+- [docs/codec-cgroups-lookup.md](codec-cgroups-lookup.md)
+- [docs/codec-apps-lookup.md](codec-apps-lookup.md)
 
 ## Core Reality
 
@@ -69,9 +72,12 @@ Current implemented layers:
   - O(1)-style lookup
   - cache preservation on failure
 
-Important current product fact:
+Important current product facts:
 
-- The current public typed service facade is `cgroups-snapshot`.
+- Public typed service facades include `cgroups-snapshot`,
+  `cgroups-lookup`, and `apps-lookup`.
+- `cgroups-lookup` enriches specific cgroup paths.
+- `apps-lookup` enriches specific PIDs and returns joined cgroup state.
 - The repo also contains internal raw/test service helpers for `increment` and
   `string-reverse`, but those are not the production public Netdata-facing
   service contract.
@@ -83,8 +89,12 @@ Relevant implementation roots:
   - [src/libnetdata/netipc/include/netipc/netipc_protocol.h](../src/libnetdata/netipc/include/netipc/netipc_protocol.h)
 - Rust public service API:
   - [src/crates/netipc/src/service/cgroups.rs](../src/crates/netipc/src/service/cgroups.rs)
+  - [src/crates/netipc/src/service/cgroups_lookup.rs](../src/crates/netipc/src/service/cgroups_lookup.rs)
+  - [src/crates/netipc/src/service/apps_lookup.rs](../src/crates/netipc/src/service/apps_lookup.rs)
 - Go public service API:
   - [src/go/pkg/netipc/service/cgroups/](../src/go/pkg/netipc/service/cgroups/)
+  - [src/go/pkg/netipc/service/cgroups_lookup/](../src/go/pkg/netipc/service/cgroups_lookup/)
+  - [src/go/pkg/netipc/service/apps_lookup/](../src/go/pkg/netipc/service/apps_lookup/)
 - Internal raw helpers used to build public typed services:
   - [src/crates/netipc/src/service/raw.rs](../src/crates/netipc/src/service/raw.rs)
   - [src/go/pkg/netipc/service/raw/](../src/go/pkg/netipc/service/raw/)
@@ -92,9 +102,10 @@ Relevant implementation roots:
 Important current limitation:
 
 - the public typed API is not generic yet
-- today, the production public typed facade is `cgroups-snapshot`
-- in C, that means the public typed call/cache/server surface is still
-  cgroups-shaped
+- today, the production public typed facades are explicit per service:
+  `cgroups-snapshot`, `cgroups-lookup`, and `apps-lookup`
+- in C, that means each public typed call/server surface is still shaped
+  by its method, not by a generic router
 - if you need a brand-new typed service, the work starts in the upstream
   source-of-truth repository:
   - `github.com/netdata/plugin-ipc`
@@ -166,6 +177,47 @@ Typical L3 uses:
 - datasets reused heavily inside a collection loop
 
 Do not use L3 if the caller only needs occasional typed calls and no cache.
+
+### Use Lookup L2 When The Consumer Owns The Working Set
+
+Use `cgroups-lookup` or `apps-lookup` when:
+
+- the consumer already has a bounded list of keys
+- the provider owns richer metadata for those keys
+- a full snapshot would transfer data the consumer will not use
+- the consumer can keep its own cache and query only misses
+
+Typical flow:
+
+- `apps.plugin` discovers live cgroup paths from live PIDs.
+- It calls `cgroups-lookup` only for unknown cgroup paths.
+- `network-viewer.plugin` discovers socket-owning PIDs.
+- It calls `apps-lookup` only for unknown PIDs.
+
+Lookup response order is part of the contract:
+
+- response item `N` corresponds to request item `N`
+- typed clients must reject mismatched echoed path or PID values
+- decoders validate wire structure only; echoed-key validation belongs in
+  the typed client layer
+
+Lookup cache lifecycle:
+
+- `UNKNOWN_RETRY_LATER` should be retried.
+- `UNKNOWN_PERMANENT` can be cached until the provider generation resets.
+- `HOST_ROOT` is permanent for the current provider generation.
+- On generation decrease/reset, evict existing `UNKNOWN_PERMANENT` and
+  `HOST_ROOT` entries before processing the new response.
+
+Wire-format footguns for lookup methods:
+
+- request headers are 16 bytes and are not identical to response headers
+- every response string has a valid offset and trailing NUL, even when empty
+- response strings must not contain interior NUL bytes
+- label tables start at the canonical 8-byte-aligned offset and padding
+  before the table must be zero
+- C code must use explicit wire-size constants; the 60-byte
+  `APPS_LOOKUP` item header naturally pads to 64 bytes as a C struct
 
 ## Netdata Integration Model
 

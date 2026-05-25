@@ -67,6 +67,12 @@ GO_BIN="${BUILD_DIR}/bin/interop_codec_go"
 FAILED=0
 
 FILES="header.bin chunk_header.bin hello.bin hello_ack.bin cgroups_req.bin cgroups_resp.bin cgroups_resp_empty.bin"
+FILES="${FILES} cgroups_lookup_req.bin cgroups_lookup_req_empty.bin"
+FILES="${FILES} cgroups_lookup_resp_known_with_labels.bin cgroups_lookup_resp_known_no_labels.bin"
+FILES="${FILES} cgroups_lookup_resp_unknown_retry.bin cgroups_lookup_resp_unknown_permanent.bin cgroups_lookup_resp_empty.bin"
+FILES="${FILES} apps_lookup_req.bin apps_lookup_req_empty.bin"
+FILES="${FILES} apps_lookup_resp_known_full.bin apps_lookup_resp_known_retry.bin apps_lookup_resp_known_permanent.bin"
+FILES="${FILES} apps_lookup_resp_known_host_root.bin apps_lookup_resp_unknown_pid.bin apps_lookup_resp_empty.bin"
 
 # --- Encode with all three ---
 echo ""

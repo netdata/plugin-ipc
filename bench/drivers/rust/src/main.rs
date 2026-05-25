@@ -15,10 +15,14 @@ fn main() {
 mod posix_only {
 
     use netipc::protocol::{
-        self, batch_item_get, increment_decode, increment_encode, BatchBuilder, Header, FLAG_BATCH,
-        HEADER_SIZE, INCREMENT_PAYLOAD_SIZE, KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG,
-        METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE, PROFILE_SHM_HYBRID, STATUS_OK,
-        VERSION,
+        self, batch_item_get, dispatch_apps_lookup, dispatch_cgroups_lookup,
+        encode_apps_lookup_request, encode_cgroups_lookup_request, increment_decode,
+        increment_encode, AppsLookupBuilder, AppsLookupResponseView, BatchBuilder,
+        CgroupsLookupBuilder, CgroupsLookupResponseView, Header, APPS_CGROUP_KNOWN,
+        CGROUP_LOOKUP_KNOWN, CGROUP_LOOKUP_UNKNOWN_RETRY_LATER, FLAG_BATCH, HEADER_SIZE,
+        INCREMENT_PAYLOAD_SIZE, KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT,
+        METHOD_INCREMENT, NIPC_UID_UNSET, ORCHESTRATOR_DOCKER, ORCHESTRATOR_K8S, PID_LOOKUP_KNOWN,
+        PID_LOOKUP_UNKNOWN, PROFILE_BASELINE, PROFILE_SHM_HYBRID, STATUS_OK, VERSION,
     };
     use netipc::service::cgroups::{CgroupsClient, ClientConfig as TypedClientConfig};
     use netipc::service::raw::{
@@ -1340,6 +1344,236 @@ mod posix_only {
     }
 
     // ---------------------------------------------------------------------------
+    //  Lookup method benchmark (codec + dispatch, no transport)
+    // ---------------------------------------------------------------------------
+
+    #[derive(Clone, Copy)]
+    enum LookupVariant {
+        Known,
+        Unknown,
+        Mixed,
+    }
+
+    fn lookup_variant_is_known(variant: LookupVariant, index: usize) -> bool {
+        match variant {
+            LookupVariant::Known => true,
+            LookupVariant::Unknown => false,
+            LookupVariant::Mixed => index % 2 == 0,
+        }
+    }
+
+    fn parse_lookup_method_scenario(scenario: &str) -> Option<(bool, LookupVariant, usize)> {
+        let is_apps = if scenario.starts_with("apps-lookup-") {
+            true
+        } else if scenario.starts_with("cgroups-lookup-") {
+            false
+        } else {
+            return None;
+        };
+
+        let variant = if scenario.contains("-known-") {
+            LookupVariant::Known
+        } else if scenario.contains("-unknown-") {
+            LookupVariant::Unknown
+        } else if scenario.contains("-mixed-") {
+            LookupVariant::Mixed
+        } else {
+            return None;
+        };
+
+        let item_count = if scenario.contains("-256") {
+            256
+        } else if scenario.contains("-16") {
+            16
+        } else {
+            return None;
+        };
+
+        Some((is_apps, variant, item_count))
+    }
+
+    fn run_lookup_method_bench(duration_sec: u32, scenario: &str, target_rps: u64) -> i32 {
+        let Some((is_apps, variant, item_count)) = parse_lookup_method_scenario(scenario) else {
+            eprintln!("lookup-method-bench: invalid scenario: {scenario}");
+            return 1;
+        };
+
+        let path_storage: Vec<Vec<u8>> = (0..item_count)
+            .map(|i| format!("/sys/fs/cgroup/bench/cg-{i:03}").into_bytes())
+            .collect();
+        let paths: Vec<&[u8]> = path_storage.iter().map(|path| path.as_slice()).collect();
+        let pids: Vec<u32> = (0..item_count).map(|i| 1000 + i as u32).collect();
+
+        let mut req_buf = vec![0u8; RESPONSE_BUF_SIZE];
+        let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
+
+        let est_samples = if target_rps == 0 {
+            2_000_000
+        } else {
+            (target_rps * duration_sec as u64) as usize
+        };
+        let mut lr = LatencyRecorder::new(est_samples);
+        let mut rl = RateLimiter::new(target_rps);
+
+        let mut requests: u64 = 0;
+        let mut errors: u64 = 0;
+
+        let cpu_start = cpu_ns();
+        let wall_start = Instant::now();
+        let deadline = Duration::from_secs(duration_sec as u64);
+
+        while wall_start.elapsed() < deadline {
+            rl.wait();
+
+            let t0 = Instant::now();
+            let result = if is_apps {
+                encode_apps_lookup_request(&pids, &mut req_buf).and_then(|req_len| {
+                    dispatch_apps_lookup(
+                        &req_buf[..req_len],
+                        &mut resp_buf,
+                        |req, builder: &mut AppsLookupBuilder| {
+                            for i in 0..req.item_count {
+                                let Ok(pid) = req.item(i) else {
+                                    return false;
+                                };
+                                if lookup_variant_is_known(variant, i as usize) {
+                                    let labels: [(&[u8], &[u8]); 1] =
+                                        [(&b"image"[..], &b"bench:latest"[..])];
+                                    if builder
+                                        .add(
+                                            PID_LOOKUP_KNOWN,
+                                            APPS_CGROUP_KNOWN,
+                                            ORCHESTRATOR_DOCKER,
+                                            pid,
+                                            1,
+                                            1000,
+                                            42,
+                                            b"bench",
+                                            b"/sys/fs/cgroup/bench",
+                                            b"bench-container",
+                                            &labels,
+                                        )
+                                        .is_err()
+                                    {
+                                        return false;
+                                    }
+                                } else if builder
+                                    .add(
+                                        PID_LOOKUP_UNKNOWN,
+                                        APPS_CGROUP_KNOWN,
+                                        0,
+                                        pid,
+                                        0,
+                                        NIPC_UID_UNSET,
+                                        0,
+                                        b"",
+                                        b"",
+                                        b"",
+                                        &[],
+                                    )
+                                    .is_err()
+                                {
+                                    return false;
+                                }
+                            }
+                            true
+                        },
+                    )
+                    .and_then(|resp_len| {
+                        let view = AppsLookupResponseView::decode(&resp_buf[..resp_len])?;
+                        if view.item_count as usize == item_count {
+                            Ok(resp_len)
+                        } else {
+                            Err(protocol::NipcError::BadItemCount)
+                        }
+                    })
+                })
+            } else {
+                encode_cgroups_lookup_request(&paths, &mut req_buf).and_then(|req_len| {
+                    dispatch_cgroups_lookup(
+                        &req_buf[..req_len],
+                        &mut resp_buf,
+                        |req, builder: &mut CgroupsLookupBuilder| {
+                            for i in 0..req.item_count {
+                                let Ok(path) = req.item(i) else {
+                                    return false;
+                                };
+                                if lookup_variant_is_known(variant, i as usize) {
+                                    let labels: [(&[u8], &[u8]); 2] = [
+                                        (&b"namespace"[..], &b"bench"[..]),
+                                        (&b"image"[..], &b"bench:latest"[..]),
+                                    ];
+                                    if builder
+                                        .add(
+                                            CGROUP_LOOKUP_KNOWN,
+                                            ORCHESTRATOR_K8S,
+                                            path.as_bytes(),
+                                            b"bench-pod",
+                                            &labels,
+                                        )
+                                        .is_err()
+                                    {
+                                        return false;
+                                    }
+                                } else if builder
+                                    .add(
+                                        CGROUP_LOOKUP_UNKNOWN_RETRY_LATER,
+                                        0,
+                                        path.as_bytes(),
+                                        b"",
+                                        &[],
+                                    )
+                                    .is_err()
+                                {
+                                    return false;
+                                }
+                            }
+                            true
+                        },
+                    )
+                    .and_then(|resp_len| {
+                        let view = CgroupsLookupResponseView::decode(&resp_buf[..resp_len])?;
+                        if view.item_count as usize == item_count {
+                            Ok(resp_len)
+                        } else {
+                            Err(protocol::NipcError::BadItemCount)
+                        }
+                    })
+                })
+            };
+
+            if result.is_err() {
+                errors += 1;
+                continue;
+            }
+
+            lr.record(t0.elapsed().as_nanos() as u64);
+            requests += 1;
+        }
+
+        let wall_sec = wall_start.elapsed().as_secs_f64();
+        let cpu_end = cpu_ns();
+        let cpu_sec = (cpu_end - cpu_start) as f64 / 1e9;
+        let throughput = requests as f64 / wall_sec;
+        let cpu_pct = (cpu_sec / wall_sec) * 100.0;
+
+        let p50 = lr.percentile(50.0) / 1000;
+        let p95 = lr.percentile(95.0) / 1000;
+        let p99 = lr.percentile(99.0) / 1000;
+
+        println!(
+            "{scenario},rust,rust,{throughput:.0},{p50},{p95},{p99},{cpu_pct:.1},0.0,{cpu_pct:.1}"
+        );
+
+        if errors > 0 {
+            eprintln!("lookup-method-bench: {errors} errors");
+            1
+        } else {
+            0
+        }
+    }
+
+    // ---------------------------------------------------------------------------
     //  Main
     // ---------------------------------------------------------------------------
 
@@ -1358,7 +1592,7 @@ mod posix_only {
                uds-batch-ping-pong-{{server,client}}, shm-batch-ping-pong-{{server,client}}\n  \
                snapshot-{{server,client}}, snapshot-shm-{{server,client}}\n  \
                uds-pipeline-client, uds-pipeline-batch-client\n  \
-               lookup-bench",
+               lookup-bench, lookup-method-bench",
                 args[0]
             );
             std::process::exit(1);
@@ -1543,6 +1777,20 @@ mod posix_only {
                 }
                 let duration: u32 = args[2].parse().unwrap_or(5);
                 run_lookup_bench(duration)
+            }
+
+            "lookup-method-bench" => {
+                if args.len() < 5 {
+                    eprintln!(
+                        "Usage: {} lookup-method-bench <duration_sec> <scenario> <target_rps>",
+                        args[0]
+                    );
+                    std::process::exit(1);
+                }
+                let duration: u32 = args[2].parse().unwrap_or(5);
+                let scenario = &args[3];
+                let target_rps: u64 = args[4].parse().unwrap_or(0);
+                run_lookup_method_bench(duration, scenario, target_rps)
             }
 
             _ => {

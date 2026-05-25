@@ -84,7 +84,7 @@ if [[ "$(uname -s)" != *MINGW* ]] && [[ "$(uname -s)" != *MSYS* ]] && [[ "${OS:-
     exit 1
 fi
 
-export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
 export MSYSTEM=MINGW64
 export TMP=/tmp
 export TEMP=/tmp

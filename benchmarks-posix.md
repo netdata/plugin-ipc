@@ -1,12 +1,12 @@
 # POSIX Benchmark Results
 
-Generated: 2026-04-19 17:52:39 UTC
+Generated: 2026-05-25 19:23:20 UTC
 
-Machine: costa-desktop (x86_64, 24 cores)
+Machine: local benchmark host (x86_64, 24 cores)
 
 CSV: benchmarks-posix.csv
 
-Complete matrix rows expected: 201
+Complete matrix rows expected: 297
 
 ## Validation Summary
 
@@ -33,6 +33,38 @@ Complete matrix rows expected: 201
 | snapshot-shm | 0 | 9 | 9 |
 | snapshot-shm | 1000 | 9 | 9 |
 | lookup | 0 | 3 | 3 |
+| cgroups-lookup-known-16 | 0 | 3 | 3 |
+| cgroups-lookup-known-16 | 100000 | 3 | 3 |
+| cgroups-lookup-known-16 | 10000 | 3 | 3 |
+| cgroups-lookup-known-16 | 1000 | 3 | 3 |
+| cgroups-lookup-unknown-16 | 0 | 3 | 3 |
+| cgroups-lookup-unknown-16 | 100000 | 3 | 3 |
+| cgroups-lookup-unknown-16 | 10000 | 3 | 3 |
+| cgroups-lookup-unknown-16 | 1000 | 3 | 3 |
+| cgroups-lookup-mixed-16 | 0 | 3 | 3 |
+| cgroups-lookup-mixed-16 | 100000 | 3 | 3 |
+| cgroups-lookup-mixed-16 | 10000 | 3 | 3 |
+| cgroups-lookup-mixed-16 | 1000 | 3 | 3 |
+| cgroups-lookup-mixed-256 | 0 | 3 | 3 |
+| cgroups-lookup-mixed-256 | 100000 | 3 | 3 |
+| cgroups-lookup-mixed-256 | 10000 | 3 | 3 |
+| cgroups-lookup-mixed-256 | 1000 | 3 | 3 |
+| apps-lookup-known-16 | 0 | 3 | 3 |
+| apps-lookup-known-16 | 100000 | 3 | 3 |
+| apps-lookup-known-16 | 10000 | 3 | 3 |
+| apps-lookup-known-16 | 1000 | 3 | 3 |
+| apps-lookup-unknown-16 | 0 | 3 | 3 |
+| apps-lookup-unknown-16 | 100000 | 3 | 3 |
+| apps-lookup-unknown-16 | 10000 | 3 | 3 |
+| apps-lookup-unknown-16 | 1000 | 3 | 3 |
+| apps-lookup-mixed-16 | 0 | 3 | 3 |
+| apps-lookup-mixed-16 | 100000 | 3 | 3 |
+| apps-lookup-mixed-16 | 10000 | 3 | 3 |
+| apps-lookup-mixed-16 | 1000 | 3 | 3 |
+| apps-lookup-mixed-256 | 0 | 3 | 3 |
+| apps-lookup-mixed-256 | 100000 | 3 | 3 |
+| apps-lookup-mixed-256 | 10000 | 3 | 3 |
+| apps-lookup-mixed-256 | 1000 | 3 | 3 |
 | uds-pipeline-d16 | 0 | 9 | 9 |
 | uds-pipeline-batch-d16 | 0 | 9 | 9 |
 
@@ -368,6 +400,107 @@ Complete matrix rows expected: 201
 | go       |   138.48M |       99.5% |      99.5% |
 | rust     |   147.68M |       99.4% |      99.4% |
 
+## Lookup Method Codec And Dispatch
+
+| Scenario | Target RPS | Language | Throughput | p50 (us) | p95 (us) | p99 (us) | CPU |
+|----------|-----------:|----------|-----------:|---------:|---------:|---------:|----:|
+| cgroups-lookup-known-16 | 0 | c        |     355.8k |        2 |        3 |        4 | 98.8% |
+| cgroups-lookup-known-16 | 0 | go       |     345.6k |        2 |        4 |        7 | 98.2% |
+| cgroups-lookup-known-16 | 0 | rust     |     507.5k |        1 |        2 |        3 | 98.4% |
+| cgroups-lookup-known-16 | 100000 | c        |     100.0k |        4 |        4 |        6 | 39.4% |
+| cgroups-lookup-known-16 | 100000 | go       |      99.9k |        2 |        4 |        7 | 31.6% |
+| cgroups-lookup-known-16 | 100000 | rust     |     100.0k |        2 |        3 |        4 | 28.4% |
+| cgroups-lookup-known-16 | 10000 | c        |      10.0k |        4 |        5 |        6 | 5.4% |
+| cgroups-lookup-known-16 | 10000 | go       |      10.0k |        3 |        9 |       16 | 5.4% |
+| cgroups-lookup-known-16 | 10000 | rust     |      10.0k |        3 |        4 |        5 | 4.4% |
+| cgroups-lookup-known-16 | 1000 | c        |       1.0k |        5 |        6 |        8 | 0.8% |
+| cgroups-lookup-known-16 | 1000 | go       |       1.0k |        5 |       13 |       22 | 1.4% |
+| cgroups-lookup-known-16 | 1000 | rust     |       1.0k |        3 |        5 |        6 | 0.7% |
+| cgroups-lookup-unknown-16 | 0 | c        |     799.9k |        1 |        1 |        1 | 98.3% |
+| cgroups-lookup-unknown-16 | 0 | go       |     657.8k |        1 |        2 |        4 | 97.9% |
+| cgroups-lookup-unknown-16 | 0 | rust     |      1.10M |        0 |        1 |        1 | 98.4% |
+| cgroups-lookup-unknown-16 | 100000 | c        |     100.0k |        1 |        2 |        3 | 19.8% |
+| cgroups-lookup-unknown-16 | 100000 | go       |      99.9k |        1 |        2 |        5 | 19.2% |
+| cgroups-lookup-unknown-16 | 100000 | rust     |     100.0k |        1 |        1 |        2 | 15.6% |
+| cgroups-lookup-unknown-16 | 10000 | c        |      10.0k |        2 |        3 |        3 | 3.6% |
+| cgroups-lookup-unknown-16 | 10000 | go       |      10.0k |        1 |        7 |       13 | 3.6% |
+| cgroups-lookup-unknown-16 | 10000 | rust     |      10.0k |        1 |        2 |        3 | 3.3% |
+| cgroups-lookup-unknown-16 | 1000 | c        |       1.0k |        3 |        4 |        5 | 0.6% |
+| cgroups-lookup-unknown-16 | 1000 | go       |       1.0k |        3 |       21 |       28 | 1.5% |
+| cgroups-lookup-unknown-16 | 1000 | rust     |       1.0k |        2 |        3 |        4 | 0.5% |
+| cgroups-lookup-mixed-16 | 0 | c        |     459.6k |        1 |        3 |        3 | 98.4% |
+| cgroups-lookup-mixed-16 | 0 | go       |     460.9k |        1 |        3 |        4 | 99.0% |
+| cgroups-lookup-mixed-16 | 0 | rust     |     669.0k |        1 |        2 |        2 | 98.6% |
+| cgroups-lookup-mixed-16 | 100000 | c        |     100.0k |        3 |        3 |        5 | 30.5% |
+| cgroups-lookup-mixed-16 | 100000 | go       |     100.0k |        2 |        3 |        6 | 28.1% |
+| cgroups-lookup-mixed-16 | 100000 | rust     |     100.0k |        2 |        2 |        3 | 22.4% |
+| cgroups-lookup-mixed-16 | 10000 | c        |      10.0k |        3 |        5 |        5 | 5.2% |
+| cgroups-lookup-mixed-16 | 10000 | go       |      10.0k |        2 |        8 |       16 | 4.6% |
+| cgroups-lookup-mixed-16 | 10000 | rust     |      10.0k |        2 |        3 |        4 | 4.2% |
+| cgroups-lookup-mixed-16 | 1000 | c        |       1.0k |        4 |        6 |        7 | 0.8% |
+| cgroups-lookup-mixed-16 | 1000 | go       |       1.0k |        5 |       21 |       33 | 1.6% |
+| cgroups-lookup-mixed-16 | 1000 | rust     |       1.0k |        3 |        5 |        6 | 0.7% |
+| cgroups-lookup-mixed-256 | 0 | c        |      31.8k |       28 |       43 |       48 | 99.2% |
+| cgroups-lookup-mixed-256 | 0 | go       |      34.1k |       26 |       43 |       63 | 98.5% |
+| cgroups-lookup-mixed-256 | 0 | rust     |      49.2k |       19 |       25 |       32 | 99.4% |
+| cgroups-lookup-mixed-256 | 100000 | c        |      32.9k |       28 |       38 |       47 | 99.1% |
+| cgroups-lookup-mixed-256 | 100000 | go       |      34.3k |       26 |       42 |       61 | 98.9% |
+| cgroups-lookup-mixed-256 | 100000 | rust     |      45.7k |       19 |       31 |       37 | 98.6% |
+| cgroups-lookup-mixed-256 | 10000 | c        |      10.0k |       48 |       56 |       67 | 43.7% |
+| cgroups-lookup-mixed-256 | 10000 | go       |      10.0k |       29 |       54 |       69 | 36.3% |
+| cgroups-lookup-mixed-256 | 10000 | rust     |      10.0k |       34 |       40 |       48 | 32.8% |
+| cgroups-lookup-mixed-256 | 1000 | c        |       1.0k |       50 |       54 |       62 | 5.1% |
+| cgroups-lookup-mixed-256 | 1000 | go       |       1.0k |       51 |       72 |       97 | 6.1% |
+| cgroups-lookup-mixed-256 | 1000 | rust     |       1.0k |       38 |       43 |       47 | 4.0% |
+| apps-lookup-known-16 | 0 | c        |     420.7k |        2 |        3 |        3 | 98.2% |
+| apps-lookup-known-16 | 0 | go       |     441.0k |        1 |        3 |        7 | 98.3% |
+| apps-lookup-known-16 | 0 | rust     |     698.2k |        1 |        2 |        2 | 98.8% |
+| apps-lookup-known-16 | 100000 | c        |     100.0k |        3 |        3 |        5 | 32.7% |
+| apps-lookup-known-16 | 100000 | go       |      99.9k |        2 |        3 |        7 | 28.2% |
+| apps-lookup-known-16 | 100000 | rust     |     100.0k |        2 |        2 |        3 | 21.4% |
+| apps-lookup-known-16 | 10000 | c        |      10.0k |        3 |       10 |       15 | 5.5% |
+| apps-lookup-known-16 | 10000 | go       |      10.0k |        2 |        8 |       15 | 4.7% |
+| apps-lookup-known-16 | 10000 | rust     |      10.0k |        2 |        3 |        4 | 3.6% |
+| apps-lookup-known-16 | 1000 | c        |       1.0k |        5 |        6 |        7 | 0.8% |
+| apps-lookup-known-16 | 1000 | go       |       1.0k |        6 |       20 |       28 | 1.7% |
+| apps-lookup-known-16 | 1000 | rust     |       1.0k |        2 |        4 |        5 | 0.6% |
+| apps-lookup-unknown-16 | 0 | c        |     746.7k |        1 |        1 |        2 | 98.9% |
+| apps-lookup-unknown-16 | 0 | go       |     622.4k |        1 |        3 |        5 | 99.0% |
+| apps-lookup-unknown-16 | 0 | rust     |      1.34M |        0 |        0 |        1 | 99.2% |
+| apps-lookup-unknown-16 | 100000 | c        |     100.0k |        1 |        2 |        2 | 19.6% |
+| apps-lookup-unknown-16 | 100000 | go       |      99.9k |        1 |        2 |        6 | 19.8% |
+| apps-lookup-unknown-16 | 100000 | rust     |     100.0k |        1 |        1 |        2 | 13.6% |
+| apps-lookup-unknown-16 | 10000 | c        |      10.0k |        2 |        3 |        3 | 3.6% |
+| apps-lookup-unknown-16 | 10000 | go       |      10.0k |        1 |        6 |       13 | 3.4% |
+| apps-lookup-unknown-16 | 10000 | rust     |      10.0k |        1 |        2 |        2 | 2.7% |
+| apps-lookup-unknown-16 | 1000 | c        |       1.0k |        3 |        4 |        6 | 0.8% |
+| apps-lookup-unknown-16 | 1000 | go       |       1.0k |        4 |       16 |       24 | 1.5% |
+| apps-lookup-unknown-16 | 1000 | rust     |       1.0k |        2 |        3 |        4 | 0.6% |
+| apps-lookup-mixed-16 | 0 | c        |     506.5k |        1 |        2 |        2 | 99.0% |
+| apps-lookup-mixed-16 | 0 | go       |     493.2k |        1 |        3 |        5 | 99.1% |
+| apps-lookup-mixed-16 | 0 | rust     |     915.7k |        0 |        1 |        1 | 99.2% |
+| apps-lookup-mixed-16 | 100000 | c        |     100.0k |        2 |        3 |        4 | 27.0% |
+| apps-lookup-mixed-16 | 100000 | go       |     100.0k |        1 |        3 |        7 | 24.7% |
+| apps-lookup-mixed-16 | 100000 | rust     |     100.0k |        1 |        1 |        2 | 17.4% |
+| apps-lookup-mixed-16 | 10000 | c        |      10.0k |        3 |        4 |        5 | 4.8% |
+| apps-lookup-mixed-16 | 10000 | go       |      10.0k |        2 |        7 |       15 | 4.5% |
+| apps-lookup-mixed-16 | 10000 | rust     |      10.0k |        1 |        3 |        4 | 3.2% |
+| apps-lookup-mixed-16 | 1000 | c        |       1.0k |        3 |        5 |        6 | 0.7% |
+| apps-lookup-mixed-16 | 1000 | go       |       1.0k |        5 |       19 |       26 | 1.4% |
+| apps-lookup-mixed-16 | 1000 | rust     |       1.0k |        3 |        4 |        5 | 0.7% |
+| apps-lookup-mixed-256 | 0 | c        |      35.7k |       26 |       36 |       41 | 99.3% |
+| apps-lookup-mixed-256 | 0 | go       |      36.6k |       24 |       42 |       67 | 99.1% |
+| apps-lookup-mixed-256 | 0 | rust     |      62.8k |       14 |       22 |       25 | 99.3% |
+| apps-lookup-mixed-256 | 100000 | c        |      35.0k |       26 |       40 |       47 | 99.0% |
+| apps-lookup-mixed-256 | 100000 | go       |      36.1k |       25 |       42 |       62 | 99.1% |
+| apps-lookup-mixed-256 | 100000 | rust     |      62.2k |       14 |       22 |       26 | 99.3% |
+| apps-lookup-mixed-256 | 10000 | c        |      10.0k |       43 |       47 |       58 | 40.7% |
+| apps-lookup-mixed-256 | 10000 | go       |      10.0k |       24 |       47 |       64 | 32.0% |
+| apps-lookup-mixed-256 | 10000 | rust     |      10.0k |       24 |       28 |       31 | 22.5% |
+| apps-lookup-mixed-256 | 1000 | c        |       1.0k |       45 |       49 |       54 | 4.6% |
+| apps-lookup-mixed-256 | 1000 | go       |       1.0k |       42 |       68 |       85 | 5.1% |
+| apps-lookup-mixed-256 | 1000 | rust     |       1.0k |       27 |       32 |       35 | 2.9% |
+
 ## Performance Floors
 
 | Metric | Floor | Status |
@@ -377,4 +510,12 @@ Complete matrix rows expected: 201
 | UDS ping-pong max | >= 120k req/s | PASS |
 | UDS snapshot refresh max | >= 100k req/s | PASS |
 | Local cache lookup | >= 10M lookups/s | PASS |
+| cgroups-lookup known-16 max | >= 250k req/s | PASS |
+| cgroups-lookup unknown-16 max | >= 500k req/s | PASS |
+| cgroups-lookup mixed-16 max | >= 350k req/s | PASS |
+| cgroups-lookup mixed-256 max | >= 25k req/s | PASS |
+| apps-lookup known-16 max | >= 300k req/s | PASS |
+| apps-lookup unknown-16 max | >= 500k req/s | PASS |
+| apps-lookup mixed-16 max | >= 350k req/s | PASS |
+| apps-lookup mixed-256 max | >= 25k req/s | PASS |
 

@@ -90,7 +90,7 @@ build_jobs() {
 }
 
 setup_msys_toolchain() {
-  export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/usr/bin:/mingw64/bin:$PATH"
+  export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:/c/Program Files/Go/bin:/usr/bin:/mingw64/bin:$PATH"
   export MSYSTEM=MSYS
   CC_BIN="/usr/bin/gcc"
   CXX_BIN="/usr/bin/g++"

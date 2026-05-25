@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -1188,6 +1189,206 @@ func runLookupBench(durationSec int) int {
 }
 
 // ---------------------------------------------------------------------------
+//  Lookup method benchmark (codec + dispatch, no transport)
+// ---------------------------------------------------------------------------
+
+type lookupVariant int
+
+const (
+	lookupKnown lookupVariant = iota + 1
+	lookupUnknown
+	lookupMixed
+)
+
+func lookupVariantIsKnown(variant lookupVariant, index int) bool {
+	switch variant {
+	case lookupKnown:
+		return true
+	case lookupUnknown:
+		return false
+	default:
+		return index%2 == 0
+	}
+}
+
+func parseLookupMethodScenario(scenario string) (isApps bool, variant lookupVariant, itemCount int, ok bool) {
+	switch {
+	case strings.HasPrefix(scenario, "apps-lookup-"):
+		isApps = true
+	case strings.HasPrefix(scenario, "cgroups-lookup-"):
+		isApps = false
+	default:
+		return false, 0, 0, false
+	}
+	switch {
+	case strings.Contains(scenario, "-known-"):
+		variant = lookupKnown
+	case strings.Contains(scenario, "-unknown-"):
+		variant = lookupUnknown
+	case strings.Contains(scenario, "-mixed-"):
+		variant = lookupMixed
+	default:
+		return false, 0, 0, false
+	}
+	switch {
+	case strings.Contains(scenario, "-256"):
+		itemCount = 256
+	case strings.Contains(scenario, "-16"):
+		itemCount = 16
+	default:
+		return false, 0, 0, false
+	}
+	return isApps, variant, itemCount, true
+}
+
+func runLookupMethodBench(durationSec int, scenario string, targetRPS uint64) int {
+	isApps, variant, itemCount, ok := parseLookupMethodScenario(scenario)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "lookup-method-bench: invalid scenario %q\n", scenario)
+		return 1
+	}
+
+	paths := make([][]byte, itemCount)
+	pids := make([]uint32, itemCount)
+	for i := 0; i < itemCount; i++ {
+		paths[i] = []byte(fmt.Sprintf("/sys/fs/cgroup/bench/cg-%03d", i))
+		pids[i] = uint32(1000 + i)
+	}
+
+	reqBuf := make([]byte, responseBufSize)
+	respBuf := make([]byte, responseBufSize)
+	lr := newLatencyRecorder(2_000_000)
+	rl := newRateLimiter(targetRPS)
+
+	var requests, errors uint64
+	cpuStart := cpuNS()
+	wallStart := time.Now()
+	deadline := time.Duration(durationSec) * time.Second
+
+	for time.Since(wallStart) < deadline {
+		rl.wait()
+		t0 := time.Now()
+
+		var err error
+		var respLen int
+		if isApps {
+			var reqLen int
+			reqLen, err = protocol.EncodeAppsLookupRequest(pids, reqBuf)
+			if err == nil {
+				respLen, err = protocol.DispatchAppsLookup(reqBuf[:reqLen], respBuf, func(req *protocol.AppsLookupRequestView, builder *protocol.AppsLookupBuilder) bool {
+					for i := uint32(0); i < req.ItemCount; i++ {
+						pid, ierr := req.Item(i)
+						if ierr != nil {
+							return false
+						}
+						if lookupVariantIsKnown(variant, int(i)) {
+							if berr := builder.Add(
+								protocol.PidLookupKnown,
+								protocol.AppsCgroupKnown,
+								protocol.OrchestratorDocker,
+								pid, 1, 1000, 42,
+								[]byte("bench"),
+								[]byte("/sys/fs/cgroup/bench"),
+								[]byte("bench-container"),
+								[]struct{ Key, Value []byte }{{Key: []byte("image"), Value: []byte("bench:latest")}},
+							); berr != nil {
+								return false
+							}
+						} else if berr := builder.Add(
+							protocol.PidLookupUnknown,
+							protocol.AppsCgroupKnown,
+							0,
+							pid, 0, protocol.NipcUIDUnset, 0,
+							nil, nil, nil, nil,
+						); berr != nil {
+							return false
+						}
+					}
+					return true
+				})
+				if err == nil {
+					var view *protocol.AppsLookupResponseView
+					view, err = protocol.DecodeAppsLookupResponse(respBuf[:respLen])
+					if err == nil && int(view.ItemCount) != itemCount {
+						err = protocol.ErrBadItemCount
+					}
+				}
+			}
+		} else {
+			var reqLen int
+			reqLen, err = protocol.EncodeCgroupsLookupRequest(paths, reqBuf)
+			if err == nil {
+				respLen, err = protocol.DispatchCgroupsLookup(reqBuf[:reqLen], respBuf, func(req *protocol.CgroupsLookupRequestView, builder *protocol.CgroupsLookupBuilder) bool {
+					for i := uint32(0); i < req.ItemCount; i++ {
+						path, ierr := req.Item(i)
+						if ierr != nil {
+							return false
+						}
+						if lookupVariantIsKnown(variant, int(i)) {
+							if berr := builder.Add(
+								protocol.CgroupLookupKnown,
+								protocol.OrchestratorK8s,
+								path.Bytes(),
+								[]byte("bench-pod"),
+								[]struct{ Key, Value []byte }{
+									{Key: []byte("namespace"), Value: []byte("bench")},
+									{Key: []byte("image"), Value: []byte("bench:latest")},
+								},
+							); berr != nil {
+								return false
+							}
+						} else if berr := builder.Add(
+							protocol.CgroupLookupUnknownRetryLater,
+							0,
+							path.Bytes(),
+							nil,
+							nil,
+						); berr != nil {
+							return false
+						}
+					}
+					return true
+				})
+				if err == nil {
+					var view *protocol.CgroupsLookupResponseView
+					view, err = protocol.DecodeCgroupsLookupResponse(respBuf[:respLen])
+					if err == nil && int(view.ItemCount) != itemCount {
+						err = protocol.ErrBadItemCount
+					}
+				}
+			}
+		}
+
+		if err != nil {
+			errors++
+			continue
+		}
+
+		lr.record(uint64(time.Since(t0).Nanoseconds()))
+		requests++
+	}
+
+	wallSec := time.Since(wallStart).Seconds()
+	cpuEnd := cpuNS()
+	cpuSec := float64(cpuEnd-cpuStart) / 1e9
+	throughput := float64(requests) / wallSec
+	cpuPct := (cpuSec / wallSec) * 100.0
+
+	p50 := lr.percentile(50.0) / 1000
+	p95 := lr.percentile(95.0) / 1000
+	p99 := lr.percentile(99.0) / 1000
+
+	fmt.Printf("%s,go,go,%.0f,%d,%d,%d,%.1f,0.0,%.1f\n",
+		scenario, throughput, p50, p95, p99, cpuPct, cpuPct)
+
+	if errors > 0 {
+		fmt.Fprintf(os.Stderr, "lookup-method-bench: %d errors\n", errors)
+		return 1
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
 //  Main
 // ---------------------------------------------------------------------------
 
@@ -1200,7 +1401,7 @@ func main() {
 				"Subcommands: uds-ping-pong-{server,client}, shm-ping-pong-{server,client},\n"+
 				"  uds-batch-ping-pong-{server,client}, shm-batch-ping-pong-{server,client},\n"+
 				"  snapshot-{server,client}, snapshot-shm-{server,client},\n"+
-				"  uds-pipeline-client, uds-pipeline-batch-client, lookup-bench\n",
+				"  uds-pipeline-client, uds-pipeline-batch-client, lookup-bench, lookup-method-bench\n",
 			os.Args[0])
 		os.Exit(1)
 	}
@@ -1213,7 +1414,7 @@ func main() {
 		"uds-batch-ping-pong-client", "shm-batch-ping-pong-client",
 		"snapshot-client", "snapshot-shm-client",
 		"uds-pipeline-client", "uds-pipeline-batch-client",
-		"lookup-bench":
+		"lookup-bench", "lookup-method-bench":
 		// Keep benchmark clients single-threaded for fair cross-language
 		// comparison, but leave servers at the runtime default.
 		runtime.GOMAXPROCS(1)
@@ -1390,6 +1591,15 @@ func main() {
 		}
 		duration, _ := strconv.Atoi(os.Args[2])
 		rc = runLookupBench(duration)
+
+	case "lookup-method-bench":
+		if len(os.Args) < 5 {
+			fmt.Fprintf(os.Stderr, "Usage: %s lookup-method-bench <duration_sec> <scenario> <target_rps>\n", os.Args[0])
+			os.Exit(1)
+		}
+		duration, _ := strconv.Atoi(os.Args[2])
+		targetRPS, _ := strconv.ParseUint(os.Args[4], 10, 64)
+		rc = runLookupMethodBench(duration, os.Args[3], targetRPS)
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n", cmd)

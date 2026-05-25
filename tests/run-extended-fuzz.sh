@@ -63,7 +63,7 @@ fail() {
 }
 
 # ---------------------------------------------------------------------------
-#  Go fuzz targets (8 targets x FUZZTIME seconds each)
+#  Go fuzz targets (12 targets x FUZZTIME seconds each)
 # ---------------------------------------------------------------------------
 
 run_go_fuzz() {
@@ -77,6 +77,10 @@ run_go_fuzz() {
         FuzzDecodeHelloAck
         FuzzDecodeCgroupsRequest
         FuzzDecodeCgroupsResponse
+        FuzzDecodeCgroupsLookupRequest
+        FuzzDecodeCgroupsLookupResponse
+        FuzzDecodeAppsLookupRequest
+        FuzzDecodeAppsLookupResponse
         FuzzBatchDirDecode
         FuzzBatchItemGet
     )

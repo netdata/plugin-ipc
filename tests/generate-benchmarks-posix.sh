@@ -22,10 +22,20 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 INPUT_CSV="${1:-${ROOT_DIR}/benchmarks-posix.csv}"
 OUTPUT_MD="${2:-${ROOT_DIR}/benchmarks-posix.md}"
 EXPECTED_HEADER="scenario,client,server,target_rps,throughput,p50_us,p95_us,p99_us,client_cpu_pct,server_cpu_pct,total_cpu_pct"
-EXPECTED_TOTAL_ROWS=201
+EXPECTED_TOTAL_ROWS=297
 VALIDATION_FAILED=0
 FLOOR_FAILED=0
 CSV_FILE=""
+LOOKUP_METHOD_SCENARIOS=(
+    cgroups-lookup-known-16
+    cgroups-lookup-unknown-16
+    cgroups-lookup-mixed-16
+    cgroups-lookup-mixed-256
+    apps-lookup-known-16
+    apps-lookup-unknown-16
+    apps-lookup-mixed-16
+    apps-lookup-mixed-256
+)
 
 log() {
     printf "${CYAN}[gen]${NC} %s\n" "$*" >&2
@@ -159,6 +169,12 @@ validate_csv() {
     done
 
     require_rows "lookup" "0" 3
+    for scenario in "${LOOKUP_METHOD_SCENARIOS[@]}"; do
+        require_rows "$scenario" "0" 3
+        require_rows "$scenario" "100000" 3
+        require_rows "$scenario" "10000" 3
+        require_rows "$scenario" "1000" 3
+    done
     require_rows "uds-pipeline-d16" "0" 9
     require_rows "uds-pipeline-batch-d16" "0" 9
     require_positive_throughput
@@ -218,6 +234,28 @@ emit_lookup_section() {
     echo ""
 }
 
+emit_lookup_method_section() {
+    echo "## Lookup Method Codec And Dispatch"
+    echo ""
+    echo "| Scenario | Target RPS | Language | Throughput | p50 (us) | p95 (us) | p99 (us) | CPU |"
+    echo "|----------|-----------:|----------|-----------:|---------:|---------:|---------:|----:|"
+
+    for scenario in "${LOOKUP_METHOD_SCENARIOS[@]}"; do
+        for target_rps in 0 100000 10000 1000; do
+            awk -F',' -v scenario="$scenario" -v target_rps="$target_rps" '
+                NR > 1 && $1 == scenario && $4 == target_rps { print }
+            ' "$CSV_FILE" | sort -t',' -k2,2 | while IFS=',' read -r row_scenario client server row_target_rps throughput p50 p95 p99 ccpu scpu tcpu; do
+                local tp_fmt
+                tp_fmt=$(format_throughput "$throughput")
+                printf "| %s | %s | %-8s | %10s | %8s | %8s | %8s | %s%% |\n" \
+                    "$row_scenario" "$row_target_rps" "$client" "$tp_fmt" "$p50" "$p95" "$p99" "$ccpu"
+            done
+        done
+    done
+
+    echo ""
+}
+
 emit_validation_summary() {
     echo "## Validation Summary"
     echo ""
@@ -239,6 +277,12 @@ emit_validation_summary() {
     done
 
     printf "| %s | %s | %d | %d |\n" "lookup" "0" 3 "$(count_rows "lookup" "0")"
+    for scenario in "${LOOKUP_METHOD_SCENARIOS[@]}"; do
+        for target_rps in 0 100000 10000 1000; do
+            printf "| %s | %s | %d | %d |\n" \
+                "$scenario" "$target_rps" 3 "$(count_rows "$scenario" "$target_rps")"
+        done
+    done
     printf "| %s | %s | %d | %d |\n" "uds-pipeline-d16" "0" 9 "$(count_rows "uds-pipeline-d16" "0")"
     printf "| %s | %s | %d | %d |\n" "uds-pipeline-batch-d16" "0" 9 "$(count_rows "uds-pipeline-batch-d16" "0")"
 
@@ -343,6 +387,14 @@ check_floors() {
     log_floor_violations_min "uds-ping-pong" "0" 120000 "uds-ping-pong"
     log_floor_violations_min "snapshot-baseline" "0" 100000 "snapshot-baseline"
     log_floor_violations_min "lookup" "0" 10000000 "lookup"
+    log_floor_violations_min "cgroups-lookup-known-16" "0" 250000 "cgroups-lookup-known-16"
+    log_floor_violations_min "cgroups-lookup-unknown-16" "0" 500000 "cgroups-lookup-unknown-16"
+    log_floor_violations_min "cgroups-lookup-mixed-16" "0" 350000 "cgroups-lookup-mixed-16"
+    log_floor_violations_min "cgroups-lookup-mixed-256" "0" 25000 "cgroups-lookup-mixed-256"
+    log_floor_violations_min "apps-lookup-known-16" "0" 300000 "apps-lookup-known-16"
+    log_floor_violations_min "apps-lookup-unknown-16" "0" 500000 "apps-lookup-unknown-16"
+    log_floor_violations_min "apps-lookup-mixed-16" "0" 350000 "apps-lookup-mixed-16"
+    log_floor_violations_min "apps-lookup-mixed-256" "0" 25000 "apps-lookup-mixed-256"
     log_floor_violations_snapshot_shm
 
     if [ "$FLOOR_FAILED" -eq 0 ]; then
@@ -360,6 +412,14 @@ emit_floor_summary() {
     echo "| UDS ping-pong max | >= 120k req/s | $(floor_status_min "uds-ping-pong" "0" 120000) |"
     echo "| UDS snapshot refresh max | >= 100k req/s | $(floor_status_min "snapshot-baseline" "0" 100000) |"
     echo "| Local cache lookup | >= 10M lookups/s | $(floor_status_min "lookup" "0" 10000000) |"
+    echo "| cgroups-lookup known-16 max | >= 250k req/s | $(floor_status_min "cgroups-lookup-known-16" "0" 250000) |"
+    echo "| cgroups-lookup unknown-16 max | >= 500k req/s | $(floor_status_min "cgroups-lookup-unknown-16" "0" 500000) |"
+    echo "| cgroups-lookup mixed-16 max | >= 350k req/s | $(floor_status_min "cgroups-lookup-mixed-16" "0" 350000) |"
+    echo "| cgroups-lookup mixed-256 max | >= 25k req/s | $(floor_status_min "cgroups-lookup-mixed-256" "0" 25000) |"
+    echo "| apps-lookup known-16 max | >= 300k req/s | $(floor_status_min "apps-lookup-known-16" "0" 300000) |"
+    echo "| apps-lookup unknown-16 max | >= 500k req/s | $(floor_status_min "apps-lookup-unknown-16" "0" 500000) |"
+    echo "| apps-lookup mixed-16 max | >= 350k req/s | $(floor_status_min "apps-lookup-mixed-16" "0" 350000) |"
+    echo "| apps-lookup mixed-256 max | >= 25k req/s | $(floor_status_min "apps-lookup-mixed-256" "0" 25000) |"
     echo ""
 }
 
@@ -371,7 +431,7 @@ generate_md() {
         echo ""
         echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
         echo ""
-        echo "Machine: $(uname -n) ($(uname -m), $(nproc) cores)"
+        echo "Machine: local benchmark host ($(uname -m), $(nproc) cores)"
         echo ""
         echo "CSV: $(basename "$INPUT_CSV")"
         echo ""
@@ -388,6 +448,7 @@ generate_md() {
         emit_scenario_section "UDS Pipeline" "uds-pipeline-d16" 0
         emit_scenario_section "UDS Pipeline+Batch" "uds-pipeline-batch-d16" 0
         emit_lookup_section
+        emit_lookup_method_section
         emit_floor_summary
     } > "$tmp_file"
 

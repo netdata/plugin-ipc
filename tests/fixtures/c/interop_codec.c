@@ -181,6 +181,150 @@ static int do_encode(const char *dir) {
         err |= write_file(dir, "cgroups_resp_empty.bin", buf, total);
     }
 
+    /* 8. CGROUPS_LOOKUP request variants */
+    {
+        nipc_str_view_t paths[2] = {
+            {.ptr = "/sys/fs/cgroup/a", .len = (uint32_t)strlen("/sys/fs/cgroup/a")},
+            {.ptr = "/system.slice/docker-abc.scope", .len = (uint32_t)strlen("/system.slice/docker-abc.scope")},
+        };
+        size_t total = nipc_cgroups_lookup_req_encode(paths, 2, buf, sizeof(buf));
+        err |= write_file(dir, "cgroups_lookup_req.bin", buf, total);
+
+        total = nipc_cgroups_lookup_req_encode(NULL, 0, buf, sizeof(buf));
+        err |= write_file(dir, "cgroups_lookup_req_empty.bin", buf, total);
+    }
+
+    /* 9. CGROUPS_LOOKUP response variants */
+    {
+        nipc_lookup_label_view_t labels[2] = {
+            {.key = {.ptr = "namespace", .len = 9}, .value = {.ptr = "default", .len = 7}},
+            {.key = {.ptr = "pod", .len = 3}, .value = {.ptr = "web", .len = 3}},
+        };
+        nipc_cgroups_lookup_builder_t b;
+        nipc_cgroups_lookup_builder_init(&b, buf, sizeof(buf), 1, 100);
+        nipc_cgroups_lookup_builder_add(&b, NIPC_CGROUP_LOOKUP_KNOWN,
+                                        NIPC_ORCHESTRATOR_K8S,
+                                        "/kubepods.slice/pod-a", (uint32_t)strlen("/kubepods.slice/pod-a"),
+                                        "pod-a", 5,
+                                        labels, 2);
+        size_t total = nipc_cgroups_lookup_builder_finish(&b);
+        err |= write_file(dir, "cgroups_lookup_resp_known_with_labels.bin", buf, total);
+    }
+    {
+        nipc_cgroups_lookup_builder_t b;
+        nipc_cgroups_lookup_builder_init(&b, buf, sizeof(buf), 1, 101);
+        nipc_cgroups_lookup_builder_add(&b, NIPC_CGROUP_LOOKUP_KNOWN,
+                                        NIPC_ORCHESTRATOR_DOCKER,
+                                        "/docker/abc", 11,
+                                        "", 0,
+                                        NULL, 0);
+        size_t total = nipc_cgroups_lookup_builder_finish(&b);
+        err |= write_file(dir, "cgroups_lookup_resp_known_no_labels.bin", buf, total);
+    }
+    {
+        nipc_cgroups_lookup_builder_t b;
+        nipc_cgroups_lookup_builder_init(&b, buf, sizeof(buf), 1, 102);
+        nipc_cgroups_lookup_builder_add(&b, NIPC_CGROUP_LOOKUP_UNKNOWN_RETRY_LATER,
+                                        0, "/missing/retry", 14, "", 0, NULL, 0);
+        size_t total = nipc_cgroups_lookup_builder_finish(&b);
+        err |= write_file(dir, "cgroups_lookup_resp_unknown_retry.bin", buf, total);
+    }
+    {
+        nipc_cgroups_lookup_builder_t b;
+        nipc_cgroups_lookup_builder_init(&b, buf, sizeof(buf), 1, 103);
+        nipc_cgroups_lookup_builder_add(&b, NIPC_CGROUP_LOOKUP_UNKNOWN_PERMANENT,
+                                        0, "/gone", 5, "", 0, NULL, 0);
+        size_t total = nipc_cgroups_lookup_builder_finish(&b);
+        err |= write_file(dir, "cgroups_lookup_resp_unknown_permanent.bin", buf, total);
+    }
+    {
+        nipc_cgroups_lookup_builder_t b;
+        nipc_cgroups_lookup_builder_init(&b, buf, sizeof(buf), 0, 104);
+        size_t total = nipc_cgroups_lookup_builder_finish(&b);
+        err |= write_file(dir, "cgroups_lookup_resp_empty.bin", buf, total);
+    }
+
+    /* 10. APPS_LOOKUP request variants */
+    {
+        uint32_t pids[3] = {0, 1234, 4321};
+        size_t total = nipc_apps_lookup_req_encode(pids, 3, buf, sizeof(buf));
+        err |= write_file(dir, "apps_lookup_req.bin", buf, total);
+
+        total = nipc_apps_lookup_req_encode(NULL, 0, buf, sizeof(buf));
+        err |= write_file(dir, "apps_lookup_req_empty.bin", buf, total);
+    }
+
+    /* 11. APPS_LOOKUP response variants */
+    {
+        nipc_lookup_label_view_t labels[2] = {
+            {.key = {.ptr = "image", .len = 5}, .value = {.ptr = "nginx:latest", .len = 12}},
+            {.key = {.ptr = "service", .len = 7}, .value = {.ptr = "web", .len = 3}},
+        };
+        nipc_apps_lookup_builder_t b;
+        nipc_apps_lookup_builder_init(&b, buf, sizeof(buf), 1, 200);
+        nipc_apps_lookup_builder_add(&b, NIPC_PID_LOOKUP_KNOWN,
+                                     NIPC_APPS_CGROUP_KNOWN,
+                                     NIPC_ORCHESTRATOR_DOCKER,
+                                     1234, 1, 1000, 123456,
+                                     "123456789012345", 15,
+                                     "/docker/abc", 11,
+                                     "container-a", 11,
+                                     labels, 2);
+        size_t total = nipc_apps_lookup_builder_finish(&b);
+        err |= write_file(dir, "apps_lookup_resp_known_full.bin", buf, total);
+    }
+    {
+        nipc_apps_lookup_builder_t b;
+        nipc_apps_lookup_builder_init(&b, buf, sizeof(buf), 1, 201);
+        nipc_apps_lookup_builder_add(&b, NIPC_PID_LOOKUP_KNOWN,
+                                     NIPC_APPS_CGROUP_UNKNOWN_RETRY_LATER,
+                                     0, 1235, 1, 1000, 123457,
+                                     "app", 3,
+                                     "/pending", 8,
+                                     "", 0, NULL, 0);
+        size_t total = nipc_apps_lookup_builder_finish(&b);
+        err |= write_file(dir, "apps_lookup_resp_known_retry.bin", buf, total);
+    }
+    {
+        nipc_apps_lookup_builder_t b;
+        nipc_apps_lookup_builder_init(&b, buf, sizeof(buf), 1, 202);
+        nipc_apps_lookup_builder_add(&b, NIPC_PID_LOOKUP_KNOWN,
+                                     NIPC_APPS_CGROUP_UNKNOWN_PERMANENT,
+                                     0, 1236, 1, 1000, 123458,
+                                     "app2", 4,
+                                     "/permanent", 10,
+                                     "", 0, NULL, 0);
+        size_t total = nipc_apps_lookup_builder_finish(&b);
+        err |= write_file(dir, "apps_lookup_resp_known_permanent.bin", buf, total);
+    }
+    {
+        nipc_apps_lookup_builder_t b;
+        nipc_apps_lookup_builder_init(&b, buf, sizeof(buf), 1, 203);
+        nipc_apps_lookup_builder_add(&b, NIPC_PID_LOOKUP_KNOWN,
+                                     NIPC_APPS_CGROUP_HOST_ROOT,
+                                     0, 1237, 1, 0, 123459,
+                                     "sshd", 4,
+                                     "", 0, "", 0, NULL, 0);
+        size_t total = nipc_apps_lookup_builder_finish(&b);
+        err |= write_file(dir, "apps_lookup_resp_known_host_root.bin", buf, total);
+    }
+    {
+        nipc_apps_lookup_builder_t b;
+        nipc_apps_lookup_builder_init(&b, buf, sizeof(buf), 1, 204);
+        nipc_apps_lookup_builder_add(&b, NIPC_PID_LOOKUP_UNKNOWN,
+                                     NIPC_APPS_CGROUP_KNOWN,
+                                     0, 0, 0, NIPC_UID_UNSET, 0,
+                                     "", 0, "", 0, "", 0, NULL, 0);
+        size_t total = nipc_apps_lookup_builder_finish(&b);
+        err |= write_file(dir, "apps_lookup_resp_unknown_pid.bin", buf, total);
+    }
+    {
+        nipc_apps_lookup_builder_t b;
+        nipc_apps_lookup_builder_init(&b, buf, sizeof(buf), 0, 205);
+        size_t total = nipc_apps_lookup_builder_finish(&b);
+        err |= write_file(dir, "apps_lookup_resp_empty.bin", buf, total);
+    }
+
     return err;
 }
 
@@ -321,6 +465,135 @@ static int do_decode(const char *dir) {
         CHECK(view.generation == 42, "empty generation");
     } else {
         g_fail++;
+    }
+
+    /* 8. CGROUPS_LOOKUP request variants */
+    n = read_file(dir, "cgroups_lookup_req.bin", buf, sizeof(buf));
+    if (n > 0) {
+        nipc_cgroups_lookup_req_view_t view;
+        CHECK(nipc_cgroups_lookup_req_decode(buf, n, &view) == NIPC_OK,
+              "decode cgroups_lookup_req");
+        CHECK(view.item_count == 2, "cgroups_lookup_req item_count");
+        nipc_cgroups_lookup_req_item_t item;
+        CHECK(nipc_cgroups_lookup_req_item(&view, 0, &item) == NIPC_OK,
+              "cgroups_lookup_req item0");
+        CHECK(memcmp(item.path.ptr, "/sys/fs/cgroup/a", item.path.len) == 0,
+              "cgroups_lookup_req item0 path");
+    } else {
+        g_fail++;
+    }
+
+    n = read_file(dir, "cgroups_lookup_req_empty.bin", buf, sizeof(buf));
+    if (n > 0) {
+        nipc_cgroups_lookup_req_view_t view;
+        CHECK(nipc_cgroups_lookup_req_decode(buf, n, &view) == NIPC_OK,
+              "decode cgroups_lookup_req_empty");
+        CHECK(view.item_count == 0, "cgroups_lookup_req_empty count");
+    } else {
+        g_fail++;
+    }
+
+    /* 9. CGROUPS_LOOKUP response variants */
+    n = read_file(dir, "cgroups_lookup_resp_known_with_labels.bin", buf, sizeof(buf));
+    if (n > 0) {
+        nipc_cgroups_lookup_resp_view_t view;
+        CHECK(nipc_cgroups_lookup_resp_decode(buf, n, &view) == NIPC_OK,
+              "decode cgroups_lookup known labels");
+        CHECK(view.generation == 100, "cgroups_lookup generation");
+        nipc_cgroups_lookup_item_view_t item;
+        CHECK(nipc_cgroups_lookup_resp_item(&view, 0, &item) == NIPC_OK,
+              "cgroups_lookup known item");
+        CHECK(item.status == NIPC_CGROUP_LOOKUP_KNOWN, "cgroups_lookup known status");
+        CHECK(item.orchestrator == NIPC_ORCHESTRATOR_K8S, "cgroups_lookup orchestrator");
+        CHECK(item.label_count == 2, "cgroups_lookup label_count");
+        nipc_lookup_label_view_t label;
+        CHECK(nipc_cgroups_lookup_item_label(&item, 0, &label) == NIPC_OK,
+              "cgroups_lookup label 0");
+        CHECK(memcmp(label.key.ptr, "namespace", label.key.len) == 0,
+              "cgroups_lookup label key");
+    } else {
+        g_fail++;
+    }
+
+    const char *cg_resp_files[] = {
+        "cgroups_lookup_resp_known_no_labels.bin",
+        "cgroups_lookup_resp_unknown_retry.bin",
+        "cgroups_lookup_resp_unknown_permanent.bin",
+        "cgroups_lookup_resp_empty.bin",
+    };
+    for (size_t i = 0; i < sizeof(cg_resp_files) / sizeof(cg_resp_files[0]); i++) {
+        n = read_file(dir, cg_resp_files[i], buf, sizeof(buf));
+        if (n > 0) {
+            nipc_cgroups_lookup_resp_view_t view;
+            CHECK(nipc_cgroups_lookup_resp_decode(buf, n, &view) == NIPC_OK,
+                  cg_resp_files[i]);
+        } else {
+            g_fail++;
+        }
+    }
+
+    /* 10. APPS_LOOKUP request variants */
+    n = read_file(dir, "apps_lookup_req.bin", buf, sizeof(buf));
+    if (n > 0) {
+        nipc_apps_lookup_req_view_t view;
+        CHECK(nipc_apps_lookup_req_decode(buf, n, &view) == NIPC_OK,
+              "decode apps_lookup_req");
+        CHECK(view.item_count == 3, "apps_lookup_req item_count");
+        nipc_apps_lookup_req_item_t item;
+        CHECK(nipc_apps_lookup_req_item(&view, 0, &item) == NIPC_OK,
+              "apps_lookup_req item0");
+        CHECK(item.pid == 0, "apps_lookup_req pid0");
+    } else {
+        g_fail++;
+    }
+    n = read_file(dir, "apps_lookup_req_empty.bin", buf, sizeof(buf));
+    if (n > 0) {
+        nipc_apps_lookup_req_view_t view;
+        CHECK(nipc_apps_lookup_req_decode(buf, n, &view) == NIPC_OK,
+              "decode apps_lookup_req_empty");
+        CHECK(view.item_count == 0, "apps_lookup_req_empty count");
+    } else {
+        g_fail++;
+    }
+
+    /* 11. APPS_LOOKUP response variants */
+    n = read_file(dir, "apps_lookup_resp_known_full.bin", buf, sizeof(buf));
+    if (n > 0) {
+        nipc_apps_lookup_resp_view_t view;
+        CHECK(nipc_apps_lookup_resp_decode(buf, n, &view) == NIPC_OK,
+              "decode apps_lookup known full");
+        nipc_apps_lookup_item_view_t item;
+        CHECK(nipc_apps_lookup_resp_item(&view, 0, &item) == NIPC_OK,
+              "apps_lookup known item");
+        CHECK(item.pid == 1234, "apps_lookup pid");
+        CHECK(item.comm.len == 15, "apps_lookup comm boundary");
+        CHECK(item.cgroup_status == NIPC_APPS_CGROUP_KNOWN,
+              "apps_lookup cgroup status");
+        nipc_lookup_label_view_t label;
+        CHECK(nipc_apps_lookup_item_label(&item, 0, &label) == NIPC_OK,
+              "apps_lookup label 0");
+        CHECK(memcmp(label.value.ptr, "nginx:latest", label.value.len) == 0,
+              "apps_lookup label value");
+    } else {
+        g_fail++;
+    }
+
+    const char *apps_resp_files[] = {
+        "apps_lookup_resp_known_retry.bin",
+        "apps_lookup_resp_known_permanent.bin",
+        "apps_lookup_resp_known_host_root.bin",
+        "apps_lookup_resp_unknown_pid.bin",
+        "apps_lookup_resp_empty.bin",
+    };
+    for (size_t i = 0; i < sizeof(apps_resp_files) / sizeof(apps_resp_files[0]); i++) {
+        n = read_file(dir, apps_resp_files[i], buf, sizeof(buf));
+        if (n > 0) {
+            nipc_apps_lookup_resp_view_t view;
+            CHECK(nipc_apps_lookup_resp_decode(buf, n, &view) == NIPC_OK,
+                  apps_resp_files[i]);
+        } else {
+            g_fail++;
+        }
     }
 
     printf("C decode: %d passed, %d failed\n", g_pass, g_fail);

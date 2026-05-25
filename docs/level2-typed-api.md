@@ -22,11 +22,34 @@ Level 2 is built around service kinds, not plugin identity.
 Examples of service kinds:
 
 - `cgroups-snapshot`
+- `cgroups-lookup`
+- `apps-lookup`
 - `ip-to-asn`
 - `pid-traffic`
 
 The provider of a service is an operational detail. Clients only know the
 service identity and the typed payload contract for that service kind.
+
+### Current Lookup Service Contracts
+
+`cgroups-lookup` exposes the `CGROUPS_LOOKUP` method as an ordered
+path-to-metadata lookup. A typed client submits cgroup paths and receives
+one response item per request item in the same order. Typed clients must
+verify the response item count and echoed path before using or caching a
+response item. Typed servers receive a decoded request view and fill a
+`CGROUPS_LOOKUP` response builder.
+
+`apps-lookup` exposes the `APPS_LOOKUP` method as an ordered
+PID-to-process-and-cgroup lookup. A typed client submits PIDs and receives
+one response item per request item in the same order. Typed clients must
+verify the response item count and echoed PID before using or caching a
+response item. Typed servers receive a decoded request view and fill an
+`APPS_LOOKUP` response builder.
+
+The authoritative field layout, status rules, and cache semantics for
+these service contracts are defined in
+[`codec-cgroups-lookup.md`](codec-cgroups-lookup.md) and
+[`codec-apps-lookup.md`](codec-apps-lookup.md).
 
 ## Scope
 
@@ -45,7 +68,7 @@ Level 2 does NOT own:
 - Batch framing and item directory management (Level 1)
 - Payload encoding/decoding (Codec)
 - Response builder mechanics (Codec)
-- Snapshot refresh, caching, or lookup strategy (Level 3)
+- Snapshot refresh, caching, or application-level lookup strategy (Level 3)
 
 ## Dependency
 

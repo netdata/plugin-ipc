@@ -66,7 +66,7 @@ if [[ "$(uname -s)" != *MINGW* ]] && [[ "$(uname -s)" != *MSYS* ]] && [[ "${OS:-
     exit 1
 fi
 
-export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
 export MSYSTEM=MINGW64
 for tool in cmake ninja gcc g++ gcov cygpath timeout; do
     if ! command -v "$tool" >/dev/null 2>&1; then

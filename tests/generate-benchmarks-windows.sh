@@ -392,7 +392,7 @@ generate_md() {
         echo ""
         echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
         echo ""
-        echo "Machine: $(hostname) ($(uname -m))"
+        echo "Machine: local Windows benchmark host ($(uname -m))"
         echo ""
         echo "CSV: $(basename "$INPUT_CSV")"
         echo ""

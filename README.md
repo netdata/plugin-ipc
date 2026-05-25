@@ -26,6 +26,8 @@ The public contract is service-oriented, not plugin-oriented:
 Examples of service kinds:
 
 - `cgroups-snapshot`
+- `cgroups-lookup`
+- `apps-lookup`
 - `ip-to-asn`
 - `pid-traffic`
 
@@ -135,6 +137,8 @@ Relevant specs:
 
 - [docs/codec.md](docs/codec.md)
 - [docs/codec-cgroups-snapshot.md](docs/codec-cgroups-snapshot.md)
+- [docs/codec-cgroups-lookup.md](docs/codec-cgroups-lookup.md)
+- [docs/codec-apps-lookup.md](docs/codec-apps-lookup.md)
 
 ### Level 2: Typed API
 
@@ -194,35 +198,38 @@ The repository includes checked-in benchmark reports with complete,
 fail-closed matrices:
 
 - POSIX report: [benchmarks-posix.md](benchmarks-posix.md)
-  - generated `2026-03-25`
-  - machine: `costa-desktop`
-  - complete matrix rows: `201`
+  - generated `2026-05-25`
+  - machine: local benchmark host
+  - complete matrix rows: `297`
 - Windows report: [benchmarks-windows.md](benchmarks-windows.md)
-  - generated `2026-03-25`
-  - machine: `win11`
+  - generated `2026-05-25`
+  - machine: local Windows benchmark host
   - complete matrix rows: `201`
 
 Headline numbers from the current checked-in reports:
 
 - **POSIX baseline UDS ping-pong**
-  - `183.0k` to `231.2k` req/s across the 3x3 language matrix
+  - `142.1k` to `169.5k` req/s across the 3x3 language matrix
 - **POSIX SHM ping-pong**
-  - `2.46M` to `3.45M` req/s
+  - `2.32M` to `3.22M` req/s
 - **POSIX UDS batch ping-pong**
-  - `27.18M` to `40.24M` req/s
+  - `20.18M` to `30.13M` req/s
 - **POSIX SHM batch ping-pong**
-  - `31.25M` to `64.15M` req/s
+  - `28.71M` to `48.95M` req/s
 - **POSIX UDS pipeline (depth=16)**
-  - `568.4k` to `735.8k` req/s
+  - `440.4k` to `620.6k` req/s
 - **POSIX UDS pipeline+batch (depth=16)**
-  - `51.96M` to `102.95M` req/s
+  - `41.61M` to `76.45M` req/s
 - **POSIX snapshot refresh**
-  - baseline: `158.9k` to `205.6k` req/s
-  - SHM: `1.01M` to `1.74M` req/s
+  - baseline: `131.2k` to `156.3k` req/s
+  - SHM: `1.10M` to `1.52M` req/s
+- **POSIX lookup methods**
+  - `cgroups-lookup`: `31.8k` to `1.10M` req/s across max-rate scenarios
+  - `apps-lookup`: `35.7k` to `1.34M` req/s across max-rate scenarios
 - **POSIX local cache lookup**
-  - C: `172.37M` req/s
-  - Go: `114.56M` req/s
-  - Rust: `203.28M` req/s
+  - C: `173.47M` req/s
+  - Go: `138.48M` req/s
+  - Rust: `147.68M` req/s
 
 - **Windows Named Pipe ping-pong**
   - `18.2k` to `21.0k` req/s
@@ -271,7 +278,7 @@ The current validation story includes:
 Linux / POSIX:
 
 - build: passing
-- `ctest`: `37/37` passing
+- `ctest`: `46/46` passing
 - C coverage: `94.1%`
 - Go coverage: `95.8%`
 - Rust coverage: `98.57%`

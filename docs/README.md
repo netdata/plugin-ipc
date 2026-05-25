@@ -76,6 +76,8 @@ Runtime model:
 |----------|-------------|
 | [codec.md](codec.md) | Principles, encode/decode contracts, builder contract, view lifetime rules, naming discipline. |
 | [codec-cgroups-snapshot.md](codec-cgroups-snapshot.md) | cgroups snapshot message type: request/response wire layout, field definitions, validation rules. |
+| [codec-cgroups-lookup.md](codec-cgroups-lookup.md) | cgroups lookup message type: request/response wire layout, labels, validation rules, security constraints. |
+| [codec-apps-lookup.md](codec-apps-lookup.md) | apps lookup message type: PID request keys, process and joined cgroup response layout, validation rules, security constraints. |
 
 ### Level 2: Typed Convenience API
 

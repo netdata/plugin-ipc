@@ -162,6 +162,161 @@ func doEncode(dir string) {
 		total := b.Finish()
 		writeFile(dir, "cgroups_resp_empty.bin", buf[:total])
 	}
+
+	// 8. CGROUPS_LOOKUP request variants.
+	{
+		buf := make([]byte, 8192)
+		total, err := protocol.EncodeCgroupsLookupRequest(
+			[][]byte{[]byte("/sys/fs/cgroup/a"), []byte("/system.slice/docker-abc.scope")},
+			buf,
+		)
+		if err != nil {
+			panic(err)
+		}
+		writeFile(dir, "cgroups_lookup_req.bin", buf[:total])
+
+		total, err = protocol.EncodeCgroupsLookupRequest(nil, buf)
+		if err != nil {
+			panic(err)
+		}
+		writeFile(dir, "cgroups_lookup_req_empty.bin", buf[:total])
+	}
+
+	// 9. CGROUPS_LOOKUP response variants.
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewCgroupsLookupBuilder(buf, 1, 100)
+		labels := []struct{ Key, Value []byte }{
+			{[]byte("namespace"), []byte("default")},
+			{[]byte("pod"), []byte("web")},
+		}
+		if err := b.Add(protocol.CgroupLookupKnown, protocol.OrchestratorK8s,
+			[]byte("/kubepods.slice/pod-a"), []byte("pod-a"), labels); err != nil {
+			panic(err)
+		}
+		total := b.Finish()
+		writeFile(dir, "cgroups_lookup_resp_known_with_labels.bin", buf[:total])
+	}
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewCgroupsLookupBuilder(buf, 1, 101)
+		if err := b.Add(protocol.CgroupLookupKnown, protocol.OrchestratorDocker,
+			[]byte("/docker/abc"), []byte(""), nil); err != nil {
+			panic(err)
+		}
+		total := b.Finish()
+		writeFile(dir, "cgroups_lookup_resp_known_no_labels.bin", buf[:total])
+	}
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewCgroupsLookupBuilder(buf, 1, 102)
+		if err := b.Add(protocol.CgroupLookupUnknownRetryLater, 0,
+			[]byte("/missing/retry"), []byte(""), nil); err != nil {
+			panic(err)
+		}
+		total := b.Finish()
+		writeFile(dir, "cgroups_lookup_resp_unknown_retry.bin", buf[:total])
+	}
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewCgroupsLookupBuilder(buf, 1, 103)
+		if err := b.Add(protocol.CgroupLookupUnknownPermanent, 0,
+			[]byte("/gone"), []byte(""), nil); err != nil {
+			panic(err)
+		}
+		total := b.Finish()
+		writeFile(dir, "cgroups_lookup_resp_unknown_permanent.bin", buf[:total])
+	}
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewCgroupsLookupBuilder(buf, 0, 104)
+		total := b.Finish()
+		writeFile(dir, "cgroups_lookup_resp_empty.bin", buf[:total])
+	}
+
+	// 10. APPS_LOOKUP request variants.
+	{
+		buf := make([]byte, 8192)
+		total, err := protocol.EncodeAppsLookupRequest([]uint32{0, 1234, 4321}, buf)
+		if err != nil {
+			panic(err)
+		}
+		writeFile(dir, "apps_lookup_req.bin", buf[:total])
+
+		total, err = protocol.EncodeAppsLookupRequest(nil, buf)
+		if err != nil {
+			panic(err)
+		}
+		writeFile(dir, "apps_lookup_req_empty.bin", buf[:total])
+	}
+
+	// 11. APPS_LOOKUP response variants.
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewAppsLookupBuilder(buf, 1, 200)
+		labels := []struct{ Key, Value []byte }{
+			{[]byte("image"), []byte("nginx:latest")},
+			{[]byte("service"), []byte("web")},
+		}
+		if err := b.Add(protocol.PidLookupKnown, protocol.AppsCgroupKnown,
+			protocol.OrchestratorDocker, 1234, 1, 1000, 123456,
+			[]byte("123456789012345"), []byte("/docker/abc"),
+			[]byte("container-a"), labels); err != nil {
+			panic(err)
+		}
+		total := b.Finish()
+		writeFile(dir, "apps_lookup_resp_known_full.bin", buf[:total])
+	}
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewAppsLookupBuilder(buf, 1, 201)
+		if err := b.Add(protocol.PidLookupKnown, protocol.AppsCgroupUnknownRetryLater,
+			0, 1235, 1, 1000, 123457,
+			[]byte("app"), []byte("/pending"), []byte(""), nil); err != nil {
+			panic(err)
+		}
+		total := b.Finish()
+		writeFile(dir, "apps_lookup_resp_known_retry.bin", buf[:total])
+	}
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewAppsLookupBuilder(buf, 1, 202)
+		if err := b.Add(protocol.PidLookupKnown, protocol.AppsCgroupUnknownPermanent,
+			0, 1236, 1, 1000, 123458,
+			[]byte("app2"), []byte("/permanent"), []byte(""), nil); err != nil {
+			panic(err)
+		}
+		total := b.Finish()
+		writeFile(dir, "apps_lookup_resp_known_permanent.bin", buf[:total])
+	}
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewAppsLookupBuilder(buf, 1, 203)
+		if err := b.Add(protocol.PidLookupKnown, protocol.AppsCgroupHostRoot,
+			0, 1237, 1, 0, 123459,
+			[]byte("sshd"), []byte(""), []byte(""), nil); err != nil {
+			panic(err)
+		}
+		total := b.Finish()
+		writeFile(dir, "apps_lookup_resp_known_host_root.bin", buf[:total])
+	}
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewAppsLookupBuilder(buf, 1, 204)
+		if err := b.Add(protocol.PidLookupUnknown, protocol.AppsCgroupKnown,
+			0, 0, 0, protocol.NipcUIDUnset, 0,
+			[]byte(""), []byte(""), []byte(""), nil); err != nil {
+			panic(err)
+		}
+		total := b.Finish()
+		writeFile(dir, "apps_lookup_resp_unknown_pid.bin", buf[:total])
+	}
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewAppsLookupBuilder(buf, 0, 205)
+		total := b.Finish()
+		writeFile(dir, "apps_lookup_resp_empty.bin", buf[:total])
+	}
 }
 
 func doDecode(dir string) bool {
@@ -292,6 +447,96 @@ func doDecode(dir string) bool {
 			c.check(view.SystemdEnabled == 0, "empty systemd_enabled")
 			c.check(view.Generation == 42, "empty generation")
 		}
+	}
+
+	// 8. CGROUPS_LOOKUP request variants.
+	{
+		data := readFile(dir, "cgroups_lookup_req.bin")
+		view, err := protocol.DecodeCgroupsLookupRequest(data)
+		c.check(err == nil, "decode cgroups_lookup_req")
+		if err == nil {
+			c.check(view.ItemCount == 2, "cgroups_lookup_req item_count")
+			item, _ := view.Item(0)
+			c.check(item.String() == "/sys/fs/cgroup/a", "cgroups_lookup_req item0")
+		}
+	}
+	{
+		data := readFile(dir, "cgroups_lookup_req_empty.bin")
+		view, err := protocol.DecodeCgroupsLookupRequest(data)
+		c.check(err == nil, "decode cgroups_lookup_req_empty")
+		if err == nil {
+			c.check(view.ItemCount == 0, "cgroups_lookup_req_empty count")
+		}
+	}
+
+	// 9. CGROUPS_LOOKUP response variants.
+	{
+		data := readFile(dir, "cgroups_lookup_resp_known_with_labels.bin")
+		view, err := protocol.DecodeCgroupsLookupResponse(data)
+		c.check(err == nil, "decode cgroups_lookup known labels")
+		if err == nil {
+			c.check(view.Generation == 100, "cgroups_lookup generation")
+			item, _ := view.Item(0)
+			c.check(item.Status == protocol.CgroupLookupKnown, "cgroups_lookup status")
+			c.check(item.Orchestrator == protocol.OrchestratorK8s, "cgroups_lookup orchestrator")
+			c.check(item.LabelCount == 2, "cgroups_lookup label_count")
+			label, _ := item.Label(0)
+			c.check(label.Key.String() == "namespace", "cgroups_lookup label")
+		}
+	}
+	for _, file := range []string{
+		"cgroups_lookup_resp_known_no_labels.bin",
+		"cgroups_lookup_resp_unknown_retry.bin",
+		"cgroups_lookup_resp_unknown_permanent.bin",
+		"cgroups_lookup_resp_empty.bin",
+	} {
+		_, err := protocol.DecodeCgroupsLookupResponse(readFile(dir, file))
+		c.check(err == nil, file)
+	}
+
+	// 10. APPS_LOOKUP request variants.
+	{
+		data := readFile(dir, "apps_lookup_req.bin")
+		view, err := protocol.DecodeAppsLookupRequest(data)
+		c.check(err == nil, "decode apps_lookup_req")
+		if err == nil {
+			c.check(view.ItemCount == 3, "apps_lookup_req item_count")
+			pid, _ := view.Item(0)
+			c.check(pid == 0, "apps_lookup_req pid0")
+		}
+	}
+	{
+		data := readFile(dir, "apps_lookup_req_empty.bin")
+		view, err := protocol.DecodeAppsLookupRequest(data)
+		c.check(err == nil, "decode apps_lookup_req_empty")
+		if err == nil {
+			c.check(view.ItemCount == 0, "apps_lookup_req_empty count")
+		}
+	}
+
+	// 11. APPS_LOOKUP response variants.
+	{
+		data := readFile(dir, "apps_lookup_resp_known_full.bin")
+		view, err := protocol.DecodeAppsLookupResponse(data)
+		c.check(err == nil, "decode apps_lookup known full")
+		if err == nil {
+			item, _ := view.Item(0)
+			c.check(item.Pid == 1234, "apps_lookup pid")
+			c.check(item.Comm.Len() == 15, "apps_lookup comm boundary")
+			c.check(item.CgroupStatus == protocol.AppsCgroupKnown, "apps_lookup cgroup status")
+			label, _ := item.Label(0)
+			c.check(label.Value.String() == "nginx:latest", "apps_lookup label")
+		}
+	}
+	for _, file := range []string{
+		"apps_lookup_resp_known_retry.bin",
+		"apps_lookup_resp_known_permanent.bin",
+		"apps_lookup_resp_known_host_root.bin",
+		"apps_lookup_resp_unknown_pid.bin",
+		"apps_lookup_resp_empty.bin",
+	} {
+		_, err := protocol.DecodeAppsLookupResponse(readFile(dir, file))
+		c.check(err == nil, file)
 	}
 
 	return c.report("Go decode")

@@ -1,8 +1,8 @@
 # Windows Benchmark Results
 
-Generated: 2026-04-19 16:05:05 UTC
+Generated: 2026-05-25 14:22:26 UTC
 
-Machine: win11 (x86_64)
+Machine: local Windows benchmark host (x86_64)
 
 CSV: benchmarks-windows.csv
 

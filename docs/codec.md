@@ -203,6 +203,12 @@ interoperability. If C, Rust, and Go implementations produce different
 bytes for the same typed input, the implementation that does not match
 the contract file is wrong.
 
+Current service-kind contract files:
+
+- [codec-cgroups-snapshot.md](codec-cgroups-snapshot.md)
+- [codec-cgroups-lookup.md](codec-cgroups-lookup.md)
+- [codec-apps-lookup.md](codec-apps-lookup.md)
+
 ## Testing requirements
 
 The Codec must have:

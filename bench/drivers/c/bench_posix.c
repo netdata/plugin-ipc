@@ -15,6 +15,7 @@
  *   snapshot-shm-server     <run_dir> <service> [duration_sec]
  *   snapshot-shm-client     <run_dir> <service> <duration_sec> <target_rps>
  *   lookup-bench            <duration_sec>
+ *   lookup-method-bench     <duration_sec> <scenario> <target_rps>
  *
  * target_rps=0 means maximum throughput (no rate limiting).
  *
@@ -1057,6 +1058,264 @@ static int run_lookup_bench(int duration_sec)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Lookup method benchmark (codec + dispatch, no transport)           */
+/* ------------------------------------------------------------------ */
+
+typedef enum {
+    LOOKUP_VARIANT_KNOWN = 1,
+    LOOKUP_VARIANT_UNKNOWN = 2,
+    LOOKUP_VARIANT_MIXED = 3,
+} lookup_variant_t;
+
+typedef struct {
+    lookup_variant_t variant;
+} lookup_method_ctx_t;
+
+static bool lookup_variant_is_known(lookup_variant_t variant, uint32_t index)
+{
+    switch (variant) {
+    case LOOKUP_VARIANT_KNOWN:
+        return true;
+    case LOOKUP_VARIANT_UNKNOWN:
+        return false;
+    case LOOKUP_VARIANT_MIXED:
+    default:
+        return (index % 2u) == 0;
+    }
+}
+
+static bool cgroups_lookup_bench_handler(void *user,
+                                         const nipc_cgroups_lookup_req_view_t *request,
+                                         nipc_cgroups_lookup_builder_t *builder)
+{
+    lookup_method_ctx_t *ctx = (lookup_method_ctx_t *)user;
+    static const nipc_lookup_label_view_t labels[] = {
+        {
+            .key = { .ptr = "namespace", .len = 9 },
+            .value = { .ptr = "bench", .len = 5 },
+        },
+        {
+            .key = { .ptr = "image", .len = 5 },
+            .value = { .ptr = "bench:latest", .len = 12 },
+        },
+    };
+
+    for (uint32_t i = 0; i < request->item_count; i++) {
+        nipc_cgroups_lookup_req_item_t item;
+        if (nipc_cgroups_lookup_req_item(request, i, &item) != NIPC_OK)
+            return false;
+
+        if (lookup_variant_is_known(ctx->variant, i)) {
+            if (nipc_cgroups_lookup_builder_add(
+                    builder, NIPC_CGROUP_LOOKUP_KNOWN, NIPC_ORCHESTRATOR_K8S,
+                    item.path.ptr, item.path.len,
+                    "bench-pod", 9, labels, 2) != NIPC_OK)
+                return false;
+        } else {
+            if (nipc_cgroups_lookup_builder_add(
+                    builder, NIPC_CGROUP_LOOKUP_UNKNOWN_RETRY_LATER, 0,
+                    item.path.ptr, item.path.len,
+                    "", 0, NULL, 0) != NIPC_OK)
+                return false;
+        }
+    }
+
+    return true;
+}
+
+static bool apps_lookup_bench_handler(void *user,
+                                      const nipc_apps_lookup_req_view_t *request,
+                                      nipc_apps_lookup_builder_t *builder)
+{
+    lookup_method_ctx_t *ctx = (lookup_method_ctx_t *)user;
+    static const nipc_lookup_label_view_t labels[] = {
+        {
+            .key = { .ptr = "image", .len = 5 },
+            .value = { .ptr = "bench:latest", .len = 12 },
+        },
+    };
+
+    for (uint32_t i = 0; i < request->item_count; i++) {
+        nipc_apps_lookup_req_item_t item;
+        if (nipc_apps_lookup_req_item(request, i, &item) != NIPC_OK)
+            return false;
+
+        if (lookup_variant_is_known(ctx->variant, i)) {
+            if (nipc_apps_lookup_builder_add(
+                    builder, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_KNOWN,
+                    NIPC_ORCHESTRATOR_DOCKER, item.pid, 1, 1000, 42,
+                    "bench", 5,
+                    "/sys/fs/cgroup/bench", 20,
+                    "bench-container", 15,
+                    labels, 1) != NIPC_OK)
+                return false;
+        } else {
+            if (nipc_apps_lookup_builder_add(
+                    builder, NIPC_PID_LOOKUP_UNKNOWN, NIPC_APPS_CGROUP_KNOWN,
+                    0, item.pid, 0, NIPC_UID_UNSET, 0,
+                    "", 0, "", 0, "", 0, NULL, 0) != NIPC_OK)
+                return false;
+        }
+    }
+
+    return true;
+}
+
+static int parse_lookup_method_scenario(const char *scenario,
+                                        int *is_apps,
+                                        lookup_variant_t *variant,
+                                        uint32_t *item_count)
+{
+    *is_apps = 0;
+    *variant = LOOKUP_VARIANT_MIXED;
+    *item_count = 16;
+
+    if (strncmp(scenario, "apps-lookup-", 12) == 0)
+        *is_apps = 1;
+    else if (strncmp(scenario, "cgroups-lookup-", 15) != 0)
+        return 0;
+
+    if (strstr(scenario, "-known-"))
+        *variant = LOOKUP_VARIANT_KNOWN;
+    else if (strstr(scenario, "-unknown-"))
+        *variant = LOOKUP_VARIANT_UNKNOWN;
+    else if (strstr(scenario, "-mixed-"))
+        *variant = LOOKUP_VARIANT_MIXED;
+    else
+        return 0;
+
+    if (strstr(scenario, "-256"))
+        *item_count = 256;
+    else if (strstr(scenario, "-16"))
+        *item_count = 16;
+    else
+        return 0;
+
+    return 1;
+}
+
+static int run_lookup_method_bench(int duration_sec,
+                                   const char *scenario,
+                                   uint64_t target_rps)
+{
+    int is_apps;
+    lookup_variant_t variant;
+    uint32_t item_count;
+    if (!parse_lookup_method_scenario(scenario, &is_apps, &variant, &item_count)) {
+        fprintf(stderr, "lookup-method-bench: invalid scenario: %s\n", scenario);
+        return 1;
+    }
+
+    char path_storage[256][64];
+    nipc_str_view_t paths[256];
+    uint32_t pids[256];
+    for (uint32_t i = 0; i < item_count; i++) {
+        int n = snprintf(path_storage[i], sizeof(path_storage[i]),
+                         "/sys/fs/cgroup/bench/cg-%03u", i);
+        paths[i].ptr = path_storage[i];
+        paths[i].len = (uint32_t)n;
+        pids[i] = 1000u + i;
+    }
+
+    uint8_t *req_buf = malloc(RESPONSE_BUF_SIZE);
+    uint8_t *resp_buf = malloc(RESPONSE_BUF_SIZE);
+    if (!req_buf || !resp_buf) {
+        free(req_buf);
+        free(resp_buf);
+        return 1;
+    }
+
+    latency_recorder_t lr;
+    size_t est_samples = (target_rps == 0) ? 2000000 :
+                         (size_t)(target_rps * (uint64_t)duration_sec);
+    latency_init(&lr, est_samples);
+
+    rate_limiter_t rl;
+    rate_limiter_init(&rl, target_rps);
+
+    lookup_method_ctx_t ctx = { .variant = variant };
+    uint64_t requests = 0;
+    uint64_t errors = 0;
+    uint64_t cpu_start = cpu_ns();
+    uint64_t wall_start = now_ns();
+    uint64_t wall_end = wall_start + (uint64_t)duration_sec * 1000000000ull;
+
+    while (now_ns() < wall_end) {
+        rate_limiter_wait(&rl);
+
+        uint64_t t0 = now_ns();
+        size_t req_len;
+        size_t resp_len = 0;
+        nipc_error_t err;
+
+        if (is_apps) {
+            req_len = nipc_apps_lookup_req_encode(pids, item_count, req_buf, RESPONSE_BUF_SIZE);
+            if (req_len == 0) {
+                errors++;
+                continue;
+            }
+            err = nipc_dispatch_apps_lookup(req_buf, req_len, resp_buf, RESPONSE_BUF_SIZE,
+                                            &resp_len, apps_lookup_bench_handler, &ctx);
+            if (err == NIPC_OK) {
+                nipc_apps_lookup_resp_view_t view;
+                err = nipc_apps_lookup_resp_decode(resp_buf, resp_len, &view);
+                if (err == NIPC_OK && view.item_count != item_count)
+                    err = NIPC_ERR_BAD_ITEM_COUNT;
+            }
+        } else {
+            req_len = nipc_cgroups_lookup_req_encode(paths, item_count, req_buf, RESPONSE_BUF_SIZE);
+            if (req_len == 0) {
+                errors++;
+                continue;
+            }
+            err = nipc_dispatch_cgroups_lookup(req_buf, req_len, resp_buf, RESPONSE_BUF_SIZE,
+                                               &resp_len, cgroups_lookup_bench_handler, &ctx);
+            if (err == NIPC_OK) {
+                nipc_cgroups_lookup_resp_view_t view;
+                err = nipc_cgroups_lookup_resp_decode(resp_buf, resp_len, &view);
+                if (err == NIPC_OK && view.item_count != item_count)
+                    err = NIPC_ERR_BAD_ITEM_COUNT;
+            }
+        }
+
+        uint64_t t1 = now_ns();
+        if (err != NIPC_OK) {
+            errors++;
+            continue;
+        }
+
+        latency_record(&lr, t1 - t0);
+        requests++;
+    }
+
+    uint64_t cpu_end = cpu_ns();
+    uint64_t wall_actual = now_ns() - wall_start;
+
+    double wall_sec = (double)wall_actual / 1e9;
+    double cpu_sec = (double)(cpu_end - cpu_start) / 1e9;
+    double throughput = (double)requests / wall_sec;
+    double cpu_pct = (cpu_sec / wall_sec) * 100.0;
+
+    uint64_t p50 = latency_percentile(&lr, 50.0) / 1000;
+    uint64_t p95 = latency_percentile(&lr, 95.0) / 1000;
+    uint64_t p99 = latency_percentile(&lr, 99.0) / 1000;
+
+    printf("%s,c,c,%.0f,%lu,%lu,%lu,%.1f,0.0,%.1f\n",
+           scenario, throughput,
+           (unsigned long)p50, (unsigned long)p95, (unsigned long)p99,
+           cpu_pct, cpu_pct);
+    fflush(stdout);
+
+    if (errors > 0)
+        fprintf(stderr, "lookup-method-bench: %lu errors\n", (unsigned long)errors);
+
+    latency_free(&lr);
+    free(req_buf);
+    free(resp_buf);
+    return errors > 0 ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Usage and main                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -1073,8 +1332,9 @@ static void usage(const char *prog)
         "  %s snapshot-shm-server     <run_dir> <service> [duration_sec]\n"
         "  %s snapshot-shm-client     <run_dir> <service> <duration_sec> <target_rps>\n"
         "  %s uds-pipeline-client    <run_dir> <service> <duration_sec> <target_rps> <depth>\n"
-        "  %s lookup-bench            <duration_sec>\n",
-        prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
+        "  %s lookup-bench            <duration_sec>\n"
+        "  %s lookup-method-bench     <duration_sec> <scenario> <target_rps>\n",
+        prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char **argv)
@@ -1402,6 +1662,17 @@ int main(int argc, char **argv)
         }
         int duration = atoi(argv[2]);
         return run_lookup_bench(duration);
+    }
+
+    if (strcmp(cmd, "lookup-method-bench") == 0) {
+        if (argc < 5) {
+            usage(argv[0]);
+            return 1;
+        }
+        int duration = atoi(argv[2]);
+        const char *scenario = argv[3];
+        uint64_t target_rps = (uint64_t)strtoull(argv[4], NULL, 10);
+        return run_lookup_method_bench(duration, scenario, target_rps);
     }
 
     /* Pipeline client: <run_dir> <service> <duration_sec> <target_rps> <depth> */

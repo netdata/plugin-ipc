@@ -143,11 +143,11 @@ warn() {
 setup_windows_toolchain() {
     case "$WINDOWS_TOOLCHAIN" in
         mingw64)
-            export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:/usr/bin:$PATH"
+            export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:/c/Program Files/Go/bin:/mingw64/bin:/usr/bin:$PATH"
             export MSYSTEM=MINGW64
             ;;
         msys)
-            export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/usr/bin:$PATH"
+            export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:/c/Program Files/Go/bin:/usr/bin:$PATH"
             export MSYSTEM=MSYS
             ;;
         *)

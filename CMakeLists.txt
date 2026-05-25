@@ -216,6 +216,10 @@ if(GO_EXECUTABLE)
         FuzzDecodeHelloAck
         FuzzDecodeCgroupsRequest
         FuzzDecodeCgroupsResponse
+        FuzzDecodeCgroupsLookupRequest
+        FuzzDecodeCgroupsLookupResponse
+        FuzzDecodeAppsLookupRequest
+        FuzzDecodeAppsLookupResponse
         FuzzBatchDirDecode
         FuzzBatchItemGet
     )
