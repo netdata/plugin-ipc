@@ -1231,10 +1231,12 @@ func parseLookupMethodScenario(scenario string) (isApps bool, variant lookupVari
 		return false, 0, 0, false
 	}
 	switch {
-	case strings.Contains(scenario, "-256"):
+	case strings.HasSuffix(scenario, "-256"):
 		itemCount = 256
-	case strings.Contains(scenario, "-16"):
+	case strings.HasSuffix(scenario, "-16"):
 		itemCount = 16
+	case strings.HasSuffix(scenario, "-1"):
+		itemCount = 1
 	default:
 		return false, 0, 0, false
 	}

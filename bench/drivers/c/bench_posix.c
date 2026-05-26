@@ -1184,10 +1184,13 @@ static int parse_lookup_method_scenario(const char *scenario,
     else
         return 0;
 
-    if (strstr(scenario, "-256"))
+    size_t scenario_len = strlen(scenario);
+    if (scenario_len >= 4 && strcmp(scenario + scenario_len - 4, "-256") == 0)
         *item_count = 256;
-    else if (strstr(scenario, "-16"))
+    else if (scenario_len >= 3 && strcmp(scenario + scenario_len - 3, "-16") == 0)
         *item_count = 16;
+    else if (scenario_len >= 2 && strcmp(scenario + scenario_len - 2, "-1") == 0)
+        *item_count = 1;
     else
         return 0;
 

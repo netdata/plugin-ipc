@@ -1381,10 +1381,12 @@ mod posix_only {
             return None;
         };
 
-        let item_count = if scenario.contains("-256") {
+        let item_count = if scenario.ends_with("-256") {
             256
-        } else if scenario.contains("-16") {
+        } else if scenario.ends_with("-16") {
             16
+        } else if scenario.ends_with("-1") {
+            1
         } else {
             return None;
         };
