@@ -66,7 +66,12 @@ if [[ "$(uname -s)" != *MINGW* ]] && [[ "$(uname -s)" != *MSYS* ]] && [[ "${OS:-
     exit 1
 fi
 
-export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
+WINDOWS_CARGO_HOME="${CARGO_HOME:-}"
+if [[ -z "$WINDOWS_CARGO_HOME" && -n "${USERPROFILE:-}" ]]; then
+    WINDOWS_CARGO_HOME="$(cygpath -u "$USERPROFILE")/.cargo"
+fi
+WINDOWS_CARGO_HOME="${WINDOWS_CARGO_HOME:-$HOME/.cargo}"
+export PATH="${WINDOWS_CARGO_HOME}/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
 export MSYSTEM=MINGW64
 for tool in cmake ninja gcc g++ gcov cygpath timeout; do
     if ! command -v "$tool" >/dev/null 2>&1; then

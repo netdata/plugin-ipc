@@ -28,6 +28,8 @@
 #define NIPC_CLIENT_BUF_DEFAULT 65536u
 #define CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS 5u
 #define CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS 5000u
+#define CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS 5u
+#define CLIENT_CALL_RECONNECT_RETRIES 20u
 
 enum {
     NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_RESPONSE_BUF_REALLOC_INTERNAL = 1,
@@ -381,6 +383,22 @@ static nipc_client_state_t client_try_connect(nipc_client_ctx_t *ctx)
     return NIPC_CLIENT_READY;
 }
 
+static bool client_reconnect_for_call(nipc_client_ctx_t *ctx)
+{
+    for (uint32_t i = 0; i < CLIENT_CALL_RECONNECT_RETRIES; i++) {
+        ctx->state = client_try_connect(ctx);
+        if (ctx->state == NIPC_CLIENT_READY)
+            return true;
+        if (ctx->state == NIPC_CLIENT_AUTH_FAILED ||
+            ctx->state == NIPC_CLIENT_INCOMPATIBLE)
+            return false;
+        if (i + 1u < CLIENT_CALL_RECONNECT_RETRIES)
+            usleep(CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS * 1000u);
+    }
+
+    return false;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Internal: send/receive via the active transport                    */
 /* ------------------------------------------------------------------ */
@@ -579,13 +597,13 @@ static nipc_error_t call_with_retry(nipc_client_ctx_t *ctx,
         if (err != NIPC_ERR_OVERFLOW) {
             client_disconnect(ctx);
             ctx->state = NIPC_CLIENT_BROKEN;
-            ctx->state = client_try_connect(ctx);
-            if (ctx->state != NIPC_CLIENT_READY) {
+            if (!client_reconnect_for_call(ctx)) {
                 ctx->error_count++;
                 return err;
             }
 
             ctx->reconnect_count++;
+            usleep(CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS * 1000u);
             err = attempt(ctx, state);
             if (err == NIPC_OK) {
                 ctx->call_count++;
@@ -600,8 +618,7 @@ static nipc_error_t call_with_retry(nipc_client_ctx_t *ctx,
 
         client_disconnect(ctx);
         ctx->state = NIPC_CLIENT_BROKEN;
-        ctx->state = client_try_connect(ctx);
-        if (ctx->state != NIPC_CLIENT_READY) {
+        if (!client_reconnect_for_call(ctx)) {
             ctx->error_count++;
             return err;
         }
@@ -623,6 +640,7 @@ static nipc_error_t call_with_retry(nipc_client_ctx_t *ctx,
             ctx->error_count++;
             return err;
         }
+        usleep(CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS * 1000u);
     }
 }
 
@@ -709,6 +727,13 @@ static nipc_error_t do_cgroups_lookup_attempt(nipc_client_ctx_t *ctx, void *stat
     size_t req_size;
     if (!cgroups_lookup_request_size(s->paths, s->path_count, &req_size))
         return NIPC_ERR_OVERFLOW;
+    if (req_size > UINT32_MAX)
+        return NIPC_ERR_OVERFLOW;
+    if (ctx->session.max_request_payload_bytes > 0 &&
+        req_size > ctx->session.max_request_payload_bytes) {
+        client_note_request_capacity(ctx, (uint32_t)req_size);
+        return NIPC_ERR_OVERFLOW;
+    }
     if (!ensure_buffer(&ctx->send_buf, &ctx->send_buf_size, req_size,
                        NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC_INTERNAL))
         return NIPC_ERR_OVERFLOW;
@@ -750,6 +775,13 @@ static nipc_error_t do_apps_lookup_attempt(nipc_client_ctx_t *ctx, void *state)
     size_t req_size;
     if (!apps_lookup_request_size(s->pid_count, &req_size))
         return NIPC_ERR_OVERFLOW;
+    if (req_size > UINT32_MAX)
+        return NIPC_ERR_OVERFLOW;
+    if (ctx->session.max_request_payload_bytes > 0 &&
+        req_size > ctx->session.max_request_payload_bytes) {
+        client_note_request_capacity(ctx, (uint32_t)req_size);
+        return NIPC_ERR_OVERFLOW;
+    }
     if (!ensure_buffer(&ctx->send_buf, &ctx->send_buf_size, req_size,
                        NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC_INTERNAL))
         return NIPC_ERR_OVERFLOW;

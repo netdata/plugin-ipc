@@ -246,4 +246,39 @@ mod tests {
         server.stop();
         assert!(!running.load(Ordering::SeqCst));
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn client_lifecycle_without_server_windows() {
+        let mut client = CgroupsLookupClient::new(
+            r"C:\Temp\nipc-cgroups-lookup-facade",
+            "cgroups-lookup-facade-no-server",
+            ClientConfig::default(),
+        );
+        assert!(!client.ready());
+        assert!(client.refresh());
+        assert_eq!(client.status().state, ClientState::NotFound);
+
+        let paths: [&[u8]; 1] = [b"/x".as_slice()];
+        assert_eq!(client.call(&paths).unwrap_err(), NipcError::BadLayout);
+        assert_eq!(client.status().error_count, 1);
+
+        client.close();
+        assert_eq!(client.status().state, ClientState::Disconnected);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_server_new_initializes_stopped_windows() {
+        let server = ManagedServer::new(
+            r"C:\Temp\nipc-cgroups-lookup-facade",
+            "cgroups-lookup-facade-new",
+            ServerConfig::default(),
+            Handler::default(),
+        );
+        let running = server.running_flag();
+        assert!(!running.load(Ordering::SeqCst));
+        server.stop();
+        assert!(!running.load(Ordering::SeqCst));
+    }
 }

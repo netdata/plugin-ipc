@@ -90,7 +90,12 @@ build_jobs() {
 }
 
 setup_msys_toolchain() {
-  export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:/c/Program Files/Go/bin:/usr/bin:/mingw64/bin:$PATH"
+  local windows_cargo_home="${CARGO_HOME:-}"
+  if [[ -z "$windows_cargo_home" && -n "${USERPROFILE:-}" ]]; then
+    windows_cargo_home="$(cygpath -u "$USERPROFILE")/.cargo"
+  fi
+  windows_cargo_home="${windows_cargo_home:-$HOME/.cargo}"
+  export PATH="${windows_cargo_home}/bin:/c/Program Files/Go/bin:/usr/bin:/mingw64/bin:$PATH"
   export MSYSTEM=MSYS
   CC_BIN="/usr/bin/gcc"
   CXX_BIN="/usr/bin/g++"

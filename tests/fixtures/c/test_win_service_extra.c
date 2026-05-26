@@ -111,6 +111,12 @@ static nipc_client_config_t default_typed_hybrid_client_config(void)
     return cfg;
 }
 
+static int service_str_eq(nipc_str_view_t view, const char *s)
+{
+    size_t len = strlen(s);
+    return view.len == len && memcmp(view.ptr, s, len) == 0;
+}
+
 static nipc_error_t raw_noop_handler(void *user,
                                      const nipc_header_t *request_hdr,
                                      const uint8_t *request_payload,
@@ -277,12 +283,106 @@ static HANDLE start_default_server_named(server_thread_ctx_t *ctx,
     return start_server_named(ctx, service, worker_count, &config, service_handler);
 }
 
+typedef enum {
+    LOOKUP_SERVER_CGROUPS = 1,
+    LOOKUP_SERVER_APPS = 2,
+} lookup_server_kind_t;
+
+typedef struct {
+    char service[64];
+    lookup_server_kind_t kind;
+    nipc_server_config_t config;
+    nipc_cgroups_lookup_service_handler_t cgroups_handler;
+    nipc_apps_lookup_service_handler_t apps_handler;
+    HANDLE ready_event;
+    volatile LONG init_ok;
+    nipc_managed_server_t server;
+} lookup_server_thread_ctx_t;
+
+static DWORD WINAPI lookup_server_thread(LPVOID arg)
+{
+    lookup_server_thread_ctx_t *ctx = (lookup_server_thread_ctx_t *)arg;
+    nipc_error_t err;
+
+    if (ctx->kind == LOOKUP_SERVER_CGROUPS) {
+        err = nipc_server_init_cgroups_lookup(&ctx->server, TEST_RUN_DIR,
+                                              ctx->service, &ctx->config, 1,
+                                              &ctx->cgroups_handler);
+    } else {
+        err = nipc_server_init_apps_lookup(&ctx->server, TEST_RUN_DIR,
+                                           ctx->service, &ctx->config, 1,
+                                           &ctx->apps_handler);
+    }
+
+    if (err != NIPC_OK) {
+        fprintf(stderr, "lookup server init failed for %s: %d\n",
+                ctx->service, err);
+        InterlockedExchange(&ctx->init_ok, 0);
+        SetEvent(ctx->ready_event);
+        return 1;
+    }
+
+    InterlockedExchange(&ctx->init_ok, 1);
+    SetEvent(ctx->ready_event);
+    nipc_server_run(&ctx->server);
+    return 0;
+}
+
+static HANDLE start_lookup_server_named(
+    lookup_server_thread_ctx_t *ctx,
+    const char *service,
+    lookup_server_kind_t kind,
+    const nipc_server_config_t *config,
+    const nipc_cgroups_lookup_service_handler_t *cgroups_handler,
+    const nipc_apps_lookup_service_handler_t *apps_handler)
+{
+    memset(ctx, 0, sizeof(*ctx));
+    strncpy(ctx->service, service, sizeof(ctx->service) - 1);
+    ctx->kind = kind;
+    ctx->config = *config;
+    if (cgroups_handler)
+        ctx->cgroups_handler = *cgroups_handler;
+    if (apps_handler)
+        ctx->apps_handler = *apps_handler;
+    ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    InterlockedExchange(&ctx->init_ok, 0);
+
+    HANDLE thread = CreateThread(NULL, 0, lookup_server_thread, ctx, 0, NULL);
+    check("lookup server thread created", thread != NULL);
+    if (!thread)
+        return NULL;
+
+    DWORD wr = WaitForSingleObject(ctx->ready_event, 5000);
+    check("lookup server ready event", wr == WAIT_OBJECT_0);
+    check("lookup server init ok", InterlockedCompareExchange(&ctx->init_ok, 0, 0) == 1);
+    CloseHandle(ctx->ready_event);
+    ctx->ready_event = NULL;
+
+    if (wr != WAIT_OBJECT_0 ||
+        InterlockedCompareExchange(&ctx->init_ok, 0, 0) != 1) {
+        WaitForSingleObject(thread, 10000);
+        CloseHandle(thread);
+        return NULL;
+    }
+
+    return thread;
+}
+
 static void stop_server_drain(server_thread_ctx_t *ctx, HANDLE thread)
 {
     nipc_server_stop(&ctx->server);
     check("server thread exited", WaitForSingleObject(thread, 10000) == WAIT_OBJECT_0);
     CloseHandle(thread);
     check("server drain completed", nipc_server_drain(&ctx->server, 10000));
+}
+
+static void stop_lookup_server_drain(lookup_server_thread_ctx_t *ctx, HANDLE thread)
+{
+    nipc_server_stop(&ctx->server);
+    check("lookup server thread exited",
+          WaitForSingleObject(thread, 10000) == WAIT_OBJECT_0);
+    CloseHandle(thread);
+    check("lookup server drain completed", nipc_server_drain(&ctx->server, 10000));
 }
 
 static bool refresh_until_ready(nipc_client_ctx_t *client, int max_tries, DWORD sleep_ms)
@@ -474,6 +574,381 @@ static void test_client_response_buffer_minimum(void)
 
     nipc_client_close(&client);
     stop_server_drain(&sctx, server_thread);
+}
+
+static bool cgroups_lookup_test_handler(void *user,
+                                        const nipc_cgroups_lookup_req_view_t *request,
+                                        nipc_cgroups_lookup_builder_t *builder)
+{
+    (void)user;
+
+    for (uint32_t i = 0; i < request->item_count; i++) {
+        nipc_cgroups_lookup_req_item_t req_item;
+        if (nipc_cgroups_lookup_req_item(request, i, &req_item) != NIPC_OK)
+            return false;
+
+        if (service_str_eq(req_item.path, "/known")) {
+            nipc_lookup_label_view_t labels[] = {
+                { .key = { .ptr = "namespace", .len = 9 },
+                  .value = { .ptr = "default", .len = 7 } },
+            };
+            if (nipc_cgroups_lookup_builder_add(
+                    builder, NIPC_CGROUP_LOOKUP_KNOWN, NIPC_ORCHESTRATOR_K8S,
+                    req_item.path.ptr, req_item.path.len,
+                    "pod-a", 5, labels, 1) != NIPC_OK)
+                return false;
+        } else {
+            if (nipc_cgroups_lookup_builder_add(
+                    builder, NIPC_CGROUP_LOOKUP_UNKNOWN_RETRY_LATER, 0,
+                    req_item.path.ptr, req_item.path.len,
+                    "", 0, NULL, 0) != NIPC_OK)
+                return false;
+        }
+    }
+
+    return true;
+}
+
+static bool apps_lookup_test_handler(void *user,
+                                     const nipc_apps_lookup_req_view_t *request,
+                                     nipc_apps_lookup_builder_t *builder)
+{
+    (void)user;
+
+    for (uint32_t i = 0; i < request->item_count; i++) {
+        nipc_apps_lookup_req_item_t req_item;
+        if (nipc_apps_lookup_req_item(request, i, &req_item) != NIPC_OK)
+            return false;
+
+        if (req_item.pid == 1234) {
+            nipc_lookup_label_view_t labels[] = {
+                { .key = { .ptr = "image", .len = 5 },
+                  .value = { .ptr = "nginx:latest", .len = 12 } },
+            };
+            if (nipc_apps_lookup_builder_add(
+                    builder, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_KNOWN,
+                    NIPC_ORCHESTRATOR_DOCKER, req_item.pid, 1, 1000, 42,
+                    "nginx", 5, "/docker/abc", 11, "container-a", 11,
+                    labels, 1) != NIPC_OK)
+                return false;
+        } else if (req_item.pid == 0) {
+            if (nipc_apps_lookup_builder_add(
+                    builder, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_HOST_ROOT,
+                    0, req_item.pid, 0, 0, 0,
+                    "swapper", 7, "", 0, "", 0, NULL, 0) != NIPC_OK)
+                return false;
+        } else {
+            if (nipc_apps_lookup_builder_add(
+                    builder, NIPC_PID_LOOKUP_UNKNOWN, 0,
+                    0, req_item.pid, 0, NIPC_UID_UNSET, 0,
+                    "", 0, "", 0, "", 0, NULL, 0) != NIPC_OK)
+                return false;
+        }
+    }
+
+    return true;
+}
+
+static void test_lookup_typed_calls(void)
+{
+    printf("--- Typed lookup calls ---\n");
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_cgroups_lookup");
+
+        lookup_server_thread_ctx_t sctx;
+        nipc_server_config_t scfg = default_typed_server_config();
+        nipc_cgroups_lookup_service_handler_t handler = {
+            .handle = cgroups_lookup_test_handler,
+            .user = NULL,
+        };
+        HANDLE server_thread = start_lookup_server_named(
+            &sctx, service, LOOKUP_SERVER_CGROUPS, &scfg, &handler, NULL);
+        if (!server_thread)
+            return;
+
+        nipc_client_ctx_t client;
+        nipc_client_config_t ccfg = default_client_config();
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("cgroups lookup client ready", refresh_until_ready(&client, 100, 10));
+
+        nipc_str_view_t paths[] = {
+            { .ptr = "/known", .len = 6 },
+            { .ptr = "/missing", .len = 8 },
+        };
+        nipc_cgroups_lookup_resp_view_t view;
+        nipc_error_t err = nipc_client_call_cgroups_lookup(&client, paths, 2, &view);
+        if (err != NIPC_OK) {
+            nipc_client_status_t status;
+            nipc_client_status(&client, &status);
+            printf("  cgroups lookup err=%d state=%d connect=%llu reconnect=%llu calls=%llu errors=%llu\n",
+                   err, status.state,
+                   (unsigned long long)status.connect_count,
+                   (unsigned long long)status.reconnect_count,
+                   (unsigned long long)status.call_count,
+                   (unsigned long long)status.error_count);
+            printf("  cgroups caps req_session=%u req_config=%u resp_session=%u resp_config=%u\n",
+                   client.session.max_request_payload_bytes,
+                   client.transport_config.max_request_payload_bytes,
+                   client.session.max_response_payload_bytes,
+                   client.transport_config.max_response_payload_bytes);
+        }
+        check("cgroups lookup call ok", err == NIPC_OK);
+
+        if (err == NIPC_OK) {
+            check("cgroups lookup item_count == 2", view.item_count == 2);
+            nipc_cgroups_lookup_item_view_t item;
+            check("cgroups lookup item 0 decode",
+                  nipc_cgroups_lookup_resp_item(&view, 0, &item) == NIPC_OK);
+            check("cgroups lookup item 0 known",
+                  item.status == NIPC_CGROUP_LOOKUP_KNOWN &&
+                  item.orchestrator == NIPC_ORCHESTRATOR_K8S &&
+                  service_str_eq(item.path, "/known") &&
+                  service_str_eq(item.name, "pod-a") &&
+                  item.label_count == 1);
+            check("cgroups lookup item 1 decode",
+                  nipc_cgroups_lookup_resp_item(&view, 1, &item) == NIPC_OK);
+            check("cgroups lookup item 1 retry",
+                  item.status == NIPC_CGROUP_LOOKUP_UNKNOWN_RETRY_LATER &&
+                  service_str_eq(item.path, "/missing") &&
+                  item.name.len == 0);
+        }
+
+        nipc_client_close(&client);
+        stop_lookup_server_drain(&sctx, server_thread);
+    }
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_apps_lookup");
+
+        lookup_server_thread_ctx_t sctx;
+        nipc_server_config_t scfg = default_typed_server_config();
+        nipc_apps_lookup_service_handler_t handler = {
+            .handle = apps_lookup_test_handler,
+            .user = NULL,
+        };
+        HANDLE server_thread = start_lookup_server_named(
+            &sctx, service, LOOKUP_SERVER_APPS, &scfg, NULL, &handler);
+        if (!server_thread)
+            return;
+
+        nipc_client_ctx_t client;
+        nipc_client_config_t ccfg = default_client_config();
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("apps lookup client ready", refresh_until_ready(&client, 100, 10));
+
+        uint32_t pids[] = {1234, 0, 9999};
+        nipc_apps_lookup_resp_view_t view;
+        nipc_error_t err = nipc_client_call_apps_lookup(&client, pids, 3, &view);
+        if (err != NIPC_OK) {
+            nipc_client_status_t status;
+            nipc_client_status(&client, &status);
+            printf("  apps lookup err=%d state=%d connect=%llu reconnect=%llu calls=%llu errors=%llu\n",
+                   err, status.state,
+                   (unsigned long long)status.connect_count,
+                   (unsigned long long)status.reconnect_count,
+                   (unsigned long long)status.call_count,
+                   (unsigned long long)status.error_count);
+            printf("  apps caps req_session=%u req_config=%u resp_session=%u resp_config=%u\n",
+                   client.session.max_request_payload_bytes,
+                   client.transport_config.max_request_payload_bytes,
+                   client.session.max_response_payload_bytes,
+                   client.transport_config.max_response_payload_bytes);
+        }
+        check("apps lookup call ok", err == NIPC_OK);
+
+        if (err == NIPC_OK) {
+            check("apps lookup item_count == 3", view.item_count == 3);
+            nipc_apps_lookup_item_view_t item;
+            check("apps lookup item 0 decode",
+                  nipc_apps_lookup_resp_item(&view, 0, &item) == NIPC_OK);
+            check("apps lookup item 0 known",
+                  item.status == NIPC_PID_LOOKUP_KNOWN &&
+                  item.cgroup_status == NIPC_APPS_CGROUP_KNOWN &&
+                  item.pid == 1234 &&
+                  service_str_eq(item.comm, "nginx") &&
+                  service_str_eq(item.cgroup_path, "/docker/abc") &&
+                  item.label_count == 1);
+            check("apps lookup item 1 decode",
+                  nipc_apps_lookup_resp_item(&view, 1, &item) == NIPC_OK);
+            check("apps lookup item 1 host root",
+                  item.pid == 0 &&
+                  item.cgroup_status == NIPC_APPS_CGROUP_HOST_ROOT &&
+                  item.cgroup_path.len == 0);
+            check("apps lookup item 2 decode",
+                  nipc_apps_lookup_resp_item(&view, 2, &item) == NIPC_OK);
+            check("apps lookup item 2 unknown",
+                  item.pid == 9999 &&
+                  item.status == NIPC_PID_LOOKUP_UNKNOWN &&
+                  item.uid == NIPC_UID_UNSET);
+        }
+
+        nipc_client_close(&client);
+        stop_lookup_server_drain(&sctx, server_thread);
+    }
+}
+
+static void test_lookup_init_and_client_guards(void)
+{
+    printf("--- Typed lookup init / client guards ---\n");
+
+    nipc_managed_server_t server;
+    nipc_server_config_t scfg = default_typed_server_config();
+
+    check("cgroups lookup init rejects null handler",
+          nipc_server_init_cgroups_lookup(&server, TEST_RUN_DIR,
+                                          "svc_lookup_null_cgroups",
+                                          &scfg, 1, NULL) ==
+              NIPC_ERR_BAD_LAYOUT);
+    check("apps lookup init rejects null handler",
+          nipc_server_init_apps_lookup(&server, TEST_RUN_DIR,
+                                       "svc_lookup_null_apps",
+                                       &scfg, 1, NULL) ==
+              NIPC_ERR_BAD_LAYOUT);
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_lookup_init_cgroups");
+        nipc_server_config_t zero_cfg = scfg;
+        zero_cfg.max_response_payload_bytes = 0;
+        nipc_cgroups_lookup_service_handler_t handler = {
+            .handle = cgroups_lookup_test_handler,
+            .user = NULL,
+        };
+        nipc_error_t err = nipc_server_init_cgroups_lookup(
+            &server, TEST_RUN_DIR, service, &zero_cfg, 0, &handler);
+        check("cgroups lookup init defaults ok", err == NIPC_OK);
+        if (err == NIPC_OK) {
+            check("cgroups lookup worker floor",
+                  server.worker_count == 1 &&
+                  server.expected_method_code == NIPC_METHOD_CGROUPS_LOOKUP);
+            nipc_server_destroy(&server);
+        }
+    }
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_lookup_init_apps");
+        nipc_server_config_t zero_cfg = scfg;
+        zero_cfg.max_response_payload_bytes = 0;
+        nipc_apps_lookup_service_handler_t handler = {
+            .handle = apps_lookup_test_handler,
+            .user = NULL,
+        };
+        nipc_error_t err = nipc_server_init_apps_lookup(
+            &server, TEST_RUN_DIR, service, &zero_cfg, 0, &handler);
+        check("apps lookup init defaults ok", err == NIPC_OK);
+        if (err == NIPC_OK) {
+            check("apps lookup worker floor",
+                  server.worker_count == 1 &&
+                  server.expected_method_code == NIPC_METHOD_APPS_LOOKUP);
+            nipc_server_destroy(&server);
+        }
+    }
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_lookup_null_cfg");
+        nipc_cgroups_lookup_service_handler_t handler = {
+            .handle = cgroups_lookup_test_handler,
+            .user = NULL,
+        };
+        nipc_error_t err = nipc_server_init_cgroups_lookup(
+            &server, TEST_RUN_DIR, service, NULL, 1, &handler);
+        check("cgroups lookup init accepts null config defaults", err == NIPC_OK);
+        if (err == NIPC_OK)
+            nipc_server_destroy(&server);
+    }
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_cgroups_lookup_bad_req");
+
+        lookup_server_thread_ctx_t sctx;
+        nipc_cgroups_lookup_service_handler_t handler = {
+            .handle = cgroups_lookup_test_handler,
+            .user = NULL,
+        };
+        HANDLE server_thread = start_lookup_server_named(
+            &sctx, service, LOOKUP_SERVER_CGROUPS, &scfg, &handler, NULL);
+        if (!server_thread)
+            return;
+
+        nipc_client_ctx_t client;
+        nipc_client_config_t ccfg = default_client_config();
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("bad cgroups lookup client ready", refresh_until_ready(&client, 100, 10));
+
+        nipc_cgroups_lookup_resp_view_t view;
+        nipc_error_t err = nipc_client_call_cgroups_lookup(&client, NULL, 1, &view);
+        check("null cgroups lookup path array rejected", err == NIPC_ERR_OVERFLOW);
+        nipc_client_close(&client);
+
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("second bad cgroups lookup client ready", refresh_until_ready(&client, 100, 10));
+
+        nipc_str_view_t bad_paths[] = {
+            { .ptr = NULL, .len = 1 },
+        };
+        err = nipc_client_call_cgroups_lookup(&client, bad_paths, 1, &view);
+        check("bad cgroups lookup request rejected", err == NIPC_ERR_BAD_LAYOUT);
+        nipc_client_close(&client);
+
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("faulted cgroups lookup client ready", refresh_until_ready(&client, 100, 10));
+
+        nipc_str_view_t valid_paths[] = {
+            { .ptr = "/known", .len = 6 },
+        };
+        nipc_win_service_test_fault_set(
+            NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC, 0);
+        err = nipc_client_call_cgroups_lookup(&client, valid_paths, 1, &view);
+        clear_test_faults();
+        check("cgroups lookup send buffer fault rejected", err == NIPC_ERR_OVERFLOW);
+
+        nipc_client_close(&client);
+        stop_lookup_server_drain(&sctx, server_thread);
+    }
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_apps_lookup_bad_req");
+
+        lookup_server_thread_ctx_t sctx;
+        nipc_apps_lookup_service_handler_t handler = {
+            .handle = apps_lookup_test_handler,
+            .user = NULL,
+        };
+        HANDLE server_thread = start_lookup_server_named(
+            &sctx, service, LOOKUP_SERVER_APPS, &scfg, NULL, &handler);
+        if (!server_thread)
+            return;
+
+        nipc_client_ctx_t client;
+        nipc_client_config_t ccfg = default_client_config();
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("bad apps lookup client ready", refresh_until_ready(&client, 100, 10));
+
+        nipc_apps_lookup_resp_view_t view;
+        uint32_t pids[] = {1234};
+        nipc_win_service_test_fault_set(
+            NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC, 0);
+        nipc_error_t err = nipc_client_call_apps_lookup(&client, pids, 1, &view);
+        clear_test_faults();
+        check("apps lookup send buffer fault rejected", err == NIPC_ERR_OVERFLOW);
+        nipc_client_close(&client);
+
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("second bad apps lookup client ready", refresh_until_ready(&client, 100, 10));
+
+        err = nipc_client_call_apps_lookup(&client, NULL, 1, &view);
+        check("bad apps lookup request rejected", err == NIPC_ERR_BAD_LAYOUT);
+
+        nipc_client_close(&client);
+        stop_lookup_server_drain(&sctx, server_thread);
+    }
 }
 
 static void test_client_fault_injection_disconnects_and_recovers(void)
@@ -958,6 +1433,8 @@ int main(void)
     RUN_TEST(test_server_init_worker_count_clamp);
     RUN_TEST(test_server_init_null_config_defaults);
     RUN_TEST(test_client_response_buffer_minimum);
+    RUN_TEST(test_lookup_typed_calls);
+    RUN_TEST(test_lookup_init_and_client_guards);
     RUN_TEST(test_client_fault_injection_disconnects_and_recovers);
     RUN_TEST(test_server_init_fault_injection);
     RUN_TEST(test_refresh_from_broken_state);

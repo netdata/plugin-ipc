@@ -4,6 +4,18 @@
 
 Status: completed
 
+Regression reopened on 2026-05-26. The pre-vendor Windows validation
+found that the close-out username sanitization changed Windows helper
+scripts from the native Rust toolchain path under `USERPROFILE` to
+`$HOME/.cargo`, but MSYS reports `HOME=/home/user` while native Rust is
+installed under the Windows user profile. This made Windows test paths
+unable to find `cargo` without an externally corrected PATH.
+
+Regression repaired on 2026-05-26. Windows helper scripts now resolve
+Cargo from `CARGO_HOME`, then `USERPROFILE` via `cygpath`, then
+`$HOME/.cargo`; Linux and Windows validation were rerun before closing
+the SOW again.
+
 Completed on 2026-05-25 after implementation, validation, benchmark
 generation, and the corrected post-implementation reviewer gate. A
 DeepSeek reviewer run that used the wrong model was discarded and does
@@ -2009,9 +2021,149 @@ tracked by SOW-B in the Netdata repository.
 
 ## Regression Log
 
-None yet.
-
 Append regression entries here only after this SOW was completed or
 closed and later testing or use found broken behavior. Use a dated
 `## Regression - YYYY-MM-DD` heading at the end of the file. Never
 prepend regression content above the original SOW narrative.
+
+## Regression - 2026-05-26
+
+What broke:
+
+- During pre-vendor Windows validation from Linux, `ctest` on `win11`
+  failed the `interop_codec` test because `cargo` was not found.
+- Evidence from `win11`: `HOME=/home/user`, `USERPROFILE` points to the
+  native Windows user profile, and `cargo` exists under
+  `$(cygpath -u "$USERPROFILE")/.cargo/bin/cargo`.
+- The failure was introduced by the 2026-05-25 close-out sanitization
+  that replaced a hardcoded local user profile path with `$HOME/.cargo`
+  in Windows helper scripts. That replacement removed the personal path
+  but did not preserve the MSYS/native-Windows home-directory distinction.
+
+Why previous validation missed it:
+
+- The close-out validation checked shell syntax and Linux-side scans, but
+  did not rerun the native Windows helper scripts after the path
+  sanitization edit.
+
+Repair plan:
+
+- Keep the personal path sanitized, but resolve the cargo home on
+  Windows via `CARGO_HOME` when set, otherwise via
+  `$(cygpath -u "$USERPROFILE")/.cargo`, with `$HOME/.cargo` only as a
+  final fallback.
+- Apply the fix to the Windows C coverage, Rust coverage, verifier,
+  benchmark, and MSYS validation helper scripts.
+- Rerun Linux validation and Windows validation before vendoring into
+  the Netdata PR checkout.
+
+Validation:
+
+- Linux validation:
+  - `/usr/bin/ctest --test-dir build --output-on-failure`: 46/46 tests
+    passed in 443.85 seconds.
+  - Go package tests for protocol, raw service, lookup facades, and
+    cgroups service passed; Windows Go test binaries for the protocol
+    and raw/lookup service packages compiled.
+  - `cargo test --manifest-path src/crates/netipc/Cargo.toml --lib`:
+    329 Rust unit tests passed.
+  - `cargo check --target x86_64-pc-windows-gnu --manifest-path
+    src/crates/netipc/Cargo.toml --tests` passed.
+  - `tests/interop_codec.sh`: C, Rust, and Go decoded each other's
+    lookup fixtures successfully; byte-identical fixture comparison
+    passed.
+  - `tests/run-coverage-c.sh`: all C files met the 90% threshold;
+    `netipc_protocol.c` 92.0% (1131/1230), `netipc_uds.c` 91.4%
+    (511/559), `netipc_shm.c` 92.0% (358/389),
+    `netipc_service.c` 90.0% (997/1108), total 91.2% (2997/3286).
+  - `tests/run-coverage-go.sh`: Go coverage 90.0% (1913/2125), meeting
+    the 90% threshold.
+  - `tests/run-coverage-rust.sh`: Rust coverage 92.84%, meeting the
+    90% threshold.
+- Windows validation from Linux:
+  - Native mingw64 C coverage passed: `netipc_service_win.c` 91.1%
+    (1048/1150), `netipc_named_pipe.c` 92.7% (569/614),
+    `netipc_win_shm.c` 94.5% (428/453), total 92.2% (2045/2217).
+  - Windows Go coverage passed: protocol 88.7%, service/cgroups 100%,
+    transport/windows 91.8%, total 90.0% (1976/2196).
+  - Windows Rust coverage passed after adding Windows lookup-service
+    tests: total 90.84%, with `service\cgroups.rs` 92.37%,
+    `transport\windows.rs` 91.65%, and `transport\win_shm.rs` 94.11%.
+  - `tests/run-verifier-windows.sh` passed Application Verifier +
+    PageHeap for `test_named_pipe.exe`, `test_win_shm.exe`,
+    `test_win_service.exe`, and `test_win_service_extra.exe`.
+  - `tests/run-windows-msys-validation.sh /tmp/netipc-msys-validation-regression 2`
+    passed the MSYS functional CTest slice and bounded mingw64-vs-MSYS
+    benchmark comparison.
+    The generated policy CSV reported all 11 comparison rows passing:
+    `np-max` 98.8%, `np-100k` 102.4%, `shm-max` 99.3%,
+    `shm-100k` 100.0%, `snapshot-np` 95.8%, `snapshot-shm` 54.4%,
+    `lookup` 140.3%, `shm-max-c-client-vs-rust-server` 95.5%,
+    `shm-max-rust-client-vs-c-server` 90.5%,
+    `snapshot-shm-c-client-vs-rust-server` 96.8%, and
+    `snapshot-shm-rust-client-vs-c-server` 55.0%, each above its
+    configured minimum.
+- Benchmark evidence:
+  - POSIX lookup-method direct benchmark for large mixed 256-item
+    requests, 5 seconds per row:
+    `cgroups-lookup-mixed-256`: C 81,624/s p50 11us p95 16us p99 19us;
+    Rust 47,778/s p50 19us p95 28us p99 32us; Go 30,280/s p50 29us
+    p95 48us p99 61us.
+    `apps-lookup-mixed-256`: C 101,260/s p50 9us p95 13us p99 15us;
+    Rust 63,695/s p50 15us p95 19us p99 23us; Go 31,788/s p50 29us
+    p95 42us p99 61us.
+  - Windows targeted local-cache lookup benchmark rows passed with
+    stable ratios near 1.01:
+    C 135,432,966/s, Rust 185,391,719/s, Go 106,269,013/s.
+  - A full Windows benchmark run was started and intentionally stopped
+    by exact local PIDs after it entered the long full-matrix path. Its
+    partial output showed unstable max-throughput warnings for two
+    unrelated named-pipe rows (`np-ping-pong c->c` stable ratio 1.599,
+    `np-ping-pong rust->c` stable ratio 2.614). Those partial rows are
+    not sign-off evidence for this Linux-only lookup-method regression;
+    targeted lookup rows and the MSYS bounded comparison are the
+    recorded benchmark evidence.
+- Same-failure scan:
+  - The root cause class was searched across the Windows helper scripts;
+    `tests/run-coverage-c-windows.sh`,
+    `tests/run-coverage-rust-windows.sh`,
+    `tests/run-verifier-windows.sh`, `tests/run-windows-bench.sh`, and
+    `tests/run-windows-msys-validation.sh` now share the same Cargo path
+    resolution pattern.
+  - The request-size preflight path was covered in POSIX C tests at
+    `tests/fixtures/c/test_service.c:943` and
+    `tests/fixtures/c/test_service.c:999`, and in Windows service tests
+    through typed lookup round trips at
+    `src/crates/netipc/src/service/raw_windows_tests.rs:696` and
+    `src/crates/netipc/src/service/raw_windows_tests.rs:732`.
+
+Artifact updates:
+
+- Runtime project skills: no new reusable workflow skill needed.
+- Specs and public docs: no protocol or API behavior changes.
+- End-user/operator docs: no published command changes beyond preserving
+  the existing Windows commands.
+- SOW lifecycle: reopened from `done/` to `current/`; after validation,
+  marked `completed` and moved back to `done/` with the regression fix.
+
+Additional root-cause note:
+
+- The shared C service changes were required because the typed lookup
+  client call path can compute its complete request size before sending.
+  Windows validation exposed a failure mode where an over-limit lookup
+  request forced a capacity-growth reconnect and could race a single
+  worker server that was still draining the previous broken session.
+  Evidence from the failing Windows run showed a typed lookup call
+  failing with `NIPC_ERR_NOT_READY`, client state `BROKEN`, reconnect
+  count `2`, and request capacity already learned as `64`.
+- The repair is intentionally narrow:
+  - `src/libnetdata/netipc/src/service/netipc_service.c:723` and
+    `src/libnetdata/netipc/src/service/netipc_service.c:771` preflight
+    cgroups/apps lookup request size against the negotiated session
+    request capacity and return `NIPC_ERR_OVERFLOW` before sending a
+    known over-limit frame.
+  - `src/libnetdata/netipc/src/service/netipc_service.c:386` and the
+    corresponding Windows service code add bounded reconnect retry for
+    call recovery, not a wire-format or API change.
+  - POSIX and Windows tests prove the path instead of relying on the
+    old shared-component coverage assumption.

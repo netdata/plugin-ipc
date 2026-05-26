@@ -2764,6 +2764,271 @@ static void test_lookup_builders_reject_offset_overflow(void) {
           "apps_lookup rejects aligned offset overflow");
 }
 
+static void test_lookup_req_encode_error_paths(void) {
+    uint8_t buf[64];
+    char interior_nul[] = { 'a', '\0', 'b' };
+    nipc_str_view_t null_path[] = {
+        { .ptr = NULL, .len = 1 },
+    };
+    nipc_str_view_t empty_path[] = {
+        { .ptr = "", .len = 0 },
+    };
+    nipc_str_view_t bad_path[] = {
+        { .ptr = interior_nul, .len = sizeof(interior_nul) },
+    };
+    nipc_str_view_t valid_path[] = {
+        { .ptr = "/x", .len = 2 },
+    };
+
+    CHECK(nipc_cgroups_lookup_req_encode(NULL, 1, buf, sizeof(buf)) == 0,
+          "cgroups_lookup request rejects missing path array");
+    CHECK(nipc_cgroups_lookup_req_encode(null_path, 1, buf, sizeof(buf)) == 0,
+          "cgroups_lookup request rejects null path");
+    CHECK(nipc_cgroups_lookup_req_encode(empty_path, 1, buf, sizeof(buf)) == 0,
+          "cgroups_lookup request rejects empty path");
+    CHECK(nipc_cgroups_lookup_req_encode(bad_path, 1, buf, sizeof(buf)) == 0,
+          "cgroups_lookup request rejects interior nul path");
+    CHECK(nipc_cgroups_lookup_req_encode(valid_path, 1, buf,
+                                         NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE) == 0,
+          "cgroups_lookup request rejects too-small buffer");
+
+    uint32_t pids[] = { 1234 };
+    CHECK(nipc_apps_lookup_req_encode(NULL, 1, buf, sizeof(buf)) == 0,
+          "apps_lookup request rejects missing pid array");
+    CHECK(nipc_apps_lookup_req_encode(pids, 1, buf,
+                                      NIPC_APPS_LOOKUP_REQ_HDR_SIZE) == 0,
+          "apps_lookup request rejects too-small buffer");
+}
+
+static void test_lookup_public_helper_paths(void) {
+    uint8_t buf[1024];
+    nipc_lookup_label_view_t labels[] = {
+        { .key = sv("role"), .value = sv("db") },
+    };
+
+    CHECK(nipc_cgroups_lookup_builder_estimate_max_items(
+              NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE) == 0,
+          "cgroups_lookup estimate returns zero at header size");
+    CHECK(nipc_cgroups_lookup_builder_estimate_max_items(sizeof(buf)) > 0,
+          "cgroups_lookup estimate returns capacity");
+    CHECK(nipc_apps_lookup_builder_estimate_max_items(
+              NIPC_APPS_LOOKUP_RESP_HDR_SIZE) == 0,
+          "apps_lookup estimate returns zero at header size");
+    CHECK(nipc_apps_lookup_builder_estimate_max_items(sizeof(buf)) > 0,
+          "apps_lookup estimate returns capacity");
+
+    nipc_str_view_t paths[] = { sv("/x") };
+    size_t n = nipc_cgroups_lookup_req_encode(paths, 1, buf, sizeof(buf));
+    CHECK(n > 0, "cgroups_lookup helper request encode");
+    nipc_cgroups_lookup_req_view_t c_req;
+    CHECK(nipc_cgroups_lookup_req_decode(buf, n, &c_req) == NIPC_OK,
+          "cgroups_lookup helper request decode");
+    nipc_cgroups_lookup_req_item_t c_req_item;
+    CHECK(nipc_cgroups_lookup_req_item(&c_req, 1, &c_req_item) ==
+              NIPC_ERR_OUT_OF_BOUNDS,
+          "cgroups_lookup request item rejects oob index");
+
+    uint32_t pids[] = { 1234 };
+    n = nipc_apps_lookup_req_encode(pids, 1, buf, sizeof(buf));
+    CHECK(n > 0, "apps_lookup helper request encode");
+    nipc_apps_lookup_req_view_t a_req;
+    CHECK(nipc_apps_lookup_req_decode(buf, n, &a_req) == NIPC_OK,
+          "apps_lookup helper request decode");
+    nipc_apps_lookup_req_item_t a_req_item;
+    CHECK(nipc_apps_lookup_req_item(&a_req, 1, &a_req_item) ==
+              NIPC_ERR_OUT_OF_BOUNDS,
+          "apps_lookup request item rejects oob index");
+
+    nipc_cgroups_lookup_builder_t cb;
+    nipc_cgroups_lookup_builder_init(&cb, buf, sizeof(buf), 2, 1);
+    nipc_cgroups_lookup_builder_set_generation(&cb, 55);
+    CHECK(nipc_cgroups_lookup_builder_add(
+              &cb, NIPC_CGROUP_LOOKUP_KNOWN, NIPC_ORCHESTRATOR_SYSTEMD,
+              "/x", 2, "unit-a", 6, labels, 1) == NIPC_OK,
+          "cgroups_lookup helper builder add");
+    n = nipc_cgroups_lookup_builder_finish(&cb);
+    CHECK(n > 0, "cgroups_lookup helper builder finish");
+    nipc_cgroups_lookup_resp_view_t c_resp;
+    CHECK(nipc_cgroups_lookup_resp_decode(buf, n, &c_resp) == NIPC_OK,
+          "cgroups_lookup helper response decode");
+    CHECK(c_resp.item_count == 1 && c_resp.generation == 55,
+          "cgroups_lookup helper response header");
+    nipc_cgroups_lookup_item_view_t c_item;
+    CHECK(nipc_cgroups_lookup_resp_item(&c_resp, 0, &c_item) == NIPC_OK,
+          "cgroups_lookup helper response item");
+    nipc_lookup_label_view_t label;
+    CHECK(nipc_cgroups_lookup_item_label(&c_item, 0, &label) == NIPC_OK &&
+              str_eq(label.key, "role") && str_eq(label.value, "db"),
+          "cgroups_lookup helper label");
+    CHECK(nipc_cgroups_lookup_item_label(&c_item, 1, &label) ==
+              NIPC_ERR_OUT_OF_BOUNDS,
+          "cgroups_lookup helper label oob");
+    CHECK(nipc_cgroups_lookup_resp_item(&c_resp, 1, &c_item) ==
+              NIPC_ERR_OUT_OF_BOUNDS,
+          "cgroups_lookup helper response item oob");
+
+    nipc_apps_lookup_builder_t ab;
+    nipc_apps_lookup_builder_init(&ab, buf, sizeof(buf), 2, 1);
+    nipc_apps_lookup_builder_set_generation(&ab, 66);
+    CHECK(nipc_apps_lookup_builder_add(
+              &ab, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_KNOWN,
+              NIPC_ORCHESTRATOR_DOCKER, 1234, 1, 1000, 42,
+              "postgres", 8, "/docker/db", 10, "db", 2, labels, 1) == NIPC_OK,
+          "apps_lookup helper builder add");
+    n = nipc_apps_lookup_builder_finish(&ab);
+    CHECK(n > 0, "apps_lookup helper builder finish");
+    nipc_apps_lookup_resp_view_t a_resp;
+    CHECK(nipc_apps_lookup_resp_decode(buf, n, &a_resp) == NIPC_OK,
+          "apps_lookup helper response decode");
+    CHECK(a_resp.item_count == 1 && a_resp.generation == 66,
+          "apps_lookup helper response header");
+    nipc_apps_lookup_item_view_t a_item;
+    CHECK(nipc_apps_lookup_resp_item(&a_resp, 0, &a_item) == NIPC_OK,
+          "apps_lookup helper response item");
+    CHECK(nipc_apps_lookup_item_label(&a_item, 0, &label) == NIPC_OK &&
+              str_eq(label.key, "role") && str_eq(label.value, "db"),
+          "apps_lookup helper label");
+    CHECK(nipc_apps_lookup_item_label(&a_item, 1, &label) ==
+              NIPC_ERR_OUT_OF_BOUNDS,
+          "apps_lookup helper label oob");
+    CHECK(nipc_apps_lookup_resp_item(&a_resp, 1, &a_item) ==
+              NIPC_ERR_OUT_OF_BOUNDS,
+          "apps_lookup helper response item oob");
+}
+
+static void test_lookup_builder_semantic_error_paths(void) {
+    uint8_t buf[256];
+    char bad[] = { 'a', '\0', 'b' };
+    nipc_lookup_label_view_t bad_label_key[] = {
+        { .key = { .ptr = bad, .len = sizeof(bad) }, .value = sv("v") },
+    };
+    nipc_lookup_label_view_t bad_label_value[] = {
+        { .key = sv("k"), .value = { .ptr = bad, .len = sizeof(bad) } },
+    };
+
+    nipc_cgroups_lookup_builder_t cb;
+    nipc_cgroups_lookup_builder_init(&cb, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_cgroups_lookup_builder_add(
+              &cb, NIPC_CGROUP_LOOKUP_KNOWN, 0,
+              "/x", 2, "", 0, NULL, 0) == NIPC_OK,
+          "cgroups_lookup max-items setup add");
+    CHECK(nipc_cgroups_lookup_builder_add(
+              &cb, NIPC_CGROUP_LOOKUP_KNOWN, 0,
+              "/y", 2, "", 0, NULL, 0) == NIPC_ERR_OVERFLOW,
+          "cgroups_lookup rejects max-items overflow");
+
+    nipc_cgroups_lookup_builder_init(&cb, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_cgroups_lookup_builder_add(
+              &cb, 99, 0, "/x", 2, "", 0, NULL, 0) == NIPC_ERR_BAD_LAYOUT,
+          "cgroups_lookup rejects bad status");
+    nipc_cgroups_lookup_builder_init(&cb, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_cgroups_lookup_builder_add(
+              &cb, NIPC_CGROUP_LOOKUP_UNKNOWN_RETRY_LATER,
+              NIPC_ORCHESTRATOR_DOCKER, "/x", 2, "n", 1, NULL, 0) ==
+              NIPC_ERR_BAD_LAYOUT,
+          "cgroups_lookup rejects metadata on unknown");
+    nipc_cgroups_lookup_builder_init(&cb, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_cgroups_lookup_builder_add(
+              &cb, NIPC_CGROUP_LOOKUP_KNOWN, 0,
+              "/x", 2, "", 0, NULL, 1) == NIPC_ERR_OVERFLOW,
+          "cgroups_lookup rejects missing labels");
+    nipc_cgroups_lookup_builder_init(&cb, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_cgroups_lookup_builder_add(
+              &cb, NIPC_CGROUP_LOOKUP_KNOWN, 0,
+              "/x", 2, "", 0, bad_label_key, 1) == NIPC_ERR_BAD_LAYOUT,
+          "cgroups_lookup rejects bad label key");
+    nipc_cgroups_lookup_builder_init(&cb, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_cgroups_lookup_builder_add(
+              &cb, NIPC_CGROUP_LOOKUP_KNOWN, 0,
+              "/x", 2, "", 0, bad_label_value, 1) == NIPC_ERR_BAD_LAYOUT,
+          "cgroups_lookup rejects bad label value");
+
+    nipc_apps_lookup_builder_t ab;
+    nipc_apps_lookup_builder_init(&ab, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_apps_lookup_builder_add(
+              &ab, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_HOST_ROOT,
+              0, 1, 0, 0, 1, "a", 1, "", 0, "", 0, NULL, 0) == NIPC_OK,
+          "apps_lookup max-items setup add");
+    CHECK(nipc_apps_lookup_builder_add(
+              &ab, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_HOST_ROOT,
+              0, 2, 0, 0, 1, "b", 1, "", 0, "", 0, NULL, 0) ==
+              NIPC_ERR_OVERFLOW,
+          "apps_lookup rejects max-items overflow");
+
+    nipc_apps_lookup_builder_init(&ab, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_apps_lookup_builder_add(
+              &ab, 99, NIPC_APPS_CGROUP_HOST_ROOT,
+              0, 1, 0, 0, 1, "a", 1, "", 0, "", 0, NULL, 0) ==
+              NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup rejects bad pid status");
+    nipc_apps_lookup_builder_init(&ab, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_apps_lookup_builder_add(
+              &ab, NIPC_PID_LOOKUP_KNOWN, 99,
+              0, 1, 0, 0, 1, "a", 1, "", 0, "", 0, NULL, 0) ==
+              NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup rejects bad cgroup status");
+    nipc_apps_lookup_builder_init(&ab, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_apps_lookup_builder_add(
+              &ab, NIPC_PID_LOOKUP_UNKNOWN, NIPC_APPS_CGROUP_UNKNOWN_RETRY_LATER,
+              0, 1, 0, NIPC_UID_UNSET, 0, "", 0, "", 0, "", 0, NULL, 0) ==
+              NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup rejects metadata on unknown pid");
+    nipc_apps_lookup_builder_init(&ab, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_apps_lookup_builder_add(
+              &ab, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_KNOWN,
+              0, 1, 0, 0, 1, "a", 1, "", 0, "", 0, NULL, 0) ==
+              NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup rejects known cgroup without path");
+    nipc_apps_lookup_builder_init(&ab, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_apps_lookup_builder_add(
+              &ab, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_UNKNOWN_RETRY_LATER,
+              NIPC_ORCHESTRATOR_DOCKER, 1, 0, 0, 1,
+              "a", 1, "/x", 2, "n", 1, NULL, 0) == NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup rejects retry metadata");
+    nipc_apps_lookup_builder_init(&ab, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_apps_lookup_builder_add(
+              &ab, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_HOST_ROOT,
+              NIPC_ORCHESTRATOR_DOCKER, 1, 0, 0, 1,
+              "a", 1, "/x", 2, "", 0, NULL, 0) == NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup rejects host-root metadata");
+    nipc_apps_lookup_builder_init(&ab, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_apps_lookup_builder_add(
+              &ab, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_KNOWN,
+              0, 1, 0, 0, 1, "a", 1, "/x", 2, "", 0, NULL, 1) ==
+              NIPC_ERR_OVERFLOW,
+          "apps_lookup rejects missing labels");
+    nipc_apps_lookup_builder_init(&ab, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_apps_lookup_builder_add(
+              &ab, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_KNOWN,
+              0, 1, 0, 0, 1, "a", 1, "/x", 2, "", 0,
+              bad_label_key, 1) == NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup rejects bad label key");
+    nipc_apps_lookup_builder_init(&ab, buf, sizeof(buf), 1, 0);
+    CHECK(nipc_apps_lookup_builder_add(
+              &ab, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_KNOWN,
+              0, 1, 0, 0, 1, "a", 1, "/x", 2, "", 0,
+              bad_label_value, 1) == NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup rejects bad label value");
+}
+
+static void test_lookup_finish_compaction_edge(void) {
+    uint8_t buf[256];
+    nipc_cgroups_lookup_builder_t cb;
+    nipc_cgroups_lookup_builder_init(&cb, buf, sizeof(buf), 2, 7);
+    CHECK(nipc_cgroups_lookup_builder_add(
+              &cb, NIPC_CGROUP_LOOKUP_KNOWN, 0,
+              "/x", 2, "", 0, NULL, 0) == NIPC_OK,
+          "cgroups_lookup compaction setup add");
+    cb.data_offset = NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE;
+    size_t n = nipc_cgroups_lookup_builder_finish(&cb);
+    CHECK(n == NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE,
+          "cgroups_lookup finish drops impossible packed area");
+    nipc_cgroups_lookup_resp_view_t view;
+    CHECK(nipc_cgroups_lookup_resp_decode(buf, n, &view) == NIPC_OK &&
+              view.item_count == 0 && view.generation == 7,
+          "cgroups_lookup finish edge decodes empty response");
+}
+
 /* ================================================================== */
 /*  Main                                                              */
 /* ================================================================== */
@@ -2903,6 +3168,10 @@ int main(void) {
     test_apps_lookup_reject_comm_len_16();
     test_lookup_builders_reject_interior_nul();
     test_lookup_builders_reject_offset_overflow();
+    test_lookup_req_encode_error_paths();
+    test_lookup_public_helper_paths();
+    test_lookup_builder_semantic_error_paths();
+    test_lookup_finish_compaction_edge();
 
     /* Coverage gap tests: protocol error paths */
     test_header_decode_kind_exactly_out_of_range();

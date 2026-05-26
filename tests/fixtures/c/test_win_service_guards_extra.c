@@ -196,6 +196,121 @@ static nipc_error_t raw_noop_handler(void *user,
     return NIPC_OK;
 }
 
+static nipc_error_t raw_invalid_payload_handler(void *user,
+                                                const nipc_header_t *request_hdr,
+                                                const uint8_t *request_payload,
+                                                size_t request_len,
+                                                uint8_t *response_buf,
+                                                size_t response_buf_size,
+                                                size_t *response_len_out)
+{
+    (void)user;
+    (void)request_hdr;
+    (void)request_payload;
+    (void)request_len;
+    if (response_buf_size < 1)
+        return NIPC_ERR_OVERFLOW;
+    response_buf[0] = 0;
+    *response_len_out = 1;
+    return NIPC_OK;
+}
+
+static nipc_error_t raw_cgroups_lookup_bad_count_handler(
+    void *user,
+    const nipc_header_t *request_hdr,
+    const uint8_t *request_payload,
+    size_t request_len,
+    uint8_t *response_buf,
+    size_t response_buf_size,
+    size_t *response_len_out)
+{
+    (void)user;
+    (void)request_hdr;
+    (void)request_payload;
+    (void)request_len;
+
+    nipc_cgroups_lookup_builder_t builder;
+    nipc_cgroups_lookup_builder_init(&builder, response_buf, response_buf_size, 1, 1);
+    if (nipc_cgroups_lookup_builder_add(
+            &builder, NIPC_CGROUP_LOOKUP_UNKNOWN_PERMANENT, 0,
+            "/known", 6, "", 0, NULL, 0) != NIPC_OK)
+        return NIPC_ERR_OVERFLOW;
+    *response_len_out = nipc_cgroups_lookup_builder_finish(&builder);
+    return *response_len_out > 0 ? NIPC_OK : NIPC_ERR_OVERFLOW;
+}
+
+static nipc_error_t raw_cgroups_lookup_wrong_path_handler(
+    void *user,
+    const nipc_header_t *request_hdr,
+    const uint8_t *request_payload,
+    size_t request_len,
+    uint8_t *response_buf,
+    size_t response_buf_size,
+    size_t *response_len_out)
+{
+    (void)user;
+    (void)request_hdr;
+    (void)request_payload;
+    (void)request_len;
+
+    nipc_cgroups_lookup_builder_t builder;
+    nipc_cgroups_lookup_builder_init(&builder, response_buf, response_buf_size, 1, 2);
+    if (nipc_cgroups_lookup_builder_add(
+            &builder, NIPC_CGROUP_LOOKUP_UNKNOWN_PERMANENT, 0,
+            "/other", 6, "", 0, NULL, 0) != NIPC_OK)
+        return NIPC_ERR_OVERFLOW;
+    *response_len_out = nipc_cgroups_lookup_builder_finish(&builder);
+    return *response_len_out > 0 ? NIPC_OK : NIPC_ERR_OVERFLOW;
+}
+
+static nipc_error_t raw_apps_lookup_bad_count_handler(
+    void *user,
+    const nipc_header_t *request_hdr,
+    const uint8_t *request_payload,
+    size_t request_len,
+    uint8_t *response_buf,
+    size_t response_buf_size,
+    size_t *response_len_out)
+{
+    (void)user;
+    (void)request_hdr;
+    (void)request_payload;
+    (void)request_len;
+
+    nipc_apps_lookup_builder_t builder;
+    nipc_apps_lookup_builder_init(&builder, response_buf, response_buf_size, 1, 1);
+    if (nipc_apps_lookup_builder_add(
+            &builder, NIPC_PID_LOOKUP_UNKNOWN, 0, 0, 1, 0,
+            NIPC_UID_UNSET, 0, "", 0, "", 0, "", 0, NULL, 0) != NIPC_OK)
+        return NIPC_ERR_OVERFLOW;
+    *response_len_out = nipc_apps_lookup_builder_finish(&builder);
+    return *response_len_out > 0 ? NIPC_OK : NIPC_ERR_OVERFLOW;
+}
+
+static nipc_error_t raw_apps_lookup_wrong_pid_handler(
+    void *user,
+    const nipc_header_t *request_hdr,
+    const uint8_t *request_payload,
+    size_t request_len,
+    uint8_t *response_buf,
+    size_t response_buf_size,
+    size_t *response_len_out)
+{
+    (void)user;
+    (void)request_hdr;
+    (void)request_payload;
+    (void)request_len;
+
+    nipc_apps_lookup_builder_t builder;
+    nipc_apps_lookup_builder_init(&builder, response_buf, response_buf_size, 1, 2);
+    if (nipc_apps_lookup_builder_add(
+            &builder, NIPC_PID_LOOKUP_UNKNOWN, 0, 0, 99, 0,
+            NIPC_UID_UNSET, 0, "", 0, "", 0, "", 0, NULL, 0) != NIPC_OK)
+        return NIPC_ERR_OVERFLOW;
+    *response_len_out = nipc_apps_lookup_builder_finish(&builder);
+    return *response_len_out > 0 ? NIPC_OK : NIPC_ERR_OVERFLOW;
+}
+
 static nipc_error_t raw_increment_handler(void *user,
                                           const nipc_header_t *request_hdr,
                                           const uint8_t *request_payload,
@@ -637,6 +752,58 @@ static void test_worker_limit_rejects_extra_client(void)
     stop_server_drain(&sctx, server_thread);
 }
 
+static void test_session_thread_create_fault_recovers(void)
+{
+    printf("--- Session thread create fault recovers ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_thread_create_fault");
+
+    server_thread_ctx_t sctx;
+    nipc_np_server_config_t scfg = default_server_config();
+    HANDLE server_thread = start_raw_server_named(
+        &sctx, service, 4, &scfg,
+        NIPC_METHOD_INCREMENT, raw_increment_handler);
+    if (!server_thread)
+        return;
+
+    nipc_client_config_t ccfg = default_typed_client_config();
+    nipc_client_ctx_t first_client;
+    uint64_t value = 0;
+
+    nipc_win_service_test_fault_set(
+        NIPC_WIN_SERVICE_TEST_FAULT_SERVER_THREAD_CREATE, 1);
+
+    nipc_client_init(&first_client, TEST_RUN_DIR, service, &ccfg);
+    check("thread-create skip client ready",
+          refresh_until_ready(&first_client, 100, 10));
+    check("thread-create skip increment succeeds",
+          test_win_client_call_increment_raw(&first_client, 10, &value) == NIPC_OK &&
+          value == 11);
+    nipc_client_close(&first_client);
+
+    nipc_np_client_config_t raw_ccfg = default_client_config();
+    nipc_np_session_t dropped = { .pipe = INVALID_HANDLE_VALUE };
+    check("thread-create fault connect completes",
+          nipc_np_connect(TEST_RUN_DIR, service, &raw_ccfg, &dropped) == NIPC_NP_OK);
+    if (dropped.pipe != INVALID_HANDLE_VALUE)
+        nipc_np_close_session(&dropped);
+
+    nipc_win_service_test_fault_clear();
+
+    nipc_client_ctx_t recovery_client;
+    value = 0;
+    nipc_client_init(&recovery_client, TEST_RUN_DIR, service, &ccfg);
+    check("thread-create recovery client ready",
+          refresh_until_ready(&recovery_client, 100, 10));
+    check("thread-create recovery increment succeeds",
+          test_win_client_call_increment_raw(&recovery_client, 20, &value) == NIPC_OK &&
+          value == 21);
+    nipc_client_close(&recovery_client);
+
+    stop_server_drain(&sctx, server_thread);
+}
+
 static void test_server_destroy_joins_active_session(void)
 {
     printf("--- Server destroy joins active session ---\n");
@@ -999,6 +1166,143 @@ static void test_server_init_truncation_and_typed_error_propagation(void)
           == NIPC_ERR_BAD_LAYOUT);
 }
 
+static void test_lookup_client_rejects_bad_responses(void)
+{
+    printf("--- Lookup client rejects bad responses ---\n");
+
+    nipc_client_config_t ccfg = default_typed_client_config();
+    nipc_np_server_config_t scfg = default_server_config();
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_cgroups_lookup_short");
+        server_thread_ctx_t sctx;
+        HANDLE server_thread = start_raw_server_named(
+            &sctx, service, 4, &scfg,
+            NIPC_METHOD_CGROUPS_LOOKUP, raw_invalid_payload_handler);
+        if (!server_thread)
+            return;
+
+        nipc_client_ctx_t client;
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("short cgroups lookup client ready", refresh_until_ready(&client, 100, 10));
+        nipc_str_view_t paths[] = {{ .ptr = "/known", .len = 6 }};
+        nipc_cgroups_lookup_resp_view_t view;
+        check("short cgroups lookup response rejected",
+              nipc_client_call_cgroups_lookup(&client, paths, 1, &view) == NIPC_ERR_TRUNCATED);
+        nipc_client_close(&client);
+        stop_server_drain(&sctx, server_thread);
+    }
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_cgroups_lookup_count");
+        server_thread_ctx_t sctx;
+        HANDLE server_thread = start_raw_server_named(
+            &sctx, service, 4, &scfg,
+            NIPC_METHOD_CGROUPS_LOOKUP, raw_cgroups_lookup_bad_count_handler);
+        if (!server_thread)
+            return;
+
+        nipc_client_ctx_t client;
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("count cgroups lookup client ready", refresh_until_ready(&client, 100, 10));
+        nipc_str_view_t paths[] = {
+            { .ptr = "/known", .len = 6 },
+            { .ptr = "/missing", .len = 8 },
+        };
+        nipc_cgroups_lookup_resp_view_t view;
+        check("count cgroups lookup response rejected",
+              nipc_client_call_cgroups_lookup(&client, paths, 2, &view) == NIPC_ERR_BAD_ITEM_COUNT);
+        nipc_client_close(&client);
+        stop_server_drain(&sctx, server_thread);
+    }
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_cgroups_lookup_path");
+        server_thread_ctx_t sctx;
+        HANDLE server_thread = start_raw_server_named(
+            &sctx, service, 4, &scfg,
+            NIPC_METHOD_CGROUPS_LOOKUP, raw_cgroups_lookup_wrong_path_handler);
+        if (!server_thread)
+            return;
+
+        nipc_client_ctx_t client;
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("path cgroups lookup client ready", refresh_until_ready(&client, 100, 10));
+        nipc_str_view_t paths[] = {{ .ptr = "/known", .len = 6 }};
+        nipc_cgroups_lookup_resp_view_t view;
+        check("path cgroups lookup response rejected",
+              nipc_client_call_cgroups_lookup(&client, paths, 1, &view) == NIPC_ERR_BAD_LAYOUT);
+        nipc_client_close(&client);
+        stop_server_drain(&sctx, server_thread);
+    }
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_apps_lookup_short");
+        server_thread_ctx_t sctx;
+        HANDLE server_thread = start_raw_server_named(
+            &sctx, service, 4, &scfg,
+            NIPC_METHOD_APPS_LOOKUP, raw_invalid_payload_handler);
+        if (!server_thread)
+            return;
+
+        nipc_client_ctx_t client;
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("short apps lookup client ready", refresh_until_ready(&client, 100, 10));
+        uint32_t pids[] = {1};
+        nipc_apps_lookup_resp_view_t view;
+        check("short apps lookup response rejected",
+              nipc_client_call_apps_lookup(&client, pids, 1, &view) == NIPC_ERR_TRUNCATED);
+        nipc_client_close(&client);
+        stop_server_drain(&sctx, server_thread);
+    }
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_apps_lookup_count");
+        server_thread_ctx_t sctx;
+        HANDLE server_thread = start_raw_server_named(
+            &sctx, service, 4, &scfg,
+            NIPC_METHOD_APPS_LOOKUP, raw_apps_lookup_bad_count_handler);
+        if (!server_thread)
+            return;
+
+        nipc_client_ctx_t client;
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("count apps lookup client ready", refresh_until_ready(&client, 100, 10));
+        uint32_t pids[] = {1, 2};
+        nipc_apps_lookup_resp_view_t view;
+        check("count apps lookup response rejected",
+              nipc_client_call_apps_lookup(&client, pids, 2, &view) == NIPC_ERR_BAD_ITEM_COUNT);
+        nipc_client_close(&client);
+        stop_server_drain(&sctx, server_thread);
+    }
+
+    {
+        char service[64];
+        unique_service(service, sizeof(service), "svc_apps_lookup_pid");
+        server_thread_ctx_t sctx;
+        HANDLE server_thread = start_raw_server_named(
+            &sctx, service, 4, &scfg,
+            NIPC_METHOD_APPS_LOOKUP, raw_apps_lookup_wrong_pid_handler);
+        if (!server_thread)
+            return;
+
+        nipc_client_ctx_t client;
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("pid apps lookup client ready", refresh_until_ready(&client, 100, 10));
+        uint32_t pids[] = {1};
+        nipc_apps_lookup_resp_view_t view;
+        check("pid apps lookup response rejected",
+              nipc_client_call_apps_lookup(&client, pids, 1, &view) == NIPC_ERR_BAD_LAYOUT);
+        nipc_client_close(&client);
+        stop_server_drain(&sctx, server_thread);
+    }
+}
+
 static void test_cache_collision_lookup_and_rehash(void)
 {
     printf("--- Cache collision lookup / rehash ---\n");
@@ -1095,9 +1399,11 @@ int main(void)
 
     test_string_dispatch_missing_handlers_and_unknown_method();
     test_server_init_truncation_and_typed_error_propagation();
+    test_lookup_client_rejects_bad_responses();
     test_cache_collision_lookup_and_rehash();
     test_drain_timeout_on_blocked_handler();
     test_worker_limit_rejects_extra_client();
+    test_session_thread_create_fault_recovers();
     test_server_destroy_joins_active_session();
     test_named_pipe_send_failure_recovers();
 

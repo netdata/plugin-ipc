@@ -141,13 +141,19 @@ warn() {
 }
 
 setup_windows_toolchain() {
+    local windows_cargo_home="${CARGO_HOME:-}"
+    if [[ -z "$windows_cargo_home" && -n "${USERPROFILE:-}" ]]; then
+        windows_cargo_home="$(cygpath -u "$USERPROFILE")/.cargo"
+    fi
+    windows_cargo_home="${windows_cargo_home:-$HOME/.cargo}"
+
     case "$WINDOWS_TOOLCHAIN" in
         mingw64)
-            export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:/c/Program Files/Go/bin:/mingw64/bin:/usr/bin:$PATH"
+            export PATH="${windows_cargo_home}/bin:/c/Program Files/Go/bin:/mingw64/bin:/usr/bin:$PATH"
             export MSYSTEM=MINGW64
             ;;
         msys)
-            export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:/c/Program Files/Go/bin:/usr/bin:$PATH"
+            export PATH="${windows_cargo_home}/bin:/c/Program Files/Go/bin:/usr/bin:$PATH"
             export MSYSTEM=MSYS
             ;;
         *)
