@@ -885,6 +885,23 @@ static bool source_string_invalid(const char *ptr, uint32_t len, bool require_no
     return ptr && bytes_have_nul(ptr, len);
 }
 
+static bool lookup_label_storage_add_u64(uint64_t *item_size, const nipc_lookup_label_view_t *label)
+{
+    if (add_u64_over_limit(*item_size, label->key.len, UINT32_MAX, item_size))
+        return false;
+
+    if (add_u64_over_limit(*item_size, 1u, UINT32_MAX, item_size))
+        return false;
+
+    if (add_u64_over_limit(*item_size, label->value.len, UINT32_MAX, item_size))
+        return false;
+
+    if (add_u64_over_limit(*item_size, 1u, UINT32_MAX, item_size))
+        return false;
+
+    return true;
+}
+
 static bool ranges_overlap_u64(uint64_t a_start, uint64_t a_end,
                                uint64_t b_start, uint64_t b_end)
 {
@@ -1616,12 +1633,7 @@ nipc_error_t nipc_cgroups_lookup_builder_add(
                 b->error = NIPC_ERR_BAD_LAYOUT;
                 return b->error;
             }
-            if (add_u64_over_limit(item_size_u64, labels[i].key.len, UINT32_MAX,
-                                   &item_size_u64) ||
-                add_u64_over_limit(item_size_u64, 1u, UINT32_MAX, &item_size_u64) ||
-                add_u64_over_limit(item_size_u64, labels[i].value.len, UINT32_MAX,
-                                   &item_size_u64) ||
-                add_u64_over_limit(item_size_u64, 1u, UINT32_MAX, &item_size_u64)) {
+            if (!lookup_label_storage_add_u64(&item_size_u64, &labels[i])) {
                 b->error = NIPC_ERR_OVERFLOW;
                 return b->error;
             }
@@ -2070,12 +2082,7 @@ nipc_error_t nipc_apps_lookup_builder_add(
                 b->error = NIPC_ERR_BAD_LAYOUT;
                 return b->error;
             }
-            if (add_u64_over_limit(item_size_u64, labels[i].key.len, UINT32_MAX,
-                                   &item_size_u64) ||
-                add_u64_over_limit(item_size_u64, 1u, UINT32_MAX, &item_size_u64) ||
-                add_u64_over_limit(item_size_u64, labels[i].value.len, UINT32_MAX,
-                                   &item_size_u64) ||
-                add_u64_over_limit(item_size_u64, 1u, UINT32_MAX, &item_size_u64)) {
+            if (!lookup_label_storage_add_u64(&item_size_u64, &labels[i])) {
                 b->error = NIPC_ERR_OVERFLOW;
                 return b->error;
             }

@@ -50,6 +50,18 @@ enum {
 
 static uint64_t g_posix_service_test_fault_state = 0;
 
+static void service_sleep_us(unsigned int usec)
+{
+    struct timespec req = {
+        .tv_sec = (time_t)(usec / 1000000u),
+        .tv_nsec = (long)(usec % 1000000u) * 1000L,
+    };
+
+    while (nanosleep(&req, &req) == -1 && errno == EINTR) {
+        // Retry with the remaining interval after signal interruption.
+    }
+}
+
 static uint64_t posix_service_fault_state_make(int site, uint32_t skip_matches)
 {
     return ((uint64_t)skip_matches << 32) | (uint32_t)site;
@@ -361,7 +373,7 @@ static nipc_client_state_t client_try_connect(nipc_client_ctx_t *ctx)
                     break;
                 if (monotonic_time_ms() >= deadline_ms)
                     break;
-                usleep(CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS * 1000u);
+                service_sleep_us(CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS * 1000u);
             }
 
             if (serr == NIPC_SHM_OK) {
@@ -394,7 +406,7 @@ static bool client_reconnect_for_call(nipc_client_ctx_t *ctx)
             ctx->state == NIPC_CLIENT_INCOMPATIBLE)
             return false;
         if (i + 1u < CLIENT_CALL_RECONNECT_RETRIES)
-            usleep(CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS * 1000u);
+            service_sleep_us(CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS * 1000u);
     }
 
     return false;
@@ -599,14 +611,14 @@ static nipc_error_t call_with_retry(nipc_client_ctx_t *ctx,
         if (err != NIPC_ERR_OVERFLOW) {
             client_disconnect(ctx);
             ctx->state = NIPC_CLIENT_BROKEN;
-            usleep(CLIENT_CALL_RECONNECT_DRAIN_MS * 1000u);
+            service_sleep_us(CLIENT_CALL_RECONNECT_DRAIN_MS * 1000u);
             if (!client_reconnect_for_call(ctx)) {
                 ctx->error_count++;
                 return err;
             }
 
             ctx->reconnect_count++;
-            usleep(CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS * 1000u);
+            service_sleep_us(CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS * 1000u);
             err = attempt(ctx, state);
             if (err == NIPC_OK) {
                 ctx->call_count++;
@@ -643,7 +655,7 @@ static nipc_error_t call_with_retry(nipc_client_ctx_t *ctx,
             ctx->error_count++;
             return err;
         }
-        usleep(CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS * 1000u);
+        service_sleep_us(CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS * 1000u);
     }
 }
 
@@ -1650,7 +1662,7 @@ void nipc_server_run(nipc_managed_server_t *server)
         nipc_uds_server_config_t accept_cfg;
         nipc_shm_ctx_t *prepared_shm = NULL;
         if (!server_prepare_accept_config(server, sid, &accept_cfg, &prepared_shm)) {
-            usleep(10000);
+            service_sleep_us(10000);
             continue;
         }
 
@@ -1661,7 +1673,7 @@ void nipc_server_run(nipc_managed_server_t *server)
             server_destroy_precreated_shm(&prepared_shm);
             if (!__atomic_load_n(&server->running, __ATOMIC_RELAXED))
                 break;
-            usleep(10000);
+            service_sleep_us(10000);
             continue;
         }
 
@@ -1800,7 +1812,7 @@ bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms)
                 break;
             }
 
-            usleep(5000); /* 5ms poll interval */
+            service_sleep_us(5000); /* 5ms poll interval */
         }
 
         /* 3. Join all session threads (finished or not) */

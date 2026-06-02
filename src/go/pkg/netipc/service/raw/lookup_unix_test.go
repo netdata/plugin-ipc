@@ -322,9 +322,7 @@ func TestLookupConcurrentClients(t *testing.T) {
 		var wg sync.WaitGroup
 		errs := make(chan error, clients*callsPerClient)
 		for range clients {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				client := NewCgroupsLookupClient(testRunDir, svc, testClientConfig())
 				defer client.Close()
 				for range 200 {
@@ -349,7 +347,7 @@ func TestLookupConcurrentClients(t *testing.T) {
 						return
 					}
 				}
-			}()
+			})
 		}
 		wg.Wait()
 		close(errs)
@@ -373,9 +371,7 @@ func TestLookupConcurrentClients(t *testing.T) {
 		var wg sync.WaitGroup
 		errs := make(chan error, clients*callsPerClient)
 		for range clients {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				client := NewAppsLookupClient(testRunDir, svc, testClientConfig())
 				defer client.Close()
 				for range 200 {
@@ -400,7 +396,7 @@ func TestLookupConcurrentClients(t *testing.T) {
 						return
 					}
 				}
-			}()
+			})
 		}
 		wg.Wait()
 		close(errs)

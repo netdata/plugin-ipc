@@ -182,7 +182,7 @@ func validateLookupDir(buf []byte, dirStart int, itemCount uint32, packedAreaLen
 	}
 
 	prevEnd := uint64(0)
-	for i := uint32(0); i < itemCount; i++ {
+	for i := range itemCount {
 		base := dirStart + int(i)*LookupDirEntrySize
 		off := ne.Uint32(buf[base : base+4])
 		length := ne.Uint32(buf[base+4 : base+8])
@@ -258,7 +258,7 @@ func validateLabels(item []byte, hdrSize int, labelCount uint16, fixedEnd int) (
 		return 0, ErrOutOfBounds
 	}
 
-	for i := uint16(0); i < labelCount; i++ {
+	for i := range labelCount {
 		entryRel, ok := checkedInt(uint64(i) * uint64(LookupLabelEntrySize))
 		if !ok {
 			return 0, ErrOutOfBounds
@@ -425,7 +425,7 @@ func DecodeCgroupsLookupRequest(buf []byte) (*CgroupsLookupRequestView, error) {
 	if err := validateLookupDir(buf, CgroupsLookupReqHdr, itemCount, len(buf)-dirEnd, 2, -1); err != nil {
 		return nil, err
 	}
-	for i := uint32(0); i < itemCount; i++ {
+	for i := range itemCount {
 		base := CgroupsLookupReqHdr + int(i)*LookupDirEntrySize
 		off, length, err := lookupDirEntry(buf, base)
 		if err != nil {
@@ -532,7 +532,7 @@ func DecodeAppsLookupRequest(buf []byte) (*AppsLookupRequestView, error) {
 	if err := validateLookupDir(buf, AppsLookupReqHdr, itemCount, len(buf)-dirEnd, 0, AppsLookupKeySize); err != nil {
 		return nil, err
 	}
-	for i := uint32(0); i < itemCount; i++ {
+	for i := range itemCount {
 		base := AppsLookupReqHdr + int(i)*LookupDirEntrySize
 		off, _, err := lookupDirEntry(buf, base)
 		if err != nil {
@@ -590,7 +590,7 @@ func DecodeCgroupsLookupResponse(buf []byte) (*CgroupsLookupResponseView, error)
 	if err := validateLookupDir(buf, CgroupsLookupRespHdr, itemCount, len(buf)-dirEnd, CgroupsLookupItemHdr, -1); err != nil {
 		return nil, err
 	}
-	for i := uint32(0); i < itemCount; i++ {
+	for i := range itemCount {
 		base := CgroupsLookupRespHdr + int(i)*LookupDirEntrySize
 		off, length, err := lookupDirEntry(buf, base)
 		if err != nil {
@@ -988,7 +988,7 @@ func finishLookupResponse(buf []byte, hdrSize int, itemCount uint32, dataOffset 
 	if finalPackedStart < firstItemAbs {
 		copy(buf[finalPackedStart:], buf[firstItemAbs:firstItemAbs+packedDataLen])
 	}
-	for i := 0; i < count; i++ {
+	for i := range count {
 		entry := hdrSize + i*LookupDirEntrySize
 		abs, ok := checkedInt(uint64(ne.Uint32(buf[entry : entry+4])))
 		if !ok || abs < firstItemAbs {
@@ -1021,7 +1021,7 @@ func DecodeAppsLookupResponse(buf []byte) (*AppsLookupResponseView, error) {
 	if err := validateLookupDir(buf, AppsLookupRespHdr, itemCount, len(buf)-dirEnd, AppsLookupItemHdr, -1); err != nil {
 		return nil, err
 	}
-	for i := uint32(0); i < itemCount; i++ {
+	for i := range itemCount {
 		base := AppsLookupRespHdr + int(i)*LookupDirEntrySize
 		off, length, err := lookupDirEntry(buf, base)
 		if err != nil {
@@ -1208,7 +1208,8 @@ func (b *AppsLookupBuilder) SetGeneration(generation uint64) {
 	b.generation = generation
 }
 
-func (b *AppsLookupBuilder) Add(status, cgroupStatus, orchestrator uint16, pid, ppid, uid uint32, starttime uint64, comm, cgroupPath, cgroupName []byte, labels []struct{ Key, Value []byte }) error {
+// Add appends one APPS_LOOKUP wire item; parameters mirror the fixed protocol fields.
+func (b *AppsLookupBuilder) Add(status, cgroupStatus, orchestrator uint16, pid, ppid, uid uint32, starttime uint64, comm, cgroupPath, cgroupName []byte, labels []struct{ Key, Value []byte }) error { //NOSONAR
 	if b.itemCount >= b.maxItems {
 		b.err = ErrOverflow
 		return ErrOverflow
