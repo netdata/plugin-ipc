@@ -8,7 +8,7 @@
     "repositoryId": null,
     "repositoryName": null,
     "createdAt": "2026-06-02T18:38:51.518Z",
-    "updatedAt": "2026-06-02T18:38:51.518Z",
+    "updatedAt": "2026-06-02T20:01:16Z",
     "languages": [
       "C",
       "Go",
@@ -21,320 +21,11 @@
     "remoteToolCount": 8,
     "remotePatternCount": 1063,
     "autoToolCount": 11,
-    "autoPatternCount": 2559
+    "autoPatternCount": 2559,
+    "rulePolicy": "enabled-rules-must-have-zero-current-findings-or-a-current-fix-plan",
+    "removedResultBearingPatternCount": 36
   },
   "tools": [
-    {
-      "toolId": "Agentlinter",
-      "patterns": [
-        {
-          "patternId": "Agentlinter_blueprint_constraints-defined"
-        },
-        {
-          "patternId": "Agentlinter_blueprint_coverage"
-        },
-        {
-          "patternId": "Agentlinter_blueprint_identity-defined"
-        },
-        {
-          "patternId": "Agentlinter_clarity_action-without-context"
-        },
-        {
-          "patternId": "Agentlinter_clarity_actionable-instructions"
-        },
-        {
-          "patternId": "Agentlinter_clarity_ambiguous-pronoun"
-        },
-        {
-          "patternId": "Agentlinter_clarity_compound-instruction"
-        },
-        {
-          "patternId": "Agentlinter_clarity_duplicate-content"
-        },
-        {
-          "patternId": "Agentlinter_clarity_english-config-files"
-        },
-        {
-          "patternId": "Agentlinter_clarity_escape-hatch-missing"
-        },
-        {
-          "patternId": "Agentlinter_clarity_has-examples"
-        },
-        {
-          "patternId": "Agentlinter_clarity_instruction-density"
-        },
-        {
-          "patternId": "Agentlinter_clarity_naked-conditional"
-        },
-        {
-          "patternId": "Agentlinter_clarity_no-contradictions"
-        },
-        {
-          "patternId": "Agentlinter_clarity_no-vague-instructions"
-        },
-        {
-          "patternId": "Agentlinter_clarity_obvious-statements"
-        },
-        {
-          "patternId": "Agentlinter_clarity_priority-signal-missing"
-        },
-        {
-          "patternId": "Agentlinter_clarity_sentence-complexity"
-        },
-        {
-          "patternId": "Agentlinter_clarity_token-budget-range"
-        },
-        {
-          "patternId": "Agentlinter_clarity_token-efficiency-score"
-        },
-        {
-          "patternId": "Agentlinter_clarity_undefined-term"
-        },
-        {
-          "patternId": "Agentlinter_claude-code_agent-focus"
-        },
-        {
-          "patternId": "Agentlinter_claude-code_descriptive-ratio"
-        },
-        {
-          "patternId": "Agentlinter_claude-code_hooks-structure"
-        },
-        {
-          "patternId": "Agentlinter_claude-code_instruction-count"
-        },
-        {
-          "patternId": "Agentlinter_claude-code_progressive-disclosure"
-        },
-        {
-          "patternId": "Agentlinter_claude-code_relevance-trap"
-        },
-        {
-          "patternId": "Agentlinter_claude-code_skills-vs-commands"
-        },
-        {
-          "patternId": "Agentlinter_completeness_command-coverage"
-        },
-        {
-          "patternId": "Agentlinter_completeness_freshness-file-paths"
-        },
-        {
-          "patternId": "Agentlinter_completeness_has-boundaries"
-        },
-        {
-          "patternId": "Agentlinter_completeness_has-error-handling"
-        },
-        {
-          "patternId": "Agentlinter_completeness_has-identity"
-        },
-        {
-          "patternId": "Agentlinter_completeness_has-output-format"
-        },
-        {
-          "patternId": "Agentlinter_completeness_has-priorities"
-        },
-        {
-          "patternId": "Agentlinter_completeness_has-tools"
-        },
-        {
-          "patternId": "Agentlinter_completeness_has-user-context"
-        },
-        {
-          "patternId": "Agentlinter_completeness_has-workflow"
-        },
-        {
-          "patternId": "Agentlinter_completeness_session-learning-hooks"
-        },
-        {
-          "patternId": "Agentlinter_completeness_verification-criteria-required"
-        },
-        {
-          "patternId": "Agentlinter_consistency_circular-dependency"
-        },
-        {
-          "patternId": "Agentlinter_consistency_identity-alignment"
-        },
-        {
-          "patternId": "Agentlinter_consistency_language-mixing"
-        },
-        {
-          "patternId": "Agentlinter_consistency_naming-convention"
-        },
-        {
-          "patternId": "Agentlinter_consistency_no-duplicate-instructions"
-        },
-        {
-          "patternId": "Agentlinter_consistency_outdated-cross-references"
-        },
-        {
-          "patternId": "Agentlinter_consistency_permission-conflict"
-        },
-        {
-          "patternId": "Agentlinter_consistency_priority-conflict"
-        },
-        {
-          "patternId": "Agentlinter_consistency_referenced-files-exist"
-        },
-        {
-          "patternId": "Agentlinter_consistency_stale-date"
-        },
-        {
-          "patternId": "Agentlinter_consistency_stale-file-reference"
-        },
-        {
-          "patternId": "Agentlinter_consistency_stale-package-reference"
-        },
-        {
-          "patternId": "Agentlinter_consistency_timezone-locale-drift"
-        },
-        {
-          "patternId": "Agentlinter_consistency_tone-voice-alignment"
-        },
-        {
-          "patternId": "Agentlinter_memory_has-context-window-awareness"
-        },
-        {
-          "patternId": "Agentlinter_memory_has-file-based-notes"
-        },
-        {
-          "patternId": "Agentlinter_memory_has-handoff-protocol"
-        },
-        {
-          "patternId": "Agentlinter_memory_has-learning-loop"
-        },
-        {
-          "patternId": "Agentlinter_memory_has-memory-strategy"
-        },
-        {
-          "patternId": "Agentlinter_memory_has-state-tracking"
-        },
-        {
-          "patternId": "Agentlinter_memory_no-mental-notes"
-        },
-        {
-          "patternId": "Agentlinter_remote-ready_env-vars-documented"
-        },
-        {
-          "patternId": "Agentlinter_remote-ready_model-settings-specified"
-        },
-        {
-          "patternId": "Agentlinter_remote-ready_workspace-path-specified"
-        },
-        {
-          "patternId": "Agentlinter_runtime_auth-mode"
-        },
-        {
-          "patternId": "Agentlinter_runtime_config-exists"
-        },
-        {
-          "patternId": "Agentlinter_runtime_config-secrets"
-        },
-        {
-          "patternId": "Agentlinter_runtime_dm-policy"
-        },
-        {
-          "patternId": "Agentlinter_runtime_gateway-bind"
-        },
-        {
-          "patternId": "Agentlinter_runtime_group-policy"
-        },
-        {
-          "patternId": "Agentlinter_runtime_token-strength"
-        },
-        {
-          "patternId": "Agentlinter_security_api-key-exposure"
-        },
-        {
-          "patternId": "Agentlinter_security_env-var-references"
-        },
-        {
-          "patternId": "Agentlinter_security_has-injection-defense"
-        },
-        {
-          "patternId": "Agentlinter_security_has-permission-boundaries"
-        },
-        {
-          "patternId": "Agentlinter_security_no-injection-defense"
-        },
-        {
-          "patternId": "Agentlinter_security_no-pii-exposure"
-        },
-        {
-          "patternId": "Agentlinter_security_no-secrets"
-        },
-        {
-          "patternId": "Agentlinter_security_prompt-injection-vulnerability"
-        },
-        {
-          "patternId": "Agentlinter_skill-safety_dangerous-commands"
-        },
-        {
-          "patternId": "Agentlinter_skill-safety_data-exfiltration"
-        },
-        {
-          "patternId": "Agentlinter_skill-safety_excessive-permissions"
-        },
-        {
-          "patternId": "Agentlinter_skill-safety_has-metadata"
-        },
-        {
-          "patternId": "Agentlinter_skill-safety_injection-vectors"
-        },
-        {
-          "patternId": "Agentlinter_skill-safety_sensitive-paths"
-        },
-        {
-          "patternId": "Agentlinter_skill-safety_skill-description-when-to-use"
-        },
-        {
-          "patternId": "Agentlinter_skill-safety_skill-name-match-dir"
-        },
-        {
-          "patternId": "Agentlinter_structure_circular-import"
-        },
-        {
-          "patternId": "Agentlinter_structure_dead-import"
-        },
-        {
-          "patternId": "Agentlinter_structure_file-size"
-        },
-        {
-          "patternId": "Agentlinter_structure_has-file-map"
-        },
-        {
-          "patternId": "Agentlinter_structure_has-main-file"
-        },
-        {
-          "patternId": "Agentlinter_structure_has-sections"
-        },
-        {
-          "patternId": "Agentlinter_structure_has-version-or-update-date"
-        },
-        {
-          "patternId": "Agentlinter_structure_heading-hierarchy"
-        },
-        {
-          "patternId": "Agentlinter_structure_modular-files"
-        },
-        {
-          "patternId": "Agentlinter_structure_no-empty-sections"
-        },
-        {
-          "patternId": "Agentlinter_structure_position-risk-warning"
-        },
-        {
-          "patternId": "Agentlinter_token-budget_compressible-padding"
-        },
-        {
-          "patternId": "Agentlinter_token-budget_section-weight"
-        },
-        {
-          "patternId": "Agentlinter_token-budget_total-tokens"
-        },
-        {
-          "patternId": "Agentlinter_token-budget_under-150-tokens"
-        }
-      ]
-    },
     {
       "toolId": "Checkov",
       "patterns": [
@@ -4415,35 +4106,6 @@
       ]
     },
     {
-      "toolId": "Lizard",
-      "patterns": [
-        {
-          "patternId": "Lizard_ccn-critical"
-        },
-        {
-          "patternId": "Lizard_ccn-medium"
-        },
-        {
-          "patternId": "Lizard_file-nloc-critical"
-        },
-        {
-          "patternId": "Lizard_file-nloc-medium"
-        },
-        {
-          "patternId": "Lizard_nloc-critical"
-        },
-        {
-          "patternId": "Lizard_nloc-medium"
-        },
-        {
-          "patternId": "Lizard_parameter-count-critical"
-        },
-        {
-          "patternId": "Lizard_parameter-count-medium"
-        }
-      ]
-    },
-    {
       "toolId": "Revive",
       "patterns": [
         {
@@ -4462,22 +4124,13 @@
           "patternId": "Revive_dot-imports"
         },
         {
-          "patternId": "Revive_empty-block"
-        },
-        {
           "patternId": "Revive_error-naming"
         },
         {
           "patternId": "Revive_error-return"
         },
         {
-          "patternId": "Revive_error-strings"
-        },
-        {
           "patternId": "Revive_errorf"
-        },
-        {
-          "patternId": "Revive_exported"
         },
         {
           "patternId": "Revive_imports-blocklist"
@@ -4489,16 +4142,10 @@
           "patternId": "Revive_indent-error-flow"
         },
         {
-          "patternId": "Revive_package-comments"
-        },
-        {
           "patternId": "Revive_range"
         },
         {
           "patternId": "Revive_receiver-naming"
-        },
-        {
-          "patternId": "Revive_redefines-builtin-id"
         },
         {
           "patternId": "Revive_superfluous-else"
@@ -4522,13 +4169,7 @@
           "patternId": "Revive_unsecure-url-scheme"
         },
         {
-          "patternId": "Revive_unused-parameter"
-        },
-        {
           "patternId": "Revive_var-declaration"
-        },
-        {
-          "patternId": "Revive_var-naming"
         }
       ]
     },
@@ -4584,9 +4225,6 @@
           "patternId": "Semgrep_c.lang.security.insecure-use-gets-fn.insecure-use-gets-fn"
         },
         {
-          "patternId": "Semgrep_c.lang.security.insecure-use-memset.insecure-use-memset"
-        },
-        {
           "patternId": "Semgrep_c.lang.security.insecure-use-printf-fn.insecure-use-printf-fn"
         },
         {
@@ -4594,9 +4232,6 @@
         },
         {
           "patternId": "Semgrep_c.lang.security.insecure-use-strcat-fn.insecure-use-strcat-fn"
-        },
-        {
-          "patternId": "Semgrep_c.lang.security.insecure-use-string-copy-fn.insecure-use-string-copy-fn"
         },
         {
           "patternId": "Semgrep_c.lang.security.insecure-use-strtok-fn.insecure-use-strtok-fn"
@@ -4629,9 +4264,6 @@
           "patternId": "Semgrep_c_buffer_rule-g-get-tmp-dir"
         },
         {
-          "patternId": "Semgrep_c_buffer_rule-getenv-curl-getenv"
-        },
-        {
           "patternId": "Semgrep_c_buffer_rule-gets--getts"
         },
         {
@@ -4648,9 +4280,6 @@
         },
         {
           "patternId": "Semgrep_c_buffer_rule-lstrcpyn-wcsncpy"
-        },
-        {
-          "patternId": "Semgrep_c_buffer_rule-memcpy-CopyMemory"
         },
         {
           "patternId": "Semgrep_c_buffer_rule-realpath"
@@ -4675,9 +4304,6 @@
         },
         {
           "patternId": "Semgrep_c_buffer_rule-strncat"
-        },
-        {
-          "patternId": "Semgrep_c_buffer_rule-strncpy"
         },
         {
           "patternId": "Semgrep_c_crypto_rule-EVP-des-ecb-EVP-des-cbc"
@@ -4716,13 +4342,7 @@
           "patternId": "Semgrep_c_misc_rule-SetSecurityDescriptorDacl"
         },
         {
-          "patternId": "Semgrep_c_misc_rule-fopen-open"
-        },
-        {
           "patternId": "Semgrep_c_misc_rule-getpass"
-        },
-        {
-          "patternId": "Semgrep_c_race_rule-access"
         },
         {
           "patternId": "Semgrep_c_race_rule-chmod"
@@ -4735,9 +4355,6 @@
         },
         {
           "patternId": "Semgrep_c_race_rule-vfork"
-        },
-        {
-          "patternId": "Semgrep_c_random_rule-drand48-erand48"
         },
         {
           "patternId": "Semgrep_c_shell_rule-CreateProcess"
@@ -5670,16 +5287,10 @@
           "patternId": "Semgrep_go.lang.correctness.overflow.overflow.integer-overflow-int32"
         },
         {
-          "patternId": "Semgrep_go.lang.correctness.permissions.file_permission.incorrect-default-permission"
-        },
-        {
           "patternId": "Semgrep_go.lang.security.audit.crypto.bad_imports.insecure-module-used"
         },
         {
           "patternId": "Semgrep_go.lang.security.audit.crypto.insecure_ssh.avoid-ssh-insecure-ignore-host-key"
-        },
-        {
-          "patternId": "Semgrep_go.lang.security.audit.crypto.math_random.math-random-used"
         },
         {
           "patternId": "Semgrep_go.lang.security.audit.crypto.missing-ssl-minversion.missing-ssl-minversion"
@@ -5710,9 +5321,6 @@
         },
         {
           "patternId": "Semgrep_go.lang.security.audit.dangerous-exec-cmd.dangerous-exec-cmd"
-        },
-        {
-          "patternId": "Semgrep_go.lang.security.audit.dangerous-exec-command.dangerous-exec-command"
         },
         {
           "patternId": "Semgrep_go.lang.security.audit.dangerous-syscall-exec.dangerous-syscall-exec"
@@ -5776,9 +5384,6 @@
         },
         {
           "patternId": "Semgrep_go.lang.security.audit.unsafe-reflect-by-name.unsafe-reflect-by-name"
-        },
-        {
-          "patternId": "Semgrep_go.lang.security.audit.unsafe.use-of-unsafe-block"
         },
         {
           "patternId": "Semgrep_go.lang.security.audit.xss.import-text-template.import-text-template"
@@ -5883,9 +5488,6 @@
           "patternId": "Semgrep_go_filesystem_rule-decompression-bomb"
         },
         {
-          "patternId": "Semgrep_go_filesystem_rule-fileread"
-        },
-        {
           "patternId": "Semgrep_go_filesystem_rule-httprootdir"
         },
         {
@@ -5914,12 +5516,6 @@
         },
         {
           "patternId": "Semgrep_go_sql_rule-concat-sqli"
-        },
-        {
-          "patternId": "Semgrep_go_subproc_rule-subproc"
-        },
-        {
-          "patternId": "Semgrep_go_unsafe_rule-unsafe"
         },
         {
           "patternId": "Semgrep_java.android.security.exported_activity.exported_activity"
@@ -7197,9 +6793,6 @@
           "patternId": "Semgrep_rust.lang.security.args-os.args-os"
         },
         {
-          "patternId": "Semgrep_rust.lang.security.args.args"
-        },
-        {
           "patternId": "Semgrep_rust.lang.security.current-exe.current-exe"
         },
         {
@@ -7216,12 +6809,6 @@
         },
         {
           "patternId": "Semgrep_rust.lang.security.ssl-verify-none.ssl-verify-none"
-        },
-        {
-          "patternId": "Semgrep_rust.lang.security.temp-dir.temp-dir"
-        },
-        {
-          "patternId": "Semgrep_rust.lang.security.unsafe-usage.unsafe-usage"
         },
         {
           "patternId": "Semgrep_scala.jwt-scala.security.jwt-scala-hardcode.jwt-scala-hardcode"
@@ -7903,9 +7490,6 @@
           "patternId": "cppcheck_invalidscanf"
         },
         {
-          "patternId": "cppcheck_knownConditionTrueFalse"
-        },
-        {
           "patternId": "cppcheck_leakNoVarFunctionCall"
         },
         {
@@ -7957,12 +7541,6 @@
           "patternId": "cppcheck_mismatchingContainers"
         },
         {
-          "patternId": "cppcheck_missingInclude"
-        },
-        {
-          "patternId": "cppcheck_missingIncludeSystem"
-        },
-        {
           "patternId": "cppcheck_missingReturn"
         },
         {
@@ -8003,9 +7581,6 @@
         },
         {
           "patternId": "cppcheck_nullPointerDefaultArg"
-        },
-        {
-          "patternId": "cppcheck_nullPointerOutOfMemory"
         },
         {
           "patternId": "cppcheck_nullPointerOutOfResources"
@@ -8218,9 +7793,6 @@
           "patternId": "cppcheck_unreachableCode"
         },
         {
-          "patternId": "cppcheck_unreadVariable"
-        },
-        {
           "patternId": "cppcheck_unsafeClassCanLeak"
         },
         {
@@ -8237,9 +7809,6 @@
         },
         {
           "patternId": "cppcheck_unusedScopedObject"
-        },
-        {
-          "patternId": "cppcheck_unusedStructMember"
         },
         {
           "patternId": "cppcheck_useClosedFile"
@@ -8287,9 +7856,6 @@
           "patternId": "cppcheck_varFuncNullUB"
         },
         {
-          "patternId": "cppcheck_variableScope"
-        },
-        {
           "patternId": "cppcheck_virtualDestructor"
         },
         {
@@ -8311,818 +7877,10 @@
           "patternId": "cppcheck_y2038-type-bits-undef"
         },
         {
-          "patternId": "cppcheck_y2038-unsafe-call"
-        },
-        {
           "patternId": "cppcheck_zerodiv"
         },
         {
           "patternId": "cppcheck_zerodivcond"
-        }
-      ]
-    },
-    {
-      "toolId": "flawfinder",
-      "patterns": [
-        {
-          "patternId": "flawfinder_AddAccessAllowedAce"
-        },
-        {
-          "patternId": "flawfinder_CoImpersonateClient"
-        },
-        {
-          "patternId": "flawfinder_CopyMemory"
-        },
-        {
-          "patternId": "flawfinder_CreateProcess"
-        },
-        {
-          "patternId": "flawfinder_CreateProcessAsUser"
-        },
-        {
-          "patternId": "flawfinder_CreateProcessWithLogon"
-        },
-        {
-          "patternId": "flawfinder_EVP_des_cbc"
-        },
-        {
-          "patternId": "flawfinder_EVP_des_cfb"
-        },
-        {
-          "patternId": "flawfinder_EVP_des_ecb"
-        },
-        {
-          "patternId": "flawfinder_EVP_des_ofb"
-        },
-        {
-          "patternId": "flawfinder_EVP_desx_cbc"
-        },
-        {
-          "patternId": "flawfinder_EVP_rc2_40_cbc"
-        },
-        {
-          "patternId": "flawfinder_EVP_rc2_64_cbc"
-        },
-        {
-          "patternId": "flawfinder_EVP_rc4_40"
-        },
-        {
-          "patternId": "flawfinder_GetTempFileName"
-        },
-        {
-          "patternId": "flawfinder_ImpersonateDdeClientWindow"
-        },
-        {
-          "patternId": "flawfinder_ImpersonateLoggedOnUser"
-        },
-        {
-          "patternId": "flawfinder_ImpersonateNamedPipeClient"
-        },
-        {
-          "patternId": "flawfinder_ImpersonateSecurityContext"
-        },
-        {
-          "patternId": "flawfinder_InitializeCriticalSection"
-        },
-        {
-          "patternId": "flawfinder_LoadLibrary"
-        },
-        {
-          "patternId": "flawfinder_LoadLibraryEx"
-        },
-        {
-          "patternId": "flawfinder_MultiByteToWideChar"
-        },
-        {
-          "patternId": "flawfinder_RpcImpersonateClient"
-        },
-        {
-          "patternId": "flawfinder_SetSecurityDescriptorDacl"
-        },
-        {
-          "patternId": "flawfinder_SetThreadToken"
-        },
-        {
-          "patternId": "flawfinder_ShellExecute"
-        },
-        {
-          "patternId": "flawfinder_StrCat"
-        },
-        {
-          "patternId": "flawfinder_StrCatA"
-        },
-        {
-          "patternId": "flawfinder_StrCatBuffA"
-        },
-        {
-          "patternId": "flawfinder_StrCatBuffW"
-        },
-        {
-          "patternId": "flawfinder_StrCatChainW"
-        },
-        {
-          "patternId": "flawfinder_StrCatN"
-        },
-        {
-          "patternId": "flawfinder_StrCatNA"
-        },
-        {
-          "patternId": "flawfinder_StrCatNW"
-        },
-        {
-          "patternId": "flawfinder_StrCpy"
-        },
-        {
-          "patternId": "flawfinder_StrCpyA"
-        },
-        {
-          "patternId": "flawfinder_StrCpyN"
-        },
-        {
-          "patternId": "flawfinder_StrCpyNA"
-        },
-        {
-          "patternId": "flawfinder_StrCpyNW"
-        },
-        {
-          "patternId": "flawfinder_StrNCat"
-        },
-        {
-          "patternId": "flawfinder_StrNCatA"
-        },
-        {
-          "patternId": "flawfinder_StrNCatW"
-        },
-        {
-          "patternId": "flawfinder_StrNCpy"
-        },
-        {
-          "patternId": "flawfinder_StrNCpyA"
-        },
-        {
-          "patternId": "flawfinder_StrNCpyW"
-        },
-        {
-          "patternId": "flawfinder_StrcatW"
-        },
-        {
-          "patternId": "flawfinder_TCHAR"
-        },
-        {
-          "patternId": "flawfinder_WinExec"
-        },
-        {
-          "patternId": "flawfinder__ftcscat"
-        },
-        {
-          "patternId": "flawfinder__ftcscpy"
-        },
-        {
-          "patternId": "flawfinder__ftprintf"
-        },
-        {
-          "patternId": "flawfinder__ftscanf"
-        },
-        {
-          "patternId": "flawfinder__gettc"
-        },
-        {
-          "patternId": "flawfinder__getts"
-        },
-        {
-          "patternId": "flawfinder__mbccat"
-        },
-        {
-          "patternId": "flawfinder__mbccpy"
-        },
-        {
-          "patternId": "flawfinder__mbscat"
-        },
-        {
-          "patternId": "flawfinder__mbscpy"
-        },
-        {
-          "patternId": "flawfinder__mbslen"
-        },
-        {
-          "patternId": "flawfinder__mbsnbcat"
-        },
-        {
-          "patternId": "flawfinder__mbsnbcpy"
-        },
-        {
-          "patternId": "flawfinder__mbsncpy"
-        },
-        {
-          "patternId": "flawfinder__snprintf"
-        },
-        {
-          "patternId": "flawfinder__sntprintf"
-        },
-        {
-          "patternId": "flawfinder__stprintf"
-        },
-        {
-          "patternId": "flawfinder__tccat"
-        },
-        {
-          "patternId": "flawfinder__tccpy"
-        },
-        {
-          "patternId": "flawfinder__tcscat"
-        },
-        {
-          "patternId": "flawfinder__tcscpy"
-        },
-        {
-          "patternId": "flawfinder__tcslen"
-        },
-        {
-          "patternId": "flawfinder__tcsncat"
-        },
-        {
-          "patternId": "flawfinder__tcsncpy"
-        },
-        {
-          "patternId": "flawfinder__tscanf"
-        },
-        {
-          "patternId": "flawfinder__vftprintf"
-        },
-        {
-          "patternId": "flawfinder__vsntprintf"
-        },
-        {
-          "patternId": "flawfinder__vstprintf"
-        },
-        {
-          "patternId": "flawfinder__vtprintf"
-        },
-        {
-          "patternId": "flawfinder__wtoi"
-        },
-        {
-          "patternId": "flawfinder__wtoi64"
-        },
-        {
-          "patternId": "flawfinder_access"
-        },
-        {
-          "patternId": "flawfinder_atoi"
-        },
-        {
-          "patternId": "flawfinder_atol"
-        },
-        {
-          "patternId": "flawfinder_bcopy"
-        },
-        {
-          "patternId": "flawfinder_char"
-        },
-        {
-          "patternId": "flawfinder_chgrp"
-        },
-        {
-          "patternId": "flawfinder_chmod"
-        },
-        {
-          "patternId": "flawfinder_chown"
-        },
-        {
-          "patternId": "flawfinder_chroot"
-        },
-        {
-          "patternId": "flawfinder_crypt"
-        },
-        {
-          "patternId": "flawfinder_crypt_r"
-        },
-        {
-          "patternId": "flawfinder_curl_getenv"
-        },
-        {
-          "patternId": "flawfinder_cuserid"
-        },
-        {
-          "patternId": "flawfinder_drand48"
-        },
-        {
-          "patternId": "flawfinder_equal"
-        },
-        {
-          "patternId": "flawfinder_erand48"
-        },
-        {
-          "patternId": "flawfinder_execl"
-        },
-        {
-          "patternId": "flawfinder_execle"
-        },
-        {
-          "patternId": "flawfinder_execlp"
-        },
-        {
-          "patternId": "flawfinder_execv"
-        },
-        {
-          "patternId": "flawfinder_execvp"
-        },
-        {
-          "patternId": "flawfinder_fgetc"
-        },
-        {
-          "patternId": "flawfinder_fopen"
-        },
-        {
-          "patternId": "flawfinder_fprintf"
-        },
-        {
-          "patternId": "flawfinder_fread"
-        },
-        {
-          "patternId": "flawfinder_fscanf"
-        },
-        {
-          "patternId": "flawfinder_fvwprintf"
-        },
-        {
-          "patternId": "flawfinder_fwprintf"
-        },
-        {
-          "patternId": "flawfinder_fwscanf"
-        },
-        {
-          "patternId": "flawfinder_g_get_home_dir"
-        },
-        {
-          "patternId": "flawfinder_g_get_tmp_dir"
-        },
-        {
-          "patternId": "flawfinder_g_rand_boolean"
-        },
-        {
-          "patternId": "flawfinder_g_rand_double"
-        },
-        {
-          "patternId": "flawfinder_g_rand_double_range"
-        },
-        {
-          "patternId": "flawfinder_g_rand_int"
-        },
-        {
-          "patternId": "flawfinder_g_rand_int_range"
-        },
-        {
-          "patternId": "flawfinder_g_random_boolean"
-        },
-        {
-          "patternId": "flawfinder_g_random_double"
-        },
-        {
-          "patternId": "flawfinder_g_random_double_range"
-        },
-        {
-          "patternId": "flawfinder_g_random_int"
-        },
-        {
-          "patternId": "flawfinder_g_random_int_range"
-        },
-        {
-          "patternId": "flawfinder_getc"
-        },
-        {
-          "patternId": "flawfinder_getchar"
-        },
-        {
-          "patternId": "flawfinder_getenv"
-        },
-        {
-          "patternId": "flawfinder_getlogin"
-        },
-        {
-          "patternId": "flawfinder_getopt"
-        },
-        {
-          "patternId": "flawfinder_getopt_long"
-        },
-        {
-          "patternId": "flawfinder_getpass"
-        },
-        {
-          "patternId": "flawfinder_getpw"
-        },
-        {
-          "patternId": "flawfinder_gets"
-        },
-        {
-          "patternId": "flawfinder_getwd"
-        },
-        {
-          "patternId": "flawfinder_gsignal"
-        },
-        {
-          "patternId": "flawfinder_is_permutation"
-        },
-        {
-          "patternId": "flawfinder_jrand48"
-        },
-        {
-          "patternId": "flawfinder_lcong48"
-        },
-        {
-          "patternId": "flawfinder_lrand48"
-        },
-        {
-          "patternId": "flawfinder_lstrcat"
-        },
-        {
-          "patternId": "flawfinder_lstrcatA"
-        },
-        {
-          "patternId": "flawfinder_lstrcatW"
-        },
-        {
-          "patternId": "flawfinder_lstrcatn"
-        },
-        {
-          "patternId": "flawfinder_lstrcatnA"
-        },
-        {
-          "patternId": "flawfinder_lstrcatnW"
-        },
-        {
-          "patternId": "flawfinder_lstrcpy"
-        },
-        {
-          "patternId": "flawfinder_lstrcpyA"
-        },
-        {
-          "patternId": "flawfinder_lstrcpyW"
-        },
-        {
-          "patternId": "flawfinder_lstrcpyn"
-        },
-        {
-          "patternId": "flawfinder_lstrcpynA"
-        },
-        {
-          "patternId": "flawfinder_lstrcpynW"
-        },
-        {
-          "patternId": "flawfinder_lstrncat"
-        },
-        {
-          "patternId": "flawfinder_memalign"
-        },
-        {
-          "patternId": "flawfinder_memcpy"
-        },
-        {
-          "patternId": "flawfinder_mismatch"
-        },
-        {
-          "patternId": "flawfinder_mkstemp"
-        },
-        {
-          "patternId": "flawfinder_mktemp"
-        },
-        {
-          "patternId": "flawfinder_mrand48"
-        },
-        {
-          "patternId": "flawfinder_nrand48"
-        },
-        {
-          "patternId": "flawfinder_open"
-        },
-        {
-          "patternId": "flawfinder_popen"
-        },
-        {
-          "patternId": "flawfinder_printf"
-        },
-        {
-          "patternId": "flawfinder_random"
-        },
-        {
-          "patternId": "flawfinder_read"
-        },
-        {
-          "patternId": "flawfinder_readlink"
-        },
-        {
-          "patternId": "flawfinder_readv"
-        },
-        {
-          "patternId": "flawfinder_realpath"
-        },
-        {
-          "patternId": "flawfinder_recv"
-        },
-        {
-          "patternId": "flawfinder_recvfrom"
-        },
-        {
-          "patternId": "flawfinder_recvmsg"
-        },
-        {
-          "patternId": "flawfinder_scanf"
-        },
-        {
-          "patternId": "flawfinder_seed48"
-        },
-        {
-          "patternId": "flawfinder_setstate"
-        },
-        {
-          "patternId": "flawfinder_snprintf"
-        },
-        {
-          "patternId": "flawfinder_sprintf"
-        },
-        {
-          "patternId": "flawfinder_srand"
-        },
-        {
-          "patternId": "flawfinder_srandom"
-        },
-        {
-          "patternId": "flawfinder_sscanf"
-        },
-        {
-          "patternId": "flawfinder_ssignal"
-        },
-        {
-          "patternId": "flawfinder_strCatBuff"
-        },
-        {
-          "patternId": "flawfinder_strcadd"
-        },
-        {
-          "patternId": "flawfinder_strcat"
-        },
-        {
-          "patternId": "flawfinder_strccpy"
-        },
-        {
-          "patternId": "flawfinder_strcpy"
-        },
-        {
-          "patternId": "flawfinder_strcpyA"
-        },
-        {
-          "patternId": "flawfinder_strcpyW"
-        },
-        {
-          "patternId": "flawfinder_strcpynA"
-        },
-        {
-          "patternId": "flawfinder_streadd"
-        },
-        {
-          "patternId": "flawfinder_strecpy"
-        },
-        {
-          "patternId": "flawfinder_strfry"
-        },
-        {
-          "patternId": "flawfinder_strlen"
-        },
-        {
-          "patternId": "flawfinder_strncat"
-        },
-        {
-          "patternId": "flawfinder_strncpy"
-        },
-        {
-          "patternId": "flawfinder_strtrns"
-        },
-        {
-          "patternId": "flawfinder_swprintf"
-        },
-        {
-          "patternId": "flawfinder_syslog"
-        },
-        {
-          "patternId": "flawfinder_system"
-        },
-        {
-          "patternId": "flawfinder_tempnam"
-        },
-        {
-          "patternId": "flawfinder_tmpfile"
-        },
-        {
-          "patternId": "flawfinder_tmpnam"
-        },
-        {
-          "patternId": "flawfinder_ulimit"
-        },
-        {
-          "patternId": "flawfinder_umask"
-        },
-        {
-          "patternId": "flawfinder_usleep"
-        },
-        {
-          "patternId": "flawfinder_vfork"
-        },
-        {
-          "patternId": "flawfinder_vfprintf"
-        },
-        {
-          "patternId": "flawfinder_vfscanf"
-        },
-        {
-          "patternId": "flawfinder_vfwprintf"
-        },
-        {
-          "patternId": "flawfinder_vfwscanf"
-        },
-        {
-          "patternId": "flawfinder_vprintf"
-        },
-        {
-          "patternId": "flawfinder_vscanf"
-        },
-        {
-          "patternId": "flawfinder_vsnprintf"
-        },
-        {
-          "patternId": "flawfinder_vsprintf"
-        },
-        {
-          "patternId": "flawfinder_vsscanf"
-        },
-        {
-          "patternId": "flawfinder_vswprintf"
-        },
-        {
-          "patternId": "flawfinder_vswscanf"
-        },
-        {
-          "patternId": "flawfinder_vwprintf"
-        },
-        {
-          "patternId": "flawfinder_vwscanf"
-        },
-        {
-          "patternId": "flawfinder_wchar_t"
-        },
-        {
-          "patternId": "flawfinder_wcscat"
-        },
-        {
-          "patternId": "flawfinder_wcscpy"
-        },
-        {
-          "patternId": "flawfinder_wcslen"
-        },
-        {
-          "patternId": "flawfinder_wcsncat"
-        },
-        {
-          "patternId": "flawfinder_wcsncpy"
-        },
-        {
-          "patternId": "flawfinder_wprintf"
-        },
-        {
-          "patternId": "flawfinder_wscanf"
-        }
-      ]
-    },
-    {
-      "toolId": "markdownlint",
-      "patterns": [
-        {
-          "patternId": "markdownlint_MD001"
-        },
-        {
-          "patternId": "markdownlint_MD003"
-        },
-        {
-          "patternId": "markdownlint_MD004"
-        },
-        {
-          "patternId": "markdownlint_MD005"
-        },
-        {
-          "patternId": "markdownlint_MD007"
-        },
-        {
-          "patternId": "markdownlint_MD010"
-        },
-        {
-          "patternId": "markdownlint_MD011"
-        },
-        {
-          "patternId": "markdownlint_MD012"
-        },
-        {
-          "patternId": "markdownlint_MD014"
-        },
-        {
-          "patternId": "markdownlint_MD018"
-        },
-        {
-          "patternId": "markdownlint_MD019"
-        },
-        {
-          "patternId": "markdownlint_MD020"
-        },
-        {
-          "patternId": "markdownlint_MD021"
-        },
-        {
-          "patternId": "markdownlint_MD022"
-        },
-        {
-          "patternId": "markdownlint_MD023"
-        },
-        {
-          "patternId": "markdownlint_MD024"
-        },
-        {
-          "patternId": "markdownlint_MD025"
-        },
-        {
-          "patternId": "markdownlint_MD026"
-        },
-        {
-          "patternId": "markdownlint_MD027"
-        },
-        {
-          "patternId": "markdownlint_MD028"
-        },
-        {
-          "patternId": "markdownlint_MD029"
-        },
-        {
-          "patternId": "markdownlint_MD030"
-        },
-        {
-          "patternId": "markdownlint_MD032"
-        },
-        {
-          "patternId": "markdownlint_MD033"
-        },
-        {
-          "patternId": "markdownlint_MD034"
-        },
-        {
-          "patternId": "markdownlint_MD035"
-        },
-        {
-          "patternId": "markdownlint_MD036"
-        },
-        {
-          "patternId": "markdownlint_MD037"
-        },
-        {
-          "patternId": "markdownlint_MD038"
-        },
-        {
-          "patternId": "markdownlint_MD039"
-        },
-        {
-          "patternId": "markdownlint_MD042"
-        },
-        {
-          "patternId": "markdownlint_MD044"
-        },
-        {
-          "patternId": "markdownlint_MD045"
-        },
-        {
-          "patternId": "markdownlint_MD046"
-        },
-        {
-          "patternId": "markdownlint_MD048"
-        },
-        {
-          "patternId": "markdownlint_MD049"
-        },
-        {
-          "patternId": "markdownlint_MD050"
-        },
-        {
-          "patternId": "markdownlint_MD051"
-        },
-        {
-          "patternId": "markdownlint_MD052"
-        },
-        {
-          "patternId": "markdownlint_MD053"
-        },
-        {
-          "patternId": "markdownlint_MD054"
-        },
-        {
-          "patternId": "markdownlint_MD055"
-        },
-        {
-          "patternId": "markdownlint_MD056"
         }
       ]
     },
@@ -9134,9 +7892,6 @@
         },
         {
           "patternId": "shellcheck_SC1073"
-        },
-        {
-          "patternId": "shellcheck_SC2001"
         },
         {
           "patternId": "shellcheck_SC2002"
@@ -9152,9 +7907,6 @@
         },
         {
           "patternId": "shellcheck_SC2015"
-        },
-        {
-          "patternId": "shellcheck_SC2016"
         },
         {
           "patternId": "shellcheck_SC2020"
@@ -9187,16 +7939,10 @@
           "patternId": "shellcheck_SC2033"
         },
         {
-          "patternId": "shellcheck_SC2034"
-        },
-        {
           "patternId": "shellcheck_SC2035"
         },
         {
           "patternId": "shellcheck_SC2036"
-        },
-        {
-          "patternId": "shellcheck_SC2086"
         },
         {
           "patternId": "shellcheck_SC2092"

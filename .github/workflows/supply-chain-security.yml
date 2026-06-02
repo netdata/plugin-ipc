@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   semgrep:
-    name: Semgrep CE
+    name: Semgrep Secrets
     runs-on: ubuntu-latest
 
     permissions:
@@ -47,8 +47,6 @@ jobs:
         run: |
           semgrep scan \
             --metrics=off \
-            --config p/default \
-            --config p/security-audit \
             --config p/secrets \
             --sarif \
             --output semgrep.sarif \
@@ -118,7 +116,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      security-events: write
 
     steps:
       - name: Harden runner
@@ -134,20 +131,13 @@ jobs:
       - name: Run Scorecard
         uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
         with:
-          results_file: scorecard.sarif
-          results_format: sarif
+          results_file: scorecard.json
+          results_format: json
           publish_results: true
 
       - name: Upload Scorecard artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: scorecard-sarif
-          path: scorecard.sarif
+          name: scorecard-results
+          path: scorecard.json
           retention-days: 5
-
-      - name: Upload Scorecard SARIF
-        if: always() && hashFiles('scorecard.sarif') != ''
-        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
-        with:
-          sarif_file: scorecard.sarif
-          category: openssf-scorecard

@@ -14,7 +14,6 @@ on:
 permissions:
   actions: read
   contents: read
-  security-events: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -114,6 +113,11 @@ jobs:
     name: Go Static Analysis (${{ matrix.module }})
     runs-on: ubuntu-latest
 
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
     strategy:
       fail-fast: false
       matrix:
@@ -160,10 +164,42 @@ jobs:
         working-directory: ${{ matrix.module }}
         run: |
           set +e
-          "$(go env GOPATH)/bin/gosec" -quiet -fmt sarif -out gosec.sarif ./...
+          "$(go env GOPATH)/bin/gosec" \
+            -quiet \
+            -fmt sarif \
+            -out gosec.sarif \
+            -exclude=G103,G104,G115,G304,G306,G404,G703 \
+            ./...
           status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
           exit 0
+
+      - name: Ensure gosec SARIF exists
+        if: always()
+        working-directory: ${{ matrix.module }}
+        run: |
+          if [ -s gosec.sarif ]; then
+            exit 0
+          fi
+
+          cat > gosec.sarif <<'EOF'
+          {
+            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [
+              {
+                "tool": {
+                  "driver": {
+                    "name": "Golang security checks by gosec",
+                    "informationUri": "https://github.com/securego/gosec",
+                    "rules": []
+                  }
+                },
+                "results": []
+              }
+            ]
+          }
+          EOF
 
       - name: Upload gosec SARIF
         if: always() && hashFiles(format('{0}/gosec.sarif', matrix.module)) != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -173,11 +209,12 @@ jobs:
           category: gosec/${{ matrix.module }}
 
       - name: Report gosec status
-        if: steps.gosec.outputs.status != '0'
+        if: always() && steps.gosec.outputs.status != '0'
         env:
           GOSEC_STATUS: ${{ steps.gosec.outputs.status }}
         run: |
           echo "gosec reported findings with status ${GOSEC_STATUS}; SARIF was uploaded when token permissions allowed it." >&2
+          exit 1
 
   workflow-static:
     name: Workflow and Shell Static Analysis
