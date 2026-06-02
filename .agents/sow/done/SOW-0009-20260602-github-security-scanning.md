@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: GitHub scanner automation is complete; the first pushed Supply Chain Security regression was repaired and validated locally.
+Sub-state: GitHub scanner automation is complete; Supply Chain Security and CodeQL first-run regressions were repaired and validated locally.
 
 ## Requirements
 
@@ -330,24 +330,34 @@ What broke:
 - First pushed GitHub run `26812274331` failed in `.github/workflows/supply-chain-security.yml`.
 - OSV-Scanner job failed during tool installation because `github.com/google/osv-scanner/v2@v2.3.8` requires Go `>=1.26.2`, while the workflow installed Go `1.25.10` from `src/go/go.mod`.
 - OpenSSF Scorecard job failed while publishing results because Scorecard rejects workflows with global `security-events: write`; the workflow had that permission at top level.
+- First pushed GitHub run `26812274378` failed in `.github/workflows/codeql.yml`.
+- Rust CodeQL failed because Rust does not support manual build mode.
+- C/C++ CodeQL failed because the workflow built every CMake target and hit an existing GCC preprocessor issue in `tests/fixtures/c/test_stress.c:840`.
 
 Evidence:
 
 - `gh run view 26812274331 --repo netdata/plugin-ipc --json jobs` showed `OSV-Scanner` and `OpenSSF Scorecard` failed while `Semgrep CE` succeeded.
 - `gh run view 26812274331 --repo netdata/plugin-ipc --log-failed` showed `requires go >= 1.26.2 (running go 1.25.10; GOTOOLCHAIN=local)`.
 - The same log showed Scorecard publish failed with `global perm is set to write: permission for security-events is set to write`.
+- `gh run view 26812274378 --repo netdata/plugin-ipc --json jobs` showed `Analyze Rust` and `Analyze C/C++` failed while `Analyze Go` succeeded.
+- The CodeQL Rust log showed `Rust does not support the manual build mode. Please try using one of the following build modes instead: none`.
+- The CodeQL C/C++ log showed `tests/fixtures/c/test_stress.c:840:46: error: missing binary operator before token "("`.
 
 Why previous validation missed it:
 
 - Local OSV ran under the workstation Go toolchain, which is newer than the SDK module `go.mod` version used by `actions/setup-go`.
 - Local `actionlint` verifies workflow syntax but cannot validate Scorecard's runtime publishing restrictions.
+- Local CodeQL was not run; `actionlint` cannot validate per-language CodeQL build-mode restrictions.
+- Local full CMake used the workstation compiler environment, while the GitHub C/C++ CodeQL job used the hosted runner compiler path and built all tests.
 
 Repair plan:
 
 1. Use Go `1.26.x` only for the OSV-Scanner tool job.
 2. Keep top-level workflow permissions read-only and move `security-events: write` to SARIF-uploading jobs.
-3. Re-run YAML parse, `actionlint`, SARIF command probes, SOW audit, and `git diff --check`.
-4. Commit and push the repair, then inspect the new GitHub run.
+3. Use CodeQL `build-mode: none` for Rust.
+4. Limit C/C++ CodeQL manual build to the C library targets.
+5. Re-run YAML parse, `actionlint`, SARIF command probes, SOW audit, and `git diff --check`.
+6. Commit and push the repair, then inspect the new GitHub run.
 
 Validation:
 
@@ -356,8 +366,9 @@ Validation:
 - `/home/costa/.local/bin/osv-scanner scan --recursive --format sarif --output-file /tmp/plugin-ipc-osv.sarif .` passed and produced SARIF `2.1.0`.
 - `bash .agents/sow/audit.sh` passed with this SOW reopened in `current/`.
 - `git diff --check` passed.
+- CodeQL repair validation passed: YAML parsing, `actionlint`, local CMake build of `netipc_protocol`, `netipc_uds`, `netipc_shm`, and `netipc_service`, SOW audit, and `git diff --check`.
 
 Artifact updates:
 
-- Updated `.github/workflows/supply-chain-security.yml`.
+- Updated `.github/workflows/supply-chain-security.yml` and `.github/workflows/codeql.yml`.
 - No specs, public docs, or project skills changed because the repair is CI configuration only.
