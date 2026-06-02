@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: GitHub scanner automation is complete; Supply Chain Security, CodeQL, and Static Analysis first-run regressions were repaired and validated locally.
+Sub-state: GitHub scanner automation is complete; scanner and runtime first-run regressions were repaired and validated locally.
 
 ## Requirements
 
@@ -334,6 +334,7 @@ What broke:
 - Rust CodeQL failed because Rust does not support manual build mode.
 - C/C++ CodeQL failed because the workflow built every CMake target and hit an existing GCC preprocessor issue in `tests/fixtures/c/test_stress.c:840`.
 - First pushed final Static Analysis run `26812569114` failed in the C Static Analysis job because it also built every CMake target before running library-scoped analyzers.
+- First pushed Runtime Safety run `26812274325` remained in progress with the Valgrind job running long after ASAN/UBSAN, TSAN, and Go race had completed.
 
 Evidence:
 
@@ -344,6 +345,8 @@ Evidence:
 - The CodeQL Rust log showed `Rust does not support the manual build mode. Please try using one of the following build modes instead: none`.
 - The CodeQL C/C++ log showed `tests/fixtures/c/test_stress.c:840:46: error: missing binary operator before token "("`.
 - `gh run view 26812569114 --repo netdata/plugin-ipc --json jobs` showed `C Static Analysis` failed at `Build C targets`, while Go and workflow/shell jobs completed successfully.
+- `gh run view 26812274325 --repo netdata/plugin-ipc --json jobs` showed ASAN/UBSAN, TSAN, and Go race succeeded, while Valgrind stayed `in_progress`.
+- The Runtime Safety run metadata showed `updatedAt` remained near job start, and GitHub would not expose in-progress Valgrind logs.
 
 Why previous validation missed it:
 
@@ -352,6 +355,7 @@ Why previous validation missed it:
 - Local CodeQL was not run; `actionlint` cannot validate per-language CodeQL build-mode restrictions.
 - Local full CMake used the workstation compiler environment, while the GitHub C/C++ CodeQL job used the hosted runner compiler path and built all tests.
 - The Static Analysis C job had the same over-broad build step as the original CodeQL C/C++ job.
+- The Runtime Safety workflow had no job timeout and ran the expensive Valgrind path on push and pull request events.
 
 Repair plan:
 
@@ -360,8 +364,9 @@ Repair plan:
 3. Use CodeQL `build-mode: none` for Rust.
 4. Limit C/C++ CodeQL manual build to the C library targets.
 5. Limit Static Analysis C build to the C library targets before running library-scoped analyzers.
-6. Re-run YAML parse, `actionlint`, C library target build, SOW audit, and `git diff --check`.
-7. Commit and push the repair, then inspect the new GitHub run.
+6. Keep Valgrind scheduled/manual with a bounded timeout; keep ASAN/UBSAN, TSAN, and Go race on push and pull request.
+7. Re-run YAML parse, `actionlint`, C library target build, SOW audit, and `git diff --check`.
+8. Commit and push the repair, then inspect the new GitHub run.
 
 Validation:
 
@@ -372,8 +377,9 @@ Validation:
 - `git diff --check` passed.
 - CodeQL repair validation passed: YAML parsing, `actionlint`, local CMake build of `netipc_protocol`, `netipc_uds`, `netipc_shm`, and `netipc_service`, SOW audit, and `git diff --check`.
 - Static Analysis C repair validation passed: YAML parsing, `actionlint`, local CMake build of `netipc_protocol`, `netipc_uds`, `netipc_shm`, and `netipc_service`, scoped `clang-tidy`, `cppcheck`, `flawfinder`, SOW audit, and `git diff --check`.
+- Runtime Safety Valgrind gating validation passed: YAML parsing, `actionlint`, SOW audit, and `git diff --check`.
 
 Artifact updates:
 
-- Updated `.github/workflows/supply-chain-security.yml`, `.github/workflows/codeql.yml`, and `.github/workflows/static-analysis.yml`.
+- Updated `.github/workflows/supply-chain-security.yml`, `.github/workflows/codeql.yml`, `.github/workflows/static-analysis.yml`, and `.github/workflows/runtime-safety.yml`.
 - No specs, public docs, or project skills changed because the repair is CI configuration only.
