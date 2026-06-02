@@ -227,8 +227,12 @@ _Static_assert(offsetof(nipc_apps_lookup_item_wire_t, cgroup_name_offset) == 48,
 _Static_assert(offsetof(nipc_apps_lookup_item_wire_t, cgroup_name_length) == 52, "");
 _Static_assert(offsetof(nipc_apps_lookup_item_wire_t, label_count) == 56, "");
 _Static_assert(offsetof(nipc_apps_lookup_item_wire_t, reserved1) == 58, "");
-_Static_assert(sizeof(nipc_apps_lookup_item_wire_t) == 64u,
-               "apps lookup C struct includes 4 bytes of trailing padding");
+_Static_assert(offsetof(nipc_apps_lookup_item_wire_t, reserved1) +
+                   sizeof(((nipc_apps_lookup_item_wire_t *)0)->reserved1) ==
+               NIPC_APPS_LOOKUP_ITEM_HDR_SIZE,
+               "apps lookup fixed wire header must end at byte 60");
+_Static_assert(sizeof(nipc_apps_lookup_item_wire_t) >= NIPC_APPS_LOOKUP_ITEM_HDR_SIZE,
+               "apps lookup C struct must cover the fixed wire header");
 
 /* Cgroups request (4 bytes) */
 _Static_assert(sizeof(nipc_cgroups_req_t) == 4,
