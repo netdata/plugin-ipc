@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: GitHub scanner automation, local scanner tools, repository secret scanning settings, and validation are complete.
+Sub-state: GitHub scanner automation is complete; the first pushed Supply Chain Security regression was repaired and validated locally.
 
 ## Requirements
 
@@ -322,3 +322,42 @@ Tracked by `.agents/sow/pending/SOW-0010-20260602-static-analysis-finding-cleanu
 None yet.
 
 Append regression entries here only after this SOW was completed or closed and later testing or use found broken behavior. Use a dated `## Regression - YYYY-MM-DD` heading at the end of the file. Never prepend regression content above the original SOW narrative.
+
+## Regression - 2026-06-02
+
+What broke:
+
+- First pushed GitHub run `26812274331` failed in `.github/workflows/supply-chain-security.yml`.
+- OSV-Scanner job failed during tool installation because `github.com/google/osv-scanner/v2@v2.3.8` requires Go `>=1.26.2`, while the workflow installed Go `1.25.10` from `src/go/go.mod`.
+- OpenSSF Scorecard job failed while publishing results because Scorecard rejects workflows with global `security-events: write`; the workflow had that permission at top level.
+
+Evidence:
+
+- `gh run view 26812274331 --repo netdata/plugin-ipc --json jobs` showed `OSV-Scanner` and `OpenSSF Scorecard` failed while `Semgrep CE` succeeded.
+- `gh run view 26812274331 --repo netdata/plugin-ipc --log-failed` showed `requires go >= 1.26.2 (running go 1.25.10; GOTOOLCHAIN=local)`.
+- The same log showed Scorecard publish failed with `global perm is set to write: permission for security-events is set to write`.
+
+Why previous validation missed it:
+
+- Local OSV ran under the workstation Go toolchain, which is newer than the SDK module `go.mod` version used by `actions/setup-go`.
+- Local `actionlint` verifies workflow syntax but cannot validate Scorecard's runtime publishing restrictions.
+
+Repair plan:
+
+1. Use Go `1.26.x` only for the OSV-Scanner tool job.
+2. Keep top-level workflow permissions read-only and move `security-events: write` to SARIF-uploading jobs.
+3. Re-run YAML parse, `actionlint`, SARIF command probes, SOW audit, and `git diff --check`.
+4. Commit and push the repair, then inspect the new GitHub run.
+
+Validation:
+
+- `ruby -e 'require "yaml"; Dir[".github/**/*.yml"].sort.each { |f| YAML.load_file(f) }; YAML.load_file(".clang-tidy")'` passed after the repair.
+- `/home/costa/.local/bin/actionlint` passed after the repair.
+- `/home/costa/.local/bin/osv-scanner scan --recursive --format sarif --output-file /tmp/plugin-ipc-osv.sarif .` passed and produced SARIF `2.1.0`.
+- `bash .agents/sow/audit.sh` passed with this SOW reopened in `current/`.
+- `git diff --check` passed.
+
+Artifact updates:
+
+- Updated `.github/workflows/supply-chain-security.yml`.
+- No specs, public docs, or project skills changed because the repair is CI configuration only.
