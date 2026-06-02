@@ -1,0 +1,17 @@
+name: NetIPC CodeQL
+
+disable-default-queries: false
+
+queries:
+  - uses: security-extended
+  - uses: security-and-quality
+
+paths:
+  - src
+  - tests
+  - bench
+
+paths-ignore:
+  - build
+  - build-*
+  - src/crates/netipc/target

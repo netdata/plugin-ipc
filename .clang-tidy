@@ -1,0 +1,10 @@
+Checks: >
+  -*,
+  clang-analyzer-*,
+  bugprone-*,
+  cert-*,
+  concurrency-*,
+  performance-*,
+  portability-*
+HeaderFilterRegex: '^(src/libnetdata/netipc|tests)/'
+FormatStyle: none

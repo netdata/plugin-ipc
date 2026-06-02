@@ -1,0 +1,208 @@
+name: Static Analysis
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "29 03 * * 2"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  c-static:
+    name: C Static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install C analysis tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-tidy cppcheck flawfinder
+
+      - name: Configure compile database
+        run: cmake -S . -B build-static -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Build C targets
+        run: cmake --build build-static --parallel
+
+      - name: Run clang-tidy on C library sources
+        run: |
+          mapfile -t c_files < <(
+            find src/libnetdata/netipc/src/protocol src/libnetdata/netipc/src/transport/posix -type f -name '*.c' | sort
+            printf '%s\n' src/libnetdata/netipc/src/service/netipc_service.c
+          )
+          if [ "${#c_files[@]}" -eq 0 ]; then
+            echo "No C source files found" >&2
+            exit 1
+          fi
+          clang-tidy -p build-static "${c_files[@]}"
+
+      - name: Run cppcheck
+        run: |
+          cppcheck \
+            --enable=warning,performance,portability \
+            --error-exitcode=1 \
+            --force \
+            --inline-suppr \
+            --std=c11 \
+            --suppress=missingIncludeSystem \
+            --suppress=unmatchedSuppression \
+            -Isrc/libnetdata/netipc/include \
+            src/libnetdata/netipc
+
+      - name: Run flawfinder
+        run: flawfinder --minlevel=5 --error-level=5 src/libnetdata/netipc tests
+
+  rust-static:
+    name: Rust Static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust components
+        run: rustup component add rustfmt clippy
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src/crates/netipc/Cargo.toml --all --check
+
+      - name: Build Rust test targets
+        run: cargo test --manifest-path src/crates/netipc/Cargo.toml --all-targets --all-features --no-run
+
+      - name: Run Clippy correctness gates
+        run: |
+          cargo clippy \
+            --manifest-path src/crates/netipc/Cargo.toml \
+            --all-targets \
+            --all-features \
+            -- \
+            -D clippy::correctness \
+            -D clippy::suspicious
+
+      - name: Install Rust advisory tools
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      - name: Audit Rust dependencies
+        working-directory: src/crates/netipc
+        run: |
+          cargo audit
+          cargo deny check advisories bans sources
+
+  go-static:
+    name: Go Static Analysis (${{ matrix.module }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - src/go
+          - tests/fixtures/go
+          - bench/drivers/go
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache: false
+
+      - name: Install Go analysis tools
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run Go tests and vet
+        working-directory: ${{ matrix.module }}
+        run: |
+          go test ./...
+          go vet ./...
+
+      - name: Run Staticcheck
+        continue-on-error: true
+        working-directory: ${{ matrix.module }}
+        run: '"$(go env GOPATH)/bin/staticcheck" ./...'
+
+      - name: Run Govulncheck
+        working-directory: ${{ matrix.module }}
+        run: '"$(go env GOPATH)/bin/govulncheck" ./...'
+
+      - name: Run gosec
+        id: gosec
+        working-directory: ${{ matrix.module }}
+        run: |
+          set +e
+          "$(go env GOPATH)/bin/gosec" -quiet -fmt sarif -out gosec.sarif ./...
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload gosec SARIF
+        if: always() && hashFiles(format('{0}/gosec.sarif', matrix.module)) != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+        with:
+          sarif_file: ${{ matrix.module }}/gosec.sarif
+          category: gosec/${{ matrix.module }}
+
+      - name: Report gosec status
+        if: steps.gosec.outputs.status != '0'
+        env:
+          GOSEC_STATUS: ${{ steps.gosec.outputs.status }}
+        run: |
+          echo "gosec reported findings with status ${GOSEC_STATUS}; SARIF was uploaded when token permissions allowed it." >&2
+
+  workflow-static:
+    name: Workflow and Shell Static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: src/go/go.mod
+          cache: false
+
+      - name: Install workflow and shell analyzers
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@latest
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Run actionlint
+        run: '"$(go env GOPATH)/bin/actionlint"'
+
+      - name: Run ShellCheck error gate
+        run: shellcheck --severity=error diff-netdata-vendor.sh vendor-to-netdata.sh tests/*.sh .agents/sow/audit.sh
