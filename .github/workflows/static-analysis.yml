@@ -40,7 +40,7 @@ jobs:
         run: cmake -S . -B build-static -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: Build C targets
-        run: cmake --build build-static --parallel
+        run: cmake --build build-static --parallel --target netipc_protocol netipc_uds netipc_shm netipc_service
 
       - name: Run clang-tidy on C library sources
         run: |

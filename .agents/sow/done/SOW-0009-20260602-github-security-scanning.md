@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: GitHub scanner automation is complete; Supply Chain Security and CodeQL first-run regressions were repaired and validated locally.
+Sub-state: GitHub scanner automation is complete; Supply Chain Security, CodeQL, and Static Analysis first-run regressions were repaired and validated locally.
 
 ## Requirements
 
@@ -333,6 +333,7 @@ What broke:
 - First pushed GitHub run `26812274378` failed in `.github/workflows/codeql.yml`.
 - Rust CodeQL failed because Rust does not support manual build mode.
 - C/C++ CodeQL failed because the workflow built every CMake target and hit an existing GCC preprocessor issue in `tests/fixtures/c/test_stress.c:840`.
+- First pushed final Static Analysis run `26812569114` failed in the C Static Analysis job because it also built every CMake target before running library-scoped analyzers.
 
 Evidence:
 
@@ -342,6 +343,7 @@ Evidence:
 - `gh run view 26812274378 --repo netdata/plugin-ipc --json jobs` showed `Analyze Rust` and `Analyze C/C++` failed while `Analyze Go` succeeded.
 - The CodeQL Rust log showed `Rust does not support the manual build mode. Please try using one of the following build modes instead: none`.
 - The CodeQL C/C++ log showed `tests/fixtures/c/test_stress.c:840:46: error: missing binary operator before token "("`.
+- `gh run view 26812569114 --repo netdata/plugin-ipc --json jobs` showed `C Static Analysis` failed at `Build C targets`, while Go and workflow/shell jobs completed successfully.
 
 Why previous validation missed it:
 
@@ -349,6 +351,7 @@ Why previous validation missed it:
 - Local `actionlint` verifies workflow syntax but cannot validate Scorecard's runtime publishing restrictions.
 - Local CodeQL was not run; `actionlint` cannot validate per-language CodeQL build-mode restrictions.
 - Local full CMake used the workstation compiler environment, while the GitHub C/C++ CodeQL job used the hosted runner compiler path and built all tests.
+- The Static Analysis C job had the same over-broad build step as the original CodeQL C/C++ job.
 
 Repair plan:
 
@@ -356,8 +359,9 @@ Repair plan:
 2. Keep top-level workflow permissions read-only and move `security-events: write` to SARIF-uploading jobs.
 3. Use CodeQL `build-mode: none` for Rust.
 4. Limit C/C++ CodeQL manual build to the C library targets.
-5. Re-run YAML parse, `actionlint`, SARIF command probes, SOW audit, and `git diff --check`.
-6. Commit and push the repair, then inspect the new GitHub run.
+5. Limit Static Analysis C build to the C library targets before running library-scoped analyzers.
+6. Re-run YAML parse, `actionlint`, C library target build, SOW audit, and `git diff --check`.
+7. Commit and push the repair, then inspect the new GitHub run.
 
 Validation:
 
@@ -367,8 +371,9 @@ Validation:
 - `bash .agents/sow/audit.sh` passed with this SOW reopened in `current/`.
 - `git diff --check` passed.
 - CodeQL repair validation passed: YAML parsing, `actionlint`, local CMake build of `netipc_protocol`, `netipc_uds`, `netipc_shm`, and `netipc_service`, SOW audit, and `git diff --check`.
+- Static Analysis C repair validation passed: YAML parsing, `actionlint`, local CMake build of `netipc_protocol`, `netipc_uds`, `netipc_shm`, and `netipc_service`, scoped `clang-tidy`, `cppcheck`, `flawfinder`, SOW audit, and `git diff --check`.
 
 Artifact updates:
 
-- Updated `.github/workflows/supply-chain-security.yml` and `.github/workflows/codeql.yml`.
+- Updated `.github/workflows/supply-chain-security.yml`, `.github/workflows/codeql.yml`, and `.github/workflows/static-analysis.yml`.
 - No specs, public docs, or project skills changed because the repair is CI configuration only.
