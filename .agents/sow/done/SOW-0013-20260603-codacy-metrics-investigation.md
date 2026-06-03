@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: LCOV `DA:` checksum regression repaired locally; remote workflow validation is the post-push verification path.
+Sub-state: LCOV `DA:` checksum regression repaired; remote workflow and Codacy dashboard validation passed.
 
 ## Requirements
 
@@ -524,9 +524,9 @@ Validation:
   module-prefix paths.
 - Final C LCOV path sample remains repository-relative:
   `SF:src/libnetdata/netipc/src/protocol/netipc_protocol.c`.
-- GitHub Actions `Codacy Coverage` will run again after this repair is pushed.
-  If the remote reporter rejects another report format issue, this SOW will be
-  reopened again as a regression with the new evidence.
+- GitHub Actions `Codacy Coverage` run `26879604593` still failed C upload
+  after this repair because optional `DA:` checksum fields remained. The
+  follow-up parser regression is recorded below.
 
 Artifact updates:
 
@@ -591,9 +591,21 @@ Validation:
   the LCOV parser and generated the Codacy coverage JSON payload. The test then
   failed at upload because it intentionally used a dummy token; that is outside
   the parser path being validated locally.
-- GitHub Actions `Codacy Coverage` will run again after this repair is pushed.
-  If the remote reporter rejects another report format issue, this SOW will be
-  reopened again as a regression with the new evidence.
+- GitHub Actions `Codacy Coverage` run `26880221479` passed after this repair
+  was pushed:
+  - generated coverage reports.
+  - uploaded the coverage artifact.
+  - verified `CODACY_API_TOKEN`.
+  - uploaded C coverage to Codacy.
+  - uploaded Rust coverage to Codacy.
+  - uploaded Go coverage to Codacy.
+  - finalized the Codacy coverage upload.
+- Codacy Cloud repository query for commit
+  `9d48c7ec7ce5efc07111d8f71d3980befd7e519a` reported:
+  - coverage: 88%.
+  - issues: 0.
+  - complex files: 43%.
+  - duplicated files: 46%.
 
 Artifact updates:
 
