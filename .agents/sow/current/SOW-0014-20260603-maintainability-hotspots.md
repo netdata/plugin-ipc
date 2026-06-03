@@ -4,7 +4,7 @@
 
 Status: in-progress
 
-Sub-state: implementing the approved first remediation target: Go raw L3 cache duplication.
+Sub-state: reviewing and applying only useful low-risk typed service-facade duplication cleanups before moving to complexity hotspots.
 
 ## Requirements
 
@@ -146,7 +146,7 @@ Open-source reference evidence:
 
 Open decisions:
 
-- After the Go raw L3 cache target is validated, decide whether to continue with larger typed service-facade duplication or stop.
+- After low-risk typed service-facade cleanup is validated, switch to complexity hotspots.
 
 ## Implications And Decisions
 
@@ -327,6 +327,19 @@ Refined recommendation:
 - Preserved public `NewCache()` signatures and platform-specific transport configuration types.
 - Kept platform-specific client construction in the build-tagged files; the shared helper accepts the already constructed raw `Client`.
 - The shared cache logic uses the checked `uint32` conversion path that was already present in the POSIX implementation.
+- Committed and pushed the raw-cache cleanup as `e762aef` with message `Refactor Go raw cache implementation`.
+- GitHub reported the direct push bypassed the pull-request rule for `main`, as requested by the user.
+- Reviewed typed service-facade duplication for obvious low-risk and useful cleanup:
+  - Useful/low-risk: same-package Go POSIX/Windows wrappers in `src/go/pkg/netipc/service/cgroups/`, `src/go/pkg/netipc/service/apps_lookup/`, and `src/go/pkg/netipc/service/cgroups_lookup/`.
+  - Reason: common wrapper code can move to untagged files inside the same package, while platform transport config conversion remains in build-tagged files.
+  - Rejected for now: cross-service Go abstraction between apps lookup and cgroups lookup, because it would require generic/internal indirection across public service packages for modest readability gain.
+  - Rejected for now: Rust apps/cgroups lookup facade abstraction, because it would likely require traits/generics/macros around service-specific public types and would make the facade less direct.
+- Applied the low-risk Go typed-facade cleanup:
+  - `src/go/pkg/netipc/service/cgroups/client_common.go`
+  - `src/go/pkg/netipc/service/cgroups/cache_common.go`
+  - `src/go/pkg/netipc/service/apps_lookup/client_common.go`
+  - `src/go/pkg/netipc/service/cgroups_lookup/client_common.go`
+- Left build-tagged Go files responsible only for POSIX/Windows transport config conversion and platform-specific `NewCache()` construction where needed.
 
 ## Validation
 
@@ -371,6 +384,27 @@ Implementation validation:
   - total: 0 issues, 0 errors.
 - `bash .agents/sow/audit.sh` passed and reported SOW initialization complete and clean.
 - `git diff --check` passed.
+- Low-risk typed-facade validation:
+  - `gofmt -w` passed for all touched Go facade files.
+  - `go test ./pkg/netipc/service/apps_lookup ./pkg/netipc/service/cgroups_lookup ./pkg/netipc/service/cgroups` passed in `src/go`.
+  - `GOOS=windows GOARCH=amd64 go test -c ./pkg/netipc/service/apps_lookup -o /tmp/plugin-ipc-apps-lookup-windows.test.exe` passed.
+  - `GOOS=windows GOARCH=amd64 go test -c ./pkg/netipc/service/cgroups_lookup -o /tmp/plugin-ipc-cgroups-lookup-windows.test.exe` passed.
+  - `GOOS=windows GOARCH=amd64 go test -c ./pkg/netipc/service/cgroups -o /tmp/plugin-ipc-cgroups-windows-b.test.exe` passed.
+  - `go test ./...` passed in `src/go`.
+  - JSCPD production-source after the Go typed-facade cleanup:
+    - previous state after raw-cache cleanup: 40 exact clones, 905 duplicated lines, 11.38%.
+    - after same-package Go typed-facade cleanup: 36 exact clones, 679 duplicated lines, 8.76%.
+  - Remaining service-facade clones are cross-service config/type shapes and small constructor similarities; these were rejected for now because removing them would require broader public-package abstraction.
+  - `codacy-analysis analyze --output-format json` passed:
+    - Checkov: 0 issues.
+    - Opengrep/Semgrep: 0 issues.
+    - Trivy: 0 issues.
+    - cppcheck: 0 issues.
+    - ShellCheck: 0 issues.
+    - Spectral: 0 issues.
+    - total: 0 issues, 0 errors.
+  - `bash .agents/sow/audit.sh` passed and reported SOW initialization complete and clean.
+  - `git diff --check` passed.
 
 Sensitive data gate:
 
