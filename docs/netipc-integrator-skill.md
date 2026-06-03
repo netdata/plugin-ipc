@@ -273,6 +273,9 @@ Netdata-specific integration rules:
 - use `os_run_dir(true)` on the provider side
 - use `os_run_dir(false)` on the consumer side
 - treat these as a matched pair
+- keep the provider runtime directory service-owned and not group- or
+  world-writable; POSIX stale cleanup will not unlink old socket/SHM paths from
+  unsafe shared directories
 - if provider and consumer do not agree on auth token or run dir, the client
   will stay in `AUTH_FAILED` or `NOT_FOUND`
 

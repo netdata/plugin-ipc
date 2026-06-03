@@ -31,10 +31,10 @@ if [[ ${#TARGETS[@]} -eq 0 ]]; then
 fi
 
 run() {
-    printf >&2 "${GRAY}$(pwd) >${NC} "
-    printf >&2 "${YELLOW}"
+    printf >&2 "%b%s >%b " "$GRAY" "$(pwd)" "$NC"
+    printf >&2 "%b" "$YELLOW"
     printf >&2 "%q " "$@"
-    printf >&2 "${NC}\n"
+    printf >&2 "%b\n" "$NC"
     if "$@"; then
         return 0
     else
@@ -164,17 +164,17 @@ for target in "${TARGETS[@]}"; do
     run "$APPVERIF_BIN" -enable "${VERIFIER_LAYER_ARGS[@]}" -for "$target"
     run env MSYS2_ARG_CONV_EXCL='*' "$GFLAGS_BIN" /p /enable "$target" /full
 
-    printf >&2 "${GRAY}$(pwd) >${NC} "
-    printf >&2 "${YELLOW}"
+    printf >&2 "%b%s >%b " "$GRAY" "$(pwd)" "$NC"
+    printf >&2 "%b" "$YELLOW"
     printf >&2 "%q %q %q " timeout "$TIMEOUT_SECONDS" "$exe_path"
-    printf >&2 "${NC}\n"
+    printf >&2 "%b\n" "$NC"
     set +e
     timeout "$TIMEOUT_SECONDS" "$exe_path" >"$stdout_log" 2>"$stderr_log"
     exit_code=$?
     set -e
 
     verifier_result=0
-    verifier_output=$(export_log "$target" "$xml_out") || verifier_result=$?
+    export_log "$target" "$xml_out" >/dev/null || verifier_result=$?
 
     if [[ $verifier_result -eq 2 ]]; then
         verifier_clean=true
@@ -193,7 +193,9 @@ for target in "${TARGETS[@]}"; do
 
     if ! $verifier_clean; then
         echo -e "${RED}Verifier findings recorded for:${NC} $target"
-        [[ -f "$xml_out" ]] && sed -n '1,120p' "$xml_out" || true
+        if [[ -f "$xml_out" ]]; then
+            sed -n '1,120p' "$xml_out" || true
+        fi
         all_pass=false
     else
         echo -e "${GREEN}No verifier findings for:${NC} $target"

@@ -1,0 +1,134 @@
+name: Codacy Local Analysis
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .codacy/**
+      - .github/workflows/codacy-analysis.yml
+      - AGENTS.md
+      - docs/**
+      - src/**
+      - tests/**
+      - bench/**
+      - "*.md"
+      - "*.sh"
+      - CMakeLists.txt
+      - Makefile
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .codacy/**
+      - .github/workflows/codacy-analysis.yml
+      - AGENTS.md
+      - docs/**
+      - src/**
+      - tests/**
+      - bench/**
+      - "*.md"
+      - "*.sh"
+      - CMakeLists.txt
+      - Makefile
+  schedule:
+    - cron: "37 04 * * 3"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codacy-local:
+    name: Codacy Local Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: "26"
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Install Codacy Analysis CLI
+        run: npm install -g @codacy/analysis-cli@0.8.0
+
+      - name: Install Opengrep
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL \
+            https://github.com/opengrep/opengrep/releases/download/v1.22.0/opengrep_manylinux_x86 \
+            -o "$HOME/.local/bin/opengrep"
+          echo "45bcd58440e397ed52c50e953ccf5948909ea77087c9186fc7d277216f62e319  $HOME/.local/bin/opengrep" | sha256sum -c -
+          chmod +x "$HOME/.local/bin/opengrep"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/opengrep" --version
+
+      - name: Inspect Codacy tool availability
+        run: |
+          codacy-analysis analyze . \
+            --inspect \
+            --output-format json \
+            --output codacy-inspect.json
+
+      - name: Run Codacy local analysis
+        id: codacy
+        run: |
+          set +e
+          codacy-analysis analyze . \
+            --install-dependencies \
+            --output-format sarif \
+            --output codacy.sarif \
+            --parallel-tools 2 \
+            --tool-timeout 900000
+          status=$?
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          if [ ! -s codacy.sarif ]; then
+            echo "Codacy SARIF output was not created." >&2
+            exit 1
+          fi
+          exit 0
+
+      - name: Upload Codacy SARIF artifact
+        if: always() && hashFiles('codacy.sarif') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codacy-sarif
+          path: codacy.sarif
+          retention-days: 5
+
+      - name: Upload Codacy SARIF to code scanning
+        if: always() && hashFiles('codacy.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+        with:
+          sarif_file: codacy.sarif
+          category: codacy-local
+
+      - name: Report Codacy analysis status
+        if: steps.codacy.outputs.status != '0'
+        env:
+          CODACY_STATUS: ${{ steps.codacy.outputs.status }}
+        run: |
+          echo "Codacy local analysis reported findings or non-fatal tool results with status ${CODACY_STATUS}; SARIF was generated for review." >&2
+          exit 1

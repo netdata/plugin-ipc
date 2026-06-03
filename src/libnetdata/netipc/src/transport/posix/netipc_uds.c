@@ -62,17 +62,42 @@ static int validate_service_name(const char *name)
     return 0;
 }
 
-/* Build socket path into dst, return 0 on success, -1 if too long. */
-static int build_socket_path(char *dst, size_t dst_len,
-                             const char *run_dir, const char *service_name)
+static int build_socket_name(char *dst, size_t dst_len, const char *service_name)
 {
     if (validate_service_name(service_name) < 0)
         return -2; /* invalid service name */
 
-    int n = snprintf(dst, dst_len, "%s/%s.sock", run_dir, service_name);
+    int n = snprintf(dst, dst_len, "%s.sock", service_name);
+    if (n < 0 || (size_t)n >= dst_len)
+        return -1;
+    return 0;
+}
+
+/* Build socket path into dst, return 0 on success, -1 if too long. */
+static int build_socket_path(char *dst, size_t dst_len,
+                             const char *run_dir, const char *service_name)
+{
+    char socket_name[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    int name_rc = build_socket_name(socket_name, sizeof(socket_name), service_name);
+    if (name_rc < 0)
+        return name_rc;
+
+    int n = snprintf(dst, dst_len, "%s/%s", run_dir, socket_name);
     if (n < 0 || (size_t)n >= dst_len)
         return -1; /* path too long */
     return 0;
+}
+
+static bool run_dir_allows_stale_unlink(const char *run_dir)
+{
+    struct stat st;
+    if (stat(run_dir, &st) != 0)
+        return false;
+    if (!S_ISDIR(st.st_mode))
+        return false;
+    if (st.st_uid != geteuid())
+        return false;
+    return (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
 }
 
 /* Get the socket's send buffer size as the packet size. */
@@ -105,11 +130,6 @@ static uint32_t highest_bit(uint32_t mask)
 static inline uint32_t min_u32(uint32_t a, uint32_t b)
 {
     return a < b ? a : b;
-}
-
-static inline uint32_t max_u32(uint32_t a, uint32_t b)
-{
-    return a > b ? a : b;
 }
 
 static inline uint32_t apply_default(uint32_t val, uint32_t def)
@@ -360,11 +380,8 @@ static nipc_uds_error_t server_handshake(int fd,
     if (server_pkt_size == 0)
         server_pkt_size = detect_packet_size(fd);
 
-    /* Server limits with defaults applied */
-    uint32_t s_req_pay  = apply_default(cfg->max_request_payload_bytes, NIPC_MAX_PAYLOAD_DEFAULT);
-    uint32_t s_req_bat  = apply_default(cfg->max_request_batch_items, UDS_DEFAULT_BATCH_ITEMS);
+    /* Server response defaults; request limits are client-proposed by spec. */
     uint32_t s_resp_pay = apply_default(cfg->max_response_payload_bytes, NIPC_MAX_PAYLOAD_DEFAULT);
-    uint32_t s_resp_bat = apply_default(cfg->max_response_batch_items, UDS_DEFAULT_BATCH_ITEMS);
     uint32_t s_profiles = cfg->supported_profiles ? cfg->supported_profiles : NIPC_PROFILE_BASELINE;
     uint32_t s_preferred = cfg->preferred_profiles;
 
@@ -502,23 +519,42 @@ static nipc_uds_error_t server_handshake(int fd,
 /*  Stale endpoint recovery                                            */
 /* ------------------------------------------------------------------ */
 
-static int unlink_stale_socket_path(const char *path)
+static int unlink_stale_socket_path(const char *run_dir,
+                                    const char *socket_name,
+                                    bool allow_stale_unlink)
 {
-    struct stat st;
-    if (lstat(path, &st) != 0)
-        return (errno == ENOENT) ? 0 : -1;
-
-    if (!S_ISSOCK(st.st_mode))
+    if (!allow_stale_unlink)
         return -1;
 
-    if (unlink(path) == 0 || errno == ENOENT)
-        return 0;
+    int dir_fd = open(run_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd < 0)
+        return -1;
 
-    return -1;
+    struct stat st;
+    if (fstatat(dir_fd, socket_name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+        int ret = (errno == ENOENT) ? 0 : -1;
+        close(dir_fd);
+        return ret;
+    }
+
+    if (!S_ISSOCK(st.st_mode)) {
+        close(dir_fd);
+        return -1;
+    }
+
+    int ret = -1;
+    if (unlinkat(dir_fd, socket_name, 0) == 0 || errno == ENOENT)
+        ret = 0;
+
+    close(dir_fd);
+    return ret;
 }
 
 /* Returns: 0 = stale (unlinked), 1 = live server, -1 = doesn't exist */
-static int check_and_recover_stale(const char *path)
+static int check_and_recover_stale(const char *run_dir,
+                                   const char *socket_name,
+                                   const char *path,
+                                   bool allow_stale_unlink)
 {
     /* Try connecting to check if a live server is there */
     int probe = socket(AF_UNIX, SOCK_SEQPACKET, 0);
@@ -539,11 +575,12 @@ static int check_and_recover_stale(const char *path)
         int saved_errno = errno;
         close(probe);
         /* Only ECONNREFUSED proves a stale socket path. Other errors
-         * (including regular files at the path) must not remove anything. */
+         * must not remove anything. */
         if (saved_errno == ENOENT) {
             ret = -1;
         } else if (saved_errno == ECONNREFUSED) {
-            ret = (unlink_stale_socket_path(path) == 0) ? 0 : 1;
+            ret = (unlink_stale_socket_path(run_dir, socket_name,
+                                            allow_stale_unlink) == 0) ? 0 : 1;
         } else {
             /* Can't determine ownership — treat as live to prevent overwriting */
             ret = 1;
@@ -572,8 +609,17 @@ nipc_uds_error_t nipc_uds_listen(const char *run_dir,
     if (path_rc < 0)
         return NIPC_UDS_ERR_PATH_TOO_LONG;
 
+    char socket_name[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    int name_rc = build_socket_name(socket_name, sizeof(socket_name), service_name);
+    if (name_rc == -2)
+        return NIPC_UDS_ERR_BAD_PARAM;
+    if (name_rc < 0)
+        return NIPC_UDS_ERR_PATH_TOO_LONG;
+
     /* Stale recovery */
-    int stale = check_and_recover_stale(path);
+    bool allow_stale_unlink = run_dir_allows_stale_unlink(run_dir);
+    int stale = check_and_recover_stale(run_dir, socket_name, path,
+                                        allow_stale_unlink);
     if (stale == 1)
         return NIPC_UDS_ERR_ADDR_IN_USE;
 

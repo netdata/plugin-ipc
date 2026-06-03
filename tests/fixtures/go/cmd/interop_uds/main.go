@@ -280,7 +280,10 @@ func main() {
 	service := os.Args[3]
 
 	// Ensure run_dir exists
-	os.MkdirAll(runDir, 0700)
+	if err := os.MkdirAll(runDir, 0700); err != nil { // #nosec G703 -- interop fixture uses caller-provided temporary run directory.
+		fmt.Fprintf(os.Stderr, "mkdir %s: %v\n", runDir, err)
+		os.Exit(1)
+	}
 
 	var rc int
 	switch mode {

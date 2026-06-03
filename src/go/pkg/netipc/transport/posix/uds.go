@@ -177,7 +177,7 @@ func (s *Session) Role() Role {
 // Close closes the session and releases resources.
 func (s *Session) Close() {
 	if s.fd >= 0 {
-		syscall.Close(s.fd)
+		_ = syscall.Close(s.fd)
 		s.fd = -1
 	}
 	s.recvBuf = nil
@@ -200,7 +200,7 @@ func Connect(runDir, serviceName string, config *ClientConfig) (*Session, error)
 
 	session, herr := connectAndHandshake(fd, path, config)
 	if herr != nil {
-		syscall.Close(fd)
+		_ = syscall.Close(fd)
 		return nil, herr
 	}
 	return session, nil
@@ -510,7 +510,7 @@ func Listen(runDir, serviceName string, config ServerConfig) (*Listener, error) 
 	}
 
 	// Stale recovery
-	stale := checkAndRecoverStale(path)
+	stale := checkAndRecoverStale(path, runDirAllowsStaleUnlink(runDir))
 	if stale == staleLiveServer {
 		return nil, ErrAddrInUse
 	}
@@ -523,7 +523,7 @@ func Listen(runDir, serviceName string, config ServerConfig) (*Listener, error) 
 	// Bind
 	sa := &syscall.SockaddrUnix{Name: path}
 	if err := syscall.Bind(fd, sa); err != nil {
-		syscall.Close(fd)
+		_ = syscall.Close(fd)
 		return nil, wrapErr(ErrSocket, "bind: "+err.Error())
 	}
 
@@ -533,8 +533,8 @@ func Listen(runDir, serviceName string, config ServerConfig) (*Listener, error) 
 	}
 
 	if err := syscall.Listen(fd, backlog); err != nil {
-		syscall.Close(fd)
-		os.Remove(path)
+		_ = syscall.Close(fd)
+		_ = os.Remove(path)
 		return nil, wrapErr(ErrSocket, "listen: "+err.Error())
 	}
 
@@ -573,7 +573,7 @@ func (l *Listener) AcceptWithConfig(sessionID uint64, config ServerConfig) (*Ses
 
 	session, herr := serverHandshake(nfd, &config, sessionID)
 	if herr != nil {
-		syscall.Close(nfd)
+		_ = syscall.Close(nfd)
 		return nil, herr
 	}
 	return session, nil
@@ -582,11 +582,11 @@ func (l *Listener) AcceptWithConfig(sessionID uint64, config ServerConfig) (*Ses
 // Close closes the listener, stops accepting, and unlinks the socket file.
 func (l *Listener) Close() {
 	if l.fd >= 0 {
-		syscall.Close(l.fd)
+		_ = syscall.Close(l.fd)
 		l.fd = -1
 	}
 	if l.path != "" {
-		os.Remove(l.path)
+		_ = os.Remove(l.path)
 		l.path = ""
 	}
 }
@@ -664,13 +664,6 @@ func minU32(a, b uint32) uint32 {
 	return b
 }
 
-func maxU32(a, b uint32) uint32 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // ---------------------------------------------------------------------------
 //  Low-level I/O
 // ---------------------------------------------------------------------------
@@ -678,12 +671,12 @@ func maxU32(a, b uint32) uint32 {
 // rawSendIov sends header + payload as one SEQPACKET message using sendmsg.
 func rawSendIov(fd int, hdr []byte, payload []byte) error {
 	var iov [2]syscall.Iovec
-	iov[0].Base = unsafe.SliceData(hdr)
+	iov[0].Base = unsafe.SliceData(hdr) // #nosec G103 -- sendmsg iovec needs the backing byte-slice pointer.
 	iov[0].SetLen(len(hdr))
 
 	iovlen := uint64(1)
 	if len(payload) > 0 {
-		iov[1].Base = unsafe.SliceData(payload)
+		iov[1].Base = unsafe.SliceData(payload) // #nosec G103 -- sendmsg iovec needs the backing byte-slice pointer.
 		iov[1].SetLen(len(payload))
 		iovlen = 2
 	}
@@ -696,7 +689,7 @@ func rawSendIov(fd int, hdr []byte, payload []byte) error {
 	n, _, errno := syscall.Syscall(
 		syscall.SYS_SENDMSG,
 		uintptr(fd),
-		uintptr(unsafe.Pointer(&msg)),
+		uintptr(unsafe.Pointer(&msg)), // #nosec G103 -- raw sendmsg syscall requires a Msghdr pointer.
 		uintptr(syscall.MSG_NOSIGNAL),
 	)
 	if errno != 0 {
@@ -741,7 +734,19 @@ const (
 	staleLiveServer staleResult = 2
 )
 
-func checkAndRecoverStale(path string) staleResult {
+func runDirAllowsStaleUnlink(runDir string) bool {
+	info, err := os.Stat(runDir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid != uint32(os.Geteuid()) {
+		return false
+	}
+	return info.Mode().Perm()&0022 == 0
+}
+
+func checkAndRecoverStale(path string, allowStaleUnlink bool) staleResult {
 	_, err := os.Stat(path)
 	if err != nil {
 		return staleNotExist
@@ -753,14 +758,25 @@ func checkAndRecoverStale(path string) staleResult {
 	conn, err := net.Dial("unixpacket", path)
 	if err == nil {
 		// Connected => live server
-		conn.Close()
+		_ = conn.Close()
 		return staleLiveServer
 	}
 
 	// Only unlink on connection-refused (stale socket).
 	// Other errors (EACCES, etc.) should not remove the file.
-	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) {
-		os.Remove(path)
+	if errors.Is(err, syscall.ENOENT) {
+		return staleNotExist
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		if !allowStaleUnlink {
+			return staleLiveServer
+		}
+		if removeErr := os.Remove(path); removeErr != nil {
+			if os.IsNotExist(removeErr) {
+				return staleNotExist
+			}
+			return staleLiveServer
+		}
 		return staleRecovered
 	}
 	// Can't determine ownership — treat as live to prevent overwriting
@@ -937,7 +953,7 @@ func serverHandshake(fd int, config *ServerConfig, sessionID uint64) (*Session, 
 		ackHdr.Encode(pkt[:protocol.HeaderSize])
 		copy(pkt[protocol.HeaderSize:], ackPayBuf[:])
 		// Best effort send
-		syscall.SendmsgN(fd, pkt[:], nil, nil, 0) //nolint:errcheck
+		_, _ = syscall.SendmsgN(fd, pkt[:], nil, nil, 0)
 	}
 
 	// Receive HELLO

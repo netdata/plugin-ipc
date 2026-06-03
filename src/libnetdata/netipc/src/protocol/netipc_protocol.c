@@ -227,8 +227,12 @@ _Static_assert(offsetof(nipc_apps_lookup_item_wire_t, cgroup_name_offset) == 48,
 _Static_assert(offsetof(nipc_apps_lookup_item_wire_t, cgroup_name_length) == 52, "");
 _Static_assert(offsetof(nipc_apps_lookup_item_wire_t, label_count) == 56, "");
 _Static_assert(offsetof(nipc_apps_lookup_item_wire_t, reserved1) == 58, "");
-_Static_assert(sizeof(nipc_apps_lookup_item_wire_t) == 64u,
-               "apps lookup C struct includes 4 bytes of trailing padding");
+_Static_assert(offsetof(nipc_apps_lookup_item_wire_t, reserved1) +
+                   sizeof(((nipc_apps_lookup_item_wire_t *)0)->reserved1) ==
+               NIPC_APPS_LOOKUP_ITEM_HDR_SIZE,
+               "apps lookup fixed wire header must end at byte 60");
+_Static_assert(sizeof(nipc_apps_lookup_item_wire_t) >= NIPC_APPS_LOOKUP_ITEM_HDR_SIZE,
+               "apps lookup C struct must cover the fixed wire header");
 
 /* Cgroups request (4 bytes) */
 _Static_assert(sizeof(nipc_cgroups_req_t) == 4,
@@ -1133,8 +1137,10 @@ size_t nipc_cgroups_lookup_req_encode(const nipc_str_view_t *paths,
         return 0;
 
     size_t dir_size = (size_t)item_count * NIPC_LOOKUP_DIR_ENTRY_SIZE;
-    if (NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE > SIZE_MAX - dir_size)
+#if SIZE_MAX <= UINT32_MAX
+    if (dir_size > SIZE_MAX - NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE)
         return 0;
+#endif
     size_t packed_start = NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE + dir_size;
     if (buf_len < packed_start)
         return 0;
@@ -1268,8 +1274,16 @@ size_t nipc_apps_lookup_req_encode(const uint32_t *pids,
 
     size_t dir_size = (size_t)item_count * NIPC_LOOKUP_DIR_ENTRY_SIZE;
     size_t key_size = (size_t)item_count * NIPC_APPS_LOOKUP_KEY_SIZE;
+#if SIZE_MAX <= UINT32_MAX
+    if (dir_size > SIZE_MAX - NIPC_APPS_LOOKUP_REQ_HDR_SIZE)
+        return 0;
+#endif
     size_t packed_start = NIPC_APPS_LOOKUP_REQ_HDR_SIZE + dir_size;
-    if (packed_start > SIZE_MAX - key_size || buf_len < packed_start + key_size)
+#if SIZE_MAX <= UINT32_MAX
+    if (key_size > SIZE_MAX - packed_start)
+        return 0;
+#endif
+    if (buf_len < packed_start + key_size)
         return 0;
     if (item_count > 0 && !pids)
         return 0;
@@ -1540,9 +1554,14 @@ void nipc_cgroups_lookup_builder_init(nipc_cgroups_lookup_builder_t *b,
         b->data_offset = SIZE_MAX;
     } else {
         size_t dir_size = (size_t)max_items * NIPC_LOOKUP_DIR_ENTRY_SIZE;
-        b->data_offset = (NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE > SIZE_MAX - dir_size)
-                             ? SIZE_MAX
-                             : NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE + dir_size;
+#if SIZE_MAX <= UINT32_MAX
+        if (dir_size > SIZE_MAX - NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE) {
+            b->data_offset = SIZE_MAX;
+        } else
+#endif
+        {
+            b->data_offset = NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE + dir_size;
+        }
     }
 }
 
@@ -1612,8 +1631,7 @@ nipc_error_t nipc_cgroups_lookup_builder_add(
     uint64_t table_start_u64 = fixed_end_u64;
     uint64_t table_bytes_u64 = 0;
     if (label_count > 0) {
-        if (!labels ||
-            (uint64_t)label_count > UINT32_MAX / NIPC_LOOKUP_LABEL_ENTRY_SIZE) {
+        if (!labels) {
             b->error = NIPC_ERR_OVERFLOW;
             return b->error;
         }
@@ -1640,6 +1658,13 @@ nipc_error_t nipc_cgroups_lookup_builder_add(
         }
     }
 
+    uint64_t buf_len_u64 = (uint64_t)b->buf_len;
+    if (item_size_u64 > buf_len_u64 ||
+        item_start_u64 > buf_len_u64 - item_size_u64) {
+        b->error = NIPC_ERR_OVERFLOW;
+        return b->error;
+    }
+
     size_t item_start = (size_t)item_start_u64;
     size_t path_offset = (size_t)path_offset_u64;
     size_t name_offset = (size_t)name_offset_u64;
@@ -1647,12 +1672,6 @@ nipc_error_t nipc_cgroups_lookup_builder_add(
     size_t item_size = (size_t)item_size_u64;
     size_t table_start = (size_t)table_start_u64;
     size_t table_bytes = (size_t)table_bytes_u64;
-
-    if (item_start > UINT32_MAX || item_size > UINT32_MAX ||
-        item_start > SIZE_MAX - item_size || item_start + item_size > b->buf_len) {
-        b->error = NIPC_ERR_OVERFLOW;
-        return b->error;
-    }
 
     if (item_start > b->data_offset)
         memset(b->buf + b->data_offset, 0, item_start - b->data_offset);
@@ -1934,9 +1953,14 @@ void nipc_apps_lookup_builder_init(nipc_apps_lookup_builder_t *b,
         b->data_offset = SIZE_MAX;
     } else {
         size_t dir_size = (size_t)max_items * NIPC_LOOKUP_DIR_ENTRY_SIZE;
-        b->data_offset = (NIPC_APPS_LOOKUP_RESP_HDR_SIZE > SIZE_MAX - dir_size)
-                             ? SIZE_MAX
-                             : NIPC_APPS_LOOKUP_RESP_HDR_SIZE + dir_size;
+#if SIZE_MAX <= UINT32_MAX
+        if (dir_size > SIZE_MAX - NIPC_APPS_LOOKUP_RESP_HDR_SIZE) {
+            b->data_offset = SIZE_MAX;
+        } else
+#endif
+        {
+            b->data_offset = NIPC_APPS_LOOKUP_RESP_HDR_SIZE + dir_size;
+        }
     }
 }
 
@@ -2061,8 +2085,7 @@ nipc_error_t nipc_apps_lookup_builder_add(
     uint64_t table_start_u64 = fixed_end_u64;
     uint64_t table_bytes_u64 = 0;
     if (label_count > 0) {
-        if (!labels ||
-            (uint64_t)label_count > UINT32_MAX / NIPC_LOOKUP_LABEL_ENTRY_SIZE) {
+        if (!labels) {
             b->error = NIPC_ERR_OVERFLOW;
             return b->error;
         }
@@ -2089,6 +2112,13 @@ nipc_error_t nipc_apps_lookup_builder_add(
         }
     }
 
+    uint64_t buf_len_u64 = (uint64_t)b->buf_len;
+    if (item_size_u64 > buf_len_u64 ||
+        item_start_u64 > buf_len_u64 - item_size_u64) {
+        b->error = NIPC_ERR_OVERFLOW;
+        return b->error;
+    }
+
     size_t item_start = (size_t)item_start_u64;
     size_t comm_offset = (size_t)comm_offset_u64;
     size_t path_offset = (size_t)path_offset_u64;
@@ -2097,12 +2127,6 @@ nipc_error_t nipc_apps_lookup_builder_add(
     size_t item_size = (size_t)item_size_u64;
     size_t table_start = (size_t)table_start_u64;
     size_t table_bytes = (size_t)table_bytes_u64;
-
-    if (item_start > UINT32_MAX || item_size > UINT32_MAX ||
-        item_start > SIZE_MAX - item_size || item_start + item_size > b->buf_len) {
-        b->error = NIPC_ERR_OVERFLOW;
-        return b->error;
-    }
 
     if (item_start > b->data_offset)
         memset(b->buf + b->data_offset, 0, item_start - b->data_offset);

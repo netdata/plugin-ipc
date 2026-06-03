@@ -3,6 +3,9 @@ build-*/
 **/target/
 *.o
 
+# Local environment and secrets
+.env
+
 # Go binaries built outside build/
 tests/fixtures/go/netipc-*
 bench/drivers/go/netipc-*

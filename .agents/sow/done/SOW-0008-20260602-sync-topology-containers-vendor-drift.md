@@ -4,7 +4,8 @@
 
 Status: completed
 
-Sub-state: source sync, validation, artifact maintenance, and follow-up mapping are complete.
+Sub-state: reopened regression, repair, validation, artifact maintenance, and
+follow-up mapping are complete.
 
 ## Requirements
 
@@ -463,3 +464,122 @@ Append regression entries here only after this SOW was completed or closed and
 later testing or use found broken behavior. Use a dated `## Regression -
 YYYY-MM-DD` heading at the end of the file. Never prepend regression content
 above the original SOW narrative.
+
+## Regression - 2026-06-02
+
+Status: completed
+
+What broke:
+
+- A new vendor diff appeared after the SOW was completed.
+- The drift is limited to
+  `src/libnetdata/netipc/src/protocol/netipc_protocol.c`.
+- The C apps lookup static assertion still depended on the naturally padded
+  `sizeof(nipc_apps_lookup_item_wire_t) == 64u` instead of asserting the fixed
+  60-byte wire header boundary directly.
+
+Evidence:
+
+- `./diff-netdata-vendor.sh <topology-containers-tree> --unified` reported
+  only this C file after expected exclusions and Go import normalization.
+- `ktsaou/netdata @ 8b652640fdeea7533bf81789d5119073c82b3b61`
+  `src/libnetdata/netipc/src/protocol/netipc_protocol.c` asserts that
+  `reserved1` ends at `NIPC_APPS_LOOKUP_ITEM_HDR_SIZE` and that the C struct
+  covers at least that fixed header size.
+- `docs/codec-apps-lookup.md` records `NIPC_APPS_LOOKUP_ITEM_HDR_SIZE: 60`
+  and explicitly says C must use explicit wire-size constants rather than
+  `sizeof(struct)` as the apps item wire length.
+- `src/libnetdata/netipc/include/netipc/netipc_protocol.h` defines
+  `NIPC_APPS_LOOKUP_ITEM_HDR_SIZE` as `60u`.
+
+Why previous validation missed it:
+
+- Previous validation was correct for the checked downstream revision at SOW
+  completion time.
+- The checked topology containers tree later moved to
+  `8b652640fdeea7533bf81789d5119073c82b3b61`, adding this narrower static
+  assertion.
+
+Repair plan:
+
+1. Replace the padded `sizeof == 64u` assertion with explicit fixed-header
+   boundary and minimum-coverage assertions.
+2. Run focused C protocol validation.
+3. Re-run the vendor diff script against the checked topology containers tree.
+4. Close this regression only after validation and artifact maintenance are
+   recorded.
+
+Validation plan:
+
+- Build `test_protocol` if the existing build tree can compile it.
+- Run `ctest --test-dir build -R '^test_protocol$' --output-on-failure`.
+- Run `./diff-netdata-vendor.sh <topology-containers-tree>`.
+- Check SOW status/directory consistency and unrelated worktree changes.
+
+Artifact updates needed:
+
+- AGENTS.md: no update expected; this does not change project workflow.
+- Runtime project skills: no update expected; no runtime `project-*` skills
+  exist.
+- Specs: no update expected; `docs/codec-apps-lookup.md` already records the
+  exact wire-size rule this change enforces.
+- End-user/operator docs: no update expected; this is internal assertion
+  hygiene with no public behavior change.
+- End-user/operator skills: no update expected; public integration guidance is
+  unchanged.
+- SOW lifecycle: this SOW was reopened in `.agents/sow/current/`, validated,
+  marked `Status: completed`, and moved back to `.agents/sow/done/`.
+
+Repair performed:
+
+- Replaced the padded `sizeof(nipc_apps_lookup_item_wire_t) == 64u` assertion
+  with:
+  - an assertion that `reserved1` ends at `NIPC_APPS_LOOKUP_ITEM_HDR_SIZE`
+    byte 60;
+  - an assertion that the C struct covers at least the fixed wire header size.
+
+Validation results:
+
+- `cmake --build build --target test_protocol`: passed.
+- `ctest --test-dir build -R '^test_protocol$' --output-on-failure`: failed
+  before running tests because `~/.local/bin/ctest` is a Python wrapper
+  missing the `cmake` module.
+- `/usr/bin/ctest --test-dir build -R '^test_protocol$' --output-on-failure`:
+  passed; `test_protocol` passed.
+- `./diff-netdata-vendor.sh <topology-containers-tree>`: passed; no C, Rust,
+  or Go source differences remain after expected exclusions and Go import-path
+  normalization.
+- Same-failure search:
+  `rg -n "sizeof\\(nipc_apps_lookup_item_wire_t\\)|fixed wire header must end|struct must cover the fixed wire header|NIPC_APPS_LOOKUP_ITEM_HDR_SIZE" src/libnetdata/netipc/src/protocol/netipc_protocol.c docs/codec-apps-lookup.md src/libnetdata/netipc/include/netipc/netipc_protocol.h`
+  confirmed the old exact `sizeof` assertion is gone and the implementation,
+  public header constant, and spec agree on the 60-byte wire header.
+
+Artifact maintenance gate:
+
+- AGENTS.md: no update needed; validation surfaced a local PATH wrapper issue,
+  not a reusable project workflow change.
+- Runtime project skills: no update needed; no runtime `project-*` skills
+  exist.
+- Specs: no update needed; `docs/codec-apps-lookup.md` already requires
+  explicit wire-size constants and records `NIPC_APPS_LOOKUP_ITEM_HDR_SIZE` as
+  60.
+- End-user/operator docs: no update needed; this changes an internal C compile
+  assertion only.
+- End-user/operator skills: no update needed; public integration guidance is
+  unchanged.
+- SOW lifecycle: reopened from `.agents/sow/done/` to `.agents/sow/current/`,
+  marked `Status: completed` after validation, and moved back to
+  `.agents/sow/done/` with the source fix.
+
+Follow-up mapping:
+
+- No follow-up work is required.
+- The `ctest` PATH wrapper failure is unrelated to this source change; the
+  validation was completed with `/usr/bin/ctest`, so no source follow-up is
+  required for this SOW.
+
+Outcome:
+
+- Completed. The upstream repository again matches the checked topology
+  containers vendored NetIPC source after expected exclusions and Go import-path
+  normalization.

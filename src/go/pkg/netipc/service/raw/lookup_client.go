@@ -39,6 +39,13 @@ func checkedLookupAlign8(v int) (int, error) {
 	return protocol.Align8(v), nil
 }
 
+func checkedLookupU32(value int) (uint32, error) {
+	if value < 0 || uint64(value) > uint64(^uint32(0)) {
+		return 0, protocol.ErrOverflow
+	}
+	return uint32(value), nil // #nosec G115 -- value is bounded by the uint32 maximum above.
+}
+
 func cgroupsLookupRequestSize(paths [][]byte) (int, error) {
 	dirSize, err := checkedLookupMul(len(paths), protocol.LookupDirEntrySize)
 	if err != nil {
@@ -109,11 +116,19 @@ func (c *Client) CallCgroupsLookup(paths [][]byte) (*protocol.CgroupsLookupRespo
 		if derr != nil {
 			return derr
 		}
-		if view.ItemCount != uint32(len(paths)) {
+		expectedCount, err := checkedLookupU32(len(paths))
+		if err != nil {
+			return err
+		}
+		if view.ItemCount != expectedCount {
 			return protocol.ErrBadItemCount
 		}
 		for i, expected := range paths {
-			item, ierr := view.Item(uint32(i))
+			itemIndex, ierr := checkedLookupU32(i)
+			if ierr != nil {
+				return ierr
+			}
+			item, ierr := view.Item(itemIndex)
 			if ierr != nil {
 				return ierr
 			}
@@ -157,11 +172,19 @@ func (c *Client) CallAppsLookup(pids []uint32) (*protocol.AppsLookupResponseView
 		if derr != nil {
 			return derr
 		}
-		if view.ItemCount != uint32(len(pids)) {
+		expectedCount, err := checkedLookupU32(len(pids))
+		if err != nil {
+			return err
+		}
+		if view.ItemCount != expectedCount {
 			return protocol.ErrBadItemCount
 		}
 		for i, expected := range pids {
-			item, ierr := view.Item(uint32(i))
+			itemIndex, ierr := checkedLookupU32(i)
+			if ierr != nil {
+				return ierr
+			}
+			item, ierr := view.Item(itemIndex)
 			if ierr != nil {
 				return ierr
 			}

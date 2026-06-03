@@ -246,15 +246,20 @@ When a session closes (graceful or broken):
 Both `server_create` (per-session) and `cleanup_stale` (startup scan)
 use the same stale detection logic:
 
-1. Open the file and mmap the header. If `open()` fails with a
+1. Verify `{run_dir}` is safe for automatic stale unlink: owned by the
+   effective process user and not group- or world-writable. If the directory is
+   unsafe, stale entries are left in place and treated as in-use.
+2. Open the file and mmap the header. If `open()` fails with a
    permission error (EACCES, EPERM), the file is left in place — it
    may belong to another user or process.
-2. Validate magic. If invalid or file is undersized: stale — unlink.
-3. Check `owner_pid` and `owner_generation`:
+3. Validate magic. If invalid or file is undersized: stale — unlink only when
+   `{run_dir}` passed the safety check.
+4. Check `owner_pid` and `owner_generation`:
    - If `owner_pid` is alive AND `owner_generation` is non-zero:
      the region is live — leave it.
    - Otherwise (PID dead, or generation is zero indicating an
-     uninitialized/legacy region): stale — unlink.
+     uninitialized/legacy region): stale — unlink only when `{run_dir}` passed
+     the safety check.
 
 The `owner_generation` check catches PID reuse: a new process that
 reuses an old PID will not have the same generation value. A zero
@@ -268,7 +273,8 @@ behind by a previous server instance that crashed or was killed:
 
 1. Scan `{run_dir}` for files matching `{service_name}-*.ipcshm`.
 2. For each file: apply the stale detection logic above.
-3. Stale files are unlinked. Live files are left in place.
+3. Stale files are unlinked only in a safe `{run_dir}`. Live files and files in
+   unsafe shared directories are left in place.
 
 This cleanup runs once at server startup, before the listener begins
 accepting connections. It is the safety net for crashes and hard
@@ -278,5 +284,6 @@ reboots.
 
 When `server_create` is called for a new session, it applies the same
 stale detection logic to the target path before attempting `O_EXCL`
-create. If a stale file exists, it is unlinked first. If a live file
-exists, the create fails with address-in-use.
+create. If a stale file exists and `{run_dir}` is safe, it is unlinked first.
+If a live file exists, or `{run_dir}` is unsafe for automatic stale unlink, the
+create fails with address-in-use.

@@ -1,3 +1,3 @@
 module github.com/netdata/plugin-ipc/go
 
-go 1.25
+go 1.25.11

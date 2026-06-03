@@ -707,10 +707,16 @@ static bool apps_lookup_request_size(uint32_t pid_count, size_t *size_out)
         return false;
     size_t dir = (size_t)pid_count * NIPC_LOOKUP_DIR_ENTRY_SIZE;
     size_t keys = (size_t)pid_count * NIPC_APPS_LOOKUP_KEY_SIZE;
-    if (NIPC_APPS_LOOKUP_REQ_HDR_SIZE > SIZE_MAX - dir ||
-        NIPC_APPS_LOOKUP_REQ_HDR_SIZE + dir > SIZE_MAX - keys)
+#if SIZE_MAX <= UINT32_MAX
+    if (dir > SIZE_MAX - NIPC_APPS_LOOKUP_REQ_HDR_SIZE)
         return false;
-    *size_out = NIPC_APPS_LOOKUP_REQ_HDR_SIZE + dir + keys;
+#endif
+    size_t data = NIPC_APPS_LOOKUP_REQ_HDR_SIZE + dir;
+#if SIZE_MAX <= UINT32_MAX
+    if (keys > SIZE_MAX - data)
+        return false;
+#endif
+    *size_out = data + keys;
     return true;
 }
 
@@ -1258,8 +1264,7 @@ static void server_handle_session(nipc_managed_server_t *server,
         switch (dispatch_err) {
         case NIPC_OK:
             if (response_len > resp_buf_size ||
-                response_len > session->max_response_payload_bytes ||
-                response_len > SIZE_MAX - NIPC_HEADER_LEN) {
+                response_len > session->max_response_payload_bytes) {
                 server_note_response_capacity(
                     server,
                     response_len >= UINT32_MAX ? UINT32_MAX : (uint32_t)response_len);
@@ -1267,8 +1272,7 @@ static void server_handle_session(nipc_managed_server_t *server,
                 close_after_response = true;
                 response_len = 0;
             } else {
-                if (response_len <= UINT32_MAX)
-                    server_note_response_capacity(server, (uint32_t)response_len);
+                server_note_response_capacity(server, (uint32_t)response_len);
                 resp_hdr.transport_status = NIPC_STATUS_OK;
             }
             break;

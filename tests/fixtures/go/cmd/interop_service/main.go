@@ -91,7 +91,7 @@ func waitForSocket(runDir, service string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	path := fmt.Sprintf("%s/%s.sock", runDir, service)
 	for time.Now().Before(deadline) {
-		if info, err := os.Stat(path); err == nil && info.Mode()&os.ModeSocket != 0 {
+		if info, err := os.Stat(path); err == nil && info.Mode()&os.ModeSocket != 0 { // #nosec G703 -- interop fixture probes caller-provided temporary socket path.
 			return true
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -211,7 +211,10 @@ func main() {
 	runDir := os.Args[2]
 	service := os.Args[3]
 
-	os.MkdirAll(runDir, 0700)
+	if err := os.MkdirAll(runDir, 0700); err != nil { // #nosec G703 -- interop fixture uses caller-provided temporary run directory.
+		fmt.Fprintf(os.Stderr, "mkdir %s: %v\n", runDir, err)
+		os.Exit(1)
+	}
 
 	var rc int
 	switch mode {

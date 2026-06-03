@@ -19,7 +19,7 @@ import (
 
 func writeFile(dir, name string, data []byte) {
 	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil { // #nosec G703 -- interop fixture writes caller-selected golden-file directory.
 		fmt.Fprintf(os.Stderr, "ERROR: cannot write %s: %v\n", path, err)
 		os.Exit(1)
 	}
@@ -27,7 +27,7 @@ func writeFile(dir, name string, data []byte) {
 
 func readFile(dir, name string) []byte {
 	path := filepath.Join(dir, name)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304,G703 -- interop fixture reads caller-selected golden-file directory.
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: cannot read %s: %v\n", path, err)
 		os.Exit(1)
@@ -143,13 +143,22 @@ func doEncode(dir string) {
 		buf := make([]byte, 8192)
 		b := protocol.NewCgroupsBuilder(buf, 3, 1, 999)
 
-		b.Add(100, 0, 1,
+		if err := b.Add(100, 0, 1,
 			[]byte("init.scope"),
-			[]byte("/sys/fs/cgroup/init.scope"))
-		b.Add(200, 0x02, 0,
+			[]byte("/sys/fs/cgroup/init.scope")); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: cannot add cgroup fixture: %v\n", err)
+			os.Exit(1)
+		}
+		if err := b.Add(200, 0x02, 0,
 			[]byte("system.slice/docker-abc.scope"),
-			[]byte("/sys/fs/cgroup/system.slice/docker-abc.scope"))
-		b.Add(300, 0, 1, []byte(""), []byte(""))
+			[]byte("/sys/fs/cgroup/system.slice/docker-abc.scope")); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: cannot add cgroup fixture: %v\n", err)
+			os.Exit(1)
+		}
+		if err := b.Add(300, 0, 1, []byte(""), []byte("")); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: cannot add cgroup fixture: %v\n", err)
+			os.Exit(1)
+		}
 
 		total := b.Finish()
 		writeFile(dir, "cgroups_resp.bin", buf[:total])

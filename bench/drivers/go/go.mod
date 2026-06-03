@@ -1,6 +1,6 @@
 module github.com/netdata/plugin-ipc/bench/drivers/go
 
-go 1.25
+go 1.25.11
 
 require github.com/netdata/plugin-ipc/go v0.0.0
 

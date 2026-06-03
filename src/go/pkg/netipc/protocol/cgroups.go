@@ -142,30 +142,42 @@ func DecodeCgroupsResponse(buf []byte) (CgroupsResponseView, error) {
 		return CgroupsResponseView{}, ErrBadLayout
 	}
 
-	// Validate directory fits (use uint64 to prevent int overflow on 32-bit).
 	dirSize64 := uint64(itemCount) * uint64(cgroupsDirEntry)
 	dirEnd64 := uint64(cgroupsRespHdr) + dirSize64
-	if dirEnd64 > uint64(len(buf)) {
+	dirEnd, ok := checkedInt(dirEnd64)
+	if !ok {
+		return CgroupsResponseView{}, ErrBadItemCount
+	}
+	if dirEnd > len(buf) {
 		return CgroupsResponseView{}, ErrTruncated
 	}
-	dirEnd := int(dirEnd64)
 
 	packedAreaLen := len(buf) - dirEnd
 
 	// Validate each directory entry.
-	dirSize := int(dirSize64)
+	dirSize, ok := checkedInt(dirSize64)
+	if !ok {
+		return CgroupsResponseView{}, ErrBadItemCount
+	}
 	for i := 0; i < dirSize; i += cgroupsDirEntry {
 		base := cgroupsRespHdr + i
-		off := ne.Uint32(buf[base : base+4])
-		length := ne.Uint32(buf[base+4 : base+8])
+		off, err := checkedWireU32Int(buf, base)
+		if err != nil {
+			return CgroupsResponseView{}, err
+		}
+		length, err := checkedWireU32Int(buf, base+4)
+		if err != nil {
+			return CgroupsResponseView{}, err
+		}
 
-		if int(off)%Alignment != 0 {
+		if off%Alignment != 0 {
 			return CgroupsResponseView{}, ErrBadAlignment
 		}
-		if uint64(off)+uint64(length) > uint64(packedAreaLen) {
+		end, ok := checkedAddInt(off, length)
+		if !ok || end > packedAreaLen {
 			return CgroupsResponseView{}, ErrOutOfBounds
 		}
-		if int(length) < cgroupsItemHdr {
+		if length < cgroupsItemHdr {
 			return CgroupsResponseView{}, ErrTruncated
 		}
 	}
@@ -188,15 +200,41 @@ func (v *CgroupsResponseView) Item(index uint32) (CgroupsItemView, error) {
 	}
 
 	dirStart := cgroupsRespHdr
-	dirSize := int(uint64(v.ItemCount) * uint64(cgroupsDirEntry))
-	packedAreaStart := dirStart + dirSize
+	dirSize, ok := checkedInt(uint64(v.ItemCount) * uint64(cgroupsDirEntry))
+	if !ok {
+		return CgroupsItemView{}, ErrBadItemCount
+	}
+	packedAreaStart, ok := checkedAddInt(dirStart, dirSize)
+	if !ok {
+		return CgroupsItemView{}, ErrOutOfBounds
+	}
 
-	dirBase := dirStart + int(index)*cgroupsDirEntry
-	itemOff := int(ne.Uint32(v.payload[dirBase : dirBase+4]))
-	itemLen := int(ne.Uint32(v.payload[dirBase+4 : dirBase+8]))
+	dirIndexOff, ok := checkedInt(uint64(index) * uint64(cgroupsDirEntry))
+	if !ok {
+		return CgroupsItemView{}, ErrOutOfBounds
+	}
+	dirBase, ok := checkedAddInt(dirStart, dirIndexOff)
+	if !ok {
+		return CgroupsItemView{}, ErrOutOfBounds
+	}
+	itemOff, err := checkedWireU32Int(v.payload, dirBase)
+	if err != nil {
+		return CgroupsItemView{}, err
+	}
+	itemLen, err := checkedWireU32Int(v.payload, dirBase+4)
+	if err != nil {
+		return CgroupsItemView{}, err
+	}
 
-	itemStart := packedAreaStart + itemOff
-	item := v.payload[itemStart : itemStart+itemLen]
+	itemStart, ok := checkedAddInt(packedAreaStart, itemOff)
+	if !ok {
+		return CgroupsItemView{}, ErrOutOfBounds
+	}
+	itemEnd, ok := checkedAddInt(itemStart, itemLen)
+	if !ok || itemEnd > len(v.payload) {
+		return CgroupsItemView{}, ErrOutOfBounds
+	}
+	item := v.payload[itemStart:itemEnd]
 
 	layoutVersion := ne.Uint16(item[0:2])
 	flags := ne.Uint16(item[2:4])
@@ -204,10 +242,24 @@ func (v *CgroupsResponseView) Item(index uint32) (CgroupsItemView, error) {
 	options := ne.Uint32(item[8:12])
 	enabled := ne.Uint32(item[12:16])
 
-	nameOff := int(ne.Uint32(item[16:20]))
-	nameLen := ne.Uint32(item[20:24])
-	pathOff := int(ne.Uint32(item[24:28]))
-	pathLen := ne.Uint32(item[28:32])
+	nameOff, err := checkedWireU32Int(item, 16)
+	if err != nil {
+		return CgroupsItemView{}, err
+	}
+	nameLen, err := checkedWireU32Int(item, 20)
+	if err != nil {
+		return CgroupsItemView{}, err
+	}
+	nameLen32 := ne.Uint32(item[20:24])
+	pathOff, err := checkedWireU32Int(item, 24)
+	if err != nil {
+		return CgroupsItemView{}, err
+	}
+	pathLen, err := checkedWireU32Int(item, 28)
+	if err != nil {
+		return CgroupsItemView{}, err
+	}
+	pathLen32 := ne.Uint32(item[28:32])
 
 	if layoutVersion != 1 {
 		return CgroupsItemView{}, ErrBadLayout
@@ -222,10 +274,15 @@ func (v *CgroupsResponseView) Item(index uint32) (CgroupsItemView, error) {
 	if nameOff < cgroupsItemHdr {
 		return CgroupsItemView{}, ErrOutOfBounds
 	}
-	if uint64(nameOff)+uint64(nameLen)+1 > uint64(itemLen) {
+	nameEnd, ok := checkedAddInt(nameOff, nameLen)
+	if !ok {
 		return CgroupsItemView{}, ErrOutOfBounds
 	}
-	if item[nameOff+int(nameLen)] != 0 {
+	nameNulEnd, ok := checkedAddInt(nameEnd, 1)
+	if !ok || nameNulEnd > itemLen {
+		return CgroupsItemView{}, ErrOutOfBounds
+	}
+	if item[nameEnd] != 0 {
 		return CgroupsItemView{}, ErrMissingNul
 	}
 
@@ -233,26 +290,27 @@ func (v *CgroupsResponseView) Item(index uint32) (CgroupsItemView, error) {
 	if pathOff < cgroupsItemHdr {
 		return CgroupsItemView{}, ErrOutOfBounds
 	}
-	if uint64(pathOff)+uint64(pathLen)+1 > uint64(itemLen) {
+	pathEnd, ok := checkedAddInt(pathOff, pathLen)
+	if !ok {
 		return CgroupsItemView{}, ErrOutOfBounds
 	}
-	if item[pathOff+int(pathLen)] != 0 {
+	pathNulEnd, ok := checkedAddInt(pathEnd, 1)
+	if !ok || pathNulEnd > itemLen {
+		return CgroupsItemView{}, ErrOutOfBounds
+	}
+	if item[pathEnd] != 0 {
 		return CgroupsItemView{}, ErrMissingNul
 	}
 
 	// Reject overlapping name and path regions (including NUL)
 	{
-		nameStart := uint64(nameOff)
-		nameEnd := nameStart + uint64(nameLen) + 1
-		pathStart := uint64(pathOff)
-		pathEnd := pathStart + uint64(pathLen) + 1
-		if nameStart < pathEnd && pathStart < nameEnd {
+		if overlap(nameOff, nameNulEnd, pathOff, pathNulEnd) {
 			return CgroupsItemView{}, ErrBadLayout
 		}
 	}
 
-	name := NewCStringView(item[nameOff:nameOff+int(nameLen)+1], nameLen)
-	path := NewCStringView(item[pathOff:pathOff+int(pathLen)+1], pathLen)
+	name := NewCStringView(item[nameOff:nameNulEnd], nameLen32)
+	path := NewCStringView(item[pathOff:pathNulEnd], pathLen32)
 
 	return CgroupsItemView{
 		LayoutVersion: layoutVersion,
@@ -309,11 +367,7 @@ func NewCgroupsBuilder(buf []byte, maxItems uint32, systemdEnabled uint32, gener
 // reserve directory slots for maxItems before packed item data is appended.
 func CgroupsBuilderMinBytes(maxItems uint32) (int, bool) {
 	minRequired := uint64(cgroupsRespHdr) + uint64(maxItems)*uint64(cgroupsDirEntry)
-	maxInt := uint64(int(^uint(0) >> 1))
-	if minRequired > maxInt {
-		return 0, false
-	}
-	return int(minRequired), true
+	return checkedInt(minRequired)
 }
 
 // SetHeader updates the response header fields written by Finish().
@@ -333,7 +387,12 @@ func EstimateCgroupsMaxItems(bufSize int) uint32 {
 	}
 
 	minAlignedItem := Align8(cgroupsItemHdr + 2)
-	return uint32((bufSize - cgroupsRespHdr) / (cgroupsDirEntry + minAlignedItem))
+	items := (bufSize - cgroupsRespHdr) / (cgroupsDirEntry + minAlignedItem)
+	items32, ok := checkedU32Int(items)
+	if !ok {
+		return ^uint32(0)
+	}
+	return items32
 }
 
 // Add adds one cgroup item. Handles offset bookkeeping, NUL termination,
@@ -343,13 +402,30 @@ func (b *CgroupsBuilder) Add(hash, options, enabled uint32, name, path []byte) e
 		return ErrOverflow
 	}
 
-	// Align item start to 8 bytes.
-	itemStart := Align8(b.dataOffset)
+	itemStart, ok := checkedAlign8(b.dataOffset)
+	if !ok {
+		return ErrOverflow
+	}
 
-	// Item payload: 32-byte header + name + NUL + path + NUL.
-	itemSize := cgroupsItemHdr + len(name) + 1 + len(path) + 1
+	nameSize, ok := checkedAddInt(len(name), 1)
+	if !ok {
+		return ErrOverflow
+	}
+	pathSize, ok := checkedAddInt(len(path), 1)
+	if !ok {
+		return ErrOverflow
+	}
+	itemSize, ok := checkedAddInt(cgroupsItemHdr, nameSize)
+	if !ok {
+		return ErrOverflow
+	}
+	itemSize, ok = checkedAddInt(itemSize, pathSize)
+	if !ok {
+		return ErrOverflow
+	}
 
-	if itemStart+itemSize > len(b.buf) {
+	itemEnd, ok := checkedAddInt(itemStart, itemSize)
+	if !ok || itemEnd > len(b.buf) {
 		return ErrOverflow
 	}
 
@@ -358,8 +434,31 @@ func (b *CgroupsBuilder) Add(hash, options, enabled uint32, name, path []byte) e
 		clear(b.buf[b.dataOffset:itemStart])
 	}
 
-	nameOffset := uint32(cgroupsItemHdr)
-	pathOffset := uint32(cgroupsItemHdr) + uint32(len(name)) + 1
+	nameLen32, ok := checkedU32Int(len(name))
+	if !ok {
+		return ErrOverflow
+	}
+	pathLen32, ok := checkedU32Int(len(path))
+	if !ok {
+		return ErrOverflow
+	}
+	nameOffset32 := uint32(cgroupsItemHdr)
+	pathOffset, ok := checkedAddInt(cgroupsItemHdr, nameSize)
+	if !ok {
+		return ErrOverflow
+	}
+	pathOffset32, ok := checkedU32Int(pathOffset)
+	if !ok {
+		return ErrOverflow
+	}
+	itemStart32, ok := checkedU32Int(itemStart)
+	if !ok {
+		return ErrOverflow
+	}
+	itemSize32, ok := checkedU32Int(itemSize)
+	if !ok {
+		return ErrOverflow
+	}
 
 	// Write item header.
 	p := itemStart
@@ -368,26 +467,33 @@ func (b *CgroupsBuilder) Add(hash, options, enabled uint32, name, path []byte) e
 	ne.PutUint32(b.buf[p+4:p+8], hash)
 	ne.PutUint32(b.buf[p+8:p+12], options)
 	ne.PutUint32(b.buf[p+12:p+16], enabled)
-	ne.PutUint32(b.buf[p+16:p+20], nameOffset)
-	ne.PutUint32(b.buf[p+20:p+24], uint32(len(name)))
-	ne.PutUint32(b.buf[p+24:p+28], pathOffset)
-	ne.PutUint32(b.buf[p+28:p+32], uint32(len(path)))
+	ne.PutUint32(b.buf[p+16:p+20], nameOffset32)
+	ne.PutUint32(b.buf[p+20:p+24], nameLen32)
+	ne.PutUint32(b.buf[p+24:p+28], pathOffset32)
+	ne.PutUint32(b.buf[p+28:p+32], pathLen32)
 
 	// Write strings with NUL terminators.
-	ns := p + int(nameOffset)
+	ns := p + cgroupsItemHdr
 	copy(b.buf[ns:], name)
 	b.buf[ns+len(name)] = 0
 
-	ps := p + int(pathOffset)
+	ps := p + pathOffset
 	copy(b.buf[ps:], path)
 	b.buf[ps+len(path)] = 0
 
 	// Write directory entry (absolute offset stored temporarily).
-	dirEntry := cgroupsRespHdr + int(b.itemCount)*cgroupsDirEntry
-	ne.PutUint32(b.buf[dirEntry:dirEntry+4], uint32(itemStart))
-	ne.PutUint32(b.buf[dirEntry+4:dirEntry+8], uint32(itemSize))
+	dirEntryOff, ok := checkedInt(uint64(b.itemCount) * uint64(cgroupsDirEntry))
+	if !ok {
+		return ErrOverflow
+	}
+	dirEntry, ok := checkedAddInt(cgroupsRespHdr, dirEntryOff)
+	if !ok {
+		return ErrOverflow
+	}
+	ne.PutUint32(b.buf[dirEntry:dirEntry+4], itemStart32)
+	ne.PutUint32(b.buf[dirEntry+4:dirEntry+8], itemSize32)
 
-	b.dataOffset = itemStart + itemSize
+	b.dataOffset = itemEnd
 	b.itemCount++
 	return nil
 }
@@ -407,25 +513,49 @@ func (b *CgroupsBuilder) Finish() int {
 		return cgroupsRespHdr
 	}
 
-	// Where the decoder expects packed data to start.
-	finalPackedStart := cgroupsRespHdr + int(b.itemCount)*cgroupsDirEntry
+	dirSize, ok := checkedInt(uint64(b.itemCount) * uint64(cgroupsDirEntry))
+	if !ok {
+		return 0
+	}
+	finalPackedStart, ok := checkedAddInt(cgroupsRespHdr, dirSize)
+	if !ok {
+		return 0
+	}
 
 	// Read the first directory entry to find where packed data begins.
-	firstItemAbs := int(ne.Uint32(p[cgroupsRespHdr : cgroupsRespHdr+4]))
+	firstItemAbs32 := ne.Uint32(p[cgroupsRespHdr : cgroupsRespHdr+4])
+	firstItemAbs, ok := checkedInt(uint64(firstItemAbs32))
+	if !ok {
+		return 0
+	}
 
 	packedDataLen := b.dataOffset - firstItemAbs
 
 	if finalPackedStart < firstItemAbs {
+		packedDataEnd, ok := checkedAddInt(firstItemAbs, packedDataLen)
+		if !ok {
+			return 0
+		}
 		// Shift packed data left.
-		copy(p[finalPackedStart:], p[firstItemAbs:firstItemAbs+packedDataLen])
+		copy(p[finalPackedStart:], p[firstItemAbs:packedDataEnd])
 	}
 
 	// Convert directory entries from absolute to relative offsets.
 	dirBase := cgroupsRespHdr
-	for i := 0; i < int(b.itemCount); i++ {
-		entry := dirBase + i*cgroupsDirEntry
+	for i := uint32(0); i < b.itemCount; i++ {
+		entryOff, ok := checkedInt(uint64(i) * uint64(cgroupsDirEntry))
+		if !ok {
+			return 0
+		}
+		entry, ok := checkedAddInt(dirBase, entryOff)
+		if !ok {
+			return 0
+		}
 		absOff := ne.Uint32(p[entry : entry+4])
-		relOff := absOff - uint32(firstItemAbs)
+		if absOff < firstItemAbs32 {
+			return 0
+		}
+		relOff := absOff - firstItemAbs32
 		ne.PutUint32(p[entry:entry+4], relOff)
 		// length stays the same.
 	}
@@ -438,7 +568,11 @@ func (b *CgroupsBuilder) Finish() int {
 	ne.PutUint32(p[12:16], 0)
 	ne.PutUint64(p[16:24], b.generation)
 
-	return finalPackedStart + packedDataLen
+	total, ok := checkedAddInt(finalPackedStart, packedDataLen)
+	if !ok {
+		return 0
+	}
+	return total
 }
 
 // DispatchCgroupsSnapshot decodes request, builds response via handler.

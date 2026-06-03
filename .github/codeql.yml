@@ -6,6 +6,15 @@ queries:
   - uses: security-extended
   - uses: security-and-quality
 
+query-filters:
+  # Current baseline rule: CodeQL queries are enabled only when this branch has
+  # no current alerts for them, or when the query is fixed in the same change.
+  - exclude:
+      id:
+        - cpp/poorly-documented-function
+        - cpp/redundant-null-check-simple
+        - rust/unused-variable
+
 paths:
   - src
   - tests

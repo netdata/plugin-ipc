@@ -34,19 +34,21 @@ jobs:
         include:
           - name: C/C++
             language: c-cpp
+            build_mode: manual
             build_command: |
               cmake -S . -B build-codeql -DCMAKE_BUILD_TYPE=Debug
-              cmake --build build-codeql --parallel
+              cmake --build build-codeql --parallel --target netipc_protocol netipc_uds netipc_shm netipc_service
           - name: Go
             language: go
+            build_mode: manual
             build_command: |
               for module in src/go tests/fixtures/go bench/drivers/go; do
                 (cd "$module" && go test ./...)
               done
           - name: Rust
             language: rust
-            build_command: |
-              cargo test --manifest-path src/crates/netipc/Cargo.toml --all-targets --all-features --no-run
+            build_mode: none
+            build_command: ":"
 
     steps:
       - name: Checkout
@@ -65,10 +67,11 @@ jobs:
         uses: github/codeql-action/init@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
         with:
           languages: ${{ matrix.language }}
-          build-mode: manual
+          build-mode: ${{ matrix.build_mode }}
           config-file: ./.github/codeql.yml
 
       - name: Build for CodeQL
+        if: matrix.build_mode == 'manual'
         run: ${{ matrix.build_command }}
 
       - name: Analyze

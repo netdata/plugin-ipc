@@ -130,11 +130,11 @@ func lookupDirOffset(hdrSize int, index uint32) (int, bool) {
 }
 
 func checkedInt(value uint64) (int, bool) {
-	maxInt := uint64(maxIntValue())
+	maxInt := uint64(maxIntValue()) // #nosec G115 -- maxIntValue is non-negative and intentionally widened for the bounds check.
 	if value > maxInt {
 		return 0, false
 	}
-	return int(value), true
+	return int(value), true // #nosec G115 -- value is bounded by maxInt above.
 }
 
 func checkedAddInt(a, b int) (int, bool) {
@@ -171,9 +171,28 @@ func checkedAlign8(v int) (int, bool) {
 }
 
 func validateLookupDir(buf []byte, dirStart int, itemCount uint32, packedAreaLen int, minLen int, exactLen int) error {
-	dirSize64 := uint64(itemCount) * uint64(LookupDirEntrySize)
-	dirEnd64 := uint64(dirStart) + dirSize64
-	dirEnd, ok := checkedInt(dirEnd64)
+	var minLen32 uint32
+	var exactLen32 uint32
+	if minLen >= 0 {
+		converted, ok := checkedU32Int(minLen)
+		if !ok {
+			return ErrBadLayout
+		}
+		minLen32 = converted
+	}
+	if exactLen >= 0 {
+		converted, ok := checkedU32Int(exactLen)
+		if !ok {
+			return ErrBadLayout
+		}
+		exactLen32 = converted
+	}
+
+	dirSize, ok := checkedInt(uint64(itemCount) * uint64(LookupDirEntrySize))
+	if !ok {
+		return ErrBadItemCount
+	}
+	dirEnd, ok := checkedAddInt(dirStart, dirSize)
 	if !ok {
 		return ErrBadItemCount
 	}
@@ -181,26 +200,35 @@ func validateLookupDir(buf []byte, dirStart int, itemCount uint32, packedAreaLen
 		return ErrTruncated
 	}
 
-	prevEnd := uint64(0)
+	prevEnd := 0
 	for i := range itemCount {
-		base := dirStart + int(i)*LookupDirEntrySize
-		off := ne.Uint32(buf[base : base+4])
-		length := ne.Uint32(buf[base+4 : base+8])
-		if off%uint32(Alignment) != 0 {
+		base, ok := lookupDirOffset(dirStart, i)
+		if !ok {
+			return ErrBadItemCount
+		}
+		off, length, err := lookupDirEntry(buf, base)
+		if err != nil {
+			return err
+		}
+		if off%Alignment != 0 {
 			return ErrBadAlignment
 		}
-		if exactLen >= 0 {
-			if length != uint32(exactLen) {
-				return ErrBadLayout
-			}
-		} else if length < uint32(minLen) {
-			return ErrBadLayout
-		}
-		end := uint64(off) + uint64(length)
-		if end > uint64(packedAreaLen) {
+		length32, ok := checkedU32Int(length)
+		if !ok {
 			return ErrOutOfBounds
 		}
-		if i > 0 && uint64(off) < prevEnd {
+		if exactLen >= 0 {
+			if length32 != exactLen32 {
+				return ErrBadLayout
+			}
+		} else if length32 < minLen32 {
+			return ErrBadLayout
+		}
+		end, ok := checkedAddInt(off, length)
+		if !ok || end > packedAreaLen {
+			return ErrOutOfBounds
+		}
+		if i > 0 && off < prevEnd {
 			return ErrBadLayout
 		}
 		prevEnd = end
@@ -212,8 +240,7 @@ func lookupString(item []byte, hdrSize int, off int, length int) (CStringView, i
 	if off < hdrSize {
 		return CStringView{}, 0, ErrOutOfBounds
 	}
-	nul64 := uint64(off) + uint64(length)
-	nul, ok := checkedInt(nul64)
+	nul, ok := checkedAddInt(off, length)
 	if !ok || nul >= len(item) {
 		return CStringView{}, 0, ErrOutOfBounds
 	}
@@ -223,7 +250,11 @@ func lookupString(item []byte, hdrSize int, off int, length int) (CStringView, i
 	if bytes.Contains(item[off:nul], []byte{0}) {
 		return CStringView{}, 0, ErrBadLayout
 	}
-	return NewCStringView(item[off:nul+1], uint32(length)), nul + 1, nil
+	length32, ok := checkedU32Int(length)
+	if !ok {
+		return CStringView{}, 0, ErrOutOfBounds
+	}
+	return NewCStringView(item[off:nul+1], length32), nul + 1, nil
 }
 
 func overlap(aStart, aEnd, bStart, bEnd int) bool {
@@ -251,9 +282,11 @@ func validateLabels(item []byte, hdrSize int, labelCount uint16, fixedEnd int) (
 		}
 	}
 
-	tableBytes64 := uint64(labelCount) * uint64(LookupLabelEntrySize)
-	expected64 := uint64(tableStart) + tableBytes64
-	expected, ok := checkedInt(expected64)
+	tableBytes, ok := checkedInt(uint64(labelCount) * uint64(LookupLabelEntrySize))
+	if !ok {
+		return 0, ErrOutOfBounds
+	}
+	expected, ok := checkedAddInt(tableStart, tableBytes)
 	if !ok || expected > len(item) {
 		return 0, ErrOutOfBounds
 	}
@@ -465,7 +498,11 @@ func (v *CgroupsLookupRequestView) Item(index uint32) (CStringView, error) {
 	if err != nil {
 		return CStringView{}, err
 	}
-	return NewCStringView(item, uint32(length-1)), nil
+	stringLen, ok := checkedU32Int(length - 1)
+	if !ok {
+		return CStringView{}, ErrOutOfBounds
+	}
+	return NewCStringView(item, stringLen), nil
 }
 
 func EncodeAppsLookupRequest(pids []uint32, buf []byte) (int, error) {
@@ -756,6 +793,10 @@ func (b *CgroupsLookupBuilder) Add(status, orchestrator uint16, path, name []byt
 	nameOff, ok := checkedAddInt(pathOff, len(path))
 	if ok {
 		nameOff, ok = checkedAddInt(nameOff, 1)
+	}
+	if !ok {
+		b.err = ErrOverflow
+		return ErrOverflow
 	}
 	fixedEnd, ok := checkedAddInt(nameOff, len(name))
 	if ok {
@@ -1273,9 +1314,17 @@ func (b *AppsLookupBuilder) Add(status, cgroupStatus, orchestrator uint16, pid, 
 	if ok {
 		pathOff, ok = checkedAddInt(pathOff, 1)
 	}
+	if !ok {
+		b.err = ErrOverflow
+		return ErrOverflow
+	}
 	nameOff, ok := checkedAddInt(pathOff, len(cgroupPath))
 	if ok {
 		nameOff, ok = checkedAddInt(nameOff, 1)
+	}
+	if !ok {
+		b.err = ErrOverflow
+		return ErrOverflow
 	}
 	fixedEnd, ok := checkedAddInt(nameOff, len(cgroupName))
 	if ok {

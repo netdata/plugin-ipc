@@ -411,11 +411,37 @@ func (c *Client) CallIncrementBatch(values []uint64) ([]uint64, error) {
 	}
 
 	var results []uint64
-	itemCount := uint32(len(values))
+	itemCount, err := checkedLookupU32(len(values))
+	if err != nil {
+		return nil, err
+	}
 
-	err := c.callWithRetry(func() error {
+	err = c.callWithRetry(func() error {
 		// Build batch request payload
-		batchBufSize := protocol.Align8(int(itemCount)*8) + int(itemCount)*protocol.IncrementPayloadSize + int(itemCount)*protocol.Alignment
+		dirBytes, err := checkedLookupMul(len(values), 8)
+		if err != nil {
+			return err
+		}
+		dirAligned, err := checkedLookupAlign8(dirBytes)
+		if err != nil {
+			return err
+		}
+		itemsBytes, err := checkedLookupMul(len(values), protocol.IncrementPayloadSize)
+		if err != nil {
+			return err
+		}
+		paddingBytes, err := checkedLookupMul(len(values), protocol.Alignment)
+		if err != nil {
+			return err
+		}
+		batchBufSize, err := checkedLookupAdd(dirAligned, itemsBytes)
+		if err != nil {
+			return err
+		}
+		batchBufSize, err = checkedLookupAdd(batchBufSize, paddingBytes)
+		if err != nil {
+			return err
+		}
 		batchBuf := ensureClientScratch(&c.requestBuf, batchBufSize)
 		bb := protocol.NewBatchBuilder(batchBuf, itemCount)
 
@@ -569,19 +595,28 @@ func (c *Client) tryConnect() ClientState {
 }
 
 func (c *Client) transportSend(hdr *protocol.Header, payload []byte) error {
+	payloadLen, err := checkedLookupU32(len(payload))
+	if err != nil {
+		c.noteRequestCapacity(^uint32(0))
+		return protocol.ErrOverflow
+	}
+
 	if c.shm != nil {
-		if len(payload) > int(c.sessionMaxRequestPayloadBytes()) {
-			c.noteRequestCapacity(uint32(len(payload)))
+		if payloadLen > c.sessionMaxRequestPayloadBytes() {
+			c.noteRequestCapacity(payloadLen)
 			return protocol.ErrOverflow
 		}
 
-		msgLen := protocol.HeaderSize + len(payload)
+		msgLen, err := checkedLookupAdd(protocol.HeaderSize, len(payload))
+		if err != nil {
+			return protocol.ErrOverflow
+		}
 		msg := ensureClientScratch(&c.sendBuf, msgLen)
 
 		hdr.Magic = protocol.MagicMsg
 		hdr.Version = protocol.Version
 		hdr.HeaderLen = protocol.HeaderLen
-		hdr.PayloadLen = uint32(len(payload))
+		hdr.PayloadLen = payloadLen
 
 		hdr.Encode(msg[:protocol.HeaderSize])
 		if len(payload) > 0 {
@@ -590,7 +625,7 @@ func (c *Client) transportSend(hdr *protocol.Header, payload []byte) error {
 
 		if err := c.shm.ShmSend(msg[:msgLen]); err != nil {
 			if errors.Is(err, posix.ErrShmMsgTooLarge) {
-				c.noteRequestCapacity(uint32(len(payload)))
+				c.noteRequestCapacity(payloadLen)
 				return protocol.ErrOverflow
 			}
 			return protocol.ErrTruncated
@@ -604,7 +639,7 @@ func (c *Client) transportSend(hdr *protocol.Header, payload []byte) error {
 	}
 	if err := c.session.Send(hdr, payload); err != nil {
 		if errors.Is(err, posix.ErrLimitExceeded) {
-			c.noteRequestCapacity(uint32(len(payload)))
+			c.noteRequestCapacity(payloadLen)
 			return protocol.ErrOverflow
 		}
 		return protocol.ErrTruncated
@@ -940,8 +975,8 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 			return
 		}
 
-		if len(payload) <= int(^uint32(0)) {
-			serverNotePayloadCapacity(&s.learnedRequestPayloadBytes, uint32(len(payload)))
+		if payloadLen, err := checkedLookupU32(len(payload)); err == nil {
+			serverNotePayloadCapacity(&s.learnedRequestPayloadBytes, payloadLen)
 		}
 
 		if !s.methodSupported(hdr.Code) {
@@ -1114,14 +1149,18 @@ type pollfd struct {
 // pollFd polls a file descriptor for readability with a timeout in ms.
 // Returns: 1 = data ready, 0 = timeout, -1 = error/hangup.
 func pollFd(fd int, timeoutMs int) int {
+	const maxInt32 = 1<<31 - 1
+	if fd < 0 || fd > maxInt32 {
+		return -1
+	}
 	pfd := pollfd{
-		fd:     int32(fd),
+		fd:     int32(fd), // #nosec G115 -- fd is checked against int32 range above.
 		events: _POLLIN,
 	}
 
 	r, _, errno := syscall.Syscall(
 		syscall.SYS_POLL,
-		uintptr(unsafe.Pointer(&pfd)),
+		uintptr(unsafe.Pointer(&pfd)), // #nosec G103 -- raw poll syscall requires a pollfd pointer.
 		1,
 		uintptr(timeoutMs),
 	)

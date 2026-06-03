@@ -33,7 +33,7 @@ func buildMessage(kind, code uint16, messageID uint64, payload []byte) []byte {
 		Code:       code,
 		ItemCount:  1,
 		MessageID:  messageID,
-		PayloadLen: uint32(len(payload)),
+		PayloadLen: uint32(len(payload)), // #nosec G115 -- fixture messages are static and fit the protocol payload field.
 	}
 	buf := make([]byte, protocol.HeaderSize+len(payload))
 	hdr.Encode(buf[:protocol.HeaderSize])
@@ -186,7 +186,10 @@ func main() {
 	runDir := os.Args[2]
 	service := os.Args[3]
 
-	os.MkdirAll(runDir, 0700)
+	if err := os.MkdirAll(runDir, 0700); err != nil { // #nosec G703 -- interop fixture uses caller-provided temporary run directory.
+		fmt.Fprintf(os.Stderr, "mkdir %s: %v\n", runDir, err)
+		os.Exit(1)
+	}
 
 	var rc int
 	switch mode {

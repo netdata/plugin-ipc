@@ -68,8 +68,54 @@ func cacheHashName(name string) uint32 {
 func cpuNS() uint64 {
 	var ts syscall.Timespec
 	// CLOCK_PROCESS_CPUTIME_ID = 2 on Linux
-	syscall.Syscall(syscall.SYS_CLOCK_GETTIME, 2, uintptr(unsafe.Pointer(&ts)), 0)
-	return uint64(ts.Sec)*1_000_000_000 + uint64(ts.Nsec)
+	_, _, _ = syscall.Syscall(syscall.SYS_CLOCK_GETTIME, 2, uintptr(unsafe.Pointer(&ts)), 0) // #nosec G103 -- clock_gettime requires passing a Timespec pointer.
+	if ts.Sec < 0 || ts.Nsec < 0 {
+		return 0
+	}
+	sec := uint64(ts.Sec)   // #nosec G115 -- clock_gettime returned a non-negative value.
+	nsec := uint64(ts.Nsec) // #nosec G115 -- clock_gettime returned a non-negative value.
+	return sec*1_000_000_000 + nsec
+}
+
+func u32FromNonNegativeInt(value int) (uint32, bool) {
+	if value < 0 || uint64(value) > uint64(^uint32(0)) {
+		return 0, false
+	}
+	return uint32(value), true // #nosec G115 -- value is bounded by the uint32 maximum above.
+}
+
+func u64FromNonNegativeInt(value int) (uint64, bool) {
+	if value < 0 {
+		return 0, false
+	}
+	return uint64(value), true // #nosec G115 -- value is checked non-negative above.
+}
+
+func durationNanos(d time.Duration) uint64 {
+	if d <= 0 {
+		return 0
+	}
+	return uint64(d.Nanoseconds()) // #nosec G115 -- d is checked non-negative above.
+}
+
+func recordLatency(lr *latencyRecorder, start, end time.Time) {
+	lr.record(durationNanos(end.Sub(start)))
+}
+
+func estimateSamples(defaultSamples int, targetRPS uint64, durationSec int) int {
+	if targetRPS == 0 || durationSec <= 0 {
+		return defaultSamples
+	}
+	duration := uint64(durationSec) // #nosec G115 -- durationSec is checked positive above.
+	if targetRPS > uint64(maxLatencySamples)/duration {
+		return maxLatencySamples
+	}
+	samples := targetRPS * duration
+	return int(samples) // #nosec G115 -- samples is bounded by maxLatencySamples above.
+}
+
+func randomBatchSize() uint32 {
+	return uint32(rand.Intn(maxBatchItems-1) + 2) // #nosec G115 -- maxBatchItems bounds the value to 2..1000.
 }
 
 // ---------------------------------------------------------------------------
@@ -123,8 +169,9 @@ func newRateLimiter(targetRPS uint64) *rateLimiter {
 	if targetRPS == 0 {
 		return &rateLimiter{limited: false}
 	}
+	intervalNs := 1_000_000_000 / targetRPS
 	return &rateLimiter{
-		interval: time.Duration(1_000_000_000/targetRPS) * time.Nanosecond,
+		interval: time.Duration(intervalNs) * time.Nanosecond, // #nosec G115 -- intervalNs is bounded by 1e9.
 		next:     time.Now(),
 		limited:  true,
 	}
@@ -401,10 +448,7 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 		defer shm.ShmClose()
 	}
 
-	estSamples := 2_000_000
-	if targetRPS > 0 {
-		estSamples = int(targetRPS) * durationSec
-	}
+	estSamples := estimateSamples(2_000_000, targetRPS, durationSec)
 	lr := newLatencyRecorder(estSamples)
 	rl := newRateLimiter(targetRPS)
 
@@ -424,7 +468,7 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 		rl.wait()
 
 		// Random batch size 2-1000 (server treats itemCount==1 as non-batch)
-		batchSize := uint32(rand.Intn(maxBatchItems-1) + 2)
+		batchSize := randomBatchSize()
 
 		// Reuse a stack builder to avoid a heap object per request.
 		var bb protocol.BatchBuilder
@@ -467,7 +511,12 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 			hdr.Magic = protocol.MagicMsg
 			hdr.Version = protocol.Version
 			hdr.HeaderLen = protocol.HeaderLen
-			hdr.PayloadLen = uint32(reqLen)
+			payloadLen, ok := u32FromNonNegativeInt(reqLen)
+			if !ok {
+				errors++
+				continue
+			}
+			hdr.PayloadLen = payloadLen
 			hdr.Encode(msg[:protocol.HeaderSize])
 			copy(msg[protocol.HeaderSize:], reqBuf[:reqLen])
 
@@ -536,7 +585,7 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 			}
 
 			t1 := time.Now()
-			lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+			recordLatency(lr, t0, t1)
 			_ = batchOK
 			totalItems += uint64(batchSize)
 		} else {
@@ -593,7 +642,7 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 			}
 
 			t1 := time.Now()
-			lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+			recordLatency(lr, t0, t1)
 			_ = batchOK
 			totalItems += uint64(batchSize)
 		}
@@ -643,13 +692,7 @@ func runPipelineClient(runDir, service string, durationSec int, targetRPS uint64
 	}
 	defer session.Close()
 
-	estSamples := maxLatencySamples
-	if targetRPS > 0 {
-		estSamples = int(targetRPS) * durationSec
-	}
-	if estSamples > maxLatencySamples {
-		estSamples = maxLatencySamples
-	}
+	estSamples := estimateSamples(maxLatencySamples, targetRPS, durationSec)
 	lr := newLatencyRecorder(estSamples)
 	rl := newRateLimiter(targetRPS)
 
@@ -714,10 +757,15 @@ func runPipelineClient(runDir, service string, durationSec int, targetRPS uint64
 		}
 
 		t1 := time.Now()
-		lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+		recordLatency(lr, t0, t1)
 
-		counter += uint64(depth)
-		requests += uint64(depth)
+		depth64, ok := u64FromNonNegativeInt(depth)
+		if !ok {
+			errors++
+			continue
+		}
+		counter += depth64
+		requests += depth64
 	}
 
 	wallSec := time.Since(wallStart).Seconds()
@@ -789,7 +837,7 @@ func runPipelineBatchClient(runDir, service string, durationSec int, targetRPS u
 		// Build and send `depth` batch requests
 		sendOK := true
 		for d := 0; d < depth; d++ {
-			bs := uint32(rand.Intn(maxBatchItems-1) + 2)
+			bs := randomBatchSize()
 			batchSizes[d] = bs
 
 			var bb protocol.BatchBuilder
@@ -797,7 +845,14 @@ func runPipelineBatchClient(runDir, service string, durationSec int, targetRPS u
 
 			for i := uint32(0); i < bs; i++ {
 				protocol.IncrementEncode(counter+uint64(i), itemBuf)
-				bb.Add(itemBuf)
+				if err := bb.Add(itemBuf); err != nil {
+					sendOK = false
+					errors++
+					break
+				}
+			}
+			if !sendOK {
+				break
 			}
 
 			reqLen, _ := bb.Finish()
@@ -836,7 +891,7 @@ func runPipelineBatchClient(runDir, service string, durationSec int, targetRPS u
 		}
 
 		t1 := time.Now()
-		lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+		recordLatency(lr, t0, t1)
 	}
 
 	wallSec := time.Since(wallStart).Seconds()
@@ -906,13 +961,7 @@ func runPingPongClient(runDir, service string, profiles uint32, durationSec int,
 		defer shm.ShmClose()
 	}
 
-	estSamples := maxLatencySamples
-	if targetRPS > 0 {
-		estSamples = int(targetRPS) * durationSec
-	}
-	if estSamples > maxLatencySamples {
-		estSamples = maxLatencySamples
-	}
+	estSamples := estimateSamples(maxLatencySamples, targetRPS, durationSec)
 	lr := newLatencyRecorder(estSamples)
 	rl := newRateLimiter(targetRPS)
 
@@ -992,7 +1041,7 @@ func runPingPongClient(runDir, service string, profiles uint32, durationSec int,
 		}
 
 		t1 := time.Now()
-		lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+		recordLatency(lr, t0, t1)
 
 		counter++
 		requests++
@@ -1041,13 +1090,7 @@ func runSnapshotClient(runDir, service string, profiles uint32, durationSec int,
 		return 1
 	}
 
-	estSamples := maxLatencySamples
-	if targetRPS > 0 {
-		estSamples = int(targetRPS) * durationSec
-	}
-	if estSamples > maxLatencySamples {
-		estSamples = maxLatencySamples
-	}
+	estSamples := estimateSamples(maxLatencySamples, targetRPS, durationSec)
 	lr := newLatencyRecorder(estSamples)
 	rl := newRateLimiter(targetRPS)
 
@@ -1075,7 +1118,7 @@ func runSnapshotClient(runDir, service string, profiles uint32, durationSec int,
 			errors++
 		}
 
-		lr.record(uint64(t1.Sub(t0).Nanoseconds()))
+		recordLatency(lr, t0, t1)
 		requests++
 	}
 
@@ -1139,7 +1182,11 @@ func runLookupBench(durationSec int) int {
 	}
 
 	lookupIndex := make([]cacheBucket, 32)
-	mask := uint32(len(lookupIndex) - 1)
+	mask, ok := u32FromNonNegativeInt(len(lookupIndex) - 1)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "cache lookup index too large")
+		return 1
+	}
 	for i := range cacheItems {
 		slot := (cacheItems[i].Hash ^ cacheHashName(cacheItems[i].Name)) & mask
 		for lookupIndex[slot].used {
@@ -1366,7 +1413,7 @@ func runLookupMethodBench(durationSec int, scenario string, targetRPS uint64) in
 			continue
 		}
 
-		lr.record(uint64(time.Since(t0).Nanoseconds()))
+		recordLatency(lr, t0, time.Now())
 		requests++
 	}
 
@@ -1438,7 +1485,10 @@ func main() {
 			}
 		}
 
-		os.MkdirAll(runDir, 0700)
+		if err := os.MkdirAll(runDir, 0700); err != nil { // #nosec G703 -- benchmark driver uses caller-provided temporary run directory.
+			fmt.Fprintf(os.Stderr, "mkdir %s: %v\n", runDir, err)
+			os.Exit(1)
+		}
 
 		var profiles uint32
 		var handlerType string
@@ -1473,7 +1523,10 @@ func main() {
 			}
 		}
 
-		os.MkdirAll(runDir, 0700)
+		if err := os.MkdirAll(runDir, 0700); err != nil { // #nosec G703 -- benchmark driver uses caller-provided temporary run directory.
+			fmt.Fprintf(os.Stderr, "mkdir %s: %v\n", runDir, err)
+			os.Exit(1)
+		}
 
 		var profiles uint32
 		switch cmd {

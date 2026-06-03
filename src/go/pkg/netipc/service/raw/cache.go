@@ -83,7 +83,12 @@ func (c *Cache) Refresh() bool {
 	// Rebuild open-addressing lookup table.
 	var buckets []cacheBucket
 	if len(newItems) > 0 {
-		bcount := nextPowerOf2U32(uint32(len(newItems)) * 2)
+		itemCount, err := checkedLookupU32(len(newItems))
+		if err != nil || itemCount > ^uint32(0)/2 {
+			c.refreshFailureCount++
+			return false
+		}
+		bcount := nextPowerOf2U32(itemCount * 2)
 		buckets = make([]cacheBucket, bcount)
 		mask := bcount - 1
 		for i := range newItems {
@@ -120,7 +125,10 @@ func (c *Cache) Lookup(hash uint32, name string) (CacheItem, bool) {
 	}
 
 	if len(c.buckets) > 0 {
-		mask := uint32(len(c.buckets) - 1)
+		mask, err := checkedLookupU32(len(c.buckets) - 1)
+		if err != nil {
+			return CacheItem{}, false
+		}
 		slot := (hash ^ cacheHashName(name)) & mask
 		for c.buckets[slot].used {
 			item := &c.items[c.buckets[slot].index]
@@ -142,9 +150,13 @@ func (c *Cache) Lookup(hash uint32, name string) (CacheItem, bool) {
 
 // Status returns a diagnostic snapshot for the L3 cache.
 func (c *Cache) Status() CacheStatus {
+	itemCount, err := checkedLookupU32(len(c.items))
+	if err != nil {
+		itemCount = ^uint32(0)
+	}
 	return CacheStatus{
 		Populated:           c.populated,
-		ItemCount:           uint32(len(c.items)),
+		ItemCount:           itemCount,
 		SystemdEnabled:      c.systemdEnabled,
 		Generation:          c.generation,
 		RefreshSuccessCount: c.refreshSuccessCount,

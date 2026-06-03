@@ -531,6 +531,10 @@ stale if a server process crashes without cleanup. Level 1 handles this:
   it (unlinks and recreates).
 - On listen: if an active endpoint exists from a live process, Level 1 fails
   with an appropriate error (address already in use).
+- On POSIX: automatic stale unlink is allowed only when `run_dir` is owned by
+  the effective process user and is not group- or world-writable. In unsafe
+  shared directories, stale entries are treated as in-use so Level 1 does not
+  unlink paths that another local user could race or replace.
 - Stale detection uses process ownership metadata (PID and generation) to
   avoid false reclamation due to PID reuse.
 
