@@ -1137,8 +1137,10 @@ size_t nipc_cgroups_lookup_req_encode(const nipc_str_view_t *paths,
         return 0;
 
     size_t dir_size = (size_t)item_count * NIPC_LOOKUP_DIR_ENTRY_SIZE;
+#if SIZE_MAX <= UINT32_MAX
     if (dir_size > SIZE_MAX - NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE)
         return 0;
+#endif
     size_t packed_start = NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE + dir_size;
     if (buf_len < packed_start)
         return 0;
@@ -1272,10 +1274,16 @@ size_t nipc_apps_lookup_req_encode(const uint32_t *pids,
 
     size_t dir_size = (size_t)item_count * NIPC_LOOKUP_DIR_ENTRY_SIZE;
     size_t key_size = (size_t)item_count * NIPC_APPS_LOOKUP_KEY_SIZE;
+#if SIZE_MAX <= UINT32_MAX
     if (dir_size > SIZE_MAX - NIPC_APPS_LOOKUP_REQ_HDR_SIZE)
         return 0;
+#endif
     size_t packed_start = NIPC_APPS_LOOKUP_REQ_HDR_SIZE + dir_size;
-    if (key_size > SIZE_MAX - packed_start || buf_len < packed_start + key_size)
+#if SIZE_MAX <= UINT32_MAX
+    if (key_size > SIZE_MAX - packed_start)
+        return 0;
+#endif
+    if (buf_len < packed_start + key_size)
         return 0;
     if (item_count > 0 && !pids)
         return 0;
@@ -1546,9 +1554,14 @@ void nipc_cgroups_lookup_builder_init(nipc_cgroups_lookup_builder_t *b,
         b->data_offset = SIZE_MAX;
     } else {
         size_t dir_size = (size_t)max_items * NIPC_LOOKUP_DIR_ENTRY_SIZE;
-        b->data_offset = (dir_size > SIZE_MAX - NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE)
-                             ? SIZE_MAX
-                             : NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE + dir_size;
+#if SIZE_MAX <= UINT32_MAX
+        if (dir_size > SIZE_MAX - NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE) {
+            b->data_offset = SIZE_MAX;
+        } else
+#endif
+        {
+            b->data_offset = NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE + dir_size;
+        }
     }
 }
 
@@ -1940,9 +1953,14 @@ void nipc_apps_lookup_builder_init(nipc_apps_lookup_builder_t *b,
         b->data_offset = SIZE_MAX;
     } else {
         size_t dir_size = (size_t)max_items * NIPC_LOOKUP_DIR_ENTRY_SIZE;
-        b->data_offset = (dir_size > SIZE_MAX - NIPC_APPS_LOOKUP_RESP_HDR_SIZE)
-                             ? SIZE_MAX
-                             : NIPC_APPS_LOOKUP_RESP_HDR_SIZE + dir_size;
+#if SIZE_MAX <= UINT32_MAX
+        if (dir_size > SIZE_MAX - NIPC_APPS_LOOKUP_RESP_HDR_SIZE) {
+            b->data_offset = SIZE_MAX;
+        } else
+#endif
+        {
+            b->data_offset = NIPC_APPS_LOOKUP_RESP_HDR_SIZE + dir_size;
+        }
     }
 }
 

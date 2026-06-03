@@ -707,11 +707,15 @@ static bool apps_lookup_request_size(uint32_t pid_count, size_t *size_out)
         return false;
     size_t dir = (size_t)pid_count * NIPC_LOOKUP_DIR_ENTRY_SIZE;
     size_t keys = (size_t)pid_count * NIPC_APPS_LOOKUP_KEY_SIZE;
+#if SIZE_MAX <= UINT32_MAX
     if (dir > SIZE_MAX - NIPC_APPS_LOOKUP_REQ_HDR_SIZE)
         return false;
+#endif
     size_t data = NIPC_APPS_LOOKUP_REQ_HDR_SIZE + dir;
+#if SIZE_MAX <= UINT32_MAX
     if (keys > SIZE_MAX - data)
         return false;
+#endif
     *size_out = data + keys;
     return true;
 }

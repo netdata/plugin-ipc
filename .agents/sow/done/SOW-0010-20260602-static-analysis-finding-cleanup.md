@@ -709,3 +709,88 @@ Artifact updates:
 - SOW lifecycle: this regression was appended after the prior SOW content; the
   SOW is marked `completed` and will be moved back to `done/` in the same
   commit as the implementation and docs.
+
+## Regression - 2026-06-03 Residual Remote CodeQL Alerts
+
+What broke:
+
+- Commit `8a23810394997b0d6752c837d11a43343d85506b` fixed most restored
+  GitHub Code Scanning findings, but the remote CodeQL run still reported nine
+  open C alerts after SARIF ingestion: seven constant-comparison alerts and two
+  TOCTOU stale-unlink alerts.
+
+Evidence:
+
+- GitHub Code Scanning reported the residual constant-comparison alerts in
+  `src/libnetdata/netipc/src/protocol/netipc_protocol.c` and
+  `src/libnetdata/netipc/src/service/netipc_service.c`; each was an overflow
+  guard that is only reachable on 32-bit `size_t` builds because the affected
+  counts are already capped by `uint32_t`.
+- GitHub Code Scanning reported the two residual TOCTOU alerts at the POSIX
+  stale cleanup `unlink()` calls in
+  `src/libnetdata/netipc/src/transport/posix/netipc_shm.c` and
+  `src/libnetdata/netipc/src/transport/posix/netipc_uds.c`.
+- The stale cleanup race cannot be fully eliminated with POSIX path unlink
+  semantics while preserving automatic stale socket/shared-memory cleanup. The
+  implemented product constraint is that automatic stale unlink only runs in a
+  process-owned run directory that is not group/world writable; the remaining
+  CodeQL finding is intentionally narrow and source-documented.
+- The previous inline `// codeql[cpp/toctou-race-condition]` comments did not
+  affect GitHub SARIF because the CodeQL configuration did not include the
+  C/C++ `AlertSuppression.ql` query.
+
+Why previous validation missed it:
+
+- The local environment does not have the CodeQL CLI installed, so the only
+  authoritative CodeQL validation point is the GitHub run after push.
+- The prior local validation proved the code built and local tools were clean,
+  but it did not prove CodeQL SARIF suppression handling.
+
+Repair plan:
+
+- Keep the CodeQL rule enabled globally and add the C/C++ alert suppression
+  query so the two reviewed stale-unlink suppressions are represented in SARIF.
+- Compile the remaining addition-overflow guards only on 32-bit `size_t`
+  platforms, where they are real portability checks, so the 64-bit CodeQL build
+  no longer sees constant-false comparisons.
+
+Validation:
+
+- `make` passed.
+- `actionlint` passed.
+- `git diff --check` passed.
+- `cmake -S . -B build-static -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
+  passed.
+- `cmake --build build-static --parallel --target netipc_protocol netipc_uds netipc_shm netipc_service`
+  passed.
+- `clang-tidy -p build-static` on the C library sources passed with the
+  repository's existing warning-only baseline.
+- The first attempted `cppcheck --project=build-static/compile_commands.json`
+  validation failed because it scanned the whole compile database and surfaced
+  existing test/benchmark findings unrelated to this SOW; that is not the
+  workflow command shape.
+- The workflow-equivalent scoped cppcheck command passed:
+  `cppcheck --enable=warning,performance,portability --error-exitcode=1 --force --inline-suppr --std=c11 --suppress=missingIncludeSystem --suppress=unmatchedSuppression -Isrc/libnetdata/netipc/include src/libnetdata/netipc`.
+- `flawfinder --minlevel=5 --error-level=5 src/libnetdata/netipc tests`
+  passed with no level-5 findings.
+- `/usr/bin/ctest --test-dir build --output-on-failure` passed all 46 tests.
+- `osv-scanner scan --recursive --format sarif --output-file /tmp/plugin-ipc-osv-final.sarif .`
+  exited 0, and the SARIF result count was 0.
+- `codacy-analysis analyze . --install-dependencies --output-format json --output /tmp/plugin-ipc-codacy-final.json --parallel-tools 2 --tool-timeout 900000`
+  exited 0 with 0 issues and 0 tool errors.
+
+Artifact updates:
+
+- AGENTS.md: no update needed; project scanner workflow requirements remain
+  accurate.
+- Runtime project skills: no update needed; the repository still has no runtime
+  `project-*` skill.
+- Specs: no update needed; the stale cleanup behavior was already documented in
+  the prior regression update.
+- End-user/operator docs: no update needed; this follow-up only makes CodeQL
+  suppression handling explicit and preserves the already documented behavior.
+- End-user/operator skills: no update needed; the public integrator skill was
+  already updated for the private runtime directory requirement.
+- SOW lifecycle: this residual remote CodeQL regression was appended after the
+  prior SOW content; the SOW remains `completed` in `done/` with the follow-up
+  implementation and validation recorded.
