@@ -4,7 +4,7 @@ Make the public L2/L3 APIs OS-transparent for Netdata plugins within each langua
 
 ## TL;DR
 
-- Costa decided that L2/L3 caller code must not care whether the target OS is POSIX or Windows.
+- user decided that L2/L3 caller code must not care whether the target OS is POSIX or Windows.
 - In C, callers must keep strongly typed caller-allocated structs, including stack allocation. Public `void *`-style heap handles are not acceptable.
 - The plan is to unify the public L2/L3 surface across Linux and Windows separately for C, Rust, and Go, while keeping each language natural, lightweight, and high-performance in its own way.
 
@@ -115,7 +115,7 @@ Make the public L2/L3 APIs OS-transparent for Netdata plugins within each langua
   - same public type names and init functions on all OSes
   - caller-allocated structs remain valid
   - OS-specific internal fields are compiled into the public structs through platform macros
-- This is closer to Costa's requirement than a heap-only opaque-handle model.
+- This is closer to user's requirement than a heap-only opaque-handle model.
 
 ### Conclusions from the analysis
 
@@ -431,7 +431,7 @@ Make the public L2/L3 APIs OS-transparent for Netdata plugins within each langua
 #### 1. C public struct strategy
 
 Context:
-- Costa requires caller-allocated strongly typed structs, including stack allocation.
+- user requires caller-allocated strongly typed structs, including stack allocation.
 - Public `void *` handles are rejected.
 
 Options:

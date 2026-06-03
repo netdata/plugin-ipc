@@ -135,10 +135,10 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
 - Decision recorded on 2026-04-15:
   - Cross-machine workflow and completion bar:
     - the only valid workflow is:
-      - commit and push in `/home/costa/src/plugin-ipc.git`
+      - commit and push in `/home/user/src/plugin-ipc.git`
       - pull on `win11:~/src/plugin-ipc.git`
       - if fixes are needed after Windows validation:
-        - fix locally in `/home/costa/src/plugin-ipc.git`
+        - fix locally in `/home/user/src/plugin-ipc.git`
         - commit and push locally
         - pull again on `win11:~/src/plugin-ipc.git`
     - do not leave uncommitted divergence as the way to sync Linux and Windows
@@ -175,7 +175,7 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       - `bash tests/run-windows-msys-validation.sh`
       - `bash tests/run-windows-bench.sh`
     - precondition verified before launch:
-      - local `/home/costa/src/plugin-ipc.git` and `win11:~/src/plugin-ipc.git` are both on commit `50c4a2d21d3009c53520d1b7fc4fac78ce77e876`
+      - local `/home/user/src/plugin-ipc.git` and `win11:~/src/plugin-ipc.git` are both on commit `50c4a2d21d3009c53520d1b7fc4fac78ce77e876`
       - `50c4a2d` is a TODO-only validation-matrix commit on top of code commit `313f7ed`
       - no tracked local modifications are present on either host
 - Decision recorded on 2026-04-15:
@@ -2491,7 +2491,7 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       - Reason:
         - the evidence shows a real API/implementation asymmetry, not just a hot-loop bug
         - your accepted single-kind-service design already points in this direction
-- Priority check raised by Costa:
+- Priority check raised by user:
   - Background:
     - Current benchmark results are already very high in absolute terms.
     - The remaining gaps are real, but fixing them now would require a broader Rust/Go managed-server redesign for batch-heavy paths.
@@ -2514,7 +2514,7 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
   - Working theory:
     - Deferring the remaining batch-path optimization is reasonable if there are more fundamental correctness, architecture, or product-fit issues still open.
     - The benchmark investigation has already done its job by identifying the structural asymmetry and proving where it lives.
-- Updated decision from Costa:
+- Updated decision from user:
   - continue the benchmark investigation for trust in the framework
   - investigate all remaining `>1.20x` differences
   - treat the Rust/Go batch-path asymmetry as already identified, and focus next on the remaining unexplained gaps
@@ -2646,7 +2646,7 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
   - verified workflow facts from those docs:
     - real Windows benchmark proof is expected on `win11`, not via Linux cross-compilation
     - login shell may start as `MSYSTEM=MSYS`; benchmark runs should set:
-      - `PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"`
+      - `PATH="/c/Users/user/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"`
       - `MSYSTEM=MINGW64`
       - `CC=/mingw64/bin/gcc`
       - `CXX=/mingw64/bin/g++`
@@ -2936,7 +2936,7 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       - result:
         - all configured Windows floors pass
         - report generation passes cleanly
-  - follow-up approved by Costa after the first trustworthy publish:
+  - follow-up approved by user after the first trustworthy publish:
     - run one fresh full Windows suite on `win11` with the current default methodology
     - objective:
       - remove the remaining "assembled artifact" caveat if the one-shot full run now passes end to end
@@ -3140,7 +3140,7 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
         - not immediately reproducible in dedicated pair or simple sequence tests
   - pending user decision before more Windows runner code changes:
     - context:
-      - Costa asked for trustworthy Windows benchmarks
+      - user asked for trustworthy Windows benchmarks
       - current state is better than before, but a clean one-shot full run is still not guaranteed
     - user constraint raised during decision review:
       - automatic retries must not hide real failures or real bugs
@@ -3223,7 +3223,7 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
     - implication:
       - the new mode preserves truth in publish mode
       - it also gives immediate isolated rerun evidence for investigation without silently healing the benchmark artifact
-  - next-step approval from Costa:
+  - next-step approval from user:
     - commit and push the strict publish + diagnostic-mode runner changes
     - then proceed immediately to the real Windows SHM investigation using the new diagnostic mode on the actual failing slice
   - commit / push completed for the diagnostic-mode runner change:
@@ -3478,11 +3478,11 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
     - implication:
       - the row failed because one repeat died mid-row, not because all repeats drifted slow
   - factual evidence of a runner/server lifecycle bug:
-    - the runner hard-kills every benchmark server after each sample in [tests/run-windows-bench.sh:247](/home/costa/src/plugin-ipc.git/tests/run-windows-bench.sh#L247) to [tests/run-windows-bench.sh:263](/home/costa/src/plugin-ipc.git/tests/run-windows-bench.sh#L263)
+    - the runner hard-kills every benchmark server after each sample in [tests/run-windows-bench.sh:247](/home/user/src/plugin-ipc.git/tests/run-windows-bench.sh#L247) to [tests/run-windows-bench.sh:263](/home/user/src/plugin-ipc.git/tests/run-windows-bench.sh#L263)
     - the Windows benchmark servers are implemented to stop themselves after `duration+3` seconds and then run normal teardown / CPU reporting:
-      - C: [bench/drivers/c/bench_windows.c:380](/home/costa/src/plugin-ipc.git/bench/drivers/c/bench_windows.c#L380) and [bench/drivers/c/bench_windows.c:398](/home/costa/src/plugin-ipc.git/bench/drivers/c/bench_windows.c#L398)
-      - Rust: [bench/drivers/rust/src/bench_windows.rs:380](/home/costa/src/plugin-ipc.git/bench/drivers/rust/src/bench_windows.rs#L380) to [bench/drivers/rust/src/bench_windows.rs:392](/home/costa/src/plugin-ipc.git/bench/drivers/rust/src/bench_windows.rs#L392)
-      - Go: [bench/drivers/go/main_windows.go:319](/home/costa/src/plugin-ipc.git/bench/drivers/go/main_windows.go#L319) to [bench/drivers/go/main_windows.go:331](/home/costa/src/plugin-ipc.git/bench/drivers/go/main_windows.go#L331)
+      - C: [bench/drivers/c/bench_windows.c:380](/home/user/src/plugin-ipc.git/bench/drivers/c/bench_windows.c#L380) and [bench/drivers/c/bench_windows.c:398](/home/user/src/plugin-ipc.git/bench/drivers/c/bench_windows.c#L398)
+      - Rust: [bench/drivers/rust/src/bench_windows.rs:380](/home/user/src/plugin-ipc.git/bench/drivers/rust/src/bench_windows.rs#L380) to [bench/drivers/rust/src/bench_windows.rs:392](/home/user/src/plugin-ipc.git/bench/drivers/rust/src/bench_windows.rs#L392)
+      - Go: [bench/drivers/go/main_windows.go:319](/home/user/src/plugin-ipc.git/bench/drivers/go/main_windows.go#L319) to [bench/drivers/go/main_windows.go:331](/home/user/src/plugin-ipc.git/bench/drivers/go/main_windows.go#L331)
     - implication:
       - the runner is violating the server lifecycle contract on Windows
       - hard kill can bypass `nipc_server_destroy()` / `server.Stop()` cleanup
@@ -3491,10 +3491,10 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
         - `"in use by live server"` collisions on the next repeat
         - immediate success when the same row is rerun in isolation
   - factual evidence that Windows SHM naming is sensitive to leaked sessions:
-    - Windows server session IDs restart from `1` for every server process in [src/libnetdata/netipc/src/service/netipc_service_win.c:933](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/service/netipc_service_win.c#L933)
-    - new sessions increment from that counter in [src/libnetdata/netipc/src/service/netipc_service_win.c:1008](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/service/netipc_service_win.c#L1008)
-    - Windows SHM object names include `run_dir + service_name + auth_token + session_id` in [src/libnetdata/netipc/include/netipc/netipc_win_shm.h:8](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_win_shm.h#L8) to [src/libnetdata/netipc/include/netipc/netipc_win_shm.h:11](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_win_shm.h#L11)
-    - stale cleanup is intentionally a no-op on Windows in [src/libnetdata/netipc/include/netipc/netipc_win_shm.h:215](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_win_shm.h#L215) to [src/libnetdata/netipc/include/netipc/netipc_win_shm.h:220](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_win_shm.h#L220) and [src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:781](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c#L781)
+    - Windows server session IDs restart from `1` for every server process in [src/libnetdata/netipc/src/service/netipc_service_win.c:933](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/src/service/netipc_service_win.c#L933)
+    - new sessions increment from that counter in [src/libnetdata/netipc/src/service/netipc_service_win.c:1008](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/src/service/netipc_service_win.c#L1008)
+    - Windows SHM object names include `run_dir + service_name + auth_token + session_id` in [src/libnetdata/netipc/include/netipc/netipc_win_shm.h:8](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_win_shm.h#L8) to [src/libnetdata/netipc/include/netipc/netipc_win_shm.h:11](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_win_shm.h#L11)
+    - stale cleanup is intentionally a no-op on Windows in [src/libnetdata/netipc/include/netipc/netipc_win_shm.h:215](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_win_shm.h#L215) to [src/libnetdata/netipc/include/netipc/netipc_win_shm.h:220](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_win_shm.h#L220) and [src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:781](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c#L781)
     - implication:
       - if a previous sample's server/session stays alive briefly, the next sample for the same service can collide on named pipe and/or SHM object names
   - factual evidence of a separate diagnostic bookkeeping bug:
@@ -3506,10 +3506,10 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       - diagnostic mode currently preserves the truth of the first failure in the terminal output
       - but it does **not** yet preserve the filesystem evidence reliably enough
   - factual evidence of a Windows SHM transport hardening gap:
-    - C Windows SHM create path does not check `GetLastError() == ERROR_ALREADY_EXISTS` after `CreateFileMappingW` / `CreateEventW` in [src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:198](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c#L198) to [src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:266](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c#L266)
+    - C Windows SHM create path does not check `GetLastError() == ERROR_ALREADY_EXISTS` after `CreateFileMappingW` / `CreateEventW` in [src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:198](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c#L198) to [src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c:266](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c#L266)
     - Rust and Go Windows SHM server-create paths also do not appear to check for existing named objects:
-      - Rust: [src/crates/netipc/src/transport/win_shm.rs:252](/home/costa/src/plugin-ipc.git/src/crates/netipc/src/transport/win_shm.rs#L252) to [src/crates/netipc/src/transport/win_shm.rs:317](/home/costa/src/plugin-ipc.git/src/crates/netipc/src/transport/win_shm.rs#L317)
-      - Go: [src/go/pkg/netipc/transport/windows/shm.go:166](/home/costa/src/plugin-ipc.git/src/go/pkg/netipc/transport/windows/shm.go#L166) to [src/go/pkg/netipc/transport/windows/shm.go:249](/home/costa/src/plugin-ipc.git/src/go/pkg/netipc/transport/windows/shm.go#L249)
+      - Rust: [src/crates/netipc/src/transport/win_shm.rs:252](/home/user/src/plugin-ipc.git/src/crates/netipc/src/transport/win_shm.rs#L252) to [src/crates/netipc/src/transport/win_shm.rs:317](/home/user/src/plugin-ipc.git/src/crates/netipc/src/transport/win_shm.rs#L317)
+      - Go: [src/go/pkg/netipc/transport/windows/shm.go:166](/home/user/src/plugin-ipc.git/src/go/pkg/netipc/transport/windows/shm.go#L166) to [src/go/pkg/netipc/transport/windows/shm.go:249](/home/user/src/plugin-ipc.git/src/go/pkg/netipc/transport/windows/shm.go#L249)
     - implication:
       - a leaked Windows SHM object may be treated as a successful create instead of an explicit collision
       - this can turn cleanup problems into nondeterministic runtime behavior
@@ -3896,5 +3896,5 @@ Fit-for-purpose goal: integrate `plugin-ipc` into `~/src/netdata/netdata/` so Ne
       - `test_win_service.exe`
       - `test_win_service_extra.exe`
 - Sync status:
-  - local `/home/costa/src/plugin-ipc.git` and `win11:~/src/plugin-ipc.git` were
+  - local `/home/user/src/plugin-ipc.git` and `win11:~/src/plugin-ipc.git` were
     synchronized to `2bca7bb` for the validation run

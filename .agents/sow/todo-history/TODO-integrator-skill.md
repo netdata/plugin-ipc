@@ -4,7 +4,7 @@ Fit-for-purpose goal: produce one authoritative caller-facing integration skill 
 
 ## TL;DR
 
-- Costa wants a single markdown skill/document for Netdata integrators.
+- user wants a single markdown skill/document for Netdata integrators.
 - It must explain how to use L1, L2, and L3 correctly when adding new plugins, clients, and servers.
 - It must cover all supported languages and both operating systems, including typed datatype creation, library integration, failure handling, retries, transport/profile logging, and best practices.
 

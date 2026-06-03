@@ -12,10 +12,10 @@
 - User decision (2026-03-11, after remediation):
   - commit the current fixes and push them
   - use `ssh win11` for real Windows validation before finalizing the commit
-  - use `/c/Users/costa/src/plugin-ipc-win.git` on `win11` for validation
+  - use `/c/Users/user/src/plugin-ipc-win.git` on `win11` for validation
   - reset that Windows test clone before applying the current patch and running tests
   - next step is to wire the same Windows validation into CI
-- Fact: local repository `/home/costa/src/plugin-ipc.git` is currently clean on branch `main` (`git status --short --branch` showed `## main...origin/main`).
+- Fact: local repository `/home/user/src/plugin-ipc.git` is currently clean on branch `main` (`git status --short --branch` showed `## main...origin/main`).
 - Fact: remote branch `origin/windows-transports-rust-go` exists and was fetched successfully on 2026-03-11.
 - Fact: local branch `windows-transports-rust-go` now tracks `origin/windows-transports-rust-go`.
 - Fact: `origin/windows-transports-rust-go` is 2 commits ahead of `origin/main`:
@@ -37,13 +37,13 @@
   - `cmake --build build --target test` fails on Linux because the Rust bench-driver manifest always includes the Windows binary and CMake builds the manifest without selecting a single bin; `netipc-live-uds-interop` and `netipc-uds-negotiation-negative` both fail for this reason.
   - `GOOS=windows GOARCH=amd64 go test ./...` fails because the Go POSIX transport package is not build-tagged out on Windows while its syscall helper definitions are unix-only.
   - POSIX SHM stale-endpoint takeover in both C and Rust only checks `owner_pid` even though the shared region stores an `owner_generation`; PID reuse can therefore make stale endpoints appear live.
-  - Windows validation scripts remain workstation-specific (`/c/Users/costa/...`, hard-coded PATH/GOROOT), so the documented Windows validation path is not portable or CI-ready.
+  - Windows validation scripts remain workstation-specific (`/c/Users/user/...`, hard-coded PATH/GOROOT), so the documented Windows validation path is not portable or CI-ready.
   - README still documents current limitations: Go/Rust rely on helper binaries for validated live paths, and Netdata integration wiring is explicitly out of scope in this repository phase.
 - Current remediation plan:
   - gate the Rust Windows bench binary behind an explicit feature and make CMake build explicit per-bin targets
   - add proper unix build tags to the Go POSIX transport sources/tests
   - strengthen POSIX SHM ownership metadata so stale-endpoint reclaim is resilient to PID reuse
-  - make Windows helper scripts path-configurable instead of Costa-workstation-specific
+  - make Windows helper scripts path-configurable instead of user-workstation-specific
   - rerun Linux validation and cross-build checks after the fixes
   - run the smoke and live Windows checks on `win11` before committing
 - Current immediate request:
@@ -69,7 +69,7 @@
   - if that validation passes, commit the specific files changed in this task and push `main`
   - produce a review with concrete findings, risks, and a readiness recommendation
 - Windows validation results on `win11` (2026-03-11):
-  - Fact: `/c/Users/costa/src/plugin-ipc-win.git` was reset to `origin/main`, cleaned, and used as the Windows validation clone.
+  - Fact: `/c/Users/user/src/plugin-ipc-win.git` was reset to `origin/main`, cleaned, and used as the Windows validation clone.
   - Fact: the current local remediation patch was applied there cleanly with `git apply`.
   - Fact: `go test ./...` under `src/go` passed on Windows when using the official Go installation.
   - Fact: `cargo check --manifest-path bench/drivers/rust/Cargo.toml --features windows-driver --bin netipc_live_win_rs` passed on Windows.
@@ -134,8 +134,8 @@
       - Windows: `HANDLE`
 
 ## Session Handoff (2026-03-08)
-- Working repository: `/home/costa/src/plugin-ipc.git` (local git repo initialized, branch `main`).
-- Port status: source/tests/docs/tooling copied from `/home/costa/src/ipc-test` and validated in-place.
+- Working repository: `/home/user/src/plugin-ipc.git` (local git repo initialized, branch `main`).
+- Port status: source/tests/docs/tooling copied from `/home/user/src/ipc-test` and validated in-place.
 - Validation already run here: `make`, `./tests/run-interop.sh`, `./tests/run-live-uds-interop.sh` (all pass).
 - Repository refactor status:
   - approved Netdata-style layout implemented:
@@ -168,7 +168,7 @@
 - Next starting point for the next session:
   - Continue replacing placeholder Rust/Go library scaffolding with real reusable API implementations.
   - Latest Windows probe findings not yet committed:
-    - `win11` repo path used for testing is `/c/Users/costa/src/plugin-ipc-win.git`
+    - `win11` repo path used for testing is `/c/Users/user/src/plugin-ipc-win.git`
     - MSYS2/POSIX C configure+build passes there
     - native `MINGW64` C build currently fails on POSIX-only headers (`arpa/inet.h`, `poll.h`, `sys/mman.h`)
     - Rust on `win11` is currently `x86_64-pc-windows-msvc`, and the crate still tries to compile POSIX transport code on that Windows target
@@ -211,18 +211,18 @@ If we manage to have an transport layer that supports millions of requests/respo
 ## Analysis (Current Status - Fact Based)
 - Fact (2026-03-12): Netdata already has an ad-hoc plugin-to-plugin communication path between `cgroups.plugin` and `ebpf.plugin`.
 - Evidence:
-  - Shared-memory layout and names are defined in [`/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.h`](/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.h).
-  - Producer initializes and populates the shared memory in [`/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c`](/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c).
-  - Consumer opens, maps, and reads it in [`/home/costa/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c`](/home/costa/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c).
+  - Shared-memory layout and names are defined in [`/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.h`](/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.h).
+  - Producer initializes and populates the shared memory in [`/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c`](/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c).
+  - Consumer opens, maps, and reads it in [`/home/user/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c`](/home/user/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c).
 - Fact: this existing path is not a generic RPC protocol.
 - Fact: it is Linux/POSIX-only shared memory plus a named semaphore, with a fixed shared struct layout and direct in-process parsing by the consumer.
 - Fact: `ebpf.plugin` keeps a local cache from this shared state and uses it widely across multiple modules, so this is effectively a periodically refreshed snapshot feed, not a request-per-lookup interface.
 - Evidence:
-  - the integration thread periodically maps or parses the shared memory in [`/home/costa/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c`](/home/costa/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c).
-  - downstream eBPF modules consume the cached data via `ebpf_cgroup_pids`, for example in [`/home/costa/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_process.c`](/home/costa/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_process.c).
+  - the integration thread periodically maps or parses the shared memory in [`/home/user/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c`](/home/user/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c).
+  - downstream eBPF modules consume the cached data via `ebpf_cgroup_pids`, for example in [`/home/user/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_process.c`](/home/user/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_process.c).
 - Implication: `plugin-ipc` could replace it functionally, but not as a naive 1:1 transport swap. The natural `plugin-ipc` replacement would be a snapshot/batch service with client-side caching, or a future shared-memory backend, not a per-item synchronous lookup in the hot path.
 - Implication: it proves the use case and some lifecycle patterns, but it is not a reusable cross-language/cross-OS service bus.
-- Fact: Repository path `/home/costa/src/ipc-test` is currently empty (no source files, no tests, no existing TODO file).
+- Fact: Repository path `/home/user/src/ipc-test` is currently empty (no source files, no tests, no existing TODO file).
 - Fact: There is no pre-existing IPC implementation in this repo to extend.
 - Fact: There is no existing build layout yet (no CMake/Cargo/go.mod).
 - Fact: Host for first benchmark pass is Linux x86_64 (Manjaro, kernel 6.18.12).
@@ -1157,7 +1157,7 @@ If we manage to have an transport layer that supports millions of requests/respo
   - `cmake --build build`
   - `/usr/bin/ctest --test-dir build --output-on-failure`
   - on `win11`:
-    - `PATH=/c/Users/costa/.cargo/bin:$PATH cargo test --manifest-path src/crates/netipc/Cargo.toml`
+    - `PATH=/c/Users/user/.cargo/bin:$PATH cargo test --manifest-path src/crates/netipc/Cargo.toml`
     - `go test ./...` from `src/go`
     - `bash tests/smoke-win.sh` with result `32 passed, 0 failed`
 - Important remaining gap after Phase 1:
@@ -1907,7 +1907,7 @@ If we manage to have an transport layer that supports millions of requests/respo
        - Go and `x/sys/unix` do expose raw Linux futex and eventfd syscalls at the syscall-number level:
        - local evidence:
          - `/usr/lib/go/src/syscall/zsysnum_linux_amd64.go` defines `SYS_FUTEX`
-         - `/home/costa/go/pkg/mod/golang.org/x/sys@v0.41.0/unix/zsysnum_linux_amd64.go` defines `SYS_FUTEX`, `SYS_FUTEX_WAIT`, `SYS_FUTEX_WAKE`, and `SYS_EVENTFD2`
+         - `/home/user/go/pkg/mod/golang.org/x/sys@v0.41.0/unix/zsysnum_linux_amd64.go` defines `SYS_FUTEX`, `SYS_FUTEX_WAIT`, `SYS_FUTEX_WAKE`, and `SYS_EVENTFD2`
        - primary references:
          - `futex(2)` / `futex(7)` on `man7.org`
          - `eventfd(2)` on `man7.org`
@@ -2122,9 +2122,9 @@ If we manage to have an transport layer that supports millions of requests/respo
      - the existing `ebpf <-> cgroups` integration is a periodically refreshed shared snapshot that `ebpf.plugin` turns into a local cache
      - the cached state is then reused across many hot paths instead of making a request for every lookup
      - evidence:
-       - producer populates the shared snapshot in [`/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c`](/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c)
-       - consumer refreshes local cached state in [`/home/costa/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c`](/home/costa/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c)
-       - hot paths later consume that cached state, for example in [`/home/costa/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_process.c`](/home/costa/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_process.c)
+       - producer populates the shared snapshot in [`/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c`](/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c)
+       - consumer refreshes local cached state in [`/home/user/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c`](/home/user/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c)
+       - hot paths later consume that cached state, for example in [`/home/user/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_process.c`](/home/user/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_process.c)
    - Options:
      - Option A:
        - keep the library generic and expose only transport/service primitives; each plugin owns any local cache it needs
@@ -2157,9 +2157,9 @@ If we manage to have an transport layer that supports millions of requests/respo
    - Context:
      - this repository currently has only `increment`-based fixtures, helpers, and tests
      - evidence:
-       - C fixture/codec tool: [`/home/costa/src/plugin-ipc.git/tests/fixtures/c/netipc_live_c.c`](/home/costa/src/plugin-ipc.git/tests/fixtures/c/netipc_live_c.c), [`/home/costa/src/plugin-ipc.git/tests/fixtures/c/netipc_codec_tool.c`](/home/costa/src/plugin-ipc.git/tests/fixtures/c/netipc_codec_tool.c)
-       - Go fixture: [`/home/costa/src/plugin-ipc.git/tests/fixtures/go/main.go`](/home/costa/src/plugin-ipc.git/tests/fixtures/go/main.go)
-       - Rust fixture: [`/home/costa/src/plugin-ipc.git/tests/fixtures/rust/src/bin/netipc_live_rs.rs`](/home/costa/src/plugin-ipc.git/tests/fixtures/rust/src/bin/netipc_live_rs.rs)
+       - C fixture/codec tool: [`/home/user/src/plugin-ipc.git/tests/fixtures/c/netipc_live_c.c`](/home/user/src/plugin-ipc.git/tests/fixtures/c/netipc_live_c.c), [`/home/user/src/plugin-ipc.git/tests/fixtures/c/netipc_codec_tool.c`](/home/user/src/plugin-ipc.git/tests/fixtures/c/netipc_codec_tool.c)
+       - Go fixture: [`/home/user/src/plugin-ipc.git/tests/fixtures/go/main.go`](/home/user/src/plugin-ipc.git/tests/fixtures/go/main.go)
+       - Rust fixture: [`/home/user/src/plugin-ipc.git/tests/fixtures/rust/src/bin/netipc_live_rs.rs`](/home/user/src/plugin-ipc.git/tests/fixtures/rust/src/bin/netipc_live_rs.rs)
        - transport APIs are still `receive_increment` / `send_increment` / `call_increment` oriented in C, Rust, and Go
      - the newly approved cache-backed helper layer should be validated with a fake producer before any Netdata-repo integration
    - Options:
@@ -2218,12 +2218,12 @@ If we manage to have an transport layer that supports millions of requests/respo
      - baseline transports (`UDS_SEQPACKET` / `Named Pipe`) already carry discrete messages naturally
      - current SHM implementations are still single-slot fixed-frame paths and do not yet model server-owned variable-size snapshot publication cleanly
      - evidence:
-       - C API still exposes `receive_increment` / `send_increment` / `call_increment` in [`/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_uds_seqpacket.h`](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_uds_seqpacket.h)
-       - Rust POSIX transport still exposes `receive_increment` / `send_increment` / `call_increment` in [`/home/costa/src/plugin-ipc.git/src/crates/netipc/src/transport/posix.rs`](/home/costa/src/plugin-ipc.git/src/crates/netipc/src/transport/posix.rs)
-       - Go POSIX transport still exposes `ReceiveIncrement` / `SendIncrement` / `CallIncrement` in [`/home/costa/src/plugin-ipc.git/src/go/pkg/netipc/transport/posix/seqpacket.go`](/home/costa/src/plugin-ipc.git/src/go/pkg/netipc/transport/posix/seqpacket.go)
+       - C API still exposes `receive_increment` / `send_increment` / `call_increment` in [`/home/user/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_uds_seqpacket.h`](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_uds_seqpacket.h)
+       - Rust POSIX transport still exposes `receive_increment` / `send_increment` / `call_increment` in [`/home/user/src/plugin-ipc.git/src/crates/netipc/src/transport/posix.rs`](/home/user/src/plugin-ipc.git/src/crates/netipc/src/transport/posix.rs)
+       - Go POSIX transport still exposes `ReceiveIncrement` / `SendIncrement` / `CallIncrement` in [`/home/user/src/plugin-ipc.git/src/go/pkg/netipc/transport/posix/seqpacket.go`](/home/user/src/plugin-ipc.git/src/go/pkg/netipc/transport/posix/seqpacket.go)
        - current SHM implementations remain single-slot request/response paths in:
-         - [`/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/posix/netipc_shm_hybrid.c`](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/posix/netipc_shm_hybrid.c)
-         - [`/home/costa/src/plugin-ipc.git/src/crates/netipc/src/transport/windows.rs`](/home/costa/src/plugin-ipc.git/src/crates/netipc/src/transport/windows.rs)
+         - [`/home/user/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/posix/netipc_shm_hybrid.c`](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/posix/netipc_shm_hybrid.c)
+         - [`/home/user/src/plugin-ipc.git/src/crates/netipc/src/transport/windows.rs`](/home/user/src/plugin-ipc.git/src/crates/netipc/src/transport/windows.rs)
    - Options:
      - Option A:
        - implement and fully test the fake snapshot/cache service first on baseline transports only (`UDS_SEQPACKET` on POSIX, `Named Pipe` on Windows), then redesign SHM for snapshot publication in a later phase
@@ -2248,9 +2248,9 @@ If we manage to have an transport layer that supports millions of requests/respo
        - one derived `max_batch_bytes`
        - no separate request-owned vs response-owned limits
      - evidence:
-       - C hello payload currently carries only `max_batch_items`, `max_batch_bytes`, and `max_payload_bytes` in [`/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_schema.h`](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_schema.h)
-       - C implementation encodes/decodes only that symmetric set in [`/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/protocol/netipc_schema.c`](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/protocol/netipc_schema.c)
-       - Rust protocol core mirrors the same fields in [`/home/costa/src/plugin-ipc.git/src/crates/netipc/src/protocol.rs`](/home/costa/src/plugin-ipc.git/src/crates/netipc/src/protocol.rs)
+       - C hello payload currently carries only `max_batch_items`, `max_batch_bytes`, and `max_payload_bytes` in [`/home/user/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_schema.h`](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_schema.h)
+       - C implementation encodes/decodes only that symmetric set in [`/home/user/src/plugin-ipc.git/src/libnetdata/netipc/src/protocol/netipc_schema.c`](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/src/protocol/netipc_schema.c)
+       - Rust protocol core mirrors the same fields in [`/home/user/src/plugin-ipc.git/src/crates/netipc/src/protocol.rs`](/home/user/src/plugin-ipc.git/src/crates/netipc/src/protocol.rs)
        - current TODO decision #54 also defines `max_batch_bytes = max_payload_bytes * max_batch_items`
      - snapshot/cache services introduce asymmetric ownership:
        - client shapes request payload sizes
@@ -2288,9 +2288,9 @@ If we manage to have an transport layer that supports millions of requests/respo
      - fake producer work is required before any Netdata-repo integration (Decision #59)
      - snapshot/cache services are now in scope (Decision #58), but SHM still uses a fixed single-slot request/response layout today
      - evidence:
-       - current phase plan starts at [`TODO-plugin-ipc.md`](/home/costa/src/plugin-ipc.git/TODO-plugin-ipc.md)
-       - current hello/hello-ack structs are still symmetric in [`/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_schema.h`](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_schema.h)
-       - current SHM path is still fixed-frame/single-slot in [`/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/posix/netipc_shm_hybrid.c`](/home/costa/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/posix/netipc_shm_hybrid.c)
+       - current phase plan starts at [`TODO-plugin-ipc.md`](/home/user/src/plugin-ipc.git/TODO-plugin-ipc.md)
+       - current hello/hello-ack structs are still symmetric in [`/home/user/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_schema.h`](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/include/netipc/netipc_schema.h)
+       - current SHM path is still fixed-frame/single-slot in [`/home/user/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/posix/netipc_shm_hybrid.c`](/home/user/src/plugin-ipc.git/src/libnetdata/netipc/src/transport/posix/netipc_shm_hybrid.c)
    - Options:
      - Option A:
        - do the work in strict phases, with each phase frozen, tested, and documented before the next one starts
@@ -2323,14 +2323,14 @@ If we manage to have an transport layer that supports millions of requests/respo
          - `enabled`
          - `path`
        - evidence:
-         - [`/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.h`](/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.h)
-         - [`/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c`](/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c)
+         - [`/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.h`](/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.h)
+         - [`/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c`](/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c)
      - the current `ebpf` consumer actually uses:
        - `hash` + `name` as identity
        - `options` to derive `systemd`
        - `path` to read `cgroup.procs`
        - evidence:
-         - [`/home/costa/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c`](/home/costa/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c)
+         - [`/home/user/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c`](/home/user/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c)
      - user requirement:
        - the fake contract and fake test must be suitable to be used later with the real `cgroups` and `ebpf` plugins exactly as-is
        - implication:
@@ -2506,8 +2506,8 @@ If we manage to have an transport layer that supports millions of requests/respo
    - Status: approved on 2026-03-12 before schema implementation.
    - Context:
      - the current producer exports `hash` and the current consumer uses `hash + name` as identity:
-       - producer writes `ptr->hash = simple_hash(ptr->name)` in [`/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c`](/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c)
-       - consumer keys on `ect->hash == ptr->hash && !strcmp(ect->name, ptr->name)` in [`/home/costa/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c`](/home/costa/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c)
+       - producer writes `ptr->hash = simple_hash(ptr->name)` in [`/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c`](/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/cgroup-discovery.c)
+       - consumer keys on `ect->hash == ptr->hash && !strcmp(ect->name, ptr->name)` in [`/home/user/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c`](/home/user/src/netdata/netdata/src/collectors/ebpf.plugin/ebpf_cgroup.c)
      - user requirement is that the fake contract should later be usable with the real plugins exactly as-is
    - Options:
      - Option A:
@@ -2548,10 +2548,10 @@ If we manage to have an transport layer that supports millions of requests/respo
        - `name[256]`
        - `path[FILENAME_MAX + 1]`
        - evidence:
-         - [`/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.h`](/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.h)
+         - [`/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.h`](/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.h)
      - the current real producer also defaults `cgroup_root_max` to `1000`:
        - evidence:
-         - [`/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.c`](/home/costa/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.c)
+         - [`/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.c`](/home/user/src/netdata/netdata/src/collectors/cgroups.plugin/sys_fs_cgroup.c)
    - Derived implications:
      - the generic negotiated payload default of `1024` is not enough for the real cleaned `cgroups` snapshot item payload
      - the fake `cgroups` snapshot helper must therefore use service-specific defaults instead of the generic protocol default
@@ -2790,7 +2790,7 @@ If we manage to have an transport layer that supports millions of requests/respo
    - Source: user asked which MSYS2 packages to install and then instructed to ssh and run the install.
    - User decision:
      - approved installation of the recommended MSYS2 package set on `win11`
-     - clarified that `ssh win11` lands in `/home/costa` under MSYS2, with repositories available under `/home/costa/src/`
+     - clarified that `ssh win11` lands in `/home/user` under MSYS2, with repositories available under `/home/user/src/`
      - clarified that the remaining Windows prerequisites are now installed
    - Package set:
      - `mingw-w64-x86_64-toolchain`
@@ -2911,7 +2911,7 @@ If we manage to have an transport layer that supports millions of requests/respo
 
 74. Remove the remaining legacy C UDS demo dependency from negotiated profile-`2` testing by teaching `netipc-live-c` the same UDS profile override knobs already exposed by the old C demo binaries.
 
-75. Repository cleanup rule (clarified by Costa)
+75. Repository cleanup rule (clarified by user)
     - This repo is library-only in purpose, but it keeps everything related to the library: source, documentation, unit/integration/stress tests, build systems, benchmarks, and scripts that exercise/validate the library.
     - File retention criterion:
       - Keep any file that is part of library source code.

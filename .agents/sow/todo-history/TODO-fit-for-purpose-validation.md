@@ -1,11 +1,11 @@
 ## Autonomous execution contract
 
-- Costa explicitly requires autonomous execution with no checkpoints.
+- user explicitly requires autonomous execution with no checkpoints.
 - Windows work must use exactly one checkout on `win11`:
   - `~/src/plugin-ipc.git`
 - Cross-machine sync workflow is fixed:
-  - commit in `/home/costa/src/plugin-ipc.git`
-  - push from `/home/costa/src/plugin-ipc.git`
+  - commit in `/home/user/src/plugin-ipc.git`
+  - push from `/home/user/src/plugin-ipc.git`
   - pull in `win11:~/src/plugin-ipc.git`
   - and vice versa for Windows-originated commits
 - No disposable Windows git clones or worktrees under `/tmp` are allowed.
@@ -36,7 +36,7 @@ Linux and native Windows.
 
 ## Execution mode
 
-- Costa explicitly asked for autonomous execution of this entire plan.
+- user explicitly asked for autonomous execution of this entire plan.
 - Work must proceed phase by phase to completion without pausing for approval,
   unless a real design decision is encountered that is not already answered by
   the existing repository docs and specifications.
@@ -50,7 +50,7 @@ Linux and native Windows.
     changes the intended contract
 - Otherwise continue until the library satisfies the no-exclusions fit-for-
   purpose criteria in this TODO.
-- `2026-03-29` Costa clarified a hard sign-off rule:
+- `2026-03-29` user clarified a hard sign-off rule:
   - "benchmark environment instability" is not an acceptable terminal
     explanation
   - any repeatable lab failure must end in one of two buckets:
@@ -61,18 +61,18 @@ Linux and native Windows.
     excuse to downgrade the failure into acceptable noise
   - final fit-for-purpose sign-off must therefore eliminate these failures by
     improving the harness/rig or by fixing code, not by classifying them away
-- `2026-04-02` Costa decision:
+- `2026-04-02` user decision:
   - checkpoint the current Windows benchmark harness fix immediately
   - commit and push the local runner/TODO changes
   - rerun the full strict native Windows benchmark suite from the pushed state
     before treating the fix as signed off
-- `2026-04-19` Costa decision:
+- `2026-04-19` user decision:
   - this task is benchmark-only
   - do not rerun the non-benchmark test suites on Linux or Windows
   - refresh only the benchmark artifacts from the latest library state
   - the Linux published `0%` server CPU report bug must be root-caused and
     fixed before the refreshed artifacts are accepted
-- `2026-04-19` Costa decision:
+- `2026-04-19` user decision:
   - after the Windows C server, Rust wait-loop, and Go SHM spin fixes landed,
     rerun the full Linux and Windows benchmark suites from the latest library
     state
@@ -83,14 +83,14 @@ Linux and native Windows.
     - `benchmarks-windows.md`
   - then commit and push only the benchmark artifact refresh and the updated
     validation evidence
-- `2026-04-19` Costa decision:
+- `2026-04-19` user decision:
   - after publishing the refreshed benchmark artifacts, investigate the Linux
     `uds-ping-pong` max floor misses before changing the documented floor
   - first determine whether there is a credible code-level improvement for the
     Go-involved POSIX baseline path
   - only if no justified near-term fix exists, lower the POSIX UDS max floor to
     a safer value instead of leaving it borderline
-- `2026-04-19` Costa decision:
+- `2026-04-19` user decision:
   - no justified near-term POSIX code fix is established for the latest Linux
     `uds-ping-pong` max misses
   - lower the documented POSIX `uds-ping-pong` max floor from `150k` to
@@ -160,7 +160,7 @@ Linux and native Windows.
 
 - The current checked-in Linux benchmark publication is visibly wrong in at
   least one field:
-  - Costa reports that the published Linux markdown shows `0%` server CPU
+  - user reports that the published Linux markdown shows `0%` server CPU
   - until root-caused, this must be treated as either:
     - a Linux benchmark measurement bug
     - a Linux report-generation bug
@@ -217,7 +217,7 @@ Linux and native Windows.
       - no concrete near-term POSIX code change was proven to restore the old
         `150k` floor safely
       - the floor itself was too tight for the latest verified host rerun
-      - Costa chose to lower the documented POSIX `uds-ping-pong` max floor to
+      - user chose to lower the documented POSIX `uds-ping-pong` max floor to
         `120k req/s` so the sign-off threshold is not borderline
 
 - The full Windows benchmark refresh on `2026-04-19` needed a targeted
@@ -376,7 +376,7 @@ Linux and native Windows.
     - `StopCode="0x300"`
     - top frame: `KERNELBASE!ConnectNamedPipe+6a`
   - exported native verifier artifact:
-    - `C:\msys64\home\costa\src\plugin-ipc.git\verifier-test_named_pipe.xml`
+    - `C:\msys64\home\user\src\plugin-ipc.git\verifier-test_named_pipe.xml`
   - current working theory:
     - a raw closed-listener path in the C L1 transport is still issuing
       `ConnectNamedPipe()` against a stale handle
@@ -392,14 +392,14 @@ Linux and native Windows.
   - `test_win_service.exe` is also clean under Application Verifier Handles:
     - fresh exported session exists with no `<logEntry>`
     - artifact:
-      - `C:\msys64\home\costa\src\plugin-ipc.git\verifier-test_win_service.xml`
+      - `C:\msys64\home\user\src\plugin-ipc.git\verifier-test_win_service.xml`
 - a new blocker replaced the old one:
   - `test_win_service_extra.exe`
     - `LayerName="Handles"`
     - `StopCode="0x300"`
     - top frame: `KERNELBASE!ReadFile+8d`
     - artifact:
-      - `C:\msys64\home\costa\src\plugin-ipc.git\verifier-test_win_service_extra.xml`
+      - `C:\msys64\home\user\src\plugin-ipc.git\verifier-test_win_service_extra.xml`
   - grounded working theory:
     - the remaining Windows C issue is no longer in the raw named-pipe
       listener path
@@ -435,7 +435,7 @@ Linux and native Windows.
         `test_refresh_from_broken_state()` now passes with no log entry
       - full `test_win_service_extra.exe` now passes under Application
         Verifier Handles with no `<logEntry>` in:
-        - `C:\msys64\home\costa\src\plugin-ipc.git\msys64homecostasrcplugin-ipc.gitverifier-test_win_service_extra-final.xml`
+        - `C:\msys64\home\user\src\plugin-ipc.git\msys64homeusersrcplugin-ipc.gitverifier-test_win_service_extra-final.xml`
 - fresh Linux interop-cache burn-down on `2026-03-29`:
   - the repeated full suite later failed in:
     - `test_cache_interop`
@@ -699,7 +699,7 @@ Linux and native Windows.
 - stale design-note burn-down on `2026-03-29`:
   - the earlier TODO note that protocol-version mismatch might still map to
     generic `DISCONNECTED` at L2/L3 was stale
-  - current verified evidence already matches Costa's recorded decision:
+  - current verified evidence already matches user's recorded decision:
     - Level 2 docs:
       - `docs/level2-typed-api.md`
       - `INCOMPATIBLE` explicitly includes protocol/layout version mismatch
@@ -1009,7 +1009,7 @@ Linux and native Windows.
     achieved throughput is clearly visible in the published report
   - target attainment is therefore not itself a benchmark sign-off requirement
     for those rows
-- `2026-03-31`: Costa decided that the current Windows full strict benchmark
+- `2026-03-31`: user decided that the current Windows full strict benchmark
   suite must remain the final confirmation gate, but it must stop being the
   main bug-discovery loop.
   - accepted workflow:
@@ -1319,7 +1319,7 @@ Linux and native Windows.
     - `Message="Invalid handle exception for current stack trace."`
     - top stack frame: `KERNELBASE!ConnectNamedPipe+6a`
   - exported verifier log:
-    - `C:\msys64\home\costa\src\plugin-ipc.git\verifier-test_named_pipe.xml`
+    - `C:\msys64\home\user\src\plugin-ipc.git\verifier-test_named_pipe.xml`
 - Current root-cause direction:
   - the explicit raw closed-listener test path in
     `tests/fixtures/c/test_named_pipe.c` was the real trigger:
@@ -1739,7 +1739,7 @@ Linux and native Windows.
     - implication:
       - Windows named-pipe fixed-rate targets currently include an oversubscribed
         `100000/s` tier that the transport cannot actually sustain
-      - Costa explicitly decided this oversubscribed fixed-rate case is
+      - user explicitly decided this oversubscribed fixed-rate case is
         acceptable as long as the published row clearly shows the achieved
         throughput
       - implementation on `2026-03-31`:
@@ -1771,7 +1771,7 @@ Linux and native Windows.
       - the final short tail busy-spins to the deadline
     - direct native `win11` proof from the current disposable tree:
       - tree:
-        - `/c/Users/costa/AppData/Local/Temp/plugin-ipc-fitproof-5372e97-20260329-040049`
+        - `/c/Users/user/AppData/Local/Temp/plugin-ipc-fitproof-5372e97-20260329-040049`
       - focused rerun command:
         - `NIPC_BENCH_FIRST_BLOCK=1 NIPC_BENCH_LAST_BLOCK=1 NIPC_BENCH_DIAGNOSE_FAILURES=1 bash tests/run-windows-bench.sh /tmp/plugin-ipc-fitproof-block1.csv 5`
       - result:
@@ -1795,14 +1795,14 @@ Linux and native Windows.
         - the next required proof is a fresh full native Windows benchmark
           suite under the patched drivers, not more surgery in the transport
           layer
-  - hard sign-off rule from Costa on `2026-03-29`:
+  - hard sign-off rule from user on `2026-03-29`:
     - the benchmark-environment explanation is not acceptable as a final
       resolution
     - the remaining Windows strict-suite failures must be resolved as either:
       - a benchmark harness / validation-rig defect that must be fixed, or
       - a product / benchmark-driver defect that must be fixed
     - no final sign-off may rely on saying the workstation / VM was noisy
-  - stricter harness burn-down on `2026-03-29` after Costa's no-excuses rule:
+  - stricter harness burn-down on `2026-03-29` after user's no-excuses rule:
     - a benchmark-harness fix was applied to the Windows benchmark binaries
       themselves:
       - `bench/drivers/c/bench_windows.c`
@@ -1974,7 +1974,7 @@ Linux and native Windows.
       - no stale remote `win11` `bench_windows_*` or `run-windows-bench`
         processes
     - disposable proof tree:
-      - `/c/Users/costa/AppData/Local/Temp/plugin-ipc-fitproof-5372e97-20260329-040049`
+      - `/c/Users/user/AppData/Local/Temp/plugin-ipc-fitproof-5372e97-20260329-040049`
     - detached native `win11` run artifacts:
       - PID file:
         - `/tmp/plugin-ipc-fitproof-full-strict.pid`
@@ -2129,13 +2129,13 @@ Linux and native Windows.
 
 ## Pending design question
 
-- `2026-03-29` Costa proposed reducing Windows benchmark wall-clock time by
+- `2026-03-29` user proposed reducing Windows benchmark wall-clock time by
   running non-max benchmark rows in parallel, potentially in batches of `4`.
 - Background:
   - today the Windows benchmark runner is fully sequential
   - the current strict trustworthy methodology makes the full native Windows
     suite take multiple hours
-  - Costa's working theory is that only `@ max` rows really stress CPU, while
+  - user's working theory is that only `@ max` rows really stress CPU, while
     non-max rows are gentle enough to overlap safely
 - Evidence gathered from the checked-in Windows artifact and runner:
   - `tests/run-windows-bench.sh` currently runs rows sequentially with:
@@ -2185,7 +2185,7 @@ Linux and native Windows.
     - the late strict Windows failures were in the benchmark-driver/harness path, not in the library transport path itself
   - fresh candidate final Windows strict rerun was relaunched from the same patched disposable proof tree:
     - tree:
-      - `/c/Users/costa/AppData/Local/Temp/plugin-ipc-fitproof-5372e97-20260329-040049`
+      - `/c/Users/user/AppData/Local/Temp/plugin-ipc-fitproof-5372e97-20260329-040049`
     - artifacts:
       - PID:
         - `/tmp/plugin-ipc-fitproof-full-after-latencyfix.pid`
@@ -3386,10 +3386,10 @@ All active Windows work must run from the single persistent checkout:
 
 Sync rule for this checkout:
 
-- commit locally in `/home/costa/src/plugin-ipc.git`, push, then pull in
+- commit locally in `/home/user/src/plugin-ipc.git`, push, then pull in
   `win11:~/src/plugin-ipc.git`
 - for Windows-originated changes, commit in `win11:~/src/plugin-ipc.git`,
-  push, then pull back into `/home/costa/src/plugin-ipc.git`
+  push, then pull back into `/home/user/src/plugin-ipc.git`
 - do not create or use disposable Windows repo clones under `/tmp`
 
 This repository’s validated Windows toolchain path is native `win11`, using:
@@ -3402,7 +3402,7 @@ This repository’s validated Windows toolchain path is native `win11`, using:
 Recommended environment:
 
 ```bash
-export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
+export PATH="/c/Users/user/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
 export MSYSTEM=MINGW64
 export CC=/mingw64/bin/gcc
 export CXX=/mingw64/bin/g++
@@ -3419,7 +3419,7 @@ type -a cargo go gcc g++ cmake ninja gcov
 
 Expected shape:
 
-- `cargo` from `/c/Users/costa/.cargo/bin`
+- `cargo` from `/c/Users/user/.cargo/bin`
 - `go` from `/c/Program Files/Go/bin`
 - `gcc` / `g++` / `gcov` from `/mingw64/bin`
 

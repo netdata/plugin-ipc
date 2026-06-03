@@ -35,7 +35,7 @@ Finish the rewrite to a production-ready state with:
 
 - user decision:
     - the remaining Windows benchmark variation and full-suite flake must be explained, and fixed where possible, before Netdata integration
-    - Costa explicitly decided that this is a hard blocker:
+    - user explicitly decided that this is a hard blocker:
       - we must find the root cause of the remaining Windows full-suite benchmark instability
       - no exceptions, no integration before it is explained
     - rationale from the user:
@@ -210,7 +210,7 @@ Finish the rewrite to a production-ready state with:
       - clean Windows validation environment used:
         - a fresh temp clone on `win11`: `/tmp/plugin-ipc-investigate`
         - correct native toolchain environment:
-          - `PATH=/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH`
+          - `PATH=/c/Users/user/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH`
           - `MSYSTEM=MINGW64`
           - `CC=/mingw64/bin/gcc`
           - `CXX=/mingw64/bin/g++`
@@ -1457,7 +1457,7 @@ Decision made by user:
       - built it as `test_win_service_guards.exe`
       - kept it out of the default `ctest` inventory
       - ran it only from `tests/run-coverage-c-windows.sh`
-  - decision made by Costa:
+  - decision made by user:
     - raise the Go coverage gate from `85%` to `90%`
     - keep the Go coverage gate policy identical on Linux and Windows
   - implementation implication of that decision:
@@ -1471,7 +1471,7 @@ Decision made by user:
     - Windows Go (`win11`): `96.7%`
     - implication:
       - the shared Linux/Windows Go gate can now safely move to `90%`
-  - decision made by Costa:
+  - decision made by user:
     - raise the Rust coverage gate from `80%` to `90%`
     - keep the Rust coverage gate policy identical on Linux and Windows
   - implementation implication of that decision:
@@ -1637,7 +1637,7 @@ Decision made by user:
     - implication:
       - the protocol split does not currently buy enough honest runtime signal to justify the lower total on its own
       - this is now a real coverage-accounting decision point, not just an implementation detail
-  - decision made by Costa:
+  - decision made by user:
     - keep the Unix Rust transport split
     - revert the Rust protocol split
     - keep the new deterministic SHM stale-cleanup tests
@@ -1650,7 +1650,7 @@ Decision made by user:
       - `src/protocol/increment_tests.rs`
       - `src/protocol/string_reverse_tests.rs`
       - `src/protocol/cgroups_tests.rs`
-  - current result after applying Costa's decision:
+  - current result after applying user's decision:
     - keep the transport split
     - keep the new deterministic SHM stale-cleanup tests
     - revert the protocol split
@@ -1772,7 +1772,7 @@ Decision made by user:
     - `tests/run-coverage-rust.sh`
   - On this machine, only `cargo-tarpaulin` is installed:
     - `command -v cargo-llvm-cov` -> empty
-    - `command -v cargo-tarpaulin` -> `/home/costa/.cargo/bin/cargo-tarpaulin`
+    - `command -v cargo-tarpaulin` -> `/home/user/.cargo/bin/cargo-tarpaulin`
   - The latest verified Linux Rust result is therefore coming from `tarpaulin`:
     - `bash tests/run-coverage-rust.sh 80`
     - total: `90.76%` (`1886/2078`)
@@ -1850,7 +1850,7 @@ Decision made by user:
     - it is the cleanest way to make Linux and Windows Rust coverage policy genuinely consistent
     - it removes the current “same threshold, different measurement semantics” drift
     - it prevents wasting more effort on Windows-only lines while we are trying to improve Linux coverage
-- Decision made by Costa:
+- Decision made by user:
   - `1. C`
   - implement Linux Rust coverage with `cargo-llvm-cov`
   - use an explicit Linux-side ignore regex for Windows-tagged files
@@ -1894,7 +1894,7 @@ Decision made by user:
     - adding more inline tests inside `src/service/cgroups.rs` can lower the measured file coverage under `cargo-llvm-cov`, even when the new tests are valid and all pass
     - this is now fixed by moving the Unix tests into `src/service/cgroups_unix_tests.rs`
     - the coverage regression from inline test growth no longer applies to the runtime file
-  - decision made by Costa:
+  - decision made by user:
     - move the Linux Rust service tests out of `src/service/cgroups.rs`
     - mirror the existing split-file test pattern already used by the Windows Rust service tests
 - Current execution slice after `a36cf6e`:
@@ -2506,7 +2506,7 @@ User decision (`2026-03-23`):
 Implementation consequence:
 
 - The Linux and Windows Rust coverage scripts must enforce the same total-threshold policy.
-- Costa later raised the shared Rust threshold to `90%` on both Linux and Windows.
+- user later raised the shared Rust threshold to `90%` on both Linux and Windows.
 
 ### 2. Cross-platform test-framework parity expectation
 
@@ -2780,7 +2780,7 @@ Important facts:
 ### Known-good Windows toolchain environment
 
 ```bash
-export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
+export PATH="/c/Users/user/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
 export MSYSTEM=MINGW64
 export CC=/mingw64/bin/gcc
 export CXX=/mingw64/bin/g++
@@ -2794,7 +2794,7 @@ type -a cargo go gcc g++ cmake ninja gcov
 
 Expected shape:
 
-- `cargo` first from `/c/Users/costa/.cargo/bin`
+- `cargo` first from `/c/Users/user/.cargo/bin`
 - `go` first from `/c/Program Files/Go/bin`
 - `gcc` / `g++` / `gcov` from `/mingw64/bin`
 
@@ -2892,8 +2892,8 @@ Current expected result:
 ### Copy benchmark artifacts back to the local repo
 
 ```bash
-scp win11:~/src/plugin-ipc.git/benchmarks-windows.csv /home/costa/src/plugin-ipc.git/benchmarks-windows.csv
-scp win11:~/src/plugin-ipc.git/benchmarks-windows.md /home/costa/src/plugin-ipc.git/benchmarks-windows.md
+scp win11:~/src/plugin-ipc.git/benchmarks-windows.csv /home/user/src/plugin-ipc.git/benchmarks-windows.csv
+scp win11:~/src/plugin-ipc.git/benchmarks-windows.md /home/user/src/plugin-ipc.git/benchmarks-windows.md
 ```
 
 ### Known pitfalls and fixes
@@ -3134,13 +3134,13 @@ Facts:
   - `ctest --test-dir build -N` on `win11`
 - Parity is reasonably good for:
   - protocol fuzzing:
-    - C standalone fuzz target and Go fuzz targets are defined before platform splits in [CMakeLists.txt](/home/costa/src/plugin-ipc.git/CMakeLists.txt)
+    - C standalone fuzz target and Go fuzz targets are defined before platform splits in [CMakeLists.txt](/home/user/src/plugin-ipc.git/CMakeLists.txt)
   - cross-language transport / L2 / L3 interop:
     - POSIX UDS / SHM / service / cache interop on Linux
     - Named Pipe / WinSHM / service / cache interop on Windows
   - benchmark matrices:
     - POSIX and Windows runners both execute 9 scenario families and generate `201` rows
-    - see [run-posix-bench.sh](/home/costa/src/plugin-ipc.git/tests/run-posix-bench.sh) and [run-windows-bench.sh](/home/costa/src/plugin-ipc.git/tests/run-windows-bench.sh)
+    - see [run-posix-bench.sh](/home/user/src/plugin-ipc.git/tests/run-posix-bench.sh) and [run-windows-bench.sh](/home/user/src/plugin-ipc.git/tests/run-windows-bench.sh)
 - Parity is not good yet for:
   - chaos testing:
     - Linux has `test_chaos`

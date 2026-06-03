@@ -7,7 +7,7 @@ diff script so future checks do not depend on ad-hoc manual commands.
 
 ## TL;DR
 
-- Costa suspects that Netdata master may now contain vendored `netipc` changes
+- user suspects that Netdata master may now contain vendored `netipc` changes
   that are not yet present upstream in `plugin-ipc`.
 - We need a repeatable script that diffs all vendored trees:
   - C: `src/libnetdata/netipc`
@@ -29,9 +29,9 @@ diff script so future checks do not depend on ad-hoc manual commands.
 ### Current repository facts
 
 - Upstream repo:
-  - `/home/costa/src/plugin-ipc.git`
+  - `/home/user/src/plugin-ipc.git`
 - Netdata master checkout to compare against:
-  - `/home/costa/src/netdata-ktsaou.git`
+  - `/home/user/src/netdata-ktsaou.git`
 - Existing vendoring helper already exists at the upstream repo root:
   - `vendor-to-netdata.sh`
 - Vendored trees in Netdata master are present at:
@@ -176,14 +176,14 @@ diff script so future checks do not depend on ad-hoc manual commands.
 - Deliverable:
   - create a script that diffs all vendored files
   - run it to identify current differences
-- Costa decision on `2026-04-23`:
+- user decision on `2026-04-23`:
   - backport the Netdata master Go cleanup commit into upstream `plugin-ipc`
   - validate it in upstream before publishing
   - run:
     - the upstream test suite on this Linux checkout
     - the upstream POSIX benchmark suite on this Linux checkout
   - then commit locally and push the backport
-- Costa decision on `2026-04-23`:
+- user decision on `2026-04-23`:
   - also commit the existing root vendoring helper:
     - `vendor-to-netdata.sh`
   - rationale:
@@ -206,7 +206,7 @@ diff script so future checks do not depend on ad-hoc manual commands.
    - the expected Netdata-local differences
    - the real vendored-library differences
    - any files that may need backporting upstream
-4. If Costa wants the Netdata Go cleanup upstreamed, backport commit
+4. If user wants the Netdata Go cleanup upstreamed, backport commit
    `9e9d16ac849853fde77269a898b211058da41e99` into the upstream Go tree and
    then rerun the diff script to confirm the vendored trees match again.
 5. Run the upstream validation required for this backport:

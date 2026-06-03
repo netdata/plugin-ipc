@@ -283,13 +283,13 @@ Output/reference skills:
 - Cross-language interoperability is mandatory across C, Rust, and Go. Do not change one language implementation without checking the corresponding contract and other language implementations.
 - Go must remain pure Go without `cgo`.
 - Performance claims require benchmark evidence. Do not adjust benchmark floors or accept parity gaps without a fact-based analysis.
-- Root `TODO*.md` files are existing project memory. Do not move, delete, or rewrite them without explicit user approval; track classification or migration through a SOW.
+- Archived TODO history under `.agents/sow/todo-history/TODO-*` is existing project memory. Do not move, delete, or rewrite those archived notes without explicit user approval; track future classification or migration through a SOW.
 
 ### Preservation Notes
 
 - No pre-existing `AGENTS.md` or tool-specific instruction file was found during SOW bootstrap.
 - Existing public docs under `docs/` were preserved as the authoritative specification surface.
-- Existing root `TODO*.md` files were preserved in place and are tracked by a pending SOW for future classification.
+- Existing root `TODO*.md` files were archived under `.agents/sow/todo-history/` by explicit user request and tracked through SOW-0002.
 - No runtime `project-*` skills were created during bootstrap by user request.
 
 Project SOW status: initialized

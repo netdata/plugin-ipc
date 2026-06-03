@@ -18,26 +18,26 @@ minimum safe fixes needed without changing the public protocol contract.
 - If code changes are needed, mirror any platform-parity fixes where the same
   pattern exists in the Windows counterpart.
 - Use the Netdata Coverity audit skill from
-  `/home/costa/src/PRs/memory-corruption-hunting/.agents/skills/coverity-audit/SKILL.md`
+  `/home/user/src/PRs/memory-corruption-hunting/.agents/skills/coverity-audit/SKILL.md`
   to fetch the live Coverity table/details and map each finding to its CID
   before implementation.
 
 ## Source of truth
 
-- Costa confirmed the Coverity `.env` is already prepared in
-  `/home/costa/src/PRs/memory-corruption-hunting/`.
-- Costa confirmed the Coverity keepalive is already running.
+- user confirmed the Coverity `.env` is already prepared in
+  `/home/user/src/PRs/memory-corruption-hunting/`.
+- user confirmed the Coverity keepalive is already running.
 - Fetched current outstanding Coverity table into:
-  - `/home/costa/src/PRs/memory-corruption-hunting/.local/audits/coverity/raw/outstanding-20260428-085558-all.json`
+  - `/home/user/src/PRs/memory-corruption-hunting/.local/audits/coverity/raw/outstanding-20260428-085558-all.json`
 - Fetched current per-defect details into:
-  - `/home/costa/src/PRs/memory-corruption-hunting/.local/audits/coverity/details/outstanding-20260428-085558/`
+  - `/home/user/src/PRs/memory-corruption-hunting/.local/audits/coverity/details/outstanding-20260428-085558/`
 - Prepared per-CID bundles under:
-  - `/home/costa/src/PRs/memory-corruption-hunting/.local/audits/coverity/triage/outstanding/cid-503341/`
-  - `/home/costa/src/PRs/memory-corruption-hunting/.local/audits/coverity/triage/outstanding/cid-503342/`
-  - `/home/costa/src/PRs/memory-corruption-hunting/.local/audits/coverity/triage/outstanding/cid-503343/`
-  - `/home/costa/src/PRs/memory-corruption-hunting/.local/audits/coverity/triage/outstanding/cid-503344/`
-  - `/home/costa/src/PRs/memory-corruption-hunting/.local/audits/coverity/triage/outstanding/cid-503345/`
-  - `/home/costa/src/PRs/memory-corruption-hunting/.local/audits/coverity/triage/outstanding/cid-503346/`
+  - `/home/user/src/PRs/memory-corruption-hunting/.local/audits/coverity/triage/outstanding/cid-503341/`
+  - `/home/user/src/PRs/memory-corruption-hunting/.local/audits/coverity/triage/outstanding/cid-503342/`
+  - `/home/user/src/PRs/memory-corruption-hunting/.local/audits/coverity/triage/outstanding/cid-503343/`
+  - `/home/user/src/PRs/memory-corruption-hunting/.local/audits/coverity/triage/outstanding/cid-503344/`
+  - `/home/user/src/PRs/memory-corruption-hunting/.local/audits/coverity/triage/outstanding/cid-503345/`
+  - `/home/user/src/PRs/memory-corruption-hunting/.local/audits/coverity/triage/outstanding/cid-503346/`
 
 ## Coverity CID mapping
 
@@ -285,9 +285,9 @@ minimum safe fixes needed without changing the public protocol contract.
    - Linux C benchmarks from this checkout.
    - Windows C benchmarks from `win11:~/src/plugin-ipc.git`.
 5. Vendor the pushed upstream library into:
-   - `/home/costa/src/PRs/memory-corruption-hunting`
+   - `/home/user/src/PRs/memory-corruption-hunting`
 6. Make exactly one Netdata-side commit in
-   `/home/costa/src/PRs/memory-corruption-hunting`.
+   `/home/user/src/PRs/memory-corruption-hunting`.
 
 ## Documentation updates required
 
