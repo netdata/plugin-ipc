@@ -177,9 +177,11 @@ bool nipc_service_common_apps_lookup_request_size(uint32_t pid_count,
 
     size_t dir = (size_t)pid_count * NIPC_LOOKUP_DIR_ENTRY_SIZE;
     size_t keys = (size_t)pid_count * NIPC_APPS_LOOKUP_KEY_SIZE;
+#if SIZE_MAX <= UINT32_MAX
     if (NIPC_APPS_LOOKUP_REQ_HDR_SIZE > SIZE_MAX - dir ||
         NIPC_APPS_LOOKUP_REQ_HDR_SIZE + dir > SIZE_MAX - keys)
         return false;
+#endif
     *size_out = NIPC_APPS_LOOKUP_REQ_HDR_SIZE + dir + keys;
     return true;
 }

@@ -807,7 +807,26 @@ Implementation validation:
     - Full Windows/MSYS `ctest` initially reported 32/34 passing. The two failures were investigated:
       - `interop_codec` failed because the first remote copy included a stale local Linux Rust `src/crates/netipc/target/debug/interop_codec` artifact; after deleting the remote temp Cargo target directory, `ctest -R '^interop_codec$'` passed.
       - `go_FuzzDecodeCgroupsLookupResponse` failed once with `context deadline exceeded` after the 20-second fuzz deadline; immediate rerun with `ctest -R '^go_FuzzDecodeCgroupsLookupResponse$'` passed.
-    - Windows/MSYS service/cache tests and cross-language interop are therefore validated for this change. The dirty-transfer artifact is not a repository failure; the single fuzz timeout is recorded as a timing flake in the full Windows smoke suite.
+- Windows/MSYS service/cache tests and cross-language interop are therefore validated for this change. The dirty-transfer artifact is not a repository failure; the single fuzz timeout is recorded as a timing flake in the full Windows smoke suite.
+
+### 2026-06-04 Code Scanning Repair
+
+- After commit `94907bf`, GitHub CodeQL reported two open `cpp/constant-comparison` alerts:
+  - alert `7579`: `src/libnetdata/netipc/src/service/netipc_service_common.c`, apps lookup request-size additive overflow guard.
+  - alert `7580`: `src/libnetdata/netipc/src/service/netipc_service_common.c`, apps lookup request-size additive overflow guard.
+- The alerts are valid for 64-bit builds because `pid_count` is `uint32_t` and the apps lookup directory/key constants are small enough that the additive `SIZE_MAX` comparisons cannot become true on 64-bit `size_t`.
+- The extracted common helper accidentally made the additive guard unconditional; the original POSIX helper guarded equivalent checks with `#if SIZE_MAX <= UINT32_MAX`.
+- Repair plan: restore the conditional 32-bit-only additive overflow guard and keep the existing multiplication guards plus caller-side `req_size > UINT32_MAX` checks.
+- Risk: low. The change affects only a static-analysis-visible overflow guard in the private C service helper. It does not change request encoding, public APIs, transport behavior, or the 64-bit runtime path.
+- Repair implemented by guarding the apps lookup additive overflow check with `#if SIZE_MAX <= UINT32_MAX`.
+- Validation:
+  - `cmake --build build` passed.
+  - `/usr/bin/ctest --test-dir build --output-on-failure -R 'service|cache'` passed: 13/13 focused service/cache tests.
+  - `codacy-analysis analyze --output-format json` passed with 0 issues across Checkov, Opengrep/Semgrep, Trivy, cppcheck, ShellCheck, and Spectral.
+  - Windows/MSYS rebuild on `win11` passed for `netipc_service_win`, `test_win_service`, `test_win_service_extra`, `test_win_service_payload_limits`, `interop_service_win_c`, and `interop_cache_win_c`.
+  - Windows/MSYS CTest service slice passed: `test_win_service`, `test_win_service_extra`, and `test_win_service_payload_limits`.
+  - `git diff --check` passed.
+  - `bash .agents/sow/audit.sh` passed.
   - `codacy-analysis analyze --output-format json` passed:
     - Checkov: 0 issues.
     - Opengrep/Semgrep: 0 issues.
