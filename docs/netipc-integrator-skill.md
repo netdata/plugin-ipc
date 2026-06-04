@@ -97,6 +97,7 @@ Relevant implementation roots:
   - [src/go/pkg/netipc/service/apps_lookup/](../src/go/pkg/netipc/service/apps_lookup/)
 - Internal raw helpers used to build public typed services:
   - [src/crates/netipc/src/service/raw.rs](../src/crates/netipc/src/service/raw.rs)
+  - [src/crates/netipc/src/service/raw/](../src/crates/netipc/src/service/raw/)
   - [src/go/pkg/netipc/service/raw/](../src/go/pkg/netipc/service/raw/)
 
 Important current limitation:
@@ -805,11 +806,16 @@ Once the codec exists:
 - add typed raw client call support
 - add typed dispatch support on the server side
 - add envelope validation for the new method code
+- in Rust, put dedicated typed raw call and dispatch adapter code in a
+  service/method-specific file under `src/crates/netipc/src/service/raw/`;
+  keep shared retry, transport send/receive, and managed-server
+  infrastructure in shared raw files
 
 Patterns to mirror:
 
 - Rust raw client/server:
   - [src/crates/netipc/src/service/raw.rs](../src/crates/netipc/src/service/raw.rs)
+  - [src/crates/netipc/src/service/raw/](../src/crates/netipc/src/service/raw/)
 - Go raw client/server:
   - [src/go/pkg/netipc/service/raw/](../src/go/pkg/netipc/service/raw/)
 - C managed server / typed call path:

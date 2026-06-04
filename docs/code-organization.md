@@ -53,6 +53,14 @@ src/
         posix.rs              # L1: UDS, SHM
         windows.rs            # L1: Named Pipe, SHM
       service/                # L2/L3: typed client/server helpers
+        raw.rs                # Internal raw helper wrapper/re-exports
+        raw/                  # Shared raw infrastructure plus per-method helpers
+          client.rs           # Shared raw client lifecycle, retry, send/receive
+          server.rs           # Shared managed-server lifecycle
+          cgroups_snapshot.rs # cgroups-snapshot raw call/dispatch
+          cgroups_lookup.rs   # cgroups-lookup raw call/dispatch
+          apps_lookup.rs      # apps-lookup raw call/dispatch
+          cgroups_cache.rs    # cgroups-snapshot Level 3 cache
 
   go/pkg/netipc/              # Go library (Go package)
     protocol/                 # Codec
@@ -154,6 +162,13 @@ Level 1 + Codec into the convenience surface.
 Each service module should correspond to one service kind. The public
 L2/L3 shape must not drift into “one server exports many unrelated
 request kinds”.
+
+Internal raw helpers may share connection lifecycle, retry policy,
+transport send/receive, managed server accept/session loops, and
+generic envelope validation. Custom typed client calls, typed handler
+aliases, dispatch adapters, and Level 3 cache logic for one service
+kind must live in service-kind-specific files so adding new service
+kinds does not expand a shared catch-all module.
 
 Service modules must NOT contain:
 

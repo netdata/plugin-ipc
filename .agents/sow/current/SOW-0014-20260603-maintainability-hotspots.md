@@ -4,7 +4,7 @@
 
 Status: in-progress
 
-Sub-state: continuing useful low-risk complexity hotspot cleanup after the raw-cache, Go facade, apps lookup, and cgroups lookup targets.
+Sub-state: continuing useful low-risk complexity hotspot cleanup after the raw-cache, Go facade, lookup codec, C service-common, and Rust raw-service organization targets.
 
 ## Requirements
 
@@ -451,6 +451,93 @@ Artifact impact plan:
 - End-user/operator skills: no exported/operator workflow change expected.
 - SOW lifecycle: record this target and keep SOW in progress unless the user asks to close it.
 
+Decision update on 2026-06-04, Rust raw service organization:
+
+- The user confirmed that `src/crates/netipc/src/service/raw.rs` has the same maintainability problem as the former mixed lookup codec files: service/method-specific code is accumulated in a shared implementation file.
+- Proceed with splitting dedicated Rust raw service/method code into separate files while keeping the public typed service facades unchanged.
+- Keep shared raw client/server transport, retry, receive, session-loop, and envelope logic in shared raw infrastructure files.
+- Move service/method-specific raw client calls, typed handler aliases, and dispatch adapters into one file per service/method.
+- Move the cgroups Level 3 cache into its own cgroups cache file.
+- After the structural split, remove duplicated raw call/send paths by using one request-buffer-based call path with explicit batch metadata.
+
+### Target Gate - Rust Raw Service Organization
+
+Problem / root-cause model:
+
+- `src/crates/netipc/src/service/raw.rs` is a high-complexity 2811-line Rust module because it combines raw client lifecycle, typed service calls, method dispatch adapters, managed server accept/session loops, transport send/receive paths, and the cgroups Level 3 cache.
+- The root architectural problem is not only file size. New Rust service methods currently require edits to shared raw constructors, shared typed call methods, and shared dispatch adapter code.
+- The duplicated call/send paths exist because small fixed requests use borrowed payload slices while dynamic requests use `self.request_buf`, and batch requests have a third envelope variant. This should be represented as one shared raw request shape, not three copied retry/envelope/send implementations.
+
+Evidence reviewed:
+
+- `src/crates/netipc/src/service/raw.rs:7` imports service/method-specific codec APIs into the shared raw module.
+- `src/crates/netipc/src/service/raw.rs:157` through `src/crates/netipc/src/service/raw.rs:184` contains method-specific client constructors.
+- `src/crates/netipc/src/service/raw.rs:293` through `src/crates/netipc/src/service/raw.rs:469` contains method-specific typed client calls.
+- `src/crates/netipc/src/service/raw.rs:1439` through `src/crates/netipc/src/service/raw.rs:1573` contains method-specific handler aliases and dispatch adapters.
+- `src/crates/netipc/src/service/raw.rs:2578` through `src/crates/netipc/src/service/raw.rs:2799` contains cgroups Level 3 cache code mixed into the same raw module.
+- `src/crates/netipc/src/service/raw.rs:642`, `src/crates/netipc/src/service/raw.rs:726`, and `src/crates/netipc/src/service/raw.rs:805` show three duplicated retry loops.
+- `src/crates/netipc/src/service/raw.rs:889`, `src/crates/netipc/src/service/raw.rs:938`, and `src/crates/netipc/src/service/raw.rs:979` show three duplicated request/response envelope paths.
+- `src/crates/netipc/src/service/raw.rs:1027` and `src/crates/netipc/src/service/raw.rs:1119` show duplicated transport send paths for borrowed payload and request-buffer payload.
+- `docs/code-organization.md` requires service modules to keep service-specific request/response orchestration clear and preserve one service endpoint per request kind.
+- `docs/level2-typed-api.md` requires Level 2 to own typed wrappers, retry policy, managed server mode, and service-specific typed dispatch while keeping transport details invisible to public callers.
+
+Affected contracts and surfaces:
+
+- Rust private service implementation under `src/crates/netipc/src/service/raw.rs` and new child files under `src/crates/netipc/src/service/raw/`.
+- Public Rust typed facades in `src/crates/netipc/src/service/cgroups.rs`, `src/crates/netipc/src/service/cgroups_lookup.rs`, and `src/crates/netipc/src/service/apps_lookup.rs` must keep their existing public API.
+- Rust raw helpers are documented as internal/test helpers, but benchmark and fixture binaries import some raw symbols directly; existing raw symbol names must remain re-exported.
+- Protocol wire bytes, transport behavior, retry semantics, response-view borrowing lifetime, and managed-server behavior must remain unchanged.
+
+Existing patterns to reuse:
+
+- Keep public typed service facades explicit and service-kind specific.
+- Mirror the Rust protocol split pattern: wrapper module plus child files, with common helpers separated from service/method-specific files.
+- Mirror the existing Go raw package shape where client/server/cache and lookup client code are not all in one source file.
+- Keep `raw.rs` as the `service::raw` module entry point and re-export existing raw symbols to avoid changing call sites.
+
+Risk and blast radius:
+
+- Medium. Most of the change is source organization, but the request-buffer call-path cleanup touches retry, overflow recovery, response envelope validation, response borrowing, batching, and SHM/baseline send paths.
+- Main regression risks are changed reconnect counts, changed overflow recovery behavior, wrong response item-count validation for batches, broken borrowed response lifetime, missed raw symbol re-export, or platform-specific compile failures.
+- Windows validation is needed because the raw module contains cfg-gated Windows client/server/session logic.
+
+Sensitive data handling plan:
+
+- Do not read `.env`.
+- Do not write secrets, credentials, tokens, customer data, personal data, private endpoints, or proprietary details into code, docs, skills, specs, or SOW artifacts.
+
+Implementation plan:
+
+1. Convert `src/crates/netipc/src/service/raw.rs` into a wrapper module that declares child files and re-exports the existing raw public/internal symbols.
+2. Move shared client state/lifecycle, request-buffer raw call logic, transport send/receive, and response borrowing into raw client infrastructure files.
+3. Move managed server state, accept loops, session loops, dispatch plumbing, and platform-specific prepared-SHM helper into raw server infrastructure files.
+4. Move cgroups snapshot, cgroups lookup, apps lookup, increment, and string-reverse typed raw calls plus dispatch adapters into service/method-specific child files.
+5. Move cgroups Level 3 cache code into a dedicated cgroups cache child file.
+6. Replace the three duplicated retry/envelope/send paths with one request-buffer-based raw call path using explicit batch metadata.
+
+Validation plan:
+
+- `cargo fmt --manifest-path src/crates/netipc/Cargo.toml -- --check`.
+- `cargo test --manifest-path src/crates/netipc/Cargo.toml`.
+- `cargo test --manifest-path src/crates/netipc/Cargo.toml --test` is not applicable because this crate uses in-package tests and fixture binaries, so use the full Cargo test command above.
+- `bash tests/interop_codec.sh` is not directly required for raw service-only source movement, but run full Rust tests and service interop because raw service behavior is touched.
+- `bash tests/test_service_interop.sh`.
+- `bash tests/test_service_shm_interop.sh`.
+- `bash tests/test_cache_interop.sh`.
+- `bash tests/test_cache_shm_interop.sh`.
+- Windows/MSYS validation over SSH `win11` for Rust raw service compile/tests if local changes pass.
+- `codacy-analysis analyze --output-format json`.
+- `git diff --check`, `bash .agents/sow/audit.sh`, and sensitive-data scan over touched durable artifacts.
+
+Artifact impact plan:
+
+- `AGENTS.md`: no workflow or guardrail change expected.
+- Runtime project skills: no reusable workflow change expected unless this refactor reveals a repeatable Rust service-addition workflow.
+- Specs: update `docs/code-organization.md` if the Rust service raw layout changes documented repository structure or service-addition guidance.
+- End-user/operator docs: no public API or behavior change expected.
+- End-user/operator skills: update `docs/netipc-integrator-skill.md` if it still points new service work at the old monolithic raw Rust file.
+- SOW lifecycle: record the target and keep the SOW in progress after validation unless the user asks to close it.
+
 2. Duplication composition refinement
 
 Context:
@@ -616,6 +703,24 @@ Refined recommendation:
   - server session loops, accept loops, drain/stop/destroy lifecycle, wakeups, cancellation, and thread handling.
 - Preserved platform-specific cache allocation fault sites through callback tables in `netipc_service.c` and `netipc_service_win.c`.
 - Did not merge POSIX and Windows session loops because they still encode different lifecycle, wait, wakeup, and cancellation behavior.
+- Continued with the approved Rust raw service organization target.
+- Converted `src/crates/netipc/src/service/raw.rs` into a small wrapper module that declares child files and re-exports the existing raw symbols used by tests, fixtures, and typed facades.
+- Split Rust raw shared infrastructure into dedicated files:
+  - `src/crates/netipc/src/service/raw/client.rs`
+  - `src/crates/netipc/src/service/raw/server.rs`
+  - `src/crates/netipc/src/service/raw/server_session_unix.rs`
+  - `src/crates/netipc/src/service/raw/server_session_windows.rs`
+  - `src/crates/netipc/src/service/raw/dispatch.rs`
+  - `src/crates/netipc/src/service/raw/common.rs`
+- Moved Rust service/method-specific raw code into one file per service/method:
+  - `src/crates/netipc/src/service/raw/cgroups_snapshot.rs`
+  - `src/crates/netipc/src/service/raw/cgroups_lookup.rs`
+  - `src/crates/netipc/src/service/raw/apps_lookup.rs`
+  - `src/crates/netipc/src/service/raw/increment.rs`
+  - `src/crates/netipc/src/service/raw/string_reverse.rs`
+- Moved Rust cgroups Level 3 cache code into `src/crates/netipc/src/service/raw/cgroups_cache.rs`.
+- Replaced the duplicated borrowed-payload, request-buffer, and batch raw call paths with one request-buffer-based retry/envelope/send path that carries explicit batch metadata.
+- Kept public typed service facades unchanged and kept existing raw symbol names re-exported from `service::raw`.
 
 ## Validation
 
@@ -958,7 +1063,7 @@ Sensitive data gate:
 
 ## Outcome
 
-Raw cache, Go typed-facade, apps lookup builder, cgroups lookup builder, apps lookup semantic validation, five Go code-scanning findings, C lookup builder function-level complexity, and C POSIX/Windows service helper duplication are locally remediated; the overall maintainability SOW remains in progress pending the next selected maintainability target and Codacy metric re-check after push.
+Raw cache, Go typed-facade, apps lookup builder, cgroups lookup builder, apps lookup semantic validation, five Go code-scanning findings, C lookup builder function-level complexity, C POSIX/Windows service helper duplication, and Rust raw-service organization are locally remediated; the overall maintainability SOW remains in progress pending the next selected maintainability target and Codacy metric re-check after push.
 
 ### 2026-06-04 Windows CI And CodeQL Coverage
 
@@ -1202,6 +1307,65 @@ Raw cache, Go typed-facade, apps lookup builder, cgroups lookup builder, apps lo
   - End-user/operator docs: `docs/code-organization.md` updated because repository layout changed.
   - End-user/operator skills: no update needed because exported/operator workflow is unchanged.
   - SOW lifecycle: target remains part of active `SOW-0014`; SOW remains in progress pending metric re-check and next selected hotspot.
+
+### 2026-06-04 Rust Raw Service File Split
+
+- The user approved applying the same per-service/per-method organization rule to `src/crates/netipc/src/service/raw.rs`.
+- Implemented Rust raw source split:
+  - `src/crates/netipc/src/service/raw.rs` is now a wrapper module with module declarations and compatibility re-exports.
+  - `src/crates/netipc/src/service/raw/common.rs` contains shared sizing and scratch-buffer helpers.
+  - `src/crates/netipc/src/service/raw/client.rs` contains raw client state, lifecycle, retry, transport send/receive, response borrowing, and the unified request-buffer call path.
+  - `src/crates/netipc/src/service/raw/server.rs` contains managed server state, accept loops, and platform-specific prepared-SHM setup.
+  - `src/crates/netipc/src/service/raw/server_session_unix.rs` contains the POSIX raw server session loop.
+  - `src/crates/netipc/src/service/raw/server_session_windows.rs` contains the Windows raw server session loop.
+  - `src/crates/netipc/src/service/raw/dispatch.rs` contains shared dispatch helpers and dispatch error mapping.
+  - `src/crates/netipc/src/service/raw/cgroups_snapshot.rs` contains cgroups snapshot typed raw calls, handler alias, and dispatch adapter.
+  - `src/crates/netipc/src/service/raw/cgroups_lookup.rs` contains cgroups lookup typed raw calls, handler alias, and dispatch adapter.
+  - `src/crates/netipc/src/service/raw/apps_lookup.rs` contains apps lookup typed raw calls, handler alias, and dispatch adapter.
+  - `src/crates/netipc/src/service/raw/increment.rs` contains internal increment fixture typed calls, handler alias, and dispatch adapter.
+  - `src/crates/netipc/src/service/raw/string_reverse.rs` contains internal string-reverse fixture typed call, handler alias, and dispatch adapter.
+  - `src/crates/netipc/src/service/raw/cgroups_cache.rs` contains the cgroups Level 3 cache implementation.
+- Size result:
+  - Before: `src/crates/netipc/src/service/raw.rs` had 2811 lines.
+  - After:
+    - `src/crates/netipc/src/service/raw.rs`: 65 lines.
+    - `src/crates/netipc/src/service/raw/apps_lookup.rs`: 91 lines.
+    - `src/crates/netipc/src/service/raw/cgroups_cache.rs`: 215 lines.
+    - `src/crates/netipc/src/service/raw/cgroups_lookup.rs`: 100 lines.
+    - `src/crates/netipc/src/service/raw/cgroups_snapshot.rs`: 67 lines.
+    - `src/crates/netipc/src/service/raw/client.rs`: 794 lines.
+    - `src/crates/netipc/src/service/raw/common.rs`: 29 lines.
+    - `src/crates/netipc/src/service/raw/dispatch.rs`: 71 lines.
+    - `src/crates/netipc/src/service/raw/increment.rs`: 91 lines.
+    - `src/crates/netipc/src/service/raw/server.rs`: 494 lines.
+    - `src/crates/netipc/src/service/raw/server_session_unix.rs`: 304 lines.
+    - `src/crates/netipc/src/service/raw/server_session_windows.rs`: 233 lines.
+    - `src/crates/netipc/src/service/raw/string_reverse.rs`: 53 lines.
+- Behavior-preservation notes:
+  - Public Rust typed facades in `service/cgroups.rs`, `service/cgroups_lookup.rs`, and `service/apps_lookup.rs` are unchanged.
+  - Existing raw helper names remain re-exported from `service::raw`.
+  - Small fixed requests now use the same request-buffer path as dynamic and batch requests; this removes duplicate retry/envelope/send code while preserving response validation and borrowing semantics.
+  - POSIX and Windows raw session loops remain separate because they encode different transport wait, SHM, close, and lifecycle behavior.
+- Validation:
+  - `cargo fmt --manifest-path src/crates/netipc/Cargo.toml -- --check` passed.
+  - `cargo test --manifest-path src/crates/netipc/Cargo.toml --lib -- --nocapture` passed: 332 Rust library tests.
+  - `cargo test --manifest-path src/crates/netipc/Cargo.toml` passed: 332 Rust library tests, all fixture/benchmark binary test harnesses, and doc-tests.
+  - `bash tests/test_service_interop.sh` passed with fresh Rust fixture binaries: 9/9 C/Rust/Go service interop pairs.
+  - `bash tests/test_service_shm_interop.sh` passed with fresh Rust fixture binaries: 9/9 C/Rust/Go SHM service interop pairs.
+  - `bash tests/test_cache_interop.sh` passed with fresh Rust fixture binaries: 9/9 C/Rust/Go cache interop pairs.
+  - `bash tests/test_cache_shm_interop.sh` passed with fresh Rust fixture binaries: 9/9 C/Rust/Go SHM cache interop pairs.
+  - Windows/MSYS Rust validation on `win11` passed: `cargo.exe test --manifest-path src/crates/netipc/Cargo.toml` ran 225 Windows library tests, all fixture/benchmark binary test harnesses, and doc-tests.
+  - `codacy-analysis analyze --output-format json` passed with 0 issues and 0 errors across Checkov, Opengrep/Semgrep, Trivy, cppcheck, ShellCheck, and Spectral.
+  - `git diff --check` passed.
+  - `bash .agents/sow/audit.sh` passed and reported SOW initialization complete and clean.
+  - Sensitive-data scan across the touched SOW, docs, and Rust raw-service files returned no matches.
+- Artifact impact:
+  - `AGENTS.md`: no workflow or guardrail change.
+  - Runtime project skills: no reusable workflow change.
+  - Specs: no public protocol/API behavior change; no spec update needed.
+  - End-user/operator docs: `docs/code-organization.md` updated because repository layout and service-addition guidance changed.
+  - End-user/operator skills: `docs/netipc-integrator-skill.md` updated so downstream integrator guidance points service/method-specific Rust raw code at the new child-file layout.
+  - SOW lifecycle: target remains part of active `SOW-0014`; SOW remains in progress pending metric re-check and the next selected hotspot.
 
 ## Lessons Extracted
 
