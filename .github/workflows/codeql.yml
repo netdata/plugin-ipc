@@ -21,7 +21,7 @@ concurrency:
 jobs:
   analyze:
     name: Analyze ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
 
     permissions:
       actions: read
@@ -32,22 +32,93 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: C/C++
+          - name: C/C++ POSIX
             language: c-cpp
+            runner: ubuntu-latest
             build_mode: manual
+            category: /language:c-cpp-posix
             build_command: |
-              cmake -S . -B build-codeql -DCMAKE_BUILD_TYPE=Debug
-              cmake --build build-codeql --parallel --target netipc_protocol netipc_uds netipc_shm netipc_service
-          - name: Go
-            language: go
+              cmake -S . -B build-codeql-posix -DCMAKE_BUILD_TYPE=Debug
+              cmake --build build-codeql-posix --parallel --target \
+                netipc_protocol \
+                netipc_uds \
+                netipc_shm \
+                netipc_service \
+                test_protocol \
+                interop_codec_c \
+                fuzz_protocol \
+                test_uds \
+                interop_uds_c \
+                test_shm \
+                interop_shm_c \
+                test_service \
+                test_service_extra \
+                test_service_payload_limits \
+                test_service_method_limits \
+                test_multi_server \
+                interop_service_c \
+                test_stress \
+                test_ping_pong \
+                test_chaos \
+                test_hardening \
+                test_cache \
+                interop_cache_c \
+                bench_posix_c
+          - name: C/C++ Windows
+            language: c-cpp
+            runner: windows-latest
             build_mode: manual
+            category: /language:c-cpp-windows
+            msys2: true
+            build_command: |
+              cmake -S . -B build-codeql-windows -G Ninja \
+                -DCMAKE_BUILD_TYPE=Debug \
+                -DCMAKE_C_COMPILER=/usr/bin/gcc \
+                -DCMAKE_CXX_COMPILER=/usr/bin/g++
+              cmake --build build-codeql-windows \
+                --parallel "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)" \
+                --target \
+                netipc_protocol \
+                netipc_named_pipe \
+                netipc_win_shm \
+                netipc_service_win \
+                test_named_pipe \
+                interop_named_pipe_c \
+                test_win_shm \
+                test_win_service \
+                test_win_service_extra \
+                test_win_service_payload_limits \
+                test_win_service_guards \
+                test_win_service_guards_extra \
+                test_win_stress \
+                interop_win_shm_c \
+                interop_service_win_c \
+                interop_cache_win_c \
+                bench_windows_c
+          - name: Go POSIX
+            language: go
+            runner: ubuntu-latest
+            build_mode: manual
+            category: /language:go-posix
             build_command: |
               for module in src/go tests/fixtures/go bench/drivers/go; do
                 (cd "$module" && go test ./...)
               done
+          - name: Go Windows
+            language: go
+            runner: windows-latest
+            build_mode: manual
+            category: /language:go-windows
+            msys2: true
+            build_command: |
+              for module in src/go tests/fixtures/go bench/drivers/go; do
+                (cd "$module" && CGO_ENABLED=0 go test ./...)
+              done
           - name: Rust
             language: rust
+            runner: ubuntu-latest
             build_mode: none
+            category: /language:rust
             build_command: ":"
 
     steps:
@@ -63,6 +134,20 @@ jobs:
           go-version-file: src/go/go.mod
           cache: false
 
+      - name: Set up MSYS2
+        if: matrix.msys2 == true
+        uses: msys2/setup-msys2@e9898307ac31d1a803454791be09ab9973336e1c # v2
+        with:
+          msystem: MSYS
+          update: true
+          path-type: inherit
+          install: >-
+            base-devel
+            gcc
+            cmake
+            ninja
+            git
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@87557b9c84dde89fdd9b10e88954ac2f4248e463 # v4.36.1
         with:
@@ -71,10 +156,15 @@ jobs:
           config-file: ./.github/codeql.yml
 
       - name: Build for CodeQL
-        if: matrix.build_mode == 'manual'
+        if: matrix.build_mode == 'manual' && matrix.msys2 != true
+        run: ${{ matrix.build_command }}
+
+      - name: Build for CodeQL on MSYS2
+        if: matrix.build_mode == 'manual' && matrix.msys2 == true
+        shell: msys2 {0}
         run: ${{ matrix.build_command }}
 
       - name: Analyze
         uses: github/codeql-action/analyze@87557b9c84dde89fdd9b10e88954ac2f4248e463 # v4.36.1
         with:
-          category: /language:${{ matrix.language }}
+          category: ${{ matrix.category }}

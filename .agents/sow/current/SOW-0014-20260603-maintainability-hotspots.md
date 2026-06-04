@@ -879,6 +879,47 @@ Sensitive data gate:
 
 Raw cache, Go typed-facade, apps lookup builder, cgroups lookup builder, apps lookup semantic validation, five Go code-scanning findings, C lookup builder function-level complexity, and C POSIX/Windows service helper duplication are locally remediated; the overall maintainability SOW remains in progress pending the next selected maintainability target and Codacy metric re-check after push.
 
+### 2026-06-04 Windows CI And CodeQL Coverage
+
+- User decision: add Windows CI coverage after discovering that current CodeQL coverage is Linux-shaped, not a CodeQL product limit.
+- Purpose: make Windows runtime and Windows static-analysis coverage first-class CI signals for this cross-platform SDK.
+- Evidence:
+  - `.github/workflows/codeql.yml` currently runs every matrix entry on `ubuntu-latest`.
+  - The C/C++ CodeQL job currently builds only POSIX targets: `netipc_protocol`, `netipc_uds`, `netipc_shm`, and `netipc_service`.
+  - The Go CodeQL job currently runs `go test ./...` on Linux, so Windows-only Go files guarded by `//go:build windows` are not extracted.
+  - `CMakeLists.txt` already has Windows runtime targets guarded by `NETIPC_WINDOWS_RUNTIME`.
+  - Existing Windows validation scripts and local validation use MSYS2/MinGW, not MSVC.
+- Decision:
+  - Add GitHub-hosted Windows CI on `windows-latest`.
+  - Use MSYS2/MinGW for the Windows runtime build because it matches the existing tested Windows scripts.
+  - Keep heavyweight Windows coverage and benchmark jobs out of push/PR CI for now; they remain explicit scripts.
+  - Add Windows CodeQL jobs for C/C++ and Go so Windows-only sources are extracted.
+- Risk:
+  - Windows hosted runners may expose timing flakiness in named-pipe/SHM tests.
+  - Adding MSYS2 introduces another pinned CI action and package-install surface.
+  - CodeQL Windows jobs increase CI time and may surface a new backlog of valid Windows-only findings.
+- Validation plan:
+  - Run local action/workflow linting.
+  - Run relevant local CMake/Go validation.
+  - Push and verify GitHub Windows runtime and CodeQL jobs.
+- Implemented:
+  - Added a `windows-latest` MSYS2/MinGW runtime job to `.github/workflows/runtime-safety.yml`.
+  - Expanded CodeQL into distinct POSIX and Windows categories for C/C++ and Go.
+  - Expanded POSIX C/C++ CodeQL build targets so test, interop, cache, stress, hardening, and benchmark C sources are compiled during extraction.
+  - Added Windows C/C++ CodeQL build targets for named pipe, Windows SHM, Windows service, Windows interop, guard, stress, and benchmark C sources.
+  - Added Windows Go CodeQL build execution so Windows build-tagged Go packages are extracted.
+- Local validation:
+  - YAML parsing passed for `.github/workflows/codeql.yml` and `.github/workflows/runtime-safety.yml`.
+  - `actionlint .github/workflows/codeql.yml .github/workflows/runtime-safety.yml` passed.
+  - POSIX expanded C/C++ CodeQL target list built locally with `cmake --build build`.
+  - Windows/MSYS runtime build command passed on the Windows validation host.
+  - Windows/MSYS runtime CTest slice passed on the Windows validation host: 12/12 targeted Windows tests.
+  - Windows Go CodeQL build command passed on the Windows validation host for `src/go`, `tests/fixtures/go`, and `bench/drivers/go`.
+  - Windows C/C++ CodeQL-only `bench_windows_c` target built on the Windows validation host.
+  - `git diff --check` passed.
+  - `bash .agents/sow/audit.sh` passed.
+  - `codacy-analysis analyze --output-format json` passed with 0 issues and 0 errors across Checkov, Opengrep/Semgrep, Trivy, cppcheck, ShellCheck, and Spectral.
+
 ## Lessons Extracted
 
 Pending.
