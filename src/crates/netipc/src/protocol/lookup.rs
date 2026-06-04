@@ -853,7 +853,7 @@ impl<'a> CgroupsLookupBuilder<'a> {
         item[name_offset + name.len()] = 0;
         if !labels.is_empty() {
             item[fixed_end..table_start].fill(0);
-            item_size = write_cgroups_lookup_labels(item, table_start, table_bytes, labels)?;
+            item_size = write_lookup_labels(item, table_start, table_bytes, labels)?;
         }
         let dir_offset = (self.item_count as usize)
             .checked_mul(LOOKUP_DIR_ENTRY_SIZE)
@@ -887,7 +887,7 @@ impl<'a> CgroupsLookupBuilder<'a> {
     }
 }
 
-fn write_cgroups_lookup_labels(
+fn write_lookup_labels(
     item: &mut [u8],
     table_start: usize,
     table_bytes: usize,
@@ -1308,35 +1308,7 @@ impl<'a> AppsLookupBuilder<'a> {
         item[name_offset + cgroup_name.len()] = 0;
         if !labels.is_empty() {
             item[fixed_end..table_start].fill(0);
-            let mut next = table_start
-                .checked_add(table_bytes)
-                .ok_or(NipcError::Overflow)?;
-            for (i, (key, value)) in labels.iter().enumerate() {
-                let entry_offset = i
-                    .checked_mul(LOOKUP_LABEL_ENTRY_SIZE)
-                    .ok_or(NipcError::Overflow)?;
-                let entry = table_start
-                    .checked_add(entry_offset)
-                    .ok_or(NipcError::Overflow)?;
-                let value_offset = next
-                    .checked_add(key.len())
-                    .and_then(|v| v.checked_add(1))
-                    .ok_or(NipcError::Overflow)?;
-                put_u32(item, entry, checked_u32(next)?);
-                put_u32(item, entry + 4, checked_u32(key.len())?);
-                put_u32(item, entry + 8, checked_u32(value_offset)?);
-                put_u32(item, entry + 12, checked_u32(value.len())?);
-                item[next..next + key.len()].copy_from_slice(key);
-                item[next + key.len()] = 0;
-                next = value_offset;
-                item[next..next + value.len()].copy_from_slice(value);
-                item[next + value.len()] = 0;
-                next = next
-                    .checked_add(value.len())
-                    .and_then(|v| v.checked_add(1))
-                    .ok_or(NipcError::Overflow)?;
-            }
-            item_size = next;
+            item_size = write_lookup_labels(item, table_start, table_bytes, labels)?;
         }
         let dir_offset = (self.item_count as usize)
             .checked_mul(LOOKUP_DIR_ENTRY_SIZE)

@@ -1148,11 +1148,11 @@ static nipc_error_t lookup_label_at(const uint8_t *item,
                               &out->value, &ignored);
 }
 
-static void cgroups_lookup_write_labels(uint8_t *item,
-                                        size_t table_start,
-                                        size_t table_bytes,
-                                        const nipc_lookup_label_view_t *labels,
-                                        uint16_t label_count)
+static void lookup_write_labels(uint8_t *item,
+                                size_t table_start,
+                                size_t table_bytes,
+                                const nipc_lookup_label_view_t *labels,
+                                uint16_t label_count)
 {
     size_t next = table_start + table_bytes;
     for (uint32_t i = 0; i < label_count; i++) {
@@ -1800,7 +1800,7 @@ nipc_error_t nipc_cgroups_lookup_builder_add(
     if (label_count > 0) {
         if (table_start > fixed_end)
             memset(item + fixed_end, 0, table_start - fixed_end);
-        cgroups_lookup_write_labels(item, table_start, table_bytes, labels, label_count);
+        lookup_write_labels(item, table_start, table_bytes, labels, label_count);
     }
 
     nipc_lookup_dir_entry_t dir_entry = {
@@ -2162,23 +2162,7 @@ nipc_error_t nipc_apps_lookup_builder_add(
     if (label_count > 0) {
         if (table_start > fixed_end)
             memset(item + fixed_end, 0, table_start - fixed_end);
-        size_t next = table_start + table_bytes;
-        for (uint32_t i = 0; i < label_count; i++) {
-            nipc_lookup_label_entry_t entry = {
-                .key_offset = (uint32_t)next,
-                .key_length = labels[i].key.len,
-                .value_offset = (uint32_t)(next + labels[i].key.len + 1u),
-                .value_length = labels[i].value.len,
-            };
-            memcpy(item + table_start + (size_t)i * NIPC_LOOKUP_LABEL_ENTRY_SIZE,
-                   &entry, sizeof(entry));
-            memcpy(item + entry.key_offset, labels[i].key.ptr, labels[i].key.len);
-            item[entry.key_offset + labels[i].key.len] = '\0';
-            if (labels[i].value.len > 0)
-                memcpy(item + entry.value_offset, labels[i].value.ptr, labels[i].value.len);
-            item[entry.value_offset + labels[i].value.len] = '\0';
-            next = entry.value_offset + labels[i].value.len + 1u;
-        }
+        lookup_write_labels(item, table_start, table_bytes, labels, label_count);
     }
 
     nipc_lookup_dir_entry_t dir_entry = {
