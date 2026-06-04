@@ -136,6 +136,35 @@ fn validate_apps_lookup_semantics(
     name_len: u64,
     label_count: u64,
 ) -> Result<(), NipcError> {
+    validate_apps_lookup_domains(status, cgroup_status, comm_len)?;
+    if status == PID_LOOKUP_UNKNOWN {
+        return validate_apps_lookup_unknown(
+            orchestrator,
+            cgroup_status,
+            ppid,
+            uid,
+            starttime,
+            comm_len,
+            path_len,
+            name_len,
+            label_count,
+        );
+    }
+    validate_apps_lookup_known(
+        cgroup_status,
+        orchestrator,
+        comm_len,
+        path_len,
+        name_len,
+        label_count,
+    )
+}
+
+fn validate_apps_lookup_domains(
+    status: u16,
+    cgroup_status: u16,
+    comm_len: u64,
+) -> Result<(), NipcError> {
     if status != PID_LOOKUP_KNOWN && status != PID_LOOKUP_UNKNOWN {
         return Err(NipcError::BadLayout);
     }
@@ -149,21 +178,43 @@ fn validate_apps_lookup_semantics(
     if comm_len > 15 {
         return Err(NipcError::BadLayout);
     }
-    if status == PID_LOOKUP_UNKNOWN {
-        if orchestrator != 0
-            || cgroup_status != 0
-            || ppid != 0
-            || uid != NIPC_UID_UNSET
-            || starttime != 0
-            || comm_len != 0
-            || path_len != 0
-            || name_len != 0
-            || label_count != 0
-        {
-            return Err(NipcError::BadLayout);
-        }
-        return Ok(());
+    Ok(())
+}
+
+fn validate_apps_lookup_unknown(
+    orchestrator: u16,
+    cgroup_status: u16,
+    ppid: u32,
+    uid: u32,
+    starttime: u64,
+    comm_len: u64,
+    path_len: u64,
+    name_len: u64,
+    label_count: u64,
+) -> Result<(), NipcError> {
+    if orchestrator != 0
+        || cgroup_status != 0
+        || ppid != 0
+        || uid != NIPC_UID_UNSET
+        || starttime != 0
+        || comm_len != 0
+        || path_len != 0
+        || name_len != 0
+        || label_count != 0
+    {
+        return Err(NipcError::BadLayout);
     }
+    Ok(())
+}
+
+fn validate_apps_lookup_known(
+    cgroup_status: u16,
+    orchestrator: u16,
+    comm_len: u64,
+    path_len: u64,
+    name_len: u64,
+    label_count: u64,
+) -> Result<(), NipcError> {
     if comm_len == 0 {
         return Err(NipcError::BadLayout);
     }

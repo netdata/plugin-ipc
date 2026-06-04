@@ -64,6 +64,16 @@ func invalidSourceString(data []byte, requireNonEmpty bool) bool {
 }
 
 func validateAppsLookupSemantics(status, cgroupStatus, orchestrator uint16, ppid, uid uint32, starttime uint64, commLen, pathLen, nameLen, labelCount int) error {
+	if err := validateAppsLookupDomains(status, cgroupStatus, commLen); err != nil {
+		return err
+	}
+	if status == PidLookupUnknown {
+		return validateAppsLookupUnknown(orchestrator, cgroupStatus, ppid, uid, starttime, commLen, pathLen, nameLen, labelCount)
+	}
+	return validateAppsLookupKnown(cgroupStatus, orchestrator, commLen, pathLen, nameLen, labelCount)
+}
+
+func validateAppsLookupDomains(status, cgroupStatus uint16, commLen int) error {
 	if status != PidLookupKnown && status != PidLookupUnknown {
 		return ErrBadLayout
 	}
@@ -74,13 +84,18 @@ func validateAppsLookupSemantics(status, cgroupStatus, orchestrator uint16, ppid
 	if commLen > 15 {
 		return ErrBadLayout
 	}
-	if status == PidLookupUnknown {
-		if orchestrator != 0 || cgroupStatus != 0 || ppid != 0 || uid != NipcUIDUnset ||
-			starttime != 0 || commLen != 0 || pathLen != 0 || nameLen != 0 || labelCount != 0 {
-			return ErrBadLayout
-		}
-		return nil
+	return nil
+}
+
+func validateAppsLookupUnknown(orchestrator, cgroupStatus uint16, ppid, uid uint32, starttime uint64, commLen, pathLen, nameLen, labelCount int) error {
+	if orchestrator != 0 || cgroupStatus != 0 || ppid != 0 || uid != NipcUIDUnset ||
+		starttime != 0 || commLen != 0 || pathLen != 0 || nameLen != 0 || labelCount != 0 {
+		return ErrBadLayout
 	}
+	return nil
+}
+
+func validateAppsLookupKnown(cgroupStatus, orchestrator uint16, commLen, pathLen, nameLen, labelCount int) error {
 	if commLen == 0 {
 		return ErrBadLayout
 	}

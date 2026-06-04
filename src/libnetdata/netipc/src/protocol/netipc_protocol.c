@@ -889,16 +889,9 @@ static bool source_string_invalid(const char *ptr, uint32_t len, bool require_no
     return ptr && bytes_have_nul(ptr, len);
 }
 
-static nipc_error_t apps_lookup_validate_semantics(uint16_t status,
-                                                   uint16_t cgroup_status,
-                                                   uint16_t orchestrator,
-                                                   uint32_t ppid,
-                                                   uint32_t uid,
-                                                   uint64_t starttime,
-                                                   uint64_t comm_len,
-                                                   uint64_t cgroup_path_len,
-                                                   uint64_t cgroup_name_len,
-                                                   uint64_t label_count)
+static nipc_error_t apps_lookup_validate_domains(uint16_t status,
+                                                 uint16_t cgroup_status,
+                                                 uint64_t comm_len)
 {
     if (status != NIPC_PID_LOOKUP_KNOWN &&
         status != NIPC_PID_LOOKUP_UNKNOWN)
@@ -910,17 +903,35 @@ static nipc_error_t apps_lookup_validate_semantics(uint16_t status,
         return NIPC_ERR_BAD_LAYOUT;
     if (comm_len > 15)
         return NIPC_ERR_BAD_LAYOUT;
+    return NIPC_OK;
+}
 
-    if (status == NIPC_PID_LOOKUP_UNKNOWN) {
-        if (orchestrator != 0 || cgroup_status != 0 ||
-            ppid != 0 || uid != NIPC_UID_UNSET ||
-            starttime != 0 || comm_len != 0 ||
-            cgroup_path_len != 0 || cgroup_name_len != 0 ||
-            label_count != 0)
-            return NIPC_ERR_BAD_LAYOUT;
-        return NIPC_OK;
-    }
+static nipc_error_t apps_lookup_validate_unknown(uint16_t orchestrator,
+                                                 uint16_t cgroup_status,
+                                                 uint32_t ppid,
+                                                 uint32_t uid,
+                                                 uint64_t starttime,
+                                                 uint64_t comm_len,
+                                                 uint64_t cgroup_path_len,
+                                                 uint64_t cgroup_name_len,
+                                                 uint64_t label_count)
+{
+    if (orchestrator != 0 || cgroup_status != 0 ||
+        ppid != 0 || uid != NIPC_UID_UNSET ||
+        starttime != 0 || comm_len != 0 ||
+        cgroup_path_len != 0 || cgroup_name_len != 0 ||
+        label_count != 0)
+        return NIPC_ERR_BAD_LAYOUT;
+    return NIPC_OK;
+}
 
+static nipc_error_t apps_lookup_validate_known(uint16_t cgroup_status,
+                                               uint16_t orchestrator,
+                                               uint64_t comm_len,
+                                               uint64_t cgroup_path_len,
+                                               uint64_t cgroup_name_len,
+                                               uint64_t label_count)
+{
     if (comm_len == 0)
         return NIPC_ERR_BAD_LAYOUT;
 
@@ -948,6 +959,30 @@ static nipc_error_t apps_lookup_validate_semantics(uint16_t status,
         return NIPC_ERR_BAD_LAYOUT;
     }
     return NIPC_OK;
+}
+
+static nipc_error_t apps_lookup_validate_semantics(uint16_t status,
+                                                   uint16_t cgroup_status,
+                                                   uint16_t orchestrator,
+                                                   uint32_t ppid,
+                                                   uint32_t uid,
+                                                   uint64_t starttime,
+                                                   uint64_t comm_len,
+                                                   uint64_t cgroup_path_len,
+                                                   uint64_t cgroup_name_len,
+                                                   uint64_t label_count)
+{
+    nipc_error_t err = apps_lookup_validate_domains(status, cgroup_status, comm_len);
+    if (err != NIPC_OK)
+        return err;
+    if (status == NIPC_PID_LOOKUP_UNKNOWN)
+        return apps_lookup_validate_unknown(orchestrator, cgroup_status,
+                                            ppid, uid, starttime, comm_len,
+                                            cgroup_path_len, cgroup_name_len,
+                                            label_count);
+    return apps_lookup_validate_known(cgroup_status, orchestrator,
+                                      comm_len, cgroup_path_len,
+                                      cgroup_name_len, label_count);
 }
 
 static nipc_error_t cgroups_lookup_validate_semantics(uint16_t status,
