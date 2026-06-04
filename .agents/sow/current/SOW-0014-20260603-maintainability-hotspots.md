@@ -1009,7 +1009,17 @@ Raw cache, Go typed-facade, apps lookup builder, cgroups lookup builder, apps lo
   - `bash .agents/sow/audit.sh` passed.
   - Sensitive-data scan across touched durable artifacts found only existing synthetic test `AUTH_TOKEN` constants and generic SOW policy text; no raw credentials or private data were added.
 - GitHub validation:
-  - Pending push and CodeQL reanalysis for this second slice.
+  - Commit `ee88933` was pushed to `main`.
+  - GitHub custom CodeQL run `26955852359` passed for C/C++ POSIX, C/C++ Windows, Go POSIX, Go Windows, and Rust.
+  - GitHub default CodeQL run `26955850096` passed.
+  - GitHub Static Analysis run `26955852120` passed.
+  - GitHub Runtime Safety run `26955852110` passed.
+  - GitHub Codacy Local Analysis run `26955852168` passed.
+  - GitHub Codacy Coverage run `26955852119` passed.
+  - GitHub Supply Chain Security run `26955852224` passed.
+  - `gh api '/repos/netdata/plugin-ipc/code-scanning/alerts?state=open&branch=main&per_page=100'` returned an empty list after C/C++ POSIX CodeQL uploaded results.
+  - The only remaining CodeQL alert after source fixes was `7633`, `cpp/stack-address-escape`, at `src/libnetdata/netipc/src/service/netipc_service.c:1484`.
+  - Alert `7633` was dismissed as `false positive` with this evidence: `docs/getting-started.md:191` documents stack-owned `nipc_managed_server_t` usage, and `src/libnetdata/netipc/src/service/netipc_service.c:1603` begins `nipc_server_destroy()`, which joins all session threads before the caller may release the server object.
 
 ## Lessons Extracted
 
