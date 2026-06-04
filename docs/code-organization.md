@@ -43,7 +43,12 @@ src/
 
   crates/netipc/              # Rust library (Cargo crate)
     src/
-      protocol.rs             # Codec
+      protocol/               # Codec
+        mod.rs                # Core wire primitives and codec re-exports
+        lookup/               # Lookup codec family
+          common.rs           # Shared lookup helpers
+          cgroups_lookup.rs   # cgroups lookup codec
+          apps_lookup.rs      # apps lookup codec
       transport/
         posix.rs              # L1: UDS, SHM
         windows.rs            # L1: Named Pipe, SHM
@@ -51,6 +56,10 @@ src/
 
   go/pkg/netipc/              # Go library (Go package)
     protocol/                 # Codec
+      frame.go                # Core wire primitives
+      lookup_common.go        # Shared lookup helpers
+      cgroups_lookup.go       # cgroups lookup codec
+      apps_lookup.go          # apps lookup codec
     transport/
       posix/                  # L1: UDS, SHM
       windows/                # L1: Named Pipe, SHM
