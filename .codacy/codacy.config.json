@@ -8182,5 +8182,8 @@
       ]
     }
   ],
-  "exclude": []
+  "exclude": [
+    "bench/**",
+    "tests/**"
+  ]
 }
