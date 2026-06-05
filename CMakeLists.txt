@@ -53,6 +53,11 @@ target_include_directories(netipc_protocol PUBLIC
 if(NOT NETIPC_WINDOWS_RUNTIME)
     add_library(netipc_uds STATIC
         src/libnetdata/netipc/src/transport/posix/netipc_uds.c
+        src/libnetdata/netipc/src/transport/posix/netipc_uds_handshake.c
+        src/libnetdata/netipc/src/transport/posix/netipc_uds_inflight.c
+        src/libnetdata/netipc/src/transport/posix/netipc_uds_lifecycle.c
+        src/libnetdata/netipc/src/transport/posix/netipc_uds_receive.c
+        src/libnetdata/netipc/src/transport/posix/netipc_uds_send.c
     )
     target_include_directories(netipc_uds PUBLIC
         src/libnetdata/netipc/include

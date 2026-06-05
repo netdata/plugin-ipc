@@ -236,8 +236,72 @@ Open decisions:
     - cppcheck: success, 45 files, 0 issues.
     - ShellCheck: success, 3 files, 0 issues.
     - Spectral: success, 11 files, 0 issues.
-    - Revive: partial, 90 files, 0 issues, 1 `findings is not iterable` invocation error.
+  - Revive: partial, 90 files, 0 issues, 1 `findings is not iterable` invocation error.
   - The previous pushed commit `5a55246b9b4698317bdf8440c898369034a1f408` has green CI for CodeQL, Static Analysis, Supply Chain Security, Codacy Local Analysis, Codacy Coverage, and the Codacy GitHub check.
+- Committed and pushed `36c06554e1a617e314574ab1cfeae17547285f14`.
+- Imported `.codacy/codacy.config.json` again after adding Revive locally:
+  - 7 tools reconfigured: Checkov, Opengrep, Trivy, Cppcheck, ShellCheck, Spectral, Revive.
+  - 2727 patterns enabled.
+  - No tool was disabled.
+- Triggered Codacy Cloud reanalysis after the push.
+- Checked GitHub CI for `36c06554e1a617e314574ab1cfeae17547285f14`:
+  - Supply Chain Security: success.
+  - Codacy Local Analysis: success.
+  - Static Analysis: success.
+  - CodeQL: success.
+  - Codacy Coverage: success.
+  - Code Quality push check: success.
+- Checked Codacy Cloud after `.codacy.yml` reached `main`:
+  - `listIgnoredFiles` reports `hasCodacyConfigurationFile: true`.
+  - 133 files are now listed as ignored, including `bench/**`, `tests/**`, Go `*_test.go`, Rust `*_tests.rs`, and Rust `tests.rs` files.
+  - Repository headline metrics still report the previous full-analysis commit `5a55246b9b4698317bdf8440c898369034a1f408` and still show 42% complex files and 41% duplicated files. This appears to be Codacy metric lag or commit-selection lag after a config-only commit.
+- Built a production-source-only file list by filtering the current Codacy file API data through the new ignored-path rules.
+- Top production complexity files after filtering ignored test/bench paths:
+  - `src/libnetdata/netipc/src/transport/posix/netipc_uds.c`: complexity 227, duplication 422.
+  - `src/go/pkg/netipc/transport/windows/pipe.go`: complexity 214, duplication 773.
+  - `src/go/pkg/netipc/transport/posix/uds.go`: complexity 182, duplication 745.
+  - `src/libnetdata/netipc/src/transport/posix/netipc_shm.c`: complexity 179, duplication 166.
+  - `src/go/pkg/netipc/protocol/apps_lookup.go`: complexity 148, duplication 175.
+- Selected `src/libnetdata/netipc/src/transport/posix/netipc_uds.c` as the next production maintainability target because it is the highest-complexity production file after excluding test/bench paths.
+- Read `src/libnetdata/netipc/src/transport/posix/netipc_uds.c` in full.
+- `netipc_uds.c` currently mixes several separate responsibilities in one compilation unit:
+  - path validation and stale endpoint recovery.
+  - low-level SEQPACKET send/receive.
+  - client handshake.
+  - server handshake.
+  - listener/connect/accept/close lifecycle.
+  - client-side in-flight message ID tracking.
+  - send chunking.
+  - receive chunk reassembly and batch validation.
+- Selected low-risk implementation shape:
+  - keep the public `netipc_uds.h` API unchanged.
+  - keep `netipc_uds.c` as shared low-level/common helpers.
+  - add a private `netipc_uds_internal.h`.
+  - move lifecycle/stale recovery, handshake, in-flight tracking, send, and receive into separate POSIX UDS implementation files.
+  - split send/receive helper logic only where it removes obvious nested branches without changing protocol behavior.
+- Implemented the POSIX UDS split:
+  - `netipc_uds.c`: shared low-level send/receive and packet-size helpers.
+  - `netipc_uds_internal.h`: private POSIX UDS declarations and constants.
+  - `netipc_uds_handshake.c`: client/server handshake and negotiation.
+  - `netipc_uds_lifecycle.c`: listen/connect/accept/close and stale socket recovery.
+  - `netipc_uds_inflight.c`: client-side message ID tracking.
+  - `netipc_uds_send.c`: outbound limit checks, single-packet send, and chunked send.
+  - `netipc_uds_receive.c`: inbound validation, chunk reassembly, and batch validation.
+- Updated `CMakeLists.txt` so the `netipc_uds` static library builds all POSIX UDS implementation files.
+- Validation after the split:
+  - `cmake --build build`: passed.
+  - `/usr/bin/ctest --test-dir build --output-on-failure`: 46/46 tests passed in 449.75 seconds.
+  - `git diff --check`: passed.
+  - `bash .agents/sow/audit.sh`: passed.
+  - `codacy-analysis analyze . --output-format json`: exit status 0, 0 issues, 1 known Revive adapter error.
+    - Checkov: success, 11 files, 0 issues.
+    - Opengrep/Semgrep: success, 271 files, 0 issues.
+    - Trivy: success, 272 files, 0 issues.
+    - cppcheck: success, 51 files, 0 issues.
+    - ShellCheck: success, 3 files, 0 issues.
+    - Spectral: success, 11 files, 0 issues.
+    - Revive: partial, 90 files, 0 issues, 1 `findings is not iterable` invocation error.
+- Note: plain `ctest` resolves to a broken user-local Python wrapper at `~/.local/bin/ctest`; system `/usr/bin/ctest` was used for validation.
 
 ## Validation
 
