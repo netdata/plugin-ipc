@@ -362,6 +362,67 @@ Open decisions:
   - `bash .agents/sow/audit.sh`: passed.
   - `codacy-analysis analyze . --output-format json`: exit status 0, 0 issues, 1 known Revive adapter invocation error:
     - Revive error: `Failed to run revive: findings is not iterable`.
+- Committed and pushed `ce9c5edeee80732d60daf4e6654dd253a49711a5`.
+- Remote validation for `ce9c5edeee80732d60daf4e6654dd253a49711a5`:
+  - GitHub CodeQL C/C++ POSIX, C/C++ Windows, Go POSIX, Go Windows, and Rust: success.
+  - GitHub Static Analysis C, Go, Rust, workflow/shell, and bench/fixture Go checks: success.
+  - GitHub Runtime Safety ASAN/UBSAN, TSAN, Go Race Detector, and Windows MSYS2 Runtime: success.
+  - GitHub Supply Chain Security OSV-Scanner, Semgrep Secrets, and OpenSSF Scorecard: success.
+  - GitHub Codacy Local Analysis: success.
+  - GitHub C, Rust, and Go Coverage: success.
+  - Valgrind: skipped.
+- Codacy Cloud analyzed `ce9c5edeee80732d60daf4e6654dd253a49711a5`:
+  - issues: 0.
+  - LOC: 41123.
+  - coverage: 88%.
+  - complex files: 30%.
+  - duplicated files: 28%.
+- Windows Named Pipe file-level Codacy result after the split:
+  - `src/go/pkg/netipc/transport/windows/pipe.go`: complexity 58, duplication 98.
+  - `src/go/pkg/netipc/transport/windows/pipe_handshake.go`: complexity 48, duplication 213.
+  - `src/go/pkg/netipc/transport/windows/pipe_listener.go`: complexity 31, duplication 14.
+  - `src/go/pkg/netipc/transport/windows/pipe_receive.go`: complexity 46, duplication 32.
+  - `src/go/pkg/netipc/transport/windows/pipe_send.go`: complexity 19, duplication 55.
+  - `src/go/pkg/netipc/transport/windows/pipe_session.go`: complexity 26, duplication 79.
+- Top production complexity files after the Windows Named Pipe split:
+  - `src/go/pkg/netipc/transport/posix/uds.go`: complexity 182, duplication 532.
+  - `src/libnetdata/netipc/src/transport/posix/netipc_shm.c`: complexity 179, duplication 160.
+  - `src/go/pkg/netipc/protocol/apps_lookup.go`: complexity 148, duplication 175.
+  - `src/go/pkg/netipc/transport/posix/shm_linux.go`: complexity 147, duplication 39.
+  - `src/crates/netipc/src/transport/posix.rs`: complexity 143, duplication 0.
+- Selected `src/go/pkg/netipc/transport/posix/uds.go` as the next file to read because it is now the top production complexity and duplication hotspot.
+- Read `src/go/pkg/netipc/transport/posix/uds.go` in full.
+- `uds.go` mixes these responsibilities in one file:
+  - POSIX constants, errors, utility helpers, low-level SEQPACKET I/O, and socket path validation.
+  - role/config/session types.
+  - client connection lifecycle.
+  - session close behavior.
+  - send chunking.
+  - receive chunk reassembly, inbound limit checks, response tracking, and batch validation.
+  - listener lifecycle, accept, close, bind/listen, and socket unlink.
+  - stale endpoint recovery.
+  - client and server handshakes.
+- Selected low-risk implementation shape:
+  - keep package name, exported API, types, errors, and behavior unchanged.
+  - split the POSIX UDS package by goal inside the same package.
+  - do not introduce a shared POSIX/Windows abstraction yet; the two transports have different syscall and stale-endpoint behavior.
+  - create separate files for session/client lifecycle, send, receive, listener, stale endpoint recovery, and handshake.
+- Implemented the POSIX UDS Go split:
+  - `uds.go`: constants, errors, path/service helpers, packet-size helper, low-level SEQPACKET I/O, and shared utility helpers.
+  - `uds_session.go`: role/config/session types, session close behavior, and client connect lifecycle.
+  - `uds_send.go`: outbound logical-message send and chunked-send flow.
+  - `uds_receive.go`: receive path, inbound limit checks, response tracking, chunk reassembly, and batch payload validation.
+  - `uds_listener.go`: listener lifecycle, accept/close behavior, bind/listen, and socket unlink.
+  - `uds_stale.go`: stale endpoint detection and safe stale socket unlink policy.
+  - `uds_handshake.go`: client/server HELLO negotiation, compatibility detection, rejection, and HELLO_ACK send.
+- Validation after the POSIX UDS Go split:
+  - `gofmt` on the touched POSIX UDS files: passed.
+  - `git diff --check`: passed.
+  - `cd src/go && go test ./pkg/netipc/transport/posix`: passed.
+  - `cd src/go && go test ./...`: passed.
+  - `bash .agents/sow/audit.sh`: passed.
+  - `codacy-analysis analyze . --output-format json`: exit status 0, 0 issues, 1 known Revive adapter invocation error:
+    - Revive error: `Failed to run revive: findings is not iterable`.
 
 ## Validation
 
