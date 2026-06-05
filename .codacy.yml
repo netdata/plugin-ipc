@@ -1,0 +1,8 @@
+---
+exclude_paths:
+  - "bench/**"
+  - "benchmarks-*"
+  - "tests/**"
+  - "**/*_test.go"
+  - "**/*_tests.rs"
+  - "**/tests.rs"

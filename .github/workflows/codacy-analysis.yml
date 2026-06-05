@@ -5,6 +5,8 @@ on:
     branches:
       - main
     paths:
+      - .codacy.yml
+      - .codacy.yaml
       - .codacy/**
       - .github/workflows/codacy-analysis.yml
       - AGENTS.md
@@ -20,6 +22,8 @@ on:
     branches:
       - main
     paths:
+      - .codacy.yml
+      - .codacy.yaml
       - .codacy/**
       - .github/workflows/codacy-analysis.yml
       - AGENTS.md

@@ -23,6 +23,7 @@ Facts:
 - Codacy Cloud currently reports 0 issues, 88% coverage, 42% complex files, and 41% duplicated files for commit `dbf77a8595b01e3e335db41883d2d5f8b72dfac7`.
 - `.codacy/codacy.config.json` currently has top-level `"exclude": []`, so test and benchmark paths are not globally excluded in the committed local Codacy configuration.
 - The installed Codacy Cloud CLI skill states that committing `.codacy/codacy.config.json` does not by itself change Codacy Cloud; `codacy tools ... --import` is required.
+- Codacy's official Cloud configuration file documentation says Cloud path ignores come from a repository-root `.codacy.yml` or `.codacy.yaml` file with `exclude_paths`, not from `.codacy/codacy.config.json`.
 - `SOW-0013` recorded the decision to keep complexity and duplication metrics active and fix real source hotspots.
 - `SOW-0014` already implemented substantial production-source organization work, including C protocol splits, Rust/Go lookup codec splits, Rust raw service splits, and C service splits.
 
@@ -63,6 +64,7 @@ Current state:
 - Codacy Cloud metrics are: 0 issues, 107960 LOC, 88% coverage, 42% complex files, and 41% duplicated files.
 - Codacy Cloud goals are: max duplicated files 10%, max complex files 10%, file duplication block threshold 1, and file complexity value threshold 20.
 - `.codacy/codacy.config.json` has partial Opengrep tool-specific excludes for a few Windows fixture files, but top-level global excludes are empty.
+- Codacy Cloud API `listIgnoredFiles` reports `hasCodacyConfigurationFile: false` for commit `5a55246b9b4698317bdf8440c898369034a1f408`, proving Cloud did not treat `.codacy/codacy.config.json` as the repository-level Cloud configuration file.
 - CodeQL is intentionally broader and still scans `src`, `tests`, and `bench`; this SOW is about Codacy maintainability scope, not weakening GitHub code scanning.
 
 Risks:
@@ -89,12 +91,16 @@ Evidence reviewed:
 - `SOW-0014` records completed C/Rust/Go production-source organization work and says further complexity or duplication work should start from fresh Codacy/GitHub evidence.
 - Codacy Cloud CLI repository query reports current metrics for commit `dbf77a8595b01e3e335db41883d2d5f8b72dfac7`.
 - Codacy Cloud CLI skill states `.codacy/codacy.config.json` is local-only until imported with `codacy tools ... --import`.
+- Codacy official docs state Cloud repository configuration uses root `.codacy.yml` or `.codacy.yaml`, starting with `---`, and path ignores are defined under `exclude_paths`.
+- Codacy Cloud API file queries after commit `5a55246b9b4698317bdf8440c898369034a1f408` still list `tests/**`, `bench/**`, Go `*_test.go`, and Rust `*_tests.rs` files in complexity and duplication data.
 
 Affected contracts and surfaces:
 
 - Local Codacy configuration file `.codacy/codacy.config.json`.
+- Cloud Codacy configuration file `.codacy.yml`.
 - Codacy Cloud repository configuration after import.
 - Codacy Cloud maintainability metrics and issue scope.
+- GitHub Codacy local-analysis workflow trigger paths.
 - SOW lifecycle records.
 - No protocol, API, wire format, runtime behavior, or public SDK behavior should change during the exclusion step.
 
@@ -119,15 +125,18 @@ Sensitive data handling plan:
 Implementation plan:
 
 1. Update `.codacy/codacy.config.json` global excludes to include `tests/**` and `bench/**`.
-2. Validate JSON syntax and run local Codacy analysis enough to prove the config is accepted.
-3. Commit and push the configuration and SOW record.
-4. Import the committed Codacy configuration into Codacy Cloud and trigger reanalysis.
-5. Record refreshed Codacy metrics.
-6. Select the next production-file maintainability target from refreshed Codacy data or local production-source approximation if Codacy does not expose contributors.
+2. Add root `.codacy.yml` with Cloud-native `exclude_paths` for test and benchmark files.
+3. Add `.codacy.yml` and `.codacy.yaml` to the Codacy local-analysis workflow path filters.
+4. Validate JSON/YAML syntax and run local Codacy analysis enough to prove the config is accepted.
+5. Commit and push the configuration and SOW record.
+6. Import the committed Codacy tool configuration into Codacy Cloud and trigger reanalysis.
+7. Record refreshed Codacy metrics.
+8. Select the next production-file maintainability target from refreshed Codacy data or local production-source approximation if Codacy does not expose contributors.
 
 Validation plan:
 
 - `jq empty .codacy/codacy.config.json`
+- YAML parser check for `.codacy.yml`.
 - `codacy-analysis analyze --output-format json` with the updated configuration.
 - `codacy tools gh netdata plugin-ipc --import -y`
 - `codacy repository gh netdata plugin-ipc --reanalyze`
@@ -192,6 +201,43 @@ Open decisions:
   - cppcheck: 45 files, 0 issues.
   - ShellCheck: 3 files, 0 issues.
   - Spectral: 10 files, 0 issues.
+- Committed and pushed `5a55246b9b4698317bdf8440c898369034a1f408`.
+- Imported `.codacy/codacy.config.json` to Codacy Cloud.
+- The import temporarily disabled Cloud Revive because the local file did not contain Revive. Revive was immediately re-enabled in Cloud.
+- Added Revive back to `.codacy/codacy.config.json` with the 21 enabled Cloud Revive patterns so future tool imports do not disable it again.
+- Verified local Codacy Analysis CLI `0.8.0` is the latest npm-published version available locally, but its Revive adapter reports a non-fatal `findings is not iterable` invocation error even when scanning one Go file. The Revive binary itself runs, and Cloud Revive remains enabled.
+- Checked Codacy Cloud after commit `5a55246b9b4698317bdf8440c898369034a1f408`:
+  - latest analyzed commit: `5a55246b9b4698317bdf8440c898369034a1f408`.
+  - metrics stayed at 0 issues, 88% coverage, 42% complex files, and 41% duplicated files.
+  - `listIgnoredFiles` reported `hasCodacyConfigurationFile: false` and only one ignored file: `bench/drivers/go/go.mod`.
+- Queried Codacy Cloud file metrics through the generated API client:
+  - `bench/drivers/go/main_windows.go`: complexity 321, duplication 1706.
+  - `bench/drivers/c/bench_windows.c`: complexity 292, duplication 1357.
+  - `tests/fixtures/c/test_uds.c`: complexity 281, duplication 2445.
+  - `src/go/pkg/netipc/transport/posix/uds_test.go`: complexity 257, duplication 4091.
+  - `src/crates/netipc/src/service/raw_unix_tests.rs`: complexity 329.
+- Added Cloud-native `.codacy.yml` with `exclude_paths` for:
+  - `bench/**`
+  - `benchmarks-*`
+  - `tests/**`
+  - `**/*_test.go`
+  - `**/*_tests.rs`
+  - `**/tests.rs`
+- Added `.codacy.yml` and `.codacy.yaml` to the Codacy local-analysis workflow path filters.
+- Validated the new local state:
+  - `.codacy.yml` parses as YAML and contains the intended `exclude_paths`.
+  - `.codacy/codacy.config.json` parses as JSON and now includes Revive with 21 patterns.
+  - `git diff --check` passed.
+  - `bash .agents/sow/audit.sh` passed.
+  - `codacy-analysis analyze . --output-format json` exited with Codacy analysis status 0, produced 0 issues, and produced 1 known Revive adapter error:
+    - Checkov: success, 11 files, 0 issues.
+    - Opengrep/Semgrep: success, 265 files, 0 issues.
+    - Trivy: success, 266 files, 0 issues.
+    - cppcheck: success, 45 files, 0 issues.
+    - ShellCheck: success, 3 files, 0 issues.
+    - Spectral: success, 11 files, 0 issues.
+    - Revive: partial, 90 files, 0 issues, 1 `findings is not iterable` invocation error.
+  - The previous pushed commit `5a55246b9b4698317bdf8440c898369034a1f408` has green CI for CodeQL, Static Analysis, Supply Chain Security, Codacy Local Analysis, Codacy Coverage, and the Codacy GitHub check.
 
 ## Validation
 
