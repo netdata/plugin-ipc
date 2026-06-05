@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-use super::server::ManagedServer;
+use super::server::{ManagedServer, ServerConfig};
 use super::server_session_windows::handle_session_win_threaded;
 use crate::protocol::{NipcError, HEADER_SIZE};
 use crate::transport::win_shm::{

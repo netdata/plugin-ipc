@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: selected maintainability hotspots and the per-codec/per-service organization sweep are implemented and validated.
+Sub-state: Windows Rust CI compile regression repaired and validated.
 
 ## Requirements
 
@@ -1529,4 +1529,61 @@ Artifact impact plan:
 
 ## Regression Log
 
-None yet.
+## Regression - 2026-06-05
+
+What broke:
+
+- GitHub Actions run `26988906854` for commit `7d6031a3bda52049e6b04483dd442a33d929a65f` failed in workflow `Runtime Safety`, job `Windows MSYS2 Runtime`.
+- The failing step was `Build Windows runtime targets`.
+- Rust Windows interop targets failed to compile because `src/crates/netipc/src/service/raw/server_windows.rs:106` referenced `ServerConfig` without importing the platform transport `ServerConfig` type.
+
+Evidence:
+
+- `gh run view 26988906854 --repo netdata/plugin-ipc --json jobs` reported job `79644582317` as failed.
+- `gh run view 26988906854 --repo netdata/plugin-ipc --job 79644582317 --log` reported:
+  - `error[E0425]: cannot find type ServerConfig in this scope`
+  - `src\service\raw\server_windows.rs:106:51`
+
+Why previous validation missed it:
+
+- The final local validation recorded Windows/MSYS configure/build and CTest success, but the CI run compiled Rust Windows interop targets through the GitHub-hosted MSYS2 workflow and exposed a missing import in the Windows-only Rust raw server split file.
+- POSIX Rust validation could not catch this because `server_windows.rs` is behind `#![cfg(windows)]`.
+
+Repair plan:
+
+- Import `ServerConfig` from `super::server` in `src/crates/netipc/src/service/raw/server_windows.rs`, matching the Unix split file's pattern.
+- Re-run Rust formatting checks and Windows Rust compile/test validation.
+- Re-run SOW audit and whitespace checks.
+
+Repair implemented:
+
+- `src/crates/netipc/src/service/raw/server_windows.rs` now imports `ServerConfig` from `super::server` alongside `ManagedServer`.
+- This matches the Unix split file and uses the cfg-selected transport `ServerConfig` re-export from `src/crates/netipc/src/service/raw/server.rs`.
+
+Validation:
+
+- `cargo fmt --manifest-path src/crates/netipc/Cargo.toml -- --check` passed.
+- `cargo check --manifest-path src/crates/netipc/Cargo.toml --target x86_64-pc-windows-gnu` passed.
+- Windows/MSYS validation on `win11` passed for the exact Runtime Safety build target list:
+  - `test_named_pipe`
+  - `test_win_shm`
+  - `test_win_service`
+  - `test_win_service_payload_limits`
+  - `test_win_service_extra`
+  - `test_win_stress`
+  - `interop_named_pipe_c`, `interop_named_pipe_rs`, `interop_named_pipe_go`
+  - `interop_win_shm_c`, `interop_win_shm_rs`, `interop_win_shm_go`
+  - `interop_service_win_c`, `interop_service_win_rs`, `interop_service_win_go`
+  - `interop_cache_win_c`, `interop_cache_win_rs`, `interop_cache_win_go`
+- Windows/MSYS CTest Runtime Safety slice passed on `win11`: 12/12 tests.
+- `git diff --check` passed.
+- `bash .agents/sow/audit.sh` passed.
+
+Artifact impact:
+
+- `AGENTS.md`: no workflow or guardrail change.
+- Runtime project skills: no reusable workflow change.
+- Specs: no protocol/API behavior change.
+- End-user/operator docs: no public docs change needed.
+- End-user/operator skills: no exported integration guidance change needed.
+- SOW lifecycle: this completed SOW was reopened from `done/` to `current/` for a true regression and will be completed again with the repair commit.
