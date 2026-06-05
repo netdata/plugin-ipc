@@ -1,5 +1,3 @@
-#![cfg(windows)]
-
 use super::client::{ClientState, RawClient};
 use super::common::{CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS, CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS};
 use crate::transport::win_shm::{
@@ -10,7 +8,6 @@ use crate::transport::windows::{NpError, NpSession};
 
 impl RawClient {
     /// Windows: attempt a full Named Pipe connection + Win SHM upgrade.
-    #[cfg(windows)]
     pub(super) fn try_connect(&mut self) -> ClientState {
         match NpSession::connect(&self.run_dir, &self.service_name, &self.transport_config) {
             Ok(session) => {

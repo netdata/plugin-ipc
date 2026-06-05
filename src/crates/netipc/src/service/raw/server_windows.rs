@@ -1,5 +1,3 @@
-#![cfg(windows)]
-
 use super::server::{ManagedServer, ServerConfig};
 use super::server_session_windows::handle_session_win_threaded;
 use crate::protocol::{NipcError, HEADER_SIZE};
@@ -12,7 +10,6 @@ use std::sync::atomic::Ordering;
 
 impl ManagedServer {
     /// Windows: run the acceptor loop over Named Pipes.
-    #[cfg(windows)]
     pub fn run(&mut self) -> Result<(), NipcError> {
         let mut listener = NpListener::bind(
             &self.run_dir,
@@ -68,14 +65,6 @@ impl ManagedServer {
                 None => None,
             };
 
-            if shm.is_none()
-                && (session.selected_profile == WIN_SHM_PROFILE_HYBRID
-                    || session.selected_profile == WIN_SHM_PROFILE_BUSYWAIT)
-            {
-                drop(session);
-                continue;
-            }
-
             let expected_method_code = self.expected_method_code;
             let handler = self.handler.clone();
             let running = self.running.clone();
@@ -102,7 +91,6 @@ impl ManagedServer {
         Ok(())
     }
 
-    #[cfg(windows)]
     fn prepare_windows_accept(&mut self) -> (u64, ServerConfig, Option<PreparedWinShm>, bool) {
         let session_id = self.next_session_id;
         self.next_session_id += 1;
@@ -153,7 +141,6 @@ impl ManagedServer {
         (session_id, cfg, Some(prepared), true)
     }
 
-    #[cfg(windows)]
     fn finalize_windows_shm(
         &self,
         session: &NpSession,
@@ -173,14 +160,12 @@ impl ManagedServer {
     }
 }
 
-#[cfg(windows)]
 #[derive(Default)]
 struct PreparedWinShm {
     hybrid: Option<WinShmContext>,
     busywait: Option<WinShmContext>,
 }
 
-#[cfg(windows)]
 impl PreparedWinShm {
     fn insert(&mut self, profile: u32, ctx: WinShmContext) {
         if profile == WIN_SHM_PROFILE_HYBRID {

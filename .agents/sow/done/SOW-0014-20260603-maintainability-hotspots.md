@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: residual Go quality findings repaired and CodeQL false-positive alert dismissed.
+Sub-state: residual Rust Windows quality findings repaired.
 
 ## Requirements
 
@@ -1641,3 +1641,60 @@ Artifact impact:
 - End-user/operator docs: no docs change needed.
 - End-user/operator skills: no exported integration guidance change needed.
 - SOW lifecycle: this completed SOW was reopened from `done/` to `current/` for residual findings and is completed again with the repair commit and alert disposition.
+
+## Regression - 2026-06-05
+
+What broke:
+
+- GitHub AI quality findings reported three issues in `src/crates/netipc/src/service/raw/server_windows.rs` after the Rust raw server split:
+  - redundant per-item `#[cfg(windows)]` attributes remained in a Windows-only module.
+  - the accept loop kept an unreachable `shm.is_none()` guard after the preceding match already handled missing Windows SHM for SHM-selected sessions with `drop(session); continue;`.
+- Same-pattern search found `src/crates/netipc/src/service/raw/client_windows.rs` also had redundant Windows gates under the `raw.rs` Windows-only module declaration.
+- The same report still listed two Go findings in `src/go/pkg/netipc/protocol/lookup_common.go`, but current `main` already contains the fixes from commit `4a5ebf0`.
+
+Evidence:
+
+- `src/crates/netipc/src/service/raw.rs:15` and `src/crates/netipc/src/service/raw.rs:27` gate `client_windows` and `server_windows` module inclusion with `#[cfg(windows)]`.
+- `src/crates/netipc/src/service/raw/server_windows.rs:1` also gated the file with `#![cfg(windows)]`, and the file had redundant item-level `#[cfg(windows)]` attributes on the run helper, Windows SHM helpers, and `PreparedWinShm`.
+- `src/crates/netipc/src/service/raw/client_windows.rs:1` also gated the file with `#![cfg(windows)]`, and `try_connect()` had a redundant item-level `#[cfg(windows)]`.
+- `src/crates/netipc/src/service/raw/server_windows.rs:60` matched `finalize_windows_shm()`, and lines `62`-`67` already dropped and continued when an SHM profile selected no SHM context; the subsequent lines `71`-`77` repeated an impossible condition.
+- `src/go/pkg/netipc/protocol/lookup_common.go:19` currently has the `LookupLabelView` doc comment.
+- `src/go/pkg/netipc/protocol/lookup_common.go:452` currently uses `count := int(itemCount)`.
+
+Root-cause model:
+
+- The Rust findings are cleanup leftovers from the Windows raw server split. They do not indicate a behavior bug, but they make the control flow and cfg ownership harder to read.
+- The Go findings are stale against the current repository state.
+
+Repair plan:
+
+- Remove the redundant file-level and per-item `#[cfg(windows)]` attributes from raw Windows child modules already gated by `raw.rs`.
+- Remove the unreachable post-match SHM guard.
+- Validate Rust formatting and Windows-target Rust compilation.
+
+Repair implemented:
+
+- `src/crates/netipc/src/service/raw/server_windows.rs` no longer repeats Windows gating inside the Windows-only `raw.rs` module declaration.
+- `src/crates/netipc/src/service/raw/server_windows.rs` no longer has the unreachable post-match SHM guard.
+- Same-pattern cleanup removed redundant Windows gates from `src/crates/netipc/src/service/raw/client_windows.rs`.
+
+Validation:
+
+- `cargo fmt --manifest-path src/crates/netipc/Cargo.toml -- --check` passed.
+- `cargo check --manifest-path src/crates/netipc/Cargo.toml --target x86_64-pc-windows-gnu` passed.
+- `cargo clippy --manifest-path src/crates/netipc/Cargo.toml --target x86_64-pc-windows-gnu -- -A warnings -D clippy::duplicated_attributes` passed.
+- A broader `cargo clippy --manifest-path src/crates/netipc/Cargo.toml --target x86_64-pc-windows-gnu -- -D warnings` was also tried and exposed pre-existing unrelated Windows-target lints outside this cleanup scope; the targeted duplicated-attribute gate passed after the repair.
+- `cargo test --manifest-path src/crates/netipc/Cargo.toml` passed: 332 Rust library tests plus fixture/benchmark binary harnesses and doc-tests.
+- `codacy-analysis analyze --files src/crates/netipc/src/service/raw/server_windows.rs src/crates/netipc/src/service/raw/client_windows.rs --output-format json` passed with 0 issues and 0 errors.
+- `git diff --check` passed.
+- Same-pattern search found no remaining `#![cfg(windows)]` or item-level `#[cfg(windows)]` attributes in `server_windows.rs` or `client_windows.rs`.
+- `bash .agents/sow/audit.sh` passed after moving this completed SOW back to `done/`, with status and directory consistent.
+
+Artifact impact:
+
+- `AGENTS.md`: no workflow or guardrail change.
+- Runtime project skills: no reusable workflow change.
+- Specs: no protocol/API behavior change.
+- End-user/operator docs: no public docs change needed.
+- End-user/operator skills: no exported integration guidance change needed.
+- SOW lifecycle: this completed SOW was reopened from `done/` to `current/` for residual Rust Windows quality findings and is completed again with the repair commit.
