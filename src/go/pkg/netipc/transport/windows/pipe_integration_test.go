@@ -1073,8 +1073,8 @@ func TestPipeHandleAndRole(t *testing.T) {
 	if client.Handle() == syscall.InvalidHandle || server.Handle() == syscall.InvalidHandle {
 		t.Fatal("session handles should be valid")
 	}
-	if client.GetRole() != RoleClient || server.GetRole() != RoleServer {
-		t.Fatalf("unexpected roles client=%d server=%d", client.GetRole(), server.GetRole())
+	if client.Role() != RoleClient || server.Role() != RoleServer {
+		t.Fatalf("unexpected roles client=%d server=%d", client.Role(), server.Role())
 	}
 }
 

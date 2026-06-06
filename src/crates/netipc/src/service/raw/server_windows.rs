@@ -54,16 +54,14 @@ impl ManagedServer {
                 continue;
             }
 
-            let shm = match self.finalize_windows_shm(&session, prepared_shm) {
-                Some(shm) => Some(shm),
-                None if session.selected_profile == WIN_SHM_PROFILE_HYBRID
-                    || session.selected_profile == WIN_SHM_PROFILE_BUSYWAIT =>
-                {
-                    drop(session);
-                    continue;
-                }
-                None => None,
-            };
+            let shm = self.finalize_windows_shm(&session, prepared_shm);
+            if shm.is_none()
+                && (session.selected_profile == WIN_SHM_PROFILE_HYBRID
+                    || session.selected_profile == WIN_SHM_PROFILE_BUSYWAIT)
+            {
+                drop(session);
+                continue;
+            }
 
             let expected_method_code = self.expected_method_code;
             let handler = self.handler.clone();
@@ -154,6 +152,7 @@ impl ManagedServer {
             return None;
         }
         let mut prepared = prepared?;
+        // Keep the negotiated context and destroy every unused prepared context.
         let selected = prepared.take(profile);
         prepared.destroy_all();
         selected

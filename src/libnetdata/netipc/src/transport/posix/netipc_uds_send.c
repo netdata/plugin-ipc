@@ -2,6 +2,11 @@
 
 #include <string.h>
 
+static size_t min_size(size_t a, size_t b)
+{
+    return a < b ? a : b;
+}
+
 static bool tracks_client_request(const nipc_uds_session_t *session,
                                   const nipc_header_t *hdr)
 {
@@ -14,7 +19,10 @@ static void update_inflight_after_send(nipc_uds_session_t *session,
                                        bool tracked,
                                        nipc_uds_error_t err)
 {
-    if (!tracked || err == NIPC_UDS_OK)
+    if (!tracked)
+        return;
+
+    if (err == NIPC_UDS_OK)
         return;
 
     if (err == NIPC_UDS_ERR_SEND)
@@ -66,9 +74,11 @@ static nipc_uds_error_t validate_outbound_limits(nipc_uds_session_t *session,
     uint32_t max_batch;
     outbound_limits(session, hdr, &max_payload, &max_batch);
 
-    if (payload_len <= UINT32_MAX &&
-        (max_payload == 0 || payload_len <= max_payload) &&
-        (max_batch == 0 || hdr->item_count <= max_batch))
+    bool payload_fits_u32 = payload_len <= UINT32_MAX;
+    bool payload_within_limit = max_payload == 0 || payload_len <= max_payload;
+    bool batch_within_limit = max_batch == 0 || hdr->item_count <= max_batch;
+
+    if (payload_fits_u32 && payload_within_limit && batch_within_limit)
         return NIPC_UDS_OK;
 
     if (tracked)
@@ -154,9 +164,7 @@ static nipc_uds_error_t send_chunked(nipc_uds_session_t *session,
         return NIPC_UDS_ERR_BAD_PARAM;
 
     size_t remaining = payload_len;
-    size_t first_chunk_payload = remaining < chunk_payload_budget
-        ? remaining
-        : chunk_payload_budget;
+    size_t first_chunk_payload = min_size(remaining, chunk_payload_budget);
     remaining -= first_chunk_payload;
 
     uint32_t continuation_chunks = 0;
@@ -175,9 +183,7 @@ static nipc_uds_error_t send_chunked(nipc_uds_session_t *session,
     remaining = payload_len - first_chunk_payload;
 
     for (uint32_t ci = 1; ci < chunk_count; ci++) {
-        size_t this_chunk = remaining < chunk_payload_budget
-            ? remaining
-            : chunk_payload_budget;
+        size_t this_chunk = min_size(remaining, chunk_payload_budget);
 
         err = send_continuation_chunk(session, hdr, src, this_chunk, ci,
                                       chunk_count, (uint32_t)total_msg,

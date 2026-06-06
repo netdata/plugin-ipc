@@ -26,6 +26,7 @@ func invalidSourceString(data []byte, requireNonEmpty bool) bool {
 	return (requireNonEmpty && len(data) == 0) || bytes.IndexByte(data, 0) >= 0
 }
 
+// maxIntValue returns the maximum value representable by int on this platform.
 func maxIntValue() int {
 	return int(^uint(0) >> 1)
 }

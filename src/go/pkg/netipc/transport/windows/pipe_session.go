@@ -15,6 +15,9 @@ const (
 	RoleServer Role = 2
 )
 
+// spinWaitIterations limits cooperative polling before falling back to sleep.
+const spinWaitIterations = 256
+
 // ClientConfig configures a client connection.
 type ClientConfig struct {
 	SupportedProfiles       uint32
@@ -72,8 +75,14 @@ func (s *Session) Handle() syscall.Handle {
 }
 
 // Role returns the session role.
-func (s *Session) GetRole() Role {
+func (s *Session) Role() Role {
 	return s.role
+}
+
+// GetRole returns the session role.
+// Deprecated: use Role.
+func (s *Session) GetRole() Role {
+	return s.Role()
 }
 
 // WaitReadable waits until bytes are available to read or the timeout expires.
@@ -101,7 +110,7 @@ func (s *Session) WaitReadable(timeoutMs uint32) (bool, error) {
 		}
 		if !yielded {
 			yielded = true
-			for i := 0; i < 256; i++ {
+			for i := 0; i < spinWaitIterations; i++ {
 				procSwitchToThread.Call()
 				available, err = peekNamedPipeAvailable(s.handle)
 				if err != nil {

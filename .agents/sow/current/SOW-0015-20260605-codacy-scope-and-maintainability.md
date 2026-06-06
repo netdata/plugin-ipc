@@ -424,6 +424,45 @@ Open decisions:
   - `codacy-analysis analyze . --output-format json`: exit status 0, 0 issues, 1 known Revive adapter invocation error:
     - Revive error: `Failed to run revive: findings is not iterable`.
 
+### 2026-06-06 - GitHub AI Findings Triage
+
+- Opened `https://github.com/netdata/plugin-ipc/security/quality/ai-findings` with the authenticated Playwright browser.
+- GitHub displayed 15 AI findings across 5 files, not 5 individual findings:
+  - `src/crates/netipc/src/service/raw/server_windows.rs`: 2 findings.
+  - `src/go/pkg/netipc/protocol/lookup_common.go`: 5 findings.
+  - `src/go/pkg/netipc/transport/posix/uds_stale.go`: 3 findings.
+  - `src/go/pkg/netipc/transport/windows/pipe_session.go`: 2 findings.
+  - `src/libnetdata/netipc/src/transport/posix/netipc_uds_send.c`: 3 findings.
+- Local verification found stale or false-positive protocol findings:
+  - `src/go/pkg/netipc/protocol/lookup_common.go:19` already has the `LookupLabelView` doc comment.
+  - `src/go/pkg/netipc/protocol/lookup_common.go:452` already uses `count := int(itemCount)` after the prior overflow check.
+  - `src/go/pkg/netipc/protocol/frame.go:75` defines package-level `ne = binary.NativeEndian`.
+  - `src/go/pkg/netipc/protocol/frame.go:100` defines package-level `Align8`.
+- Accepted real low-risk findings:
+  - Simplify redundant Rust Windows SHM finalization match.
+  - Document the Rust Windows SHM cleanup order.
+  - Add a doc comment for unexported Go `maxIntValue` to satisfy the scanner without behavior change.
+  - Cache effective UID before POSIX stale-unlink directory stat.
+  - Use a bounded UDS stale-candidate dial timeout and retry transient `ECONNREFUSED` before unlinking.
+  - Add idiomatic Windows Go `Role()` accessors while preserving deprecated `GetRole()` wrappers.
+  - Replace the Windows named-pipe spin-loop magic number with a named constant.
+  - Split C UDS send compound conditions and local min expressions without changing send behavior.
+- Same-pattern search found `src/go/pkg/netipc/transport/windows/shm.go:163` also exposed only `GetRole()` while POSIX SHM exposes `Role()`; added the same additive `Role()` API there and kept `GetRole()` for compatibility.
+- Validation for this AI-findings pass:
+  - `gofmt` on touched Go files: passed.
+  - `cargo fmt --manifest-path src/crates/netipc/Cargo.toml`: passed.
+  - `git diff --check`: passed.
+  - `cd src/go && go test ./pkg/netipc/protocol ./pkg/netipc/transport/posix`: passed.
+  - `cd src/go && go test ./...`: passed.
+  - `cd src/go && GOOS=windows GOARCH=amd64 go test -c -o /tmp/netipc-transport-windows.test.exe ./pkg/netipc/transport/windows`: passed.
+  - `ssh win11 'cd /tmp/plugin-ipc-ai-findings/src/go && MSYSTEM=MSYS go test ./pkg/netipc/transport/windows'`: passed.
+  - `cargo test --manifest-path src/crates/netipc/Cargo.toml`: passed, 332 Rust unit tests.
+  - `cmake --build build`: passed.
+  - `/usr/bin/ctest --test-dir build --output-on-failure`: passed, 46/46 tests.
+  - `bash .agents/sow/audit.sh`: passed.
+  - `codacy-analysis analyze --files ... --output-format json`: exit status 0, 0 issues, 1 known Revive adapter error:
+    - Revive error: `Failed to run revive: findings is not iterable`.
+
 ## Validation
 
 Acceptance criteria evidence:
