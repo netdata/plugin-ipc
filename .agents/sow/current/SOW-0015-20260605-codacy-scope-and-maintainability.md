@@ -738,6 +738,64 @@ Validation completed for this duplication-reduction increment:
   - `cppcheck_missingIncludeSystem` appears non-actionable in Codacy because it cannot see ordinary system headers in the analyzer environment.
   - `cppcheck_unusedStructMember` is noisy for NetIPC wire-layout structs and internal callback tables, but disabling it affects the whole Netdata repository unless a narrower suppression path is chosen.
 
+### 2026-06-07 - PR 22649 latest review-thread pass
+
+Netdata PR #22649 was rechecked after vendoring SDK commit `04f8b09` into Netdata commit `d60e6bc19a`.
+
+Facts from GitHub, SonarCloud, and CI:
+
+- GitHub review threads: ten total, eight resolved, two open.
+- SonarCloud PR issue API: zero unresolved issues.
+- SonarCloud PR hotspot API: zero unresolved hotspots.
+- Netdata CI: zero failed checks at the snapshot; 103 checks still running and one CLA check pending.
+
+Open GitHub review threads:
+
+- `src/go/pkg/netipc/transport/internal/framing/handshake.go`: cubic claimed the negotiated request payload should follow `min(max(client, server), 256MB)`.
+  - Current public spec evidence says otherwise: `docs/level1-wire-envelope.md` defines proposals above `1 MiB` as `LIMIT_EXCEEDED` and says accepted request payload limits are echoed unchanged.
+  - Same-language evidence: C POSIX, C Windows, Rust POSIX, Rust Windows, and Go all implement the same `1 MiB` reject plus echo behavior.
+  - Decision for this increment: do not change the handshake contract as a PR-comment side effect. Add source clarification if needed and report the thread as stale/contract-conflicting unless the user explicitly chooses to revise the protocol across docs, C, Rust, Go, and tests.
+- `src/go/pkg/netipc/transport/internal/framing/receive.go`: cubic claimed packets whose received length exceeds the declared frame length should be rejected instead of accepted.
+  - Local verification found the finding is real and same-pattern across all packet transports:
+    - Go shared framing accepted `n >= totalMsg`.
+    - C POSIX UDS accepted `(size_t)n >= total_msg`.
+    - C Windows Named Pipe accepted `n >= total_msg`.
+    - Rust POSIX UDS accepted `n >= total_msg`.
+    - Rust Windows Named Pipe accepted `n >= total_msg`.
+  - Decision for this increment: fix the whole class so exact-length packets are accepted, shorter packets enter the chunked path, and longer packets fail as framing/protocol errors.
+
+Implemented SDK follow-up:
+
+- Added a Go shared-framing comment clarifying the current Level 1 handshake contract: request payload limits are client-proposed, proposals above the wire cap are rejected, and accepted values are echoed unchanged.
+- Changed non-chunked receive completion in Go shared framing, C POSIX UDS, C Windows Named Pipe, Rust POSIX UDS, and Rust Windows Named Pipe from `received_len >= declared_total` to:
+  - reject `received_len > declared_total` as a protocol/framing error.
+  - accept only `received_len == declared_total` as a complete non-chunked message.
+  - keep `received_len < declared_total` as the chunked-message path.
+- Added regression tests for packets that declare one payload byte but contain two bytes in the same packet:
+  - Go shared framing unit test.
+  - POSIX C UDS integration test.
+  - Windows C Named Pipe integration test.
+  - POSIX Rust UDS socketpair test.
+  - Windows Rust Named Pipe test.
+
+Validation completed for this increment:
+
+- `cd src/go && go test -count=1 ./pkg/netipc/transport/internal/framing`: passed.
+- `cd src/go && go test -count=1 ./pkg/netipc/transport/internal/framing ./pkg/netipc/transport/posix`: passed.
+- `cd src/go && go test -count=1 ./pkg/netipc/...`: passed.
+- `cd src/go && GOOS=windows GOARCH=amd64 go test -c -o /tmp/netipc-transport-windows.test.exe ./pkg/netipc/transport/windows`: passed.
+- `cargo test --manifest-path src/crates/netipc/Cargo.toml test_receive_packet_longer_than_declared_payload -- --test-threads=1`: passed.
+- `cargo test --manifest-path src/crates/netipc/Cargo.toml transport::posix -- --test-threads=1`: 60 tests passed.
+- `cargo test --manifest-path src/crates/netipc/Cargo.toml -- --test-threads=1`: 333 tests passed.
+- `cmake --build build --target test_uds`: passed.
+- `/usr/bin/ctest --test-dir build --output-on-failure -R '^test_uds$'`: passed.
+- `cmake --build build`: passed.
+- `/usr/bin/ctest --test-dir build --output-on-failure`: 46/46 tests passed.
+- Win11 MSYS C validation: `test_named_pipe` built and passed.
+- Win11 Go validation: `cd src/go && MSYSTEM=MSYS CGO_ENABLED=0 go test -count=1 ./pkg/netipc/transport/internal/framing ./pkg/netipc/transport/windows`: passed.
+- Win11 Rust validation: `MSYSTEM=MSYS cargo test --manifest-path src/crates/netipc/Cargo.toml transport::windows -- --test-threads=1`: 26 Windows transport tests passed.
+- `git diff --check`: passed.
+
 ## Validation
 
 Acceptance criteria evidence:

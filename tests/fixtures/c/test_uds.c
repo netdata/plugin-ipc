@@ -139,6 +139,7 @@ typedef enum {
     RAW_RESP_BATCH_COUNT_EXCEEDED,
     RAW_RESP_BAD_CONTINUATION_HEADER,
     RAW_RESP_MISSING_CONTINUATION,
+    RAW_RESP_TRAILING_PACKET,
 } raw_response_mode_t;
 
 typedef struct {
@@ -570,6 +571,25 @@ static void *raw_response_server_thread(void *arg)
                 };
                 pkt[NIPC_HEADER_LEN] = 0xAD;
                 nipc_header_encode(&resp, pkt, sizeof(pkt));
+                send(session.fd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+                break;
+            }
+            case RAW_RESP_TRAILING_PACKET: {
+                uint8_t pkt[NIPC_HEADER_LEN + 2] = {0};
+                nipc_header_t resp = {
+                    .magic = NIPC_MAGIC_MSG,
+                    .version = NIPC_VERSION,
+                    .header_len = NIPC_HEADER_LEN,
+                    .kind = NIPC_KIND_RESPONSE,
+                    .code = hdr.code,
+                    .item_count = 1,
+                    .message_id = hdr.message_id,
+                    .transport_status = NIPC_STATUS_OK,
+                    .payload_len = 1,
+                };
+                pkt[NIPC_HEADER_LEN] = 0xBE;
+                pkt[NIPC_HEADER_LEN + 1] = 0xEF;
+                nipc_header_encode(&resp, pkt, NIPC_HEADER_LEN);
                 send(session.fd, pkt, sizeof(pkt), MSG_NOSIGNAL);
                 break;
             }
@@ -2815,6 +2835,63 @@ static void test_receive_short_packet_protocol(void)
     cleanup_socket(svc);
 }
 
+static void test_receive_trailing_packet_protocol(void)
+{
+    printf("Test: Receive rejects response packet with trailing bytes\n");
+    const char *svc = "test_trailing_resp";
+    cleanup_socket(svc);
+
+    raw_response_server_ctx_t sctx = {
+        .service = svc,
+        .config = default_server_config(),
+        .mode = RAW_RESP_TRAILING_PACKET,
+        .ready = 0,
+        .done = 0,
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
+
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("raw-response trailing server ready",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect trailing response test", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = 1,
+            .item_count = 1,
+            .message_id = 7002,
+        };
+        uint8_t payload[] = { 0xAA };
+        nipc_uds_error_t serr = nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+        check("send trailing response request ok", serr == NIPC_UDS_OK);
+
+        if (serr == NIPC_UDS_OK) {
+            uint8_t buf[4096];
+            nipc_header_t resp_hdr;
+            const void *resp_payload;
+            size_t resp_payload_len;
+            nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                     &resp_hdr, &resp_payload, &resp_payload_len);
+            check("trailing response packet rejected", rerr == NIPC_UDS_ERR_PROTOCOL);
+        }
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
 static void test_receive_batch_dir_too_short(void)
 {
     printf("Test: Receive rejects too-short batch directory\n");
@@ -3186,6 +3263,7 @@ int main(void)
     test_accept_incompatible_hello_version(); printf("\n");
     test_accept_incompatible_hello_layout(); printf("\n");
     test_receive_short_packet_protocol(); printf("\n");
+    test_receive_trailing_packet_protocol(); printf("\n");
     test_receive_batch_dir_too_short(); printf("\n");
     test_receive_short_continuation_packet(); printf("\n");
     test_receive_item_count_exceeds_limit(); printf("\n");

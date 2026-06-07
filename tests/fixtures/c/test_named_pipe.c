@@ -95,6 +95,7 @@ typedef enum {
     FAKE_ACK_GOOD_THEN_SHORT_RESPONSE,
     FAKE_ACK_GOOD_THEN_BAD_RESPONSE_HEADER,
     FAKE_ACK_GOOD_THEN_ZERO_MESSAGE,
+    FAKE_ACK_GOOD_THEN_TRAILING_RESPONSE,
     FAKE_ACK_CLOSE_BEFORE_ACK,
 } fake_ack_mode_t;
 
@@ -422,7 +423,8 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
         ctx->mode == FAKE_ACK_GOOD_THEN_BAD_BATCH_DIR ||
         ctx->mode == FAKE_ACK_GOOD_THEN_BAD_CHUNKED_BATCH_DIR ||
         ctx->mode == FAKE_ACK_GOOD_THEN_SHORT_RESPONSE ||
-        ctx->mode == FAKE_ACK_GOOD_THEN_BAD_RESPONSE_HEADER) {
+        ctx->mode == FAKE_ACK_GOOD_THEN_BAD_RESPONSE_HEADER ||
+        ctx->mode == FAKE_ACK_GOOD_THEN_TRAILING_RESPONSE) {
         if (!raw_pipe_read(pipe, buf, sizeof(buf), &bytes_read)) {
             CloseHandle(pipe);
             return 1;
@@ -765,6 +767,26 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
             bad_pkt[2] = 0;
             bad_pkt[3] = 0;
             if (!raw_pipe_write(pipe, bad_pkt, (DWORD)bad_len)) {
+                CloseHandle(pipe);
+                return 1;
+            }
+        } else if (ctx->mode == FAKE_ACK_GOOD_THEN_TRAILING_RESPONSE) {
+            uint8_t bad_pkt[NIPC_HEADER_LEN + 2] = { 0 };
+            nipc_header_t resp_hdr = {
+                .magic = NIPC_MAGIC_MSG,
+                .version = NIPC_VERSION,
+                .header_len = NIPC_HEADER_LEN,
+                .kind = NIPC_KIND_RESPONSE,
+                .code = req_hdr.code,
+                .item_count = 1,
+                .message_id = req_hdr.message_id,
+                .payload_len = 1,
+                .transport_status = NIPC_STATUS_OK,
+            };
+            nipc_header_encode(&resp_hdr, bad_pkt, NIPC_HEADER_LEN);
+            bad_pkt[NIPC_HEADER_LEN] = 0xBE;
+            bad_pkt[NIPC_HEADER_LEN + 1] = 0xEF;
+            if (!raw_pipe_write(pipe, bad_pkt, (DWORD)sizeof(bad_pkt))) {
                 CloseHandle(pipe);
                 return 1;
             }
@@ -2248,6 +2270,7 @@ static void test_response_protocol_validation(void)
     } cases[] = {
         { "short response header rejected", FAKE_ACK_GOOD_THEN_SHORT_RESPONSE },
         { "bad decoded response header rejected", FAKE_ACK_GOOD_THEN_BAD_RESPONSE_HEADER },
+        { "trailing response packet rejected", FAKE_ACK_GOOD_THEN_TRAILING_RESPONSE },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
