@@ -40,27 +40,6 @@ if [ ! -d "$DST/src/libnetdata" ]; then
     exit 1
 fi
 
-# ── C headers ─────────────────────────────────────────────────────────
-C_HEADERS=(
-    netipc_named_pipe.h
-    netipc_protocol.h
-    netipc_service.h
-    netipc_shm.h
-    netipc_uds.h
-    netipc_win_shm.h
-)
-
-# ── C sources ────────────────────────────────────────────────────────
-C_SOURCES=(
-    src/protocol/netipc_protocol.c
-    src/service/netipc_service.c
-    src/service/netipc_service_win.c
-    src/transport/posix/netipc_shm.c
-    src/transport/posix/netipc_uds.c
-    src/transport/windows/netipc_named_pipe.c
-    src/transport/windows/netipc_win_shm.c
-)
-
 # ── Rust crate (entire src/ tree + Cargo files) ──────────────────────
 # ── Go package (entire pkg/netipc/ tree + go.mod) ────────────────────
 
@@ -70,17 +49,16 @@ echo ""
 
 # ── C ────────────────────────────────────────────────────────────────
 echo -e "${YELLOW}=== C headers ===${NC}"
-for h in "${C_HEADERS[@]}"; do
-    run cp -f "$SRC/libnetdata/netipc/include/netipc/$h" \
-              "$DST/src/libnetdata/netipc/include/netipc/$h"
-done
+run mkdir -p "$DST/src/libnetdata/netipc/include/netipc"
+run rsync -a --delete \
+    "$SRC/libnetdata/netipc/include/netipc/" \
+    "$DST/src/libnetdata/netipc/include/netipc/"
 
 echo -e "${YELLOW}=== C sources ===${NC}"
-for s in "${C_SOURCES[@]}"; do
-    d="$DST/src/libnetdata/netipc/$s"
-    run mkdir -p "$(dirname "$d")"
-    run cp -f "$SRC/libnetdata/netipc/$s" "$d"
-done
+run mkdir -p "$DST/src/libnetdata/netipc/src"
+run rsync -a --delete \
+    "$SRC/libnetdata/netipc/src/" \
+    "$DST/src/libnetdata/netipc/src/"
 
 # ── Rust ─────────────────────────────────────────────────────────────
 # Only the src/ tree is synced. Cargo.toml and Cargo.lock are NOT
@@ -129,7 +107,7 @@ run rsync -a --delete \
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo ""
-C_COUNT=$(( ${#C_HEADERS[@]} + ${#C_SOURCES[@]} ))
+C_COUNT=$(find "$SRC/libnetdata/netipc/include/netipc" "$SRC/libnetdata/netipc/src" -type f | wc -l)
 RUST_COUNT=$(find "$RUST_SRC/src" -type f | wc -l)
 GO_COUNT=$(find "$GO_SRC/pkg" -type f | wc -l)
 echo -e "${GREEN}Done.${NC} Vendored ${C_COUNT} C files, ${RUST_COUNT} Rust files, ${GO_COUNT} Go files."

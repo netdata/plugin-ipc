@@ -1,8 +1,9 @@
 #include "netipc_uds_internal.h"
 
+#include <assert.h>
 #include <string.h>
 
-static size_t min_size(size_t a, size_t b)
+static size_t min_of_size_t(size_t a, size_t b)
 {
     return a < b ? a : b;
 }
@@ -91,6 +92,8 @@ static void fill_envelope(nipc_header_t *hdr, size_t payload_len)
     hdr->magic = NIPC_MAGIC_MSG;
     hdr->version = NIPC_VERSION;
     hdr->header_len = NIPC_HEADER_LEN;
+    /* validate_outbound_limits() rejects payloads that cannot fit the header. */
+    assert(payload_len <= UINT32_MAX);
     hdr->payload_len = (uint32_t)payload_len;
 }
 
@@ -133,6 +136,9 @@ static nipc_uds_error_t send_continuation_chunk(nipc_uds_session_t *session,
                                                 uint32_t total_msg,
                                                 bool tracked)
 {
+    /* packet_size is negotiated as uint32_t, so continuation chunks fit u32. */
+    assert(this_chunk <= UINT32_MAX);
+
     nipc_chunk_header_t chk = {
         .magic = NIPC_MAGIC_CHUNK,
         .version = NIPC_VERSION,
@@ -159,18 +165,22 @@ static nipc_uds_error_t send_chunked(nipc_uds_session_t *session,
                                      size_t total_msg,
                                      bool tracked)
 {
-    size_t chunk_payload_budget = session->packet_size - NIPC_HEADER_LEN;
-    if (chunk_payload_budget == 0)
+    if (session->packet_size <= NIPC_HEADER_LEN)
         return NIPC_UDS_ERR_BAD_PARAM;
 
+    /* nipc_uds_header_payload_len() rejects totals wider than the wire field. */
+    assert(total_msg <= UINT32_MAX);
+    uint32_t total_msg_u32 = (uint32_t)total_msg;
+
+    size_t chunk_payload_budget = session->packet_size - NIPC_HEADER_LEN;
     size_t remaining = payload_len;
-    size_t first_chunk_payload = min_size(remaining, chunk_payload_budget);
+    size_t first_chunk_payload = min_of_size_t(remaining, chunk_payload_budget);
     remaining -= first_chunk_payload;
 
     uint32_t continuation_chunks = 0;
     if (remaining > 0) {
-        continuation_chunks = (uint32_t)((remaining + chunk_payload_budget - 1)
-                                         / chunk_payload_budget);
+        continuation_chunks = (uint32_t)(1 + ((remaining - 1)
+                                              / chunk_payload_budget));
     }
     uint32_t chunk_count = 1 + continuation_chunks;
 
@@ -183,10 +193,10 @@ static nipc_uds_error_t send_chunked(nipc_uds_session_t *session,
     remaining = payload_len - first_chunk_payload;
 
     for (uint32_t ci = 1; ci < chunk_count; ci++) {
-        size_t this_chunk = min_size(remaining, chunk_payload_budget);
+        size_t this_chunk = min_of_size_t(remaining, chunk_payload_budget);
 
         err = send_continuation_chunk(session, hdr, src, this_chunk, ci,
-                                      chunk_count, (uint32_t)total_msg,
+                                      chunk_count, total_msg_u32,
                                       tracked);
         if (err != NIPC_UDS_OK)
             return err;

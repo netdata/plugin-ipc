@@ -16,6 +16,11 @@ func (s *Session) Send(hdr *protocol.Header, payload []byte) error {
 		return wrapErr(ErrBadParam, "session closed")
 	}
 
+	totalMsg, err := headerPayloadLen(len(payload))
+	if err != nil {
+		return err
+	}
+
 	if s.role == RoleClient && hdr.Kind == protocol.KindRequest {
 		if s.inflightIDs == nil {
 			s.inflightIDs = make(map[uint64]struct{})
@@ -32,7 +37,7 @@ func (s *Session) Send(hdr *protocol.Header, payload []byte) error {
 	hdr.PayloadLen = uint32(len(payload))
 
 	tracked := s.role == RoleClient && hdr.Kind == protocol.KindRequest
-	sendErr := s.sendInner(hdr, payload)
+	sendErr := s.sendInner(hdr, payload, totalMsg)
 	if sendErr != nil && tracked {
 		if errors.Is(sendErr, ErrDisconnected) {
 			s.failAllInflight()
@@ -44,8 +49,16 @@ func (s *Session) Send(hdr *protocol.Header, payload []byte) error {
 	return sendErr
 }
 
-func (s *Session) sendInner(hdr *protocol.Header, payload []byte) error {
-	totalMsg := protocol.HeaderSize + len(payload)
+func headerPayloadLen(payloadLen int) (int, error) {
+	if payloadLen < 0 ||
+		uint64(payloadLen) > uint64(^uint32(0))-uint64(protocol.HeaderSize) {
+		return 0, wrapErr(ErrLimitExceeded, "total message length exceeds protocol limit")
+	}
+	totalMsg := protocol.HeaderSize + payloadLen
+	return totalMsg, nil
+}
+
+func (s *Session) sendInner(hdr *protocol.Header, payload []byte, totalMsg int) error {
 
 	if totalMsg <= int(s.PacketSize) {
 		msg := ensurePipeScratchBuf(&s.sendBuf, totalMsg)
@@ -67,7 +80,7 @@ func (s *Session) sendInner(hdr *protocol.Header, payload []byte) error {
 	remainingAfterFirst := len(payload) - firstChunkPayload
 	continuationChunks := uint32(0)
 	if remainingAfterFirst > 0 {
-		continuationChunks = uint32((remainingAfterFirst + chunkPayloadBudget - 1) / chunkPayloadBudget)
+		continuationChunks = uint32(1 + ((remainingAfterFirst - 1) / chunkPayloadBudget))
 	}
 	chunkCount := 1 + continuationChunks
 

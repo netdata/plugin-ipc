@@ -108,9 +108,8 @@ static uint32_t expected_chunk_count(size_t payload_len,
     size_t remaining_after_first = payload_len - first_payload_bytes;
     uint32_t expected_continuations = 0;
     if (remaining_after_first > 0 && chunk_payload_budget > 0) {
-        expected_continuations = (uint32_t)((remaining_after_first +
-                                             chunk_payload_budget - 1)
-                                            / chunk_payload_budget);
+        expected_continuations = (uint32_t)(1 + ((remaining_after_first - 1)
+                                            / chunk_payload_budget));
     }
     return 1 + expected_continuations;
 }

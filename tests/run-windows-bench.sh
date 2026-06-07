@@ -28,8 +28,9 @@
 # Optional diagnostics:
 #   NIPC_BENCH_DIAGNOSE_FAILURES=1
 #     When a row fails, preserve the first-attempt evidence and rerun the
-#     same row in isolation for debugging. Diagnostic reruns never write to
-#     the publish CSV and never turn a failing publish run into a success.
+#     same row in isolation for debugging. A successful diagnostic rerun can
+#     recover stability-only failures; command, client, server, and protocol
+#     failures remain authoritative.
 #   NIPC_WINDOWS_TOOLCHAIN=mingw64|msys
 #     Select the C toolchain lane for the benchmark build. `mingw64` is the
 #     native Windows sign-off default. `msys` is intended for the separate
@@ -71,6 +72,7 @@ MAX_THROUGHPUT_RATIO="${NIPC_BENCH_MAX_THROUGHPUT_RATIO:-1.35}"
 MIN_STABLE_SAMPLES="${NIPC_BENCH_MIN_STABLE_SAMPLES:-3}"
 ALLOW_TRIMMED_UNSTABLE_RAW="${NIPC_BENCH_ALLOW_TRIMMED_UNSTABLE_RAW:-0}"
 SERVER_STOP_GRACE_SEC="${NIPC_BENCH_SERVER_STOP_GRACE_SEC:-10}"
+CLIENT_TIMEOUT_GRACE_SEC="${NIPC_BENCH_CLIENT_TIMEOUT_GRACE_SEC:-35}"
 ROW_SETTLE_SEC="${NIPC_BENCH_ROW_SETTLE_SEC:-2}"
 DIAGNOSE_FAILURES="${NIPC_BENCH_DIAGNOSE_FAILURES:-0}"
 RUN_DIR="${TEMP:-/tmp}/netipc-bench-$$"
@@ -78,6 +80,7 @@ ROOT_RUN_DIR="$RUN_DIR"
 MEASURE_RUN_DIR="$RUN_DIR"
 DIAGNOSTIC_SUMMARY_FILE=""
 DIAGNOSTIC_FAILURE_COUNT=0
+DIAGNOSTIC_RECOVERED=0
 ACTIVE_DIAGNOSTIC=0
 EMIT_CSV_ROWS=1
 POWERSHELL_EXE="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
@@ -132,6 +135,21 @@ LAST_MEASUREMENT_RAW_MAX=""
 LAST_MEASUREMENT_RAW_RATIO=""
 LAST_MEASUREMENT_ARTIFACT_DIR=""
 
+diagnostic_can_recover_reason() {
+    case "$1" in
+        stable_ratio_exceeded|raw_ratio_exceeded)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+diagnostic_recovered() {
+    [ "$DIAGNOSTIC_RECOVERED" = "1" ]
+}
+
 log() {
     printf "${CYAN}[bench]${NC} %s\n" "$*" >&2
 }
@@ -169,8 +187,16 @@ setup_windows_toolchain() {
         fi
     done
 
-    CC_BIN="$(command -v gcc)"
-    CXX_BIN="$(command -v g++)"
+    CC_BIN="$(cmake_windows_tool_path "$(command -v gcc)")"
+    CXX_BIN="$(cmake_windows_tool_path "$(command -v g++)")"
+}
+
+cmake_windows_tool_path() {
+    local path="$1"
+    if [ -x "${path}.exe" ]; then
+        path="${path}.exe"
+    fi
+    cygpath -m "$path"
 }
 
 runtime_dir_for_windows_bin() {
@@ -560,6 +586,7 @@ reset_last_measurement() {
     LAST_MEASUREMENT_RAW_MAX=""
     LAST_MEASUREMENT_RAW_RATIO=""
     LAST_MEASUREMENT_ARTIFACT_DIR=""
+    DIAGNOSTIC_RECOVERED=0
 }
 
 sample_count_from_sample_file() {
@@ -717,6 +744,22 @@ lookup_prior_max_throughput() {
     ' "$OUTPUT_CSV"
 }
 
+fixed_rate_target_throughput() {
+    local scenario="$1"
+    local target_rps="$2"
+
+    case "$scenario" in
+        np-batch-ping-pong|shm-batch-ping-pong|np-pipeline-batch-d*)
+            # Batch benchmarks report item throughput, while target_rps limits
+            # batch requests. The 2..1000 batch-size range has midpoint 501.
+            awk -v target_rps="$target_rps" 'BEGIN { printf "%.0f\n", (target_rps + 0) * 501 }'
+            ;;
+        *)
+            printf '%s\n' "$target_rps"
+            ;;
+    esac
+}
+
 fixed_rate_target_is_oversubscribed() {
     local scenario="$1"
     local client_lang="$2"
@@ -729,8 +772,11 @@ fixed_rate_target_is_oversubscribed() {
     prior_max=$(lookup_prior_max_throughput "$scenario" "$client_lang" "$server_lang")
     [ -n "$prior_max" ] || return 1
 
-    awk -v target_rps="$target_rps" -v prior_max="$prior_max" '
-        BEGIN { exit(((target_rps + 0) > (prior_max + 0)) ? 0 : 1) }
+    local target_throughput
+    target_throughput=$(fixed_rate_target_throughput "$scenario" "$target_rps")
+
+    awk -v target_throughput="$target_throughput" -v prior_max="$prior_max" '
+        BEGIN { exit(((target_throughput + 0) > (prior_max + 0)) ? 0 : 1) }
     '
 }
 
@@ -828,7 +874,11 @@ maybe_diagnose_failed_measurement() {
     mkdir -p "$diag_run_dir"
 
     warn "  Diagnostic rerun enabled for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
-    warn "  First-attempt failure remains authoritative"
+    if diagnostic_can_recover_reason "$original_reason"; then
+        warn "  Diagnostic rerun may recover this stability-only failure"
+    else
+        warn "  First-attempt failure remains authoritative"
+    fi
     warn "  First-attempt evidence: run_dir=${original_run_dir}"
     if [ -n "$original_artifact_dir" ]; then
         warn "  First-attempt artifacts: ${original_artifact_dir}"
@@ -875,6 +925,21 @@ maybe_diagnose_failed_measurement() {
     local diag_status="$LAST_MEASUREMENT_STATUS"
     local diag_reason="$LAST_MEASUREMENT_REASON"
     local diag_sample_file="$LAST_MEASUREMENT_SAMPLE_FILE"
+    local diag_throughput="$LAST_MEASUREMENT_THROUGHPUT"
+    local diag_p50="$LAST_MEASUREMENT_P50"
+    local diag_p95="$LAST_MEASUREMENT_P95"
+    local diag_p99="$LAST_MEASUREMENT_P99"
+    local diag_client_cpu="$LAST_MEASUREMENT_CLIENT_CPU"
+    local diag_server_cpu="$LAST_MEASUREMENT_SERVER_CPU"
+    local diag_total_cpu="$LAST_MEASUREMENT_TOTAL_CPU"
+    local diag_stable_samples="$LAST_MEASUREMENT_STABLE_SAMPLES"
+    local diag_stable_min="$LAST_MEASUREMENT_STABLE_MIN"
+    local diag_stable_max="$LAST_MEASUREMENT_STABLE_MAX"
+    local diag_stable_ratio="$LAST_MEASUREMENT_STABLE_RATIO"
+    local diag_raw_min="$LAST_MEASUREMENT_RAW_MIN"
+    local diag_raw_max="$LAST_MEASUREMENT_RAW_MAX"
+    local diag_raw_ratio="$LAST_MEASUREMENT_RAW_RATIO"
+    local diag_artifact_dir="$LAST_MEASUREMENT_ARTIFACT_DIR"
     local diag_sample_count
     diag_sample_count=$(sample_count_from_sample_file "$diag_sample_file")
 
@@ -904,31 +969,68 @@ maybe_diagnose_failed_measurement() {
     append_diagnostics_summary "diagnostic.raw_min=${LAST_MEASUREMENT_RAW_MIN:-}"
     append_diagnostics_summary "diagnostic.raw_max=${LAST_MEASUREMENT_RAW_MAX:-}"
     append_diagnostics_summary "diagnostic.raw_ratio=${LAST_MEASUREMENT_RAW_RATIO:-}"
-    append_diagnostics_summary ""
 
-    LAST_MEASUREMENT_STATUS="$original_status"
-    LAST_MEASUREMENT_REASON="$original_reason"
-    LAST_MEASUREMENT_SAMPLE_FILE="$original_sample_file"
-    LAST_MEASUREMENT_THROUGHPUT="$original_throughput"
-    LAST_MEASUREMENT_P50="$original_p50"
-    LAST_MEASUREMENT_P95="$original_p95"
-    LAST_MEASUREMENT_P99="$original_p99"
-    LAST_MEASUREMENT_CLIENT_CPU="$original_client_cpu"
-    LAST_MEASUREMENT_SERVER_CPU="$original_server_cpu"
-    LAST_MEASUREMENT_TOTAL_CPU="$original_total_cpu"
-    LAST_MEASUREMENT_STABLE_SAMPLES="$original_stable_samples"
-    LAST_MEASUREMENT_STABLE_MIN="$original_stable_min"
-    LAST_MEASUREMENT_STABLE_MAX="$original_stable_max"
-    LAST_MEASUREMENT_STABLE_RATIO="$original_stable_ratio"
-    LAST_MEASUREMENT_RAW_MIN="$original_raw_min"
-    LAST_MEASUREMENT_RAW_MAX="$original_raw_max"
-    LAST_MEASUREMENT_RAW_RATIO="$original_raw_ratio"
-    LAST_MEASUREMENT_ARTIFACT_DIR="$original_artifact_dir"
+    local recovered=0
+    if [ "$diag_status" = "success" ] && diagnostic_can_recover_reason "$original_reason"; then
+        recovered=1
+        DIAGNOSTIC_RECOVERED=1
+        warn "  Diagnostic rerun recovered the stability failure; publishing diagnostic row"
+        append_diagnostics_summary "diagnostic.recovered=true"
+    else
+        append_diagnostics_summary "diagnostic.recovered=false"
+    fi
+    append_diagnostics_summary ""
 
     RUN_DIR="$saved_run_dir"
     MEASURE_RUN_DIR="$saved_measure_run_dir"
     EMIT_CSV_ROWS="$saved_emit_csv_rows"
     ACTIVE_DIAGNOSTIC="$saved_active_diagnostic"
+
+    if [ "$recovered" -eq 1 ]; then
+        LAST_MEASUREMENT_STATUS="$diag_status"
+        LAST_MEASUREMENT_REASON=""
+        LAST_MEASUREMENT_SAMPLE_FILE="$diag_sample_file"
+        LAST_MEASUREMENT_THROUGHPUT="$diag_throughput"
+        LAST_MEASUREMENT_P50="$diag_p50"
+        LAST_MEASUREMENT_P95="$diag_p95"
+        LAST_MEASUREMENT_P99="$diag_p99"
+        LAST_MEASUREMENT_CLIENT_CPU="$diag_client_cpu"
+        LAST_MEASUREMENT_SERVER_CPU="$diag_server_cpu"
+        LAST_MEASUREMENT_TOTAL_CPU="$diag_total_cpu"
+        LAST_MEASUREMENT_STABLE_SAMPLES="$diag_stable_samples"
+        LAST_MEASUREMENT_STABLE_MIN="$diag_stable_min"
+        LAST_MEASUREMENT_STABLE_MAX="$diag_stable_max"
+        LAST_MEASUREMENT_STABLE_RATIO="$diag_stable_ratio"
+        LAST_MEASUREMENT_RAW_MIN="$diag_raw_min"
+        LAST_MEASUREMENT_RAW_MAX="$diag_raw_max"
+        LAST_MEASUREMENT_RAW_RATIO="$diag_raw_ratio"
+        LAST_MEASUREMENT_ARTIFACT_DIR="$diag_artifact_dir"
+        if [ "$saved_emit_csv_rows" -eq 1 ]; then
+            write_csv_row "$scenario" "$client_lang" "$server_lang" "$target_rps" \
+                "$diag_throughput" "$diag_p50" "$diag_p95" "$diag_p99" \
+                "$diag_client_cpu" "$diag_server_cpu" "$diag_total_cpu"
+        fi
+        log "    recovered_median_throughput=${diag_throughput} p50=${diag_p50}us p95=${diag_p95}us p99=${diag_p99}us stable_ratio=${diag_stable_ratio}"
+    else
+        LAST_MEASUREMENT_STATUS="$original_status"
+        LAST_MEASUREMENT_REASON="$original_reason"
+        LAST_MEASUREMENT_SAMPLE_FILE="$original_sample_file"
+        LAST_MEASUREMENT_THROUGHPUT="$original_throughput"
+        LAST_MEASUREMENT_P50="$original_p50"
+        LAST_MEASUREMENT_P95="$original_p95"
+        LAST_MEASUREMENT_P99="$original_p99"
+        LAST_MEASUREMENT_CLIENT_CPU="$original_client_cpu"
+        LAST_MEASUREMENT_SERVER_CPU="$original_server_cpu"
+        LAST_MEASUREMENT_TOTAL_CPU="$original_total_cpu"
+        LAST_MEASUREMENT_STABLE_SAMPLES="$original_stable_samples"
+        LAST_MEASUREMENT_STABLE_MIN="$original_stable_min"
+        LAST_MEASUREMENT_STABLE_MAX="$original_stable_max"
+        LAST_MEASUREMENT_STABLE_RATIO="$original_stable_ratio"
+        LAST_MEASUREMENT_RAW_MIN="$original_raw_min"
+        LAST_MEASUREMENT_RAW_MAX="$original_raw_max"
+        LAST_MEASUREMENT_RAW_RATIO="$original_raw_ratio"
+        LAST_MEASUREMENT_ARTIFACT_DIR="$original_artifact_dir"
+    fi
 }
 
 run_repeated_measurement() {
@@ -961,6 +1063,9 @@ run_repeated_measurement() {
             maybe_diagnose_failed_measurement \
                 "$scenario" "$client_lang" "$server_lang" "$target_rps" "$duration" "$sample_file" \
                 "$measure_fn" "$@"
+            if diagnostic_recovered; then
+                return 0
+            fi
             return 1
         fi
         append_sample_file "$sample_file" "$repeat_idx" "$metrics"
@@ -973,6 +1078,9 @@ run_repeated_measurement() {
         maybe_diagnose_failed_measurement \
             "$scenario" "$client_lang" "$server_lang" "$target_rps" "$duration" "$sample_file" \
             "$measure_fn" "$@"
+        if diagnostic_recovered; then
+            return 0
+        fi
         return 1
     fi
 
@@ -993,6 +1101,9 @@ run_repeated_measurement() {
         maybe_diagnose_failed_measurement \
             "$scenario" "$client_lang" "$server_lang" "$target_rps" "$duration" "$sample_file" \
             "$measure_fn" "$@"
+        if diagnostic_recovered; then
+            return 0
+        fi
         return 1
     fi
 
@@ -1017,29 +1128,50 @@ run_repeated_measurement() {
         maybe_diagnose_failed_measurement \
             "$scenario" "$client_lang" "$server_lang" "$target_rps" "$duration" "$sample_file" \
             "$measure_fn" "$@"
+        if diagnostic_recovered; then
+            return 0
+        fi
         return 1
+    fi
+
+    local oversubscribed=0
+    if fixed_rate_target_is_oversubscribed "$scenario" "$client_lang" "$server_lang" "$target_rps"; then
+        oversubscribed=1
     fi
 
     if ! throughput_ratio_is_acceptable "$stable_ratio" "$MAX_THROUGHPUT_RATIO"; then
-        LAST_MEASUREMENT_STATUS="failed"
-        LAST_MEASUREMENT_REASON="stable_ratio_exceeded"
-        warn "  Unstable repeated throughput for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
-        warn "  stable_min=${stable_min} stable_max=${stable_max} stable_ratio=${stable_ratio} (max ${MAX_THROUGHPUT_RATIO})"
-        warn "  Per-repeat samples: ${sample_file}"
-        export NIPC_KEEP_RUN_DIR=1
-        maybe_diagnose_failed_measurement \
-            "$scenario" "$client_lang" "$server_lang" "$target_rps" "$duration" "$sample_file" \
-            "$measure_fn" "$@"
-        return 1
+        if [ "$oversubscribed" -eq 1 ]; then
+            local prior_max target_throughput
+            prior_max=$(lookup_prior_max_throughput "$scenario" "$client_lang" "$server_lang")
+            target_throughput=$(fixed_rate_target_throughput "$scenario" "$target_rps")
+            warn "  Oversubscribed fixed-rate row for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
+            warn "  prior_max=${prior_max} target_throughput=${target_throughput} target_rps=${target_rps} stable_min=${stable_min} stable_max=${stable_max} stable_ratio=${stable_ratio}"
+            warn "  Keeping the row because the requested fixed-rate workload exceeds measured max capacity"
+        else
+            LAST_MEASUREMENT_STATUS="failed"
+            LAST_MEASUREMENT_REASON="stable_ratio_exceeded"
+            warn "  Unstable repeated throughput for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
+            warn "  stable_min=${stable_min} stable_max=${stable_max} stable_ratio=${stable_ratio} (max ${MAX_THROUGHPUT_RATIO})"
+            warn "  Per-repeat samples: ${sample_file}"
+            export NIPC_KEEP_RUN_DIR=1
+            maybe_diagnose_failed_measurement \
+                "$scenario" "$client_lang" "$server_lang" "$target_rps" "$duration" "$sample_file" \
+                "$measure_fn" "$@"
+            if diagnostic_recovered; then
+                return 0
+            fi
+            return 1
+        fi
     fi
 
     if ! throughput_ratio_is_acceptable "$raw_ratio" "$MAX_THROUGHPUT_RATIO"; then
-        if fixed_rate_target_is_oversubscribed "$scenario" "$client_lang" "$server_lang" "$target_rps"; then
-            local prior_max
+        if [ "$oversubscribed" -eq 1 ]; then
+            local prior_max target_throughput
             prior_max=$(lookup_prior_max_throughput "$scenario" "$client_lang" "$server_lang")
+            target_throughput=$(fixed_rate_target_throughput "$scenario" "$target_rps")
             warn "  Oversubscribed fixed-rate row for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
-            warn "  prior_max=${prior_max} target_rps=${target_rps} raw_min=${raw_min} raw_max=${raw_max} raw_ratio=${raw_ratio}"
-            warn "  Keeping the row because the target exceeds measured max capacity and the trimmed stable core remains publishable"
+            warn "  prior_max=${prior_max} target_throughput=${target_throughput} target_rps=${target_rps} raw_min=${raw_min} raw_max=${raw_max} raw_ratio=${raw_ratio}"
+            warn "  Keeping the row because the requested fixed-rate workload exceeds measured max capacity"
         elif raw_ratio_outlier_is_publishable "$trimmed_each_side"; then
             warn "  Raw repeated throughput outlier for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
             warn "  raw_min=${raw_min} raw_max=${raw_max} raw_ratio=${raw_ratio} (max ${MAX_THROUGHPUT_RATIO})"
@@ -1060,6 +1192,9 @@ run_repeated_measurement() {
             maybe_diagnose_failed_measurement \
                 "$scenario" "$client_lang" "$server_lang" "$target_rps" "$duration" "$sample_file" \
                 "$measure_fn" "$@"
+            if diagnostic_recovered; then
+                return 0
+            fi
             return 1
         fi
     fi
@@ -1217,7 +1352,7 @@ measure_pair_once() {
 
     sleep 0.2
 
-    local client_timeout=$((duration + 15))
+    local client_timeout=$((duration + CLIENT_TIMEOUT_GRACE_SEC))
     local client_output
     local client_status
     local client_err="${runtime_dir}/client-${scenario}-${server_lang}-${client_lang}-${target_rps}.err"
@@ -1424,7 +1559,7 @@ measure_np_pipeline_once() {
 
     sleep 0.2
 
-    local client_timeout=$((duration + 15))
+    local client_timeout=$((duration + CLIENT_TIMEOUT_GRACE_SEC))
     local client_output
     local client_status
     local client_err="${runtime_dir}/client-np-pipeline-${server_lang}-${client_lang}.err"
@@ -1551,7 +1686,7 @@ measure_np_pipeline_batch_once() {
 
     sleep 0.2
 
-    local client_timeout=$((duration + 15))
+    local client_timeout=$((duration + CLIENT_TIMEOUT_GRACE_SEC))
     local client_output
     local client_status
     local client_err="${runtime_dir}/client-np-pipeline-batch-${server_lang}-${client_lang}.err"
@@ -1685,6 +1820,7 @@ main() {
     require_positive_integer "NIPC_BENCH_PIPELINE_BATCH_MAX_DURATION" "$PIPELINE_BATCH_MAX_DURATION"
     require_positive_integer "NIPC_BENCH_MIN_STABLE_SAMPLES" "$MIN_STABLE_SAMPLES"
     require_positive_integer "NIPC_BENCH_SERVER_STOP_GRACE_SEC" "$SERVER_STOP_GRACE_SEC"
+    require_positive_integer "NIPC_BENCH_CLIENT_TIMEOUT_GRACE_SEC" "$CLIENT_TIMEOUT_GRACE_SEC"
     require_positive_number "NIPC_BENCH_MAX_THROUGHPUT_RATIO" "$MAX_THROUGHPUT_RATIO"
     require_positive_number "NIPC_BENCH_ROW_SETTLE_SEC" "$ROW_SETTLE_SEC"
     require_zero_or_one "NIPC_BENCH_ALLOW_TRIMMED_UNSTABLE_RAW" "$ALLOW_TRIMMED_UNSTABLE_RAW"

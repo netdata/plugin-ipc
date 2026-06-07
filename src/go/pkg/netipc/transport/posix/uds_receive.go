@@ -147,7 +147,7 @@ func expectedReceiveChunkCount(payloadLen, firstPayloadBytes, chunkPayloadBudget
 	remainingAfterFirst := payloadLen - firstPayloadBytes
 	expectedContinuations := uint32(0)
 	if remainingAfterFirst > 0 && chunkPayloadBudget > 0 {
-		expectedContinuations = uint32((remainingAfterFirst + chunkPayloadBudget - 1) / chunkPayloadBudget)
+		expectedContinuations = uint32(1 + ((remainingAfterFirst - 1) / chunkPayloadBudget))
 	}
 	return 1 + expectedContinuations
 }

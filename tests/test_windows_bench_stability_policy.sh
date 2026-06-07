@@ -52,4 +52,15 @@ assert_true raw_ratio_outlier_is_publishable "$trimmed_each_side"
 ALLOW_TRIMMED_UNSTABLE_RAW=1
 assert_false raw_ratio_outlier_is_publishable 0
 
-printf 'PASS: Windows benchmark raw-outlier policy\n'
+assert_true diagnostic_can_recover_reason stable_ratio_exceeded
+assert_true diagnostic_can_recover_reason raw_ratio_exceeded
+assert_false diagnostic_can_recover_reason measurement_command_failed_repeat_1
+assert_false diagnostic_can_recover_reason aggregate_failed
+assert_false diagnostic_can_recover_reason insufficient_stable_samples
+
+DIAGNOSTIC_RECOVERED=0
+assert_false diagnostic_recovered
+DIAGNOSTIC_RECOVERED=1
+assert_true diagnostic_recovered
+
+printf 'PASS: Windows benchmark stability policy\n'

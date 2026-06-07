@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1433,11 +1434,45 @@ static void test_send_recv_validation(void)
                             chunk_payload, sizeof(chunk_payload))
                   == NIPC_UDS_ERR_BAD_PARAM);
 
+        tiny_packet_session.packet_size = NIPC_HEADER_LEN - 1;
+        check("send rejects underflow chunk payload budget",
+              nipc_uds_send(&tiny_packet_session, &chunk_hdr,
+                            chunk_payload, sizeof(chunk_payload))
+                  == NIPC_UDS_ERR_BAD_PARAM);
+
         close(sv[0]);
         close(sv[1]);
     } else {
         if (sv[0] >= 0) close(sv[0]);
         if (sv[1] >= 0) close(sv[1]);
+    }
+
+    int sv_big[2] = {-1, -1};
+    check("socketpair for oversized framed length", socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv_big) == 0);
+    if (sv_big[0] >= 0 && sv_big[1] >= 0) {
+        nipc_uds_session_t large_session;
+        memset(&large_session, 0, sizeof(large_session));
+        large_session.fd = sv_big[0];
+        large_session.packet_size = NIPC_HEADER_LEN + 1;
+        large_session.role = NIPC_UDS_ROLE_SERVER;
+
+        nipc_header_t large_hdr = {0};
+        large_hdr.kind = NIPC_KIND_REQUEST;
+        large_hdr.code = 1;
+        large_hdr.message_id = 2;
+        large_hdr.item_count = 1;
+        uint8_t one_byte_payload = 0;
+
+        check("send rejects oversized total message length",
+              nipc_uds_send(&large_session, &large_hdr,
+                            &one_byte_payload, (size_t)UINT32_MAX)
+                  == NIPC_UDS_ERR_LIMIT_EXCEEDED);
+
+        close(sv_big[0]);
+        close(sv_big[1]);
+    } else {
+        if (sv_big[0] >= 0) close(sv_big[0]);
+        if (sv_big[1] >= 0) close(sv_big[1]);
     }
 }
 

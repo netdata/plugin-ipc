@@ -463,64 +463,165 @@ Open decisions:
   - `codacy-analysis analyze --files ... --output-format json`: exit status 0, 0 issues, 1 known Revive adapter error:
     - Revive error: `Failed to run revive: findings is not iterable`.
 
+### 2026-06-07 - C UDS Send AI Follow-up
+
+- GitHub AI findings on `src/libnetdata/netipc/src/transport/posix/netipc_uds_send.c` reported:
+  - ambiguous `min_size` helper name.
+  - casts from `size_t` to `uint32_t` for payload length, chunk payload length, and total message length whose invariants were not explicit.
+  - ceil division using `(remaining + chunk_payload_budget - 1)`, which could overflow in the abstract.
+- Local verification found one issue stronger than the GitHub wording:
+  - `src/libnetdata/netipc/src/transport/posix/netipc_uds.c:nipc_uds_header_payload_len()` only checked `SIZE_MAX` overflow on 32-bit builds and did not reject framed total message lengths above `UINT32_MAX` on 64-bit builds.
+  - `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c:header_payload_len()` had the same helper shape, so the same contract issue existed in the Windows C transport.
+- Implemented follow-up:
+  - renamed POSIX helper `min_size` to `min_of_size_t`.
+  - added assertions at the narrowing cast sites.
+  - changed POSIX and Windows C total-message helpers to reject `NIPC_HEADER_LEN + payload_len > UINT32_MAX`.
+  - changed POSIX and Windows C chunk-count calculation to `1 + ((remaining - 1) / chunk_payload_budget)` to avoid forming a potentially overflowing addition.
+  - changed chunk-budget checks from equality to `session->packet_size <= NIPC_HEADER_LEN` to avoid unsigned underflow if a malformed session reaches send.
+  - added POSIX C regression coverage for underflow chunk budget and oversized framed total-message length.
+- Benchmark runner follow-up:
+  - Full Windows benchmark startup failed before running benchmarks because `tests/run-windows-bench.sh` passed `/mingw64/bin/gcc` and `/mingw64/bin/g++` to CMake.
+  - CMake 4.3.0 in the current MSYS environment translated those to `C:/msys64/mingw64/bin/gcc` and rejected them as non-existing full paths.
+  - Updated the runner to pass Windows-style `.exe` paths from `cygpath -m`, for example `C:/msys64/mingw64/bin/gcc.exe`.
+- POSIX benchmark failure root cause:
+  - Full POSIX benchmark initially failed deterministically on `uds-batch-ping-pong rust->c @ max`.
+  - Manual focused repro failed before processing item zero.
+  - Root cause: the Rust POSIX batch benchmark client/server configs raised batch item counts and response payload size, but did not raise request payload size. Large 2..1000 item batch requests could exceed the negotiated request payload limit before reaching the C server.
+  - Fixed `bench/drivers/rust/src/main.rs` so POSIX Rust batch client and server configs set all four batch/request/response limits consistently.
+- Go benchmark determinism follow-up:
+  - Local `go doc math/rand.Seed` for the installed Go toolchain says package-level random state is seeded randomly at startup when `Seed` is not called, and since Go 1.24 package-level `Seed` is a no-op.
+  - C and Rust benchmark batch-size streams were deterministic xorshift32 with seed `12345`; Go was not.
+  - Replaced Go package-global `math/rand` batch sizing in POSIX and Windows benchmark drivers with a local xorshift32 sequence matching the C/Rust seed.
+- Windows benchmark stability-policy follow-up:
+  - Batch benchmark rows report item throughput, while `target_rps` controls batch request rate.
+  - The Windows runner previously compared `target_rps` directly to prior max item throughput when deciding whether a fixed-rate row was oversubscribed.
+  - Added fixed-rate target throughput calculation for batch rows using the 2..1000 batch-size midpoint, so oversubscription classification compares item-throughput to item-throughput.
+  - Moved oversubscription handling before stable-ratio failure handling so an intentionally overloaded fixed-rate row is classified consistently.
+- Windows benchmark timeout evidence:
+  - First fresh full Windows run reached `shm-ping-pong c->go @ max` and recorded one hard failure: the C client was killed by the runner outer `timeout` with exit 124 while the Go server had printed `READY`.
+  - The C client produced no stderr because the outer timeout was shorter than the benchmark client's own 30s SHM receive timeout.
+  - Fixed `tests/run-windows-bench.sh` by adding `NIPC_BENCH_CLIENT_TIMEOUT_GRACE_SEC`, default `35`, and using `duration + CLIENT_TIMEOUT_GRACE_SEC` for client process timeouts.
+  - Stopped the invalid full Windows run and cleaned up only the exact remote benchmark PIDs tied to `/tmp/plugin-ipc-bench-full-results-fixed4` and `/tmp/netipc-bench-88189`.
+  - Focused Win11 diagnostic for `shm-ping-pong c->go @ max` with diagnostics enabled passed: throughput `2714891/s`, p50 `3.700us`, p95 `8.900us`, p99 `16.200us`, stable ratio `1.017852`, no warnings.
+  - A fresh full Windows benchmark rerun with the improved timeout (`fixed5`) was stopped after the first row failed the stability policy, not correctness: `np-ping-pong c->c @ max` samples were `75452`, `74311`, `52814`, `66071`, and `51296`, with no client/server errors.
+  - Focused Win11 diagnostic for `np-ping-pong c->c @ max` with the same default durations passed: throughput `77680/s`, p50 `13.200us`, p95 `41.800us`, p99 `82.600us`, stable ratio `1.093959`, no warnings.
+  - The final full Win11 benchmark rerun with diagnostics enabled passed with exit status 0:
+    - output CSV: `/tmp/plugin-ipc-bench-full-results-final2/benchmarks-windows.csv`
+    - row count: 202 lines.
+    - hard failure scan: no `client failed`, `server failed`, `did not stop`, `error`, `One or more Windows benchmark scenarios failed`, or `Diagnostic rerun failed` matches.
+    - one stability-only row was recovered by a successful diagnostic rerun: `np-batch-ping-pong go->go @ 10000/s`, first attempt stable ratio `1.849425`, diagnostic stable ratio `1.000165`, recovered median throughput `5040434/s`.
+    - remaining warnings were raw repeated-throughput outliers or oversubscribed fixed-rate rows kept by the benchmark policy, with stable trimmed cores or intentional overload evidence.
+- Vendor script follow-up:
+  - `vendor-to-netdata.sh` still had a hard-coded C file list from before the C source splits.
+  - Updated it to rsync the full vendored C include tree and C source tree, preserving Netdata-specific root wrapper files outside those synced subtrees.
+  - This is required before updating the NetIPC vendored copy in `~/src/netdata-ktsaou.git`; otherwise split C files would be silently missed.
+- Validation completed so far for this follow-up:
+  - `bash -n tests/run-windows-bench.sh vendor-to-netdata.sh`: passed.
+  - `git diff --check`: passed.
+  - `cmake --build build`: passed.
+  - `/usr/bin/ctest --test-dir build --output-on-failure`: 46/46 tests passed in 449.56 seconds.
+  - `cargo test --manifest-path src/crates/netipc/Cargo.toml`: 332 tests passed; benchmark and interop test targets built and had 0 tests.
+  - `cd src/go && go test ./...`: passed.
+  - `cd bench/drivers/go && go test ./...`: passed.
+  - `cd bench/drivers/go && GOOS=windows GOARCH=amd64 go test -c -o /tmp/plugin-ipc-go-bench-windows.test.exe .`: passed.
+  - `bash -n tests/run-windows-bench.sh tests/test_windows_bench_stability_policy.sh vendor-to-netdata.sh`: passed.
+  - Local targeted Codacy Analysis CLI scan with JSON output on the changed files: 0 issues, 1 known Revive adapter invocation error (`findings is not iterable`); latest output `/tmp/plugin-ipc-codacy-final6.json`.
+  - Full POSIX benchmark rerun: 298 CSV lines, no warnings or failures, output at `/tmp/plugin-ipc-bench-full-posix-final/benchmarks-posix.csv`.
+  - Full Win11 benchmark rerun: 202 CSV lines, no hard failures, output at `/tmp/plugin-ipc-bench-full-results-final2/benchmarks-windows.csv`.
+
+### 2026-06-07 - Netdata Re-vendor Plan
+
+The next repository step is to update the vendored NetIPC copy in `~/src/netdata-ktsaou.git` after this SDK commit is pushed.
+
+Plan:
+
+1. Read `~/src/netdata-ktsaou.git/AGENTS.md` and any active Netdata SOW instructions before editing that repository.
+2. Create or switch to a dedicated Netdata branch for the vendor update.
+3. Run `./vendor-to-netdata.sh ~/src/netdata-ktsaou.git` from this repository.
+4. Run `./diff-netdata-vendor.sh ~/src/netdata-ktsaou.git --unified` and inspect the result so only expected vendored NetIPC files changed.
+5. If the script reports required Go import rewrites, run the exact rewrite command in the Netdata repository and re-check the diff.
+6. Update Netdata build integration if the split C source files require changed source lists.
+7. Validate Netdata build/tests for the vendored NetIPC surface, including Windows compile/unit validation if the Netdata workflow exposes it locally.
+8. Commit only explicit Netdata vendor/update files, push the branch, and open a PR against Netdata.
+
 ## Validation
 
 Acceptance criteria evidence:
 
-- Pending.
+- Codacy global scope correction was implemented earlier in this SOW and pushed.
+- The C UDS send AI finding was addressed in `src/libnetdata/netipc/src/transport/posix/netipc_uds_send.c`:
+  - helper renamed to `min_of_size_t`.
+  - narrowing casts now have explicit assertions and safety-contract comments.
+  - send chunk count no longer forms `(remaining + chunk_payload_budget - 1)`.
+- Same-pattern C transport issue was addressed in `src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c`.
+- Vendor script now copies the full vendored C include/source subtrees so split C files are not missed.
 
 Tests or equivalent validation:
 
-- Pending.
+- `cmake --build build`: passed.
+- `/usr/bin/ctest --test-dir build --output-on-failure`: 46/46 passed.
+- `cargo test --manifest-path src/crates/netipc/Cargo.toml`: 332 passed.
+- `cd src/go && go test ./...`: passed.
+- `cd bench/drivers/go && go test ./...`: passed.
+- `git diff --check`: passed.
+- `bash -n tests/run-windows-bench.sh tests/test_windows_bench_stability_policy.sh vendor-to-netdata.sh`: passed.
+- `codacy-analysis analyze --files ... --output-format json`: 0 issues; known local Revive adapter invocation error remains.
 
 Real-use evidence:
 
-- Pending.
+- Full POSIX benchmark: 298 CSV lines, no warnings or failures, artifact `/tmp/plugin-ipc-bench-full-posix-final/benchmarks-posix.csv`.
+- Full Win11 benchmark: 202 CSV lines, exit status 0, no hard failure scan matches, artifact `/tmp/plugin-ipc-bench-full-results-final2/benchmarks-windows.csv`.
+- Win11 diagnostic rerun recovered one stability-only row and published the diagnostic row.
 
 Reviewer findings:
 
-- No external reviewer used yet.
+- GitHub AI findings for `netipc_uds_send.c` were manually verified and addressed.
+- No external AI reviewer was used for this increment.
 
 Same-failure scan:
 
-- Pending.
+- Same C total-message-width helper pattern was found and fixed in the Windows named-pipe transport.
+- Same chunk-count overflow-prone ceil pattern was found and fixed in POSIX C, Windows C, POSIX Rust, Windows Rust, POSIX Go, and Windows Go transport paths.
+- Same benchmark batch sizing nondeterminism pattern was found and fixed in POSIX and Windows Go benchmark drivers.
 
 Sensitive data gate:
 
-- Pending final scan.
+- `.env` was not read or committed.
+- SOW evidence records local artifact paths, command names, and sanitized tool output only; no secrets or customer data were written.
 
 Artifact maintenance gate:
 
-- AGENTS.md: pending.
-- Runtime project skills: pending.
-- Specs: pending.
-- End-user/operator docs: pending.
-- End-user/operator skills: pending.
-- SOW lifecycle: pending.
+- AGENTS.md: no workflow or guardrail change needed.
+- Runtime project skills: no reusable project workflow changed.
+- Specs: no protocol/API spec update needed; wire fields were already `u32`, and the implementation now enforces that existing wire contract consistently.
+- End-user/operator docs: no public usage behavior changed.
+- End-user/operator skills: no exported/operator workflow changed.
+- SOW lifecycle: SOW remains `in-progress`; this increment records validation and the Netdata re-vendor plan.
 
 Specs update:
 
-- Pending.
+- No spec update needed for this increment; the implementation now matches the existing `u32` wire-field constraints.
 
 Project skills update:
 
-- Pending.
+- No project skill update needed; no reusable repo workflow changed beyond the current SOW evidence.
 
 End-user/operator docs update:
 
-- Pending.
+- No end-user/operator docs update needed; public API and documented usage did not change.
 
 End-user/operator skills update:
 
-- Pending.
+- No end-user/operator skill update needed.
 
 Lessons:
 
-- Pending.
+- Benchmark runners must distinguish correctness failures from stability-only noise and must preserve first-attempt evidence before any diagnostic recovery.
+- Vendor scripts should copy source subtrees after source-file organization splits; hard-coded file lists go stale quickly.
 
 Follow-up mapping:
 
-- Pending.
+- Netdata re-vendor work is planned in this SOW and will be performed after the SDK commit is pushed.
 
 ## Outcome
 

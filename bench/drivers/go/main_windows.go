@@ -14,7 +14,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math/rand"
 	"os"
 	"os/exec"
 	"runtime"
@@ -65,6 +64,25 @@ func cacheHashNameWin(name string) uint32 {
 		h = ((h << 5) + h) + uint32(name[i])
 	}
 	return h
+}
+
+type xorshift32Win struct {
+	state uint32
+}
+
+func newXorShift32Win() xorshift32Win {
+	return xorshift32Win{state: 12345}
+}
+
+func (rng *xorshift32Win) next() uint32 {
+	rng.state ^= rng.state << 13
+	rng.state ^= rng.state >> 17
+	rng.state ^= rng.state << 5
+	return rng.state
+}
+
+func randomBatchSizeWin(rng *xorshift32Win) uint32 {
+	return (rng.next() % (maxBatchItemsWin - 1)) + 2
 }
 
 // ---------------------------------------------------------------------------
@@ -818,6 +836,7 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 	}
 
 	runtime.GC()
+	rng := newXorShift32Win()
 
 	cpuStart := cpuNSWin()
 	wallStart := nowNS()
@@ -827,7 +846,7 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 		rl.wait()
 
 		// Random batch size 2-1000 (server treats itemCount==1 as non-batch)
-		batchSize := uint32(rand.Intn(maxBatchItemsWin-1) + 2)
+		batchSize := randomBatchSizeWin(&rng)
 
 		// Reuse a stack builder to avoid a heap object per request.
 		var bb protocol.BatchBuilder
@@ -1348,6 +1367,7 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 	cpuStart := cpuNSWin()
 	wallStart := nowNS()
 	tickDeadline := tickMSWin() + uint64(durationSec)*1000
+	rng := newXorShift32Win()
 
 	for tickMSWin() < tickDeadline {
 		rl.wait()
@@ -1366,7 +1386,7 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 		for received < depth {
 			if sent < depth {
 				slot := sent
-				bs := uint32(rand.Intn(maxBatchItemsWin-1) + 2)
+				bs := randomBatchSizeWin(&rng)
 
 				var bb protocol.BatchBuilder
 				bb.Reset(reqBufs[slot], bs)

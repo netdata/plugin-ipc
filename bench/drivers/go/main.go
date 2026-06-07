@@ -12,7 +12,6 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
-	"math/rand"
 	"os"
 	"os/signal"
 	"runtime"
@@ -114,8 +113,23 @@ func estimateSamples(defaultSamples int, targetRPS uint64, durationSec int) int 
 	return int(samples) // #nosec G115 -- samples is bounded by maxLatencySamples above.
 }
 
-func randomBatchSize() uint32 {
-	return uint32(rand.Intn(maxBatchItems-1) + 2) // #nosec G115 -- maxBatchItems bounds the value to 2..1000.
+type xorshift32 struct {
+	state uint32
+}
+
+func newXorShift32() xorshift32 {
+	return xorshift32{state: 12345}
+}
+
+func (rng *xorshift32) next() uint32 {
+	rng.state ^= rng.state << 13
+	rng.state ^= rng.state >> 17
+	rng.state ^= rng.state << 5
+	return rng.state
+}
+
+func randomBatchSize(rng *xorshift32) uint32 {
+	return (rng.next() % (maxBatchItems - 1)) + 2
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +465,7 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 	estSamples := estimateSamples(2_000_000, targetRPS, durationSec)
 	lr := newLatencyRecorder(estSamples)
 	rl := newRateLimiter(targetRPS)
+	rng := newXorShift32()
 
 	reqBuf := make([]byte, batchBufSize)
 	respBuf := make([]byte, batchBufSize+protocol.HeaderSize)
@@ -468,7 +483,7 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 		rl.wait()
 
 		// Random batch size 2-1000 (server treats itemCount==1 as non-batch)
-		batchSize := randomBatchSize()
+		batchSize := randomBatchSize(&rng)
 
 		// Reuse a stack builder to avoid a heap object per request.
 		var bb protocol.BatchBuilder
@@ -813,6 +828,7 @@ func runPipelineBatchClient(runDir, service string, durationSec int, targetRPS u
 
 	lr := newLatencyRecorder(2_000_000)
 	rl := newRateLimiter(targetRPS)
+	rng := newXorShift32()
 
 	// Pre-allocate per-depth buffers
 	reqBufs := make([][]byte, depth)
@@ -837,7 +853,7 @@ func runPipelineBatchClient(runDir, service string, durationSec int, targetRPS u
 		// Build and send `depth` batch requests
 		sendOK := true
 		for d := 0; d < depth; d++ {
-			bs := randomBatchSize()
+			bs := randomBatchSize(&rng)
 			batchSizes[d] = bs
 
 			var bb protocol.BatchBuilder

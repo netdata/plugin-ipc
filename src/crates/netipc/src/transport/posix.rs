@@ -293,7 +293,9 @@ impl UdsSession {
                 self.max_response_batch_items,
             )
         };
-        if payload.len() > max_payload as usize || payload.len() > u32::MAX as usize {
+        if payload.len() > max_payload as usize
+            || payload.len() > (u32::MAX as usize).saturating_sub(HEADER_SIZE)
+        {
             return Err(UdsError::LimitExceeded);
         }
         if hdr.item_count > max_items {
@@ -353,7 +355,7 @@ impl UdsSession {
         let remaining_after_first = payload.len() - first_chunk_payload;
 
         let continuation_chunks = if remaining_after_first > 0 {
-            (remaining_after_first + chunk_payload_budget - 1) / chunk_payload_budget
+            1 + ((remaining_after_first - 1) / chunk_payload_budget)
         } else {
             0
         };
@@ -488,7 +490,7 @@ impl UdsSession {
         // Expected chunk count
         let remaining_after_first = hdr.payload_len as usize - first_payload_bytes;
         let expected_continuations = if remaining_after_first > 0 && chunk_payload_budget > 0 {
-            (remaining_after_first + chunk_payload_budget - 1) / chunk_payload_budget
+            1 + ((remaining_after_first - 1) / chunk_payload_budget)
         } else {
             0
         };
