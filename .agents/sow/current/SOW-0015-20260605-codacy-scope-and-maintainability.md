@@ -617,6 +617,58 @@ Validation completed for this hotspot follow-up:
 - `/usr/bin/ctest --test-dir build --output-on-failure`: 46/46 tests passed.
 - Win11 temp-copy focused C validation: MSYS CMake build of `test_win_service`, `test_win_service_extra`, and `test_win_service_payload_limits` passed; CTest for those three tests passed.
 
+### 2026-06-07 - PR 22649 Review And Duplication Follow-up
+
+Netdata PR #22649 was rechecked after the previous SDK re-vendor commit.
+
+Facts from GitHub and SonarCloud:
+
+- GitHub review threads: two total, two resolved, zero open.
+- SonarCloud issue API: zero unresolved issues on the PR.
+- SonarCloud hotspot API: zero unresolved hotspots on the PR.
+- SonarCloud quality gate still failed because new-code duplication is 10.5%, above the configured 3% threshold.
+- Cubic added a new top-level review on the current PR head with six findings and no new unresolved inline review threads.
+
+Validated and fixed Cubic findings in SDK source:
+
+- Rust POSIX stale endpoint recovery leaked the probe socket when `ECONNREFUSED` was treated conservatively; the early return was removed so the common close path always runs.
+- Go Windows named-pipe `Accept()` read listener config without the listener mutex; it now takes a locked config snapshot before calling `AcceptWithConfig()`.
+- Go Windows named-pipe `Close()` could leave the accepting pipe handle open if the wake-up `CreateFile()` failed; it now marks the stored handle invalid and closes the accepting handle as fallback.
+- Rust raw string-reverse client now uses checked size arithmetic before allocating the request scratch buffer.
+- Go cgroups cache bucket sizing now rejects item counts that would overflow `nextPowerOf2U32()` or the platform `int` length before allocation.
+- Go POSIX UDS and Windows named-pipe send helpers now calculate total framed length in `uint64` and check both the protocol `u32` limit and platform `int` limit before returning an `int`.
+
+Same-pattern fixes and tests:
+
+- The Go total-length helper pattern was fixed in both POSIX UDS and Windows named-pipe transports.
+- Added Go unit tests for cgroups cache bucket-count overflow edges.
+- Added Go unit tests for POSIX and Windows send total-length bounds.
+
+Validation completed for this review follow-up:
+
+- `git diff --check`: passed.
+- `cd src/go && go test -count=1 ./pkg/netipc/service/raw ./pkg/netipc/transport/posix`: passed.
+- `cd src/go && go test -count=1 ./pkg/netipc/...`: passed.
+- `cargo test --manifest-path src/crates/netipc/Cargo.toml string_reverse -- --test-threads=1`: 21 POSIX string-reverse-related tests passed.
+- `cargo test --manifest-path src/crates/netipc/Cargo.toml -- --test-threads=1`: 332 tests passed.
+- Win11 temp-copy Go validation: `cd src/go && go test -count=1 ./pkg/netipc/transport/windows ./pkg/netipc/service/raw`: passed.
+- Win11 temp-copy Rust validation: `cargo test --manifest-path src/crates/netipc/Cargo.toml string_reverse -- --test-threads=1`: 14 Windows string-reverse-related tests passed.
+
+SonarCloud duplication composition for Netdata PR #22649:
+
+- `src/go/pkg/netipc/transport/windows/pipe_receive.go`: 189 duplicated lines.
+- `src/go/pkg/netipc/transport/posix/uds_receive.go`: 189 duplicated lines.
+- `src/go/pkg/netipc/service/raw/server_unix.go`: 160 duplicated lines.
+- `src/go/pkg/netipc/service/raw/server_windows.go`: 159 duplicated lines.
+- `src/go/pkg/netipc/transport/windows/pipe_handshake.go`: 141 duplicated lines.
+- `src/go/pkg/netipc/transport/posix/uds_handshake.go`: 141 duplicated lines.
+- `src/libnetdata/netipc/src/service/netipc_service_posix_client_call.c`: 74 duplicated lines.
+- `src/libnetdata/netipc/src/service/netipc_service_win_client_call.c`: 74 duplicated lines.
+- `src/libnetdata/netipc/src/service/netipc_service_posix_server.c`: 61 duplicated lines.
+- `src/libnetdata/netipc/src/service/netipc_service_win_server.c`: 61 duplicated lines.
+
+The duplication is a real POSIX/Windows paired-implementation signal, not unresolved Sonar line findings. It will be handled after this review-finding fix is committed and re-vendored.
+
 ## Validation
 
 Acceptance criteria evidence:
