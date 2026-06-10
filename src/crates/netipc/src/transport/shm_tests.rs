@@ -11,7 +11,11 @@ const TEST_RUN_DIR: &str = "/tmp/nipc_shm_rust_test";
 const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn ensure_run_dir() {
+    use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::create_dir_all(TEST_RUN_DIR);
+    // The stale-unlink guard refuses group/other-writable run dirs; pin the
+    // mode so the process umask cannot decide test outcomes.
+    let _ = std::fs::set_permissions(TEST_RUN_DIR, std::fs::Permissions::from_mode(0o700));
 }
 
 fn cleanup_shm(service: &str, session_id: u64) {
