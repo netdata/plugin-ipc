@@ -11,6 +11,8 @@ import (
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/internal/framing"
 )
 
+const receiveAbortPollMs uint32 = 100
+
 // Receive reads one logical message. buf is a scratch buffer.
 func (s *Session) Receive(buf []byte) (protocol.Header, []byte, error) {
 	return s.ReceiveTimeout(buf, 0, nil)
@@ -40,12 +42,15 @@ func (s *Session) ReceiveTimeout(buf []byte, timeoutMs uint32, abortCh <-chan st
 		Recv:                    recv,
 		EnsurePacketScratch:     ensurePipeScratchBuf,
 		IsRecvDisconnect:        func(err error) bool { return errors.Is(err, ErrDisconnected) },
-		FailAllInflight:         s.failAllInflight,
-		ErrLimitExceeded:        func(msg string) error { return wrapErr(ErrLimitExceeded, msg) },
-		ErrProtocol:             func(msg string) error { return wrapErr(ErrProtocol, msg) },
-		ErrChunk:                func(msg string) error { return wrapErr(ErrChunk, msg) },
-		ErrUnknownMsgID:         func(msg string) error { return wrapErr(ErrUnknownMsgID, msg) },
-		ErrRecv:                 func(msg string) error { return wrapErr(ErrRecv, msg) },
+		PropagateRecvError: func(err error) bool {
+			return errors.Is(err, ErrTimeout) || errors.Is(err, ErrAborted)
+		},
+		FailAllInflight:  s.failAllInflight,
+		ErrLimitExceeded: func(msg string) error { return wrapErr(ErrLimitExceeded, msg) },
+		ErrProtocol:      func(msg string) error { return wrapErr(ErrProtocol, msg) },
+		ErrChunk:         func(msg string) error { return wrapErr(ErrChunk, msg) },
+		ErrUnknownMsgID:  func(msg string) error { return wrapErr(ErrUnknownMsgID, msg) },
+		ErrRecv:          func(msg string) error { return wrapErr(ErrRecv, msg) },
 	}, buf)
 }
 
@@ -75,7 +80,7 @@ func (w receiveWait) waitMs() (uint32, error) {
 		}
 	}
 
-	waitMs := uint32(100)
+	waitMs := receiveAbortPollMs
 	if w.infinite {
 		return waitMs, nil
 	}
@@ -84,13 +89,21 @@ func (w receiveWait) waitMs() (uint32, error) {
 	if remaining <= 0 {
 		return 0, ErrTimeout
 	}
-	if remaining < time.Duration(waitMs)*time.Millisecond {
-		waitMs = uint32((remaining + time.Millisecond - 1) / time.Millisecond)
-		if waitMs == 0 {
-			waitMs = 1
-		}
+	return boundedReceiveWaitMs(remaining, waitMs), nil
+}
+
+func boundedReceiveWaitMs(remaining time.Duration, pollCapMs uint32) uint32 {
+	if remaining <= 0 {
+		return 0
 	}
-	return waitMs, nil
+	if remaining >= time.Duration(pollCapMs)*time.Millisecond {
+		return pollCapMs
+	}
+	waitMs := uint32((remaining + time.Millisecond - 1) / time.Millisecond) // #nosec G115 -- remaining is positive and below pollCapMs here.
+	if waitMs == 0 {
+		return 1
+	}
+	return waitMs
 }
 
 func (s *Session) rawRecvWithTimeout(buf []byte, wait receiveWait) (int, error) {

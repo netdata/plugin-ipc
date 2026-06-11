@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: implementation and validation completed on 2026-06-11; `SOW-0015` remains paused and can be resumed after this SOW is committed.
+Sub-state: regression repair completed on 2026-06-11 after CI failures on commit `aaec3d5`; `SOW-0015` remains paused and can be resumed after this repair is committed.
 
 ## Requirements
 
@@ -375,4 +375,53 @@ None.
 
 ## Regression Log
 
-None yet.
+### 2026-06-11
+
+CI failures after commit `aaec3d5` reopened this SOW:
+
+- Static Analysis run `27336192003`, job `Go Static Analysis (src/go)`, failed because `gosec` exited with status 1 after uploading SARIF. Local reproduction with `gosec -fmt=json -exclude=G404 ./...` under `src/go` reports `G115` at `src/go/pkg/netipc/service/raw/client_unix.go:198`: integer overflow conversion `int64 -> uint32` in the SHM receive polling timeout calculation.
+- CodeQL run `27336192249`, job `Analyze Go Windows`, failed in the MSYS2 build step while running Go tests. The failing test was `TestSessionReceiveRejectsMalformedChunks/continuation_recv_disconnect` in `src/go/pkg/netipc/transport/windows/pipe_edge_test.go`; CI observed `peer disconnected` while the existing test expected the old wrapped continuation receive error.
+
+Why previous validation missed it:
+
+- The local Go validation did not run `gosec`; the static-analysis workflow did.
+- The final `win11` validation did run Windows Go tests, but the CI failure is a Windows named-pipe close timing variation. The changed framing code returned raw continuation receive errors, so one platform/timing path exposed a direct `ErrDisconnected` instead of the pre-existing wrapped `ErrRecv` contract.
+
+Repair plan:
+
+- Keep timeout and abort errors distinct through chunk continuation receives.
+- Restore pre-SOW behavior for ordinary continuation receive failures by wrapping them as `ErrRecv("continuation recv: ...")`.
+- Replace duplicated timeout polling conversions with bounded helpers that prove the narrowed value is below the poll cap before converting to `uint32`.
+
+Validation plan:
+
+- Re-run `gosec -fmt=json -exclude=G404 ./...` under `src/go`.
+- Re-run `cd src/go && go test ./pkg/netipc/...` locally.
+- Re-run the failing Windows package/test on `win11` with `MSYSTEM=MSYS`.
+- Re-run `git diff --check`.
+
+Repair results:
+
+- Updated `src/go/pkg/netipc/transport/internal/framing/receive.go` so chunk continuation receive errors are wrapped as `ErrRecv("continuation recv: ...")` unless the transport explicitly marks them as timeout/abort control errors.
+- Updated POSIX UDS and Windows Named Pipe receive config to propagate only timeout and abort receive errors raw.
+- Replaced duplicated Go SHM timeout narrowing logic in `src/go/pkg/netipc/service/raw/client_unix.go` and `src/go/pkg/netipc/service/raw/client_windows.go` with `boundedClientWaitMs()`, which caps the value before the justified `G115`-suppressed conversion.
+- Updated Windows named-pipe receive polling to use the same bounded conversion pattern.
+
+Validation results:
+
+- `cd src/go && go test ./pkg/netipc/...`: passed.
+- `cd src/go && go vet ./...`: passed.
+- `cd src/go && staticcheck ./...`: passed.
+- Exact CI-style `gosec -quiet -fmt sarif -out gosec.sarif -exclude=G404 ./...` passed for `src/go`, `tests/fixtures/go`, and `bench/drivers/go`.
+- Verbose local `gosec -fmt=json -exclude=G404 ./...` under `src/go` now reports zero issues; it still reports the pre-existing assembly-stub SSA warning for `pkg/netipc/transport/posix/shm_pause_amd64.go`, but the CI-style SARIF command exits successfully with zero findings.
+- `win11` MSYS CodeQL-style loop passed: `CGO_ENABLED=0 go test ./...` in `src/go`, `tests/fixtures/go`, and `bench/drivers/go`.
+- `win11` focused failure reproduction passed 50 times: `CGO_ENABLED=0 go test ./pkg/netipc/transport/windows -run 'TestSessionReceiveRejectsMalformedChunks/continuation_recv_disconnect' -count=50`.
+- `git diff --check`: passed.
+
+Regression artifact maintenance:
+
+- `AGENTS.md`: no update needed; workflow and project guardrails did not change.
+- Runtime project skills: no update needed; this was a narrow code regression repair, not a reusable workflow change.
+- Specs and end-user/operator docs: no update needed; public timeout/abort behavior remains as documented.
+- End-user/operator skills: no update needed; integrator guidance remains correct.
+- SOW lifecycle: SOW was reopened from `done/`, repaired, validated, marked completed, and moved back to `done/` with the repair commit.

@@ -194,12 +194,7 @@ func (c *Client) transportReceiveWithControl(timeoutMs uint32, abortCh <-chan st
 				if remaining <= 0 {
 					return protocol.Header{}, nil, protocol.ErrTimeout
 				}
-				if remaining < time.Duration(waitMs)*time.Millisecond {
-					waitMs = uint32((remaining + time.Millisecond - 1) / time.Millisecond)
-					if waitMs == 0 {
-						waitMs = 1
-					}
-				}
+				waitMs = boundedClientWaitMs(remaining, waitMs)
 			}
 
 			mlen, err := c.shm.ShmReceive(scratch, waitMs)

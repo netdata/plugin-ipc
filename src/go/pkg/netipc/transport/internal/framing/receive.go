@@ -23,6 +23,7 @@ type Receiver struct {
 	Recv                func([]byte) (int, error)
 	EnsurePacketScratch func(*[]byte, int) []byte
 	OnRecvError         func(error)
+	PropagateRecvError  func(error) bool
 
 	ErrLimitExceeded func(string) error
 	ErrProtocol      func(string) error
@@ -47,6 +48,7 @@ type SessionReceiveConfig struct {
 	Recv                func([]byte) (int, error)
 	EnsurePacketScratch func(*[]byte, int) []byte
 	IsRecvDisconnect    func(error) bool
+	PropagateRecvError  func(error) bool
 	FailAllInflight     func()
 
 	ErrLimitExceeded func(string) error
@@ -74,6 +76,7 @@ func SessionReceive(config SessionReceiveConfig, buf []byte) (protocol.Header, [
 		PacketBuf:           config.PacketBuf,
 		Recv:                config.Recv,
 		EnsurePacketScratch: config.EnsurePacketScratch,
+		PropagateRecvError:  config.PropagateRecvError,
 		OnRecvError: func(err error) {
 			if config.IsRecvDisconnect(err) {
 				config.FailAllInflight()
@@ -256,7 +259,10 @@ func (r Receiver) receiveOneChunk(
 	cn, err := r.Recv(pktBuf)
 	if err != nil {
 		r.noteRecvError(err)
-		return err
+		if r.PropagateRecvError != nil && r.PropagateRecvError(err) {
+			return err
+		}
+		return r.ErrRecv("continuation recv: " + err.Error())
 	}
 	if cn < protocol.HeaderSize {
 		return r.ErrChunk("continuation too short")

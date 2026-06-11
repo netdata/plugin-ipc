@@ -151,11 +151,14 @@ func (s *Session) ReceiveTimeout(buf []byte, timeoutMs uint32, abortCh <-chan st
 		Recv:                    recv,
 		EnsurePacketScratch:     ensureScratchBuf,
 		IsRecvDisconnect:        func(err error) bool { return errors.Is(err, ErrRecv) },
-		FailAllInflight:         s.failAllInflight,
-		ErrLimitExceeded:        func(msg string) error { return wrapErr(ErrLimitExceeded, msg) },
-		ErrProtocol:             func(msg string) error { return wrapErr(ErrProtocol, msg) },
-		ErrChunk:                func(msg string) error { return wrapErr(ErrChunk, msg) },
-		ErrUnknownMsgID:         func(msg string) error { return wrapErr(ErrUnknownMsgID, msg) },
-		ErrRecv:                 func(msg string) error { return wrapErr(ErrRecv, msg) },
+		PropagateRecvError: func(err error) bool {
+			return errors.Is(err, ErrTimeout) || errors.Is(err, ErrAborted)
+		},
+		FailAllInflight:  s.failAllInflight,
+		ErrLimitExceeded: func(msg string) error { return wrapErr(ErrLimitExceeded, msg) },
+		ErrProtocol:      func(msg string) error { return wrapErr(ErrProtocol, msg) },
+		ErrChunk:         func(msg string) error { return wrapErr(ErrChunk, msg) },
+		ErrUnknownMsgID:  func(msg string) error { return wrapErr(ErrUnknownMsgID, msg) },
+		ErrRecv:          func(msg string) error { return wrapErr(ErrRecv, msg) },
 	}, buf)
 }
