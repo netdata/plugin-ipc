@@ -11,7 +11,19 @@ import (
 type CgroupsLookupHandler func(*protocol.CgroupsLookupRequestView, *protocol.CgroupsLookupBuilder) bool
 
 func cgroupsLookupRequestSize(paths [][]byte) (int, error) {
-	dirSize, err := checkedLookupMul(len(paths), protocol.LookupDirEntrySize)
+	return cgroupsLookupRequestSizeForCount(len(paths), func(i int) int {
+		return len(paths[i])
+	})
+}
+
+func cgroupsLookupRequestSizeForLengths(pathLens []int) (int, error) {
+	return cgroupsLookupRequestSizeForCount(len(pathLens), func(i int) int {
+		return pathLens[i]
+	})
+}
+
+func cgroupsLookupRequestSizeForCount(count int, pathLenAt func(int) int) (int, error) {
+	dirSize, err := checkedLookupMul(count, protocol.LookupDirEntrySize)
 	if err != nil {
 		return 0, err
 	}
@@ -20,12 +32,12 @@ func cgroupsLookupRequestSize(paths [][]byte) (int, error) {
 		return 0, err
 	}
 	data := size
-	for _, path := range paths {
+	for i := 0; i < count; i++ {
 		data, err = checkedLookupAlign8(data)
 		if err != nil {
 			return 0, err
 		}
-		data, err = checkedLookupAdd(data, len(path))
+		data, err = checkedLookupAdd(data, pathLenAt(i))
 		if err != nil {
 			return 0, err
 		}
@@ -54,7 +66,7 @@ func cgroupsLookupNextRequest(paths [][]byte, maxPayload uint32) (int, int, erro
 		if err != nil {
 			return 0, 0, err
 		}
-		if uint64(size) <= uint64(maxPayload) {
+		if lookupSizeWithinLimit(size, maxPayload) {
 			bestCount = mid
 			bestSize = size
 			lo = mid + 1
@@ -69,23 +81,7 @@ func cgroupsLookupNextRequest(paths [][]byte, maxPayload uint32) (int, int, erro
 }
 
 func cgroupsLookupOversizedRequestItem(path []byte) ([]byte, error) {
-	size, err := checkedLookupAdd(protocol.CgroupsLookupRespHdr, protocol.LookupDirEntrySize)
-	if err != nil {
-		return nil, err
-	}
-	size, err = checkedLookupAlign8(size)
-	if err != nil {
-		return nil, err
-	}
-	itemSize, err := checkedLookupAdd(protocol.CgroupsLookupItemHdr, len(path))
-	if err != nil {
-		return nil, err
-	}
-	itemSize, err = checkedLookupAdd(itemSize, 2)
-	if err != nil {
-		return nil, err
-	}
-	size, err = checkedLookupAdd(size, itemSize)
+	size, err := cgroupsLookupOversizedRequestItemSize(len(path))
 	if err != nil {
 		return nil, err
 	}
@@ -105,6 +101,26 @@ func cgroupsLookupOversizedRequestItem(path []byte) ([]byte, error) {
 		return nil, err
 	}
 	return cloneLookupRawItem(rawItem), nil
+}
+
+func cgroupsLookupOversizedRequestItemSize(pathLen int) (int, error) {
+	size, err := checkedLookupAdd(protocol.CgroupsLookupRespHdr, protocol.LookupDirEntrySize)
+	if err != nil {
+		return 0, err
+	}
+	size, err = checkedLookupAlign8(size)
+	if err != nil {
+		return 0, err
+	}
+	itemSize, err := checkedLookupAdd(protocol.CgroupsLookupItemHdr, pathLen)
+	if err != nil {
+		return 0, err
+	}
+	itemSize, err = checkedLookupAdd(itemSize, 2)
+	if err != nil {
+		return 0, err
+	}
+	return checkedLookupAdd(size, itemSize)
 }
 
 // CallCgroupsLookup performs a blocking typed CGROUPS_LOOKUP call.
@@ -225,14 +241,18 @@ func (c *Client) CallCgroupsLookupWithTimeout(paths [][]byte, timeoutMs uint32) 
 			if start < len(paths) {
 				continue
 			}
-			if uint32(len(rawItems)) != expectedCount {
+			rawItemCount, cerr := checkedLookupU32(len(rawItems))
+			if cerr != nil {
+				return nil, cerr
+			}
+			if rawItemCount != expectedCount {
 				return nil, protocol.ErrBadItemCount
 			}
 			size, serr := lookupRawResponseSize(protocol.CgroupsLookupRespHdr, rawItems)
 			if serr != nil {
 				return nil, serr
 			}
-			if uint64(size) > uint64(c.maxLogicalLookupResponseBytes) {
+			if lookupSizeExceedsLimit(size, c.maxLogicalLookupResponseBytes) {
 				return nil, protocol.ErrOverflow
 			}
 			stitched := make([]byte, size)

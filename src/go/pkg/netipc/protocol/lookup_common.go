@@ -384,26 +384,8 @@ func writeLookupLabels(item []byte, tableStart, tableBytes int, labels []struct{
 		return 0, ErrOverflow
 	}
 	for i, label := range labels {
-		keyOff32, ok := checkedU32Int(next)
-		if !ok {
-			return 0, ErrOverflow
-		}
-		keyLen32, ok := checkedU32Int(len(label.Key))
-		if !ok {
-			return 0, ErrOverflow
-		}
-		valueOff, ok := checkedAddInt(next, len(label.Key))
-		if ok {
-			valueOff, ok = checkedAddInt(valueOff, 1)
-		}
-		if !ok {
-			return 0, ErrOverflow
-		}
-		valueOff32, ok := checkedU32Int(valueOff)
-		if !ok {
-			return 0, ErrOverflow
-		}
-		valueLen32, ok := checkedU32Int(len(label.Value))
+		keyOff32, keyLen32, valueOff, valueOff32, valueLen32, itemNext, ok :=
+			lookupLabelWriteLayout(next, len(label.Key), len(label.Value))
 		if !ok {
 			return 0, ErrOverflow
 		}
@@ -424,32 +406,49 @@ func writeLookupLabels(item []byte, tableStart, tableBytes int, labels []struct{
 		next = valueOff
 		copy(item[next:], label.Value)
 		item[next+len(label.Value)] = 0
-		next, ok = checkedAddInt(next, len(label.Value))
-		if ok {
-			next, ok = checkedAddInt(next, 1)
-		}
-		if !ok {
-			return 0, ErrOverflow
-		}
+		next = itemNext
 	}
 	return next, nil
 }
 
+func lookupLabelWriteLayout(next, keyLen, valueLen int) (keyOff32, keyLen32 uint32, valueOff int, valueOff32, valueLen32 uint32, itemNext int, ok bool) {
+	keyOff32, ok = checkedU32Int(next)
+	if !ok {
+		return 0, 0, 0, 0, 0, 0, false
+	}
+	keyLen32, ok = checkedU32Int(keyLen)
+	if !ok {
+		return 0, 0, 0, 0, 0, 0, false
+	}
+	valueOff, ok = checkedAddInt(next, keyLen)
+	if ok {
+		valueOff, ok = checkedAddInt(valueOff, 1)
+	}
+	if !ok {
+		return 0, 0, 0, 0, 0, 0, false
+	}
+	valueOff32, ok = checkedU32Int(valueOff)
+	if !ok {
+		return 0, 0, 0, 0, 0, 0, false
+	}
+	valueLen32, ok = checkedU32Int(valueLen)
+	if !ok {
+		return 0, 0, 0, 0, 0, 0, false
+	}
+	itemNext, ok = checkedAddInt(valueOff, valueLen)
+	if ok {
+		itemNext, ok = checkedAddInt(itemNext, 1)
+	}
+	if !ok {
+		return 0, 0, 0, 0, 0, 0, false
+	}
+	return keyOff32, keyLen32, valueOff, valueOff32, valueLen32, itemNext, true
+}
+
 func labelLayoutGo(fixedEnd int, labels []struct{ Key, Value []byte }) (int, int, int, error) {
-	if len(labels) == 0 {
-		return fixedEnd, 0, fixedEnd, nil
-	}
-	tableStart, ok := checkedAlign8(fixedEnd)
-	if !ok {
-		return 0, 0, 0, ErrOverflow
-	}
-	tableBytes, ok := checkedMulInt(len(labels), LookupLabelEntrySize)
-	if !ok {
-		return 0, 0, 0, ErrOverflow
-	}
-	itemSize, ok := checkedAddInt(tableStart, tableBytes)
-	if !ok {
-		return 0, 0, 0, ErrOverflow
+	tableStart, tableBytes, itemSize, err := labelLayoutPrefix(fixedEnd, len(labels))
+	if err != nil {
+		return 0, 0, 0, err
 	}
 	for _, label := range labels {
 		if invalidSourceString(label.Key, true) || invalidSourceString(label.Value, false) {
@@ -470,6 +469,25 @@ func labelLayoutGo(fixedEnd int, labels []struct{ Key, Value []byte }) (int, int
 		if !ok {
 			return 0, 0, 0, ErrOverflow
 		}
+	}
+	return tableStart, tableBytes, itemSize, nil
+}
+
+func labelLayoutPrefix(fixedEnd, labelCount int) (int, int, int, error) {
+	if labelCount == 0 {
+		return fixedEnd, 0, fixedEnd, nil
+	}
+	tableStart, ok := checkedAlign8(fixedEnd)
+	if !ok {
+		return 0, 0, 0, ErrOverflow
+	}
+	tableBytes, ok := checkedMulInt(labelCount, LookupLabelEntrySize)
+	if !ok {
+		return 0, 0, 0, ErrOverflow
+	}
+	itemSize, ok := checkedAddInt(tableStart, tableBytes)
+	if !ok {
+		return 0, 0, 0, ErrOverflow
 	}
 	return tableStart, tableBytes, itemSize, nil
 }
@@ -537,11 +555,7 @@ func lookupResponseRawItem(payload []byte, hdrSize int, itemCount uint32, index 
 }
 
 func encodeLookupRawResponse(buf []byte, hdrSize int, generation uint64, items [][]byte, minItemLen int, validate func([]byte) error) (int, error) {
-	if uint64(len(items)) > uint64(^uint32(0)) {
-		return 0, ErrOverflow
-	}
-	itemCount := uint32(len(items)) // #nosec G115 -- len(items) is bounded above.
-	minRequired, ok := lookupBuilderDataOffset(hdrSize, itemCount)
+	itemCount, minRequired, ok := lookupRawResponseMinBytes(hdrSize, len(items))
 	if !ok || len(buf) < minRequired {
 		return 0, ErrOverflow
 	}
@@ -555,11 +569,7 @@ func encodeLookupRawResponse(buf []byte, hdrSize int, generation uint64, items [
 				return 0, err
 			}
 		}
-		itemStart, ok := checkedAlign8(dataOffset)
-		if !ok {
-			return 0, ErrOverflow
-		}
-		itemEnd, ok := checkedAddInt(itemStart, len(item))
+		itemStart, itemEnd, ok := lookupRawResponseItemBounds(dataOffset, len(item))
 		if !ok || itemEnd > len(buf) {
 			return 0, ErrOverflow
 		}
@@ -583,4 +593,25 @@ func encodeLookupRawResponse(buf []byte, hdrSize int, generation uint64, items [
 		return 0, ErrOverflow
 	}
 	return n, nil
+}
+
+func lookupRawResponseMinBytes(hdrSize, itemCount int) (uint32, int, bool) {
+	if itemCount < 0 || uint64(itemCount) > uint64(^uint32(0)) {
+		return 0, 0, false
+	}
+	itemCount32 := uint32(itemCount)
+	minRequired, ok := lookupBuilderDataOffset(hdrSize, itemCount32)
+	return itemCount32, minRequired, ok
+}
+
+func lookupRawResponseItemBounds(dataOffset, itemLen int) (int, int, bool) {
+	itemStart, ok := checkedAlign8(dataOffset)
+	if !ok {
+		return 0, 0, false
+	}
+	itemEnd, ok := checkedAddInt(itemStart, itemLen)
+	if !ok {
+		return 0, 0, false
+	}
+	return itemStart, itemEnd, true
 }

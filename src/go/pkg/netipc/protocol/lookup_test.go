@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"strconv"
 	"testing"
 )
 
@@ -976,8 +977,11 @@ func TestLookupInternalGuardCoverage(t *testing.T) {
 	if _, ok := checkedU32Int(-1); ok {
 		t.Fatalf("checkedU32Int(-1) succeeded")
 	}
-	if _, ok := checkedU32Int(int(uint64(^uint32(0)) + 1)); ok {
-		t.Fatalf("checkedU32Int(uint32 max + 1) succeeded")
+	if strconv.IntSize >= 64 {
+		maxU32 := ^uint32(0)
+		if _, ok := checkedU32Int(int(uint64(maxU32) + 1)); ok {
+			t.Fatalf("checkedU32Int(uint32 max + 1) succeeded")
+		}
 	}
 	if _, ok := checkedU16Int(-1); ok {
 		t.Fatalf("checkedU16Int(-1) succeeded")

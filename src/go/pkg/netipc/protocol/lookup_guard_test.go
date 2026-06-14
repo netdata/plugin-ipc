@@ -3,10 +3,8 @@ package protocol
 import (
 	"bytes"
 	"errors"
-	"reflect"
 	"strconv"
 	"testing"
-	"unsafe"
 )
 
 func TestLookupRequestEncodeAndViewGuards(t *testing.T) {
@@ -57,6 +55,133 @@ func TestLookupRequestEncodeAndViewGuards(t *testing.T) {
 	ne.PutUint32(truncatedCgroups[4:8], 1)
 	if _, err := DecodeCgroupsLookupRequest(truncatedCgroups); !errors.Is(err, ErrTruncated) {
 		t.Fatalf("cgroups truncated directory decode = %v, want ErrTruncated", err)
+	}
+}
+
+func TestLookupSyntheticArithmeticGuards(t *testing.T) {
+	maxInt := maxIntValue()
+
+	if payloadExceededSuffixFits(16, 0, []int{1}, 0, 2) != true {
+		t.Fatal("mismatched suffix lens should be treated as non-actionable")
+	}
+	if payloadExceededSuffixFits(16, 0, []int{1}, 2, 1) != true {
+		t.Fatal("suffix starting after max items should fit vacuously")
+	}
+	if payloadExceededSuffixFits(16, maxInt, []int{1}, 0, 1) != false {
+		t.Fatal("suffix with overflowing alignment should not fit")
+	}
+	if payloadExceededSuffixFits(16, 0, []int{maxInt}, 0, 1) != false {
+		t.Fatal("suffix with overflowing item end should not fit")
+	}
+	if payloadExceededSuffixFits(16, 0, []int{4, 4}, 1, 2) != true {
+		t.Fatal("valid suffix should fit")
+	}
+
+	if _, _, _, _, _, _, ok := lookupLabelWriteLayout(-1, 1, 1); ok {
+		t.Fatal("negative label key offset should fail")
+	}
+	if _, _, _, _, _, _, ok := lookupLabelWriteLayout(0, -1, 1); ok {
+		t.Fatal("negative label key length should fail")
+	}
+	if _, _, _, _, _, _, ok := lookupLabelWriteLayout(maxInt, 1, 1); ok {
+		t.Fatal("overflowing label value offset should fail")
+	}
+	if strconv.IntSize >= 64 {
+		maxU32Value := ^uint32(0)
+		overU32 := int(uint64(maxU32Value) + 1)
+		if _, _, _, _, _, _, ok := lookupLabelWriteLayout(overU32, 1, 1); ok {
+			t.Fatal("label key offset above uint32 should fail")
+		}
+		if _, _, _, _, _, _, ok := lookupLabelWriteLayout(0, overU32, 1); ok {
+			t.Fatal("label key length above uint32 should fail")
+		}
+		if _, _, _, _, _, _, ok := lookupLabelWriteLayout(int(maxU32Value), 0, 1); ok {
+			t.Fatal("label value offset above uint32 should fail")
+		}
+		if _, _, _, _, _, _, ok := lookupLabelWriteLayout(0, 0, overU32); ok {
+			t.Fatal("label value length above uint32 should fail")
+		}
+	}
+
+	if _, _, _, err := labelLayoutPrefix(maxInt, 1); !errors.Is(err, ErrOverflow) {
+		t.Fatalf("label layout align overflow = %v, want ErrOverflow", err)
+	}
+	if _, _, _, err := labelLayoutPrefix(0, maxInt/LookupLabelEntrySize+1); !errors.Is(err, ErrOverflow) {
+		t.Fatalf("label table size overflow = %v, want ErrOverflow", err)
+	}
+	if _, _, _, err := labelLayoutGo(16, []struct{ Key, Value []byte }{{Key: []byte{}, Value: []byte("v")}}); !errors.Is(err, ErrBadLayout) {
+		t.Fatalf("empty label key layout error = %v, want ErrBadLayout", err)
+	}
+
+	if _, ok := lookupBuilderDataOffset(maxInt, 1); ok {
+		t.Fatal("lookup builder data offset should fail when header plus directory overflows")
+	}
+	if _, ok := lookupDirOffset(maxInt, 1); ok {
+		t.Fatal("lookup directory offset should fail when header plus entry offset overflows")
+	}
+	if _, _, ok := lookupRawResponseMinBytes(0, -1); ok {
+		t.Fatal("negative raw response item count should fail")
+	}
+	if _, _, ok := lookupRawResponseMinBytes(maxInt, 1); ok {
+		t.Fatal("raw response min bytes should fail when header plus directory overflows")
+	}
+	if _, _, ok := lookupRawResponseItemBounds(maxInt, 1); ok {
+		t.Fatal("raw response item bounds should fail on alignment overflow")
+	}
+	if _, _, ok := lookupRawResponseItemBounds(0, -1); ok {
+		t.Fatal("raw response item bounds should fail on invalid item length")
+	}
+
+	if _, _, ok := appsLookupRequestLayoutForCount(-1); ok {
+		t.Fatal("negative apps lookup request count should fail")
+	}
+	if _, _, ok := appsLookupRequestLayoutForCount(maxInt/LookupDirEntrySize + 1); ok {
+		t.Fatal("apps lookup request directory size should overflow")
+	}
+	if _, _, ok := appsLookupRequestLayoutForCount(maxInt/AppsLookupKeySize + 1); ok {
+		t.Fatal("apps lookup request key size should overflow")
+	}
+	if _, ok := cgroupsLookupRequestPackedStartForCount(-1); ok {
+		t.Fatal("negative cgroups lookup request count should fail")
+	}
+	if _, ok := cgroupsLookupRequestPackedStartForCount(maxInt/LookupDirEntrySize + 1); ok {
+		t.Fatal("cgroups lookup request directory size should overflow")
+	}
+	if _, ok := cgroupsLookupRequestPackedStartForCount(maxInt / LookupDirEntrySize); ok {
+		t.Fatal("cgroups lookup request packed start should overflow")
+	}
+	if strconv.IntSize >= 64 {
+		maxU32Value := ^uint32(0)
+		overU32 := int(uint64(maxU32Value) + 1)
+		if _, _, ok := appsLookupRequestLayoutForCount(overU32); ok {
+			t.Fatal("apps lookup request count above uint32 should fail")
+		}
+		if _, ok := cgroupsLookupRequestPackedStartForCount(overU32); ok {
+			t.Fatal("cgroups lookup request count above uint32 should fail")
+		}
+	}
+
+	if _, _, _, ok := cgroupsItemLayoutForLengths(-1, 1); ok {
+		t.Fatal("negative cgroups item name length should fail")
+	}
+	if _, _, _, ok := cgroupsItemLayoutForLengths(1, -1); ok {
+		t.Fatal("negative cgroups item path length should fail")
+	}
+	if _, _, _, ok := cgroupsItemLayoutForLengths(maxInt, 1); ok {
+		t.Fatal("overflowing cgroups item name size should fail")
+	}
+	if _, _, _, ok := cgroupsItemLayoutForLengths(1, maxInt); ok {
+		t.Fatal("overflowing cgroups item path size should fail")
+	}
+	if strconv.IntSize >= 64 {
+		maxU32Value := ^uint32(0)
+		maxU32 := int(maxU32Value)
+		if _, _, _, ok := cgroupsItemLayoutForLengths(maxU32, 1); ok {
+			t.Fatal("cgroups item path offset above uint32 should fail")
+		}
+		if _, _, _, ok := cgroupsItemLayoutForLengths(0, maxU32); ok {
+			t.Fatal("cgroups item size above uint32 should fail")
+		}
 	}
 }
 
@@ -215,6 +340,53 @@ func TestLookupResponseLabelsRoundTrip(t *testing.T) {
 	}
 	if _, err := cgroupsItem.Label(uint32(len(labels))); !errors.Is(err, ErrOutOfBounds) {
 		t.Fatalf("cgroups label out of bounds = %v, want ErrOutOfBounds", err)
+	}
+}
+
+func TestLookupValidateLabelsRejectsMalformedLayouts(t *testing.T) {
+	if _, err := validateLabels(make([]byte, 2), 0, 0, 1); !errors.Is(err, ErrBadLayout) {
+		t.Fatalf("zero labels with trailing data = %v, want ErrBadLayout", err)
+	}
+	if _, err := validateLabels(nil, 0, 1, maxIntValue()); !errors.Is(err, ErrOutOfBounds) {
+		t.Fatalf("label table alignment overflow = %v, want ErrOutOfBounds", err)
+	}
+	if _, err := validateLabels(make([]byte, 4), 0, 1, 8); !errors.Is(err, ErrOutOfBounds) {
+		t.Fatalf("label table starts past item = %v, want ErrOutOfBounds", err)
+	}
+
+	padded := make([]byte, 8)
+	padded[1] = 1
+	if _, err := validateLabels(padded, 0, 1, 1); !errors.Is(err, ErrBadLayout) {
+		t.Fatalf("nonzero label table padding = %v, want ErrBadLayout", err)
+	}
+	if _, err := validateLabels(make([]byte, 8), 0, 1, 8); !errors.Is(err, ErrOutOfBounds) {
+		t.Fatalf("truncated label table = %v, want ErrOutOfBounds", err)
+	}
+
+	keyOffsetMismatch := make([]byte, 24)
+	ne.PutUint32(keyOffsetMismatch[8:12], 25)
+	ne.PutUint32(keyOffsetMismatch[12:16], 1)
+	if _, err := validateLabels(keyOffsetMismatch, 0, 1, 8); !errors.Is(err, ErrBadLayout) {
+		t.Fatalf("label key offset mismatch = %v, want ErrBadLayout", err)
+	}
+
+	valueOffsetMismatch := make([]byte, 28)
+	ne.PutUint32(valueOffsetMismatch[8:12], 24)
+	ne.PutUint32(valueOffsetMismatch[12:16], 1)
+	ne.PutUint32(valueOffsetMismatch[16:20], 27)
+	valueOffsetMismatch[25] = 0
+	if _, err := validateLabels(valueOffsetMismatch, 0, 1, 8); !errors.Is(err, ErrBadLayout) {
+		t.Fatalf("label value offset mismatch = %v, want ErrBadLayout", err)
+	}
+
+	trailing := make([]byte, 28)
+	ne.PutUint32(trailing[8:12], 24)
+	ne.PutUint32(trailing[12:16], 1)
+	ne.PutUint32(trailing[16:20], 26)
+	trailing[25] = 0
+	trailing[26] = 0
+	if _, err := validateLabels(trailing, 0, 1, 8); !errors.Is(err, ErrBadLayout) {
+		t.Fatalf("label trailing data = %v, want ErrBadLayout", err)
 	}
 }
 
@@ -961,55 +1133,50 @@ func TestLookupBuildersRejectItemOffsetsAboveWireRange(t *testing.T) {
 		t.Skip("synthetic 32-bit wire offset guards require 64-bit int")
 	}
 
-	var sentinel byte
-	fakeBuf := unsafe.Slice(&sentinel, int(uint64(^uint32(0))+4096))
-	largeOffset := int(uint64(^uint32(0)) + 8)
+	maxU32Value := ^uint32(0)
+	largeOffset := int(uint64(maxU32Value) + 8)
 
-	appsKnown := &AppsLookupBuilder{buf: fakeBuf, maxItems: 1, dataOffset: largeOffset}
+	appsKnown := &AppsLookupBuilder{buf: make([]byte, AppsLookupRespHdr+LookupDirEntrySize), maxItems: 1, dataOffset: largeOffset}
 	if err := appsKnown.Add(PidLookupKnown, AppsCgroupHostRoot, 0, 1, 0, 0, 0, []byte("x"), nil, nil, nil); !errors.Is(err, ErrOverflow) {
 		t.Fatalf("apps known high item offset error = %v, want ErrOverflow", err)
 	}
 
-	appsUnknown := &AppsLookupBuilder{buf: fakeBuf, maxItems: 1, dataOffset: largeOffset}
+	appsUnknown := &AppsLookupBuilder{buf: make([]byte, AppsLookupRespHdr+LookupDirEntrySize), maxItems: 1, dataOffset: largeOffset}
 	if err := appsUnknown.Add(PidLookupUnknown, 0, 0, 2, 0, NipcUIDUnset, 0, nil, nil, nil, nil); !errors.Is(err, ErrOverflow) {
 		t.Fatalf("apps unknown high item offset error = %v, want ErrOverflow", err)
 	}
 
-	cgroupsKnown := &CgroupsLookupBuilder{buf: fakeBuf, maxItems: 1, dataOffset: largeOffset}
+	cgroupsKnown := &CgroupsLookupBuilder{buf: make([]byte, CgroupsLookupRespHdr+LookupDirEntrySize), maxItems: 1, dataOffset: largeOffset}
 	if err := cgroupsKnown.Add(CgroupLookupKnown, OrchestratorK8s, []byte("/x"), nil, nil); !errors.Is(err, ErrOverflow) {
 		t.Fatalf("cgroups known high item offset error = %v, want ErrOverflow", err)
 	}
 
-	cgroupsUnknown := &CgroupsLookupBuilder{buf: fakeBuf, maxItems: 1, dataOffset: largeOffset}
+	cgroupsUnknown := &CgroupsLookupBuilder{buf: make([]byte, CgroupsLookupRespHdr+LookupDirEntrySize), maxItems: 1, dataOffset: largeOffset}
 	if err := cgroupsUnknown.Add(CgroupLookupUnknownRetryLater, 0, []byte("/x"), nil, nil); !errors.Is(err, ErrOverflow) {
 		t.Fatalf("cgroups unknown high item offset error = %v, want ErrOverflow", err)
 	}
 }
 
-var lookupTestFakeLabel struct{ Key, Value []byte }
-
 func TestLookupRejectsUnrepresentableItemCounts(t *testing.T) {
 	if strconv.IntSize < 64 {
 		t.Skip("oversized slice-header guard requires 64-bit int")
 	}
-	hugeLen := int(uint64(^uint32(0)) + 1)
+	maxU32Value := ^uint32(0)
+	hugeLen := int(uint64(maxU32Value) + 1)
 
-	hugePids := unsafe.Slice((*uint32)(unsafe.Pointer(uintptr(1))), hugeLen)
-	if n, err := EncodeAppsLookupRequest(hugePids, nil); n != 0 || !errors.Is(err, ErrOverflow) {
-		t.Fatalf("huge apps request = n %d err %v, want 0 ErrOverflow", n, err)
+	if _, _, ok := appsLookupRequestLayoutForCount(hugeLen); ok {
+		t.Fatal("huge apps request count should overflow")
 	}
 
-	hugePaths := unsafe.Slice((*[]byte)(unsafe.Pointer(uintptr(1))), hugeLen)
-	if n, err := EncodeCgroupsLookupRequest(hugePaths, nil); n != 0 || !errors.Is(err, ErrOverflow) {
-		t.Fatalf("huge cgroups request = n %d err %v, want 0 ErrOverflow", n, err)
+	if _, ok := cgroupsLookupRequestPackedStartForCount(hugeLen); ok {
+		t.Fatal("huge cgroups request count should overflow")
 	}
 
-	hugeItems := unsafe.Slice((*[]byte)(unsafe.Pointer(uintptr(1))), hugeLen)
-	if n, err := EncodeAppsLookupRawResponse(hugeItems, 0, nil); n != 0 || !errors.Is(err, ErrOverflow) {
-		t.Fatalf("huge apps raw response = n %d err %v, want 0 ErrOverflow", n, err)
+	if _, _, ok := lookupRawResponseMinBytes(AppsLookupRespHdr, hugeLen); ok {
+		t.Fatal("huge apps raw response count should overflow")
 	}
-	if n, err := EncodeCgroupsLookupRawResponse(hugeItems, 0, nil); n != 0 || !errors.Is(err, ErrOverflow) {
-		t.Fatalf("huge cgroups raw response = n %d err %v, want 0 ErrOverflow", n, err)
+	if _, _, ok := lookupRawResponseMinBytes(CgroupsLookupRespHdr, hugeLen); ok {
+		t.Fatal("huge cgroups raw response count should overflow")
 	}
 }
 
@@ -1043,11 +1210,15 @@ func TestLookupViewsRejectCorruptDirectPayloads(t *testing.T) {
 }
 
 func TestLookupCommonHelperErrorGuards(t *testing.T) {
-	if err := validateLookupDir(make([]byte, 16), 0, 0, 0, int(uint64(^uint32(0))+1), -1); !errors.Is(err, ErrBadLayout) {
-		t.Fatalf("validateLookupDir minLen conversion error = %v, want ErrBadLayout", err)
-	}
-	if err := validateLookupDir(make([]byte, 16), 0, 0, 0, -1, int(uint64(^uint32(0))+1)); !errors.Is(err, ErrBadLayout) {
-		t.Fatalf("validateLookupDir exactLen conversion error = %v, want ErrBadLayout", err)
+	if strconv.IntSize >= 64 {
+		maxU32Value := ^uint32(0)
+		overU32 := int(uint64(maxU32Value) + 1)
+		if err := validateLookupDir(make([]byte, 16), 0, 0, 0, overU32, -1); !errors.Is(err, ErrBadLayout) {
+			t.Fatalf("validateLookupDir minLen conversion error = %v, want ErrBadLayout", err)
+		}
+		if err := validateLookupDir(make([]byte, 16), 0, 0, 0, -1, overU32); !errors.Is(err, ErrBadLayout) {
+			t.Fatalf("validateLookupDir exactLen conversion error = %v, want ErrBadLayout", err)
+		}
 	}
 
 	padding := make([]byte, 24)
@@ -1114,13 +1285,15 @@ func TestLookupCommonHelperErrorGuards(t *testing.T) {
 	}
 
 	if strconv.IntSize >= 64 {
-		var sentinel byte
-		hugeBytes := unsafe.Slice(&sentinel, maxIntValue())
-		if _, err := writeLookupLabels(make([]byte, 64), 0, 16, []struct{ Key, Value []byte }{{Key: hugeBytes}}); !errors.Is(err, ErrOverflow) {
-			t.Fatalf("writeLookupLabels key length overflow = %v, want ErrOverflow", err)
+		if _, _, _, _, _, _, ok := lookupLabelWriteLayout(16, maxIntValue(), 0); ok {
+			t.Fatal("writeLookupLabels key length should overflow")
 		}
-		if n, err := encodeLookupRawResponse(make([]byte, 64), AppsLookupRespHdr, 0, [][]byte{hugeBytes}, 1, nil); n != 0 || !errors.Is(err, ErrOverflow) {
-			t.Fatalf("raw response huge item = n %d err %v, want 0 ErrOverflow", n, err)
+		_, dataOffset, ok := lookupRawResponseMinBytes(AppsLookupRespHdr, 1)
+		if !ok {
+			t.Fatal("one-item raw response minimum should fit")
+		}
+		if _, _, ok := lookupRawResponseItemBounds(dataOffset, maxIntValue()); ok {
+			t.Fatal("raw response huge item should overflow")
 		}
 	}
 }
@@ -1208,8 +1381,7 @@ func TestLookupBuildersRejectHugeLabelCounts(t *testing.T) {
 		t.Skip("synthetic huge label-count guard requires 64-bit int")
 	}
 
-	var labelSentinel struct{ Key, Value []byte }
-	hugeLabels := unsafe.Slice(&labelSentinel, int(^uint16(0))+1)
+	hugeLabels := make([]struct{ Key, Value []byte }, int(^uint16(0))+1)
 
 	var appsBuf [AppsLookupRespHdr + LookupDirEntrySize + appsLookupUnknownItemSize]byte
 	apps := NewAppsLookupBuilder(appsBuf[:], 1, 0)
@@ -1344,24 +1516,23 @@ func TestCgroupsSnapshotAdditionalGuardCoverage(t *testing.T) {
 		t.Skip("synthetic snapshot overflow guards require 64-bit int")
 	}
 
-	var sentinel byte
-	fakeBuf := unsafe.Slice(&sentinel, maxIntValue())
-	tooLarge := unsafe.Slice(&sentinel, int(uint64(^uint32(0))+1))
-	maxU32Bytes := unsafe.Slice(&sentinel, int(^uint32(0)))
+	maxU32Value := ^uint32(0)
+	tooLarge := int(uint64(maxU32Value) + 1)
+	maxU32Bytes := int(maxU32Value)
 
-	if err := (&CgroupsBuilder{buf: fakeBuf, maxItems: 1, dataOffset: cgroupsRespHdr + cgroupsDirEntry}).Add(1, 0, 1, tooLarge, nil); !errors.Is(err, ErrOverflow) {
-		t.Fatalf("snapshot huge name error = %v, want ErrOverflow", err)
+	if _, _, _, ok := cgroupsItemLayoutForLengths(tooLarge, 0); ok {
+		t.Fatal("snapshot huge name layout should overflow")
 	}
-	if err := (&CgroupsBuilder{buf: fakeBuf, maxItems: 1, dataOffset: cgroupsRespHdr + cgroupsDirEntry}).Add(1, 0, 1, nil, tooLarge); !errors.Is(err, ErrOverflow) {
-		t.Fatalf("snapshot huge path error = %v, want ErrOverflow", err)
+	if _, _, _, ok := cgroupsItemLayoutForLengths(0, tooLarge); ok {
+		t.Fatal("snapshot huge path layout should overflow")
 	}
-	if err := (&CgroupsBuilder{buf: fakeBuf, maxItems: 1, dataOffset: cgroupsRespHdr + cgroupsDirEntry}).Add(1, 0, 1, maxU32Bytes, []byte("p")); !errors.Is(err, ErrOverflow) {
-		t.Fatalf("snapshot path-offset overflow error = %v, want ErrOverflow", err)
+	if _, _, _, ok := cgroupsItemLayoutForLengths(maxU32Bytes, len("p")); ok {
+		t.Fatal("snapshot path-offset layout should overflow")
 	}
-	if err := (&CgroupsBuilder{buf: fakeBuf, maxItems: 1, dataOffset: cgroupsRespHdr + cgroupsDirEntry}).Add(1, 0, 1, nil, maxU32Bytes); !errors.Is(err, ErrOverflow) {
-		t.Fatalf("snapshot item-size overflow error = %v, want ErrOverflow", err)
+	if _, _, _, ok := cgroupsItemLayoutForLengths(0, maxU32Bytes); ok {
+		t.Fatal("snapshot item-size layout should overflow")
 	}
-	if err := (&CgroupsBuilder{buf: fakeBuf, maxItems: 1, dataOffset: maxIntValue()}).Add(1, 0, 1, []byte("n"), []byte("p")); !errors.Is(err, ErrOverflow) {
+	if err := (&CgroupsBuilder{buf: make([]byte, cgroupsRespHdr+cgroupsDirEntry), maxItems: 1, dataOffset: maxIntValue()}).Add(1, 0, 1, []byte("n"), []byte("p")); !errors.Is(err, ErrOverflow) {
 		t.Fatalf("snapshot data-offset overflow error = %v, want ErrOverflow", err)
 	}
 }
@@ -1415,11 +1586,9 @@ func TestProtocolFinalizerAndDispatchGuards(t *testing.T) {
 	}
 
 	if strconv.IntSize >= 64 {
-		var sentinel byte
-		huge := unsafe.String(&sentinel, int(uint64(^uint32(0))+1))
-		buf := unsafe.Slice(&sentinel, maxIntValue())
-		if n := StringReverseEncode(huge, buf); n != 0 {
-			t.Fatalf("huge string reverse encode = %d, want 0", n)
+		maxU32Value := ^uint32(0)
+		if _, ok := stringReverseEncodedLen(int(uint64(maxU32Value) + 1)); ok {
+			t.Fatal("huge string reverse length should overflow")
 		}
 	}
 }
@@ -1626,12 +1795,7 @@ func TestLookupLabelSyntheticOverflowGuards(t *testing.T) {
 	}
 
 	maxInt := maxIntValue()
-	var hugeLabels []struct{ Key, Value []byte }
-	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&hugeLabels))
-	hdr.Data = uintptr(unsafe.Pointer(&lookupTestFakeLabel))
-	hdr.Len = maxInt/LookupLabelEntrySize + 1
-	hdr.Cap = hdr.Len
-	if _, _, _, err := labelLayoutGo(16, hugeLabels); !errors.Is(err, ErrOverflow) {
+	if _, _, _, err := labelLayoutPrefix(16, maxInt/LookupLabelEntrySize+1); !errors.Is(err, ErrOverflow) {
 		t.Fatalf("huge label table layout = %v, want ErrOverflow", err)
 	}
 
@@ -1642,13 +1806,13 @@ func TestLookupLabelSyntheticOverflowGuards(t *testing.T) {
 		t.Fatalf("label layout item-size overflow = %v, want ErrOverflow", err)
 	}
 
-	var byteSentinel byte
-	hugeBytes := unsafe.Slice(&byteSentinel, int(uint64(^uint32(0))+1))
-	if _, err := writeLookupLabels(make([]byte, 64), 16, LookupLabelEntrySize, []struct{ Key, Value []byte }{{Key: hugeBytes}}); !errors.Is(err, ErrOverflow) {
-		t.Fatalf("huge label key write = %v, want ErrOverflow", err)
+	maxU32Value := ^uint32(0)
+	hugeBytes := int(uint64(maxU32Value) + 1)
+	if _, _, _, _, _, _, ok := lookupLabelWriteLayout(16, hugeBytes, 0); ok {
+		t.Fatal("huge label key write should overflow")
 	}
-	if _, err := writeLookupLabels(make([]byte, 64), 16, LookupLabelEntrySize, []struct{ Key, Value []byte }{{Key: []byte("k"), Value: hugeBytes}}); !errors.Is(err, ErrOverflow) {
-		t.Fatalf("huge label value write = %v, want ErrOverflow", err)
+	if _, _, _, _, _, _, ok := lookupLabelWriteLayout(16, 1, hugeBytes); ok {
+		t.Fatal("huge label value write should overflow")
 	}
 }
 
@@ -1674,5 +1838,108 @@ func TestLookupRawResponseGuardEdges(t *testing.T) {
 	}
 	if _, err := EncodeAppsLookupRawResponse([][]byte{make([]byte, AppsLookupItemHdr)}, 1, make([]byte, 128)); !errors.Is(err, ErrBadLayout) {
 		t.Fatalf("raw response invalid item = %v, want ErrBadLayout", err)
+	}
+}
+
+func TestLookupThirtyTwoBitGuardCoverage(t *testing.T) {
+	if strconv.IntSize != 32 {
+		t.Skip("32-bit integer guard coverage requires GOARCH=386")
+	}
+
+	overMaxInt := uint32(maxIntValue()) + 1
+	var dir [LookupDirEntrySize]byte
+	ne.PutUint32(dir[0:4], overMaxInt)
+	ne.PutUint32(dir[4:8], 0)
+	if _, err := checkedWireU32Int(dir[:], 0); !errors.Is(err, ErrOutOfBounds) {
+		t.Fatalf("checkedWireU32Int over int range = %v, want ErrOutOfBounds", err)
+	}
+	if _, _, err := lookupDirEntry(dir[:], 0); !errors.Is(err, ErrOutOfBounds) {
+		t.Fatalf("lookupDirEntry offset over int range = %v, want ErrOutOfBounds", err)
+	}
+	ne.PutUint32(dir[0:4], 0)
+	ne.PutUint32(dir[4:8], overMaxInt)
+	if _, _, err := lookupDirEntry(dir[:], 0); !errors.Is(err, ErrOutOfBounds) {
+		t.Fatalf("lookupDirEntry length over int range = %v, want ErrOutOfBounds", err)
+	}
+
+	hugeLookupItems := uint32(maxIntValue()/LookupDirEntrySize) + 1
+	if _, ok := lookupBuilderDataOffset(AppsLookupRespHdr, hugeLookupItems); ok {
+		t.Fatal("lookupBuilderDataOffset huge item count should fail on 32-bit")
+	}
+	if _, ok := lookupDirOffset(AppsLookupRespHdr, hugeLookupItems); ok {
+		t.Fatal("lookupDirOffset huge index should fail on 32-bit")
+	}
+
+	if _, err := BatchDirDecode(nil, hugeLookupItems, 0); !errors.Is(err, ErrBadItemCount) {
+		t.Fatalf("BatchDirDecode huge item count = %v, want ErrBadItemCount", err)
+	}
+	if err := BatchDirValidate(nil, hugeLookupItems, 0); !errors.Is(err, ErrBadItemCount) {
+		t.Fatalf("BatchDirValidate huge item count = %v, want ErrBadItemCount", err)
+	}
+	if _, err := BatchItemGet([]byte{0}, hugeLookupItems, 0); !errors.Is(err, ErrBadItemCount) {
+		t.Fatalf("BatchItemGet huge item count = %v, want ErrBadItemCount", err)
+	}
+
+	var batch BatchBuilder
+	batch.Reset(nil, hugeLookupItems)
+	if batch.dirEnd != maxIntValue() || batch.dataOffset != 0 {
+		t.Fatalf("BatchBuilder huge reset = dirEnd %d dataOffset %d", batch.dirEnd, batch.dataOffset)
+	}
+
+	if got := payloadExceededSuffixFits(0, 0, nil, 0, hugeLookupItems); !got {
+		t.Fatal("payloadExceededSuffixFits should ignore unrepresentable maxItems")
+	}
+	if got := payloadExceededSuffixFits(0, 0, make([]int, 1), overMaxInt, 1); got {
+		t.Fatal("payloadExceededSuffixFits should reject unrepresentable first index")
+	}
+
+	appsReq := make([]byte, AppsLookupReqHdr)
+	ne.PutUint16(appsReq[0:2], 1)
+	ne.PutUint32(appsReq[4:8], hugeLookupItems)
+	if _, err := DecodeAppsLookupRequest(appsReq); !errors.Is(err, ErrBadItemCount) {
+		t.Fatalf("DecodeAppsLookupRequest huge item count = %v, want ErrBadItemCount", err)
+	}
+	if _, err := (&AppsLookupRequestView{ItemCount: hugeLookupItems, payload: appsReq}).Item(0); !errors.Is(err, ErrOverflow) {
+		t.Fatalf("AppsLookupRequestView.Item huge item count = %v, want ErrOverflow", err)
+	}
+
+	appsResp := make([]byte, AppsLookupRespHdr)
+	ne.PutUint16(appsResp[0:2], 1)
+	ne.PutUint32(appsResp[4:8], hugeLookupItems)
+	if _, err := DecodeAppsLookupResponse(appsResp); !errors.Is(err, ErrBadItemCount) {
+		t.Fatalf("DecodeAppsLookupResponse huge item count = %v, want ErrBadItemCount", err)
+	}
+	if _, err := (&AppsLookupResponseView{ItemCount: hugeLookupItems, payload: appsResp}).Item(0); !errors.Is(err, ErrOverflow) {
+		t.Fatalf("AppsLookupResponseView.Item huge item count = %v, want ErrOverflow", err)
+	}
+
+	cgroupsReq := make([]byte, CgroupsLookupReqHdr)
+	ne.PutUint16(cgroupsReq[0:2], 1)
+	ne.PutUint32(cgroupsReq[4:8], hugeLookupItems)
+	if _, err := DecodeCgroupsLookupRequest(cgroupsReq); !errors.Is(err, ErrBadItemCount) {
+		t.Fatalf("DecodeCgroupsLookupRequest huge item count = %v, want ErrBadItemCount", err)
+	}
+	if _, err := (&CgroupsLookupRequestView{ItemCount: hugeLookupItems, payload: cgroupsReq}).Item(0); !errors.Is(err, ErrOverflow) {
+		t.Fatalf("CgroupsLookupRequestView.Item huge item count = %v, want ErrOverflow", err)
+	}
+
+	cgroupsResp := make([]byte, CgroupsLookupRespHdr)
+	ne.PutUint16(cgroupsResp[0:2], 1)
+	ne.PutUint32(cgroupsResp[4:8], hugeLookupItems)
+	if _, err := DecodeCgroupsLookupResponse(cgroupsResp); !errors.Is(err, ErrBadItemCount) {
+		t.Fatalf("DecodeCgroupsLookupResponse huge item count = %v, want ErrBadItemCount", err)
+	}
+	if _, err := (&CgroupsLookupResponseView{ItemCount: hugeLookupItems, payload: cgroupsResp}).Item(0); !errors.Is(err, ErrOverflow) {
+		t.Fatalf("CgroupsLookupResponseView.Item huge item count = %v, want ErrOverflow", err)
+	}
+
+	cgroupsSnapshotResp := make([]byte, cgroupsRespHdr)
+	ne.PutUint16(cgroupsSnapshotResp[0:2], 1)
+	ne.PutUint32(cgroupsSnapshotResp[4:8], uint32(maxIntValue()/cgroupsDirEntry)+1)
+	if _, err := DecodeCgroupsResponse(cgroupsSnapshotResp); !errors.Is(err, ErrBadItemCount) {
+		t.Fatalf("DecodeCgroupsResponse huge item count = %v, want ErrBadItemCount", err)
+	}
+	if _, err := (&CgroupsResponseView{ItemCount: uint32(maxIntValue()/cgroupsDirEntry) + 1, payload: cgroupsSnapshotResp}).Item(0); !errors.Is(err, ErrBadItemCount) {
+		t.Fatalf("CgroupsResponseView.Item huge item count = %v, want ErrBadItemCount", err)
 	}
 }

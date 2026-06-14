@@ -3,11 +3,9 @@ package raw
 import (
 	"encoding/binary"
 	"errors"
-	"reflect"
 	"strconv"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 )
@@ -150,46 +148,76 @@ func TestLookupSyntheticOverflowSizingGuards(t *testing.T) {
 	maxInt := int(^uint(0) >> 1)
 
 	hugePidCount := maxInt/protocol.LookupDirEntrySize + 1
-	hugePids := unsafe.Slice((*uint32)(unsafe.Pointer(uintptr(1))), hugePidCount)
-	if _, err := appsLookupRequestSize(hugePids); !errors.Is(err, protocol.ErrOverflow) {
+	if _, err := appsLookupRequestSizeForCount(hugePidCount); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("apps huge request size error = %v, want ErrOverflow", err)
 	}
-	var pidSentinel uint32
-	hugeHeaderPids := unsafe.Slice(&pidSentinel, maxInt/protocol.LookupDirEntrySize)
-	if _, err := appsLookupRequestSize(hugeHeaderPids); !errors.Is(err, protocol.ErrOverflow) {
+	if _, err := appsLookupRequestSizeForCount(maxInt / protocol.LookupDirEntrySize); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("apps request header-size overflow error = %v, want ErrOverflow", err)
 	}
 
-	var byteSentinel byte
-	hugePath := unsafe.Slice(&byteSentinel, maxInt)
-	if _, err := cgroupsLookupRequestSize([][]byte{hugePath}); !errors.Is(err, protocol.ErrOverflow) {
+	hugePathLen := maxInt
+	if _, err := cgroupsLookupRequestSizeForLengths([]int{hugePathLen}); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("cgroups huge request size error = %v, want ErrOverflow", err)
 	}
-	if _, err := cgroupsLookupOversizedRequestItem(hugePath); !errors.Is(err, protocol.ErrOverflow) {
+	if _, err := cgroupsLookupOversizedRequestItemSize(hugePathLen); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("cgroups huge oversized-item synthesis error = %v, want ErrOverflow", err)
 	}
-	if _, err := lookupRawResponseSize(protocol.CgroupsLookupRespHdr, [][]byte{hugePath}); !errors.Is(err, protocol.ErrOverflow) {
+	if _, err := lookupRawResponseSizeForLengths(protocol.CgroupsLookupRespHdr, []int{hugePathLen}); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("huge raw response item size error = %v, want ErrOverflow", err)
 	}
 
 	cgroupsOneItemBase := protocol.CgroupsLookupReqHdr + protocol.LookupDirEntrySize
-	addOneOverflowPath := unsafe.Slice(&byteSentinel, maxInt-cgroupsOneItemBase)
-	if _, err := cgroupsLookupRequestSize([][]byte{addOneOverflowPath}); !errors.Is(err, protocol.ErrOverflow) {
+	addOneOverflowPathLen := maxInt - cgroupsOneItemBase
+	if _, err := cgroupsLookupRequestSizeForLengths([]int{addOneOverflowPathLen}); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("cgroups request NUL-size overflow error = %v, want ErrOverflow", err)
 	}
 	cgroupsTwoItemBase := protocol.CgroupsLookupReqHdr + 2*protocol.LookupDirEntrySize
-	alignOverflowPath := unsafe.Slice(&byteSentinel, maxInt-cgroupsTwoItemBase-4)
-	if _, err := cgroupsLookupRequestSize([][]byte{alignOverflowPath, []byte("x")}); !errors.Is(err, protocol.ErrOverflow) {
+	alignOverflowPathLen := maxInt - cgroupsTwoItemBase - 4
+	if _, err := cgroupsLookupRequestSizeForLengths([]int{alignOverflowPathLen, len("x")}); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("cgroups request next-item align overflow error = %v, want ErrOverflow", err)
 	}
 
-	var hugeItems [][]byte
-	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&hugeItems))
-	hdr.Data = 1
-	hdr.Len = hugePidCount
-	hdr.Cap = hugePidCount
-	if _, err := lookupRawResponseSize(protocol.CgroupsLookupRespHdr, hugeItems); !errors.Is(err, protocol.ErrOverflow) {
+	if _, err := lookupRawResponseSizeForCount(protocol.CgroupsLookupRespHdr, hugePidCount, func(int) int {
+		return 0
+	}); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("huge raw response item count error = %v, want ErrOverflow", err)
+	}
+
+	if _, err := appsLookupRequestSizeForCount(maxInt/protocol.AppsLookupKeySize + 1); !errors.Is(err, protocol.ErrOverflow) {
+		t.Fatalf("apps request key-size overflow error = %v, want ErrOverflow", err)
+	}
+	if _, err := cgroupsLookupRequestSizeForCount(-1, func(int) int { return 0 }); !errors.Is(err, protocol.ErrOverflow) {
+		t.Fatalf("cgroups negative item count error = %v, want ErrOverflow", err)
+	}
+	if _, err := cgroupsLookupRequestSizeForLengths([]int{-1}); !errors.Is(err, protocol.ErrOverflow) {
+		t.Fatalf("cgroups negative path length error = %v, want ErrOverflow", err)
+	}
+	if _, err := cgroupsLookupRequestSizeForCount(1, func(int) int { return maxInt }); !errors.Is(err, protocol.ErrOverflow) {
+		t.Fatalf("cgroups path-size overflow error = %v, want ErrOverflow", err)
+	}
+	if _, err := cgroupsLookupOversizedRequestItemSize(-1); !errors.Is(err, protocol.ErrOverflow) {
+		t.Fatalf("cgroups negative oversized item path error = %v, want ErrOverflow", err)
+	}
+	if _, err := cgroupsLookupOversizedRequestItemSize(maxInt); !errors.Is(err, protocol.ErrOverflow) {
+		t.Fatalf("cgroups oversized item path-size overflow error = %v, want ErrOverflow", err)
+	}
+	if _, err := lookupRawResponseSizeForCount(-1, 1, func(int) int { return 0 }); !errors.Is(err, protocol.ErrOverflow) {
+		t.Fatalf("negative raw response header error = %v, want ErrOverflow", err)
+	}
+	if _, err := lookupRawResponseSizeForCount(protocol.CgroupsLookupRespHdr, -1, func(int) int { return 0 }); !errors.Is(err, protocol.ErrOverflow) {
+		t.Fatalf("negative raw response item count error = %v, want ErrOverflow", err)
+	}
+	if _, err := lookupRawResponseSizeForCount(protocol.CgroupsLookupRespHdr, 1, func(int) int { return -1 }); !errors.Is(err, protocol.ErrOverflow) {
+		t.Fatalf("negative raw response item length error = %v, want ErrOverflow", err)
+	}
+	if lookupSizeWithinLimit(-1, 1) {
+		t.Fatal("negative lookup size should not fit")
+	}
+	if !lookupSizeExceedsLimit(-1, 1) {
+		t.Fatal("negative lookup size should exceed limit")
+	}
+	if _, err := incrementBatchRequestSize(-1); !errors.Is(err, protocol.ErrOverflow) {
+		t.Fatalf("negative increment batch size error = %v, want ErrOverflow", err)
 	}
 }
 
@@ -364,6 +392,15 @@ func TestLookupReadyAndCapacityGuards(t *testing.T) {
 	if err := client.ensureLookupRequestCapacity(16); err != nil {
 		t.Fatalf("sessionless request capacity = %v", err)
 	}
+
+	client = &Client{abortCh: make(chan struct{}), state: StateReady}
+	client.Abort()
+	if err := client.ensureLookupRequestCapacity(1); !errors.Is(err, protocol.ErrAborted) {
+		t.Fatalf("aborted capacity growth error = %v, want ErrAborted", err)
+	}
+	if client.state != StateBroken || client.errorCount != 1 {
+		t.Fatalf("aborted capacity growth state/error = %d/%d, want broken/1", client.state, client.errorCount)
+	}
 }
 
 func TestLookupWrongMethodFailsBeforeTransport(t *testing.T) {
@@ -403,10 +440,7 @@ func TestIncrementBatchRejectsUnrepresentableItemCount(t *testing.T) {
 	if strconv.IntSize < 64 {
 		t.Skip("synthetic oversized slice guard requires 64-bit int")
 	}
-	var sentinel uint64
-	hugeValues := unsafe.Slice(&sentinel, int(uint64(^uint32(0))+1))
-	client := NewIncrementClient("", "", testLookupClientConfig())
-	if _, err := client.CallIncrementBatch(hugeValues); !errors.Is(err, protocol.ErrOverflow) {
+	if _, err := incrementBatchRequestSize(int(uint64(^uint32(0)) + 1)); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("huge increment batch error = %v, want ErrOverflow", err)
 	}
 }

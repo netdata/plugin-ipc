@@ -974,6 +974,16 @@ func TestLookupRequestCapacityReconnectPaths(t *testing.T) {
 		t.Fatalf("already-large session capacity = %v", err)
 	}
 
+	ts.stop()
+	cleanupAll(svc)
+	client.session.MaxRequestPayloadBytes = 64
+	if err := client.ensureLookupRequestCapacity(128); !errors.Is(err, protocol.ErrOverflow) {
+		t.Fatalf("capacity reconnect to stopped service = %v, want ErrOverflow", err)
+	}
+	if client.state == StateReady {
+		t.Fatal("client should not stay ready after failed capacity reconnect")
+	}
+
 	missing := NewAppsLookupClient(testRunDir, uniqueUnixService("go_svc_lookup_request_capacity_missing"), ccfg)
 	defer missing.Close()
 	missing.state = StateReady

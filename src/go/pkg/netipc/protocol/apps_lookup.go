@@ -123,22 +123,11 @@ func validateAppsLookupKnown(v appsLookupSemantics) error {
 
 func EncodeAppsLookupRequest(pids []uint32, buf []byte) (int, error) {
 	count := len(pids)
-	if uint64(count) > uint64(^uint32(0)) {
-		return 0, ErrOverflow
-	}
-	dirSize, ok := checkedMulInt(count, LookupDirEntrySize)
+	count32, ok := checkedU32Int(count)
 	if !ok {
 		return 0, ErrOverflow
 	}
-	keySize, ok := checkedMulInt(count, AppsLookupKeySize)
-	if !ok {
-		return 0, ErrOverflow
-	}
-	packedStart, ok := checkedAddInt(AppsLookupReqHdr, dirSize)
-	if !ok {
-		return 0, ErrOverflow
-	}
-	total, ok := checkedAddInt(packedStart, keySize)
+	packedStart, total, ok := appsLookupRequestLayoutForCount(count)
 	if !ok {
 		return 0, ErrOverflow
 	}
@@ -159,10 +148,33 @@ func EncodeAppsLookupRequest(pids []uint32, buf []byte) (int, error) {
 	}
 	ne.PutUint16(buf[0:2], 1)
 	ne.PutUint16(buf[2:4], 0)
-	ne.PutUint32(buf[4:8], uint32(count))
+	ne.PutUint32(buf[4:8], count32)
 	ne.PutUint32(buf[8:12], 0)
 	ne.PutUint32(buf[12:16], 0)
 	return total, nil
+}
+
+func appsLookupRequestLayoutForCount(count int) (packedStart, total int, ok bool) {
+	if count < 0 || uint64(count) > uint64(^uint32(0)) {
+		return 0, 0, false
+	}
+	dirSize, ok := checkedMulInt(count, LookupDirEntrySize)
+	if !ok {
+		return 0, 0, false
+	}
+	keySize, ok := checkedMulInt(count, AppsLookupKeySize)
+	if !ok {
+		return 0, 0, false
+	}
+	packedStart, ok = checkedAddInt(AppsLookupReqHdr, dirSize)
+	if !ok {
+		return 0, 0, false
+	}
+	total, ok = checkedAddInt(packedStart, keySize)
+	if !ok {
+		return 0, 0, false
+	}
+	return packedStart, total, true
 }
 
 func DecodeAppsLookupRequest(buf []byte) (*AppsLookupRequestView, error) {

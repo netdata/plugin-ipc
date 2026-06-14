@@ -3,11 +3,11 @@
 package raw
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 )
@@ -343,17 +343,12 @@ func TestCacheOverflowGuards(t *testing.T) {
 		t.Skip("oversized slice-header guard requires 64-bit int")
 	}
 
-	cache := newCache(&Client{state: StateReady, abortCh: make(chan struct{})})
-	cache.populated = true
-	cache.buckets = unsafe.Slice((*cacheBucket)(unsafe.Pointer(uintptr(1))), int(uint64(^uint32(0))+2))
-	if _, found := cache.Lookup(1, "missing"); found {
-		t.Fatal("lookup with unrepresentable bucket count should fail closed")
+	if _, err := cacheBucketMaskForLen(int(uint64(^uint32(0)) + 2)); !errors.Is(err, protocol.ErrOverflow) {
+		t.Fatalf("unrepresentable bucket count error = %v, want ErrOverflow", err)
 	}
 
-	cache.items = unsafe.Slice((*CacheItem)(unsafe.Pointer(uintptr(1))), int(uint64(^uint32(0))+1))
-	status := cache.Status()
-	if status.ItemCount != ^uint32(0) {
-		t.Fatalf("overflow status item count = %d, want uint32 max", status.ItemCount)
+	if got := cacheStatusItemCountForLen(int(uint64(^uint32(0)) + 1)); got != ^uint32(0) {
+		t.Fatalf("overflow status item count = %d, want uint32 max", got)
 	}
 }
 

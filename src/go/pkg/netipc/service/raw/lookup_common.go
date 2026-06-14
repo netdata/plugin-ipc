@@ -53,6 +53,12 @@ func (c *Client) ensureReadyForLogicalLookup() error {
 }
 
 func (c *Client) ensureLookupRequestCapacity(required int) error {
+	if c.abortRequested.Load() {
+		c.disconnect()
+		c.state = StateBroken
+		c.errorCount++
+		return protocol.ErrAborted
+	}
 	if required < 0 || uint64(required) > uint64(^uint32(0)) {
 		return protocol.ErrOverflow
 	}
@@ -154,7 +160,19 @@ func cloneLookupRawItem(item []byte) []byte {
 }
 
 func lookupRawResponseSize(hdrSize int, items [][]byte) (int, error) {
-	dirSize, err := checkedLookupMul(len(items), protocol.LookupDirEntrySize)
+	return lookupRawResponseSizeForCount(hdrSize, len(items), func(i int) int {
+		return len(items[i])
+	})
+}
+
+func lookupRawResponseSizeForLengths(hdrSize int, itemLens []int) (int, error) {
+	return lookupRawResponseSizeForCount(hdrSize, len(itemLens), func(i int) int {
+		return itemLens[i]
+	})
+}
+
+func lookupRawResponseSizeForCount(hdrSize, count int, itemLenAt func(int) int) (int, error) {
+	dirSize, err := checkedLookupMul(count, protocol.LookupDirEntrySize)
 	if err != nil {
 		return 0, err
 	}
@@ -162,15 +180,25 @@ func lookupRawResponseSize(hdrSize int, items [][]byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	for _, item := range items {
+	for i := 0; i < count; i++ {
 		data, err = checkedLookupAlign8(data)
 		if err != nil {
 			return 0, err
 		}
-		data, err = checkedLookupAdd(data, len(item))
+		data, err = checkedLookupAdd(data, itemLenAt(i))
 		if err != nil {
 			return 0, err
 		}
 	}
 	return data, nil
+}
+
+func lookupSizeWithinLimit(size int, limit uint32) bool {
+	size32, err := checkedLookupU32(size)
+	return err == nil && size32 <= limit
+}
+
+func lookupSizeExceedsLimit(size int, limit uint32) bool {
+	size32, err := checkedLookupU32(size)
+	return err != nil || size32 > limit
 }

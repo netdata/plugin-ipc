@@ -438,6 +438,14 @@ func (b *BatchBuilder) Add(item []byte) error {
 	if !ok {
 		return ErrOverflow
 	}
+	alignedOff32, ok := checkedU32Int(alignedOff)
+	if !ok {
+		return ErrOverflow
+	}
+	itemLen32, ok := checkedU32Int(len(item))
+	if !ok {
+		return ErrOverflow
+	}
 	absPos, ok := checkedAddInt(b.dirEnd, alignedOff)
 	if !ok {
 		return ErrOverflow
@@ -465,14 +473,6 @@ func (b *BatchBuilder) Add(item []byte) error {
 
 	// Write directory entry.
 	idx, ok := checkedInt(uint64(b.itemCount) * 8)
-	if !ok {
-		return ErrOverflow
-	}
-	alignedOff32, ok := checkedU32Int(alignedOff)
-	if !ok {
-		return ErrOverflow
-	}
-	itemLen32, ok := checkedU32Int(len(item))
 	if !ok {
 		return ErrOverflow
 	}

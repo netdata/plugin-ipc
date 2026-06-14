@@ -25,6 +25,7 @@ type Server struct {
 	nextSessionID                atomic.Uint64
 	workerCount                  int
 	wg                           sync.WaitGroup
+	listenerMu                   sync.Mutex
 	listener                     *windows.Listener // stored so Stop() can close it
 }
 
@@ -151,11 +152,8 @@ func (s *Server) Run() error {
 	if err != nil {
 		return err
 	}
-	s.listener = listener
-	defer func() {
-		listener.Close()
-		s.listener = nil
-	}()
+	s.setListener(listener)
+	defer s.closeListener(listener)
 
 	s.running.Store(true)
 	sem := make(chan struct{}, s.workerCount)
@@ -216,8 +214,28 @@ func (s *Server) Run() error {
 // Stop signals the server to stop and unblocks Accept by closing the listener.
 func (s *Server) Stop() {
 	s.running.Store(false)
-	if s.listener != nil {
-		s.listener.Close()
+	s.closeListener(nil)
+}
+
+func (s *Server) setListener(listener *windows.Listener) {
+	s.listenerMu.Lock()
+	s.listener = listener
+	s.listenerMu.Unlock()
+}
+
+func (s *Server) closeListener(listener *windows.Listener) {
+	s.listenerMu.Lock()
+	target := listener
+	if target == nil {
+		target = s.listener
+	}
+	if target != nil && s.listener == target {
+		s.listener = nil
+	}
+	s.listenerMu.Unlock()
+
+	if target != nil {
+		target.Close()
 	}
 }
 

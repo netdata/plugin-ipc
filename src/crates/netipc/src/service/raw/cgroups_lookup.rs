@@ -165,66 +165,68 @@ impl RawClient {
                 RawCallKind::single(),
                 remaining_timeout,
             )?;
-            let view = CgroupsLookupResponseView::decode(self.response_payload(response)?)?;
-            if let Some(expected_generation) = generation {
-                if view.generation != expected_generation {
-                    return Err(NipcError::BadLayout);
-                }
-            } else {
-                generation = Some(view.generation);
-            }
-            if view.item_count != req_paths.len() as u32 {
-                return Err(NipcError::BadItemCount);
-            }
-            let mut payload_exceeded_at: Option<usize> = None;
-            for (i, expected) in req_paths.iter().enumerate() {
-                let item = view.item(i as u32)?;
-                if item.path.as_bytes() != *expected {
-                    return Err(NipcError::BadLayout);
-                }
-                if item.status == CGROUP_LOOKUP_PAYLOAD_EXCEEDED {
-                    payload_exceeded_at = Some(i);
-                    break;
-                }
-                raw_items.push(view.raw_item(i as u32)?.to_vec());
-            }
-            if let Some(first) = payload_exceeded_at {
-                for (i, expected) in req_paths.iter().enumerate().skip(first) {
-                    let item = view.item(i as u32)?;
-                    if item.path.as_bytes() != *expected
-                        || item.status != CGROUP_LOOKUP_PAYLOAD_EXCEEDED
-                    {
+            let final_size = {
+                let view = CgroupsLookupResponseView::decode(self.response_payload(response)?)?;
+                if let Some(expected_generation) = generation {
+                    if view.generation != expected_generation {
                         return Err(NipcError::BadLayout);
                     }
+                } else {
+                    generation = Some(view.generation);
                 }
-                if first == 0 {
+                if view.item_count != req_paths.len() as u32 {
+                    return Err(NipcError::BadItemCount);
+                }
+                let mut payload_exceeded_at: Option<usize> = None;
+                for (i, expected) in req_paths.iter().enumerate() {
+                    let item = view.item(i as u32)?;
+                    if item.path.as_bytes() != *expected {
+                        return Err(NipcError::BadLayout);
+                    }
+                    if item.status == CGROUP_LOOKUP_PAYLOAD_EXCEEDED {
+                        payload_exceeded_at = Some(i);
+                        break;
+                    }
+                    raw_items.push(view.raw_item(i as u32)?.to_vec());
+                }
+                if let Some(first) = payload_exceeded_at {
+                    for (i, expected) in req_paths.iter().enumerate().skip(first) {
+                        let item = view.item(i as u32)?;
+                        if item.path.as_bytes() != *expected
+                            || item.status != CGROUP_LOOKUP_PAYLOAD_EXCEEDED
+                        {
+                            return Err(NipcError::BadLayout);
+                        }
+                    }
+                    if first == 0 {
+                        return Err(NipcError::Overflow);
+                    }
+                    start += first;
+                    continue;
+                }
+                start += req_count;
+                if start < paths.len() {
+                    continue;
+                }
+                if raw_items.len() != paths.len() {
+                    return Err(NipcError::BadItemCount);
+                }
+                let size = lookup_raw_response_size(
+                    CGROUPS_LOOKUP_RESP_HDR_SIZE,
+                    raw_items.len(),
+                    &raw_items,
+                )?;
+                if size > self.max_logical_lookup_response_bytes as usize {
                     return Err(NipcError::Overflow);
                 }
-                start += first;
-                continue;
-            }
-            start += req_count;
-            if start < paths.len() {
-                continue;
-            }
-            if raw_items.len() != paths.len() {
-                return Err(NipcError::BadItemCount);
-            }
-            let size = lookup_raw_response_size(
-                CGROUPS_LOOKUP_RESP_HDR_SIZE,
-                raw_items.len(),
-                &raw_items,
-            )?;
-            if size > self.max_logical_lookup_response_bytes as usize {
-                return Err(NipcError::Overflow);
-            }
-            drop(view);
-            self.transport_buf.resize(size, 0);
+                size
+            };
+            self.transport_buf.resize(final_size, 0);
             let refs: Vec<&[u8]> = raw_items.iter().map(Vec::as_slice).collect();
             let n = protocol::encode_cgroups_lookup_raw_response(
                 &refs,
                 generation.unwrap_or(0),
-                &mut self.transport_buf[..size],
+                &mut self.transport_buf[..final_size],
             )?;
             return CgroupsLookupResponseView::decode(&self.transport_buf[..n]);
         }

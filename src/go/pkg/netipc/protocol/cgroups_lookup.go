@@ -56,14 +56,11 @@ func validateCgroupsLookupSemantics(status, orchestrator uint16, pathLen, nameLe
 
 func EncodeCgroupsLookupRequest(paths [][]byte, buf []byte) (int, error) {
 	count := len(paths)
-	if uint64(count) > uint64(^uint32(0)) {
-		return 0, ErrOverflow
-	}
-	dirSize, ok := checkedMulInt(count, LookupDirEntrySize)
+	count32, ok := checkedU32Int(count)
 	if !ok {
 		return 0, ErrOverflow
 	}
-	packedStart, ok := checkedAddInt(CgroupsLookupReqHdr, dirSize)
+	packedStart, ok := cgroupsLookupRequestPackedStartForCount(count)
 	if !ok {
 		return 0, ErrOverflow
 	}
@@ -108,10 +105,21 @@ func EncodeCgroupsLookupRequest(paths [][]byte, buf []byte) (int, error) {
 	}
 	ne.PutUint16(buf[0:2], 1)
 	ne.PutUint16(buf[2:4], 0)
-	ne.PutUint32(buf[4:8], uint32(count))
+	ne.PutUint32(buf[4:8], count32)
 	ne.PutUint32(buf[8:12], 0)
 	ne.PutUint32(buf[12:16], 0)
 	return data, nil
+}
+
+func cgroupsLookupRequestPackedStartForCount(count int) (int, bool) {
+	if count < 0 || uint64(count) > uint64(^uint32(0)) {
+		return 0, false
+	}
+	dirSize, ok := checkedMulInt(count, LookupDirEntrySize)
+	if !ok {
+		return 0, false
+	}
+	return checkedAddInt(CgroupsLookupReqHdr, dirSize)
 }
 
 func DecodeCgroupsLookupRequest(buf []byte) (*CgroupsLookupRequestView, error) {

@@ -10,11 +10,15 @@ import (
 type AppsLookupHandler func(*protocol.AppsLookupRequestView, *protocol.AppsLookupBuilder) bool
 
 func appsLookupRequestSize(pids []uint32) (int, error) {
-	dirSize, err := checkedLookupMul(len(pids), protocol.LookupDirEntrySize)
+	return appsLookupRequestSizeForCount(len(pids))
+}
+
+func appsLookupRequestSizeForCount(count int) (int, error) {
+	dirSize, err := checkedLookupMul(count, protocol.LookupDirEntrySize)
 	if err != nil {
 		return 0, err
 	}
-	keySize, err := checkedLookupMul(len(pids), protocol.AppsLookupKeySize)
+	keySize, err := checkedLookupMul(count, protocol.AppsLookupKeySize)
 	if err != nil {
 		return 0, err
 	}
@@ -161,14 +165,18 @@ func (c *Client) CallAppsLookupWithTimeout(pids []uint32, timeoutMs uint32) (*pr
 			if start < len(pids) {
 				continue
 			}
-			if uint32(len(rawItems)) != expectedCount {
+			rawItemCount, cerr := checkedLookupU32(len(rawItems))
+			if cerr != nil {
+				return nil, cerr
+			}
+			if rawItemCount != expectedCount {
 				return nil, protocol.ErrBadItemCount
 			}
 			size, serr := lookupRawResponseSize(protocol.AppsLookupRespHdr, rawItems)
 			if serr != nil {
 				return nil, serr
 			}
-			if uint64(size) > uint64(c.maxLogicalLookupResponseBytes) {
+			if lookupSizeExceedsLimit(size, c.maxLogicalLookupResponseBytes) {
 				return nil, protocol.ErrOverflow
 			}
 			stitched := make([]byte, size)

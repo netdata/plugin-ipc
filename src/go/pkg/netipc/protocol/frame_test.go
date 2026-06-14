@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strconv"
 	"testing"
-	"unsafe"
 )
 
 // ---------------------------------------------------------------------------
@@ -552,13 +551,13 @@ func TestBatchBuilderSyntheticOverflowGuards(t *testing.T) {
 	if strconv.IntSize < 64 {
 		t.Skip("synthetic 64-bit slice-header guard requires 64-bit int")
 	}
-	var sentinel byte
-	fakeBuf := unsafe.Slice(&sentinel, int(uint64(^uint32(0))+16))
+	maxU32 := ^uint32(0)
+	overU32 := int(uint64(maxU32) + 1)
 	builder = &BatchBuilder{
-		buf:        fakeBuf,
+		buf:        make([]byte, 16),
 		maxItems:   1,
 		dirEnd:     0,
-		dataOffset: int(uint64(^uint32(0)) + 1),
+		dataOffset: overU32,
 	}
 	if err := builder.Add(nil); !errors.Is(err, ErrOverflow) {
 		t.Fatalf("builder wire-offset overflow = %v, want ErrOverflow", err)
@@ -1511,24 +1510,17 @@ func TestCgroupsBuilderForcedOverflowGuards(t *testing.T) {
 	}
 
 	if strconv.IntSize >= 64 {
-		var sentinel byte
-		huge := unsafe.Slice(&sentinel, maxIntValue())
-		b = &CgroupsBuilder{buf: make([]byte, 64), maxItems: 1}
-		if err := b.Add(1, 0, 1, huge, []byte("/path")); err != ErrOverflow {
-			t.Fatalf("snapshot huge name overflow = %v, want ErrOverflow", err)
+		if _, _, _, ok := cgroupsItemLayoutForLengths(maxIntValue(), len("/path")); ok {
+			t.Fatal("snapshot huge name layout should overflow")
 		}
-		b = &CgroupsBuilder{buf: make([]byte, 64), maxItems: 1}
-		if err := b.Add(1, 0, 1, []byte("name"), huge); err != ErrOverflow {
-			t.Fatalf("snapshot huge path overflow = %v, want ErrOverflow", err)
+		if _, _, _, ok := cgroupsItemLayoutForLengths(len("name"), maxIntValue()); ok {
+			t.Fatal("snapshot huge path layout should overflow")
 		}
-		nearMax := unsafe.Slice(&sentinel, maxIntValue()-cgroupsItemHdr)
-		b = &CgroupsBuilder{buf: make([]byte, 64), maxItems: 1}
-		if err := b.Add(1, 0, 1, nearMax, nil); err != ErrOverflow {
-			t.Fatalf("snapshot item-size name overflow = %v, want ErrOverflow", err)
+		if _, _, _, ok := cgroupsItemLayoutForLengths(maxIntValue()-cgroupsItemHdr, 0); ok {
+			t.Fatal("snapshot item-size name layout should overflow")
 		}
-		b = &CgroupsBuilder{buf: make([]byte, 64), maxItems: 1}
-		if err := b.Add(1, 0, 1, nil, nearMax); err != ErrOverflow {
-			t.Fatalf("snapshot item-size path overflow = %v, want ErrOverflow", err)
+		if _, _, _, ok := cgroupsItemLayoutForLengths(0, maxIntValue()-cgroupsItemHdr); ok {
+			t.Fatal("snapshot item-size path layout should overflow")
 		}
 		if got := EstimateCgroupsMaxItems(maxIntValue()); got != ^uint32(0) {
 			t.Fatalf("huge estimate = %d, want uint32 max", got)

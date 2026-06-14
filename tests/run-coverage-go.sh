@@ -54,9 +54,17 @@ total_statements=0
 for pkg in "${PACKAGES[@]}"; do
     pkg_name=$(echo "$pkg" | sed 's|^\./pkg/netipc/||; s|/$||')
     coverfile="$COVERDIR/${pkg_name//\//_}.out"
+    go_env=(CGO_ENABLED=0)
+    arch_note=""
+    if [[ "$pkg" == "./pkg/netipc/protocol/" ]]; then
+        # The protocol package is pure Go and contains explicit 32-bit integer
+        # guards. Exercise it on 386 so coverage includes those safety paths.
+        go_env=(GOARCH=386 CGO_ENABLED=0)
+        arch_note=" (GOARCH=386)"
+    fi
 
-    echo -e "${YELLOW}Testing $pkg_name...${NC}"
-    if CGO_ENABLED=0 go test -count=1 -timeout=240s \
+    echo -e "${YELLOW}Testing ${pkg_name}${arch_note}...${NC}"
+    if env "${go_env[@]}" go test -count=1 -timeout=240s \
         -coverprofile="$coverfile" \
         -covermode=count \
         "$pkg" 2>&1; then
