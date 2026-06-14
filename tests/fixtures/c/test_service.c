@@ -1238,10 +1238,12 @@ static bool cgroups_lookup_scale_handler(void *user,
     uint32_t call = __atomic_add_fetch(&state->calls, 1, __ATOMIC_ACQ_REL);
     uint64_t generation = state->mixed_generation ? (uint64_t)call : 7u;
     char huge_name[512];
+    char huge_label[512];
 
     lookup_scale_note_items(state, request->item_count);
     lookup_scale_after_call(state, call);
     memset(huge_name, 'x', sizeof(huge_name));
+    memset(huge_label, 'l', sizeof(huge_label));
     nipc_cgroups_lookup_builder_set_generation(builder, generation);
 
     for (uint32_t i = 0; i < request->item_count; i++) {
@@ -1254,6 +1256,16 @@ static bool cgroups_lookup_scale_handler(void *user,
                     builder, NIPC_CGROUP_LOOKUP_KNOWN, NIPC_ORCHESTRATOR_K8S,
                     req_item.path.ptr, req_item.path.len,
                     huge_name, sizeof(huge_name), NULL, 0) != NIPC_OK)
+                return false;
+        } else if (service_str_eq(req_item.path, "/huge-label")) {
+            nipc_lookup_label_view_t labels[] = {
+                { .key = { .ptr = "huge", .len = 4 },
+                  .value = { .ptr = huge_label, .len = sizeof(huge_label) } },
+            };
+            if (nipc_cgroups_lookup_builder_add(
+                    builder, NIPC_CGROUP_LOOKUP_KNOWN, NIPC_ORCHESTRATOR_K8S,
+                    req_item.path.ptr, req_item.path.len,
+                    "ok", 2, labels, 1) != NIPC_OK)
                 return false;
         } else {
             if (nipc_cgroups_lookup_builder_add(
@@ -1275,11 +1287,13 @@ static bool apps_lookup_scale_handler(void *user,
     uint32_t call = __atomic_add_fetch(&state->calls, 1, __ATOMIC_ACQ_REL);
     uint64_t generation = state->mixed_generation ? (uint64_t)call : 9u;
     char huge_path[1025];
+    char huge_label[512];
 
     lookup_scale_note_items(state, request->item_count);
     lookup_scale_after_call(state, call);
     huge_path[0] = '/';
     memset(huge_path + 1, 'x', sizeof(huge_path) - 1);
+    memset(huge_label, 'l', sizeof(huge_label));
     nipc_apps_lookup_builder_set_generation(builder, generation);
 
     for (uint32_t i = 0; i < request->item_count; i++) {
@@ -1293,6 +1307,17 @@ static bool apps_lookup_scale_handler(void *user,
                     NIPC_ORCHESTRATOR_DOCKER, req_item.pid, 1, 1000, 42,
                     "ok", 2, huge_path, sizeof(huge_path),
                     "name", 4, NULL, 0) != NIPC_OK)
+                return false;
+        } else if (req_item.pid == 44) {
+            nipc_lookup_label_view_t labels[] = {
+                { .key = { .ptr = "huge", .len = 4 },
+                  .value = { .ptr = huge_label, .len = sizeof(huge_label) } },
+            };
+            if (nipc_apps_lookup_builder_add(
+                    builder, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_KNOWN,
+                    NIPC_ORCHESTRATOR_DOCKER, req_item.pid, 1, 1000, 42,
+                    "ok", 2, "/ok", 3,
+                    "name", 4, labels, 1) != NIPC_OK)
                 return false;
         } else {
             if (nipc_apps_lookup_builder_add(
@@ -2249,7 +2274,7 @@ static void test_cgroups_lookup_payload_exceeded_retry(void)
     lookup_server_thread_ctx_t sctx;
     memset(&sctx, 0, sizeof(sctx));
     sctx.config = default_service_server_config();
-    sctx.config.max_response_payload_bytes = 160;
+    sctx.config.max_response_payload_bytes = 256;
     sctx.has_config = 1;
     sctx.cgroups_handler.handle = cgroups_lookup_scale_handler;
     sctx.cgroups_handler.user = &state;
@@ -2267,16 +2292,17 @@ static void test_cgroups_lookup_payload_exceeded_retry(void)
     nipc_str_view_t paths[] = {
         { .ptr = "/a", .len = 2 },
         { .ptr = "/huge", .len = 5 },
+        { .ptr = "/huge-label", .len = 11 },
         { .ptr = "/b", .len = 2 },
     };
     nipc_cgroups_lookup_resp_view_t view;
-    nipc_error_t err = nipc_client_call_cgroups_lookup(&client, paths, 3, &view);
+    nipc_error_t err = nipc_client_call_cgroups_lookup(&client, paths, 4, &view);
     check("cgroups scale call ok", err == NIPC_OK);
     check("cgroups scale used follow-up call",
           __atomic_load_n(&state.calls, __ATOMIC_ACQUIRE) >= 2);
 
     if (err == NIPC_OK) {
-        check("cgroups scale item_count == 3", view.item_count == 3);
+        check("cgroups scale item_count == 4", view.item_count == 4);
         check("cgroups scale generation stable", view.generation == 7u);
 
         nipc_cgroups_lookup_item_view_t item;
@@ -2296,7 +2322,14 @@ static void test_cgroups_lookup_payload_exceeded_retry(void)
 
         check("cgroups scale item 2 decode",
               nipc_cgroups_lookup_resp_item(&view, 2, &item) == NIPC_OK);
-        check("cgroups scale item 2 known",
+        check("cgroups scale item 2 oversized",
+              item.status == NIPC_CGROUP_LOOKUP_OVERSIZED_ITEM &&
+              service_str_eq(item.path, "/huge-label") &&
+              item.name.len == 0);
+
+        check("cgroups scale item 3 decode",
+              nipc_cgroups_lookup_resp_item(&view, 3, &item) == NIPC_OK);
+        check("cgroups scale item 3 known",
               item.status == NIPC_CGROUP_LOOKUP_KNOWN &&
               service_str_eq(item.path, "/b") &&
               service_str_eq(item.name, "ok"));
@@ -2332,15 +2365,15 @@ static void test_apps_lookup_payload_exceeded_retry(void)
     nipc_client_refresh(&client);
     check("apps scale client ready", nipc_client_ready(&client));
 
-    uint32_t pids[] = {11, 22, 33};
+    uint32_t pids[] = {11, 22, 44, 33};
     nipc_apps_lookup_resp_view_t view;
-    nipc_error_t err = nipc_client_call_apps_lookup(&client, pids, 3, &view);
+    nipc_error_t err = nipc_client_call_apps_lookup(&client, pids, 4, &view);
     check("apps scale call ok", err == NIPC_OK);
     check("apps scale used follow-up call",
           __atomic_load_n(&state.calls, __ATOMIC_ACQUIRE) >= 2);
 
     if (err == NIPC_OK) {
-        check("apps scale item_count == 3", view.item_count == 3);
+        check("apps scale item_count == 4", view.item_count == 4);
         check("apps scale generation stable", view.generation == 9u);
 
         nipc_apps_lookup_item_view_t item;
@@ -2362,7 +2395,15 @@ static void test_apps_lookup_payload_exceeded_retry(void)
 
         check("apps scale item 2 decode",
               nipc_apps_lookup_resp_item(&view, 2, &item) == NIPC_OK);
-        check("apps scale item 2 known",
+        check("apps scale item 2 oversized",
+              item.status == NIPC_PID_LOOKUP_OVERSIZED_ITEM &&
+              item.pid == 44 &&
+              item.comm.len == 0 &&
+              item.cgroup_path.len == 0);
+
+        check("apps scale item 3 decode",
+              nipc_apps_lookup_resp_item(&view, 3, &item) == NIPC_OK);
+        check("apps scale item 3 known",
               item.status == NIPC_PID_LOOKUP_KNOWN &&
               item.pid == 33 &&
               service_str_eq(item.comm, "ok") &&

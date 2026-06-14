@@ -66,7 +66,7 @@ func winTestAppsLookupHandler(req *protocol.AppsLookupRequestView, builder *prot
 func TestWinCgroupsLookupTransparentPayloadExceededRetry(t *testing.T) {
 	svc := uniqueWinService("go_win_cgroups_lookup_scale")
 	cfg := testWinServerConfig()
-	cfg.MaxResponsePayloadBytes = 160
+	cfg.MaxResponsePayloadBytes = 256
 	var calls atomic.Uint32
 
 	ts := startTestServerWinWithConfig(svc, cfg, protocol.MethodCgroupsLookup, CgroupsLookupDispatch(
@@ -79,10 +79,15 @@ func TestWinCgroupsLookupTransparentPayloadExceededRetry(t *testing.T) {
 					return false
 				}
 				name := []byte("ok")
+				var labels []struct{ Key, Value []byte }
 				if path.String() == "/huge" {
 					name = bytes.Repeat([]byte("x"), 512)
+				} else if path.String() == "/huge-label" {
+					labels = []struct{ Key, Value []byte }{
+						{Key: []byte("huge"), Value: bytes.Repeat([]byte("l"), 512)},
+					}
 				}
-				if err := builder.Add(protocol.CgroupLookupKnown, protocol.OrchestratorK8s, path.Bytes(), name, nil); err != nil {
+				if err := builder.Add(protocol.CgroupLookupKnown, protocol.OrchestratorK8s, path.Bytes(), name, labels); err != nil {
 					return false
 				}
 			}
@@ -95,27 +100,31 @@ func TestWinCgroupsLookupTransparentPayloadExceededRetry(t *testing.T) {
 	defer client.Close()
 	waitWinClientReady(t, client)
 
-	view, err := client.CallCgroupsLookup([][]byte{[]byte("/a"), []byte("/huge"), []byte("/b")})
+	view, err := client.CallCgroupsLookup([][]byte{[]byte("/a"), []byte("/huge"), []byte("/huge-label"), []byte("/b")})
 	if err != nil {
 		t.Fatalf("call failed: %v", err)
 	}
 	if calls.Load() < 2 {
 		t.Fatalf("handler calls = %d, want at least 2", calls.Load())
 	}
-	if view.ItemCount != 3 || view.Generation != 7 {
+	if view.ItemCount != 4 || view.Generation != 7 {
 		t.Fatalf("header = count %d generation %d", view.ItemCount, view.Generation)
 	}
 	item0, _ := view.Item(0)
 	item1, _ := view.Item(1)
 	item2, _ := view.Item(2)
+	item3, _ := view.Item(3)
 	if item0.Status != protocol.CgroupLookupKnown || item0.Path.String() != "/a" {
 		t.Fatalf("item0 = %+v", item0)
 	}
 	if item1.Status != protocol.CgroupLookupOversizedItem || item1.Path.String() != "/huge" {
 		t.Fatalf("item1 = %+v", item1)
 	}
-	if item2.Status != protocol.CgroupLookupKnown || item2.Path.String() != "/b" || item2.Name.String() != "ok" {
+	if item2.Status != protocol.CgroupLookupOversizedItem || item2.Path.String() != "/huge-label" {
 		t.Fatalf("item2 = %+v", item2)
+	}
+	if item3.Status != protocol.CgroupLookupKnown || item3.Path.String() != "/b" || item3.Name.String() != "ok" {
+		t.Fatalf("item3 = %+v", item3)
 	}
 }
 
@@ -135,8 +144,13 @@ func TestWinAppsLookupTransparentPayloadExceededRetry(t *testing.T) {
 					return false
 				}
 				cgroupPath := []byte("/ok")
+				var labels []struct{ Key, Value []byte }
 				if pid == 22 {
 					cgroupPath = append([]byte("/"), bytes.Repeat([]byte("x"), 1024)...)
+				} else if pid == 44 {
+					labels = []struct{ Key, Value []byte }{
+						{Key: []byte("huge"), Value: bytes.Repeat([]byte("l"), 512)},
+					}
 				}
 				if err := builder.Add(
 					protocol.PidLookupKnown,
@@ -149,7 +163,7 @@ func TestWinAppsLookupTransparentPayloadExceededRetry(t *testing.T) {
 					[]byte("ok"),
 					cgroupPath,
 					[]byte("name"),
-					nil,
+					labels,
 				); err != nil {
 					return false
 				}
@@ -163,27 +177,31 @@ func TestWinAppsLookupTransparentPayloadExceededRetry(t *testing.T) {
 	defer client.Close()
 	waitWinClientReady(t, client)
 
-	view, err := client.CallAppsLookup([]uint32{11, 22, 33})
+	view, err := client.CallAppsLookup([]uint32{11, 22, 44, 33})
 	if err != nil {
 		t.Fatalf("call failed: %v", err)
 	}
 	if calls.Load() < 2 {
 		t.Fatalf("handler calls = %d, want at least 2", calls.Load())
 	}
-	if view.ItemCount != 3 || view.Generation != 9 {
+	if view.ItemCount != 4 || view.Generation != 9 {
 		t.Fatalf("header = count %d generation %d", view.ItemCount, view.Generation)
 	}
 	item0, _ := view.Item(0)
 	item1, _ := view.Item(1)
 	item2, _ := view.Item(2)
+	item3, _ := view.Item(3)
 	if item0.Status != protocol.PidLookupKnown || item0.Pid != 11 || item0.Comm.String() != "ok" {
 		t.Fatalf("item0 = %+v", item0)
 	}
 	if item1.Status != protocol.PidLookupOversizedItem || item1.Pid != 22 {
 		t.Fatalf("item1 = %+v", item1)
 	}
-	if item2.Status != protocol.PidLookupKnown || item2.Pid != 33 || item2.Comm.String() != "ok" {
+	if item2.Status != protocol.PidLookupOversizedItem || item2.Pid != 44 {
 		t.Fatalf("item2 = %+v", item2)
+	}
+	if item3.Status != protocol.PidLookupKnown || item3.Pid != 33 || item3.Comm.String() != "ok" {
+		t.Fatalf("item3 = %+v", item3)
 	}
 }
 

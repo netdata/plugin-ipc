@@ -1182,7 +1182,7 @@ fn test_lookup_zero_item_calls() {
 fn test_cgroups_lookup_transparent_payload_exceeded_retry() {
     let svc = unique_service("rs_svc_cgroups_lookup_scale");
     let mut cfg = server_config();
-    cfg.max_response_payload_bytes = 160;
+    cfg.max_response_payload_bytes = 256;
     let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let handler_calls = calls.clone();
     let handler = cgroups_lookup_dispatch(Arc::new(move |req, builder| {
@@ -1200,13 +1200,22 @@ fn test_cgroups_lookup_transparent_payload_exceeded_retry() {
             } else {
                 b"ok"
             };
+            let label_value;
+            let labels;
+            let labels_ref: &[(&[u8], &[u8])] = if item.as_bytes() == b"/huge-label" {
+                label_value = vec![b'l'; 512];
+                labels = [(b"huge".as_slice(), label_value.as_slice())];
+                &labels
+            } else {
+                &[]
+            };
             if builder
                 .add(
                     CGROUP_LOOKUP_KNOWN,
                     ORCHESTRATOR_K8S,
                     item.as_bytes(),
                     name_ref,
-                    &[],
+                    labels_ref,
                 )
                 .is_err()
             {
@@ -1221,13 +1230,18 @@ fn test_cgroups_lookup_transparent_payload_exceeded_retry() {
     connect_ready(&mut client);
 
     let view = client
-        .call_cgroups_lookup(&[b"/a".as_slice(), b"/huge".as_slice(), b"/b".as_slice()])
+        .call_cgroups_lookup(&[
+            b"/a".as_slice(),
+            b"/huge".as_slice(),
+            b"/huge-label".as_slice(),
+            b"/b".as_slice(),
+        ])
         .expect("cgroups lookup scale call");
     assert!(
         calls.load(Ordering::SeqCst) >= 2,
         "handler should be called for at least two subrequests"
     );
-    assert_eq!(view.item_count, 3);
+    assert_eq!(view.item_count, 4);
     assert_eq!(view.generation, 7);
     let item0 = view.item(0).expect("item 0");
     assert_eq!(item0.status, CGROUP_LOOKUP_KNOWN);
@@ -1236,9 +1250,12 @@ fn test_cgroups_lookup_transparent_payload_exceeded_retry() {
     assert_eq!(item1.status, CGROUP_LOOKUP_OVERSIZED_ITEM);
     assert_eq!(item1.path.as_bytes(), b"/huge");
     let item2 = view.item(2).expect("item 2");
-    assert_eq!(item2.status, CGROUP_LOOKUP_KNOWN);
-    assert_eq!(item2.path.as_bytes(), b"/b");
-    assert_eq!(item2.name.as_bytes(), b"ok");
+    assert_eq!(item2.status, CGROUP_LOOKUP_OVERSIZED_ITEM);
+    assert_eq!(item2.path.as_bytes(), b"/huge-label");
+    let item3 = view.item(3).expect("item 3");
+    assert_eq!(item3.status, CGROUP_LOOKUP_KNOWN);
+    assert_eq!(item3.path.as_bytes(), b"/b");
+    assert_eq!(item3.name.as_bytes(), b"ok");
 
     client.close();
     server.stop();
@@ -1267,6 +1284,15 @@ fn test_apps_lookup_transparent_payload_exceeded_retry() {
             } else {
                 b"/ok"
             };
+            let label_value;
+            let labels;
+            let labels_ref: &[(&[u8], &[u8])] = if pid == 44 {
+                label_value = vec![b'l'; 512];
+                labels = [(b"huge".as_slice(), label_value.as_slice())];
+                &labels
+            } else {
+                &[]
+            };
             if builder
                 .add(
                     PID_LOOKUP_KNOWN,
@@ -1279,7 +1305,7 @@ fn test_apps_lookup_transparent_payload_exceeded_retry() {
                     b"ok",
                     cgroup_path_ref,
                     b"name",
-                    &[],
+                    labels_ref,
                 )
                 .is_err()
             {
@@ -1294,13 +1320,13 @@ fn test_apps_lookup_transparent_payload_exceeded_retry() {
     connect_ready(&mut client);
 
     let view = client
-        .call_apps_lookup(&[11, 22, 33])
+        .call_apps_lookup(&[11, 22, 44, 33])
         .expect("apps lookup scale call");
     assert!(
         calls.load(Ordering::SeqCst) >= 2,
         "handler should be called for at least two subrequests"
     );
-    assert_eq!(view.item_count, 3);
+    assert_eq!(view.item_count, 4);
     assert_eq!(view.generation, 9);
     let item0 = view.item(0).expect("item 0");
     assert_eq!(item0.status, PID_LOOKUP_KNOWN);
@@ -1310,9 +1336,12 @@ fn test_apps_lookup_transparent_payload_exceeded_retry() {
     assert_eq!(item1.status, PID_LOOKUP_OVERSIZED_ITEM);
     assert_eq!(item1.pid, 22);
     let item2 = view.item(2).expect("item 2");
-    assert_eq!(item2.status, PID_LOOKUP_KNOWN);
-    assert_eq!(item2.pid, 33);
-    assert_eq!(item2.comm.as_bytes(), b"ok");
+    assert_eq!(item2.status, PID_LOOKUP_OVERSIZED_ITEM);
+    assert_eq!(item2.pid, 44);
+    let item3 = view.item(3).expect("item 3");
+    assert_eq!(item3.status, PID_LOOKUP_KNOWN);
+    assert_eq!(item3.pid, 33);
+    assert_eq!(item3.comm.as_bytes(), b"ok");
 
     client.close();
     server.stop();
