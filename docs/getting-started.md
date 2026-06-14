@@ -30,7 +30,9 @@ API shape from the specifications:
 - Clients use typed calls only
 - Servers expose one service kind only
 - Request/response scratch buffers remain internal to the library
-- Typed callers do not provide `max_request_payload_bytes`
+- Typed callers do not pass per-call wire buffer sizes; deployment-scale
+  payload budgets are configured once during client/server initialization or
+  left at documented defaults
 
 ## Service-Oriented Discovery
 
@@ -63,6 +65,7 @@ Runtime expectations:
 
 nipc_client_config_t cfg = {
     .supported_profiles         = NIPC_PROFILE_BASELINE,
+    .max_request_payload_bytes  = 65536,
     .max_request_batch_items    = 1,
     .max_response_payload_bytes = 65536,
     .auth_token                 = 0xDEADBEEFCAFEBABE,
@@ -98,6 +101,7 @@ use netipc::protocol::PROFILE_BASELINE;
 
 let config = ClientConfig {
     supported_profiles: PROFILE_BASELINE,
+    max_request_payload_bytes: 65536,
     max_request_batch_items: 1,
     max_response_payload_bytes: 65536,
     auth_token: 0xDEADBEEFCAFEBABE,
@@ -131,6 +135,7 @@ import "github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 
 config := cgroups.ClientConfig{
     SupportedProfiles:       protocol.ProfileBaseline,
+    MaxRequestPayloadBytes:  65536,
     MaxRequestBatchItems:    1,
     MaxResponsePayloadBytes: 65536,
     AuthToken:               0xDEADBEEFCAFEBABE,
@@ -158,6 +163,22 @@ explicit timeout of zero uses the client context default, which is
 30000 ms. Clients also expose an abort signal so shutdown code can
 release a call blocked in receive; the abort remains active until it is
 cleared or the client is closed.
+
+Lookup clients also expose logical-call ceilings at initialization time.
+Zero means "use the library default"; non-zero values tune the deployment:
+
+- C `nipc_client_config_t`: `max_logical_lookup_items`,
+  `max_logical_lookup_subcalls`, `max_logical_lookup_response_bytes`
+- Rust `apps_lookup::ClientConfig` and `cgroups_lookup::ClientConfig`:
+  `max_logical_lookup_items`, `max_logical_lookup_subcalls`,
+  `max_logical_lookup_response_bytes`
+- Go `apps_lookup.ClientConfig` and `cgroups_lookup.ClientConfig`:
+  `MaxLogicalLookupItems`, `MaxLogicalLookupSubcalls`,
+  `MaxLogicalLookupResponseBytes`
+
+These are policy ceilings, not per-call buffers. Level 2 still performs
+request splitting, `PAYLOAD_EXCEEDED` retry, request-key `OVERSIZED_ITEM`
+handling for variable-length lookup keys, and response stitching internally.
 
 ## Managed Server (L2)
 
@@ -189,6 +210,7 @@ nipc_cgroups_service_handler_t service_handler = {
 
 nipc_server_config_t scfg = {
     .supported_profiles         = NIPC_PROFILE_BASELINE,
+    .max_request_payload_bytes  = 65536,
     .max_request_batch_items    = 1,
     .max_response_payload_bytes = 65536,
     .auth_token                 = 0xDEADBEEFCAFEBABE,

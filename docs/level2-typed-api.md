@@ -30,6 +30,27 @@ Examples of service kinds:
 The provider of a service is an operational detail. Clients only know the
 service identity and the typed payload contract for that service kind.
 
+### Strict Contract Matching
+
+NetIPC does not provide backward-compatibility, forward-compatibility, or
+best-effort compatibility across provider/client contract drift. A plugin
+provider and client must match the documented method, layout, status,
+generation, and echoed-key contract exactly.
+
+Any method mismatch, layout mismatch, unsupported status, echoed-key
+mismatch, or stitched lookup generation mismatch rejects the affected call.
+The library must not silently reinterpret mixed layouts or return a logical
+lookup response assembled from different generations.
+
+This is a global NetIPC rule, not a lookup-only rule. Netdata plugins and
+the NetIPC library version they use must match the documented contract
+100%. Compatibility shims for method, layout, status, generation, or
+echoed-key drift are not part of the library contract.
+
+New services inherit this rule. Do not reopen mixed-generation or
+provider/client compatibility as a per-service design choice unless the
+global NetIPC specification itself is revised.
+
 ### Current Lookup Service Contracts
 
 `cgroups-lookup` exposes the `CGROUPS_LOOKUP` method as an ordered
@@ -45,6 +66,35 @@ one response item per request item in the same order. Typed clients must
 verify the response item count and echoed PID before using or caching a
 response item. Typed servers receive a decoded request view and fill an
 `APPS_LOOKUP` response builder.
+
+Lookup calls are logical Level 2 calls. One public typed lookup call may
+use multiple ordinary Level 1 request/response cycles internally when the
+response does not fit in the current payload budget. This is transparent to
+the Level 2 API consumer. The outer envelopes remain ordinary non-batch
+messages; lookup split/retry/stitch does not use `NIPC_FLAG_BATCH`.
+
+Lookup response builders use standard item outcomes for oversized
+responses. These outcomes have the same meaning in C, Rust, and Go:
+
+- `PAYLOAD_EXCEEDED`: the current response payload budget was reached at
+  this item. The server must mark this item and every following unencoded
+  item in that response with `PAYLOAD_EXCEEDED`. The Level 2 client must
+  retry those items transparently and stitch the final logical response.
+  Application callers must not be asked to handle this retry.
+- `OVERSIZED_ITEM`: this one valid item cannot fit by itself within the
+  configured maximum payload budget. This outcome is final and not
+  retriable. The Level 2 client keeps the item outcome and continues
+  enriching later items when possible.
+
+For lookup methods with variable-length request keys, a valid key that cannot
+fit into one configured request payload also becomes an item-level
+`OVERSIZED_ITEM` when the codec can represent that key in the final logical
+response. Malformed or unrepresentable keys remain whole-call failures.
+
+Generation matching is strict. If a logical lookup call uses multiple
+subresponses, every subresponse must carry exactly the same generation.
+Any generation mismatch rejects the whole logical call. NetIPC does not
+support mixed-generation stitched responses.
 
 The authoritative field layout, status rules, and cache semantics for
 these service contracts are defined in
@@ -149,16 +199,24 @@ Examples of internal reusable state:
 - Per-session receive buffers and response builders
 - Batch assembly and batch extraction scratch
 
-These buffers are implementation details. Their sizing is derived from
-the negotiated limits and the service-kind-specific Codec contracts. For
-typed requests, the initial request-payload proposal is internal library
-logic derived from:
+These buffers are owned by the library, but their ceilings are not hidden
+hardcoded literals. Client and server initialization config must provide
+defaults and override points for scale-sensitive limits such as transport
+payload budgets, logical lookup item count, logical stitched response
+bytes, and logical subcall count. Small systems can choose small limits;
+large systems can choose larger limits. Implementations must read these
+limits from config/default state instead of scattering fixed numeric
+ceilings through the code.
+
+For typed requests, the initial request-payload proposal is library logic
+derived from:
 
 - the method schema
 - the intended batch size
 - explicit sizing assumptions for dynamic fields
 
-They are never part of the public Level 2 API.
+Callers still never pass scratch buffers, raw wire sizes, or per-call
+transport buffers to typed calls.
 
 Borrowed typed views returned by Level 2 therefore have explicit
 lifetime rules:
@@ -213,10 +271,32 @@ Abort is sticky until the caller explicitly clears it or closes the
 client. A call that observes the abort signal returns a distinct aborted
 error and is not retried.
 
-Negotiated request payload ceilings are capped at 1 MiB. If a peer
-proposes a larger request ceiling, handshake rejects with
-`transport_status = LIMIT_EXCEEDED`. The cap is enforced before the value
-becomes part of the session.
+Negotiated request and response payload ceilings are configuration
+controlled. The library may provide documented defaults, but the effective
+ceilings must come from client/server initialization config or from those
+named defaults, not from hardcoded literals in call paths. If a peer
+proposes a payload ceiling above the receiver's configured maximum, the
+handshake rejects with `transport_status = LIMIT_EXCEEDED`. The ceiling is
+enforced before the value becomes part of the session. This lets a small
+deployment choose small buffers while a large deployment can opt into much
+larger buffers.
+
+Lookup logical-call ceilings are also initialization policy. Consumers may
+override item count, subcall count, and stitched response byte ceilings for
+their deployment size. Zero-valued fields use named library defaults. The
+defaults are not protocol limits and must not be copied into call paths as
+fixed literals.
+
+The standard lookup oversized-response behavior is therefore mandatory in
+every implementation: servers return `PAYLOAD_EXCEEDED` for the unfit suffix,
+clients retry that suffix internally, and `OVERSIZED_ITEM` remains a final
+per-item outcome while later items continue when possible.
+
+Strict rejection remains structural and performance-conscious. Level 2 and the
+Codec layer validate bounds, lengths, layout/status values, echoed keys,
+generation matching, and required terminators so invalid bytes cannot produce
+unsafe views. NetIPC does not add checksums, payload hashing, full-payload
+integrity scans, or heuristic repair to typed lookup scale handling.
 
 If handshake selects an SHM profile and the client cannot attach SHM
 locally, Level 2 must close that session, remove SHM from future transport
@@ -261,10 +341,11 @@ context at startup and uses it for the lifetime of the process.
 - **initialize(service_namespace, service_name, config)**: creates the
   context. Does NOT connect. Does NOT require the server to be running.
   The public typed config includes: auth token, supported/preferred
-  profiles, caller batch intent, and any method-specific response sizing
-  hints that remain public. `max_request_payload_bytes` is internal library
-  state and is not a caller-provided typed-L2 knob. Returns the context
-  object.
+  profiles, caller batch intent, payload-budget defaults, logical-call
+  ceilings, and any method-specific response sizing hints that remain
+  public. Zero-valued limits use library defaults. Non-zero limits let the
+  consumer adapt NetIPC to small IoT systems or large-memory HPC systems.
+  Returns the context object.
 
 - **refresh(ctx)**: the caller calls this periodically from its own loop.
   This is where connection attempts and reconnections happen. Returns
@@ -312,10 +393,19 @@ Level 2 exposes service-kind-specific blocking call functions. Each call:
 The public call signature is typed. The caller provides typed request
 data only. It does not provide transport scratch buffers.
 
-Typed callers also do not provide `max_request_payload_bytes`. The library
-derives the initial proposal internally from the method schema, intended
-batch size, and sizing assumptions for dynamic fields. Reconnect-on-overflow
-exists only as fallback if that internal estimate was too small.
+Typed callers do not provide per-call wire buffer sizes. The initialization
+config may provide request and response payload budgets plus logical-call
+ceilings. The library derives per-call sizing internally from the method
+schema, intended batch size, configured ceilings, and sizing assumptions for
+dynamic fields.
+Reconnect-on-overflow exists only as fallback if that internal estimate was
+too small or if negotiated capacities must grow.
+
+For lookup service kinds, the public call still returns one logical view in
+request order. If a server response contains `PAYLOAD_EXCEEDED` items, the
+Level 2 client retries those items internally and stitches the final view.
+If a response contains `OVERSIZED_ITEM`, that item remains in the final view
+as a non-retriable item outcome while later items may still succeed.
 
 Response ownership is defined per method type:
 
@@ -371,8 +461,11 @@ The returned result is service-kind-specific:
   contract explicitly promises ownership
 
 Items are correlated by position: response item 0 corresponds to
-request item 0. The batch travels as one logical message — no
-pipelining overhead, one round-trip for N items.
+request item 0. For APIs that use `NIPC_FLAG_BATCH`, the batch travels as
+one Level 1 batch message with no per-item pipelining overhead. Lookup
+methods have their own method-internal item directories and the scale
+contract described earlier in this document: one public typed lookup call
+may use multiple ordinary Level 2 request/response cycles internally.
 
 ## Managed server
 
@@ -500,6 +593,10 @@ Level 2 must have:
 - **Overflow recovery tests**: request/response payload overflow recovery is
   tested end-to-end, including disconnect, full handshake, reconnect, and
   retry behavior.
+- **Lookup scale tests**: lookup `PAYLOAD_EXCEEDED` suffix retry,
+  `OVERSIZED_ITEM` final outcome, exact generation matching across
+  subresponses, configurable logical ceilings, and final response stitching
+  are tested in every supported implementation language.
 - **Multi-client tests**: multiple concurrent clients to one managed
   server, independent session failure, correct response routing.
 - **Convenience path tests**: call when ready, call when not ready

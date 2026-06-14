@@ -356,7 +356,6 @@ func serverConfigWin(profiles uint32) windows.ServerConfig {
 		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: responseBufSizeWin,
-		MaxResponseBatchItems:   1,
 		AuthToken:               authTokenWin,
 	}
 }
@@ -368,7 +367,6 @@ func clientConfigWin(profiles uint32) windows.ClientConfig {
 		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: responseBufSizeWin,
-		MaxResponseBatchItems:   1,
 		AuthToken:               authTokenWin,
 	}
 }
@@ -401,6 +399,7 @@ func typedServerConfigWin(profiles uint32) cgroups.ServerConfig {
 	return cgroups.ServerConfig{
 		SupportedProfiles:       profiles,
 		PreferredProfiles:       profiles,
+		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: responseBufSizeWin,
 		AuthToken:               authTokenWin,
@@ -411,6 +410,7 @@ func typedClientConfigWin(profiles uint32) cgroups.ClientConfig {
 	return cgroups.ClientConfig{
 		SupportedProfiles:       profiles,
 		PreferredProfiles:       profiles,
+		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: responseBufSizeWin,
 		AuthToken:               authTokenWin,
@@ -616,21 +616,30 @@ func warmServerWin(runDir, service string) error {
 		args = append(args, warmupDepth)
 	}
 
-	cmd := exec.Command(warmupBin, args...)
-	cmd.Stdout = io.Discard
+	const maxWarmupAttempts = 5
+	for attempt := 1; attempt <= maxWarmupAttempts; attempt++ {
+		cmd := exec.Command(warmupBin, args...)
+		cmd.Stdout = io.Discard
 
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg != "" {
-			return fmt.Errorf("server warmup client failed: %w: %s", err, msg)
+		if err := cmd.Run(); err != nil {
+			msg := strings.TrimSpace(stderr.String())
+			if strings.Contains(msg, "not ready after retries") && attempt < maxWarmupAttempts {
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			if msg != "" {
+				return fmt.Errorf("server warmup client failed: %w: %s", err, msg)
+			}
+			return fmt.Errorf("server warmup client failed: %w", err)
 		}
-		return fmt.Errorf("server warmup client failed: %w", err)
+
+		return nil
 	}
 
-	return nil
+	return fmt.Errorf("server warmup client failed: exhausted startup retries")
 }
 
 // ---------------------------------------------------------------------------

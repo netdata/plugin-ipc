@@ -59,8 +59,8 @@ pub(super) fn method_supported_internal(
     handler.is_some() && method_code == expected_method_code
 }
 
-pub(super) fn server_note_payload_capacity(target: &AtomicU32, payload_len: u32) {
-    let grown = next_power_of_2_u32(payload_len);
+pub(super) fn server_note_payload_capacity(target: &AtomicU32, payload_len: u32, ceiling: u32) {
+    let grown = next_power_of_2_u32(payload_len).min(ceiling);
     let mut current = target.load(Ordering::Relaxed);
     while grown > current {
         match target.compare_exchange_weak(current, grown, Ordering::Release, Ordering::Relaxed) {

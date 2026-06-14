@@ -43,6 +43,8 @@ mod posix_only {
     const AUTH_TOKEN: u64 = 0xBE4C400000C0FFEE;
     const RESPONSE_BUF_SIZE: usize = 65536;
     const MAX_LATENCY_SAMPLES: usize = 10_000_000;
+    const LOOKUP_METHOD_MAX_ITEMS: usize = 32768;
+    const LOOKUP_METHOD_BUF_BYTES_PER_ITEM: usize = 256;
 
     const PROFILE_UDS: u32 = PROFILE_BASELINE;
     const PROFILE_SHM: u32 = PROFILE_BASELINE | PROFILE_SHM_HYBRID;
@@ -139,8 +141,10 @@ mod posix_only {
         ServerConfig {
             supported_profiles: profiles,
             preferred_profiles: profiles,
+            max_request_payload_bytes: 4096,
             max_request_batch_items: 1,
             max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
+            max_response_batch_items: 1,
             auth_token: AUTH_TOKEN,
             backlog: 4,
             ..ServerConfig::default()
@@ -151,8 +155,10 @@ mod posix_only {
         ClientConfig {
             supported_profiles: profiles,
             preferred_profiles: profiles,
+            max_request_payload_bytes: 4096,
             max_request_batch_items: 1,
             max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
+            max_response_batch_items: 1,
             auth_token: AUTH_TOKEN,
             ..ClientConfig::default()
         }
@@ -202,6 +208,22 @@ mod posix_only {
 
     fn ping_pong_handler() -> DispatchHandler {
         increment_dispatch(std::sync::Arc::new(|counter| Some(counter + 1)))
+    }
+
+    fn spawn_server_stop_waker(
+        run_dir: &str,
+        service: &str,
+        wake_config: ClientConfig,
+        stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        duration_sec: u32,
+    ) {
+        let stop_run_dir = run_dir.to_string();
+        let stop_service = service.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(duration_sec as u64 + 3));
+            stop_flag.store(false, Ordering::Release);
+            let _ = UdsSession::connect(&stop_run_dir, &stop_service, &wake_config);
+        });
     }
 
     // ---------------------------------------------------------------------------
@@ -288,11 +310,13 @@ mod posix_only {
         let cpu_start = cpu_ns();
 
         let stop_flag = server.running_flag();
-        let dur = duration_sec;
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(dur as u64 + 3));
-            stop_flag.store(false, Ordering::Release);
-        });
+        spawn_server_stop_waker(
+            run_dir,
+            service,
+            client_config(profiles),
+            stop_flag,
+            duration_sec,
+        );
 
         let _ = server.run();
 
@@ -322,11 +346,13 @@ mod posix_only {
         let cpu_start = cpu_ns();
 
         let stop_flag = server.running_flag();
-        let dur = duration_sec;
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(dur as u64 + 3));
-            stop_flag.store(false, Ordering::Release);
-        });
+        spawn_server_stop_waker(
+            run_dir,
+            service,
+            batch_client_config(profiles),
+            stop_flag,
+            duration_sec,
+        );
 
         let _ = server.run();
 
@@ -1385,7 +1411,11 @@ mod posix_only {
             return None;
         };
 
-        let item_count = if scenario.ends_with("-256") {
+        let item_count = if scenario.ends_with("-32768") {
+            32768
+        } else if scenario.ends_with("-8192") {
+            8192
+        } else if scenario.ends_with("-256") {
             256
         } else if scenario.ends_with("-16") {
             16
@@ -1398,11 +1428,19 @@ mod posix_only {
         Some((is_apps, variant, item_count))
     }
 
+    fn lookup_method_buffer_size(item_count: usize) -> usize {
+        (item_count * LOOKUP_METHOD_BUF_BYTES_PER_ITEM + 4096).max(RESPONSE_BUF_SIZE)
+    }
+
     fn run_lookup_method_bench(duration_sec: u32, scenario: &str, target_rps: u64) -> i32 {
         let Some((is_apps, variant, item_count)) = parse_lookup_method_scenario(scenario) else {
             eprintln!("lookup-method-bench: invalid scenario: {scenario}");
             return 1;
         };
+        if item_count == 0 || item_count > LOOKUP_METHOD_MAX_ITEMS {
+            eprintln!("lookup-method-bench: unsupported item count: {item_count}");
+            return 1;
+        }
 
         let path_storage: Vec<Vec<u8>> = (0..item_count)
             .map(|i| format!("/sys/fs/cgroup/bench/cg-{i:03}").into_bytes())
@@ -1410,8 +1448,9 @@ mod posix_only {
         let paths: Vec<&[u8]> = path_storage.iter().map(|path| path.as_slice()).collect();
         let pids: Vec<u32> = (0..item_count).map(|i| 1000 + i as u32).collect();
 
-        let mut req_buf = vec![0u8; RESPONSE_BUF_SIZE];
-        let mut resp_buf = vec![0u8; RESPONSE_BUF_SIZE];
+        let io_buf_size = lookup_method_buffer_size(item_count);
+        let mut req_buf = vec![0u8; io_buf_size];
+        let mut resp_buf = vec![0u8; io_buf_size];
 
         let est_samples = if target_rps == 0 {
             2_000_000

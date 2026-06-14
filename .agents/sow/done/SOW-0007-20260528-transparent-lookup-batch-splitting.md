@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: open
+Status: closed
 
-Sub-state: follow-up tracked from SOW-0006; not yet scheduled.
+Sub-state: superseded before implementation by `SOW-0021 - NetIPC At Scale`.
 
 ## Requirements
 
@@ -152,13 +152,20 @@ Pending.
 
 - Created as the tracked follow-up for SOW-0006's explicitly scoped-out transparent split/stitch work.
 
+### 2026-06-13
+
+- Closed before implementation because `SOW-0021 - NetIPC At Scale` supersedes this narrower request-splitting SOW.
+- The old all-or-error oversized single-item assumption is explicitly replaced by SOW-0021's item-level outcome contract.
+- The old staged C/Rust/Go parity option is explicitly replaced by SOW-0021's all-language completion requirement.
+
 ## Validation
 
-Pending.
+- Not executed in this SOW because the implementation and validation scope moved to SOW-0021 before this SOW started.
+- SOW-0021 owns the full C/Rust/Go, POSIX/Windows, interop, coverage, benchmark, and downstream vendoring validation.
 
 ## Outcome
 
-Pending.
+Closed as superseded by `SOW-0021 - NetIPC At Scale`.
 
 ## Lessons Extracted
 
@@ -166,7 +173,7 @@ Pending.
 
 ## Followup
 
-None yet.
+The active implementation and validation follow-up is SOW-0021.
 
 ## Regression Log
 

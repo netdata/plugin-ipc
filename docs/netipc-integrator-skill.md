@@ -49,6 +49,14 @@ Before adding anything, internalize these facts:
 - Public L2/L3 is transport-agnostic from the caller perspective.
   - Callers should not branch on UDS vs Named Pipe or SHM vs baseline.
   - Transport-specific tuning belongs below the public typed API.
+- Provider/client contract drift is never handled best-effort.
+  - Method, layout, status, echoed-key, and generation contracts must match.
+  - Mixed-generation stitched lookup responses are rejected.
+  - Do not add compatibility shims for plugin/library drift.
+- Payload budgets and logical lookup ceilings are deployment policy.
+  - Configure them at client/server initialization.
+  - Zero means "use the documented library default".
+  - Named defaults are not protocol hard limits.
 
 ## What Exists Today
 
@@ -214,6 +222,26 @@ Lookup response order is part of the contract:
 - decoders validate wire structure only; echoed-key validation belongs in
   the typed client layer
 
+Lookup scale behavior is part of the Level 2 contract:
+
+- Level 2 consumers pass typed semantic keys only; they do not split around
+  transport payload budgets.
+- A server that fills the current response budget marks the first unfit item
+  and all following unencoded items as `PAYLOAD_EXCEEDED`.
+- Level 2 clients retry `PAYLOAD_EXCEEDED` items internally and stitch the
+  final logical response.
+- `PAYLOAD_EXCEEDED` must not become caller-managed retry work.
+- A single valid item that cannot fit by itself within the configured maximum
+  payload budget is `OVERSIZED_ITEM`.
+- For variable-length lookup keys, a valid key that cannot fit into one
+  configured request payload is also an item-level `OVERSIZED_ITEM` when the
+  codec can still represent that key in the final logical response.
+- `OVERSIZED_ITEM` is final and not retriable; later items may still be
+  enriched.
+- C, Rust, and Go must implement the same status semantics.
+- Treat `PAYLOAD_EXCEEDED` and `OVERSIZED_ITEM` as standard outcomes in every
+  implementation language, not language-local behavior.
+
 Lookup cache lifecycle:
 
 - `UNKNOWN_RETRY_LATER` should be retried.
@@ -221,6 +249,15 @@ Lookup cache lifecycle:
 - `HOST_ROOT` is permanent for the current provider generation.
 - On generation decrease/reset, evict existing `UNKNOWN_PERMANENT` and
   `HOST_ROOT` entries before processing the new response.
+- If Level 2 stitches a logical lookup response from multiple subresponses,
+  every subresponse generation must match exactly. Any mismatch rejects the
+  entire logical call.
+- NetIPC does not support partial compatibility across provider/library
+  layout differences. A method, layout, generation, echoed-key, or status
+  mismatch is a rejection, not a best-effort decode.
+- Do not add backward-compatibility, forward-compatibility, or mixed-generation
+  shims for plugin/library drift. Netdata plugins and NetIPC providers/clients
+  must match the documented contract exactly.
 
 Wire-format footguns for lookup methods:
 
@@ -398,7 +435,7 @@ Public typed service facade lives in:
 
 - [src/crates/netipc/src/service/cgroups_snapshot.rs](../src/crates/netipc/src/service/cgroups_snapshot.rs)
 
-The historical [src/crates/netipc/src/service/cgroups.rs](../src/crates/netipc/src/service/cgroups.rs) module path is compatibility-only.
+The historical [src/crates/netipc/src/service/cgroups.rs](../src/crates/netipc/src/service/cgroups.rs) module path is a legacy import alias only.
 
 Current public shapes:
 
@@ -428,7 +465,7 @@ Public typed service facade lives in:
 
 - [src/go/pkg/netipc/service/cgroups_snapshot/](../src/go/pkg/netipc/service/cgroups_snapshot/)
 
-The historical [src/go/pkg/netipc/service/cgroups/](../src/go/pkg/netipc/service/cgroups/) import path is compatibility-only.
+The historical [src/go/pkg/netipc/service/cgroups/](../src/go/pkg/netipc/service/cgroups/) import path is a legacy import alias only.
 
 Current public shapes:
 
@@ -549,6 +586,8 @@ L2 typed calls are at-least-once:
   retried
 - overflow-driven resize recovery may reconnect multiple times while capacities
   grow
+- lookup `PAYLOAD_EXCEEDED` recovery happens inside Level 2 by retrying only
+  the affected suffix and stitching the final logical response
 - managed servers close a session after terminal service errors such as
   `LIMIT_EXCEEDED`, `BAD_ENVELOPE`, or `INTERNAL_ERROR`; recovery is a new
   handshake on a new session
@@ -557,6 +596,16 @@ L2 typed calls are also bounded:
 
 - a per-call timeout of zero uses the client context default
 - the default client context timeout is 30000 ms
+- payload budgets and logical-call ceilings come from initialization config or
+  documented defaults, not scattered hardcoded literals
+- named defaults are not protocol hard limits; explicit initialization config
+  is the deployment authority
+- request and response payload budgets must remain consumer-tunable at
+  initialization time; do not bake deployment ceilings into implementation
+  paths
+- lookup item-count, subcall-count, and stitched-response-byte ceilings must
+  also remain initialization policy, with zero-valued config fields mapping to
+  named defaults
 - the deadline covers the complete logical response, including chunked
   baseline messages and SHM waits
 - timeout and abort have distinct errors, so shutdown handling does not need

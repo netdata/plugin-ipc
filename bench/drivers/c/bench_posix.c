@@ -48,6 +48,9 @@
 #define RESPONSE_BUF_SIZE  65536
 #define MAX_LATENCY_SAMPLES (10 * 1000 * 1000) /* 10M samples max */
 #define DEFAULT_DURATION   30 /* seconds */
+#define LOOKUP_METHOD_MAX_ITEMS 32768u
+#define LOOKUP_METHOD_PATH_BYTES 64u
+#define LOOKUP_METHOD_BUF_BYTES_PER_ITEM 256u
 
 /* Profiles for SHM vs baseline */
 #define BENCH_PROFILE_UDS  NIPC_PROFILE_BASELINE
@@ -1216,17 +1219,29 @@ static int parse_lookup_method_scenario(const char *scenario,
     else
         return 0;
 
-    size_t scenario_len = strlen(scenario);
-    if (scenario_len >= 4 && strcmp(scenario + scenario_len - 4, "-256") == 0)
-        *item_count = 256;
-    else if (scenario_len >= 3 && strcmp(scenario + scenario_len - 3, "-16") == 0)
-        *item_count = 16;
-    else if (scenario_len >= 2 && strcmp(scenario + scenario_len - 2, "-1") == 0)
-        *item_count = 1;
-    else
+    const char *dash = strrchr(scenario, '-');
+    if (!dash || dash[1] == '\0')
         return 0;
 
+    char *end = NULL;
+    errno = 0;
+    unsigned long parsed = strtoul(dash + 1, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || parsed == 0 ||
+        parsed > LOOKUP_METHOD_MAX_ITEMS)
+        return 0;
+
+    if (parsed != 1 && parsed != 16 && parsed != 256 &&
+        parsed != 8192 && parsed != 32768)
+        return 0;
+
+    *item_count = (uint32_t)parsed;
     return 1;
+}
+
+static size_t lookup_method_buffer_size(uint32_t item_count)
+{
+    size_t scaled = (size_t)item_count * LOOKUP_METHOD_BUF_BYTES_PER_ITEM + 4096u;
+    return scaled > RESPONSE_BUF_SIZE ? scaled : RESPONSE_BUF_SIZE;
 }
 
 static int run_lookup_method_bench(int duration_sec,
@@ -1241,9 +1256,17 @@ static int run_lookup_method_bench(int duration_sec,
         return 1;
     }
 
-    char path_storage[256][64];
-    nipc_str_view_t paths[256];
-    uint32_t pids[256];
+    char (*path_storage)[LOOKUP_METHOD_PATH_BYTES] =
+        calloc(item_count, sizeof(*path_storage));
+    nipc_str_view_t *paths = calloc(item_count, sizeof(*paths));
+    uint32_t *pids = malloc((size_t)item_count * sizeof(*pids));
+    if (!path_storage || !paths || !pids) {
+        free(path_storage);
+        free(paths);
+        free(pids);
+        return 1;
+    }
+
     for (uint32_t i = 0; i < item_count; i++) {
         int n = snprintf(path_storage[i], sizeof(path_storage[i]),
                          "/sys/fs/cgroup/bench/cg-%03u", i);
@@ -1252,9 +1275,13 @@ static int run_lookup_method_bench(int duration_sec,
         pids[i] = 1000u + i;
     }
 
-    uint8_t *req_buf = malloc(RESPONSE_BUF_SIZE);
-    uint8_t *resp_buf = malloc(RESPONSE_BUF_SIZE);
+    size_t io_buf_size = lookup_method_buffer_size(item_count);
+    uint8_t *req_buf = malloc(io_buf_size);
+    uint8_t *resp_buf = malloc(io_buf_size);
     if (!req_buf || !resp_buf) {
+        free(path_storage);
+        free(paths);
+        free(pids);
         free(req_buf);
         free(resp_buf);
         return 1;
@@ -1284,12 +1311,12 @@ static int run_lookup_method_bench(int duration_sec,
         nipc_error_t err;
 
         if (is_apps) {
-            req_len = nipc_apps_lookup_req_encode(pids, item_count, req_buf, RESPONSE_BUF_SIZE);
+            req_len = nipc_apps_lookup_req_encode(pids, item_count, req_buf, io_buf_size);
             if (req_len == 0) {
                 errors++;
                 continue;
             }
-            err = nipc_dispatch_apps_lookup(req_buf, req_len, resp_buf, RESPONSE_BUF_SIZE,
+            err = nipc_dispatch_apps_lookup(req_buf, req_len, resp_buf, io_buf_size,
                                             &resp_len, apps_lookup_bench_handler, &ctx);
             if (err == NIPC_OK) {
                 nipc_apps_lookup_resp_view_t view;
@@ -1298,12 +1325,12 @@ static int run_lookup_method_bench(int duration_sec,
                     err = NIPC_ERR_BAD_ITEM_COUNT;
             }
         } else {
-            req_len = nipc_cgroups_lookup_req_encode(paths, item_count, req_buf, RESPONSE_BUF_SIZE);
+            req_len = nipc_cgroups_lookup_req_encode(paths, item_count, req_buf, io_buf_size);
             if (req_len == 0) {
                 errors++;
                 continue;
             }
-            err = nipc_dispatch_cgroups_lookup(req_buf, req_len, resp_buf, RESPONSE_BUF_SIZE,
+            err = nipc_dispatch_cgroups_lookup(req_buf, req_len, resp_buf, io_buf_size,
                                                &resp_len, cgroups_lookup_bench_handler, &ctx);
             if (err == NIPC_OK) {
                 nipc_cgroups_lookup_resp_view_t view;
@@ -1345,6 +1372,9 @@ static int run_lookup_method_bench(int duration_sec,
         fprintf(stderr, "lookup-method-bench: %lu errors\n", (unsigned long)errors);
 
     latency_free(&lr);
+    free(path_storage);
+    free(paths);
+    free(pids);
     free(req_buf);
     free(resp_buf);
     return errors > 0 ? 1 : 0;

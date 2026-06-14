@@ -1035,6 +1035,7 @@ static void test_string_dispatch_missing_handlers_and_unknown_method(void)
         nipc_np_session_t session = { .pipe = INVALID_HANDLE_VALUE };
 
         unique_service(service, sizeof(service), "svc_missing_snap");
+        ccfg.max_request_payload_bytes = NIPC_MAX_PAYLOAD_DEFAULT;
         HANDLE server_thread = start_server_named(
             &sctx, service, 4, &scfg, &missing_snapshot_service_handler);
         if (!server_thread)

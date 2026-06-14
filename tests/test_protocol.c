@@ -2006,6 +2006,43 @@ static size_t build_apps_lookup_known_labeled(uint8_t *buf, size_t buf_len) {
     return nipc_apps_lookup_builder_finish(&b);
 }
 
+static size_t build_cgroups_lookup_boundary_response(uint8_t *buf, size_t buf_len) {
+    nipc_lookup_label_view_t labels[] = {
+        { .key = sv("namespace"), .value = sv("default") },
+    };
+    nipc_cgroups_lookup_builder_t b;
+    nipc_cgroups_lookup_builder_init(&b, buf, buf_len, 2, 333);
+    CHECK(nipc_cgroups_lookup_builder_add(
+              &b, NIPC_CGROUP_LOOKUP_KNOWN, NIPC_ORCHESTRATOR_K8S,
+              "/kubepods/pod-a", 15, "pod-a", 5, NULL, 0) == NIPC_OK,
+          "build cgroups_lookup boundary item 0");
+    CHECK(nipc_cgroups_lookup_builder_add(
+              &b, NIPC_CGROUP_LOOKUP_KNOWN, NIPC_ORCHESTRATOR_K8S,
+              "/kubepods/long-pod-path", 23, "long-pod-name", 13,
+              labels, 1) == NIPC_OK,
+          "build cgroups_lookup boundary item 1");
+    return nipc_cgroups_lookup_builder_finish(&b);
+}
+
+static size_t build_apps_lookup_boundary_response(uint8_t *buf, size_t buf_len) {
+    nipc_lookup_label_view_t labels[] = {
+        { .key = sv("role"), .value = sv("api") },
+    };
+    nipc_apps_lookup_builder_t b;
+    nipc_apps_lookup_builder_init(&b, buf, buf_len, 2, 222);
+    CHECK(nipc_apps_lookup_builder_add(
+              &b, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_HOST_ROOT,
+              0, 1234, 1, 1000, 42, "a", 1, "", 0, "", 0, NULL, 0) == NIPC_OK,
+          "build apps_lookup boundary item 0");
+    CHECK(nipc_apps_lookup_builder_add(
+              &b, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_KNOWN,
+              NIPC_ORCHESTRATOR_DOCKER, 5678, 1, 1000, 43,
+              "worker", 6, "/docker/long-container-path", 27,
+              "container-name", 14, labels, 1) == NIPC_OK,
+          "build apps_lookup boundary item 1");
+    return nipc_apps_lookup_builder_finish(&b);
+}
+
 static bool cgroups_lookup_dispatch_handler(void *user,
                                             const nipc_cgroups_lookup_req_view_t *request,
                                             nipc_cgroups_lookup_builder_t *builder) {
@@ -2415,6 +2452,97 @@ static void test_apps_lookup_req_resp_roundtrip(void) {
           "apps_lookup unknown pid fields");
 }
 
+static void test_lookup_response_exact_and_short_boundary(void) {
+    uint8_t large[1024];
+    uint8_t exact[1024];
+    uint8_t short_buf[1024];
+
+    size_t apps_exact_len =
+        build_apps_lookup_boundary_response(large, sizeof(large));
+    CHECK(apps_exact_len > NIPC_APPS_LOOKUP_RESP_HDR_SIZE +
+                               2 * NIPC_LOOKUP_DIR_ENTRY_SIZE,
+          "apps_lookup boundary response has item payloads");
+
+    size_t apps_len =
+        build_apps_lookup_boundary_response(exact, apps_exact_len);
+    CHECK(apps_len == apps_exact_len, "apps_lookup exact response fits");
+    nipc_apps_lookup_resp_view_t apps_view;
+    CHECK(nipc_apps_lookup_resp_decode(exact, apps_len, &apps_view) == NIPC_OK,
+          "apps_lookup exact response decodes");
+    nipc_apps_lookup_item_view_t apps_item;
+    CHECK(nipc_apps_lookup_resp_item(&apps_view, 1, &apps_item) == NIPC_OK,
+          "apps_lookup exact response item 1");
+    CHECK(apps_item.status == NIPC_PID_LOOKUP_KNOWN && apps_item.pid == 5678,
+          "apps_lookup exact response keeps item 1 known");
+
+    apps_len = build_apps_lookup_boundary_response(exact, apps_exact_len + 1);
+    CHECK(apps_len == apps_exact_len, "apps_lookup plus-one response fits");
+    CHECK(nipc_apps_lookup_resp_decode(exact, apps_len, &apps_view) == NIPC_OK,
+          "apps_lookup plus-one response decodes");
+    CHECK(nipc_apps_lookup_resp_item(&apps_view, 1, &apps_item) == NIPC_OK,
+          "apps_lookup plus-one response item 1");
+    CHECK(apps_item.status == NIPC_PID_LOOKUP_KNOWN && apps_item.pid == 5678,
+          "apps_lookup plus-one response keeps item 1 known");
+
+    size_t apps_short_len =
+        build_apps_lookup_boundary_response(short_buf, apps_exact_len - 1);
+    CHECK(nipc_apps_lookup_resp_decode(short_buf, apps_short_len, &apps_view) ==
+              NIPC_OK,
+          "apps_lookup short response decodes");
+    CHECK(nipc_apps_lookup_resp_item(&apps_view, 1, &apps_item) == NIPC_OK,
+          "apps_lookup short response item 1");
+    CHECK(apps_item.status == NIPC_PID_LOOKUP_PAYLOAD_EXCEEDED &&
+              apps_item.pid == 5678,
+          "apps_lookup short response marks item 1 payload exceeded");
+
+    size_t cgroups_exact_len =
+        build_cgroups_lookup_boundary_response(large, sizeof(large));
+    CHECK(cgroups_exact_len > NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE +
+                                  2 * NIPC_LOOKUP_DIR_ENTRY_SIZE,
+          "cgroups_lookup boundary response has item payloads");
+
+    size_t cgroups_len =
+        build_cgroups_lookup_boundary_response(exact, cgroups_exact_len);
+    CHECK(cgroups_len == cgroups_exact_len, "cgroups_lookup exact response fits");
+    nipc_cgroups_lookup_resp_view_t cgroups_view;
+    CHECK(nipc_cgroups_lookup_resp_decode(exact, cgroups_len, &cgroups_view) ==
+              NIPC_OK,
+          "cgroups_lookup exact response decodes");
+    nipc_cgroups_lookup_item_view_t cgroups_item;
+    CHECK(nipc_cgroups_lookup_resp_item(&cgroups_view, 1, &cgroups_item) ==
+              NIPC_OK,
+          "cgroups_lookup exact response item 1");
+    CHECK(cgroups_item.status == NIPC_CGROUP_LOOKUP_KNOWN &&
+              str_eq(cgroups_item.path, "/kubepods/long-pod-path"),
+          "cgroups_lookup exact response keeps item 1 known");
+
+    cgroups_len =
+        build_cgroups_lookup_boundary_response(exact, cgroups_exact_len + 1);
+    CHECK(cgroups_len == cgroups_exact_len,
+          "cgroups_lookup plus-one response fits");
+    CHECK(nipc_cgroups_lookup_resp_decode(exact, cgroups_len, &cgroups_view) ==
+              NIPC_OK,
+          "cgroups_lookup plus-one response decodes");
+    CHECK(nipc_cgroups_lookup_resp_item(&cgroups_view, 1, &cgroups_item) ==
+              NIPC_OK,
+          "cgroups_lookup plus-one response item 1");
+    CHECK(cgroups_item.status == NIPC_CGROUP_LOOKUP_KNOWN &&
+              str_eq(cgroups_item.path, "/kubepods/long-pod-path"),
+          "cgroups_lookup plus-one response keeps item 1 known");
+
+    size_t cgroups_short_len =
+        build_cgroups_lookup_boundary_response(short_buf, cgroups_exact_len - 1);
+    CHECK(nipc_cgroups_lookup_resp_decode(short_buf, cgroups_short_len,
+                                          &cgroups_view) == NIPC_OK,
+          "cgroups_lookup short response decodes");
+    CHECK(nipc_cgroups_lookup_resp_item(&cgroups_view, 1, &cgroups_item) ==
+              NIPC_OK,
+          "cgroups_lookup short response item 1");
+    CHECK(cgroups_item.status == NIPC_CGROUP_LOOKUP_PAYLOAD_EXCEEDED &&
+              str_eq(cgroups_item.path, "/kubepods/long-pod-path"),
+          "cgroups_lookup short response marks item 1 payload exceeded");
+}
+
 static void test_lookup_responses_reject_bad_layouts(void) {
     uint8_t buf[1024];
     uint8_t bad[1024];
@@ -2722,6 +2850,144 @@ static void test_apps_lookup_reject_comm_len_16(void) {
           "apps_lookup rejects comm len 16");
 }
 
+static void test_apps_lookup_additional_guard_paths(void) {
+    uint8_t req[128];
+    uint8_t buf[1024];
+    uint8_t bad[1024];
+    uint8_t out[1024];
+    uint32_t pids[] = { 42 };
+    size_t req_len = nipc_apps_lookup_req_encode(pids, 1, req, sizeof(req));
+    CHECK(req_len > 0, "apps_lookup guard request encode");
+
+    nipc_apps_lookup_req_view_t req_view;
+    CHECK(nipc_apps_lookup_req_decode(req, NIPC_APPS_LOOKUP_REQ_HDR_SIZE - 1,
+                                      &req_view) == NIPC_ERR_TRUNCATED,
+          "apps_lookup request rejects truncated header");
+    CHECK(nipc_apps_lookup_req_decode(req, NIPC_APPS_LOOKUP_REQ_HDR_SIZE + 4,
+                                      &req_view) == NIPC_ERR_TRUNCATED,
+          "apps_lookup request rejects truncated directory");
+
+    size_t n = build_apps_lookup_known_labeled(buf, sizeof(buf));
+    CHECK(n > 0, "apps_lookup guard response build");
+    nipc_apps_lookup_resp_view_t view;
+
+    CHECK(nipc_apps_lookup_resp_decode(buf, NIPC_APPS_LOOKUP_RESP_HDR_SIZE - 1,
+                                       &view) == NIPC_ERR_TRUNCATED,
+          "apps_lookup response rejects truncated header");
+
+    memcpy(bad, buf, n);
+    put16(bad, 0, 99);
+    CHECK(nipc_apps_lookup_resp_decode(bad, n, &view) == NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup response rejects bad header layout");
+
+    memcpy(bad, buf, n);
+    put16(bad, 2, 1);
+    CHECK(nipc_apps_lookup_resp_decode(bad, n, &view) == NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup response rejects header flags");
+
+    CHECK(nipc_apps_lookup_resp_decode(buf, NIPC_APPS_LOOKUP_RESP_HDR_SIZE + 4,
+                                       &view) == NIPC_ERR_TRUNCATED,
+          "apps_lookup response rejects truncated directory");
+
+    memcpy(bad, buf, n);
+    put32(bad, NIPC_APPS_LOOKUP_RESP_HDR_SIZE, 1);
+    CHECK(nipc_apps_lookup_resp_decode(bad, n, &view) == NIPC_ERR_BAD_ALIGNMENT,
+          "apps_lookup response rejects bad item alignment");
+
+    memcpy(bad, buf, n);
+    put32(bad, NIPC_APPS_LOOKUP_RESP_HDR_SIZE + 4,
+          NIPC_APPS_LOOKUP_ITEM_HDR_SIZE - 1);
+    CHECK(nipc_apps_lookup_resp_decode(bad, n, &view) == NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup response rejects short item directory length");
+
+    memcpy(bad, buf, n);
+    put32(bad, NIPC_APPS_LOOKUP_RESP_HDR_SIZE + 4, 4096);
+    CHECK(nipc_apps_lookup_resp_decode(bad, n, &view) == NIPC_ERR_OUT_OF_BOUNDS,
+          "apps_lookup response rejects oob item directory length");
+
+    memcpy(bad, buf, n);
+    uint32_t item_len = 0;
+    uint8_t *item = lookup_resp_item_ptr(bad, NIPC_APPS_LOOKUP_RESP_HDR_SIZE, 1, 0,
+                                         &item_len);
+    put32(item, 44, item_len);
+    CHECK(nipc_apps_lookup_resp_decode(bad, n, &view) == NIPC_ERR_OUT_OF_BOUNDS,
+          "apps_lookup response rejects cgroup path length out of item");
+
+    memcpy(bad, buf, n);
+    item = lookup_resp_item_ptr(bad, NIPC_APPS_LOOKUP_RESP_HDR_SIZE, 1, 0,
+                                &item_len);
+    uint32_t comm_off = get32(item, 32);
+    uint32_t comm_len = get32(item, 36);
+    put32(item, 40, comm_off);
+    put32(item, 44, comm_len);
+    CHECK(nipc_apps_lookup_resp_decode(bad, n, &view) == NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup response rejects overlapping comm and path");
+
+    CHECK(nipc_apps_lookup_resp_decode(buf, n, &view) == NIPC_OK,
+          "apps_lookup guard response decode");
+    const uint8_t *raw_item = NULL;
+    uint32_t raw_len = 0;
+    CHECK(nipc_apps_lookup_resp_raw_item(&view, 1, &raw_item, &raw_len) ==
+              NIPC_ERR_OUT_OF_BOUNDS,
+          "apps_lookup raw item rejects oob index");
+    CHECK(nipc_apps_lookup_resp_raw_item(&view, 0, &raw_item, &raw_len) == NIPC_OK,
+          "apps_lookup raw item extracts item");
+
+    nipc_apps_lookup_resp_view_t manual_view = view;
+    manual_view._payload_len = NIPC_APPS_LOOKUP_RESP_HDR_SIZE;
+    CHECK(nipc_apps_lookup_resp_raw_item(&manual_view, 0, &raw_item, &raw_len) ==
+              NIPC_ERR_TRUNCATED,
+          "apps_lookup raw item rejects truncated payload view");
+
+    memcpy(bad, buf, n);
+    put32(bad, NIPC_APPS_LOOKUP_RESP_HDR_SIZE + 4, UINT32_MAX);
+    manual_view = view;
+    manual_view._payload = bad;
+    manual_view._payload_len = n;
+    CHECK(nipc_apps_lookup_resp_raw_item(&manual_view, 0, &raw_item, &raw_len) ==
+              NIPC_ERR_OUT_OF_BOUNDS,
+          "apps_lookup raw item rejects oob directory entry");
+
+    size_t encoded_len = 0;
+    CHECK(nipc_apps_lookup_raw_resp_encode(
+              NULL, NULL, 1, 0, out, sizeof(out), &encoded_len) ==
+              NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup raw response rejects missing item arrays");
+
+    CHECK(nipc_apps_lookup_resp_raw_item(&view, 0, &raw_item, &raw_len) == NIPC_OK,
+          "apps_lookup raw response source item");
+    const uint8_t *items[] = { raw_item };
+    uint32_t short_lens[] = { NIPC_APPS_LOOKUP_ITEM_HDR_SIZE - 1 };
+    CHECK(nipc_apps_lookup_raw_resp_encode(
+              items, short_lens, 1, 0, out, sizeof(out), &encoded_len) ==
+              NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup raw response rejects short item");
+
+    uint8_t invalid_item[512];
+    CHECK(raw_len <= sizeof(invalid_item), "apps_lookup raw item fits mutation buffer");
+    memcpy(invalid_item, raw_item, raw_len);
+    put16(invalid_item, 0, 99);
+    const uint8_t *invalid_items[] = { invalid_item };
+    uint32_t invalid_lens[] = { raw_len };
+    CHECK(nipc_apps_lookup_raw_resp_encode(
+              invalid_items, invalid_lens, 1, 0, out, sizeof(out), &encoded_len) ==
+              NIPC_ERR_BAD_LAYOUT,
+          "apps_lookup raw response rejects invalid item");
+
+    uint32_t lens[] = { raw_len };
+    CHECK(nipc_apps_lookup_raw_resp_encode(
+              items, lens, 1, 0, out,
+              NIPC_APPS_LOOKUP_RESP_HDR_SIZE + NIPC_LOOKUP_DIR_ENTRY_SIZE,
+              &encoded_len) == NIPC_ERR_OVERFLOW,
+          "apps_lookup raw response rejects too-small output");
+    CHECK(nipc_apps_lookup_raw_resp_encode(
+              items, lens, 1, 99, out, sizeof(out), &encoded_len) == NIPC_OK,
+          "apps_lookup raw response encodes valid item");
+    CHECK(nipc_apps_lookup_resp_decode(out, encoded_len, &view) == NIPC_OK &&
+              view.generation == 99 && view.item_count == 1,
+          "apps_lookup raw response valid output decodes");
+}
+
 static void test_lookup_builders_reject_interior_nul(void) {
     uint8_t buf[512];
     char bad[] = { 'a', '\0', 'b' };
@@ -2922,14 +3188,14 @@ static void test_lookup_builder_semantic_error_paths(void) {
           "cgroups_lookup rejects bad status");
     nipc_cgroups_lookup_builder_init(&cb, buf, sizeof(buf), 1, 0);
     CHECK(nipc_cgroups_lookup_builder_add(
-              &cb, NIPC_CGROUP_LOOKUP_UNKNOWN_RETRY_LATER,
-              NIPC_ORCHESTRATOR_DOCKER, "/x", 2, "n", 1, NULL, 0) ==
-              NIPC_ERR_BAD_LAYOUT,
+	              &cb, NIPC_CGROUP_LOOKUP_UNKNOWN_RETRY_LATER,
+	              NIPC_ORCHESTRATOR_DOCKER, "/x", 2, "n", 1, NULL, 0) ==
+	              NIPC_ERR_BAD_LAYOUT,
           "cgroups_lookup rejects metadata on unknown");
     nipc_cgroups_lookup_builder_init(&cb, buf, sizeof(buf), 1, 0);
     CHECK(nipc_cgroups_lookup_builder_add(
               &cb, NIPC_CGROUP_LOOKUP_KNOWN, 0,
-              "/x", 2, "", 0, NULL, 1) == NIPC_ERR_OVERFLOW,
+              "/x", 2, "", 0, NULL, 1) == NIPC_ERR_BAD_LAYOUT,
           "cgroups_lookup rejects missing labels");
     nipc_cgroups_lookup_builder_init(&cb, buf, sizeof(buf), 1, 0);
     CHECK(nipc_cgroups_lookup_builder_add(
@@ -3009,7 +3275,7 @@ static void test_lookup_builder_semantic_error_paths(void) {
     CHECK(nipc_apps_lookup_builder_add(
               &ab, NIPC_PID_LOOKUP_KNOWN, NIPC_APPS_CGROUP_KNOWN,
               0, 1, 0, 0, 1, "a", 1, "/x", 2, "", 0, NULL, 1) ==
-              NIPC_ERR_OVERFLOW,
+              NIPC_ERR_BAD_LAYOUT,
           "apps_lookup rejects missing labels");
     nipc_apps_lookup_builder_init(&ab, buf, sizeof(buf), 1, 0);
     CHECK(nipc_apps_lookup_builder_add(
@@ -3182,8 +3448,10 @@ int main(void) {
     test_dispatch_cgroups_lookup_paths();
     test_dispatch_apps_lookup_paths();
     test_apps_lookup_req_resp_roundtrip();
+    test_lookup_response_exact_and_short_boundary();
     test_lookup_responses_reject_bad_layouts();
     test_apps_lookup_reject_comm_len_16();
+    test_apps_lookup_additional_guard_paths();
     test_lookup_builders_reject_interior_nul();
     test_lookup_builders_reject_offset_overflow();
     test_lookup_req_encode_error_paths();

@@ -2159,7 +2159,7 @@ static void test_directional_limit_negotiation(void)
     };
     sctx.config.max_response_payload_bytes = 65536;
     sctx.config.max_response_batch_items = 32;
-    sctx.config.max_request_payload_bytes = 128;
+    sctx.config.max_request_payload_bytes = 65536;
     sctx.config.max_request_batch_items = 8;
     __atomic_store_n(&sctx.ready, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&sctx.done, 0, __ATOMIC_RELAXED);

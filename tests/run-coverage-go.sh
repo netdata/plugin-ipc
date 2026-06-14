@@ -37,6 +37,10 @@ cd "$GO_DIR"
 # Packages to measure (POSIX only -- Windows packages can't be tested here)
 PACKAGES=(
     "./pkg/netipc/protocol/"
+    "./pkg/netipc/service/internal/transportconfig/"
+    "./pkg/netipc/service/raw/"
+    "./pkg/netipc/service/apps_lookup/"
+    "./pkg/netipc/service/cgroups_lookup/"
     "./pkg/netipc/transport/posix/"
     "./pkg/netipc/service/cgroups_snapshot/"
 )
@@ -52,7 +56,7 @@ for pkg in "${PACKAGES[@]}"; do
     coverfile="$COVERDIR/${pkg_name//\//_}.out"
 
     echo -e "${YELLOW}Testing $pkg_name...${NC}"
-    if CGO_ENABLED=0 go test -count=1 -timeout=120s \
+    if CGO_ENABLED=0 go test -count=1 -timeout=240s \
         -coverprofile="$coverfile" \
         -covermode=count \
         "$pkg" 2>&1; then

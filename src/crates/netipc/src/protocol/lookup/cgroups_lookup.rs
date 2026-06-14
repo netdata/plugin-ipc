@@ -6,6 +6,8 @@ use crate::protocol::{align8, NipcError, StrView};
 pub const CGROUP_LOOKUP_KNOWN: u16 = 0;
 pub const CGROUP_LOOKUP_UNKNOWN_RETRY_LATER: u16 = 1;
 pub const CGROUP_LOOKUP_UNKNOWN_PERMANENT: u16 = 2;
+pub const CGROUP_LOOKUP_PAYLOAD_EXCEEDED: u16 = 3;
+pub const CGROUP_LOOKUP_OVERSIZED_ITEM: u16 = 4;
 
 pub const CGROUPS_LOOKUP_REQ_HDR_SIZE: usize = 16;
 pub const CGROUPS_LOOKUP_RESP_HDR_SIZE: usize = 16;
@@ -47,6 +49,8 @@ fn validate_cgroups_lookup_semantics(
     if status != CGROUP_LOOKUP_KNOWN
         && status != CGROUP_LOOKUP_UNKNOWN_RETRY_LATER
         && status != CGROUP_LOOKUP_UNKNOWN_PERMANENT
+        && status != CGROUP_LOOKUP_PAYLOAD_EXCEEDED
+        && status != CGROUP_LOOKUP_OVERSIZED_ITEM
     {
         return Err(NipcError::BadLayout);
     }
@@ -225,6 +229,34 @@ impl<'a> CgroupsLookupResponseView<'a> {
         let len = u32_at(self.payload, base + 4) as usize;
         decode_cgroups_item(checked_subslice(self.payload, packed_start, off, len)?)
     }
+
+    pub fn raw_item(&self, index: u32) -> Result<&'a [u8], NipcError> {
+        response_raw_item(
+            self.payload,
+            CGROUPS_LOOKUP_RESP_HDR_SIZE,
+            self.item_count,
+            index,
+        )
+    }
+}
+
+pub fn encode_cgroups_lookup_raw_response(
+    items: &[&[u8]],
+    generation: u64,
+    buf: &mut [u8],
+) -> Result<usize, NipcError> {
+    encode_raw_response(
+        buf,
+        CGROUPS_LOOKUP_RESP_HDR_SIZE,
+        generation,
+        items,
+        CGROUPS_LOOKUP_ITEM_HDR_SIZE,
+        validate_cgroups_lookup_raw_item,
+    )
+}
+
+fn validate_cgroups_lookup_raw_item(item: &[u8]) -> Result<(), NipcError> {
+    decode_cgroups_item(item).map(|_| ())
 }
 
 fn decode_cgroups_item(item: &[u8]) -> Result<CgroupsLookupItemView<'_>, NipcError> {
@@ -291,6 +323,7 @@ pub struct CgroupsLookupBuilder<'a> {
     max_items: u32,
     data_offset: usize,
     error: Option<NipcError>,
+    payload_exceeded_suffix: bool,
 }
 
 impl<'a> CgroupsLookupBuilder<'a> {
@@ -310,6 +343,7 @@ impl<'a> CgroupsLookupBuilder<'a> {
             max_items,
             data_offset,
             error: None,
+            payload_exceeded_suffix: false,
         }
     }
 
@@ -325,6 +359,9 @@ impl<'a> CgroupsLookupBuilder<'a> {
         name: &[u8],
         labels: &[(&[u8], &[u8])],
     ) -> Result<(), NipcError> {
+        if self.payload_exceeded_suffix {
+            return self.add_non_known_item(CGROUP_LOOKUP_PAYLOAD_EXCEEDED, path);
+        }
         if self.item_count >= self.max_items {
             self.error = Some(NipcError::Overflow);
             return Err(NipcError::Overflow);
@@ -343,9 +380,18 @@ impl<'a> CgroupsLookupBuilder<'a> {
             self.error = Some(NipcError::BadLayout);
             return Err(NipcError::BadLayout);
         }
+        if status != CGROUP_LOOKUP_KNOWN {
+            return match self.add_non_known_item(status, path) {
+                Err(NipcError::Overflow) => self.note_item_overflow(path),
+                other => other,
+            };
+        }
         let label_count = match checked_u16(labels.len()) {
             Ok(v) => v,
             Err(err) => {
+                if err == NipcError::Overflow {
+                    return self.note_item_overflow(path);
+                }
                 self.error = Some(err);
                 return Err(err);
             }
@@ -357,24 +403,26 @@ impl<'a> CgroupsLookupBuilder<'a> {
             .checked_add(path.len())
             .and_then(|v| v.checked_add(1))
         else {
-            self.error = Some(NipcError::Overflow);
-            return Err(NipcError::Overflow);
+            return self.note_item_overflow(path);
         };
         let Some(fixed_end) = name_offset
             .checked_add(name.len())
             .and_then(|v| v.checked_add(1))
         else {
-            self.error = Some(NipcError::Overflow);
-            return Err(NipcError::Overflow);
+            return self.note_item_overflow(path);
         };
-        let (table_start, table_bytes, mut item_size) = label_layout(fixed_end, labels)?;
-        let item_end = item_start
-            .checked_add(item_size)
-            .ok_or(NipcError::Overflow)?;
-        if item_end > self.buf.len() {
-            self.error = Some(NipcError::Overflow);
-            return Err(NipcError::Overflow);
-        }
+        let (table_start, table_bytes, mut item_size) = match label_layout(fixed_end, labels) {
+            Ok(v) => v,
+            Err(NipcError::Overflow) => return self.note_item_overflow(path),
+            Err(err) => {
+                self.error = Some(err);
+                return Err(err);
+            }
+        };
+        let item_end = match item_start.checked_add(item_size) {
+            Some(v) if v <= self.buf.len() => v,
+            _ => return self.note_item_overflow(path),
+        };
         if item_start > self.data_offset {
             self.buf[self.data_offset..item_start].fill(0);
         }
@@ -410,7 +458,92 @@ impl<'a> CgroupsLookupBuilder<'a> {
         put_u32(self.buf, dir + 4, checked_u32(item_size)?);
         self.data_offset = item_end;
         self.item_count += 1;
+        self.error = None;
         Ok(())
+    }
+
+    fn add_non_known_item(&mut self, status: u16, path: &[u8]) -> Result<(), NipcError> {
+        if self.item_count >= self.max_items {
+            self.error = Some(NipcError::Overflow);
+            return Err(NipcError::Overflow);
+        }
+        let item_start = align8(self.data_offset);
+        let Some(name_offset) = CGROUPS_LOOKUP_ITEM_HDR_SIZE
+            .checked_add(path.len())
+            .and_then(|v| v.checked_add(1))
+        else {
+            self.error = Some(NipcError::Overflow);
+            return Err(NipcError::Overflow);
+        };
+        let Some(item_size) = name_offset.checked_add(1) else {
+            self.error = Some(NipcError::Overflow);
+            return Err(NipcError::Overflow);
+        };
+        let Some(item_end) = item_start.checked_add(item_size) else {
+            self.error = Some(NipcError::Overflow);
+            return Err(NipcError::Overflow);
+        };
+        if item_end > self.buf.len() {
+            self.error = Some(NipcError::Overflow);
+            return Err(NipcError::Overflow);
+        }
+        if item_start > self.data_offset {
+            self.buf[self.data_offset..item_start].fill(0);
+        }
+        let item = &mut self.buf[item_start..item_end];
+        if let Err(err) = write_cgroups_item_header(
+            item,
+            status,
+            0,
+            CGROUPS_LOOKUP_ITEM_HDR_SIZE,
+            path.len(),
+            name_offset,
+            0,
+            0,
+        ) {
+            self.error = Some(err);
+            return Err(err);
+        }
+        item[CGROUPS_LOOKUP_ITEM_HDR_SIZE..CGROUPS_LOOKUP_ITEM_HDR_SIZE + path.len()]
+            .copy_from_slice(path);
+        item[CGROUPS_LOOKUP_ITEM_HDR_SIZE + path.len()] = 0;
+        item[name_offset] = 0;
+        let Some(dir_offset) = (self.item_count as usize).checked_mul(LOOKUP_DIR_ENTRY_SIZE) else {
+            self.error = Some(NipcError::Overflow);
+            return Err(NipcError::Overflow);
+        };
+        let Some(dir) = CGROUPS_LOOKUP_RESP_HDR_SIZE.checked_add(dir_offset) else {
+            self.error = Some(NipcError::Overflow);
+            return Err(NipcError::Overflow);
+        };
+        let item_start_u32 = match checked_u32(item_start) {
+            Ok(v) => v,
+            Err(err) => {
+                self.error = Some(err);
+                return Err(err);
+            }
+        };
+        let item_size_u32 = match checked_u32(item_size) {
+            Ok(v) => v,
+            Err(err) => {
+                self.error = Some(err);
+                return Err(err);
+            }
+        };
+        put_u32(self.buf, dir, item_start_u32);
+        put_u32(self.buf, dir + 4, item_size_u32);
+        self.data_offset = item_end;
+        self.item_count += 1;
+        self.error = None;
+        Ok(())
+    }
+
+    fn note_item_overflow(&mut self, path: &[u8]) -> Result<(), NipcError> {
+        if self.item_count == 0 {
+            return self.add_non_known_item(CGROUP_LOOKUP_OVERSIZED_ITEM, path);
+        }
+        self.payload_exceeded_suffix = true;
+        self.add_non_known_item(CGROUP_LOOKUP_PAYLOAD_EXCEEDED, path)
     }
 
     pub fn finish(self) -> Result<usize, NipcError> {
@@ -521,6 +654,61 @@ mod tests {
         let label = item.label(0).unwrap();
         assert_eq!(label.key.as_bytes(), b"namespace");
         assert_eq!(label.value.as_bytes(), b"default");
+    }
+
+    fn build_cgroups_lookup_boundary_response(buf: &mut [u8]) -> usize {
+        let mut b = CgroupsLookupBuilder::new(buf, 2, 333);
+        b.add(
+            CGROUP_LOOKUP_KNOWN,
+            ORCHESTRATOR_K8S,
+            b"/kubepods/pod-a",
+            b"pod-a",
+            &[],
+        )
+        .unwrap();
+        b.add(
+            CGROUP_LOOKUP_KNOWN,
+            ORCHESTRATOR_K8S,
+            b"/kubepods/long-pod-path",
+            b"long-pod-name",
+            &[(b"namespace".as_slice(), b"default".as_slice())],
+        )
+        .unwrap();
+        b.finish().unwrap()
+    }
+
+    #[test]
+    fn cgroups_lookup_response_exact_and_short_boundary() {
+        let mut large = vec![0u8; 1024];
+        let exact_len = build_cgroups_lookup_boundary_response(&mut large);
+        assert!(exact_len > CGROUPS_LOOKUP_RESP_HDR_SIZE + 2 * LOOKUP_DIR_ENTRY_SIZE);
+
+        let mut exact = vec![0u8; exact_len];
+        assert_eq!(
+            build_cgroups_lookup_boundary_response(&mut exact),
+            exact_len
+        );
+        let view = CgroupsLookupResponseView::decode(&exact).unwrap();
+        let item = view.item(1).unwrap();
+        assert_eq!(item.status, CGROUP_LOOKUP_KNOWN);
+        assert_eq!(item.path.as_bytes(), b"/kubepods/long-pod-path");
+
+        let mut plus_one = vec![0u8; exact_len + 1];
+        assert_eq!(
+            build_cgroups_lookup_boundary_response(&mut plus_one),
+            exact_len
+        );
+        let view = CgroupsLookupResponseView::decode(&plus_one[..exact_len]).unwrap();
+        let item = view.item(1).unwrap();
+        assert_eq!(item.status, CGROUP_LOOKUP_KNOWN);
+        assert_eq!(item.path.as_bytes(), b"/kubepods/long-pod-path");
+
+        let mut short = vec![0u8; exact_len - 1];
+        let short_len = build_cgroups_lookup_boundary_response(&mut short);
+        let view = CgroupsLookupResponseView::decode(&short[..short_len]).unwrap();
+        let item = view.item(1).unwrap();
+        assert_eq!(item.status, CGROUP_LOOKUP_PAYLOAD_EXCEEDED);
+        assert_eq!(item.path.as_bytes(), b"/kubepods/long-pod-path");
     }
 
     fn cgroups_lookup_labeled_response() -> Vec<u8> {

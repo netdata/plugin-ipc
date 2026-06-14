@@ -408,6 +408,7 @@ fn typed_client_config(profiles: u32) -> TypedClientConfig {
     TypedClientConfig {
         supported_profiles: profiles,
         preferred_profiles: profiles,
+        max_request_payload_bytes: 4096,
         max_request_batch_items: 1,
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
         auth_token: AUTH_TOKEN,

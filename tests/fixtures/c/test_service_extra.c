@@ -2,6 +2,7 @@
 
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_protocol.h"
+#include "netipc_service_common.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -234,6 +235,124 @@ static void ensure_run_dir(void)
     mkdir(TEST_RUN_DIR, 0700);
 }
 
+static void test_common_service_helpers(void)
+{
+    printf("--- Common service helpers ---\n");
+
+    {
+        uint32_t msg_len = 0;
+        check("u32 header length rejects overflow",
+              !nipc_service_common_header_payload_len_u32(UINT32_MAX,
+                                                          &msg_len));
+    }
+
+    {
+        char dst[4] = "xxx";
+
+        nipc_service_common_copy_cstr_field(NULL, sizeof(dst), "abc");
+        check("copy cstr tolerates null destination", 1);
+
+        nipc_service_common_copy_cstr_field(dst, 0, "abc");
+        check("copy cstr tolerates zero destination size", 1);
+
+        nipc_service_common_copy_cstr_field(dst, sizeof(dst), NULL);
+        check("copy cstr null source clears destination", dst[0] == '\0');
+
+        nipc_service_common_copy_cstr_field(dst, sizeof(dst), "abcdef");
+        check("copy cstr truncates and terminates",
+              strcmp(dst, "abc") == 0);
+    }
+
+    {
+        nipc_client_ctx_t ctx;
+        memset(&ctx, 0, sizeof(ctx));
+
+        check("call timeout uses library default",
+              nipc_service_common_client_call_timeout_ms(&ctx, 0)
+              == NIPC_CLIENT_CALL_TIMEOUT_DEFAULT_MS);
+        ctx.call_timeout_ms = 1234;
+        check("call timeout uses context default",
+              nipc_service_common_client_call_timeout_ms(&ctx, 0) == 1234);
+        check("call timeout uses explicit timeout",
+              nipc_service_common_client_call_timeout_ms(&ctx, 7) == 7);
+    }
+
+    {
+        nipc_header_t req = {
+            .code = NIPC_METHOD_INCREMENT,
+            .flags = NIPC_FLAG_BATCH,
+            .item_count = 3,
+            .message_id = 42,
+        };
+        nipc_header_t resp;
+
+        nipc_service_common_prepare_response_header(&req, &resp);
+        check("batch response header preserves item count",
+              resp.item_count == req.item_count);
+        check("batch response header preserves batch flag",
+              (resp.flags & NIPC_FLAG_BATCH) != 0);
+    }
+
+    {
+        nipc_client_ctx_t ctx;
+        nipc_header_t hdr;
+
+        memset(&ctx, 0, sizeof(ctx));
+        memset(&hdr, 0, sizeof(hdr));
+        hdr.transport_status = NIPC_STATUS_BAD_ENVELOPE;
+        check("bad envelope status maps to bad layout",
+              nipc_service_common_response_status_to_error(&ctx, &hdr)
+              == NIPC_ERR_BAD_LAYOUT);
+
+        hdr.transport_status = 999;
+        check("unknown response status maps to bad layout",
+              nipc_service_common_response_status_to_error(&ctx, &hdr)
+              == NIPC_ERR_BAD_LAYOUT);
+    }
+
+    {
+        nipc_client_ctx_t ctx;
+        nipc_header_t hdr;
+        uint8_t *msg = NULL;
+        size_t msg_len = 0;
+
+        memset(&ctx, 0, sizeof(ctx));
+        check("prepare shm request rejects u32 overflow",
+              nipc_service_common_client_prepare_shm_request(
+                  &ctx, &hdr, NULL, (size_t)UINT32_MAX + 1u,
+                  &msg, &msg_len) == NIPC_ERR_OVERFLOW);
+    }
+
+    {
+        nipc_managed_server_t server;
+        nipc_header_t resp;
+        size_t response_len = 32;
+        bool close_after_response = false;
+
+        memset(&server, 0, sizeof(server));
+        memset(&resp, 0, sizeof(resp));
+        nipc_service_common_apply_dispatch_result(
+            &server, NIPC_OK, 8, RESPONSE_BUF_SIZE, true,
+            &resp, &response_len, &close_after_response);
+        check("oversize dispatch result returns limit status",
+              resp.transport_status == NIPC_STATUS_LIMIT_EXCEEDED);
+        check("oversize dispatch result closes session",
+              close_after_response && response_len == 0);
+
+        response_len = 16;
+        close_after_response = false;
+        memset(&resp, 0, sizeof(resp));
+        nipc_service_common_apply_dispatch_result(
+            &server, NIPC_ERR_OVERFLOW, RESPONSE_BUF_SIZE,
+            UINT32_MAX / 2u, true, &resp, &response_len,
+            &close_after_response);
+        check("overflow dispatch result returns limit status",
+              resp.transport_status == NIPC_STATUS_LIMIT_EXCEEDED);
+        check("overflow dispatch result closes session",
+              close_after_response && response_len == 0);
+    }
+}
+
 static void test_client_fault_injection_disconnects_and_recovers(void)
 {
     printf("--- Client fault injection disconnects / recovers ---\n");
@@ -410,6 +529,7 @@ int main(void)
     printf("=== POSIX Service Extra Tests ===\n\n");
     ensure_run_dir();
 
+    test_common_service_helpers();
     test_client_fault_injection_disconnects_and_recovers();
     test_server_init_fault_injection();
     test_cache_fault_injection();

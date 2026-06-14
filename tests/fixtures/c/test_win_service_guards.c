@@ -940,13 +940,15 @@ static void test_client_batch_and_string_guards(void)
         if (nipc_client_ready(&client)) {
             nipc_error_t err = test_win_client_call_increment_batch_raw(
                 &client, req, 2, resp);
-            check("increment batch transparently resizes and succeeds",
-                  err == NIPC_OK && resp[0] == 8 && resp[1] == 12);
+            check("increment batch respects configured request ceiling",
+                  err == NIPC_ERR_OVERFLOW);
             nipc_client_status(&client, &status);
-            check("increment batch resize reconnects once",
-                  status.reconnect_count >= 1);
-            check("increment batch negotiated request size grows",
-                  client.session.max_request_payload_bytes >= 32u);
+            check("increment batch overflow is counted as error",
+                  status.error_count >= 1);
+            check("increment batch request size stays capped",
+                  client.session.max_request_payload_bytes <= 8u);
+            check("increment batch overflow breaks client",
+                  !nipc_client_ready(&client));
         }
 
         nipc_client_close(&client);
@@ -981,13 +983,15 @@ static void test_client_batch_and_string_guards(void)
         if (nipc_client_ready(&client)) {
             nipc_error_t err = test_win_client_call_string_reverse_raw(
                 &client, "this request is intentionally too large", 38, &view);
-            check("string reverse transparently resizes and succeeds",
-                  err == NIPC_OK && view.str_len == 38);
+            check("string reverse respects configured request ceiling",
+                  err == NIPC_ERR_OVERFLOW);
             nipc_client_status(&client, &status);
-            check("string reverse resize reconnects once",
-                  status.reconnect_count >= 1);
-            check("string reverse negotiated request size grows",
-                  client.session.max_request_payload_bytes >= 64u);
+            check("string reverse overflow is counted as error",
+                  status.error_count >= 1);
+            check("string reverse request size stays capped",
+                  client.session.max_request_payload_bytes <= 16u);
+            check("string reverse overflow breaks client",
+                  !nipc_client_ready(&client));
         }
 
         nipc_client_close(&client);
@@ -1212,13 +1216,15 @@ static void test_hybrid_client_send_capacity_guard(void)
         nipc_client_status_t status = {0};
         nipc_error_t err = test_win_client_call_string_reverse_raw(
             &client, "this request is intentionally too large", 38, &view);
-        check("hybrid SHM request overflow transparently recovers",
-              err == NIPC_OK && view.str_len == 38);
+        check("hybrid SHM request overflow respects configured ceiling",
+              err == NIPC_ERR_OVERFLOW);
         nipc_client_status(&client, &status);
-        check("hybrid send-capacity resize reconnects once",
-              status.reconnect_count >= 1);
-        check("hybrid send-capacity resize keeps client READY",
-              nipc_client_ready(&client));
+        check("hybrid send-capacity overflow is counted as error",
+              status.error_count >= 1);
+        check("hybrid send-capacity request size stays capped",
+              client.session.max_request_payload_bytes <= 16u);
+        check("hybrid send-capacity overflow breaks client",
+              !nipc_client_ready(&client));
     }
 
     nipc_client_close(&client);
@@ -1253,15 +1259,15 @@ static void test_hybrid_batch_send_capacity_guard(void)
         uint64_t resp[4] = { 0, 0, 0, 0 };
         nipc_client_status_t status = {0};
         nipc_error_t err = test_win_client_call_increment_batch_raw(&client, req, 4, resp);
-        check("hybrid batch request overflow transparently recovers",
-              err == NIPC_OK &&
-              resp[0] == 42 && resp[1] == 100 &&
-              resp[2] == 124 && resp[3] == 778);
+        check("hybrid batch request overflow respects configured ceiling",
+              err == NIPC_ERR_OVERFLOW);
         nipc_client_status(&client, &status);
-        check("hybrid batch resize reconnects once",
-              status.reconnect_count >= 1);
-        check("hybrid batch resize keeps client READY",
-              nipc_client_ready(&client));
+        check("hybrid batch overflow is counted as error",
+              status.error_count >= 1);
+        check("hybrid batch request size stays capped",
+              client.session.max_request_payload_bytes <= 16u);
+        check("hybrid batch overflow breaks client",
+              !nipc_client_ready(&client));
     }
 
     nipc_client_close(&client);

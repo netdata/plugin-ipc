@@ -7,15 +7,22 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
+	appslookup "github.com/netdata/plugin-ipc/go/pkg/netipc/service/apps_lookup"
+	cgroupslookup "github.com/netdata/plugin-ipc/go/pkg/netipc/service/cgroups_lookup"
 	cgroups "github.com/netdata/plugin-ipc/go/pkg/netipc/service/cgroups_snapshot"
 )
 
 const (
-	authToken       = uint64(0xDEADBEEFCAFEBABE)
-	responseBufSize = 65536
+	authToken                      = uint64(0xDEADBEEFCAFEBABE)
+	responseBufSize                = 65536
+	lookupScaleItemsDefault        = 8192
+	lookupScaleRequestPayloadBytes = 8192
+	lookupScaleCallTimeoutMs       = 120000
+	lookupMixedItems               = 5
 )
 
 // detectProfiles reads NIPC_PROFILE env var: "shm" enables SHM_HYBRID|BASELINE,
@@ -44,6 +51,188 @@ func clientConfig() cgroups.ClientConfig {
 		MaxRequestBatchItems:    16,
 		MaxResponsePayloadBytes: responseBufSize,
 		AuthToken:               authToken,
+	}
+}
+
+func lookupItemCount() int {
+	raw := os.Getenv("NIPC_LOOKUP_SCALE_ITEMS")
+	if raw == "" {
+		return lookupScaleItemsDefault
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 || value > 65536 {
+		return lookupScaleItemsDefault
+	}
+	return value
+}
+
+func lookupCountU32(value int) uint32 {
+	return uint32(value) // #nosec G115 -- interop scale item counts are bounded to 1..65536.
+}
+
+func appsLookupServerConfig() appslookup.ServerConfig {
+	profiles := detectProfiles()
+	return appslookup.ServerConfig{
+		SupportedProfiles:       profiles,
+		PreferredProfiles:       profiles,
+		MaxRequestPayloadBytes:  lookupScaleRequestPayloadBytes,
+		MaxRequestBatchItems:    16,
+		MaxResponsePayloadBytes: responseBufSize,
+		AuthToken:               authToken,
+	}
+}
+
+func appsLookupClientConfig(itemCount int) appslookup.ClientConfig {
+	profiles := detectProfiles()
+	return appslookup.ClientConfig{
+		SupportedProfiles:             profiles,
+		PreferredProfiles:             profiles,
+		MaxRequestPayloadBytes:        lookupScaleRequestPayloadBytes,
+		MaxRequestBatchItems:          16,
+		MaxResponsePayloadBytes:       responseBufSize,
+		CallTimeoutMs:                 lookupScaleCallTimeoutMs,
+		AuthToken:                     authToken,
+		MaxLogicalLookupItems:         lookupCountU32(itemCount),
+		MaxLogicalLookupSubcalls:      4096,
+		MaxLogicalLookupResponseBytes: 64 * 1024 * 1024,
+	}
+}
+
+func cgroupsLookupServerConfig() cgroupslookup.ServerConfig {
+	profiles := detectProfiles()
+	return cgroupslookup.ServerConfig{
+		SupportedProfiles:       profiles,
+		PreferredProfiles:       profiles,
+		MaxRequestPayloadBytes:  lookupScaleRequestPayloadBytes,
+		MaxRequestBatchItems:    16,
+		MaxResponsePayloadBytes: responseBufSize,
+		AuthToken:               authToken,
+	}
+}
+
+func cgroupsLookupClientConfig(itemCount int) cgroupslookup.ClientConfig {
+	profiles := detectProfiles()
+	return cgroupslookup.ClientConfig{
+		SupportedProfiles:             profiles,
+		PreferredProfiles:             profiles,
+		MaxRequestPayloadBytes:        lookupScaleRequestPayloadBytes,
+		MaxRequestBatchItems:          16,
+		MaxResponsePayloadBytes:       responseBufSize,
+		CallTimeoutMs:                 lookupScaleCallTimeoutMs,
+		AuthToken:                     authToken,
+		MaxLogicalLookupItems:         lookupCountU32(itemCount),
+		MaxLogicalLookupSubcalls:      4096,
+		MaxLogicalLookupResponseBytes: 64 * 1024 * 1024,
+	}
+}
+
+func appsLookupHandler() appslookup.Handler {
+	return appslookup.Handler{
+		Handle: func(req *protocol.AppsLookupRequestView, builder *protocol.AppsLookupBuilder) bool {
+			builder.SetGeneration(9)
+			for i := uint32(0); i < req.ItemCount; i++ {
+				pid, err := req.Item(i)
+				if err != nil {
+					return false
+				}
+				if err := builder.Add(
+					protocol.PidLookupKnown,
+					protocol.AppsCgroupKnown,
+					protocol.OrchestratorDocker,
+					pid,
+					1,
+					1000,
+					42,
+					[]byte("ok"),
+					[]byte("/ok"),
+					[]byte("name"),
+					nil,
+				); err != nil {
+					return false
+				}
+			}
+			return true
+		},
+	}
+}
+
+func cgroupsLookupHandler() cgroupslookup.Handler {
+	return cgroupslookup.Handler{
+		Handle: func(req *protocol.CgroupsLookupRequestView, builder *protocol.CgroupsLookupBuilder) bool {
+			builder.SetGeneration(7)
+			for i := uint32(0); i < req.ItemCount; i++ {
+				path, err := req.Item(i)
+				if err != nil {
+					return false
+				}
+				if err := builder.Add(protocol.CgroupLookupKnown, protocol.OrchestratorK8s, path.Bytes(), []byte("ok"), nil); err != nil {
+					return false
+				}
+			}
+			return true
+		},
+	}
+}
+
+func appsLookupMixedHandler() appslookup.Handler {
+	return appslookup.Handler{
+		Handle: func(req *protocol.AppsLookupRequestView, builder *protocol.AppsLookupBuilder) bool {
+			builder.SetGeneration(19)
+			for i := uint32(0); i < req.ItemCount; i++ {
+				pid, err := req.Item(i)
+				if err != nil {
+					return false
+				}
+				labels := []struct{ Key, Value []byte }{{Key: []byte("role"), Value: []byte("api")}}
+				switch pid {
+				case 1001:
+					err = builder.Add(protocol.PidLookupKnown, protocol.AppsCgroupKnown, protocol.OrchestratorDocker, pid, 1, 1000, 42, []byte("known"), []byte("/cg/known"), []byte("pod-a"), labels)
+				case 1002:
+					err = builder.Add(protocol.PidLookupKnown, protocol.AppsCgroupHostRoot, 0, pid, 1, 1001, 43, []byte("host"), nil, nil, nil)
+				case 1003:
+					err = builder.Add(protocol.PidLookupUnknown, 0, 0, pid, 0, protocol.NipcUIDUnset, 0, nil, nil, nil, nil)
+				case 1004:
+					err = builder.Add(protocol.PidLookupOversizedItem, 0, 0, pid, 0, protocol.NipcUIDUnset, 0, nil, nil, nil, nil)
+				default:
+					err = builder.Add(protocol.PidLookupKnown, protocol.AppsCgroupUnknownRetryLater, 0, pid, 1, 1002, 44, []byte("retry"), nil, nil, nil)
+				}
+				if err != nil {
+					return false
+				}
+			}
+			return true
+		},
+	}
+}
+
+func cgroupsLookupMixedHandler() cgroupslookup.Handler {
+	return cgroupslookup.Handler{
+		Handle: func(req *protocol.CgroupsLookupRequestView, builder *protocol.CgroupsLookupBuilder) bool {
+			builder.SetGeneration(17)
+			for i := uint32(0); i < req.ItemCount; i++ {
+				path, err := req.Item(i)
+				if err != nil {
+					return false
+				}
+				labels := []struct{ Key, Value []byte }{{Key: []byte("role"), Value: []byte("db")}}
+				switch path.String() {
+				case "/known":
+					err = builder.Add(protocol.CgroupLookupKnown, protocol.OrchestratorK8s, path.Bytes(), []byte("pod-a"), labels)
+				case "/retry":
+					err = builder.Add(protocol.CgroupLookupUnknownRetryLater, 0, path.Bytes(), nil, nil)
+				case "/permanent":
+					err = builder.Add(protocol.CgroupLookupUnknownPermanent, 0, path.Bytes(), nil, nil)
+				case "/oversized":
+					err = builder.Add(protocol.CgroupLookupOversizedItem, 0, path.Bytes(), nil, nil)
+				default:
+					err = builder.Add(protocol.CgroupLookupKnown, protocol.OrchestratorDocker, path.Bytes(), []byte("pod-b"), nil)
+				}
+				if err != nil {
+					return false
+				}
+			}
+			return true
+		},
 	}
 }
 
@@ -89,6 +278,281 @@ func runServer(runDir, service string) int {
 		fmt.Fprintf(os.Stderr, "server: %v\n", err)
 		return 1
 	}
+	return 0
+}
+
+type stoppableServer interface {
+	Run() error
+	Stop()
+}
+
+func runLookupServer(server stoppableServer) int {
+	fmt.Println("READY")
+
+	go func() {
+		time.Sleep(120 * time.Second)
+		server.Stop()
+	}()
+
+	if err := server.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "server: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func runAppsServer(runDir, service string) int {
+	return runLookupServer(
+		appslookup.NewServerWithWorkers(runDir, service, appsLookupServerConfig(), appsLookupHandler(), 8),
+	)
+}
+
+func runCgroupsLookupServer(runDir, service string) int {
+	return runLookupServer(
+		cgroupslookup.NewServerWithWorkers(runDir, service, cgroupsLookupServerConfig(), cgroupsLookupHandler(), 8),
+	)
+}
+
+func runAppsMixedServer(runDir, service string) int {
+	return runLookupServer(
+		appslookup.NewServerWithWorkers(runDir, service, appsLookupServerConfig(), appsLookupMixedHandler(), 2),
+	)
+}
+
+func runCgroupsMixedServer(runDir, service string) int {
+	return runLookupServer(
+		cgroupslookup.NewServerWithWorkers(runDir, service, cgroupsLookupServerConfig(), cgroupsLookupMixedHandler(), 2),
+	)
+}
+
+func largeLookupPids(count int) []uint32 {
+	pids := make([]uint32, count)
+	var pid uint32 = 100000
+	for i := range pids {
+		pids[i] = pid
+		pid++
+	}
+	return pids
+}
+
+func largeLookupPaths(count int) [][]byte {
+	paths := make([][]byte, count)
+	for i := range paths {
+		paths[i] = []byte(fmt.Sprintf("/cg/%05d", i))
+	}
+	return paths
+}
+
+func waitAppsClientReady(client *appslookup.Client) bool {
+	for i := 0; i < 200; i++ {
+		client.Refresh()
+		if client.Ready() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+func waitCgroupsLookupClientReady(client *cgroupslookup.Client) bool {
+	for i := 0; i < 200; i++ {
+		client.Refresh()
+		if client.Ready() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+func runAppsClient(runDir, service string) int {
+	itemCount := lookupItemCount()
+	pids := largeLookupPids(itemCount)
+	client := appslookup.NewClient(runDir, service, appsLookupClientConfig(itemCount))
+	defer client.Close()
+	if !waitAppsClientReady(client) {
+		fmt.Fprintf(os.Stderr, "apps client: not ready\n")
+		return 1
+	}
+
+	view, err := client.Call(pids)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "apps client: call failed: %v\n", err)
+		fmt.Println("FAIL")
+		return 1
+	}
+	if view.ItemCount != lookupCountU32(len(pids)) || view.Generation != 9 {
+		fmt.Fprintf(os.Stderr, "apps client: bad header count=%d generation=%d\n", view.ItemCount, view.Generation)
+		fmt.Println("FAIL")
+		return 1
+	}
+	for i, expected := range pids {
+		item, err := view.Item(lookupCountU32(i))
+		if err != nil ||
+			item.Status != protocol.PidLookupKnown ||
+			item.Pid != expected ||
+			item.Comm.String() != "ok" ||
+			item.CgroupPath.String() != "/ok" {
+			fmt.Fprintf(os.Stderr, "apps client: bad item %d\n", i)
+			fmt.Println("FAIL")
+			return 1
+		}
+	}
+
+	fmt.Println("PASS")
+	return 0
+}
+
+func runCgroupsLookupClient(runDir, service string) int {
+	itemCount := lookupItemCount()
+	paths := largeLookupPaths(itemCount)
+	client := cgroupslookup.NewClient(runDir, service, cgroupsLookupClientConfig(itemCount))
+	defer client.Close()
+	if !waitCgroupsLookupClientReady(client) {
+		fmt.Fprintf(os.Stderr, "cgroups lookup client: not ready\n")
+		return 1
+	}
+
+	view, err := client.Call(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cgroups lookup client: call failed: %v\n", err)
+		fmt.Println("FAIL")
+		return 1
+	}
+	if view.ItemCount != lookupCountU32(len(paths)) || view.Generation != 7 {
+		fmt.Fprintf(os.Stderr, "cgroups lookup client: bad header count=%d generation=%d\n", view.ItemCount, view.Generation)
+		fmt.Println("FAIL")
+		return 1
+	}
+	for i, expected := range paths {
+		item, err := view.Item(lookupCountU32(i))
+		if err != nil ||
+			item.Status != protocol.CgroupLookupKnown ||
+			item.Path.String() != string(expected) ||
+			item.Name.String() != "ok" {
+			fmt.Fprintf(os.Stderr, "cgroups lookup client: bad item %d\n", i)
+			fmt.Println("FAIL")
+			return 1
+		}
+	}
+
+	fmt.Println("PASS")
+	return 0
+}
+
+func runAppsMixedClient(runDir, service string) int {
+	pids := []uint32{1001, 1002, 1003, 1004, 1005}
+	client := appslookup.NewClient(runDir, service, appsLookupClientConfig(lookupMixedItems))
+	defer client.Close()
+	if !waitAppsClientReady(client) {
+		fmt.Fprintf(os.Stderr, "apps mixed client: not ready\n")
+		return 1
+	}
+
+	view, err := client.Call(pids)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "apps mixed client: call failed: %v\n", err)
+		fmt.Println("FAIL")
+		return 1
+	}
+	if view.ItemCount != lookupMixedItems || view.Generation != 19 {
+		fmt.Fprintf(os.Stderr, "apps mixed client: bad header count=%d generation=%d\n", view.ItemCount, view.Generation)
+		fmt.Println("FAIL")
+		return 1
+	}
+	item0, err := view.Item(0)
+	if err != nil || item0.Status != protocol.PidLookupKnown || item0.CgroupStatus != protocol.AppsCgroupKnown ||
+		item0.Pid != 1001 || item0.Comm.String() != "known" || item0.CgroupPath.String() != "/cg/known" || item0.LabelCount != 1 {
+		fmt.Fprintf(os.Stderr, "apps mixed client: bad item 0\n")
+		fmt.Println("FAIL")
+		return 1
+	}
+	label, err := item0.Label(0)
+	if err != nil || label.Key.String() != "role" || label.Value.String() != "api" {
+		fmt.Fprintf(os.Stderr, "apps mixed client: bad item 0 label\n")
+		fmt.Println("FAIL")
+		return 1
+	}
+	checks := []struct {
+		index        uint32
+		pid          uint32
+		status       uint16
+		cgroupStatus uint16
+		comm         string
+	}{
+		{1, 1002, protocol.PidLookupKnown, protocol.AppsCgroupHostRoot, "host"},
+		{2, 1003, protocol.PidLookupUnknown, 0, ""},
+		{3, 1004, protocol.PidLookupOversizedItem, 0, ""},
+		{4, 1005, protocol.PidLookupKnown, protocol.AppsCgroupUnknownRetryLater, "retry"},
+	}
+	for _, check := range checks {
+		item, err := view.Item(check.index)
+		if err != nil || item.Pid != check.pid || item.Status != check.status ||
+			item.CgroupStatus != check.cgroupStatus || item.Comm.String() != check.comm {
+			fmt.Fprintf(os.Stderr, "apps mixed client: bad item %d\n", check.index)
+			fmt.Println("FAIL")
+			return 1
+		}
+	}
+
+	fmt.Println("PASS")
+	return 0
+}
+
+func runCgroupsMixedClient(runDir, service string) int {
+	paths := [][]byte{[]byte("/known"), []byte("/retry"), []byte("/permanent"), []byte("/oversized"), []byte("/known2")}
+	client := cgroupslookup.NewClient(runDir, service, cgroupsLookupClientConfig(lookupMixedItems))
+	defer client.Close()
+	if !waitCgroupsLookupClientReady(client) {
+		fmt.Fprintf(os.Stderr, "cgroups mixed client: not ready\n")
+		return 1
+	}
+
+	view, err := client.Call(paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cgroups mixed client: call failed: %v\n", err)
+		fmt.Println("FAIL")
+		return 1
+	}
+	if view.ItemCount != lookupMixedItems || view.Generation != 17 {
+		fmt.Fprintf(os.Stderr, "cgroups mixed client: bad header count=%d generation=%d\n", view.ItemCount, view.Generation)
+		fmt.Println("FAIL")
+		return 1
+	}
+	item0, err := view.Item(0)
+	if err != nil || item0.Status != protocol.CgroupLookupKnown ||
+		item0.Path.String() != "/known" || item0.Name.String() != "pod-a" || item0.LabelCount != 1 {
+		fmt.Fprintf(os.Stderr, "cgroups mixed client: bad item 0\n")
+		fmt.Println("FAIL")
+		return 1
+	}
+	label, err := item0.Label(0)
+	if err != nil || label.Key.String() != "role" || label.Value.String() != "db" {
+		fmt.Fprintf(os.Stderr, "cgroups mixed client: bad item 0 label\n")
+		fmt.Println("FAIL")
+		return 1
+	}
+	cases := []struct {
+		index  uint32
+		path   string
+		status uint16
+		name   string
+	}{
+		{1, "/retry", protocol.CgroupLookupUnknownRetryLater, ""},
+		{2, "/permanent", protocol.CgroupLookupUnknownPermanent, ""},
+		{3, "/oversized", protocol.CgroupLookupOversizedItem, ""},
+		{4, "/known2", protocol.CgroupLookupKnown, "pod-b"},
+	}
+	for _, tc := range cases {
+		item, err := view.Item(tc.index)
+		if err != nil || item.Status != tc.status || item.Path.String() != tc.path || item.Name.String() != tc.name {
+			fmt.Fprintf(os.Stderr, "cgroups mixed client: bad item %d\n", tc.index)
+			fmt.Println("FAIL")
+			return 1
+		}
+	}
+
+	fmt.Println("PASS")
 	return 0
 }
 
@@ -156,7 +620,7 @@ func runClient(runDir, service string) int {
 
 func main() {
 	if len(os.Args) != 4 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <server|client> <run_dir> <service_name>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s <server|client|apps-server|apps-client|cgroups-server|cgroups-client|apps-mixed-server|apps-mixed-client|cgroups-mixed-server|cgroups-mixed-client> <run_dir> <service_name>\n", os.Args[0])
 		os.Exit(1)
 	}
 
@@ -170,6 +634,22 @@ func main() {
 		rc = runServer(runDir, service)
 	case "client":
 		rc = runClient(runDir, service)
+	case "apps-server":
+		rc = runAppsServer(runDir, service)
+	case "apps-client":
+		rc = runAppsClient(runDir, service)
+	case "cgroups-server":
+		rc = runCgroupsLookupServer(runDir, service)
+	case "cgroups-client":
+		rc = runCgroupsLookupClient(runDir, service)
+	case "apps-mixed-server":
+		rc = runAppsMixedServer(runDir, service)
+	case "apps-mixed-client":
+		rc = runAppsMixedClient(runDir, service)
+	case "cgroups-mixed-server":
+		rc = runCgroupsMixedServer(runDir, service)
+	case "cgroups-mixed-client":
+		rc = runCgroupsMixedClient(runDir, service)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown mode: %s\n", mode)
 		rc = 1

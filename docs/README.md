@@ -4,6 +4,32 @@ These documents are the authoritative specification for the plugin-ipc
 library. Implementation must align with them. When code and spec disagree,
 the spec is right unless explicitly revised.
 
+## Non-Negotiable Contracts
+
+- These contracts apply to every implementation language and every service
+  unless a future spec explicitly changes the global contract.
+- All wire contracts and typed API behavior are implemented identically in
+  C, Rust, and Go.
+- NetIPC does not support mixed provider/client generations or compatibility
+  shims. Method, layout, status, echoed-key, and generation contracts must
+  match exactly or the call is rejected.
+- Level 2 lookup APIs are scale-safe logical calls. Consumers pass typed keys;
+  the library owns request splitting, response stitching, and transport payload
+  mechanics.
+- `PAYLOAD_EXCEEDED` is a standard lookup response outcome used by Level 2 to
+  retry only the affected suffix internally.
+- `OVERSIZED_ITEM` is a standard final per-item outcome. One valid oversized
+  item must not poison the whole logical lookup batch.
+- Payload budgets and logical lookup ceilings come from initialization config
+  or documented defaults. They are deployment policy, not scattered hardcoded
+  call-path literals.
+- Named defaults are not protocol hard limits. Explicit client/server
+  initialization config is the deployment authority.
+- Corrupt or malformed payload detection is structural only: bounds, lengths,
+  alignment, layout/version/status, item counts, echoed keys, required NUL
+  terminators, and generation matching. NetIPC does not add checksums,
+  payload hashing, or heuristic repair to the high-performance IPC path.
+
 ## Architecture
 
 The library is organized into four independent concerns:

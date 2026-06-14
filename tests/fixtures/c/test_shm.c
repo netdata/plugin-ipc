@@ -962,6 +962,27 @@ static void test_server_create_validation(void)
     check("path too long",
           nipc_shm_server_create(long_dir, "svc", 1, 4096, 4096, &ctx)
               == NIPC_SHM_ERR_PATH_TOO_LONG);
+
+    char long_service[300];
+    memset(long_service, 'a', sizeof(long_service) - 1);
+    long_service[sizeof(long_service) - 1] = '\0';
+    check("service name too long",
+          nipc_shm_server_create(TEST_RUN_DIR, long_service, 1, 4096, 4096,
+                                 &ctx) == NIPC_SHM_ERR_PATH_TOO_LONG);
+
+    check("missing run_dir",
+          nipc_shm_server_create("/tmp/nipc_shm_missing_dir_99999", "svc",
+                                 1, 4096, 4096, &ctx) == NIPC_SHM_ERR_OPEN);
+
+    check("request capacity uint32 overflow",
+          nipc_shm_server_create(TEST_RUN_DIR, "shm_cap_overflow", 1,
+                                 UINT32_MAX - NIPC_SHM_HEADER_LEN, 4096,
+                                 &ctx) == NIPC_SHM_ERR_BAD_PARAM);
+
+    check("response capacity uint32 overflow",
+          nipc_shm_server_create(TEST_RUN_DIR, "shm_resp_cap_overflow", 1,
+                                 4096, UINT32_MAX - 1024,
+                                 &ctx) == NIPC_SHM_ERR_BAD_PARAM);
 }
 
 static void test_client_attach_validation(void)
@@ -992,6 +1013,17 @@ static void test_client_attach_validation(void)
     check("path too long",
           nipc_shm_client_attach(long_dir, "svc", 1, &ctx)
               == NIPC_SHM_ERR_PATH_TOO_LONG);
+
+    char long_service[300];
+    memset(long_service, 'a', sizeof(long_service) - 1);
+    long_service[sizeof(long_service) - 1] = '\0';
+    check("service name too long",
+          nipc_shm_client_attach(TEST_RUN_DIR, long_service, 1, &ctx)
+              == NIPC_SHM_ERR_PATH_TOO_LONG);
+
+    check("missing run_dir",
+          nipc_shm_client_attach("/tmp/nipc_shm_missing_dir_99999", "svc",
+                                 1, &ctx) == NIPC_SHM_ERR_OPEN);
 
     /* Non-existent file */
     check("non-existent file",
@@ -1321,6 +1353,12 @@ static void test_cleanup_stale_params(void)
     nipc_shm_cleanup_stale(TEST_RUN_DIR, "bad/name");
     check("cleanup_stale invalid service ok", 1);
 
+    char long_service[300];
+    memset(long_service, 'a', sizeof(long_service) - 1);
+    long_service[sizeof(long_service) - 1] = '\0';
+    nipc_shm_cleanup_stale(TEST_RUN_DIR, long_service);
+    check("cleanup_stale long service prefix ok", 1);
+
     nipc_shm_cleanup_stale("/tmp/nonexistent_shm_dir_99999", "svc");
     check("cleanup_stale nonexistent dir ok", 1);
 }
@@ -1550,6 +1588,29 @@ static void test_stale_symlink_reclaimed_without_touching_target(void)
     cleanup_shm(svc);
 }
 
+static void test_stale_directory_reclaimed(void)
+{
+    printf("Test: Stale SHM recovery reclaims endpoint directory\n");
+    const char *svc = "shm_stale_dir";
+    cleanup_shm(svc);
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s-%016" PRIx64 ".ipcshm",
+             TEST_RUN_DIR, svc, (uint64_t)1);
+    rmdir(path);
+    check("stale endpoint directory created", mkdir(path, 0700) == 0);
+
+    nipc_shm_ctx_t server;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
+    check("create reclaims endpoint directory", err == NIPC_SHM_OK);
+    if (err == NIPC_SHM_OK)
+        nipc_shm_destroy(&server);
+
+    rmdir(path);
+    cleanup_shm(svc);
+}
+
 static void test_shm_bad_header_len_file(void)
 {
     printf("Test: Client attach to file with bad header_len\n");
@@ -1671,6 +1732,50 @@ static void test_cleanup_stale_ignores_nonmatching_files(void)
     unlink(wrong_suffix);
 }
 
+static void test_shm_receive_zero_length_corruption(void)
+{
+    printf("Test: SHM receive rejects zero-length published messages\n");
+    const char *svc = "shm_zero_len";
+    cleanup_shm(svc);
+
+    nipc_shm_ctx_t server;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
+    check("server create", err == NIPC_SHM_OK);
+
+    if (err == NIPC_SHM_OK) {
+        nipc_shm_ctx_t client;
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
+        check("client attach", err == NIPC_SHM_OK);
+
+        if (err == NIPC_SHM_OK) {
+            nipc_shm_region_header_t *hdr =
+                (nipc_shm_region_header_t *)server.base;
+            uint8_t buf[64];
+            size_t msg_len = 123;
+
+            __atomic_store_n(&hdr->req_len, 0, __ATOMIC_RELEASE);
+            __atomic_add_fetch(&hdr->req_seq, 1, __ATOMIC_RELEASE);
+            err = nipc_shm_receive(&server, buf, sizeof(buf), &msg_len, 1);
+            check("server receive rejects zero-length request",
+                  err == NIPC_SHM_ERR_BAD_HEADER && msg_len == 0);
+
+            msg_len = 123;
+            __atomic_store_n(&hdr->resp_len, 0, __ATOMIC_RELEASE);
+            __atomic_add_fetch(&hdr->resp_seq, 1, __ATOMIC_RELEASE);
+            err = nipc_shm_receive(&client, buf, sizeof(buf), &msg_len, 1);
+            check("client receive rejects zero-length response",
+                  err == NIPC_SHM_ERR_BAD_HEADER && msg_len == 0);
+
+            nipc_shm_close(&client);
+        }
+
+        nipc_shm_destroy(&server);
+    }
+
+    cleanup_shm(svc);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
@@ -1714,9 +1819,11 @@ int main(void)
     test_stale_undersized_file();      printf("\n");
     test_stale_bad_magic_file();       printf("\n");
     test_stale_symlink_reclaimed_without_touching_target(); printf("\n");
+    test_stale_directory_reclaimed();  printf("\n");
     test_shm_bad_header_len_file();    printf("\n");
     test_shm_bad_size_alignment_file(); printf("\n");
     test_shm_declared_area_exceeds_file(); printf("\n");
+    test_shm_receive_zero_length_corruption(); printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

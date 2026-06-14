@@ -18,6 +18,9 @@ specification is wrong.
 - outer envelope: one non-batch request and one non-batch response
 
 The method-internal item directory is not a Level 1 batch directory.
+One public Level 2 logical lookup call may use multiple ordinary non-batch
+request/response cycles internally when response payload limits require it.
+This does not use `NIPC_FLAG_BATCH`.
 
 ## Shared Constants
 
@@ -41,6 +44,8 @@ PID status:
 |------:|------|
 | 0 | `KNOWN` |
 | 1 | `UNKNOWN` |
+| 2 | `PAYLOAD_EXCEEDED` |
+| 3 | `OVERSIZED_ITEM` |
 
 Cgroup status:
 
@@ -51,7 +56,7 @@ Cgroup status:
 | 2 | `UNKNOWN_PERMANENT` |
 | 3 | `HOST_ROOT` |
 
-Decoders must reject unknown status and cgroup-status values.
+Decoders must reject status and cgroup-status values not listed here.
 
 Shared orchestrator values:
 
@@ -127,6 +132,11 @@ Fixed response header, 16 bytes:
 The item directory follows the header and uses the same 8-byte entry
 shape as the request.
 Decoders must accept every `generation` value, including `0`.
+When a Level 2 client stitches multiple APPS_LOOKUP subresponses into one
+logical response, every subresponse generation must match exactly. Any
+generation mismatch rejects the whole logical call. NetIPC does not support
+mixed-generation stitched lookup results or compatibility shims for
+provider/client contract drift.
 
 Per-item fixed header, 60 bytes:
 
@@ -156,7 +166,7 @@ Two zero-length strings cannot share the same NUL byte.
 
 ## Field Semantics
 
-For `status == UNKNOWN`:
+For `status == UNKNOWN`, `PAYLOAD_EXCEEDED`, or `OVERSIZED_ITEM`:
 
 - `orchestrator == 0`
 - `cgroup_status == 0`
@@ -167,6 +177,19 @@ For `status == UNKNOWN`:
 - `cgroup_path_length == 0`
 - `cgroup_name_length == 0`
 - `label_count == 0`
+
+`UNKNOWN` means the provider does not know this PID.
+
+`PAYLOAD_EXCEEDED` means the server reached the current response payload
+budget at this item. The server must mark this item and every following
+unencoded item in the same response as `PAYLOAD_EXCEEDED`. A Level 2 client
+must retry those items internally and stitch the final logical response. A
+Level 2 API consumer must not be required to issue this retry manually.
+
+`OVERSIZED_ITEM` means this valid item cannot fit by itself within the
+configured maximum payload budget. It is not retriable. The item remains in
+the final logical response as not enriched, and other items may still
+succeed.
 
 For `status == KNOWN`:
 
@@ -256,6 +279,14 @@ The wire decoder validates structure. The typed client must also verify:
 
 - response `item_count` equals request `item_count`
 - response item `N` echoes request PID `N`
+- `PAYLOAD_EXCEEDED` items are retried internally by Level 2, not exposed as
+  caller-managed retry work
+- `OVERSIZED_ITEM` is retained as a final non-retriable item outcome
+- when a logical call uses multiple subresponses, every response
+  `generation` must match exactly; mismatches reject the whole logical call
+- provider and client method, layout, status, echoed-key, and generation
+  contracts must match exactly; NetIPC does not do backward-compatible or
+  forward-compatible best-effort decoding
 - cache users track the response `generation`; on generation decrease or
   reset, evict cached `UNKNOWN_PERMANENT` and `HOST_ROOT` entries before
   processing the new response

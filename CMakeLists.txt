@@ -311,6 +311,9 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_link_libraries(test_service_extra PRIVATE
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
     )
+    target_include_directories(test_service_extra PRIVATE
+        src/libnetdata/netipc/src/service
+    )
     target_compile_definitions(test_service_extra PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_service_extra COMMAND test_service_extra)
     set_tests_properties(test_service_extra PROPERTIES TIMEOUT 120)
@@ -568,6 +571,15 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
         TIMEOUT 120
         ENVIRONMENT "INTEROP_SVC_C=$<TARGET_FILE:interop_service_c>;INTEROP_SVC_RS=${INTEROP_SVC_RS};INTEROP_SVC_GO=${INTEROP_SVC_GO}"
     )
+
+    add_test(NAME test_lookup_scale_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_lookup_scale_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_lookup_scale_interop PROPERTIES
+        TIMEOUT 180
+        ENVIRONMENT "INTEROP_SVC_C=$<TARGET_FILE:interop_service_c>;INTEROP_SVC_RS=${INTEROP_SVC_RS};INTEROP_SVC_GO=${INTEROP_SVC_GO};NIPC_LOOKUP_SCALE_ITEMS=8192"
+    )
 endif()
 
 # --- L3 cache tests (Linux only) -------------------------------------------
@@ -662,6 +674,15 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
     set_tests_properties(test_service_shm_interop PROPERTIES
         TIMEOUT 120
         ENVIRONMENT "INTEROP_SVC_C=$<TARGET_FILE:interop_service_c>;INTEROP_SVC_RS=${INTEROP_SVC_RS};INTEROP_SVC_GO=${INTEROP_SVC_GO}"
+    )
+
+    add_test(NAME test_lookup_scale_shm_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_lookup_scale_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_lookup_scale_shm_interop PROPERTIES
+        TIMEOUT 180
+        ENVIRONMENT "INTEROP_SVC_C=$<TARGET_FILE:interop_service_c>;INTEROP_SVC_RS=${INTEROP_SVC_RS};INTEROP_SVC_GO=${INTEROP_SVC_GO};NIPC_LOOKUP_SCALE_ITEMS=8192;NIPC_PROFILE=shm"
     )
 endif()
 
@@ -963,6 +984,26 @@ if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
         TIMEOUT 120
         RESOURCE_LOCK win_service_interop_tests
         ENVIRONMENT "INTEROP_SVC_C=$<TARGET_FILE:interop_service_win_c>;INTEROP_SVC_RS=${INTEROP_SVC_WIN_RS};INTEROP_SVC_GO=${INTEROP_SVC_WIN_GO}"
+    )
+
+    add_test(NAME test_lookup_scale_win_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_lookup_scale_win_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_lookup_scale_win_interop PROPERTIES
+        TIMEOUT 300
+        RESOURCE_LOCK win_service_interop_tests
+        ENVIRONMENT "INTEROP_SVC_C=$<TARGET_FILE:interop_service_win_c>;INTEROP_SVC_RS=${INTEROP_SVC_WIN_RS};INTEROP_SVC_GO=${INTEROP_SVC_WIN_GO};NIPC_LOOKUP_SCALE_ITEMS=8192"
+    )
+
+    add_test(NAME test_lookup_scale_win_shm_interop
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_lookup_scale_win_shm_interop.sh"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(test_lookup_scale_win_shm_interop PROPERTIES
+        TIMEOUT 300
+        RESOURCE_LOCK win_service_interop_tests
+        ENVIRONMENT "INTEROP_SVC_C=$<TARGET_FILE:interop_service_win_c>;INTEROP_SVC_RS=${INTEROP_SVC_WIN_RS};INTEROP_SVC_GO=${INTEROP_SVC_WIN_GO};NIPC_LOOKUP_SCALE_ITEMS=8192"
     )
 endif()
 

@@ -25,7 +25,7 @@ and "the peer has received those bytes correctly." Specifically:
 - Transparent chunking for packet-limited transports
 - Request/response correlation by message_id
 - Sequencing and out-of-order detection
-- Chunk integrity validation
+- Chunk structural and sequence validation
 - Protocol failure detection and reporting
 - Connection health monitoring and failure propagation
 - Native wait-object exposure for caller-owned event loops
@@ -421,6 +421,11 @@ All protocol failures result in session termination. Level 1 does not attempt
 to recover from protocol violations — a violation means the peer is broken or
 the connection is corrupted, and continuing would be unsafe.
 
+This is structural validation only: magic, version, declared lengths,
+directional limits, item directory bounds, chunk sequence, and expected
+message kind. Level 1 does not add checksums, cryptographic hashes, payload
+hashing, full-payload integrity scans, or heuristic repair to the hot path.
+
 ### Connection health
 
 Level 1 monitors connection health at the transport level:
@@ -571,7 +576,7 @@ Level 1 must have:
   including:
   - authorization success/failure
   - profile intersection and selection
-  - request payload acceptance and `> 1 MiB` rejection
+  - request payload acceptance and configured-maximum rejection
   - request/response batch-item symmetry
   - response payload authority
   - packet-size negotiation

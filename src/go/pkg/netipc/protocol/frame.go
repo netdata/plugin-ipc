@@ -60,8 +60,10 @@ const (
 	// Defaults.
 	MaxPayloadDefault uint32 = 1024
 
-	// MaxPayloadCap is the hard cap on negotiated request payload sizes
-	// (1 MiB) to prevent excessive memory allocation from a compromised peer.
+	// MaxPayloadCap is the zero-config automatic growth ceiling used only when
+	// callers did not configure larger payload budgets explicitly. It is not a
+	// protocol hard limit; peers may negotiate larger ceilings from
+	// initialization config.
 	MaxPayloadCap uint32 = 1024 * 1024
 
 	// Alignment for batch items and typed codec items.
@@ -278,7 +280,7 @@ func BatchDirDecode(buf []byte, itemCount uint32, packedAreaLen uint32) ([]Batch
 	}
 
 	out := make([]BatchEntry, count)
-	for i := range count {
+	for i := 0; i < count; i++ {
 		base := i * 8
 		off := ne.Uint32(buf[base : base+4])
 		length := ne.Uint32(buf[base+4 : base+8])
@@ -308,7 +310,7 @@ func BatchDirValidate(buf []byte, itemCount uint32, packedAreaLen uint32) error 
 	if len(buf) < dirSize {
 		return ErrTruncated
 	}
-	for i := range count {
+	for i := 0; i < count; i++ {
 		base := i * 8
 		off := ne.Uint32(buf[base : base+4])
 		length := ne.Uint32(buf[base+4 : base+8])

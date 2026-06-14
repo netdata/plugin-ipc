@@ -18,9 +18,15 @@ BUILD_DIR="$ROOT_DIR/build-coverage"
 # Library source files to measure (relative to ROOT_DIR)
 LIB_SOURCES=(
     "src/libnetdata/netipc/src/protocol/netipc_protocol.c"
+    "src/libnetdata/netipc/src/protocol/netipc_protocol_lookup_common.c"
+    "src/libnetdata/netipc/src/protocol/netipc_protocol_apps_lookup.c"
+    "src/libnetdata/netipc/src/protocol/netipc_protocol_cgroups_lookup.c"
     "src/libnetdata/netipc/src/transport/posix/netipc_uds.c"
     "src/libnetdata/netipc/src/transport/posix/netipc_shm.c"
     "src/libnetdata/netipc/src/service/netipc_service.c"
+    "src/libnetdata/netipc/src/service/netipc_service_common.c"
+    "src/libnetdata/netipc/src/service/netipc_service_apps_lookup.c"
+    "src/libnetdata/netipc/src/service/netipc_service_cgroups_lookup.c"
 )
 
 # Threshold for C library coverage

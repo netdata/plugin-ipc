@@ -3,8 +3,10 @@ package protocol
 const (
 	NipcUIDUnset uint32 = ^uint32(0)
 
-	PidLookupKnown   uint16 = 0
-	PidLookupUnknown uint16 = 1
+	PidLookupKnown           uint16 = 0
+	PidLookupUnknown         uint16 = 1
+	PidLookupPayloadExceeded uint16 = 2
+	PidLookupOversizedItem   uint16 = 3
 
 	AppsCgroupKnown             uint16 = 0
 	AppsCgroupUnknownRetryLater uint16 = 1
@@ -65,14 +67,15 @@ func validateAppsLookupSemantics(v appsLookupSemantics) error {
 	if err := validateAppsLookupDomains(v.status, v.cgroupStatus, v.commLen); err != nil {
 		return err
 	}
-	if v.status == PidLookupUnknown {
+	if v.status != PidLookupKnown {
 		return validateAppsLookupUnknown(v)
 	}
 	return validateAppsLookupKnown(v)
 }
 
 func validateAppsLookupDomains(status, cgroupStatus uint16, commLen int) error {
-	if status != PidLookupKnown && status != PidLookupUnknown {
+	if status != PidLookupKnown && status != PidLookupUnknown &&
+		status != PidLookupPayloadExceeded && status != PidLookupOversizedItem {
 		return ErrBadLayout
 	}
 	if cgroupStatus != AppsCgroupKnown && cgroupStatus != AppsCgroupUnknownRetryLater &&
@@ -182,7 +185,7 @@ func DecodeAppsLookupRequest(buf []byte) (*AppsLookupRequestView, error) {
 	if err := validateLookupDir(buf, AppsLookupReqHdr, itemCount, len(buf)-dirEnd, 0, AppsLookupKeySize); err != nil {
 		return nil, err
 	}
-	for i := range itemCount {
+	for i := uint32(0); i < itemCount; i++ {
 		base := AppsLookupReqHdr + int(i)*LookupDirEntrySize
 		off, _, err := lookupDirEntry(buf, base)
 		if err != nil {
@@ -240,7 +243,7 @@ func DecodeAppsLookupResponse(buf []byte) (*AppsLookupResponseView, error) {
 	if err := validateLookupDir(buf, AppsLookupRespHdr, itemCount, len(buf)-dirEnd, AppsLookupItemHdr, -1); err != nil {
 		return nil, err
 	}
-	for i := range itemCount {
+	for i := uint32(0); i < itemCount; i++ {
 		base := AppsLookupRespHdr + int(i)*LookupDirEntrySize
 		off, length, err := lookupDirEntry(buf, base)
 		if err != nil {
@@ -284,6 +287,19 @@ func (v *AppsLookupResponseView) Item(index uint32) (*AppsLookupItemView, error)
 		return nil, err
 	}
 	return decodeAppsLookupItem(item)
+}
+
+// RawItem returns the validated raw wire item bytes for a response item.
+func (v *AppsLookupResponseView) RawItem(index uint32) ([]byte, error) {
+	return lookupResponseRawItem(v.payload, AppsLookupRespHdr, v.ItemCount, index)
+}
+
+// EncodeAppsLookupRawResponse encodes validated raw APPS_LOOKUP response items.
+func EncodeAppsLookupRawResponse(items [][]byte, generation uint64, buf []byte) (int, error) {
+	return encodeLookupRawResponse(buf, AppsLookupRespHdr, generation, items, AppsLookupItemHdr, func(item []byte) error {
+		_, err := decodeAppsLookupItem(item)
+		return err
+	})
 }
 
 func decodeAppsLookupItem(item []byte) (*AppsLookupItemView, error) {
@@ -339,8 +355,8 @@ func decodeAppsLookupItem(item []byte) (*AppsLookupItemView, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if status == PidLookupUnknown {
-		return decodeAppsLookupUnknownItem(item, pid, commOff, pathOff, nameOff)
+	if status != PidLookupKnown {
+		return decodeAppsLookupUnknownItem(item, status, pid, commOff, pathOff, nameOff)
 	}
 	comm, commEnd, err := lookupString(item, AppsLookupItemHdr, commOff, commLen)
 	if err != nil {
@@ -379,7 +395,7 @@ func decodeAppsLookupItem(item []byte) (*AppsLookupItemView, error) {
 	}, nil
 }
 
-func decodeAppsLookupUnknownItem(item []byte, pid uint32, commOff, pathOff, nameOff int) (*AppsLookupItemView, error) {
+func decodeAppsLookupUnknownItem(item []byte, status uint16, pid uint32, commOff, pathOff, nameOff int) (*AppsLookupItemView, error) {
 	comm, commEnd, err := lookupEmptyString(item, AppsLookupItemHdr, commOff)
 	if err != nil {
 		return nil, err
@@ -401,8 +417,8 @@ func decodeAppsLookupUnknownItem(item []byte, pid uint32, commOff, pathOff, name
 		return nil, ErrBadLayout
 	}
 	return &AppsLookupItemView{
-		Status:           PidLookupUnknown,
-		CgroupStatus:     AppsCgroupKnown,
+		Status:           status,
+		CgroupStatus:     0,
 		Pid:              pid,
 		Uid:              NipcUIDUnset,
 		Comm:             comm,
@@ -418,12 +434,13 @@ func (v *AppsLookupItemView) Label(index uint32) (LookupLabelView, error) {
 }
 
 type AppsLookupBuilder struct {
-	buf        []byte
-	generation uint64
-	itemCount  uint32
-	maxItems   uint32
-	dataOffset int
-	err        error
+	buf                   []byte
+	generation            uint64
+	itemCount             uint32
+	maxItems              uint32
+	dataOffset            int
+	err                   error
+	payloadExceededSuffix bool
 }
 
 func NewAppsLookupBuilder(buf []byte, maxItems uint32, generation uint64) *AppsLookupBuilder {
@@ -443,6 +460,9 @@ func (b *AppsLookupBuilder) SetGeneration(generation uint64) {
 
 // Add appends one APPS_LOOKUP wire item; parameters mirror the fixed protocol fields.
 func (b *AppsLookupBuilder) Add(status, cgroupStatus, orchestrator uint16, pid, ppid, uid uint32, starttime uint64, comm, cgroupPath, cgroupName []byte, labels []struct{ Key, Value []byte }) error { //NOSONAR
+	if b.payloadExceededSuffix {
+		return b.addUnknown(PidLookupPayloadExceeded, pid)
+	}
 	if b.itemCount >= b.maxItems {
 		b.err = ErrOverflow
 		return ErrOverflow
@@ -462,8 +482,14 @@ func (b *AppsLookupBuilder) Add(status, cgroupStatus, orchestrator uint16, pid, 
 		b.err = err
 		return err
 	}
-	if status == PidLookupUnknown {
-		return b.addUnknown(pid)
+	if status != PidLookupKnown {
+		if err := b.addUnknown(status, pid); err != nil {
+			if err == ErrOverflow {
+				return b.noteItemOverflow(pid)
+			}
+			return err
+		}
+		return nil
 	}
 	if invalidSourceString(comm, status == PidLookupKnown) ||
 		invalidSourceString(cgroupPath, false) || invalidSourceString(cgroupName, false) {
@@ -472,13 +498,11 @@ func (b *AppsLookupBuilder) Add(status, cgroupStatus, orchestrator uint16, pid, 
 	}
 	labelCount, ok := checkedU16Int(len(labels))
 	if !ok {
-		b.err = ErrOverflow
-		return ErrOverflow
+		return b.noteItemOverflow(pid)
 	}
 	itemStart, ok := checkedAlign8(b.dataOffset)
 	if !ok {
-		b.err = ErrOverflow
-		return ErrOverflow
+		return b.noteItemOverflow(pid)
 	}
 	commOff := AppsLookupItemHdr
 	pathOff, ok := checkedAddInt(commOff, len(comm))
@@ -486,38 +510,33 @@ func (b *AppsLookupBuilder) Add(status, cgroupStatus, orchestrator uint16, pid, 
 		pathOff, ok = checkedAddInt(pathOff, 1)
 	}
 	if !ok {
-		b.err = ErrOverflow
-		return ErrOverflow
+		return b.noteItemOverflow(pid)
 	}
 	nameOff, ok := checkedAddInt(pathOff, len(cgroupPath))
 	if ok {
 		nameOff, ok = checkedAddInt(nameOff, 1)
 	}
 	if !ok {
-		b.err = ErrOverflow
-		return ErrOverflow
+		return b.noteItemOverflow(pid)
 	}
 	fixedEnd, ok := checkedAddInt(nameOff, len(cgroupName))
 	if ok {
 		fixedEnd, ok = checkedAddInt(fixedEnd, 1)
 	}
 	if !ok {
-		b.err = ErrOverflow
-		return ErrOverflow
+		return b.noteItemOverflow(pid)
 	}
 	tableStart, tableBytes, itemSize, err := labelLayoutGo(fixedEnd, labels)
 	if err != nil {
+		if err == ErrOverflow {
+			return b.noteItemOverflow(pid)
+		}
 		b.err = err
 		return err
 	}
 	itemEnd, ok := checkedAddInt(itemStart, itemSize)
-	if !ok {
-		b.err = ErrOverflow
-		return ErrOverflow
-	}
-	if itemEnd > len(b.buf) {
-		b.err = ErrOverflow
-		return ErrOverflow
+	if !ok || itemEnd > len(b.buf) {
+		return b.noteItemOverflow(pid)
 	}
 	commOff32, ok := checkedU32Int(commOff)
 	if !ok {
@@ -605,7 +624,7 @@ func (b *AppsLookupBuilder) Add(status, cgroupStatus, orchestrator uint16, pid, 
 	return nil
 }
 
-func (b *AppsLookupBuilder) addUnknown(pid uint32) error {
+func (b *AppsLookupBuilder) addUnknown(status uint16, pid uint32) error {
 	itemStart, ok := checkedAlign8(b.dataOffset)
 	if !ok {
 		b.err = ErrOverflow
@@ -630,7 +649,7 @@ func (b *AppsLookupBuilder) addUnknown(pid uint32) error {
 	item := b.buf[itemStart:itemEnd]
 	clear(item)
 	ne.PutUint16(item[0:2], 1)
-	ne.PutUint16(item[2:4], PidLookupUnknown)
+	ne.PutUint16(item[2:4], status)
 	ne.PutUint32(item[8:12], pid)
 	ne.PutUint32(item[16:20], NipcUIDUnset)
 	ne.PutUint32(item[32:36], AppsLookupItemHdr)
@@ -646,7 +665,16 @@ func (b *AppsLookupBuilder) addUnknown(pid uint32) error {
 	ne.PutUint32(b.buf[dir+4:dir+8], itemSize32)
 	b.dataOffset = itemEnd
 	b.itemCount++
+	b.err = nil
 	return nil
+}
+
+func (b *AppsLookupBuilder) noteItemOverflow(pid uint32) error {
+	if b.itemCount == 0 {
+		return b.addUnknown(PidLookupOversizedItem, pid)
+	}
+	b.payloadExceededSuffix = true
+	return b.addUnknown(PidLookupPayloadExceeded, pid)
 }
 
 func (b *AppsLookupBuilder) Finish() int {

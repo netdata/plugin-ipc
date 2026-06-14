@@ -232,17 +232,16 @@ static void test_response_limit_reconnect(bool hybrid)
               before_response_cap == 16u);
 
         nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
-        check("payload-limit snapshot recovers after limit response",
-              err == NIPC_OK && view.item_count == 1);
+        check("payload-limit snapshot respects configured ceiling",
+              err == NIPC_ERR_OVERFLOW);
 
         nipc_client_status(&client, &status);
         check("payload-limit reconnects after limit response",
               status.reconnect_count >= 1);
-        check("payload-limit negotiated response cap grows",
-              client.session.max_response_payload_bytes > before_response_cap);
-        check("payload-limit client remains ready on selected profile",
-              nipc_client_ready(&client) &&
-              (hybrid ? client.shm != NULL : client.shm == NULL));
+        check("payload-limit response cap stays constrained",
+              client.session.max_response_payload_bytes <= before_response_cap);
+        check("payload-limit overflow breaks client",
+              !nipc_client_ready(&client));
     }
 
     nipc_client_close(&client);

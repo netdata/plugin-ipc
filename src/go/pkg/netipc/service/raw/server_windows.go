@@ -12,18 +12,20 @@ import (
 
 // Server is an internal managed server bound to one expected request kind.
 type Server struct {
-	runDir                      string
-	serviceName                 string
-	config                      windows.ServerConfig
-	expectedMethodCode          uint16
-	handler                     DispatchHandler
-	running                     atomic.Bool
-	learnedRequestPayloadBytes  atomic.Uint32
-	learnedResponsePayloadBytes atomic.Uint32
-	nextSessionID               atomic.Uint64
-	workerCount                 int
-	wg                          sync.WaitGroup
-	listener                    *windows.Listener // stored so Stop() can close it
+	runDir                       string
+	serviceName                  string
+	config                       windows.ServerConfig
+	expectedMethodCode           uint16
+	handler                      DispatchHandler
+	running                      atomic.Bool
+	learnedRequestPayloadBytes   atomic.Uint32
+	learnedResponsePayloadBytes  atomic.Uint32
+	requestPayloadGrowthCeiling  uint32
+	responsePayloadGrowthCeiling uint32
+	nextSessionID                atomic.Uint64
+	workerCount                  int
+	wg                           sync.WaitGroup
+	listener                     *windows.Listener // stored so Stop() can close it
 }
 
 // NewServer creates a new managed server.

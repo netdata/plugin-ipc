@@ -1,0 +1,4 @@
+scenario,client,server,target_rps,min_throughput,original_throughput,retry_samples,median_throughput,min_retry,max_retry,stable_ratio,status
+snapshot-baseline,go,c,0,100000,92647,7,107500.000,105358,117000,1.110499,recovered
+snapshot-baseline,go,go,0,100000,93605,7,104212.000,101257,109259,1.079027,recovered
+apps-lookup-mixed-16,go,go,0,350000,296177,7,377175.000,329963,383826,1.163240,recovered

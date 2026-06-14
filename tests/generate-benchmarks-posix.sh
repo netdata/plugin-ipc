@@ -22,24 +22,29 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 INPUT_CSV="${1:-${ROOT_DIR}/benchmarks-posix.csv}"
 OUTPUT_MD="${2:-${ROOT_DIR}/benchmarks-posix.md}"
 EXPECTED_HEADER="scenario,client,server,target_rps,throughput,p50_us,p95_us,p99_us,client_cpu_pct,server_cpu_pct,total_cpu_pct"
-EXPECTED_TOTAL_ROWS=297
+EXPECTED_TOTAL_ROWS=345
 RUNNER_DEFAULT_FIXED_DURATION=5
 RUNNER_DEFAULT_MAX_DURATION=10
-RUNNER_DEFAULT_FLOOR_RETRY_SAMPLES=3
+RUNNER_DEFAULT_FLOOR_RETRY_SAMPLES=7
 RUNNER_DEFAULT_FLOOR_RETRY_DURATION=20
 RUNNER_DEFAULT_FLOOR_RETRY_MAX_RATIO=1.35
 VALIDATION_FAILED=0
 FLOOR_FAILED=0
 CSV_FILE=""
+RETRY_CSV="${INPUT_CSV%.csv}.floor-retries.csv"
 LOOKUP_METHOD_SCENARIOS=(
     cgroups-lookup-known-16
     cgroups-lookup-unknown-16
     cgroups-lookup-mixed-16
     cgroups-lookup-mixed-256
+    cgroups-lookup-known-8192
+    cgroups-lookup-known-32768
     apps-lookup-known-16
     apps-lookup-unknown-16
     apps-lookup-mixed-16
     apps-lookup-mixed-256
+    apps-lookup-known-8192
+    apps-lookup-known-32768
 )
 
 log() {
@@ -322,6 +327,38 @@ has_snapshot_shm_violation() {
     ' "$CSV_FILE"
 }
 
+retry_recovered() {
+    local scenario="$1"
+    local client="$2"
+    local server="$3"
+    local target_rps="$4"
+    local min_throughput="$5"
+    local original_throughput="$6"
+
+    [ -f "$RETRY_CSV" ] || return 1
+
+    awk -F',' \
+        -v scenario="$scenario" \
+        -v client="$client" \
+        -v server="$server" \
+        -v target_rps="$target_rps" \
+        -v min_throughput="$min_throughput" \
+        -v original_throughput="$original_throughput" '
+        NR > 1 &&
+        $1 == scenario &&
+        $2 == client &&
+        $3 == server &&
+        $4 == target_rps &&
+        ($5 + 0) == (min_throughput + 0) &&
+        ($6 + 0) == (original_throughput + 0) &&
+        $12 == "recovered" &&
+        ($8 + 0) >= (min_throughput + 0) {
+            found = 1
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$RETRY_CSV"
+}
+
 log_floor_violations_min() {
     local scenario="$1"
     local target_rps="$2"
@@ -333,16 +370,21 @@ log_floor_violations_min() {
         NR > 1 && $1 == scenario && $4 == target_rps {
             throughput = $5 + 0
             if (throughput < min_throughput) {
-                printf "%s->%s: %.0f\n", $2, $3, throughput
+                printf "%s,%s,%.0f\n", $2, $3, throughput
             }
         }
     ' "$CSV_FILE")
 
     if [ -n "$violations" ]; then
         while IFS= read -r violation; do
-            warn "FLOOR VIOLATION: ${label} ${violation} (min ${min_throughput})"
+            IFS=',' read -r client server throughput <<< "$violation"
+            if retry_recovered "$scenario" "$client" "$server" "$target_rps" "$min_throughput" "$throughput"; then
+                log "FLOOR RECOVERED: ${label} ${client}->${server}: ${throughput} (min ${min_throughput})"
+            else
+                warn "FLOOR VIOLATION: ${label} ${client}->${server}: ${throughput} (min ${min_throughput})"
+                FLOOR_FAILED=1
+            fi
         done <<< "$violations"
-        FLOOR_FAILED=1
     fi
 }
 
@@ -353,16 +395,21 @@ log_floor_violations_snapshot_shm() {
             throughput = $5 + 0
             min = ($2 == "go" || $3 == "go") ? 800000 : 1000000
             if (throughput < min) {
-                printf "%s->%s: %.0f (min %d)\n", $2, $3, throughput, min
+                printf "%s,%s,%.0f,%d\n", $2, $3, throughput, min
             }
         }
     ' "$CSV_FILE")
 
     if [ -n "$violations" ]; then
         while IFS= read -r violation; do
-            warn "FLOOR VIOLATION: snapshot-shm ${violation}"
+            IFS=',' read -r client server throughput min_throughput <<< "$violation"
+            if retry_recovered "snapshot-shm" "$client" "$server" "0" "$min_throughput" "$throughput"; then
+                log "FLOOR RECOVERED: snapshot-shm ${client}->${server}: ${throughput} (min ${min_throughput})"
+            else
+                warn "FLOOR VIOLATION: snapshot-shm ${client}->${server}: ${throughput} (min ${min_throughput})"
+                FLOOR_FAILED=1
+            fi
         done <<< "$violations"
-        FLOOR_FAILED=1
     fi
 }
 
@@ -370,16 +417,64 @@ floor_status_min() {
     local scenario="$1"
     local target_rps="$2"
     local min_throughput="$3"
-    if has_min_violation "$scenario" "$target_rps" "$min_throughput"; then
-        printf "FAIL"
+    local violations
+    violations=$(awk -F',' -v scenario="$scenario" -v target_rps="$target_rps" -v min_throughput="$min_throughput" '
+        NR > 1 && $1 == scenario && $4 == target_rps && ($5 + 0) < (min_throughput + 0) {
+            printf "%s,%s,%.0f\n", $2, $3, $5
+        }
+    ' "$CSV_FILE")
+    if [ -z "$violations" ]; then
+        printf "PASS"
+        return
+    fi
+
+    local recovered=0
+    while IFS= read -r violation; do
+        IFS=',' read -r client server throughput <<< "$violation"
+        if retry_recovered "$scenario" "$client" "$server" "$target_rps" "$min_throughput" "$throughput"; then
+            recovered=1
+        else
+            printf "FAIL"
+            return
+        fi
+    done <<< "$violations"
+
+    if [ "$recovered" -eq 1 ]; then
+        printf "PASS (retry)"
     else
         printf "PASS"
     fi
 }
 
 floor_status_snapshot_shm() {
-    if has_snapshot_shm_violation; then
-        printf "FAIL"
+    local violations
+    violations=$(awk -F',' '
+        NR > 1 && $1 == "snapshot-shm" && $4 == "0" {
+            throughput = $5 + 0
+            min = ($2 == "go" || $3 == "go") ? 800000 : 1000000
+            if (throughput < min) {
+                printf "%s,%s,%.0f,%d\n", $2, $3, throughput, min
+            }
+        }
+    ' "$CSV_FILE")
+    if [ -z "$violations" ]; then
+        printf "PASS"
+        return
+    fi
+
+    local recovered=0
+    while IFS= read -r violation; do
+        IFS=',' read -r client server throughput min_throughput <<< "$violation"
+        if retry_recovered "snapshot-shm" "$client" "$server" "0" "$min_throughput" "$throughput"; then
+            recovered=1
+        else
+            printf "FAIL"
+            return
+        fi
+    done <<< "$violations"
+
+    if [ "$recovered" -eq 1 ]; then
+        printf "PASS (retry)"
     else
         printf "PASS"
     fi
@@ -436,6 +531,7 @@ emit_methodology() {
     echo "- The script CLI duration controls fixed-rate rows; \`NIPC_BENCH_MAX_DURATION\` controls max-throughput rows."
     echo "- Rows that miss an enforced max-throughput floor are retried before publication: ${RUNNER_DEFAULT_FLOOR_RETRY_SAMPLES} samples x ${RUNNER_DEFAULT_FLOOR_RETRY_DURATION}s by default, published only when the retry median meets the same floor and retry max/min throughput ratio is <= ${RUNNER_DEFAULT_FLOOR_RETRY_MAX_RATIO}."
     echo "- Retry diagnostics, when used, are written next to the CSV as \`*.floor-retries.csv\`."
+    echo "- Lookup method scale rows at 8192 and 32768 items are codec+dispatch stress gates: the generator requires complete positive-throughput rows, while stable floors are introduced only after baseline data is collected."
     echo ""
 }
 

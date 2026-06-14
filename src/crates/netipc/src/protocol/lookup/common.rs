@@ -376,6 +376,64 @@ pub(super) fn finish_lookup_response(
         .ok_or(NipcError::Overflow)
 }
 
+pub(super) fn response_raw_item<'a>(
+    payload: &'a [u8],
+    hdr_size: usize,
+    item_count: u32,
+    index: u32,
+) -> Result<&'a [u8], NipcError> {
+    if index >= item_count {
+        return Err(NipcError::OutOfBounds);
+    }
+    let packed_start = lookup_data_offset(hdr_size, item_count)?;
+    let base = lookup_dir_entry_offset(hdr_size, index)?;
+    let off = u32_at(payload, base) as usize;
+    let len = u32_at(payload, base + 4) as usize;
+    checked_subslice(payload, packed_start, off, len)
+}
+
+pub(super) fn encode_raw_response(
+    buf: &mut [u8],
+    hdr_size: usize,
+    generation: u64,
+    items: &[&[u8]],
+    min_item_len: usize,
+    validate: fn(&[u8]) -> Result<(), NipcError>,
+) -> Result<usize, NipcError> {
+    let item_count = u32::try_from(items.len()).map_err(|_| NipcError::Overflow)?;
+    let mut data_offset = lookup_data_offset(hdr_size, item_count)?;
+    if buf.len() < data_offset {
+        return Err(NipcError::Overflow);
+    }
+    for (i, item) in items.iter().enumerate() {
+        if item.len() < min_item_len {
+            return Err(NipcError::BadLayout);
+        }
+        validate(item)?;
+        let item_start = align8(data_offset);
+        let item_end = item_start
+            .checked_add(item.len())
+            .ok_or(NipcError::Overflow)?;
+        if item_end > buf.len() {
+            return Err(NipcError::Overflow);
+        }
+        if item_start > data_offset {
+            buf[data_offset..item_start].fill(0);
+        }
+        buf[item_start..item_end].copy_from_slice(item);
+        let dir = hdr_size
+            .checked_add(
+                i.checked_mul(LOOKUP_DIR_ENTRY_SIZE)
+                    .ok_or(NipcError::Overflow)?,
+            )
+            .ok_or(NipcError::Overflow)?;
+        put_u32(buf, dir, checked_u32(item_start)?);
+        put_u32(buf, dir + 4, checked_u32(item.len())?);
+        data_offset = item_end;
+    }
+    finish_lookup_response(buf, hdr_size, item_count, data_offset, generation)
+}
+
 #[cfg(test)]
 pub(super) fn response_item_bounds(
     buf: &[u8],

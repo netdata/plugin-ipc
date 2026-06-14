@@ -13,17 +13,20 @@ import (
 // Server is an internal managed server bound to one expected request kind.
 // Supports multiple concurrent client sessions up to workerCount.
 type Server struct {
-	runDir                      string
-	serviceName                 string
-	config                      posix.ServerConfig
-	expectedMethodCode          uint16
-	handler                     DispatchHandler
-	running                     atomic.Bool
-	learnedRequestPayloadBytes  atomic.Uint32
-	learnedResponsePayloadBytes atomic.Uint32
-	nextSessionID               atomic.Uint64
-	workerCount                 int
-	wg                          sync.WaitGroup
+	runDir                       string
+	serviceName                  string
+	config                       posix.ServerConfig
+	expectedMethodCode           uint16
+	handler                      DispatchHandler
+	running                      atomic.Bool
+	learnedRequestPayloadBytes   atomic.Uint32
+	learnedResponsePayloadBytes  atomic.Uint32
+	requestPayloadGrowthCeiling  uint32
+	responsePayloadGrowthCeiling uint32
+	nextSessionID                atomic.Uint64
+	workerCount                  int
+	wg                           sync.WaitGroup
+	listener                     *posix.Listener
 }
 
 // NewServer creates a new managed server. workerCount limits the
@@ -98,7 +101,11 @@ func (s *Server) Run() error {
 	if err != nil {
 		return err
 	}
-	defer listener.Close()
+	s.listener = listener
+	defer func() {
+		listener.Close()
+		s.listener = nil
+	}()
 
 	s.running.Store(true)
 
@@ -165,9 +172,12 @@ func (s *Server) Run() error {
 	return nil
 }
 
-// Stop signals the server to stop.
+// Stop signals the server to stop and unblocks Accept by closing the listener.
 func (s *Server) Stop() {
 	s.running.Store(false)
+	if s.listener != nil {
+		s.listener.Close()
+	}
 }
 
 func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {

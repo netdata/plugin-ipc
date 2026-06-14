@@ -114,13 +114,16 @@ presence.
 ### 6. Strict validation on decode
 
 Decoders must reject invalid payloads rather than producing corrupt views.
-Validation includes:
+Validation is structural only. It exists to make zero-copy views safe and to
+fail fast on invalid bytes; it is not a checksum, payload hash, cryptographic
+integrity layer, or heuristic repair mechanism. Validation includes:
 
 - Payload shorter than the fixed method-local header: reject
 - Offset + length for any field exceeding payload bounds: reject
 - Overlapping field regions where the schema forbids them: reject
 - String field missing the required trailing NUL: reject
 - Unknown or unsupported layout_version: reject
+- Unknown or unsupported status values: reject
 
 Decode failure is reported as an error, not as a partial view.
 

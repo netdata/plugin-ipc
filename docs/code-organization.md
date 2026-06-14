@@ -25,6 +25,27 @@ Examples of service kinds:
 - `ip-to-asn`
 - `pid-traffic`
 
+## Global Implementation Rules
+
+These rules apply to every service and every supported implementation language:
+
+- C, Rust, and Go must expose the same wire contract and typed behavior.
+- NetIPC has no backward-compatibility, forward-compatibility, or best-effort
+  compatibility mode for provider/client drift. Method, layout, status,
+  echoed-key, and generation contracts must match exactly or the call fails.
+- Mixed-generation stitched lookup responses are globally unsupported. Do not
+  add service-local compatibility shims or partial stitching rules.
+- Lookup `PAYLOAD_EXCEEDED` and `OVERSIZED_ITEM` are standard response
+  outcomes, not language-local behavior. Level 2 consumes
+  `PAYLOAD_EXCEEDED` internally and treats `OVERSIZED_ITEM` as a final
+  per-item outcome.
+- Payload budgets and logical lookup ceilings are initialization policy.
+  Implementations may provide named defaults, but call paths must read
+  configured values or named defaults instead of embedding deployment-size
+  literals.
+- Named defaults are not protocol hard limits. Small deployments can choose
+  smaller buffers; large-memory deployments can opt into larger budgets.
+
 ## Repository layout
 
 The repository mirrors Netdata's destination structure so that future
@@ -68,7 +89,7 @@ src/
         cgroups_snapshot.rs   # cgroups-snapshot public typed facade
         cgroups_lookup.rs     # cgroups-lookup public typed facade
         apps_lookup.rs        # apps-lookup public typed facade
-        cgroups.rs            # compatibility re-exports for historical imports
+        cgroups.rs            # legacy re-exports for historical imports
         raw.rs                # Internal raw helper wrapper/re-exports
         raw/                  # Shared raw infrastructure plus per-method helpers
           client.rs           # Raw client state and public lifecycle
@@ -99,7 +120,7 @@ src/
       cgroups_snapshot/       # cgroups-snapshot public typed facade
       cgroups_lookup/         # cgroups-lookup public typed facade
       apps_lookup/            # apps-lookup public typed facade
-      cgroups/                # compatibility aliases for historical imports
+      cgroups/                # legacy aliases for historical imports
       raw/                    # Internal raw helper infrastructure
         client.go             # shared raw client retry/envelope flow
         client_unix.go        # POSIX client connect/send/receive

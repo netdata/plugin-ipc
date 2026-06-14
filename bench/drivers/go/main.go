@@ -44,6 +44,9 @@ const (
 	// Batch scenario limits (mirrors C driver).
 	maxBatchItems = 1000
 	batchBufSize  = maxBatchItems*48 + 4096 // 52096
+
+	lookupMethodMaxItems        = 32768
+	lookupMethodBufBytesPerItem = 256
 )
 
 type cacheBucket struct {
@@ -263,6 +266,7 @@ func typedServerConfig(profiles uint32) cgroups.ServerConfig {
 	return cgroups.ServerConfig{
 		SupportedProfiles:       profiles,
 		PreferredProfiles:       profiles,
+		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: responseBufSize,
 		AuthToken:               authToken,
@@ -273,10 +277,31 @@ func typedClientConfig(profiles uint32) cgroups.ClientConfig {
 	return cgroups.ClientConfig{
 		SupportedProfiles:       profiles,
 		PreferredProfiles:       profiles,
+		MaxRequestPayloadBytes:  4096,
 		MaxRequestBatchItems:    1,
 		MaxResponsePayloadBytes: responseBufSize,
 		AuthToken:               authToken,
 	}
+}
+
+func stopServerAfter(runDir, service string, durationSec int, stop func()) {
+	go func() {
+		time.Sleep(time.Duration(durationSec+3) * time.Second)
+		stop()
+
+		session, err := posix.Connect(runDir, service, &posix.ClientConfig{
+			SupportedProfiles:       protocol.ProfileBaseline,
+			PreferredProfiles:       protocol.ProfileBaseline,
+			MaxRequestPayloadBytes:  4096,
+			MaxRequestBatchItems:    1,
+			MaxResponsePayloadBytes: responseBufSize,
+			MaxResponseBatchItems:   1,
+			AuthToken:               authToken,
+		})
+		if err == nil {
+			session.Close()
+		}
+	}()
 }
 
 // ---------------------------------------------------------------------------
@@ -344,10 +369,7 @@ func runServer(runDir, service string, profiles uint32, durationSec int, handler
 
 		cpuStart := cpuNS()
 
-		go func() {
-			time.Sleep(time.Duration(durationSec+3) * time.Second)
-			server.Stop()
-		}()
+		stopServerAfter(runDir, service, durationSec, server.Stop)
 
 		if err := server.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "server: %v\n", err)
@@ -367,10 +389,7 @@ func runServer(runDir, service string, profiles uint32, durationSec int, handler
 
 		cpuStart := cpuNS()
 
-		go func() {
-			time.Sleep(time.Duration(durationSec+3) * time.Second)
-			server.Stop()
-		}()
+		stopServerAfter(runDir, service, durationSec, server.Stop)
 
 		if err := server.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "server: %v\n", err)
@@ -405,10 +424,7 @@ func runBatchServer(runDir, service string, profiles uint32, durationSec int) in
 
 	cpuStart := cpuNS()
 
-	go func() {
-		time.Sleep(time.Duration(durationSec+3) * time.Second)
-		server.Stop()
-	}()
+	stopServerAfter(runDir, service, durationSec, server.Stop)
 
 	if err := server.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "batch server: %v\n", err)
@@ -1297,6 +1313,10 @@ func parseLookupMethodScenario(scenario string) (isApps bool, variant lookupVari
 		return false, 0, 0, false
 	}
 	switch {
+	case strings.HasSuffix(scenario, "-32768"):
+		itemCount = 32768
+	case strings.HasSuffix(scenario, "-8192"):
+		itemCount = 8192
 	case strings.HasSuffix(scenario, "-256"):
 		itemCount = 256
 	case strings.HasSuffix(scenario, "-16"):
@@ -1309,22 +1329,35 @@ func parseLookupMethodScenario(scenario string) (isApps bool, variant lookupVari
 	return isApps, variant, itemCount, true
 }
 
+func lookupMethodBufferSize(itemCount int) int {
+	scaled := itemCount*lookupMethodBufBytesPerItem + 4096
+	if scaled < responseBufSize {
+		return responseBufSize
+	}
+	return scaled
+}
+
 func runLookupMethodBench(durationSec int, scenario string, targetRPS uint64) int {
 	isApps, variant, itemCount, ok := parseLookupMethodScenario(scenario)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "lookup-method-bench: invalid scenario %q\n", scenario)
 		return 1
 	}
+	if itemCount <= 0 || itemCount > lookupMethodMaxItems {
+		fmt.Fprintf(os.Stderr, "lookup-method-bench: unsupported item count %d\n", itemCount)
+		return 1
+	}
 
 	paths := make([][]byte, itemCount)
 	pids := make([]uint32, itemCount)
-	for i := range itemCount {
+	for i := 0; i < itemCount; i++ {
 		paths[i] = fmt.Appendf(nil, "/sys/fs/cgroup/bench/cg-%03d", i)
-		pids[i] = uint32(1000 + i)
+		pids[i] = uint32(1000 + i) // #nosec G115 -- itemCount is bounded to lookupMethodMaxItems.
 	}
 
-	reqBuf := make([]byte, responseBufSize)
-	respBuf := make([]byte, responseBufSize)
+	ioBufSize := lookupMethodBufferSize(itemCount)
+	reqBuf := make([]byte, ioBufSize)
+	respBuf := make([]byte, ioBufSize)
 	lr := newLatencyRecorder(2_000_000)
 	rl := newRateLimiter(targetRPS)
 

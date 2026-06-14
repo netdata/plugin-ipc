@@ -16,6 +16,10 @@ GO_DIR="$ROOT_DIR/src/go"
 
 PACKAGES=(
     "./pkg/netipc/protocol/"
+    "./pkg/netipc/service/internal/transportconfig/"
+    "./pkg/netipc/service/raw/"
+    "./pkg/netipc/service/apps_lookup/"
+    "./pkg/netipc/service/cgroups_lookup/"
     "./pkg/netipc/service/cgroups_snapshot/"
     "./pkg/netipc/transport/windows/"
 )

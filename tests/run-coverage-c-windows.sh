@@ -17,7 +17,14 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build-windows-coverage-c"
 
 LIB_SOURCES=(
+    "src/libnetdata/netipc/src/protocol/netipc_protocol.c"
+    "src/libnetdata/netipc/src/protocol/netipc_protocol_lookup_common.c"
+    "src/libnetdata/netipc/src/protocol/netipc_protocol_apps_lookup.c"
+    "src/libnetdata/netipc/src/protocol/netipc_protocol_cgroups_lookup.c"
+    "src/libnetdata/netipc/src/service/netipc_service_common.c"
     "src/libnetdata/netipc/src/service/netipc_service_win.c"
+    "src/libnetdata/netipc/src/service/netipc_service_apps_lookup.c"
+    "src/libnetdata/netipc/src/service/netipc_service_cgroups_lookup.c"
     "src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c"
     "src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c"
 )

@@ -10,7 +10,7 @@
 #   5. UDS batch ping-pong (9 pairs x 4 rates, random 2-1000 items)
 #   6. SHM batch ping-pong (9 pairs x 4 rates, random 2-1000 items)
 #   7. Local cache lookup (3 languages x 1 rate)
-#   8. Lookup method codec+dispatch (8 scenarios x 3 languages x 4 rates)
+#   8. Lookup method codec+dispatch (12 scenarios x 3 languages x 4 rates)
 #   9. UDS pipeline (9 pairs x 1 rate, depth=16)
 #   10. UDS pipeline+batch (9 pairs x 1 rate, depth=16)
 #
@@ -29,7 +29,7 @@
 #     rows.
 #   NIPC_BENCH_FLOOR_RETRY_SAMPLES
 #     Repeated diagnostic samples for max-throughput rows that miss a published
-#     performance floor. Defaults to 3. Set to 0 to disable recovery.
+#     performance floor. Defaults to 7. Set to 0 to disable recovery.
 #   NIPC_BENCH_FLOOR_RETRY_DURATION
 #     Duration for each floor-retry sample. Defaults to 20s.
 #   NIPC_BENCH_FLOOR_RETRY_MAX_RATIO
@@ -54,7 +54,7 @@ SERVER_STOP_GRACE_SEC="${NIPC_BENCH_SERVER_STOP_GRACE_SEC:-10}"
 OUTPUT_CSV="${1:-${ROOT_DIR}/benchmarks-posix.csv}"
 DURATION="${2:-5}"
 MAX_DURATION="${NIPC_BENCH_MAX_DURATION:-10}"
-FLOOR_RETRY_SAMPLES="${NIPC_BENCH_FLOOR_RETRY_SAMPLES:-3}"
+FLOOR_RETRY_SAMPLES="${NIPC_BENCH_FLOOR_RETRY_SAMPLES:-7}"
 FLOOR_RETRY_DURATION="${NIPC_BENCH_FLOOR_RETRY_DURATION:-20}"
 FLOOR_RETRY_MAX_RATIO="${NIPC_BENCH_FLOOR_RETRY_MAX_RATIO:-1.35}"
 FLOOR_RETRY_CSV="${OUTPUT_CSV%.csv}.floor-retries.csv"
@@ -156,10 +156,12 @@ start_server() {
     local pid=$!
     SERVER_PIDS+=("$pid")
 
-    # Wait for READY (up to 5s)
+    # Wait for READY and for the UDS listener socket to exist (up to 5s).
+    # Some drivers print READY just before entering the managed server loop.
     local waited=0
+    local socket_path="${RUN_DIR}/${svc}.sock"
     while [ $waited -lt 50 ]; do
-        if grep -q "^READY$" "$server_out" 2>/dev/null; then
+        if grep -q "^READY$" "$server_out" 2>/dev/null && [ -S "$socket_path" ]; then
             echo "$pid"
             return 0
         fi
@@ -901,6 +903,7 @@ main() {
 
     # CSV header
     echo "scenario,client,server,target_rps,throughput,p50_us,p95_us,p99_us,client_cpu_pct,server_cpu_pct,total_cpu_pct" > "$OUTPUT_CSV"
+    rm -f "$FLOOR_RETRY_CSV"
 
     local LANGS=(c rust go)
     local RATES_PING_PONG=(0 100000 10000 1000)
@@ -911,10 +914,14 @@ main() {
         cgroups-lookup-unknown-16
         cgroups-lookup-mixed-16
         cgroups-lookup-mixed-256
+        cgroups-lookup-known-8192
+        cgroups-lookup-known-32768
         apps-lookup-known-16
         apps-lookup-unknown-16
         apps-lookup-mixed-16
         apps-lookup-mixed-256
+        apps-lookup-known-8192
+        apps-lookup-known-32768
     )
 
     # 1. UDS ping-pong: 9 pairs x 4 rates
@@ -1044,7 +1051,7 @@ main() {
         fi
     done
 
-    # 8. Lookup method codec+dispatch: 8 scenarios x 3 languages x 4 rates
+    # 8. Lookup method codec+dispatch: 12 scenarios x 3 languages x 4 rates
     log "=== Lookup Methods (codec + dispatch) ==="
     for rate in "${RATES_LOOKUP_METHOD[@]}"; do
         row_duration="$(duration_for_target "$rate")"

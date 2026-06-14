@@ -165,7 +165,7 @@ func validateLookupDir(buf []byte, dirStart int, itemCount uint32, packedAreaLen
 	}
 
 	prevEnd := 0
-	for i := range itemCount {
+	for i := uint32(0); i < itemCount; i++ {
 		base, ok := lookupDirOffset(dirStart, i)
 		if !ok {
 			return ErrBadItemCount
@@ -265,7 +265,7 @@ func validateLabels(item []byte, hdrSize int, labelCount uint16, fixedEnd int) (
 		return 0, ErrOutOfBounds
 	}
 
-	for i := range labelCount {
+	for i := uint16(0); i < labelCount; i++ {
 		entryRel, ok := checkedInt(uint64(i) * uint64(LookupLabelEntrySize))
 		if !ok {
 			return 0, ErrOutOfBounds
@@ -476,7 +476,7 @@ func finishLookupResponse(buf []byte, hdrSize int, itemCount uint32, dataOffset 
 	if finalPackedStart < firstItemAbs {
 		copy(buf[finalPackedStart:], buf[firstItemAbs:firstItemAbs+packedDataLen])
 	}
-	for i := range count {
+	for i := 0; i < count; i++ {
 		entry := hdrSize + i*LookupDirEntrySize
 		abs, ok := checkedInt(uint64(ne.Uint32(buf[entry : entry+4])))
 		if !ok || abs < firstItemAbs {
@@ -489,4 +489,72 @@ func finishLookupResponse(buf []byte, hdrSize int, itemCount uint32, dataOffset 
 		ne.PutUint32(buf[entry:entry+4], rel)
 	}
 	return finalPackedStart + packedDataLen
+}
+
+func lookupResponseRawItem(payload []byte, hdrSize int, itemCount uint32, index uint32) ([]byte, error) {
+	if index >= itemCount {
+		return nil, ErrOutOfBounds
+	}
+	packedStart, ok := lookupBuilderDataOffset(hdrSize, itemCount)
+	if !ok {
+		return nil, ErrBadItemCount
+	}
+	dir, ok := lookupDirOffset(hdrSize, index)
+	if !ok {
+		return nil, ErrBadItemCount
+	}
+	off, length, err := lookupDirEntry(payload, dir)
+	if err != nil {
+		return nil, err
+	}
+	return lookupPayloadSlice(payload, packedStart, off, length)
+}
+
+func encodeLookupRawResponse(buf []byte, hdrSize int, generation uint64, items [][]byte, minItemLen int, validate func([]byte) error) (int, error) {
+	if uint64(len(items)) > uint64(^uint32(0)) {
+		return 0, ErrOverflow
+	}
+	itemCount := uint32(len(items)) // #nosec G115 -- len(items) is bounded above.
+	minRequired, ok := lookupBuilderDataOffset(hdrSize, itemCount)
+	if !ok || len(buf) < minRequired {
+		return 0, ErrOverflow
+	}
+	dataOffset := minRequired
+	for i, item := range items {
+		if len(item) < minItemLen {
+			return 0, ErrBadLayout
+		}
+		if validate != nil {
+			if err := validate(item); err != nil {
+				return 0, err
+			}
+		}
+		itemStart, ok := checkedAlign8(dataOffset)
+		if !ok {
+			return 0, ErrOverflow
+		}
+		itemEnd, ok := checkedAddInt(itemStart, len(item))
+		if !ok || itemEnd > len(buf) {
+			return 0, ErrOverflow
+		}
+		clear(buf[dataOffset:itemStart])
+		copy(buf[itemStart:itemEnd], item)
+		dir := hdrSize + i*LookupDirEntrySize
+		itemStart32, ok := checkedU32Int(itemStart)
+		if !ok {
+			return 0, ErrOverflow
+		}
+		itemLen32, ok := checkedU32Int(len(item))
+		if !ok {
+			return 0, ErrOverflow
+		}
+		ne.PutUint32(buf[dir:dir+4], itemStart32)
+		ne.PutUint32(buf[dir+4:dir+8], itemLen32)
+		dataOffset = itemEnd
+	}
+	n := finishLookupResponse(buf, hdrSize, itemCount, dataOffset, generation)
+	if n == 0 {
+		return 0, ErrOverflow
+	}
+	return n, nil
 }

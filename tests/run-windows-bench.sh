@@ -193,6 +193,10 @@ setup_windows_toolchain() {
 
 cmake_windows_tool_path() {
     local path="$1"
+    if [ "$WINDOWS_TOOLCHAIN" = "msys" ]; then
+        printf '%s\n' "$path"
+        return
+    fi
     if [ -x "${path}.exe" ]; then
         path="${path}.exe"
     fi

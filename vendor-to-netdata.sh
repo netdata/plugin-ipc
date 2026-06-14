@@ -138,8 +138,9 @@ echo ""
 echo "  1. Fix Go import paths:"
 if [ -n "$GO_DST_MODULE" ] && [ "$GO_SRC_MODULE" != "$GO_DST_MODULE" ]; then
     echo -e "     ${GRAY}cd $DST${NC}"
-    echo -e "     ${GRAY}find src/go/pkg/netipc -name '*.go' -exec sed -i 's|${GO_SRC_MODULE}|${GO_DST_MODULE}|g' {} +${NC}"
+    echo -e "     ${GRAY}find src/go/pkg/netipc -name '*.go' -exec sed -i.bak 's|${GO_SRC_MODULE}|${GO_DST_MODULE}|g' {} +${NC}"
     echo -e "     ${GRAY}git diff -- src/go/pkg/netipc${NC}"
+    echo -e "     ${GRAY}find src/go/pkg/netipc -name '*.bak' -delete${NC}"
 else
     echo -e "     ${GRAY}(check if Go module path differs between repos and sed-replace)${NC}"
 fi

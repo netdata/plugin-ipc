@@ -238,7 +238,27 @@ func doEncode(dir string) {
 	}
 	{
 		buf := make([]byte, 8192)
-		b := protocol.NewCgroupsLookupBuilder(buf, 0, 104)
+		b := protocol.NewCgroupsLookupBuilder(buf, 1, 104)
+		if err := b.Add(protocol.CgroupLookupPayloadExceeded, 0,
+			[]byte("/payload-exceeded"), []byte(""), nil); err != nil {
+			panic(err)
+		}
+		total := b.Finish()
+		writeFile(dir, "cgroups_lookup_resp_payload_exceeded.bin", buf[:total])
+	}
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewCgroupsLookupBuilder(buf, 1, 105)
+		if err := b.Add(protocol.CgroupLookupOversizedItem, 0,
+			[]byte("/oversized"), []byte(""), nil); err != nil {
+			panic(err)
+		}
+		total := b.Finish()
+		writeFile(dir, "cgroups_lookup_resp_oversized_item.bin", buf[:total])
+	}
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewCgroupsLookupBuilder(buf, 0, 106)
 		total := b.Finish()
 		writeFile(dir, "cgroups_lookup_resp_empty.bin", buf[:total])
 	}
@@ -322,7 +342,29 @@ func doEncode(dir string) {
 	}
 	{
 		buf := make([]byte, 8192)
-		b := protocol.NewAppsLookupBuilder(buf, 0, 205)
+		b := protocol.NewAppsLookupBuilder(buf, 1, 205)
+		if err := b.Add(protocol.PidLookupPayloadExceeded, 0,
+			0, 1238, 0, protocol.NipcUIDUnset, 0,
+			[]byte(""), []byte(""), []byte(""), nil); err != nil {
+			panic(err)
+		}
+		total := b.Finish()
+		writeFile(dir, "apps_lookup_resp_payload_exceeded.bin", buf[:total])
+	}
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewAppsLookupBuilder(buf, 1, 206)
+		if err := b.Add(protocol.PidLookupOversizedItem, 0,
+			0, 1239, 0, protocol.NipcUIDUnset, 0,
+			[]byte(""), []byte(""), []byte(""), nil); err != nil {
+			panic(err)
+		}
+		total := b.Finish()
+		writeFile(dir, "apps_lookup_resp_oversized_item.bin", buf[:total])
+	}
+	{
+		buf := make([]byte, 8192)
+		b := protocol.NewAppsLookupBuilder(buf, 0, 207)
 		total := b.Finish()
 		writeFile(dir, "apps_lookup_resp_empty.bin", buf[:total])
 	}
@@ -502,6 +544,28 @@ func doDecode(dir string) bool {
 		_, err := protocol.DecodeCgroupsLookupResponse(readFile(dir, file))
 		c.check(err == nil, file)
 	}
+	{
+		data := readFile(dir, "cgroups_lookup_resp_payload_exceeded.bin")
+		view, err := protocol.DecodeCgroupsLookupResponse(data)
+		c.check(err == nil, "decode cgroups_lookup payload_exceeded")
+		if err == nil {
+			item, _ := view.Item(0)
+			c.check(item.Status == protocol.CgroupLookupPayloadExceeded, "cgroups_lookup payload_exceeded status")
+			c.check(item.Path.String() == "/payload-exceeded", "cgroups_lookup payload_exceeded path")
+			c.check(item.Name.Len() == 0, "cgroups_lookup payload_exceeded name")
+		}
+	}
+	{
+		data := readFile(dir, "cgroups_lookup_resp_oversized_item.bin")
+		view, err := protocol.DecodeCgroupsLookupResponse(data)
+		c.check(err == nil, "decode cgroups_lookup oversized_item")
+		if err == nil {
+			item, _ := view.Item(0)
+			c.check(item.Status == protocol.CgroupLookupOversizedItem, "cgroups_lookup oversized_item status")
+			c.check(item.Path.String() == "/oversized", "cgroups_lookup oversized_item path")
+			c.check(item.Name.Len() == 0, "cgroups_lookup oversized_item name")
+		}
+	}
 
 	// 10. APPS_LOOKUP request variants.
 	{
@@ -546,6 +610,28 @@ func doDecode(dir string) bool {
 	} {
 		_, err := protocol.DecodeAppsLookupResponse(readFile(dir, file))
 		c.check(err == nil, file)
+	}
+	{
+		data := readFile(dir, "apps_lookup_resp_payload_exceeded.bin")
+		view, err := protocol.DecodeAppsLookupResponse(data)
+		c.check(err == nil, "decode apps_lookup payload_exceeded")
+		if err == nil {
+			item, _ := view.Item(0)
+			c.check(item.Status == protocol.PidLookupPayloadExceeded, "apps_lookup payload_exceeded status")
+			c.check(item.Pid == 1238, "apps_lookup payload_exceeded pid")
+			c.check(item.Comm.Len() == 0, "apps_lookup payload_exceeded comm")
+		}
+	}
+	{
+		data := readFile(dir, "apps_lookup_resp_oversized_item.bin")
+		view, err := protocol.DecodeAppsLookupResponse(data)
+		c.check(err == nil, "decode apps_lookup oversized_item")
+		if err == nil {
+			item, _ := view.Item(0)
+			c.check(item.Status == protocol.PidLookupOversizedItem, "apps_lookup oversized_item status")
+			c.check(item.Pid == 1239, "apps_lookup oversized_item pid")
+			c.check(item.Comm.Len() == 0, "apps_lookup oversized_item comm")
+		}
 	}
 
 	return c.report("Go decode")

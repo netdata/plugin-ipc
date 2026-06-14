@@ -61,6 +61,7 @@ trap cleanup EXIT
 stop_server() {
     local server_pid="$1"
     local waited=0
+    local win_pid
 
     if ! kill -0 "$server_pid" 2>/dev/null; then
         wait "$server_pid" 2>/dev/null || true
@@ -78,10 +79,11 @@ stop_server() {
         waited=$((waited + 1))
     done
 
-    if command -v taskkill.exe >/dev/null 2>&1; then
-        taskkill.exe /PID "$server_pid" /T /F >/dev/null 2>&1 || true
-    elif command -v taskkill >/dev/null 2>&1; then
-        taskkill /PID "$server_pid" /T /F >/dev/null 2>&1 || true
+    win_pid=$(ps -W 2>/dev/null | awk -v pid="$server_pid" '$1 == pid {print $4; exit}')
+    if [[ -n "$win_pid" ]] && command -v taskkill.exe >/dev/null 2>&1; then
+        taskkill.exe //PID "$win_pid" //T //F >/dev/null 2>&1 || true
+    elif [[ -n "$win_pid" ]] && command -v taskkill >/dev/null 2>&1; then
+        taskkill //PID "$win_pid" //T //F >/dev/null 2>&1 || true
     fi
 
     waited=0

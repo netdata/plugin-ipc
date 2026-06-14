@@ -70,7 +70,7 @@ The decoder validates:
 - layout_version is recognized
 
 Returns a request view (trivial for this method type, but the decode
-path must still exist for consistency and forward compatibility).
+path must still exist so every method has an explicit request decoder).
 
 ## Response payload
 

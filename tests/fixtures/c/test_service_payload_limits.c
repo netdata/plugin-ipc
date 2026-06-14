@@ -141,13 +141,15 @@ static void test_typed_response_overflow_reconnect_guards(void)
             nipc_client_status_t status = {0};
 
             nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
-            check("typed baseline response overflow recovers",
-                  err == NIPC_OK && view.item_count == 3);
+            check("typed baseline response overflow respects configured ceiling",
+                  err == NIPC_ERR_OVERFLOW);
             nipc_client_status(&client, &status);
             check("typed baseline response overflow reconnects",
                   status.reconnect_count >= 1);
-            check("typed baseline response capacity grows",
-                  client.session.max_response_payload_bytes > 16u);
+            check("typed baseline response capacity stays capped",
+                  client.session.max_response_payload_bytes <= 16u);
+            check("typed baseline response overflow breaks client",
+                  !nipc_client_ready(&client));
         }
 
         nipc_client_close(&client);
@@ -176,15 +178,15 @@ static void test_typed_response_overflow_reconnect_guards(void)
             nipc_client_status_t status = {0};
 
             nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
-            check("typed hybrid response overflow recovers",
-                  err == NIPC_OK && view.item_count == 3);
+            check("typed hybrid response overflow respects configured ceiling",
+                  err == NIPC_ERR_OVERFLOW);
             nipc_client_status(&client, &status);
             check("typed hybrid response overflow reconnects",
                   status.reconnect_count >= 1);
-            check("typed hybrid response capacity grows",
-                  client.session.max_response_payload_bytes > 16u);
-            check("typed hybrid response overflow keeps client ready",
-                  nipc_client_ready(&client) && client.shm != NULL);
+            check("typed hybrid response capacity stays capped",
+                  client.session.max_response_payload_bytes <= 16u);
+            check("typed hybrid response overflow breaks client",
+                  !nipc_client_ready(&client));
         }
 
         nipc_client_close(&client);
@@ -222,13 +224,15 @@ static void test_typed_dispatch_overflow_reconnect_guard(void)
         nipc_client_status_t status = {0};
 
         nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
-        check("typed dispatch overflow recovers",
-              err == NIPC_OK && view.item_count == 1);
+        check("typed dispatch overflow respects configured ceiling",
+              err == NIPC_ERR_OVERFLOW);
         nipc_client_status(&client, &status);
         check("typed dispatch overflow reconnects",
               status.reconnect_count >= 1);
-        check("typed dispatch response capacity grows above builder floor",
-              client.session.max_response_payload_bytes > 1024u);
+        check("typed dispatch response capacity stays capped",
+              client.session.max_response_payload_bytes <= 16u);
+        check("typed dispatch overflow breaks client",
+              !nipc_client_ready(&client));
     }
 
     nipc_client_close(&client);

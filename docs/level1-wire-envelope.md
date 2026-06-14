@@ -75,6 +75,8 @@ Used in the `code` field when `kind = REQUEST` or `kind = RESPONSE`:
 | 1 | INCREMENT | Test/benchmark method (u64 ping-pong) |
 | 2 | CGROUPS_SNAPSHOT | Cgroups snapshot refresh |
 | 3 | STRING_REVERSE | Test method (variable-length string ping-pong) |
+| 4 | CGROUPS_LOOKUP | Ordered cgroup path metadata lookup |
+| 5 | APPS_LOOKUP | Ordered PID/app/cgroup metadata lookup |
 
 New methods are assigned sequential codes. The method code space is
 shared across all services — each method has a globally unique code.
@@ -230,9 +232,9 @@ The following matrix is normative.
 | `flags` | Must be `0`, otherwise reject with `BAD_ENVELOPE` | none on failure, or `flags = 0` on success | `flags = 0` |
 | `auth_token` | Exact-match authorization check | no negotiated auth field; result is carried only in `transport_status` | authorization outcome only |
 | `supported_profiles` + `preferred_profiles` | Compute `intersection = client_supported & server_supported`; if empty reject with `UNSUPPORTED`; otherwise choose one final profile | `server_supported_profiles`, `intersection_profiles`, `selected_profile` | `selected_profile` |
-| `max_request_payload_bytes` | Client proposes the whole request payload ceiling. If proposal exceeds `1 MiB`, reject with `LIMIT_EXCEEDED`. Otherwise echo it unchanged. | `agreed_max_request_payload_bytes` | `agreed_max_request_payload_bytes` |
+| `max_request_payload_bytes` | Client proposes the whole request payload ceiling. If the proposal exceeds the server's configured request-payload maximum, reject with `LIMIT_EXCEEDED`. Otherwise echo the effective accepted ceiling. | `agreed_max_request_payload_bytes` | `agreed_max_request_payload_bytes` |
 | `max_request_batch_items` | Echo unchanged unless a concrete protocol-level constraint is introduced in a future revision | `agreed_max_request_batch_items` | `agreed_max_request_batch_items` |
-| `max_response_payload_bytes` | Treat as a client hint only; server decides the final response payload ceiling it will use | `agreed_max_response_payload_bytes` | `agreed_max_response_payload_bytes` |
+| `max_response_payload_bytes` | Treat as a client hint only; server chooses the final response payload ceiling from that hint, server configuration, and resource policy | `agreed_max_response_payload_bytes` | `agreed_max_response_payload_bytes` |
 | `max_response_batch_items` | Kept on the wire for symmetry; server must return the same effective batch-item limit as request batching for that session | `agreed_max_response_batch_items` | `agreed_max_response_batch_items`, which must equal `agreed_max_request_batch_items` |
 | `packet_size` | Choose `min(client_packet_size, server_packet_size)`; if result is `<= 32`, reject with `INCOMPATIBLE` | `agreed_packet_size` | `agreed_packet_size` |
 | no client field | Server allocates a fresh session identifier | `session_id` | `session_id` |
@@ -259,7 +261,7 @@ On handshake rejection, the server sends `HELLO_ACK` with a non-`OK`
 | no mutually supported profile | `UNSUPPORTED` |
 | `layout_version != 1` | `INCOMPATIBLE` |
 | negotiated packet size `<= 32` | `INCOMPATIBLE` |
-| proposed `max_request_payload_bytes > 1 MiB` | `LIMIT_EXCEEDED` |
+| proposed `max_request_payload_bytes` exceeds the server's configured request-payload maximum | `LIMIT_EXCEEDED` |
 | malformed reserved/padding fields | `BAD_ENVELOPE` |
 
 The `session_id` is a server-generated monotonic counter (starting at 1,
@@ -309,7 +311,24 @@ Bit 0 is always the baseline profile for the platform.
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| MAX_PAYLOAD_DEFAULT | 1024 | Default single-payload ceiling in bytes |
+| NIPC_MAX_PAYLOAD_DEFAULT / MAX_PAYLOAD_DEFAULT | 1024 | Zero-config single-payload default in bytes |
+| NIPC_MAX_PAYLOAD_CAP / MAX_PAYLOAD_CAP | 1048576 | Zero-config automatic growth ceiling used only while callers did not configure larger payload budgets |
+
+These are named defaults, not hidden deployment policy. Client and server
+initialization config may override request and response payload ceilings.
+Implementations must use configured values or named defaults in call paths,
+not scattered numeric literals, so small systems can choose small buffers and
+large systems can opt into larger budgets.
+
+These defaults are not protocol hard limits. If both peers are initialized with
+larger payload budgets and local memory policy allows them, the handshake may
+negotiate larger request/response ceilings.
+
+Level 2 service facades may define larger named response defaults for typed
+services. For example, the C service layer uses
+`NIPC_SERVICE_RESPONSE_BUF_DEFAULT` (`65536`) as its zero-config response
+payload budget. Such defaults are service policy, not Level 1 wire limits;
+consumers can still override payload budgets during initialization.
 
 ## Validation rules
 

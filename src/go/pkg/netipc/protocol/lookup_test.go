@@ -1,6 +1,9 @@
 package protocol
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func labels(items ...struct{ Key, Value []byte }) []struct{ Key, Value []byte } {
 	return items
@@ -620,8 +623,21 @@ func TestCgroupsLookupBuilderGuardCoverage(t *testing.T) {
 		}
 	}
 	tooManyLabels := make([]struct{ Key, Value []byte }, int(^uint16(0))+1)
-	if err := NewCgroupsLookupBuilder(resp[:], 1, 0).Add(CgroupLookupKnown, 0, []byte("/x"), nil, tooManyLabels); err != ErrOverflow {
-		t.Fatalf("cgroups too-many-labels error = %v, want ErrOverflow", err)
+	tooManyBuilder := NewCgroupsLookupBuilder(resp[:], 1, 0)
+	if err := tooManyBuilder.Add(CgroupLookupKnown, 0, []byte("/x"), nil, tooManyLabels); err != nil {
+		t.Fatalf("cgroups too-many-labels error = %v, want nil", err)
+	}
+	n := tooManyBuilder.Finish()
+	tooManyView, err := DecodeCgroupsLookupResponse(resp[:n])
+	if err != nil {
+		t.Fatalf("decode cgroups too-many-labels response: %v", err)
+	}
+	tooManyItem, err := tooManyView.Item(0)
+	if err != nil {
+		t.Fatalf("cgroups too-many-labels item: %v", err)
+	}
+	if tooManyItem.Status != CgroupLookupOversizedItem {
+		t.Fatalf("cgroups too-many-labels status = %d, want OVERSIZED_ITEM", tooManyItem.Status)
 	}
 
 	small := make([]byte, CgroupsLookupRespHdr+LookupDirEntrySize)
@@ -826,8 +842,21 @@ func TestAppsLookupBuilderGuardCoverage(t *testing.T) {
 		}
 	}
 	tooManyLabels := make([]struct{ Key, Value []byte }, int(^uint16(0))+1)
-	if err := NewAppsLookupBuilder(resp[:], 1, 0).Add(PidLookupKnown, AppsCgroupKnown, 0, 1, 0, 0, 0, []byte("x"), []byte("/x"), nil, tooManyLabels); err != ErrOverflow {
-		t.Fatalf("apps too-many-labels error = %v, want ErrOverflow", err)
+	tooManyBuilder := NewAppsLookupBuilder(resp[:], 1, 0)
+	if err := tooManyBuilder.Add(PidLookupKnown, AppsCgroupKnown, 0, 1, 0, 0, 0, []byte("x"), []byte("/x"), nil, tooManyLabels); err != nil {
+		t.Fatalf("apps too-many-labels error = %v, want nil", err)
+	}
+	n := tooManyBuilder.Finish()
+	tooManyView, err := DecodeAppsLookupResponse(resp[:n])
+	if err != nil {
+		t.Fatalf("decode apps too-many-labels response: %v", err)
+	}
+	tooManyItem, err := tooManyView.Item(0)
+	if err != nil {
+		t.Fatalf("apps too-many-labels item: %v", err)
+	}
+	if tooManyItem.Status != PidLookupOversizedItem {
+		t.Fatalf("apps too-many-labels status = %d, want OVERSIZED_ITEM", tooManyItem.Status)
 	}
 
 	small := make([]byte, AppsLookupRespHdr+LookupDirEntrySize)
@@ -1552,4 +1581,144 @@ func TestLookupDispatchCoverage(t *testing.T) {
 	if n, err := DispatchAppsLookup(req[:AppsLookupReqHdr-1], resp[:], nil); err != ErrTruncated || n != 0 {
 		t.Fatalf("dispatch apps bad request = n %d err %v", n, err)
 	}
+}
+
+func TestLookupRawResponseRoundTrip(t *testing.T) {
+	cgItem := validCgroupsLookupItemBytes(t)
+	var cgResp [512]byte
+	cgN, err := EncodeCgroupsLookupRawResponse([][]byte{cgItem}, 44, cgResp[:])
+	if err != nil {
+		t.Fatalf("encode raw cgroups response: %v", err)
+	}
+	cgView, err := DecodeCgroupsLookupResponse(cgResp[:cgN])
+	if err != nil {
+		t.Fatalf("decode raw cgroups response: %v", err)
+	}
+	if cgView.Generation != 44 || cgView.ItemCount != 1 {
+		t.Fatalf("raw cgroups header = generation %d count %d", cgView.Generation, cgView.ItemCount)
+	}
+	cgRaw, err := cgView.RawItem(0)
+	if err != nil {
+		t.Fatalf("raw cgroups item: %v", err)
+	}
+	if string(cgRaw) != string(cgItem) {
+		t.Fatalf("raw cgroups item changed")
+	}
+	if _, err := cgView.RawItem(1); err != ErrOutOfBounds {
+		t.Fatalf("raw cgroups out-of-bounds error = %v, want ErrOutOfBounds", err)
+	}
+	if _, err := EncodeCgroupsLookupRawResponse([][]byte{cgItem[:CgroupsLookupItemHdr-1]}, 0, cgResp[:]); err != ErrBadLayout {
+		t.Fatalf("short raw cgroups item error = %v, want ErrBadLayout", err)
+	}
+	if _, err := EncodeCgroupsLookupRawResponse([][]byte{cgItem}, 0, cgResp[:CgroupsLookupRespHdr+LookupDirEntrySize]); err != ErrOverflow {
+		t.Fatalf("small raw cgroups buffer error = %v, want ErrOverflow", err)
+	}
+	badCgItem := append([]byte(nil), cgItem...)
+	ne.PutUint16(badCgItem[2:4], 99)
+	if _, err := EncodeCgroupsLookupRawResponse([][]byte{badCgItem}, 0, cgResp[:]); err != ErrBadLayout {
+		t.Fatalf("invalid raw cgroups item error = %v, want ErrBadLayout", err)
+	}
+
+	appsItem := validAppsLookupItemBytes(t)
+	var appsResp [1024]byte
+	appsN, err := EncodeAppsLookupRawResponse([][]byte{appsItem}, 55, appsResp[:])
+	if err != nil {
+		t.Fatalf("encode raw apps response: %v", err)
+	}
+	appsView, err := DecodeAppsLookupResponse(appsResp[:appsN])
+	if err != nil {
+		t.Fatalf("decode raw apps response: %v", err)
+	}
+	if appsView.Generation != 55 || appsView.ItemCount != 1 {
+		t.Fatalf("raw apps header = generation %d count %d", appsView.Generation, appsView.ItemCount)
+	}
+	appsRaw, err := appsView.RawItem(0)
+	if err != nil {
+		t.Fatalf("raw apps item: %v", err)
+	}
+	if string(appsRaw) != string(appsItem) {
+		t.Fatalf("raw apps item changed")
+	}
+	if _, err := appsView.RawItem(1); err != ErrOutOfBounds {
+		t.Fatalf("raw apps out-of-bounds error = %v, want ErrOutOfBounds", err)
+	}
+	if _, err := EncodeAppsLookupRawResponse([][]byte{appsItem[:AppsLookupItemHdr-1]}, 0, appsResp[:]); err != ErrBadLayout {
+		t.Fatalf("short raw apps item error = %v, want ErrBadLayout", err)
+	}
+	if _, err := EncodeAppsLookupRawResponse([][]byte{appsItem}, 0, appsResp[:AppsLookupRespHdr+LookupDirEntrySize]); err != ErrOverflow {
+		t.Fatalf("small raw apps buffer error = %v, want ErrOverflow", err)
+	}
+	badAppsItem := append([]byte(nil), appsItem...)
+	ne.PutUint16(badAppsItem[2:4], 99)
+	if _, err := EncodeAppsLookupRawResponse([][]byte{badAppsItem}, 0, appsResp[:]); err != ErrBadLayout {
+		t.Fatalf("invalid raw apps item error = %v, want ErrBadLayout", err)
+	}
+}
+
+func TestLookupBuilderOverflowStatusSuffix(t *testing.T) {
+	t.Run("apps", func(t *testing.T) {
+		buf := make([]byte, 256)
+		builder := NewAppsLookupBuilder(buf, 3, 1)
+		if err := builder.Add(PidLookupKnown, AppsCgroupKnown, 0, 1, 0, 0, 0, []byte("a"), []byte("/a"), nil, nil); err != nil {
+			t.Fatalf("add first apps item: %v", err)
+		}
+		if err := builder.Add(PidLookupKnown, AppsCgroupKnown, 0, 2, 0, 0, 0, []byte("b"), bytes.Repeat([]byte("x"), 256), nil, nil); err != nil {
+			t.Fatalf("add overflow apps item: %v", err)
+		}
+		if err := builder.Add(PidLookupKnown, AppsCgroupKnown, 0, 3, 0, 0, 0, []byte("c"), []byte("/c"), nil, nil); err != nil {
+			t.Fatalf("add suffix apps item: %v", err)
+		}
+		view, err := DecodeAppsLookupResponse(buf[:builder.Finish()])
+		if err != nil {
+			t.Fatalf("decode apps overflow suffix: %v", err)
+		}
+		if view.ItemCount != 3 {
+			t.Fatalf("apps item count = %d, want 3", view.ItemCount)
+		}
+		item0, _ := view.Item(0)
+		item1, _ := view.Item(1)
+		item2, _ := view.Item(2)
+		if item0.Status != PidLookupKnown || item0.Pid != 1 {
+			t.Fatalf("apps item0 = %+v", item0)
+		}
+		if item1.Status != PidLookupPayloadExceeded || item1.Pid != 2 {
+			t.Fatalf("apps item1 = %+v", item1)
+		}
+		if item2.Status != PidLookupPayloadExceeded || item2.Pid != 3 {
+			t.Fatalf("apps item2 = %+v", item2)
+		}
+	})
+
+	t.Run("cgroups", func(t *testing.T) {
+		buf := make([]byte, 192)
+		builder := NewCgroupsLookupBuilder(buf, 3, 1)
+		if err := builder.Add(CgroupLookupKnown, 0, []byte("/a"), []byte("a"), nil); err != nil {
+			t.Fatalf("add first cgroups item: %v", err)
+		}
+		if err := builder.Add(CgroupLookupKnown, 0, []byte("/b"), bytes.Repeat([]byte("x"), 192), nil); err != nil {
+			t.Fatalf("add overflow cgroups item: %v", err)
+		}
+		if err := builder.Add(CgroupLookupKnown, 0, []byte("/c"), []byte("c"), nil); err != nil {
+			t.Fatalf("add suffix cgroups item: %v", err)
+		}
+		view, err := DecodeCgroupsLookupResponse(buf[:builder.Finish()])
+		if err != nil {
+			t.Fatalf("decode cgroups overflow suffix: %v", err)
+		}
+		if view.ItemCount != 3 {
+			t.Fatalf("cgroups item count = %d, want 3", view.ItemCount)
+		}
+		item0, _ := view.Item(0)
+		item1, _ := view.Item(1)
+		item2, _ := view.Item(2)
+		if item0.Status != CgroupLookupKnown || item0.Path.String() != "/a" {
+			t.Fatalf("cgroups item0 = %+v", item0)
+		}
+		if item1.Status != CgroupLookupPayloadExceeded || item1.Path.String() != "/b" {
+			t.Fatalf("cgroups item1 = %+v", item1)
+		}
+		if item2.Status != CgroupLookupPayloadExceeded || item2.Path.String() != "/c" {
+			t.Fatalf("cgroups item2 = %+v", item2)
+		}
+	})
 }

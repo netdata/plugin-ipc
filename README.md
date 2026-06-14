@@ -14,6 +14,28 @@ same wire contracts and typed APIs. The goal is simple:
 This README is a summary of the current verified state of the repository.
 The authoritative specifications live under [docs/](docs/README.md).
 
+## Non-Negotiable Contract
+
+- These rules apply to every implementation language and every service unless
+  a future spec explicitly changes the global contract.
+- C, Rust, and Go must implement the same wire contract and typed behavior.
+- NetIPC does not do backward-compatible, forward-compatible, or best-effort
+  decoding across method, layout, status, echoed-key, or generation drift.
+- Netdata plugins and NetIPC providers/clients must match the documented
+  contract exactly. Any mismatch is rejected.
+- Mixed-generation stitched lookup responses are not supported.
+- Level 2 lookup callers pass typed semantic keys; they do not split requests
+  around transport payload budgets and do not stitch responses manually.
+- Lookup `PAYLOAD_EXCEEDED` is an internal Level 2 retry signal. The client
+  retries only the affected suffix and returns one logical response.
+- Lookup `OVERSIZED_ITEM` is a final per-item outcome. One oversized valid item
+  must not invalidate the rest of the logical lookup batch.
+- Payload budgets and logical lookup ceilings are initialization policy.
+  Zero-valued fields use documented defaults; consumers can override them for
+  small IoT systems or large-memory HPC deployments.
+- Named defaults are defaults, not protocol hard limits. Explicit client/server
+  initialization config is the deployment authority.
+
 ## Service Model
 
 The public contract is service-oriented, not plugin-oriented:

@@ -72,6 +72,15 @@ static size_t read_file(int dir_fd, const char *name,
     return n;
 }
 
+static int view_eq(nipc_str_view_t view, const char *expected) {
+    size_t len = strlen(expected);
+    if (view.len != len)
+        return 0;
+    if (len == 0)
+        return 1;
+    return view.ptr != NULL && memcmp(view.ptr, expected, len) == 0;
+}
+
 /* ================================================================== */
 /*  Encode all test messages                                           */
 /* ================================================================== */
@@ -250,7 +259,23 @@ static int do_encode(int dir_fd) {
     }
     {
         nipc_cgroups_lookup_builder_t b;
-        nipc_cgroups_lookup_builder_init(&b, buf, sizeof(buf), 0, 104);
+        nipc_cgroups_lookup_builder_init(&b, buf, sizeof(buf), 1, 104);
+        nipc_cgroups_lookup_builder_add(&b, NIPC_CGROUP_LOOKUP_PAYLOAD_EXCEEDED,
+                                        0, "/payload-exceeded", 17, "", 0, NULL, 0);
+        size_t total = nipc_cgroups_lookup_builder_finish(&b);
+        err |= write_file(dir_fd, "cgroups_lookup_resp_payload_exceeded.bin", buf, total);
+    }
+    {
+        nipc_cgroups_lookup_builder_t b;
+        nipc_cgroups_lookup_builder_init(&b, buf, sizeof(buf), 1, 105);
+        nipc_cgroups_lookup_builder_add(&b, NIPC_CGROUP_LOOKUP_OVERSIZED_ITEM,
+                                        0, "/oversized", 10, "", 0, NULL, 0);
+        size_t total = nipc_cgroups_lookup_builder_finish(&b);
+        err |= write_file(dir_fd, "cgroups_lookup_resp_oversized_item.bin", buf, total);
+    }
+    {
+        nipc_cgroups_lookup_builder_t b;
+        nipc_cgroups_lookup_builder_init(&b, buf, sizeof(buf), 0, 106);
         size_t total = nipc_cgroups_lookup_builder_finish(&b);
         err |= write_file(dir_fd, "cgroups_lookup_resp_empty.bin", buf, total);
     }
@@ -331,7 +356,25 @@ static int do_encode(int dir_fd) {
     }
     {
         nipc_apps_lookup_builder_t b;
-        nipc_apps_lookup_builder_init(&b, buf, sizeof(buf), 0, 205);
+        nipc_apps_lookup_builder_init(&b, buf, sizeof(buf), 1, 205);
+        nipc_apps_lookup_builder_add(&b, NIPC_PID_LOOKUP_PAYLOAD_EXCEEDED,
+                                     0, 0, 1238, 0, NIPC_UID_UNSET, 0,
+                                     "", 0, "", 0, "", 0, NULL, 0);
+        size_t total = nipc_apps_lookup_builder_finish(&b);
+        err |= write_file(dir_fd, "apps_lookup_resp_payload_exceeded.bin", buf, total);
+    }
+    {
+        nipc_apps_lookup_builder_t b;
+        nipc_apps_lookup_builder_init(&b, buf, sizeof(buf), 1, 206);
+        nipc_apps_lookup_builder_add(&b, NIPC_PID_LOOKUP_OVERSIZED_ITEM,
+                                     0, 0, 1239, 0, NIPC_UID_UNSET, 0,
+                                     "", 0, "", 0, "", 0, NULL, 0);
+        size_t total = nipc_apps_lookup_builder_finish(&b);
+        err |= write_file(dir_fd, "apps_lookup_resp_oversized_item.bin", buf, total);
+    }
+    {
+        nipc_apps_lookup_builder_t b;
+        nipc_apps_lookup_builder_init(&b, buf, sizeof(buf), 0, 207);
         size_t total = nipc_apps_lookup_builder_finish(&b);
         err |= write_file(dir_fd, "apps_lookup_resp_empty.bin", buf, total);
     }
@@ -543,6 +586,39 @@ static int do_decode(int dir_fd) {
         }
     }
 
+    n = read_file(dir_fd, "cgroups_lookup_resp_payload_exceeded.bin", buf, sizeof(buf));
+    if (n > 0) {
+        nipc_cgroups_lookup_resp_view_t view;
+        CHECK(nipc_cgroups_lookup_resp_decode(buf, n, &view) == NIPC_OK,
+              "decode cgroups_lookup payload_exceeded");
+        nipc_cgroups_lookup_item_view_t item;
+        CHECK(nipc_cgroups_lookup_resp_item(&view, 0, &item) == NIPC_OK,
+              "cgroups_lookup payload_exceeded item");
+        CHECK(item.status == NIPC_CGROUP_LOOKUP_PAYLOAD_EXCEEDED,
+              "cgroups_lookup payload_exceeded status");
+        CHECK(view_eq(item.path, "/payload-exceeded"),
+              "cgroups_lookup payload_exceeded path");
+        CHECK(item.name.len == 0, "cgroups_lookup payload_exceeded name empty");
+    } else {
+        g_fail++;
+    }
+
+    n = read_file(dir_fd, "cgroups_lookup_resp_oversized_item.bin", buf, sizeof(buf));
+    if (n > 0) {
+        nipc_cgroups_lookup_resp_view_t view;
+        CHECK(nipc_cgroups_lookup_resp_decode(buf, n, &view) == NIPC_OK,
+              "decode cgroups_lookup oversized_item");
+        nipc_cgroups_lookup_item_view_t item;
+        CHECK(nipc_cgroups_lookup_resp_item(&view, 0, &item) == NIPC_OK,
+              "cgroups_lookup oversized_item item");
+        CHECK(item.status == NIPC_CGROUP_LOOKUP_OVERSIZED_ITEM,
+              "cgroups_lookup oversized_item status");
+        CHECK(view_eq(item.path, "/oversized"), "cgroups_lookup oversized_item path");
+        CHECK(item.name.len == 0, "cgroups_lookup oversized_item name empty");
+    } else {
+        g_fail++;
+    }
+
     /* 10. APPS_LOOKUP request variants */
     n = read_file(dir_fd, "apps_lookup_req.bin", buf, sizeof(buf));
     if (n > 0) {
@@ -605,6 +681,38 @@ static int do_decode(int dir_fd) {
         } else {
             g_fail++;
         }
+    }
+
+    n = read_file(dir_fd, "apps_lookup_resp_payload_exceeded.bin", buf, sizeof(buf));
+    if (n > 0) {
+        nipc_apps_lookup_resp_view_t view;
+        CHECK(nipc_apps_lookup_resp_decode(buf, n, &view) == NIPC_OK,
+              "decode apps_lookup payload_exceeded");
+        nipc_apps_lookup_item_view_t item;
+        CHECK(nipc_apps_lookup_resp_item(&view, 0, &item) == NIPC_OK,
+              "apps_lookup payload_exceeded item");
+        CHECK(item.status == NIPC_PID_LOOKUP_PAYLOAD_EXCEEDED,
+              "apps_lookup payload_exceeded status");
+        CHECK(item.pid == 1238, "apps_lookup payload_exceeded pid");
+        CHECK(item.comm.len == 0, "apps_lookup payload_exceeded comm empty");
+    } else {
+        g_fail++;
+    }
+
+    n = read_file(dir_fd, "apps_lookup_resp_oversized_item.bin", buf, sizeof(buf));
+    if (n > 0) {
+        nipc_apps_lookup_resp_view_t view;
+        CHECK(nipc_apps_lookup_resp_decode(buf, n, &view) == NIPC_OK,
+              "decode apps_lookup oversized_item");
+        nipc_apps_lookup_item_view_t item;
+        CHECK(nipc_apps_lookup_resp_item(&view, 0, &item) == NIPC_OK,
+              "apps_lookup oversized_item item");
+        CHECK(item.status == NIPC_PID_LOOKUP_OVERSIZED_ITEM,
+              "apps_lookup oversized_item status");
+        CHECK(item.pid == 1239, "apps_lookup oversized_item pid");
+        CHECK(item.comm.len == 0, "apps_lookup oversized_item comm empty");
+    } else {
+        g_fail++;
     }
 
     printf("C decode: %d passed, %d failed\n", g_pass, g_fail);
