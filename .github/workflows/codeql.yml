@@ -136,7 +136,7 @@ jobs:
 
       - name: Set up MSYS2
         if: matrix.msys2 == true
-        uses: msys2/setup-msys2@e9898307ac31d1a803454791be09ab9973336e1c # v2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
         with:
           msystem: MSYS
           update: true
