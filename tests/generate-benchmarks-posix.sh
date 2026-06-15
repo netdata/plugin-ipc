@@ -32,6 +32,7 @@ VALIDATION_FAILED=0
 FLOOR_FAILED=0
 CSV_FILE=""
 RETRY_CSV="${INPUT_CSV%.csv}.floor-retries.csv"
+NOTES_MD="${INPUT_CSV%.csv}.notes.md"
 LOOKUP_METHOD_SCENARIOS=(
     cgroups-lookup-known-16
     cgroups-lookup-unknown-16
@@ -535,6 +536,15 @@ emit_methodology() {
     echo ""
 }
 
+emit_benchmark_notes() {
+    if [ ! -s "$NOTES_MD" ]; then
+        return
+    fi
+
+    cat "$NOTES_MD"
+    echo ""
+}
+
 generate_md() {
     local tmp_file="${OUTPUT_MD}.tmp.$$"
 
@@ -551,6 +561,7 @@ generate_md() {
         echo ""
 
         emit_validation_summary
+        emit_benchmark_notes
         emit_scenario_section "UDS Ping-Pong" "uds-ping-pong" 0 100000 10000 1000
         emit_scenario_section "SHM Ping-Pong" "shm-ping-pong" 0 100000 10000 1000
         emit_scenario_section "UDS Batch Ping-Pong" "uds-batch-ping-pong" 0 100000 10000 1000

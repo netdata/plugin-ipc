@@ -143,55 +143,69 @@ func DecodeCgroupsLookupRequest(buf []byte) (*CgroupsLookupRequestView, error) {
 	if err := validateLookupDir(buf, CgroupsLookupReqHdr, itemCount, len(buf)-dirEnd, 2, -1); err != nil {
 		return nil, err
 	}
+	view := &CgroupsLookupRequestView{ItemCount: itemCount, packedStart: dirEnd, payload: buf}
 	for i := uint32(0); i < itemCount; i++ {
-		base := CgroupsLookupReqHdr + int(i)*LookupDirEntrySize
-		off, length, err := lookupDirEntry(buf, base)
+		keyWithNul, key, err := view.itemBytes(i)
 		if err != nil {
 			return nil, err
 		}
-		key, err := lookupPayloadSlice(buf, dirEnd, off, length)
-		if err != nil {
-			return nil, err
-		}
-		if key[length-1] != 0 {
+		if keyWithNul[len(keyWithNul)-1] != 0 {
 			return nil, ErrMissingNul
 		}
-		if bytes.IndexByte(key[:length-1], 0) >= 0 {
+		if bytes.IndexByte(key, 0) >= 0 {
 			return nil, ErrBadLayout
 		}
 	}
-	return &CgroupsLookupRequestView{ItemCount: itemCount, packedStart: dirEnd, payload: buf}, nil
+	return view, nil
 }
 
 func (v *CgroupsLookupRequestView) Item(index uint32) (CStringView, error) {
-	if index >= v.ItemCount {
+	item, path, err := v.itemBytes(index)
+	if err != nil {
+		return CStringView{}, err
+	}
+	pathLen := len(path)
+	if uint64(pathLen) > uint64(^uint32(0)) {
 		return CStringView{}, ErrOutOfBounds
+	}
+	return NewCStringView(item, uint32(pathLen)), nil // #nosec G115 -- bounded above.
+}
+
+func (v *CgroupsLookupRequestView) itemBytes(index uint32) ([]byte, []byte, error) {
+	if index >= v.ItemCount {
+		return nil, nil, ErrOutOfBounds
 	}
 	dirEnd := v.packedStart
 	if dirEnd == 0 {
 		var ok bool
 		dirEnd, ok = lookupBuilderDataOffset(CgroupsLookupReqHdr, v.ItemCount)
 		if !ok {
-			return CStringView{}, ErrOverflow
+			return nil, nil, ErrOverflow
 		}
 	}
-	base, ok := lookupDirOffset(CgroupsLookupReqHdr, index)
-	if !ok {
-		return CStringView{}, ErrOverflow
+	dirOff64 := uint64(index) * uint64(LookupDirEntrySize)
+	if dirOff64 > uint64(maxIntValue()) || CgroupsLookupReqHdr > maxIntValue()-int(dirOff64) {
+		return nil, nil, ErrOverflow
 	}
-	off, length, err := lookupDirEntry(v.payload, base)
-	if err != nil {
-		return CStringView{}, err
+	base := CgroupsLookupReqHdr + int(dirOff64) // #nosec G115 -- bounded by maxIntValue above.
+	if base > len(v.payload)-LookupDirEntrySize {
+		return nil, nil, ErrOutOfBounds
 	}
+	off32 := ne.Uint32(v.payload[base : base+4])
+	length32 := ne.Uint32(v.payload[base+4 : base+8])
+	if uint64(off32) > uint64(maxIntValue()) || uint64(length32) > uint64(maxIntValue()) {
+		return nil, nil, ErrOutOfBounds
+	}
+	length := int(length32) // #nosec G115 -- bounded by maxIntValue above.
+	off := int(off32)       // #nosec G115 -- bounded by maxIntValue above.
 	item, err := lookupPayloadSlice(v.payload, dirEnd, off, length)
 	if err != nil {
-		return CStringView{}, err
+		return nil, nil, err
 	}
-	stringLen, ok := checkedU32Int(length - 1)
-	if !ok {
-		return CStringView{}, ErrOutOfBounds
+	if length < 1 {
+		return nil, nil, ErrOutOfBounds
 	}
-	return NewCStringView(item, stringLen), nil
+	return item, item[:length-1], nil
 }
 
 func (v *CgroupsLookupRequestView) payloadExceededItemSize(index uint32) (int, error) {
@@ -508,12 +522,12 @@ func (b *CgroupsLookupBuilder) AddRequestItem(req *CgroupsLookupRequestView, ind
 		b.err = ErrBadLayout
 		return ErrBadLayout
 	}
-	path, err := req.Item(index)
+	_, path, err := req.itemBytes(index)
 	if err != nil {
 		b.err = err
 		return err
 	}
-	return b.add(status, orchestrator, path.Bytes(), name, labels, true)
+	return b.add(status, orchestrator, path, name, labels, true)
 }
 
 func (b *CgroupsLookupBuilder) add(status, orchestrator uint16, path, name []byte, labels []struct{ Key, Value []byte }, pathValidated bool) error {

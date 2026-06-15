@@ -1897,6 +1897,17 @@ func TestLookupThirtyTwoBitGuardCoverage(t *testing.T) {
 	if _, err := BatchItemGet(make([]byte, LookupDirEntrySize), overMaxInt, 0); !errors.Is(err, ErrBadItemCount) {
 		t.Fatalf("BatchItemGet over int range = %v, want ErrBadItemCount", err)
 	}
+	batchDir := make([]byte, LookupDirEntrySize)
+	ne.PutUint32(batchDir[0:4], overMaxInt)
+	ne.PutUint32(batchDir[4:8], 0)
+	if _, err := BatchItemGet(batchDir, 1, 0); !errors.Is(err, ErrOutOfBounds) {
+		t.Fatalf("BatchItemGet over-int offset = %v, want ErrOutOfBounds", err)
+	}
+	ne.PutUint32(batchDir[0:4], 0)
+	ne.PutUint32(batchDir[4:8], overMaxInt)
+	if _, err := BatchItemGet(batchDir, 1, 0); !errors.Is(err, ErrOutOfBounds) {
+		t.Fatalf("BatchItemGet over-int length = %v, want ErrOutOfBounds", err)
+	}
 	if _, err := BatchDirDecode(nil, hugeLookupItems, 0); !errors.Is(err, ErrBadItemCount) {
 		t.Fatalf("BatchDirDecode huge item count = %v, want ErrBadItemCount", err)
 	}
@@ -1911,6 +1922,33 @@ func TestLookupThirtyTwoBitGuardCoverage(t *testing.T) {
 	batch.Reset(nil, hugeLookupItems)
 	if batch.dirEnd != maxIntValue() || batch.dataOffset != 0 {
 		t.Fatalf("BatchBuilder huge reset = dirEnd %d dataOffset %d", batch.dirEnd, batch.dataOffset)
+	}
+	batch = BatchBuilder{
+		buf:        make([]byte, 16),
+		maxItems:   ^uint32(0),
+		itemCount:  hugeLookupItems,
+		dirEnd:     LookupDirEntrySize,
+		dataOffset: 0,
+	}
+	if err := batch.Add(nil); !errors.Is(err, ErrOverflow) {
+		t.Fatalf("BatchBuilder over-int item index = %v, want ErrOverflow", err)
+	}
+
+	cgroupsPayload := make([]byte, CgroupsLookupReqHdr+LookupDirEntrySize)
+	cgroupsView := &CgroupsLookupRequestView{
+		ItemCount:   1,
+		packedStart: CgroupsLookupReqHdr + LookupDirEntrySize,
+		payload:     cgroupsPayload,
+	}
+	ne.PutUint32(cgroupsPayload[CgroupsLookupReqHdr:CgroupsLookupReqHdr+4], 0)
+	ne.PutUint32(cgroupsPayload[CgroupsLookupReqHdr+4:CgroupsLookupReqHdr+8], 0)
+	if _, _, err := cgroupsView.itemBytes(0); !errors.Is(err, ErrOutOfBounds) {
+		t.Fatalf("cgroups itemBytes zero length = %v, want ErrOutOfBounds", err)
+	}
+	ne.PutUint32(cgroupsPayload[CgroupsLookupReqHdr:CgroupsLookupReqHdr+4], overMaxInt)
+	ne.PutUint32(cgroupsPayload[CgroupsLookupReqHdr+4:CgroupsLookupReqHdr+8], 1)
+	if _, _, err := cgroupsView.itemBytes(0); !errors.Is(err, ErrOutOfBounds) {
+		t.Fatalf("cgroups itemBytes over-int offset = %v, want ErrOutOfBounds", err)
 	}
 
 	if got := payloadExceededSuffixFits(0, 0, nil, 0, hugeLookupItems); !got {

@@ -300,17 +300,15 @@ func BatchDirDecode(buf []byte, itemCount uint32, packedAreaLen uint32) ([]Batch
 // BatchDirValidate validates the batch directory without allocating.
 // Checks alignment and that each entry falls within packedAreaLen.
 func BatchDirValidate(buf []byte, itemCount uint32, packedAreaLen uint32) error {
-	count, ok := checkedInt(uint64(itemCount))
-	if !ok {
+	dirSize64 := uint64(itemCount) * 8
+	if dirSize64 > uint64(maxIntValue()) {
 		return ErrBadItemCount
 	}
-	dirSize, ok := checkedMulInt(count, 8)
-	if !ok {
-		return ErrBadItemCount
-	}
+	dirSize := int(dirSize64) // #nosec G115 -- bounded by maxIntValue above.
 	if len(buf) < dirSize {
 		return ErrTruncated
 	}
+	count := int(itemCount)
 	for i := 0; i < count; i++ {
 		base := i * 8
 		off := ne.Uint32(buf[base : base+4])
@@ -332,55 +330,30 @@ func BatchItemGet(payload []byte, itemCount uint32, index uint32) ([]byte, error
 		return nil, ErrOutOfBounds
 	}
 
-	dirSize, ok := checkedInt(uint64(itemCount) * 8)
-	if !ok {
+	dirSize64 := uint64(itemCount) * 8
+	if dirSize64 > uint64(maxIntValue()) {
 		return nil, ErrBadItemCount
 	}
-	dirAligned, ok := checkedAlign8(dirSize)
-	if !ok {
-		return nil, ErrBadItemCount
-	}
-
-	if len(payload) < dirAligned {
+	dirSize := int(dirSize64) // #nosec G115 -- bounded by maxIntValue above.
+	if len(payload) < dirSize {
 		return nil, ErrTruncated
 	}
 
-	idx, ok := checkedInt(uint64(index))
-	if !ok {
-		return nil, ErrOutOfBounds
-	}
-	base, ok := checkedMulInt(idx, 8)
-	if !ok {
-		return nil, ErrOutOfBounds
-	}
-	off, err := checkedWireU32Int(payload, base)
-	if err != nil {
-		return nil, err
-	}
-	length, err := checkedWireU32Int(payload, base+4)
-	if err != nil {
-		return nil, err
-	}
-
-	packedAreaStart := dirAligned
+	base := int(index) * 8 // #nosec G115 -- index < itemCount and dirSize is bounded above.
+	off := ne.Uint32(payload[base : base+4])
+	length := ne.Uint32(payload[base+4 : base+8])
+	packedAreaStart := dirSize
 	packedAreaLen := len(payload) - packedAreaStart
 
-	if off%Alignment != 0 {
+	if off%uint32(Alignment) != 0 {
 		return nil, ErrBadAlignment
 	}
-	relEnd, ok := checkedAddInt(off, length)
-	if !ok || relEnd > packedAreaLen {
+	if uint64(off)+uint64(length) > uint64(packedAreaLen) {
 		return nil, ErrOutOfBounds
 	}
 
-	start, ok := checkedAddInt(packedAreaStart, off)
-	if !ok {
-		return nil, ErrOutOfBounds
-	}
-	end, ok := checkedAddInt(start, length)
-	if !ok {
-		return nil, ErrOutOfBounds
-	}
+	start := packedAreaStart + int(off) // #nosec G115 -- bounds check above proves this fits len(payload).
+	end := start + int(length)          // #nosec G115 -- bounds check above proves this fits len(payload).
 	return payload[start:end], nil
 }
 
@@ -430,59 +403,98 @@ func NewBatchBuilder(buf []byte, maxItems uint32) *BatchBuilder {
 
 // Add appends an item payload. Handles alignment padding.
 func (b *BatchBuilder) Add(item []byte) error {
+	maxInt := maxIntValue()
+	// Inline the common case; addSlow preserves the precise error returns for
+	// overflow and unusual bounds.
+	if b.itemCount < b.maxItems &&
+		b.dirEnd >= 0 &&
+		b.dataOffset >= 0 &&
+		b.dataOffset <= maxInt-7 &&
+		uint64(len(item)) <= uint64(^uint32(0)) {
+		alignedOff := Align8(b.dataOffset)
+		if uint64(alignedOff) <= uint64(^uint32(0)) &&
+			alignedOff <= maxInt-b.dirEnd &&
+			len(item) <= maxInt-alignedOff {
+			absPos := b.dirEnd + alignedOff
+			if len(item) <= maxInt-absPos {
+				itemEnd := absPos + len(item)
+				idx64 := uint64(b.itemCount) * 8
+				if idx64 <= uint64(maxInt) {
+					idx := int(idx64) // #nosec G115 -- bounded by maxInt above.
+					if itemEnd <= len(b.buf) && idx <= len(b.buf)-8 {
+						if alignedOff > b.dataOffset {
+							clear(b.buf[b.dirEnd+b.dataOffset : b.dirEnd+alignedOff])
+						}
+						copy(b.buf[absPos:], item)
+						ne.PutUint32(b.buf[idx:idx+4], uint32(alignedOff))  // #nosec G115 -- bounded above.
+						ne.PutUint32(b.buf[idx+4:idx+8], uint32(len(item))) // #nosec G115 -- bounded above.
+						b.dataOffset = alignedOff + len(item)
+						b.itemCount++
+						return nil
+					}
+				}
+			}
+		}
+	}
+	return b.addSlow(item)
+}
+
+func (b *BatchBuilder) addSlow(item []byte) error {
 	if b.itemCount >= b.maxItems {
 		return ErrOverflow
 	}
-
-	alignedOff, ok := checkedAlign8(b.dataOffset)
-	if !ok {
+	if b.dirEnd < 0 || b.dataOffset < 0 || b.dataOffset > maxIntValue()-7 {
 		return ErrOverflow
 	}
-	alignedOff32, ok := checkedU32Int(alignedOff)
-	if !ok {
+	alignedOff := Align8(b.dataOffset)
+	if uint64(alignedOff) > uint64(^uint32(0)) {
 		return ErrOverflow
 	}
-	itemLen32, ok := checkedU32Int(len(item))
-	if !ok {
+	if uint64(len(item)) > uint64(^uint32(0)) {
 		return ErrOverflow
 	}
-	absPos, ok := checkedAddInt(b.dirEnd, alignedOff)
-	if !ok {
+	if alignedOff > maxIntValue()-b.dirEnd {
 		return ErrOverflow
 	}
-
-	itemEnd, ok := checkedAddInt(absPos, len(item))
-	if !ok || itemEnd > len(b.buf) {
+	absPos := b.dirEnd + alignedOff
+	if len(item) > maxIntValue()-absPos {
+		return ErrOverflow
+	}
+	itemEnd := absPos + len(item)
+	if itemEnd > len(b.buf) {
+		return ErrOverflow
+	}
+	if len(item) > maxIntValue()-alignedOff {
 		return ErrOverflow
 	}
 
 	// Zero alignment padding.
 	if alignedOff > b.dataOffset {
-		padStart, ok := checkedAddInt(b.dirEnd, b.dataOffset)
-		if !ok {
+		if b.dataOffset > maxIntValue()-b.dirEnd {
 			return ErrOverflow
 		}
-		padEnd, ok := checkedAddInt(b.dirEnd, alignedOff)
-		if !ok {
-			return ErrOverflow
-		}
+		padStart := b.dirEnd + b.dataOffset
+		padEnd := b.dirEnd + alignedOff
 		clear(b.buf[padStart:padEnd])
 	}
 
 	copy(b.buf[absPos:], item)
 
 	// Write directory entry.
-	idx, ok := checkedInt(uint64(b.itemCount) * 8)
-	if !ok {
+	idx64 := uint64(b.itemCount) * 8
+	if idx64 > uint64(maxIntValue()) {
 		return ErrOverflow
 	}
+	idx := int(idx64) // #nosec G115 -- bounded by maxIntValue above.
+	if idx > len(b.buf)-8 {
+		return ErrOverflow
+	}
+	alignedOff32 := uint32(alignedOff) // #nosec G115 -- bounded by uint32 max above.
+	itemLen32 := uint32(len(item))     // #nosec G115 -- bounded by uint32 max above.
 	ne.PutUint32(b.buf[idx:idx+4], alignedOff32)
 	ne.PutUint32(b.buf[idx+4:idx+8], itemLen32)
 
-	b.dataOffset, ok = checkedAddInt(alignedOff, len(item))
-	if !ok {
-		return ErrOverflow
-	}
+	b.dataOffset = alignedOff + len(item)
 	b.itemCount++
 	return nil
 }

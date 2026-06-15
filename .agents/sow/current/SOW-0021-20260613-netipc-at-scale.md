@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: in-progress
+Status: paused
 
-Sub-state: implementation active; supersedes SOW-0007 and owns the full C/Rust/Go, POSIX/Windows, interop, coverage, benchmark, review, vendoring, and downstream PR scope. Server learned-capacity cap governance is implemented and validated; downstream topology-containers post-vendor validation passed; the 2026-06-15 full POSIX/Windows validation rerun passed; remaining review focuses on any broader adversarial matrix gaps before the SOW can close.
+Sub-state: paused on 2026-06-15 by user request to create and investigate SOW-0022 for cross-language benchmark anomalies before deciding whether the anomalies are implementation problems or benchmark artifacts. Server learned-capacity cap governance is implemented and validated; downstream topology-containers post-vendor validation passed; the 2026-06-15 full POSIX/Windows validation rerun passed.
 
 ## Requirements
 

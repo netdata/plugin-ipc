@@ -33,6 +33,7 @@ RUNNER_DEFAULT_ALLOW_TRIMMED_UNSTABLE_RAW=1
 VALIDATION_FAILED=0
 FLOOR_FAILED=0
 CSV_FILE=""
+NOTES_MD="${INPUT_CSV%.csv}.notes.md"
 
 log() {
     printf "${CYAN}[gen]${NC} %s\n" "$*" >&2
@@ -270,6 +271,15 @@ emit_methodology() {
     echo ""
 }
 
+emit_benchmark_notes() {
+    if [ ! -s "$NOTES_MD" ]; then
+        return
+    fi
+
+    cat "$NOTES_MD"
+    echo ""
+}
+
 has_min_violation() {
     local scenario="$1"
     local target_rps="$2"
@@ -403,6 +413,7 @@ generate_md() {
 
         emit_methodology
         emit_validation_summary
+        emit_benchmark_notes
         emit_scenario_section "Named Pipe Ping-Pong" "np-ping-pong" 0 100000 10000 1000
         emit_scenario_section "Win SHM Ping-Pong" "shm-ping-pong" 0 100000 10000 1000
         emit_scenario_section "Named Pipe Batch Ping-Pong" "np-batch-ping-pong" 0 100000 10000 1000

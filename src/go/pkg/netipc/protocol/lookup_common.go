@@ -66,14 +66,14 @@ func lookupDirEntry(buf []byte, base int) (int, int, error) {
 }
 
 func lookupPayloadSlice(buf []byte, start int, off int, length int) ([]byte, error) {
-	abs, ok := checkedAddInt(start, off)
-	if !ok {
+	if start < 0 || off < 0 || length < 0 || start > maxIntValue()-off {
 		return nil, ErrOutOfBounds
 	}
-	end, ok := checkedAddInt(abs, length)
-	if !ok || end > len(buf) {
+	abs := start + off
+	if abs > len(buf) || length > len(buf)-abs {
 		return nil, ErrOutOfBounds
 	}
+	end := abs + length
 	return buf[abs:end], nil
 }
 
@@ -260,6 +260,12 @@ func payloadExceededFixedSuffixFits(bufLen, dataOffset, itemLen int, first, maxI
 }
 
 func validateLookupDir(buf []byte, dirStart int, itemCount uint32, packedAreaLen int, minLen int, exactLen int) error {
+	if dirStart < 0 {
+		return ErrBadItemCount
+	}
+	if packedAreaLen < 0 {
+		return ErrOutOfBounds
+	}
 	var minLen32 uint32
 	var exactLen32 uint32
 	if minLen >= 0 {
@@ -277,47 +283,40 @@ func validateLookupDir(buf []byte, dirStart int, itemCount uint32, packedAreaLen
 		exactLen32 = converted
 	}
 
-	dirSize, ok := checkedInt(uint64(itemCount) * uint64(LookupDirEntrySize))
-	if !ok {
+	dirSize64 := uint64(itemCount) * uint64(LookupDirEntrySize)
+	if dirSize64 > uint64(maxIntValue()) {
 		return ErrBadItemCount
 	}
-	dirEnd, ok := checkedAddInt(dirStart, dirSize)
-	if !ok {
+	dirSize := int(dirSize64) // #nosec G115 -- bounded by maxIntValue above.
+	if dirStart > maxIntValue()-dirSize {
 		return ErrBadItemCount
 	}
+	dirEnd := dirStart + dirSize
 	if dirEnd > len(buf) {
 		return ErrTruncated
 	}
 
-	prevEnd := 0
-	for i := uint32(0); i < itemCount; i++ {
-		base, ok := lookupDirOffset(dirStart, i)
-		if !ok {
-			return ErrBadItemCount
-		}
-		off, length, err := lookupDirEntry(buf, base)
-		if err != nil {
-			return err
-		}
-		if off%Alignment != 0 {
+	prevEnd := uint64(0)
+	count := int(itemCount)
+	for i := 0; i < count; i++ {
+		base := dirStart + i*LookupDirEntrySize
+		off := ne.Uint32(buf[base : base+4])
+		length := ne.Uint32(buf[base+4 : base+8])
+		if off%uint32(Alignment) != 0 {
 			return ErrBadAlignment
 		}
-		length32, ok := checkedU32Int(length)
-		if !ok {
-			return ErrOutOfBounds
-		}
 		if exactLen >= 0 {
-			if length32 != exactLen32 {
+			if length != exactLen32 {
 				return ErrBadLayout
 			}
-		} else if length32 < minLen32 {
+		} else if length < minLen32 {
 			return ErrBadLayout
 		}
-		end, ok := checkedAddInt(off, length)
-		if !ok || end > packedAreaLen {
+		end := uint64(off) + uint64(length)
+		if end > uint64(packedAreaLen) {
 			return ErrOutOfBounds
 		}
-		if i > 0 && off < prevEnd {
+		if i > 0 && uint64(off) < prevEnd {
 			return ErrBadLayout
 		}
 		prevEnd = end
@@ -339,11 +338,11 @@ func viewOut[T any](owner *T, view *CStringView) *CStringView {
 }
 
 func lookupStringInto(item []byte, hdrSize int, off int, length int, out *CStringView) (int, error) {
-	if off < hdrSize {
+	if off < hdrSize || length < 0 || off > maxIntValue()-length {
 		return 0, ErrOutOfBounds
 	}
-	nul, ok := checkedAddInt(off, length)
-	if !ok || nul >= len(item) {
+	nul := off + length
+	if nul >= len(item) {
 		return 0, ErrOutOfBounds
 	}
 	if item[nul] != 0 {
@@ -353,10 +352,10 @@ func lookupStringInto(item []byte, hdrSize int, off int, length int, out *CStrin
 		return 0, ErrBadLayout
 	}
 	if out != nil {
-		length32, ok := checkedU32Int(length)
-		if !ok {
+		if uint64(length) > uint64(^uint32(0)) {
 			return 0, ErrOutOfBounds
 		}
+		length32 := uint32(length) // #nosec G115 -- bounded by uint32 max above.
 		*out = NewCStringView(item[off:nul+1], length32)
 	}
 	return nul + 1, nil
@@ -503,24 +502,33 @@ func lookupLabelAt(item []byte, hdrSize int, labelCount uint16, tableOffset int,
 }
 
 func writeLookupLabels(item []byte, tableStart, tableBytes int, labels []struct{ Key, Value []byte }) (int, error) {
-	next, ok := checkedAddInt(tableStart, tableBytes)
-	if !ok {
+	if tableStart < 0 || tableBytes < 0 || tableStart > maxIntValue()-tableBytes {
 		return 0, ErrOverflow
 	}
+	next := tableStart + tableBytes
 	for i, label := range labels {
-		keyOff32, keyLen32, valueOff, valueOff32, valueLen32, itemNext, ok :=
-			lookupLabelWriteLayout(next, len(label.Key), len(label.Value))
-		if !ok {
+		keyLen := len(label.Key)
+		valueLen := len(label.Value)
+		if next > maxIntValue()-keyLen ||
+			next+keyLen > maxIntValue()-1 {
 			return 0, ErrOverflow
 		}
-		entryRel, ok := checkedMulInt(i, LookupLabelEntrySize)
-		if !ok {
+		valueOff := next + keyLen + 1
+		if valueOff > maxIntValue()-valueLen || valueOff+valueLen > maxIntValue()-1 {
 			return 0, ErrOverflow
 		}
-		entry, ok := checkedAddInt(tableStart, entryRel)
-		if !ok {
+		itemNext := valueOff + valueLen + 1
+		if uint64(next) > uint64(^uint32(0)) ||
+			uint64(keyLen) > uint64(^uint32(0)) ||
+			uint64(valueOff) > uint64(^uint32(0)) ||
+			uint64(valueLen) > uint64(^uint32(0)) {
 			return 0, ErrOverflow
 		}
+		entry := tableStart + i*LookupLabelEntrySize
+		keyOff32 := uint32(next)       // #nosec G115 -- bounded by uint32 max above.
+		keyLen32 := uint32(keyLen)     // #nosec G115 -- bounded by uint32 max above.
+		valueOff32 := uint32(valueOff) // #nosec G115 -- bounded by uint32 max above.
+		valueLen32 := uint32(valueLen) // #nosec G115 -- bounded by uint32 max above.
 		ne.PutUint32(item[entry:entry+4], keyOff32)
 		ne.PutUint32(item[entry+4:entry+8], keyLen32)
 		ne.PutUint32(item[entry+8:entry+12], valueOff32)
@@ -578,21 +586,18 @@ func labelLayoutGo(fixedEnd int, labels []struct{ Key, Value []byte }) (int, int
 		if invalidSourceString(label.Key, true) || invalidSourceString(label.Value, false) {
 			return 0, 0, 0, ErrBadLayout
 		}
-		keySize, ok := checkedAddInt(len(label.Key), 1)
-		if ok {
-			valueSize, okValue := checkedAddInt(len(label.Value), 1)
-			if okValue {
-				keySize, ok = checkedAddInt(keySize, valueSize)
-			} else {
-				ok = false
-			}
-		}
-		if ok {
-			itemSize, ok = checkedAddInt(itemSize, keySize)
-		}
-		if !ok {
+		keyLen := len(label.Key)
+		valueLen := len(label.Value)
+		if keyLen > maxIntValue()-1 ||
+			valueLen > maxIntValue()-1 ||
+			keyLen+1 > maxIntValue()-(valueLen+1) {
 			return 0, 0, 0, ErrOverflow
 		}
+		labelBytes := keyLen + 1 + valueLen + 1
+		if itemSize > maxIntValue()-labelBytes {
+			return 0, 0, 0, ErrOverflow
+		}
+		itemSize += labelBytes
 	}
 	return tableStart, tableBytes, itemSize, nil
 }
@@ -601,18 +606,19 @@ func labelLayoutPrefix(fixedEnd, labelCount int) (int, int, int, error) {
 	if labelCount == 0 {
 		return fixedEnd, 0, fixedEnd, nil
 	}
-	tableStart, ok := checkedAlign8(fixedEnd)
-	if !ok {
+	if fixedEnd < 0 || fixedEnd > maxIntValue()-7 {
 		return 0, 0, 0, ErrOverflow
 	}
-	tableBytes, ok := checkedMulInt(labelCount, LookupLabelEntrySize)
-	if !ok {
+	tableStart := Align8(fixedEnd)
+	tableBytes64 := uint64(labelCount) * uint64(LookupLabelEntrySize)
+	if tableBytes64 > uint64(maxIntValue()) {
 		return 0, 0, 0, ErrOverflow
 	}
-	itemSize, ok := checkedAddInt(tableStart, tableBytes)
-	if !ok {
+	tableBytes := int(tableBytes64) // #nosec G115 -- bounded by maxIntValue above.
+	if tableStart > maxIntValue()-tableBytes {
 		return 0, 0, 0, ErrOverflow
 	}
+	itemSize := tableStart + tableBytes
 	return tableStart, tableBytes, itemSize, nil
 }
 
