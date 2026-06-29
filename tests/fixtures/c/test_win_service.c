@@ -50,6 +50,19 @@ static void unique_service(char *buf, size_t len, const char *prefix)
              prefix, (long)n, (unsigned long)GetCurrentProcessId());
 }
 
+static int cache_has(nipc_cgroups_cache_t *cache, uint32_t hash, const char *name)
+{
+    nipc_cgroups_cache_read_guard_t guard;
+    if (!nipc_cgroups_cache_read_lock(cache, &guard))
+        return 0;
+
+    const nipc_cgroups_cache_item_view_t *item =
+        nipc_cgroups_cache_get(&guard, hash, name);
+    int found = item != NULL;
+    nipc_cgroups_cache_read_unlock(&guard);
+    return found;
+}
+
 static nipc_server_config_t default_server_config(void)
 {
     return (nipc_server_config_t){
@@ -863,7 +876,7 @@ static void test_cache_refresh_preserves(void)
     check("first refresh ok", nipc_cgroups_cache_refresh(&cache));
     check("cache ready", nipc_cgroups_cache_ready(&cache));
     check("cached item present",
-          nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+          cache_has(&cache, 1001, "docker-abc123"));
 
     nipc_client_close(&cache.client);
     stop_server(&sctx, server_thread);
@@ -871,7 +884,7 @@ static void test_cache_refresh_preserves(void)
     check("refresh without server fails", !nipc_cgroups_cache_refresh(&cache));
     check("cache stays ready", nipc_cgroups_cache_ready(&cache));
     check("old cached item preserved",
-          nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+          cache_has(&cache, 1001, "docker-abc123"));
 
     nipc_cgroups_cache_status_t status;
     nipc_cgroups_cache_status(&cache, &status);
@@ -898,7 +911,9 @@ static void test_cache_reconnect_rebuilds(void)
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, service, &ccfg);
 
     check("first refresh ok", nipc_cgroups_cache_refresh(&cache));
-    check("item_count == 3", cache.item_count == 3);
+    nipc_cgroups_cache_status_t status;
+    nipc_cgroups_cache_status(&cache, &status);
+    check("item_count == 3", status.item_count == 3);
 
     if (cache.client.session_valid) {
         nipc_np_close_session(&cache.client.session);
@@ -906,10 +921,8 @@ static void test_cache_reconnect_rebuilds(void)
     }
 
     check("refresh after reconnect ok", nipc_cgroups_cache_refresh(&cache));
-    check("item_count still == 3", cache.item_count == 3);
-
-    nipc_cgroups_cache_status_t status;
     nipc_cgroups_cache_status(&cache, &status);
+    check("item_count still == 3", status.item_count == 3);
     check("refresh_success_count == 2", status.refresh_success_count == 2);
 
     nipc_cgroups_cache_close(&cache);
@@ -934,11 +947,12 @@ static void test_cache_empty_snapshot(void)
 
     check("empty refresh ok", nipc_cgroups_cache_refresh(&cache));
     check("cache ready after empty refresh", nipc_cgroups_cache_ready(&cache));
-    check("item_count == 0", cache.item_count == 0);
-    check("lookup miss on empty cache",
-          nipc_cgroups_cache_lookup(&cache, 123, "missing") == NULL);
-
     nipc_cgroups_cache_status_t status;
+    nipc_cgroups_cache_status(&cache, &status);
+    check("item_count == 0", status.item_count == 0);
+    check("lookup miss on empty cache",
+          !cache_has(&cache, 123, "missing"));
+
     nipc_cgroups_cache_status(&cache, &status);
     check("status item_count == 0", status.item_count == 0);
     check("status success_count == 1", status.refresh_success_count == 1);

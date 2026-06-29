@@ -1453,12 +1453,22 @@ static int run_lookup_bench(int duration_sec)
     }
 
     nipc_cgroups_cache_t cache;
-    memset(&cache, 0, sizeof(cache));
-    cache.items = items;
-    cache.item_count = 16;
-    cache.populated = true;
-    cache.systemd_enabled = 1;
-    cache.generation = 1;
+    nipc_client_config_t ccfg = {
+        .supported_profiles = NIPC_PROFILE_BASELINE,
+        .max_request_batch_items = 1,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .auth_token = AUTH_TOKEN,
+    };
+    nipc_cgroups_cache_init(&cache, ".", "bench_lookup", &ccfg);
+    if (!nipc_cgroups_cache_seed_for_tests(&cache, items, 16, 1, 1)) {
+        fprintf(stderr, "lookup: failed to seed cache\n");
+        for (int i = 0; i < 16; i++) {
+            free(items[i].name);
+            free(items[i].path);
+        }
+        nipc_cgroups_cache_close(&cache);
+        return 1;
+    }
 
     uint64_t lookups = 0;
     uint64_t hits = 0;
@@ -1468,12 +1478,16 @@ static int run_lookup_bench(int duration_sec)
     ULONGLONG tick_deadline = GetTickCount64() + (ULONGLONG)duration_sec * 1000;
 
     while (GetTickCount64() < tick_deadline) {
-        for (int i = 0; i < 16; i++) {
-            const nipc_cgroups_cache_item_t *found =
-                nipc_cgroups_cache_lookup(&cache, items[i].hash, items[i].name);
-            if (found)
-                hits++;
-            lookups++;
+        nipc_cgroups_cache_read_guard_t guard;
+        if (nipc_cgroups_cache_read_lock(&cache, &guard)) {
+            for (int i = 0; i < 16; i++) {
+                const nipc_cgroups_cache_item_view_t *found =
+                    nipc_cgroups_cache_get(&guard, items[i].hash, items[i].name);
+                if (found)
+                    hits++;
+                lookups++;
+            }
+            nipc_cgroups_cache_read_unlock(&guard);
         }
     }
 
@@ -1498,6 +1512,7 @@ static int run_lookup_bench(int duration_sec)
         free(items[i].name);
         free(items[i].path);
     }
+    nipc_cgroups_cache_close(&cache);
 
     return (hits == lookups) ? 0 : 1;
 }

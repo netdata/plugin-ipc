@@ -166,12 +166,19 @@ static int run_client(const char *run_dir, const char *service)
     }
 
     /* Verify lookups */
-    const nipc_cgroups_cache_item_t *item =
-        nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123");
-    if (!item) {
+    nipc_cgroups_cache_read_guard_t guard = {0};
+    if (!nipc_cgroups_cache_read_lock(&cache, &guard)) {
+        fprintf(stderr, "client: cache read lock failed\n");
+        ok = 0;
+    }
+
+    const nipc_cgroups_cache_item_view_t *item = NULL;
+    if (ok)
+        item = nipc_cgroups_cache_get(&guard, 1001, "docker-abc123");
+    if (ok && !item) {
         fprintf(stderr, "client: item 1001 not found\n");
         ok = 0;
-    } else {
+    } else if (ok) {
         if (item->hash != 1001) {
             fprintf(stderr, "client: item hash: got %u\n", item->hash);
             ok = 0;
@@ -187,10 +194,12 @@ static int run_client(const char *run_dir, const char *service)
     }
 
     /* Verify not-found */
-    if (nipc_cgroups_cache_lookup(&cache, 9999, "nonexistent") != NULL) {
+    if (ok &&
+        nipc_cgroups_cache_get(&guard, 9999, "nonexistent") != NULL) {
         fprintf(stderr, "client: nonexistent item should be NULL\n");
         ok = 0;
     }
+    nipc_cgroups_cache_read_unlock(&guard);
 
     nipc_cgroups_cache_close(&cache);
 

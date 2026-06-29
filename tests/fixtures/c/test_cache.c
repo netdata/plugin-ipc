@@ -235,6 +235,18 @@ static void stop_server(server_thread_ctx_t *sctx, pthread_t tid)
     pthread_join(tid, NULL);
 }
 
+static int cache_has(nipc_cgroups_cache_t *cache, uint32_t hash, const char *name)
+{
+    nipc_cgroups_cache_read_guard_t guard;
+    if (!nipc_cgroups_cache_read_lock(cache, &guard))
+        return 0;
+    const nipc_cgroups_cache_item_view_t *item =
+        nipc_cgroups_cache_get(&guard, hash, name);
+    int found = item != NULL;
+    nipc_cgroups_cache_read_unlock(&guard);
+    return found;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Test 1: Full round-trip                                            */
 /* ------------------------------------------------------------------ */
@@ -262,8 +274,10 @@ static void test_full_round_trip(void)
     check("ready after refresh", nipc_cgroups_cache_ready(&cache));
 
     /* Lookup by hash + name */
-    const nipc_cgroups_cache_item_t *item =
-        nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123");
+    nipc_cgroups_cache_read_guard_t guard;
+    check("read lock acquired", nipc_cgroups_cache_read_lock(&cache, &guard));
+    const nipc_cgroups_cache_item_view_t *item =
+        nipc_cgroups_cache_get(&guard, 1001, "docker-abc123");
     check("lookup found item", item != NULL);
     if (item) {
         check("item hash", item->hash == 1001);
@@ -271,14 +285,26 @@ static void test_full_round_trip(void)
         check("item enabled", item->enabled == 1);
         check("item name", strcmp(item->name, "docker-abc123") == 0);
         check("item path", strcmp(item->path, "/sys/fs/cgroup/docker/abc123") == 0);
+
+        nipc_cgroups_cache_item_t *copy =
+            nipc_cgroups_cache_item_dup(&guard, item);
+        check("item dup succeeds", copy != NULL);
+        if (copy) {
+            check("dup survives as owned item",
+                  copy->hash == item->hash &&
+                  strcmp(copy->name, item->name) == 0 &&
+                  strcmp(copy->path, item->path) == 0);
+            nipc_cgroups_cache_item_free(copy);
+        }
     }
 
-    const nipc_cgroups_cache_item_t *item2 =
-        nipc_cgroups_cache_lookup(&cache, 3003, "systemd-user");
+    const nipc_cgroups_cache_item_view_t *item2 =
+        nipc_cgroups_cache_get(&guard, 3003, "systemd-user");
     check("lookup item 2 found", item2 != NULL);
     if (item2) {
         check("item 2 enabled == 0", item2->enabled == 0);
     }
+    nipc_cgroups_cache_read_unlock(&guard);
 
     /* Status */
     nipc_cgroups_cache_status_t status;
@@ -318,7 +344,7 @@ static void test_refresh_failure_preserves(void)
     /* First refresh populates cache */
     check("first refresh ok", nipc_cgroups_cache_refresh(&cache));
     check("ready", nipc_cgroups_cache_ready(&cache));
-    check("lookup ok", nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+    check("lookup ok", cache_has(&cache, 1001, "docker-abc123"));
 
     /* Kill server */
     stop_server(&sctx, tid);
@@ -330,7 +356,7 @@ static void test_refresh_failure_preserves(void)
     check("refresh fails", !updated);
     check("still ready (old cache)", nipc_cgroups_cache_ready(&cache));
     check("old item still found",
-          nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+          cache_has(&cache, 1001, "docker-abc123"));
 
     nipc_cgroups_cache_status_t status;
     nipc_cgroups_cache_status(&cache, &status);
@@ -409,15 +435,15 @@ static void test_lookup_not_found(void)
 
     /* Non-existent hash */
     check("nonexistent -> NULL",
-          nipc_cgroups_cache_lookup(&cache, 9999, "nonexistent") == NULL);
+          !cache_has(&cache, 9999, "nonexistent"));
 
     /* Correct hash, wrong name */
     check("wrong name -> NULL",
-          nipc_cgroups_cache_lookup(&cache, 1001, "wrong-name") == NULL);
+          !cache_has(&cache, 1001, "wrong-name"));
 
     /* Correct name, wrong hash */
     check("wrong hash -> NULL",
-          nipc_cgroups_cache_lookup(&cache, 9999, "docker-abc123") == NULL);
+          !cache_has(&cache, 9999, "docker-abc123"));
 
     nipc_cgroups_cache_close(&cache);
     stop_server(&sctx, tid);
@@ -440,7 +466,7 @@ static void test_empty_cache(void)
 
     check("not ready", !nipc_cgroups_cache_ready(&cache));
     check("lookup -> NULL",
-          nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") == NULL);
+          !cache_has(&cache, 1001, "docker-abc123"));
 
     nipc_cgroups_cache_status_t status;
     nipc_cgroups_cache_status(&cache, &status);
@@ -473,11 +499,6 @@ static void test_large_dataset(void)
     ccfg.max_response_payload_bytes = LARGE_BUF_SIZE;
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, svc, &ccfg);
 
-    /* Resize the internal response buffer for the large dataset */
-    free(cache.response_buf);
-    cache.response_buf_size = LARGE_BUF_SIZE;
-    cache.response_buf = malloc(cache.response_buf_size);
-
     check("refresh ok", nipc_cgroups_cache_refresh(&cache));
 
     nipc_cgroups_cache_status_t status;
@@ -486,26 +507,128 @@ static void test_large_dataset(void)
 
     /* Verify all lookups */
     int all_ok = 1;
-    for (int i = 0; i < LARGE_N; i++) {
-        char name[64], path[128];
-        snprintf(name, sizeof(name), "cgroup-%d", i);
-        snprintf(path, sizeof(path), "/sys/fs/cgroup/test/%d", i);
+    nipc_cgroups_cache_read_guard_t guard;
+    if (!nipc_cgroups_cache_read_lock(&cache, &guard)) {
+        all_ok = 0;
+    } else {
+        for (int i = 0; i < LARGE_N; i++) {
+            char name[64], path[128];
+            snprintf(name, sizeof(name), "cgroup-%d", i);
+            snprintf(path, sizeof(path), "/sys/fs/cgroup/test/%d", i);
 
-        const nipc_cgroups_cache_item_t *item =
-            nipc_cgroups_cache_lookup(&cache, (uint32_t)(i + 1000), name);
-        if (!item) {
-            printf("  FAIL: item %d not found\n", i);
-            all_ok = 0;
-            break;
+            const nipc_cgroups_cache_item_view_t *item =
+                nipc_cgroups_cache_get(&guard, (uint32_t)(i + 1000), name);
+            if (!item) {
+                printf("  FAIL: item %d not found\n", i);
+                all_ok = 0;
+                break;
+            }
+            if (item->hash != (uint32_t)(i + 1000) ||
+                strcmp(item->path, path) != 0) {
+                printf("  FAIL: item %d data mismatch\n", i);
+                all_ok = 0;
+                break;
+            }
         }
-        if (item->hash != (uint32_t)(i + 1000) ||
-            strcmp(item->path, path) != 0) {
-            printf("  FAIL: item %d data mismatch\n", i);
-            all_ok = 0;
-            break;
-        }
+        nipc_cgroups_cache_read_unlock(&guard);
     }
     check("all 1000 lookups correct", all_ok);
+
+    nipc_cgroups_cache_close(&cache);
+    stop_server(&sctx, tid);
+    cleanup_all(svc);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test 7: Concurrent readers while refresh publishes snapshots        */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    nipc_cgroups_cache_t *cache;
+    int iterations;
+    int failures;
+} cache_reader_ctx_t;
+
+static void *cache_reader_thread_fn(void *arg)
+{
+    cache_reader_ctx_t *ctx = (cache_reader_ctx_t *)arg;
+
+    for (int i = 0; i < ctx->iterations; i++) {
+        nipc_cgroups_cache_read_guard_t guard;
+        if (!nipc_cgroups_cache_read_lock(ctx->cache, &guard)) {
+            ctx->failures++;
+            continue;
+        }
+
+        const nipc_cgroups_cache_item_view_t *view =
+            nipc_cgroups_cache_get(&guard, 1001, "docker-abc123");
+        if (!view || view->hash != 1001 ||
+            strcmp(view->path, "/sys/fs/cgroup/docker/abc123") != 0) {
+            ctx->failures++;
+            nipc_cgroups_cache_read_unlock(&guard);
+            continue;
+        }
+
+        nipc_cgroups_cache_item_t *copy =
+            nipc_cgroups_cache_item_dup(&guard, view);
+        if (!copy || copy->hash != view->hash ||
+            strcmp(copy->name, view->name) != 0) {
+            ctx->failures++;
+        }
+        nipc_cgroups_cache_item_free(copy);
+
+        usleep(100);
+        nipc_cgroups_cache_read_unlock(&guard);
+    }
+
+    return NULL;
+}
+
+static void test_concurrent_readers_refresh(void)
+{
+    printf("Test 7: L3 concurrent readers during refresh\n");
+    const char *svc = "cache_concurrent";
+    cleanup_all(svc);
+
+    server_thread_ctx_t sctx;
+    pthread_t tid;
+    start_server(&sctx, svc, test_cgroups_handler, RESPONSE_BUF_SIZE, &tid);
+    check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_cgroups_cache_t cache;
+    nipc_client_config_t ccfg = default_client_config();
+    nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, svc, &ccfg);
+    check("initial refresh ok", nipc_cgroups_cache_refresh(&cache));
+
+    enum { READER_COUNT = 4, READER_ITERS = 500, WRITER_ITERS = 100 };
+    cache_reader_ctx_t rctx[READER_COUNT];
+    pthread_t readers[READER_COUNT];
+
+    for (int i = 0; i < READER_COUNT; i++) {
+        rctx[i].cache = &cache;
+        rctx[i].iterations = READER_ITERS;
+        rctx[i].failures = 0;
+        pthread_create(&readers[i], NULL, cache_reader_thread_fn, &rctx[i]);
+    }
+
+    int writer_failures = 0;
+    for (int i = 0; i < WRITER_ITERS; i++) {
+        if (!nipc_cgroups_cache_refresh(&cache))
+            writer_failures++;
+    }
+
+    int reader_failures = 0;
+    for (int i = 0; i < READER_COUNT; i++) {
+        pthread_join(readers[i], NULL);
+        reader_failures += rctx[i].failures;
+    }
+
+    nipc_cgroups_cache_status_t status;
+    nipc_cgroups_cache_status(&cache, &status);
+    check("concurrent refreshes succeeded", writer_failures == 0);
+    check("concurrent readers saw stable views", reader_failures == 0);
+    check("success_count includes writer iterations",
+          status.refresh_success_count == 1 + WRITER_ITERS);
 
     nipc_cgroups_cache_close(&cache);
     stop_server(&sctx, tid);
@@ -530,6 +653,7 @@ int main(void)
     test_lookup_not_found();         printf("\n");
     test_empty_cache();              printf("\n");
     test_large_dataset();            printf("\n");
+    test_concurrent_readers_refresh(); printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

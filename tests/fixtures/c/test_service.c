@@ -63,6 +63,37 @@ static void ensure_run_dir(void)
     mkdir(TEST_RUN_DIR, 0700);
 }
 
+static int cache_has(nipc_cgroups_cache_t *cache, uint32_t hash, const char *name)
+{
+    nipc_cgroups_cache_read_guard_t guard;
+    if (!nipc_cgroups_cache_read_lock(cache, &guard))
+        return 0;
+
+    const nipc_cgroups_cache_item_view_t *item =
+        nipc_cgroups_cache_get(&guard, hash, name);
+    int found = item != NULL;
+    nipc_cgroups_cache_read_unlock(&guard);
+    return found;
+}
+
+static int cache_get_enabled(nipc_cgroups_cache_t *cache,
+                             uint32_t hash,
+                             const char *name,
+                             uint32_t *enabled)
+{
+    nipc_cgroups_cache_read_guard_t guard;
+    if (!nipc_cgroups_cache_read_lock(cache, &guard))
+        return 0;
+
+    const nipc_cgroups_cache_item_view_t *item =
+        nipc_cgroups_cache_get(&guard, hash, name);
+    int found = item != NULL;
+    if (item && enabled)
+        *enabled = item->enabled;
+    nipc_cgroups_cache_read_unlock(&guard);
+    return found;
+}
+
 static uint64_t monotonic_msec(void)
 {
     struct timespec ts;
@@ -6362,7 +6393,7 @@ static void test_cache_refresh_failure_preserves(void)
     check("first refresh ok", updated);
     check("ready after refresh", nipc_cgroups_cache_ready(&cache));
     check("lookup ok after refresh",
-          nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+          cache_has(&cache, 1001, "docker-abc123"));
 
     /* Get baseline status */
     nipc_cgroups_cache_status_t s0;
@@ -6380,9 +6411,9 @@ static void test_cache_refresh_failure_preserves(void)
     check("refresh fails without server", !updated);
     check("still ready (old cache preserved)", nipc_cgroups_cache_ready(&cache));
     check("old data still present",
-          nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+          cache_has(&cache, 1001, "docker-abc123"));
     check("item 2 still present",
-          nipc_cgroups_cache_lookup(&cache, 3003, "systemd-user") != NULL);
+          cache_has(&cache, 3003, "systemd-user"));
 
     nipc_cgroups_cache_status_t s1;
     nipc_cgroups_cache_status(&cache, &s1);
@@ -6441,7 +6472,7 @@ static void test_malformed_response_handling(void)
     check("first refresh ok", updated);
     check("cache ready", nipc_cgroups_cache_ready(&cache));
     check("data present",
-          nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+          cache_has(&cache, 1001, "docker-abc123"));
 
     /* Stop good server, start garbage server */
     stop_server(&sctx_good, tid_good);
@@ -6460,7 +6491,7 @@ static void test_malformed_response_handling(void)
     check("refresh with garbage fails", !updated);
     check("still ready (old cache preserved)", nipc_cgroups_cache_ready(&cache));
     check("old data still present",
-          nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+          cache_has(&cache, 1001, "docker-abc123"));
 
     nipc_cgroups_cache_status_t status;
     nipc_cgroups_cache_status(&cache, &status);
@@ -6911,7 +6942,7 @@ static void test_cache_empty_snapshot(void)
 
     /* Lookup should return NULL for any key */
     check("lookup on empty returns NULL",
-          nipc_cgroups_cache_lookup(&cache, 123, "nonexistent") == NULL);
+          !cache_has(&cache, 123, "nonexistent"));
 
     nipc_cgroups_cache_status_t status;
     nipc_cgroups_cache_status(&cache, &status);
@@ -6951,25 +6982,26 @@ static void test_cache_linear_scan(void)
     check("cache ready", nipc_cgroups_cache_ready(&cache));
 
     /* Lookup all 3 items from test_cgroups_handler */
-    const nipc_cgroups_cache_item_t *item;
-    item = nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123");
-    check("lookup docker-abc123", item != NULL);
-    if (item) check("docker-abc123 enabled", item->enabled == 1);
+    uint32_t enabled = 0;
+    check("lookup docker-abc123",
+          cache_get_enabled(&cache, 1001, "docker-abc123", &enabled));
+    check("docker-abc123 enabled", enabled == 1);
 
-    item = nipc_cgroups_cache_lookup(&cache, 2002, "k8s-pod-xyz");
-    check("lookup k8s-pod-xyz", item != NULL);
+    check("lookup k8s-pod-xyz",
+          cache_has(&cache, 2002, "k8s-pod-xyz"));
 
-    item = nipc_cgroups_cache_lookup(&cache, 3003, "systemd-user");
-    check("lookup systemd-user", item != NULL);
-    if (item) check("systemd-user disabled", item->enabled == 0);
+    enabled = 1;
+    check("lookup systemd-user",
+          cache_get_enabled(&cache, 3003, "systemd-user", &enabled));
+    check("systemd-user disabled", enabled == 0);
 
     /* Lookup non-existent item */
-    item = nipc_cgroups_cache_lookup(&cache, 9999, "nonexistent");
-    check("lookup nonexistent returns NULL", item == NULL);
+    check("lookup nonexistent returns NULL",
+          !cache_has(&cache, 9999, "nonexistent"));
 
     /* Lookup with wrong hash but correct name */
-    item = nipc_cgroups_cache_lookup(&cache, 9999, "docker-abc123");
-    check("wrong hash returns NULL", item == NULL);
+    check("wrong hash returns NULL",
+          !cache_has(&cache, 9999, "docker-abc123"));
 
     nipc_cgroups_cache_close(&cache);
     stop_server(&sctx, tid);

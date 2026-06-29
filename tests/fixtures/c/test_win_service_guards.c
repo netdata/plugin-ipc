@@ -49,6 +49,19 @@ static void unique_service(char *buf, size_t len, const char *prefix)
              prefix, (long)n, (unsigned long)GetCurrentProcessId());
 }
 
+static int cache_has(nipc_cgroups_cache_t *cache, uint32_t hash, const char *name)
+{
+    nipc_cgroups_cache_read_guard_t guard;
+    if (!nipc_cgroups_cache_read_lock(cache, &guard))
+        return 0;
+
+    const nipc_cgroups_cache_item_view_t *item =
+        nipc_cgroups_cache_get(&guard, hash, name);
+    int found = item != NULL;
+    nipc_cgroups_cache_read_unlock(&guard);
+    return found;
+}
+
 static nipc_np_server_config_t default_server_config(void)
 {
     return (nipc_np_server_config_t){
@@ -1807,10 +1820,11 @@ static void test_cache_collision_lookup_and_rehash(void)
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, service, &ccfg);
 
     check("collision refresh ok", nipc_cgroups_cache_refresh(&cache));
-    check("collision cache item_count == 8", cache.item_count == 8);
-    check("collision cache bucket_count == 16", cache.bucket_count == 16);
+    nipc_cgroups_cache_status_t status;
+    nipc_cgroups_cache_status(&cache, &status);
+    check("collision cache item_count == 8", status.item_count == 8);
     check("collision lookup reaches probed entry",
-          nipc_cgroups_cache_lookup(&cache, 42, "y9") != NULL);
+          cache_has(&cache, 42, "y9"));
 
     nipc_cgroups_cache_close(&cache);
     stop_server_drain(&sctx, server_thread);

@@ -430,13 +430,6 @@ static void *scale_client_thread_fn(void *arg)
     nipc_cgroups_cache_t cache;
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, ctx->service, &ccfg);
 
-    /* Resize the internal response buffer for large datasets */
-    if (ctx->resp_buf_size > cache.response_buf_size) {
-        free(cache.response_buf);
-        cache.response_buf_size = ctx->resp_buf_size;
-        cache.response_buf = malloc(cache.response_buf_size);
-    }
-
     for (int i = 0; i < ctx->request_count; i++) {
         bool updated = nipc_cgroups_cache_refresh(&cache);
         if (updated && nipc_cgroups_cache_ready(&cache)) {
@@ -453,17 +446,23 @@ static void *scale_client_thread_fn(void *arg)
             bool item_ok = true;
             int spots[] = {0, ctx->expected_items / 4, ctx->expected_items / 2,
                            3 * ctx->expected_items / 4, ctx->expected_items - 1};
-            for (int k = 0; k < 5; k++) {
-                int idx = spots[k];
-                char name[64];
-                snprintf(name, sizeof(name), "container-%04d", idx);
-                uint32_t hash = simple_hash(name);
-                const nipc_cgroups_cache_item_t *item =
-                    nipc_cgroups_cache_lookup(&cache, hash, name);
-                if (!item || item->hash != hash) {
-                    item_ok = false;
-                    break;
+            nipc_cgroups_cache_read_guard_t guard;
+            if (!nipc_cgroups_cache_read_lock(&cache, &guard)) {
+                item_ok = false;
+            } else {
+                for (int k = 0; k < 5; k++) {
+                    int idx = spots[k];
+                    char name[64];
+                    snprintf(name, sizeof(name), "container-%04d", idx);
+                    uint32_t hash = simple_hash(name);
+                    const nipc_cgroups_cache_item_view_t *item =
+                        nipc_cgroups_cache_get(&guard, hash, name);
+                    if (!item || item->hash != hash) {
+                        item_ok = false;
+                        break;
+                    }
                 }
+                nipc_cgroups_cache_read_unlock(&guard);
             }
 
             if (item_ok)

@@ -284,14 +284,28 @@ nipc_cgroups_cache_init(&cache, "/run/netdata", "cgroups-snapshot", &ccfg);
 
 /* Call periodically from your loop */
 if (nipc_cgroups_cache_refresh(&cache)) {
-    printf("cache updated, %u items\n", cache.item_count);
+    nipc_cgroups_cache_status_t status;
+    nipc_cgroups_cache_status(&cache, &status);
+    printf("cache updated, %u items\n", status.item_count);
 }
 
-/* O(1) lookup (hash table, no I/O) */
-const nipc_cgroups_cache_item_t *item =
-    nipc_cgroups_cache_lookup(&cache, hash, "docker-abc123");
-if (item) {
-    /* item->name, item->path, item->enabled, item->options */
+/* O(1) borrowed lookup (hash table, no I/O) */
+nipc_cgroups_cache_read_guard_t guard;
+if (nipc_cgroups_cache_read_lock(&cache, &guard)) {
+    const nipc_cgroups_cache_item_view_t *view =
+        nipc_cgroups_cache_get(&guard, hash, "docker-abc123");
+    if (view) {
+        nipc_cgroups_cache_item_t *copy =
+            nipc_cgroups_cache_item_dup(&guard, view);
+        nipc_cgroups_cache_read_unlock(&guard);
+
+        if (copy) {
+            /* copy->name, copy->path, copy->enabled, copy->options */
+            nipc_cgroups_cache_item_free(copy);
+        }
+    } else {
+        nipc_cgroups_cache_read_unlock(&guard);
+    }
 }
 
 nipc_cgroups_cache_close(&cache);
@@ -302,15 +316,18 @@ nipc_cgroups_cache_close(&cache);
 ```rust
 use netipc::service::cgroups::CgroupsCache;
 
-let mut cache = CgroupsCache::new("/run/netdata", "cgroups-snapshot", config);
+let cache = CgroupsCache::new("/run/netdata", "cgroups-snapshot", config);
 
 // Call periodically
 if cache.refresh() {
     println!("cache updated");
 }
 
-// O(1) lookup
-if let Some(item) = cache.lookup(hash, "docker-abc123") {
+// O(1) borrowed lookup
+let guard = cache.read_lock();
+if let Some(view) = guard.get(hash, "docker-abc123") {
+    let item = cache.item_dup(view);
+    drop(guard);
     println!("{}: {}", item.name, item.path);
 }
 
@@ -329,8 +346,13 @@ if cache.Refresh() {
 }
 
 // O(1) lookup
-if item, found := cache.Lookup(hash, "docker-abc123"); found {
+guard := cache.ReadLock()
+if view := guard.Get(hash, "docker-abc123"); view != nil {
+    item := guard.Dup(view)
+    guard.Unlock()
     fmt.Printf("%s: %s\n", item.Name, item.Path)
+} else {
+    guard.Unlock()
 }
 ```
 
@@ -352,6 +374,9 @@ if item, found := cache.Lookup(hash, "docker-abc123"); found {
   proved too small.
 - **Cache preservation**: on refresh failure, the previous cache is
   preserved. The cache is empty only if no refresh has ever succeeded.
+- **Guarded cache reads**: borrowed cache views are valid only while the
+  caller holds the cache read guard. Duplicate a view when data must survive
+  unlock.
 - **Transport negotiation**: if SHM is selected during handshake, the
   successful handshake means the server already prepared SHM for that
   session; if client-side attach still fails, recovery is a new baseline

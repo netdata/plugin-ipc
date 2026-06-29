@@ -53,19 +53,6 @@ const (
 	clientShmAttachRetryTimeoutWin  = 5 * time.Second
 )
 
-type cacheBucketWin struct {
-	index int
-	used  bool
-}
-
-func cacheHashNameWin(name string) uint32 {
-	h := uint32(5381)
-	for i := 0; i < len(name); i++ {
-		h = ((h << 5) + h) + uint32(name[i])
-	}
-	return h
-}
-
 type xorshift32Win struct {
 	state uint32
 }
@@ -1840,14 +1827,17 @@ func runLookupBenchWin(durationSec int) int {
 		}
 	}
 
-	lookupIndex := make([]cacheBucketWin, 32)
-	mask := uint32(len(lookupIndex) - 1)
-	for i := range cacheItems {
-		slot := (cacheItems[i].Hash ^ cacheHashNameWin(cacheItems[i].Name)) & mask
-		for lookupIndex[slot].used {
-			slot = (slot + 1) & mask
-		}
-		lookupIndex[slot] = cacheBucketWin{index: i, used: true}
+	cache := rawsvc.NewCache(".", "bench_lookup", windows.ClientConfig{
+		SupportedProfiles:       protocol.ProfileBaseline,
+		PreferredProfiles:       0,
+		MaxRequestBatchItems:    1,
+		MaxResponsePayloadBytes: responseBufSizeWin,
+		MaxResponseBatchItems:   1,
+		AuthToken:               authTokenWin,
+	})
+	if !cache.SeedForTests(cacheItems, 1, 1) {
+		fmt.Fprintln(os.Stderr, "cache seed failed")
+		return 1
 	}
 
 	var lookups, hits uint64
@@ -1857,22 +1847,14 @@ func runLookupBenchWin(durationSec int) int {
 	tickDeadline := tickMSWin() + uint64(durationSec)*1000
 
 	for tickMSWin() < tickDeadline {
+		guard := cache.ReadLock()
 		for _, it := range items {
-			slot := (it.hash ^ cacheHashNameWin(it.name)) & mask
-			found := false
-			for lookupIndex[slot].used {
-				bucketItem := cacheItems[lookupIndex[slot].index]
-				if bucketItem.Hash == it.hash && bucketItem.Name == it.name {
-					found = true
-					break
-				}
-				slot = (slot + 1) & mask
-			}
-			if found {
+			if guard.Get(it.hash, it.name) != nil {
 				hits++
 			}
 			lookups++
 		}
+		guard.Unlock()
 	}
 
 	wallSec := float64(nowNS()-wallStart) / 1e9

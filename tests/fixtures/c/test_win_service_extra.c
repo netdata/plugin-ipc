@@ -56,6 +56,19 @@ static int should_run_test(const char *name)
     return strstr(name, g_test_filter) != NULL;
 }
 
+static int cache_has(nipc_cgroups_cache_t *cache, uint32_t hash, const char *name)
+{
+    nipc_cgroups_cache_read_guard_t guard;
+    if (!nipc_cgroups_cache_read_lock(cache, &guard))
+        return 0;
+
+    const nipc_cgroups_cache_item_view_t *item =
+        nipc_cgroups_cache_get(&guard, hash, name);
+    int found = item != NULL;
+    nipc_cgroups_cache_read_unlock(&guard);
+    return found;
+}
+
 #define RUN_TEST(fn)                                                         \
     do {                                                                     \
         if (should_run_test(#fn))                                            \
@@ -4047,21 +4060,18 @@ static void test_cache_refresh_rebuilds_and_linear_lookup(void)
     nipc_cgroups_cache_init(&cache, TEST_RUN_DIR, service, &ccfg);
 
     check("first refresh ok", nipc_cgroups_cache_refresh(&cache));
-    check("item_count == 3", cache.item_count == 3);
-    check("hash table built", cache.buckets != NULL && cache.bucket_count > 0);
-    check("second refresh ok", nipc_cgroups_cache_refresh(&cache));
-    check("item_count still == 3", cache.item_count == 3);
-
-    free(cache.buckets);
-    cache.buckets = NULL;
-    cache.bucket_count = 0;
-    check("linear lookup hit",
-          nipc_cgroups_cache_lookup(&cache, 2002, "k8s-pod-xyz") != NULL);
-    check("linear lookup miss",
-          nipc_cgroups_cache_lookup(&cache, 9999, "missing") == NULL);
-
     nipc_cgroups_cache_status_t status;
     nipc_cgroups_cache_status(&cache, &status);
+    check("item_count == 3", status.item_count == 3);
+    check("lookup hit after first refresh",
+          cache_has(&cache, 2002, "k8s-pod-xyz"));
+    check("second refresh ok", nipc_cgroups_cache_refresh(&cache));
+    nipc_cgroups_cache_status(&cache, &status);
+    check("item_count still == 3", status.item_count == 3);
+    check("lookup hit after rebuild",
+          cache_has(&cache, 2002, "k8s-pod-xyz"));
+    check("lookup miss after rebuild",
+          !cache_has(&cache, 9999, "missing"));
     check("refresh_success_count == 2", status.refresh_success_count == 2);
 
     nipc_cgroups_cache_close(&cache);
@@ -4086,11 +4096,12 @@ static void test_cache_empty_snapshot(void)
 
     check("empty refresh ok", nipc_cgroups_cache_refresh(&cache));
     check("cache ready after empty refresh", nipc_cgroups_cache_ready(&cache));
-    check("item_count == 0", cache.item_count == 0);
-    check("lookup miss on empty cache",
-          nipc_cgroups_cache_lookup(&cache, 123, "missing") == NULL);
-
     nipc_cgroups_cache_status_t status;
+    nipc_cgroups_cache_status(&cache, &status);
+    check("item_count == 0", status.item_count == 0);
+    check("lookup miss on empty cache",
+          !cache_has(&cache, 123, "missing"));
+
     nipc_cgroups_cache_status(&cache, &status);
     check("status item_count == 0", status.item_count == 0);
     check("status success_count == 1", status.refresh_success_count == 1);
@@ -4172,10 +4183,12 @@ static void test_cache_fault_injection(void)
         bool ok = nipc_cgroups_cache_refresh(&cache);
         check(cases[i].label, ok == cases[i].expect_refresh_ok);
         if (cases[i].expect_refresh_ok) {
-            check("cache bucket fault leaves buckets NULL",
-                  cache.buckets == NULL && cache.bucket_count == 0);
+            nipc_cgroups_cache_status_t status;
+            nipc_cgroups_cache_status(&cache, &status);
+            check("cache bucket fault still populates snapshot",
+                  status.populated && status.item_count == 3);
             check("cache bucket fault still serves lookup",
-                  nipc_cgroups_cache_lookup(&cache, 2002, "k8s-pod-xyz") != NULL);
+                  cache_has(&cache, 2002, "k8s-pod-xyz"));
         } else {
             nipc_cgroups_cache_status_t status;
             nipc_cgroups_cache_status(&cache, &status);
@@ -4187,7 +4200,7 @@ static void test_cache_fault_injection(void)
         check("cache refresh recovers after fault",
               nipc_cgroups_cache_refresh(&cache));
         check("cache refresh recovery lookup works",
-              nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+              cache_has(&cache, 1001, "docker-abc123"));
 
         nipc_cgroups_cache_close(&cache);
         stop_server_drain(&sctx, server_thread);
@@ -4452,6 +4465,35 @@ static void test_common_helper_edges(void)
               client.reconnect_count == 1);
 
     g_common_retry_mock = NULL;
+}
+
+static void test_lookup_remaining_timeout_helpers(void)
+{
+    printf("--- Lookup remaining timeout helpers ---\n");
+
+    nipc_client_ctx_t client;
+    nipc_client_config_t ccfg = default_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, "svc_lookup_timeout_helpers",
+                     &ccfg);
+
+    uint32_t timeout = 0;
+    nipc_client_abort(&client);
+    check("apps lookup remaining timeout reports abort",
+          nipc_apps_lookup_remaining_timeout_for_tests(&client, 1, &timeout)
+              == NIPC_ERR_ABORTED);
+    check("cgroups lookup remaining timeout reports abort",
+          nipc_cgroups_lookup_remaining_timeout_for_tests(&client, 1, &timeout)
+              == NIPC_ERR_ABORTED);
+
+    nipc_client_clear_abort(&client);
+    check("apps lookup remaining timeout reports expired deadline",
+          nipc_apps_lookup_remaining_timeout_for_tests(&client, 0, &timeout)
+              == NIPC_ERR_TIMEOUT);
+    check("cgroups lookup remaining timeout reports expired deadline",
+          nipc_cgroups_lookup_remaining_timeout_for_tests(&client, 0, &timeout)
+              == NIPC_ERR_TIMEOUT);
+
+    nipc_client_close(&client);
 }
 
 static void test_lookup_client_preflight_edges(void)
@@ -4777,6 +4819,7 @@ int main(void)
     g_test_filter = getenv("NIPC_TEST_FILTER");
 
     RUN_TEST(test_common_helper_edges);
+    RUN_TEST(test_lookup_remaining_timeout_helpers);
     RUN_TEST(test_client_init_defaults_and_truncation);
     RUN_TEST(test_client_init_null_config_defaults);
     RUN_TEST(test_server_init_argument_validation);

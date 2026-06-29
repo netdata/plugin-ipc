@@ -370,34 +370,43 @@ as explicit assumptions, not as implementation details they can reinterpret.
     synchronization model explicitly.
   - The library only dispatches requests. It does not protect your plugin's
     data structures for you.
-- L2 clients and L3 caches should be treated as single-owner mutable objects
-  unless the integrator adds external synchronization.
-  - They are not documented as internally synchronized shared objects.
+- L2 clients should be treated as single-owner mutable objects unless the
+  integrator adds external synchronization.
   - The only cross-thread operation provided by the public client contract is
     the abort signal, which may be triggered by a shutdown thread to release a
     call blocked in transport receive.
-  - On the same object instance, do not concurrently call:
+  - On the same L2 client object instance, do not concurrently call:
     - `refresh()`
     - blocking typed methods
     - `close()`
-    - `lookup()` while a refresh may rebuild the cache
-  - In C, the public client/cache types hold mutable state and reusable scratch
-    buffers without a public thread-safety contract.
-  - In Go, the public/raw client and cache types mutate internal state and do
-    not use internal locking.
+  - In C, public client objects hold mutable state and reusable scratch buffers
+    without a public thread-safety contract.
+  - In Go, public/raw clients mutate internal state and do not use internal
+    locking.
   - In Rust, mutating operations require `&mut self`, which already pushes the
     caller toward serialized ownership.
   - In practice:
     - C and Go require the integrator to prevent data races explicitly
     - Rust prevents some of these mistakes at compile time, but the ownership
       model still must be designed intentionally
+- L3 cgroups snapshot caches are internally synchronized and support
+  concurrent refresh/read access through the explicit read-guard API.
+  - Refresh builds a new snapshot privately, then publishes it under write
+    synchronization.
+  - Borrowed reads must follow this pattern:
+    - acquire cache read guard
+    - call `get` / `Get` / `guard.get`
+    - consume the borrowed view or duplicate it
+    - release the read guard
+  - Use `dup` / `Dup` when data must survive the guard. In C, release the owned
+    item with `nipc_cgroups_cache_item_free()`.
 - Returned views and references have validity limits.
   - C typed response views are valid only until the next call on the same
     client context.
-  - C cache lookup pointers are valid only until the next successful refresh.
-  - Rust follows the same ownership idea through borrowed references.
-  - Do not hold these across refresh/call boundaries or share them with other
-    threads without copying the needed data first.
+  - L3 borrowed cache item views are valid only while the caller holds the read
+    guard that produced them.
+  - Do not hold borrowed views across guard unlock, refresh/call boundaries, or
+    thread handoff without duplicating the needed data first.
 - One service endpoint exposes one service kind only.
   - Public L2/L3 is not a generic multi-method RPC router.
   - Do not design one endpoint that multiplexes unrelated method families.
@@ -437,7 +446,11 @@ Current public shapes:
   - `nipc_cgroups_cache_init()`
   - `nipc_cgroups_cache_refresh()`
   - `nipc_cgroups_cache_ready()`
-  - `nipc_cgroups_cache_lookup()`
+  - `nipc_cgroups_cache_read_lock()`
+  - `nipc_cgroups_cache_get()`
+  - `nipc_cgroups_cache_item_dup()`
+  - `nipc_cgroups_cache_read_unlock()`
+  - `nipc_cgroups_cache_item_free()`
   - `nipc_cgroups_cache_status()`
   - `nipc_cgroups_cache_close()`
 
@@ -467,7 +480,9 @@ Current public shapes:
   - `CgroupsCache::new()`
   - `refresh()`
   - `ready()`
-  - `lookup()`
+  - `read_lock()`
+  - `CgroupsCacheReadGuard::get()`
+  - `CgroupsCacheReadGuard::dup()`
   - `status()`
   - `close()`
 
@@ -497,7 +512,10 @@ Current public shapes:
   - `NewCache()`
   - `Refresh()`
   - `Ready()`
-  - `Lookup()`
+  - `ReadLock()`
+  - `CacheReadGuard.Get()`
+  - `CacheReadGuard.Dup()`
+  - `CacheReadGuard.Unlock()`
   - `Status()`
   - `Close()`
 
@@ -1008,26 +1026,28 @@ Do not:
 
 Do not skip this either.
 
-Public L2 clients and L3 caches are mutable objects. The library does not
-document them as generally safe for concurrent shared access.
+Public L2 clients are mutable objects. Public L3 cgroups caches are guarded
+snapshot objects.
 
 Use these rules:
 
 - do not call `refresh()` concurrently on the same client object
 - do not call blocking typed methods concurrently on the same client object
   unless that specific API explicitly promises it
-- do not perform `lookup()` concurrently with `refresh()` on the same L3 cache
-  object unless you add external synchronization
-- do not share C/Rust response views or cache item references across threads
-  without copying the needed data
+- use L3 cache read guards for all borrowed cache access
+- do not use borrowed cache views after unlocking the read guard
+- duplicate/copy the borrowed view when data must survive unlock or move to
+  another thread
+- do not share C/Rust response views across threads without copying the needed
+  data
 - if multiple threads need the same enrichment data:
-  - either give each thread its own client/cache object
-  - or wrap shared access in one explicit synchronization strategy
+  - either give each thread its own L2 client/cache object
+  - or share one L3 cache through its read-guard API
 
 Practical consequences:
 
 - a function-only consumer should usually refresh once, then do all lookups from
-  one stable local state while rendering
+  one read-guarded local snapshot while rendering
 - if a plugin has one hot path and one refresh path on different threads, the
   cache ownership and handoff model must be designed explicitly
 - if you need lock-free read paths, publish immutable snapshots instead of
@@ -1197,8 +1217,10 @@ Before implementation is accepted, confirm all of these explicitly:
 - The upstream-vs-Netdata ownership split is clear.
 - The provider's shared mutable data has an explicit synchronization model.
 - The client or cache object has an explicit ownership/concurrency model.
-- No code performs concurrent `refresh()` / `lookup()` / typed calls on the same
-  mutable object without external synchronization.
+- No code performs concurrent blocking typed calls on the same L2 client object
+  without external synchronization.
+- L3 cache borrowed views are accessed only under the cache read guard, and any
+  data needed after unlock is duplicated first.
 - No response view or cache item reference is held past its validity boundary.
 - Startup ordering, retry states, and degradation behavior are documented.
 - Platform-specific data availability and semantic differences were checked.

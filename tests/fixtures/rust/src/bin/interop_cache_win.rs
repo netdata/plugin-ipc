@@ -112,7 +112,7 @@ fn run_client(run_dir: &str, service: &str) -> i32 {
         ..ClientConfig::default()
     };
 
-    let mut cache = CgroupsCache::new(run_dir, service, config);
+    let cache = CgroupsCache::new(run_dir, service, config);
 
     let mut updated = false;
     for _ in 0..200 {
@@ -148,7 +148,8 @@ fn run_client(run_dir: &str, service: &str) -> i32 {
         ok = false;
     }
 
-    match cache.lookup(1001, "docker-abc123") {
+    let guard = cache.read_lock();
+    match guard.get(1001, "docker-abc123") {
         Some(item) => {
             if item.hash != 1001 {
                 eprintln!("client: item hash: got {}", item.hash);
@@ -169,10 +170,11 @@ fn run_client(run_dir: &str, service: &str) -> i32 {
         }
     }
 
-    if cache.lookup(9999, "nonexistent").is_some() {
+    if guard.get(9999, "nonexistent").is_some() {
         eprintln!("client: nonexistent item should be None");
         ok = false;
     }
+    drop(guard);
 
     cache.close();
 

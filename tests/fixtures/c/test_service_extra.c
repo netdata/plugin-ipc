@@ -36,6 +36,19 @@ static void unique_service(char *buf, size_t len, const char *prefix)
     snprintf(buf, len, "%s_%d_%ld", prefix, n, (long)getpid());
 }
 
+static int cache_has(nipc_cgroups_cache_t *cache, uint32_t hash, const char *name)
+{
+    nipc_cgroups_cache_read_guard_t guard;
+    if (!nipc_cgroups_cache_read_lock(cache, &guard))
+        return 0;
+
+    const nipc_cgroups_cache_item_view_t *item =
+        nipc_cgroups_cache_get(&guard, hash, name);
+    int found = item != NULL;
+    nipc_cgroups_cache_read_unlock(&guard);
+    return found;
+}
+
 static nipc_server_config_t default_typed_server_config(void)
 {
     return (nipc_server_config_t){
@@ -353,6 +366,34 @@ static void test_common_service_helpers(void)
     }
 }
 
+static void test_lookup_remaining_timeout_helpers(void)
+{
+    printf("--- Lookup remaining timeout helpers ---\n");
+
+    nipc_client_ctx_t client;
+    nipc_client_config_t ccfg = default_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, "svc_lookup_timeout_helpers", &ccfg);
+
+    uint32_t timeout = 0;
+    nipc_client_abort(&client);
+    check("apps lookup remaining timeout reports abort",
+          nipc_apps_lookup_remaining_timeout_for_tests(&client, 1, &timeout)
+          == NIPC_ERR_ABORTED);
+    check("cgroups lookup remaining timeout reports abort",
+          nipc_cgroups_lookup_remaining_timeout_for_tests(&client, 1, &timeout)
+          == NIPC_ERR_ABORTED);
+
+    nipc_client_clear_abort(&client);
+    check("apps lookup remaining timeout reports expired deadline",
+          nipc_apps_lookup_remaining_timeout_for_tests(&client, 0, &timeout)
+          == NIPC_ERR_TIMEOUT);
+    check("cgroups lookup remaining timeout reports expired deadline",
+          nipc_cgroups_lookup_remaining_timeout_for_tests(&client, 0, &timeout)
+          == NIPC_ERR_TIMEOUT);
+
+    nipc_client_close(&client);
+}
+
 static void test_client_fault_injection_disconnects_and_recovers(void)
 {
     printf("--- Client fault injection disconnects / recovers ---\n");
@@ -501,10 +542,12 @@ static void test_cache_fault_injection(void)
             int ok = nipc_cgroups_cache_refresh(&cache);
             check(cases[i].label, ok == cases[i].expect_refresh_ok);
             if (cases[i].expect_refresh_ok) {
-                check("cache bucket fault leaves buckets NULL",
-                      cache.buckets == NULL && cache.bucket_count == 0);
+                nipc_cgroups_cache_status_t status;
+                nipc_cgroups_cache_status(&cache, &status);
+                check("cache bucket fault still populates snapshot",
+                      status.populated && status.item_count == 3);
                 check("cache bucket fault still serves lookup",
-                      nipc_cgroups_cache_lookup(&cache, 2002, "k8s-pod-xyz") != NULL);
+                      cache_has(&cache, 2002, "k8s-pod-xyz"));
             } else {
                 nipc_cgroups_cache_status_t status;
                 nipc_cgroups_cache_status(&cache, &status);
@@ -517,7 +560,7 @@ static void test_cache_fault_injection(void)
         check("cache refresh recovers after fault",
               nipc_cgroups_cache_refresh(&cache));
         check("cache refresh recovery lookup works",
-              nipc_cgroups_cache_lookup(&cache, 1001, "docker-abc123") != NULL);
+              cache_has(&cache, 1001, "docker-abc123"));
 
         nipc_cgroups_cache_close(&cache);
         stop_server_drain(&sctx, tid);
@@ -530,6 +573,7 @@ int main(void)
     ensure_run_dir();
 
     test_common_service_helpers();
+    test_lookup_remaining_timeout_helpers();
     test_client_fault_injection_disconnects_and_recovers();
     test_server_init_fault_injection();
     test_cache_fault_injection();

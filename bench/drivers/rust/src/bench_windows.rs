@@ -27,7 +27,8 @@ use netipc::protocol::{
 use netipc::service::cgroups::{CgroupsClient, ClientConfig as TypedClientConfig};
 #[cfg(windows)]
 use netipc::service::raw::{
-    increment_dispatch, snapshot_dispatch, CgroupsCacheItem, DispatchHandler, ManagedServer,
+    increment_dispatch, snapshot_dispatch, CgroupsCache, CgroupsCacheItem, DispatchHandler,
+    ManagedServer,
 };
 #[cfg(windows)]
 use netipc::transport::win_shm::{WinShmContext, PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID};
@@ -1758,20 +1759,6 @@ fn run_pipeline_batch_client(
 
 #[cfg(windows)]
 fn run_lookup_bench(duration_sec: u32) -> i32 {
-    #[derive(Clone, Copy, Default)]
-    struct Bucket {
-        index: usize,
-        used: bool,
-    }
-
-    fn hash_name(name: &str) -> u32 {
-        let mut h: u32 = 5381;
-        for b in name.as_bytes() {
-            h = ((h << 5).wrapping_add(h)).wrapping_add(*b as u32);
-        }
-        h
-    }
-
     let items: Vec<CgroupsCacheItem> = (0..16)
         .map(|i| CgroupsCacheItem {
             hash: 1000 + i,
@@ -1782,33 +1769,30 @@ fn run_lookup_bench(duration_sec: u32) -> i32 {
         })
         .collect();
 
-    let mut lookup_index = vec![Bucket::default(); 32];
-    let mask = (lookup_index.len() - 1) as u32;
-    for (idx, item) in items.iter().enumerate() {
-        let mut slot = (item.hash ^ hash_name(&item.name)) & mask;
-        while lookup_index[slot as usize].used {
-            slot = (slot + 1) & mask;
-        }
-        lookup_index[slot as usize] = Bucket {
-            index: idx,
-            used: true,
-        };
-    }
+    let cache = CgroupsCache::new(
+        ".",
+        "bench_lookup",
+        ClientConfig {
+            supported_profiles: PROFILE_BASELINE,
+            preferred_profiles: 0,
+            max_request_payload_bytes: 0,
+            max_request_batch_items: 1,
+            max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
+            max_response_batch_items: 1,
+            auth_token: AUTH_TOKEN,
+            packet_size: 0,
+        },
+    );
+    cache.seed_for_tests(items.clone(), 1, 1);
 
     let mut lookups: u64 = 0;
     let mut hits: u64 = 0;
 
     let warmup_deadline = TickDeadline::new(LOOKUP_WARMUP_SEC);
     while !warmup_deadline.expired() {
+        let guard = cache.read_lock();
         for item in &items {
-            let mut slot = (item.hash ^ hash_name(&item.name)) & mask;
-            while lookup_index[slot as usize].used {
-                let bucket_item = &items[lookup_index[slot as usize].index];
-                if bucket_item.hash == item.hash && bucket_item.name == item.name {
-                    break;
-                }
-                slot = (slot + 1) & mask;
-            }
+            let _ = guard.get(item.hash, &item.name);
         }
     }
 
@@ -1817,18 +1801,9 @@ fn run_lookup_bench(duration_sec: u32) -> i32 {
     let tick_deadline = TickDeadline::new(duration_sec);
 
     while !tick_deadline.expired() {
+        let guard = cache.read_lock();
         for item in &items {
-            let mut slot = (item.hash ^ hash_name(&item.name)) & mask;
-            let mut found = false;
-            while lookup_index[slot as usize].used {
-                let bucket_item = &items[lookup_index[slot as usize].index];
-                if bucket_item.hash == item.hash && bucket_item.name == item.name {
-                    found = true;
-                    break;
-                }
-                slot = (slot + 1) & mask;
-            }
-            if found {
+            if guard.get(item.hash, &item.name).is_some() {
                 hits += 1;
             }
             lookups += 1;

@@ -104,14 +104,18 @@ static nipc_error_t cgroups_lookup_remaining_timeout(nipc_client_ctx_t *ctx,
   return NIPC_OK;
 }
 
+nipc_error_t nipc_cgroups_lookup_remaining_timeout_for_tests(
+    nipc_client_ctx_t *ctx, uint64_t deadline_ms, uint32_t *timeout_out) {
+  return cgroups_lookup_remaining_timeout(ctx, deadline_ms, timeout_out);
+}
+
 static nipc_error_t
 cgroups_lookup_next_request_count(nipc_client_ctx_t *ctx,
                                   const nipc_str_view_t *paths,
                                   uint32_t remaining, uint32_t *count_out,
                                   size_t *size_out) {
   if (remaining == 0) {
-    if (!cgroups_lookup_request_size(NULL, 0, size_out))
-      return NIPC_ERR_OVERFLOW;
+    *size_out = NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE;
     *count_out = 0;
     return NIPC_OK;
   }

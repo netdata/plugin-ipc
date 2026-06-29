@@ -171,16 +171,26 @@ Note: ready means "has cached data," not "is currently connected."
 A helper can be ready (has cache) while disconnected (server went
 away after last successful refresh).
 
-### Lookup
+### Guarded Lookup
 
 Look up an item in the local cache by key. For the cgroups snapshot
 service, the key is hash + name.
 
-Lookup is a pure in-memory operation. It accesses only the local cache.
-It never triggers I/O or refresh.
+Lookup is a pure in-memory operation. It accesses only the local cache. It
+never triggers I/O or refresh.
 
-If the cache is empty (no successful refresh yet), lookup returns
-not-found.
+Borrowed lookup requires an explicit read guard:
+
+1. Acquire the cache read guard.
+2. Call the service-specific `get` operation with the lookup key.
+3. Use the borrowed immutable view only while the guard remains held.
+4. Duplicate the view if the caller needs an owned item that survives unlock.
+5. Release the read guard.
+
+Refresh may build a replacement snapshot while readers hold guards, but it
+cannot publish and retire the guarded snapshot until those readers release their
+guards. If the cache is empty (no successful refresh yet), guarded lookup
+returns not-found.
 
 ### Status
 
@@ -244,7 +254,8 @@ service-specific:
 
 - Refresh call (wraps the specific Level 2 typed call)
 - Cache data structure (tailored to the service's item type)
-- Lookup function (keyed by the service's identity fields)
+- Guarded lookup function (keyed by the service's identity fields)
+- Duplicate/copy function for callers that need owned data after unlock
 
 The general refresh/cache/lookup lifecycle is the same across all
 snapshot services. Only the data shape and lookup key differ.
@@ -263,9 +274,12 @@ Level 3 must have:
   old cache.
 - **Malformed response tests**: corrupt snapshot payload preserves
   previous cache and disconnects.
-- **Lookup tests**: lookup by key returns correct item, lookup for
-  missing key returns not-found, lookup on empty cache returns
-  not-found.
+- **Guarded lookup tests**: lookup by key returns correct borrowed view, lookup
+  for missing key returns not-found, lookup on empty cache returns not-found,
+  duplicated items survive guard unlock.
+- **Concurrency tests**: readers holding guards can run while refresh builds and
+  publishes replacement snapshots, without invalidating borrowed views before
+  unlock.
 - **Large dataset tests**: refresh with maximum item count at the
   negotiated limit, refresh with items containing maximum-length
   strings.

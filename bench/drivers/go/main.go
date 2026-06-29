@@ -49,19 +49,6 @@ const (
 	lookupMethodBufBytesPerItem = 256
 )
 
-type cacheBucket struct {
-	index int
-	used  bool
-}
-
-func cacheHashName(name string) uint32 {
-	h := uint32(5381)
-	for i := 0; i < len(name); i++ {
-		h = ((h << 5) + h) + uint32(name[i])
-	}
-	return h
-}
-
 // ---------------------------------------------------------------------------
 //  Timing helpers
 // ---------------------------------------------------------------------------
@@ -1216,18 +1203,17 @@ func runLookupBench(durationSec int) int {
 		}
 	}
 
-	lookupIndex := make([]cacheBucket, 32)
-	mask, ok := u32FromNonNegativeInt(len(lookupIndex) - 1)
-	if !ok {
-		fmt.Fprintln(os.Stderr, "cache lookup index too large")
+	cache := rawsvc.NewCache("/tmp", "bench_lookup", posix.ClientConfig{
+		SupportedProfiles:       protocol.ProfileBaseline,
+		PreferredProfiles:       0,
+		MaxRequestBatchItems:    1,
+		MaxResponsePayloadBytes: responseBufSize,
+		MaxResponseBatchItems:   1,
+		AuthToken:               authToken,
+	})
+	if !cache.SeedForTests(cacheItems, 1, 1) {
+		fmt.Fprintln(os.Stderr, "cache seed failed")
 		return 1
-	}
-	for i := range cacheItems {
-		slot := (cacheItems[i].Hash ^ cacheHashName(cacheItems[i].Name)) & mask
-		for lookupIndex[slot].used {
-			slot = (slot + 1) & mask
-		}
-		lookupIndex[slot] = cacheBucket{index: i, used: true}
 	}
 
 	var lookups, hits uint64
@@ -1237,22 +1223,14 @@ func runLookupBench(durationSec int) int {
 	deadline := time.Duration(durationSec) * time.Second
 
 	for time.Since(wallStart) < deadline {
+		guard := cache.ReadLock()
 		for _, it := range items {
-			slot := (it.hash ^ cacheHashName(it.name)) & mask
-			found := false
-			for lookupIndex[slot].used {
-				bucketItem := &cacheItems[lookupIndex[slot].index]
-				if bucketItem.Hash == it.hash && bucketItem.Name == it.name {
-					found = true
-					break
-				}
-				slot = (slot + 1) & mask
-			}
-			if found {
+			if guard.Get(it.hash, it.name) != nil {
 				hits++
 			}
 			lookups++
 		}
+		guard.Unlock()
 	}
 
 	wallSec := time.Since(wallStart).Seconds()

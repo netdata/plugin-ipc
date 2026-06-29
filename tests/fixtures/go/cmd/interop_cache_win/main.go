@@ -125,11 +125,13 @@ func runClient(runDir, service string) int {
 		ok = false
 	}
 
-	item, found := cache.Lookup(1001, "docker-abc123")
-	if !found {
+	guard := cache.ReadLock()
+	itemView := guard.Get(1001, "docker-abc123")
+	if itemView == nil {
 		fmt.Fprintf(os.Stderr, "client: item 1001 not found\n")
 		ok = false
 	} else {
+		item := guard.Dup(itemView)
 		if item.Hash != 1001 {
 			fmt.Fprintf(os.Stderr, "client: item hash: got %d\n", item.Hash)
 			ok = false
@@ -144,11 +146,11 @@ func runClient(runDir, service string) int {
 		}
 	}
 
-	_, notFound := cache.Lookup(9999, "nonexistent")
-	if notFound {
+	if guard.Get(9999, "nonexistent") != nil {
 		fmt.Fprintf(os.Stderr, "client: nonexistent item should not be found\n")
 		ok = false
 	}
+	guard.Unlock()
 
 	cache.Close()
 
