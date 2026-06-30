@@ -143,12 +143,14 @@ Uses two named kernel events (`req_event`, `resp_event`) created via
    once more (avoid race), then `WaitForSingleObject(req_event,
    timeout)`.
 3. Clear `req_server_waiting` after waking.
-4. Read `req_len`. If `req_len` is 0, report a protocol error — `send`
-   rejects zero-length messages, so this indicates SHM corruption.
-5. Validate `req_len` against `request_capacity`. If `req_len` exceeds
-   the capacity, discard the message and report an error. This prevents
+4. Once `req_seq` has advanced, read `req_len`, copy the message bytes if
+   they fit the caller buffer, then re-read both `req_seq` and `req_len`.
+   If either value changed during the copy, report a protocol error.
+5. If `req_len` is 0, report a protocol error — `send` rejects zero-length
+   messages, so this indicates SHM corruption.
+6. Validate `req_len` against `request_capacity`. If `req_len` exceeds the
+   capacity, discard the message and report an error. This prevents
    out-of-bounds reads from a malicious or buggy peer.
-6. Read the message bytes from the request area.
 
 #### Server sends a response
 
@@ -163,11 +165,12 @@ Uses two named kernel events (`req_event`, `resp_event`) created via
 2. If not advanced: set `resp_client_waiting = 1`, check `resp_seq`
    once more, then `WaitForSingleObject(resp_event, timeout)`.
 3. Clear `resp_client_waiting` after waking.
-4. Read `resp_len`. If `resp_len` is 0, report a protocol error
-   (SHM corruption).
-5. Validate `resp_len` against `response_capacity`. If `resp_len`
-   exceeds the capacity, discard the message and report an error.
-6. Read the message bytes from the response area.
+4. Once `resp_seq` has advanced, read `resp_len`, copy the message bytes if
+   they fit the caller buffer, then re-read both `resp_seq` and `resp_len`.
+   If either value changed during the copy, report a protocol error.
+5. If `resp_len` is 0, report a protocol error (SHM corruption).
+6. Validate `resp_len` against `response_capacity`. If `resp_len` exceeds
+   the capacity, discard the message and report an error.
 
 ### SHM_BUSYWAIT (pure spin, no kernel events)
 
@@ -177,12 +180,12 @@ sequence numbers.
 - The publication protocol is the same as SHM_HYBRID except:
   - No `SetEvent` calls.
   - No `WaitForSingleObject` calls.
-  - The waiter spins indefinitely (with deadline polling every
-    `BUSYWAIT_DEADLINE_POLL_MASK + 1` iterations to check for timeout
-    expiry).
+  - The waiter spins indefinitely, polling every
+    `BUSYWAIT_DEADLINE_POLL_MASK + 1` iterations to check timeout/peer-close
+    state and yield the current thread.
 
-This profile burns full CPU on both client and server but achieves the
-lowest possible latency.
+This profile is CPU-intensive on both client and server, but the implementation
+must periodically yield so an infinite wait does not monopolize a core.
 
 ## Close protocol
 

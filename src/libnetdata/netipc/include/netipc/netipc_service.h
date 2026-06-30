@@ -146,6 +146,8 @@ typedef struct {
   nipc_shm_ctx_t *shm; /* non-NULL if SHM profile negotiated */
   int abort_pipe[2];
   bool abort_pipe_valid;
+  pthread_mutex_t abort_pipe_lock;
+  bool abort_pipe_lock_initialized;
 #endif
 
   uint32_t call_timeout_ms;
@@ -325,7 +327,11 @@ typedef struct nipc_session_ctx {
   pthread_t thread;
 #endif
   uint64_t id;
+#if defined(_WIN32) || defined(__MSYS__)
+  volatile LONG active; /* use Interlocked* for cross-thread access */
+#else
   bool active; /* use __atomic builtins for cross-thread access */
+#endif
 } nipc_session_ctx_t;
 
 struct nipc_managed_server {
@@ -355,6 +361,7 @@ struct nipc_managed_server {
 #if defined(_WIN32) || defined(__MSYS__)
   volatile LONG running;
   volatile LONG accept_loop_active;
+  volatile LONG accept_loop_thread_id;
 #else
   bool running;
 #endif

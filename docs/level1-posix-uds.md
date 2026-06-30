@@ -35,6 +35,9 @@ fallback.
    If a stale socket file exists from a dead process, the server
    unlinks it and recreates. If the socket is actively held by a live
    process, the server fails with address-in-use.
+   If two servers start concurrently for the same service name, one may
+   lose the probe/bind race and fail with address-in-use. The contract is
+   one owner per service endpoint.
 
 2. **Client**: connects to the socket path. The OS delivers a connected
    SEQPACKET file descriptor.

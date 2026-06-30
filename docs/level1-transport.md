@@ -527,6 +527,18 @@ mandatory capability, not an optional enhancement.
   Level 1. Level 2 managed server mode provides an opinionated threading
   model on top.
 
+## Raw session thread ownership
+
+Level 1 raw session objects are mutable transport state. A single session
+object is single-owner unless the caller serializes access externally.
+
+- Multiple clients may use independent sessions concurrently.
+- A listener may accept multiple independent sessions concurrently.
+- Concurrent send/receive/close calls on the same raw session object require
+  caller-provided synchronization.
+- Code that needs a library-owned concurrency model should use the Level 2
+  managed server or typed client APIs instead of sharing raw Level 1 sessions.
+
 ## Stale endpoint recovery
 
 Service endpoints (socket files, named pipe names, SHM regions) may become
@@ -547,6 +559,10 @@ stale if a server process crashes without cleanup. Level 1 handles this:
 - `run_dir` is expected to be the embedding service's private runtime
   directory (e.g. netdata's run dir); its permissions do not gate stale
   recovery.
+- Concurrent startup of two servers for the same POSIX socket can still race
+  between stale-file probe and bind. Level 1 treats this as an address-in-use
+  startup conflict, not as a steady-state safety issue. Operators should run one
+  owner for a service endpoint.
 
 ## Testing requirements
 

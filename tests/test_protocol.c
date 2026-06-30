@@ -488,6 +488,30 @@ static void test_hello_decode_nonzero_padding(void) {
     CHECK(err == NIPC_ERR_BAD_LAYOUT, "hello nonzero padding rejected");
 }
 
+static void test_hello_decode_clears_struct_padding(void) {
+    nipc_hello_t h = {
+        .layout_version = 1,
+        .supported_profiles = NIPC_PROFILE_BASELINE,
+        .max_request_payload_bytes = 1024,
+        .max_request_batch_items = 1,
+        .max_response_payload_bytes = 1024,
+        .max_response_batch_items = 1,
+        .packet_size = 65536,
+    };
+    uint8_t buf[NIPC_HELLO_WIRE_SIZE];
+    CHECK(nipc_hello_encode(&h, buf, sizeof(buf)) == NIPC_HELLO_WIRE_SIZE,
+          "hello encode for padding clear test");
+
+    nipc_hello_t out;
+    memset(&out, 0xA5, sizeof(out));
+    nipc_error_t err = nipc_hello_decode(buf, sizeof(buf), &out);
+    CHECK(err == NIPC_OK, "hello decode clears padding ok");
+
+    const uint8_t *raw = (const uint8_t *)&out;
+    for (size_t i = NIPC_HELLO_WIRE_SIZE; i < sizeof(out); i++)
+        CHECK(raw[i] == 0, "hello decode zeroes trailing struct padding");
+}
+
 /* ================================================================== */
 /*  Hello-ack payload tests                                           */
 /* ================================================================== */
@@ -1610,6 +1634,151 @@ static void test_string_reverse_decode_no_nul(void) {
     nipc_string_reverse_view_t view;
     nipc_error_t err = nipc_string_reverse_decode(buf, n, &view);
     CHECK(err == NIPC_ERR_MISSING_NUL, "string_reverse decode missing NUL");
+}
+
+static void test_string_reverse_decode_bad_offset(void) {
+    uint8_t buf[16] = {0};
+    uint32_t offset = NIPC_STRING_REVERSE_HDR_SIZE + 1;
+    uint32_t len = 1;
+    memcpy(buf, &offset, sizeof(offset));
+    memcpy(buf + 4, &len, sizeof(len));
+    buf[offset] = 'x';
+    buf[offset + len] = '\0';
+
+    nipc_string_reverse_view_t view;
+    nipc_error_t err = nipc_string_reverse_decode(buf, sizeof(buf), &view);
+    CHECK(err == NIPC_ERR_BAD_LAYOUT, "string_reverse rejects non-canonical offset");
+}
+
+static void write_lookup_dir_entry(uint8_t *buf, size_t header_size,
+                                   uint32_t index, uint32_t offset,
+                                   uint32_t length) {
+    nipc_lookup_dir_entry_t entry = {
+        .offset = offset,
+        .length = length,
+    };
+    memcpy(buf + header_size + (size_t)index * NIPC_LOOKUP_DIR_ENTRY_SIZE,
+           &entry, sizeof(entry));
+}
+
+static void test_lookup_accessors_revalidate_manual_views(void) {
+    uint8_t cgroups_buf[64];
+    nipc_str_view_t path = {.ptr = "/x", .len = 2};
+    size_t n = nipc_cgroups_lookup_req_encode(&path, 1, cgroups_buf,
+                                              sizeof(cgroups_buf));
+    CHECK(n > 0, "cgroups lookup request encode for accessor guard");
+
+    nipc_cgroups_lookup_req_view_t cgroups_view = {
+        ._payload = cgroups_buf,
+        ._payload_len = NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE + NIPC_LOOKUP_DIR_ENTRY_SIZE,
+        .item_count = 1,
+    };
+    nipc_cgroups_lookup_req_item_t cgroups_item;
+    nipc_error_t err =
+        nipc_cgroups_lookup_req_item(&cgroups_view, 0, &cgroups_item);
+    CHECK(err == NIPC_ERR_OUT_OF_BOUNDS,
+          "cgroups lookup req accessor rejects truncated manual view");
+
+    cgroups_view._payload_len =
+        NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE + NIPC_LOOKUP_DIR_ENTRY_SIZE + 8;
+
+    write_lookup_dir_entry(cgroups_buf, NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE, 0,
+                           1, 3);
+    err = nipc_cgroups_lookup_req_item(&cgroups_view, 0, &cgroups_item);
+    CHECK(err == NIPC_ERR_BAD_ALIGNMENT,
+          "cgroups lookup req accessor rejects misaligned key");
+
+    write_lookup_dir_entry(cgroups_buf, NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE, 0,
+                           0, 1);
+    err = nipc_cgroups_lookup_req_item(&cgroups_view, 0, &cgroups_item);
+    CHECK(err == NIPC_ERR_TRUNCATED,
+          "cgroups lookup req accessor rejects short key");
+
+    write_lookup_dir_entry(cgroups_buf, NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE, 0,
+                           0, 3);
+    memcpy(cgroups_buf + NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE +
+               NIPC_LOOKUP_DIR_ENTRY_SIZE,
+           "/xy", 3);
+    err = nipc_cgroups_lookup_req_item(&cgroups_view, 0, &cgroups_item);
+    CHECK(err == NIPC_ERR_MISSING_NUL,
+          "cgroups lookup req accessor rejects missing key nul");
+
+    memcpy(cgroups_buf + NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE +
+               NIPC_LOOKUP_DIR_ENTRY_SIZE,
+           "/\0x\0", 4);
+    write_lookup_dir_entry(cgroups_buf, NIPC_CGROUPS_LOOKUP_REQ_HDR_SIZE, 0,
+                           0, 4);
+    err = nipc_cgroups_lookup_req_item(&cgroups_view, 0, &cgroups_item);
+    CHECK(err == NIPC_ERR_BAD_LAYOUT,
+          "cgroups lookup req accessor rejects interior key nul");
+
+    uint8_t cgroups_resp[256];
+    nipc_cgroups_lookup_builder_t cb;
+    nipc_cgroups_lookup_builder_init(&cb, cgroups_resp, sizeof(cgroups_resp),
+                                     1, 7);
+    CHECK(nipc_cgroups_lookup_builder_add(
+              &cb, NIPC_CGROUP_LOOKUP_KNOWN, NIPC_ORCHESTRATOR_K8S,
+              "/kubepods.slice/pod-x", 20, "pod-x", 5, NULL, 0) == NIPC_OK,
+          "cgroups lookup response accessor guard build item");
+    size_t resp_len = nipc_cgroups_lookup_builder_finish(&cb);
+    CHECK(resp_len > 0, "cgroups lookup response accessor guard finish");
+
+    nipc_cgroups_lookup_resp_view_t cgroups_resp_view;
+    CHECK(nipc_cgroups_lookup_resp_decode(cgroups_resp, resp_len,
+                                          &cgroups_resp_view) == NIPC_OK,
+          "cgroups lookup response accessor guard decode");
+
+    nipc_cgroups_lookup_item_view_t cgroups_resp_item;
+    CHECK(nipc_cgroups_lookup_resp_item(NULL, 0, &cgroups_resp_item) ==
+              NIPC_ERR_BAD_LAYOUT,
+          "cgroups lookup resp accessor rejects null view");
+    CHECK(nipc_cgroups_lookup_resp_item(&cgroups_resp_view, 0, NULL) ==
+              NIPC_ERR_BAD_LAYOUT,
+          "cgroups lookup resp accessor rejects null output");
+
+    nipc_cgroups_lookup_resp_view_t manual_resp = cgroups_resp_view;
+    manual_resp._payload_len =
+        NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE + NIPC_LOOKUP_DIR_ENTRY_SIZE - 1;
+    CHECK(nipc_cgroups_lookup_resp_item(&manual_resp, 0, &cgroups_resp_item) ==
+              NIPC_ERR_TRUNCATED,
+          "cgroups lookup resp accessor rejects truncated manual view");
+
+    manual_resp = cgroups_resp_view;
+    write_lookup_dir_entry(cgroups_resp, NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE, 0,
+                           1, NIPC_CGROUPS_LOOKUP_ITEM_HDR_SIZE);
+    CHECK(nipc_cgroups_lookup_resp_item(&manual_resp, 0, &cgroups_resp_item) ==
+              NIPC_ERR_BAD_ALIGNMENT,
+          "cgroups lookup resp accessor rejects misaligned item");
+
+    write_lookup_dir_entry(cgroups_resp, NIPC_CGROUPS_LOOKUP_RESP_HDR_SIZE, 0,
+                           0, UINT32_MAX);
+    CHECK(nipc_cgroups_lookup_resp_item(&manual_resp, 0, &cgroups_resp_item) ==
+              NIPC_ERR_OUT_OF_BOUNDS,
+          "cgroups lookup resp accessor rejects oob item");
+
+    const uint8_t *raw_item = NULL;
+    uint32_t raw_len = 0;
+    CHECK(nipc_cgroups_lookup_resp_raw_item(NULL, 0, &raw_item, &raw_len) ==
+              NIPC_ERR_BAD_LAYOUT,
+          "cgroups lookup raw accessor rejects null view");
+    CHECK(nipc_cgroups_lookup_resp_raw_item(&manual_resp, 0, &raw_item,
+                                            &raw_len) == NIPC_ERR_OUT_OF_BOUNDS,
+          "cgroups lookup raw accessor rejects oob item");
+
+    uint8_t apps_buf[64];
+    uint32_t pid = 1234;
+    n = nipc_apps_lookup_req_encode(&pid, 1, apps_buf, sizeof(apps_buf));
+    CHECK(n > 0, "apps lookup request encode for accessor guard");
+
+    nipc_apps_lookup_req_view_t apps_view = {
+        ._payload = apps_buf,
+        ._payload_len = NIPC_APPS_LOOKUP_REQ_HDR_SIZE + NIPC_LOOKUP_DIR_ENTRY_SIZE,
+        .item_count = 1,
+    };
+    nipc_apps_lookup_req_item_t apps_item;
+    err = nipc_apps_lookup_req_item(&apps_view, 0, &apps_item);
+    CHECK(err == NIPC_ERR_OUT_OF_BOUNDS,
+          "apps lookup req accessor rejects truncated manual view");
 }
 
 /* ================================================================== */
@@ -3570,6 +3739,7 @@ int main(void) {
     test_hello_decode_bad_layout();
     test_hello_encode_too_small();
     test_hello_decode_nonzero_padding();
+    test_hello_decode_clears_struct_padding();
 
     /* Hello-ack tests */
     test_hello_ack_roundtrip();
@@ -3640,6 +3810,8 @@ int main(void) {
     test_string_reverse_decode_truncated();
     test_string_reverse_decode_oob();
     test_string_reverse_decode_no_nul();
+    test_string_reverse_decode_bad_offset();
+    test_lookup_accessors_revalidate_manual_views();
     test_dispatch_increment_bad_input();
     test_dispatch_increment_handler_fails();
     test_dispatch_increment_resp_too_small();

@@ -86,6 +86,42 @@ static bool server_prepare_accept_config(nipc_managed_server_t *server,
   return cfg_out->supported_profiles != 0;
 }
 
+static void server_accept_loop_mark_active(nipc_managed_server_t *server) {
+  if (!server || !server->sessions)
+    return;
+
+  pthread_mutex_lock(&server->sessions_lock);
+  server->acceptor_thread = pthread_self();
+  server->acceptor_started = true;
+  pthread_mutex_unlock(&server->sessions_lock);
+}
+
+static void server_accept_loop_mark_inactive(nipc_managed_server_t *server) {
+  if (!server || !server->sessions)
+    return;
+
+  pthread_mutex_lock(&server->sessions_lock);
+  server->acceptor_started = false;
+  pthread_mutex_unlock(&server->sessions_lock);
+}
+
+static void server_wait_accept_loop_inactive(nipc_managed_server_t *server) {
+  if (!server || !server->sessions)
+    return;
+
+  for (;;) {
+    pthread_mutex_lock(&server->sessions_lock);
+    bool active = server->acceptor_started;
+    bool current_thread =
+        active && pthread_equal(server->acceptor_thread, pthread_self());
+    pthread_mutex_unlock(&server->sessions_lock);
+
+    if (!active || current_thread)
+      return;
+    nipc_service_posix_sleep_us(1000);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Public API: managed server                                         */
 /* ------------------------------------------------------------------ */
@@ -150,6 +186,7 @@ nipc_server_init_raw_for_tests(nipc_managed_server_t *server,
 
 void nipc_server_run(nipc_managed_server_t *server) {
   __atomic_store_n(&server->running, true, __ATOMIC_RELEASE);
+  server_accept_loop_mark_active(server);
 
   while (__atomic_load_n(&server->running, __ATOMIC_RELAXED)) {
     /* Poll the listener fd before blocking on accept */
@@ -264,6 +301,8 @@ void nipc_server_run(nipc_managed_server_t *server) {
       free(sctx);
     }
   }
+
+  server_accept_loop_mark_inactive(server);
 }
 
 void nipc_server_stop(nipc_managed_server_t *server) {
@@ -277,6 +316,7 @@ bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms) {
    * loop will exit on its next poll timeout (100ms). The listener
    * is closed later by nipc_server_destroy(). */
   __atomic_store_n(&server->running, false, __ATOMIC_RELEASE);
+  server_wait_accept_loop_inactive(server);
 
   /* 2. Wait for in-flight sessions to complete */
   bool all_drained = true;
@@ -352,6 +392,7 @@ bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms) {
 void nipc_server_destroy(nipc_managed_server_t *server) {
   __atomic_store_n(&server->running, false, __ATOMIC_RELEASE);
   nipc_uds_close_listener(&server->listener);
+  server_wait_accept_loop_inactive(server);
 
   /* Join all active session threads */
   if (server->sessions) {

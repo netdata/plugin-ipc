@@ -319,7 +319,7 @@ static bool server_has_active_sessions(nipc_managed_server_t *server)
         nipc_session_ctx_t *session = server->sessions[i];
         if (!session)
             continue;
-        if (InterlockedCompareExchange((volatile LONG *)&session->active, 0, 0)) {
+        if (InterlockedCompareExchange(&session->active, 0, 0)) {
             active = true;
             break;
         }

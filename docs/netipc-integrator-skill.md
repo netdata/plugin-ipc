@@ -157,6 +157,7 @@ Non-negotiable rule:
   - retries / reconnects
   - raw payload encode/decode
   - batch and chunk rules
+  - single-owner or externally locked access to each raw session object
 
 Use L1 for:
 
