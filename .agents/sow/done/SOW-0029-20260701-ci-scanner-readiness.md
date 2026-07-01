@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: implementation, validation, and artifact updates completed.
+Sub-state: regression fix implemented and locally validated; GitHub CodeQL must be checked immediately after push because no local CodeQL CLI is installed.
 
 ## Requirements
 
@@ -291,15 +291,16 @@ Follow-up mapping:
 
 Follow-up mapping:
 
-- Pending.
+- The pushed GitHub CodeQL run for this regression commit must be checked immediately after push. If the alert remains live on the new commit, reopen this SOW again as a continued regression.
 
 ## Outcome
 
-Pending.
+Scanner-readiness cleanup is complete locally. The first pushed implementation left one live CodeQL suppression-placement alert; this regression fix moves the suppression into the official CodeQL-supported position without changing runtime behavior.
 
 ## Lessons Extracted
 
-Pending.
+- For CodeQL C/C++ alert suppressions, `// codeql[query-id]` must be a standalone comment on the line before the alert, not an end-of-line comment.
+- When local CodeQL is unavailable, pushed GitHub CodeQL is the first authoritative validation point; any suppression-only fix must be checked remotely immediately after push.
 
 ## Followup
 
@@ -307,4 +308,61 @@ None yet.
 
 ## Regression Log
 
-None yet.
+See the appended regression section below.
+
+## Regression - 2026-07-01 Remote CodeQL Suppression Placement
+
+What broke:
+
+- After commit `d00beebb0538b478a9e8515b1e75439bc1efb208` was pushed, GitHub Actions completed successfully, but GitHub Code Scanning still reported one live CodeQL alert:
+  - rule: `cpp/stack-address-escape`
+  - file: `src/libnetdata/netipc/src/service/netipc_service_posix_server.c`
+  - line: assignment of `sctx->server = server`
+  - commit: `d00beebb0538b478a9e8515b1e75439bc1efb208`
+
+Evidence:
+
+- `gh run list --repo netdata/plugin-ipc --commit d00beebb0538b478a9e8515b1e75439bc1efb208` showed all GitHub Actions workflows completed successfully.
+- `gh api repos/netdata/plugin-ipc/code-scanning/alerts/7758` showed the `cpp/stack-address-escape` instance on the pushed commit.
+- Official CodeQL documentation says `// codeql[query-id]` suppression comments must be on a blank line before the alert. The original fix placed the suppression on the assignment line, so CodeQL did not apply it.
+
+Why previous validation missed it:
+
+- Local CodeQL CLI is not installed, so the first authoritative CodeQL validation was the GitHub run after push.
+- The local source review used the correct query id but the wrong comment placement.
+
+Repair plan:
+
+1. Move the `// codeql[cpp/stack-address-escape]` comment to its own line immediately before the assignment.
+2. Keep the existing lifetime explanation in the source.
+3. Run focused local validation and SOW audit.
+4. Commit, push, and re-check GitHub Code Scanning for the pushed commit.
+
+Validation plan:
+
+- `cmake --build build --target netipc_service`
+- `/usr/bin/ctest --test-dir build --output-on-failure -R service`
+- `bash .agents/sow/audit.sh`
+- `git diff --check`
+- GitHub CodeQL check after push.
+
+Validation results:
+
+- `cmake --build build --target netipc_service` passed.
+- `/usr/bin/ctest --test-dir build --output-on-failure -R service` passed, 9/9 tests.
+- Local CodeQL validation was not available: `command -v codeql`, `~/.local/bin`, and `gh extension list` showed no CodeQL CLI or extension installed.
+
+Artifact updates:
+
+- AGENTS.md: no update needed; the workflow rule did not change.
+- Runtime project skills: no update needed; no reusable project operation changed.
+- Specs: no update needed; public API, wire format, transport semantics, and behavior did not change.
+- End-user/operator docs: no update needed; no user-facing behavior changed.
+- End-user/operator skills: no update needed.
+- SOW lifecycle: this completed SOW was moved back to `current/`, marked `in-progress`, this regression section was appended after the original SOW narrative, then the SOW was marked `completed` again for the regression fix commit.
+
+Outcome:
+
+- The source now uses the CodeQL-documented suppression placement.
+- Runtime behavior is unchanged.
+- Remote GitHub CodeQL must be rechecked after this commit is pushed.
