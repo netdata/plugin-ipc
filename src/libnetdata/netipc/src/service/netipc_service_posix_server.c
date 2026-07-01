@@ -265,9 +265,6 @@ void nipc_server_run(nipc_managed_server_t *server) {
       continue;
     }
 
-    /* The caller-owned server object stays live until destroy joins sessions. */
-    // codeql[cpp/stack-address-escape]
-    sctx->server = server;
     sctx->session = session;
     sctx->shm = shm;
     sctx->id = sid;
@@ -277,9 +274,33 @@ void nipc_server_run(nipc_managed_server_t *server) {
     pthread_mutex_unlock(&server->sessions_lock);
 
     /* Spawn handler thread for this session */
-    int rc = nipc_service_posix_pthread_create(
-        &sctx->thread, NULL, nipc_service_posix_session_handler_thread, sctx);
-    if (rc != 0) {
+    nipc_posix_session_start_arg_t start_arg = {
+        .copied = false,
+        .server = server,
+        .session = sctx,
+    };
+    int start_mutex_rc = pthread_mutex_init(&start_arg.lock, NULL);
+    int start_cond_rc = start_mutex_rc == 0
+                            ? pthread_cond_init(&start_arg.copied_cond, NULL)
+                            : -1;
+    int rc = -1;
+    if (start_mutex_rc == 0 && start_cond_rc == 0) {
+      rc = nipc_service_posix_pthread_create(
+          &sctx->thread, NULL, nipc_service_posix_session_handler_thread,
+          &start_arg);
+    }
+    if (rc == 0) {
+      pthread_mutex_lock(&start_arg.lock);
+      while (!start_arg.copied)
+        pthread_cond_wait(&start_arg.copied_cond, &start_arg.lock);
+      pthread_mutex_unlock(&start_arg.lock);
+    }
+    if (start_cond_rc == 0)
+      pthread_cond_destroy(&start_arg.copied_cond);
+    if (start_mutex_rc == 0)
+      pthread_mutex_destroy(&start_arg.lock);
+
+    if (start_mutex_rc != 0 || start_cond_rc != 0 || rc != 0) {
       /* Thread creation failed: clean up */
       pthread_mutex_lock(&server->sessions_lock);
       /* Remove the sctx we just added */

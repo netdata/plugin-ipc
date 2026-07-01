@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: regression fix implemented and locally validated; GitHub CodeQL must be checked immediately after push because no local CodeQL CLI is installed.
+Sub-state: continued CodeQL regression fixed with source-level POSIX session-thread handoff change, low-priority validation policy added, and local validation completed.
 
 ## Requirements
 
@@ -366,3 +366,80 @@ Outcome:
 - The source now uses the CodeQL-documented suppression placement.
 - Runtime behavior is unchanged.
 - Remote GitHub CodeQL must be rechecked after this commit is pushed.
+
+## Regression - 2026-07-01 Continued Stack Pointer Escape Alert
+
+What broke:
+
+- Commit `90305c116eae9b81202f2311c1636a4b1ac31a2c` moved the CodeQL suppression to the documented position and GitHub CodeQL completed successfully.
+- GitHub Code Scanning marked the old alert `7758` fixed, but opened new alert `7725` for the same `cpp/stack-address-escape` rule at the same server-pointer assignment, now shifted to line 270.
+
+Evidence:
+
+- `gh api repos/netdata/plugin-ipc/code-scanning/alerts/7758` reported `state=fixed` at `2026-07-01T07:10:21Z`.
+- `gh api repos/netdata/plugin-ipc/code-scanning/alerts/7725` reported a live `cpp/stack-address-escape` instance on commit `90305c116eae9b81202f2311c1636a4b1ac31a2c`.
+- CodeQL C/C++ POSIX analysis for `90305c116eae9b81202f2311c1636a4b1ac31a2c` had `results_count=1`.
+
+Why previous validation missed it:
+
+- The previous fix relied on CodeQL suppression behavior. GitHub Code Scanning did not suppress this alert in the repository's current CodeQL setup.
+- Local CodeQL is still unavailable, so remote GitHub CodeQL remains the first authoritative check.
+
+Repair plan:
+
+1. Stop storing the caller-owned POSIX server pointer in the heap session context.
+2. Pass the server pointer and session context to the POSIX session thread through a stack start argument guarded by a mutex and condition variable.
+3. Make the accept loop wait until the child thread copies those arguments before the stack object leaves scope.
+4. Keep the existing session lifetime and shutdown behavior unchanged.
+5. Validate POSIX service tests locally, close the SOW, push, and re-check GitHub Code Scanning.
+
+Risk:
+
+- This changes the POSIX session-thread start path. The runtime behavior should stay the same, but validation must cover service tests because a missed handoff synchronization bug could deadlock or race at session startup.
+
+Validation plan:
+
+- `cmake --build build --target netipc_service`
+- `tests/run-low-priority.sh /usr/bin/ctest --test-dir build --output-on-failure -R service`
+- SOW audit and `git diff --check`
+- GitHub CodeQL after push
+
+Additional user request during validation:
+
+- The user asked that validation and benchmark scripts/instructions always use low scheduler priority so the desktop remains responsive while still allowing the workstation to use its full available capacity.
+
+Process update:
+
+- Added `tests/run-low-priority.sh` as a reusable wrapper for direct commands and as a sourceable helper for validation scripts.
+- Updated validation and benchmark shell scripts under `tests/` that have a standard Bash prologue to self-reexec through the helper.
+- Updated `AGENTS.md` project commands so direct CTest and other long validation commands use `tests/run-low-priority.sh`.
+- Updated `docs/netipc-integrator-skill.md`, `docs/README.md`, and `docs/code-organization.md` because validation command guidance changed.
+
+Low-priority validation evidence:
+
+- `tests/run-low-priority.sh bash -c 'printf "ni=%s\n" "$(ps -o ni= -p $$ | tr -d " ")"'` printed `ni=19`.
+- `ps` showed the active `ctest` process and its Go fuzz children running with nice value `19`.
+
+Validation results:
+
+- `cmake --build build --target netipc_service` passed.
+- `/usr/bin/ctest --test-dir build --output-on-failure -R service` passed, 9/9 tests.
+- Full low-priority CTest passed: `nice -n 19 ionice -c 3 /usr/bin/ctest --test-dir build --output-on-failure`, 48/48 tests, total real time 478.30 seconds.
+- `bash -n tests/*.sh` passed after adding the low-priority helper and script prologues.
+- `git diff --check` passed after the source, script, docs, and SOW changes.
+
+Artifact updates:
+
+- AGENTS.md: updated direct local validation command guidance to use `tests/run-low-priority.sh`.
+- Runtime project skills: no runtime input skill update needed; the new rule is repository-wide command behavior, not Netdata vendoring-specific procedure.
+- Specs: no update needed; no public API, wire format, data format, or transport semantics changed.
+- End-user/operator docs: updated `docs/README.md` and `docs/code-organization.md` because validation command behavior changed.
+- End-user/operator skills: updated `docs/netipc-integrator-skill.md` because validation guidance changed.
+- SOW lifecycle: this SOW was reopened for the continued CodeQL regression and marked completed again after validation.
+
+Outcome:
+
+- The POSIX session context no longer stores the caller-owned server pointer in heap session state.
+- The POSIX session thread receives the server pointer through a synchronized stack start argument and copies it before the accept loop continues.
+- Local validation and benchmark scripts now self-run at low CPU/I/O scheduler priority by default.
+- GitHub CodeQL must be checked again after push; if a same-rule alert remains on the new commit, this SOW must be reopened again.

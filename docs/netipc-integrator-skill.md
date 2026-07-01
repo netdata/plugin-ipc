@@ -1270,6 +1270,9 @@ it should:
 9. Add tests for codec, L2, interop, and L3 if applicable.
 10. Add operational logs at the plugin boundary.
 11. Validate Linux and Windows behavior before claiming the integration is ready.
+   - Run long local validation and benchmarks through
+     `tests/run-low-priority.sh` or the repository test scripts, which self-run
+     at low scheduler priority.
 12. State the provider synchronization model explicitly.
 13. State the client/cache ownership model explicitly.
 14. Verify view/reference validity boundaries before sharing any returned data.

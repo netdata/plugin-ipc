@@ -11,6 +11,9 @@
 
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/run-low-priority.sh"
+netipc_low_priority_self "$@"
+
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'

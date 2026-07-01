@@ -349,7 +349,9 @@ for their respective ecosystems:
 - `go.mod`: Go module metadata (used by CMake via go invocation)
 
 All validation and benchmark workflows must be runnable through CMake
-targets. Shell scripts remain thin orchestrators that CMake invokes.
+targets. Shell scripts remain thin orchestrators that CMake invokes. Local
+validation and benchmark scripts self-reexec through `tests/run-low-priority.sh`
+so they run with low CPU/I/O scheduler priority on developer workstations.
 
 ## Cross-language consistency
 

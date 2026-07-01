@@ -143,6 +143,9 @@ universal rules are:
 - High test coverage with enforced minimums (90%+ line coverage
   on POSIX via `run-coverage-{c,rust,go}.sh`; Windows coverage is
   verified via unit tests and cross-language interop, not lcov/llvm-cov)
+- Local validation and benchmark commands run at low scheduler priority through
+  `tests/run-low-priority.sh` so developer desktops remain responsive; direct
+  long-running commands should use that wrapper.
 - Fuzz testing for all parsing/decoding paths
 - Cross-language interop tests for all wire contracts, over both
   baseline and SHM transports
