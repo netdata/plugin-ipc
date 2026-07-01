@@ -4,7 +4,7 @@
 
 Status: in-progress
 
-Sub-state: preflight found one Netdata-only vendored-source Sonar cleanup that must be backported to `plugin-ipc` before copying source into Netdata.
+Sub-state: Netdata vendoring exposed a missing public L3 cache enumeration API required by the eBPF cgroup consumer; implementation is paused for a user design decision.
 
 ## Requirements
 
@@ -37,6 +37,7 @@ Inferences:
 Unknowns:
 
 - Whether the next pushed source commit will keep GitHub and Codacy checks green; this must be checked before copying into Netdata.
+- Whether the L3 cache public API should grow a borrowed scan/enumeration operation, an allocated snapshot-copy operation, or a different integration path for consumers that need to process every cached cgroup item.
 
 ### Acceptance Criteria
 
@@ -155,7 +156,7 @@ Open-source reference evidence:
 
 Open decisions:
 
-None currently blocking. The target checkout is `~/src/netdata-ktsaou.git`; branch/PR handling will be determined after local validation so unrelated local files are not staged.
+- 2026-07-01: Netdata vendoring blocks on an L3 cache API decision. The new guarded cache contract supports borrowed lookup by key, but Netdata's eBPF cgroup integration needs to enumerate all cached cgroup items after each refresh.
 
 ## Implications And Decisions
 
@@ -199,6 +200,64 @@ None currently blocking. The target checkout is `~/src/netdata-ktsaou.git`; bran
   - `git diff --check`: passed.
   - `bash .agents/sow/audit.sh`: passed.
 - Note: the unqualified `ctest` in the user-local PATH failed because its Python `cmake` module was unavailable, so validation used `/usr/bin/ctest`.
+- Committed and pushed source backport as `bb7a73e0e2b871352eeb3c4403afbd69649a351d`.
+- Source post-push preflight for `bb7a73e0e2b871352eeb3c4403afbd69649a351d`:
+  - GitHub Actions/check-runs: all completed successfully; Valgrind was skipped by workflow policy.
+  - Current-commit GitHub code-scanning analyses: zero results for CodeQL C/C++ POSIX, CodeQL C/C++ Windows, CodeQL Go POSIX, CodeQL Go Windows, CodeQL Rust, Semgrep, gosec, OSV, and Codacy local.
+  - GitHub open code-scanning alerts: only stale Semgrep alert `7750` remains on old commit `b4dfe405e1f99be417c21a9c0478aba2f64facaa`; not present in the current commit analyses.
+  - GitHub Dependabot open alerts: none.
+  - GitHub secret-scanning open alerts: none.
+  - Codacy Cloud analyzed `bb7a73e0e2b871352eeb3c4403afbd69649a351d`; repository problems were empty and coverage was 90%.
+  - Codacy Cloud issues remain the 23 previously accepted Go standard-library dependency findings at `src/go/go.mod:3`, tied to the required `go 1.26.0` compatibility.
+- Pre-vendor decision after source post-push preflight: proceed to Netdata vendoring from `bb7a73e0e2b871352eeb3c4403afbd69649a351d`.
+- Netdata vendoring from `bb7a73e0e2b871352eeb3c4403afbd69649a351d` exposed a compile blocker in `src/collectors/ebpf.plugin/ebpf_cgroup.c`:
+  - Netdata still reads removed public cache fields: `ebpf_cgroup_cache.item_count`, `ebpf_cgroup_cache.generation`, `ebpf_cgroup_cache.systemd_enabled`, and `ebpf_cgroup_cache.items`.
+  - Source evidence: `src/libnetdata/netipc/include/netipc/netipc_service.h` exposes `nipc_cgroups_cache_status()`, `nipc_cgroups_cache_read_lock()`, `nipc_cgroups_cache_get()`, `nipc_cgroups_cache_item_dup()`, and `nipc_cgroups_cache_item_free()`, but no public enumeration operation.
+  - Source implementation evidence: `src/libnetdata/netipc/src/service/netipc_service_cgroups_cache_common.c` keeps `snapshot->views` and `snapshot->item_count` internally, so read-guarded enumeration can be implemented without exposing mutable snapshot internals.
+  - Netdata consumer evidence: `src/collectors/ebpf.plugin/ebpf_cgroup.c` counts enabled items and rebuilds eBPF cgroup targets by iterating every cached item. Key-based lookup alone cannot express this workflow.
+- Implementation paused before changing source API or Netdata consumer code because the correct public API shape is a design decision.
+- Follow-up risk review found that `ebpf.plugin` does not appear to be an L3 hot-lookup consumer:
+  - One cgroup integration thread calls `ebpf_parse_cgroup_netipc_data()` periodically.
+  - Other eBPF module threads consume the derived `ebpf_cgroup_pids` table protected by `mutex_cgroup_shm`; they do not look up items in the NetIPC L3 cache.
+  - The direct L2 snapshot API already supports `fetch -> iterate response view -> process`, using `nipc_client_call_cgroups_snapshot()` and `nipc_cgroups_resp_item()`.
+  - Risks of replacing L3 with direct L2 in `ebpf.plugin` are manageable if implementation preserves existing failure semantics: on failed fetch, return before touching `ebpf_cgroup_pids`; on successful fetch, use borrowed response views only before the next typed call or client close; keep the 5000 ms call timeout and abort path; preserve empty-snapshot behavior.
+- Accepted plan: do not add a new L3 enumeration API for this vendoring fix; adapt `ebpf.plugin` to use a plain `nipc_client_ctx_t` and direct L2 snapshot fetch/process.
+- User decision: switch `ebpf.plugin` to direct L2 snapshot fetch/process for this vendoring fix. Do not add a new L3 enumeration API in `plugin-ipc`.
+- Implemented the Netdata-side consumer adaptation in `src/collectors/ebpf.plugin/ebpf_cgroup.c`:
+  - replaced the local `nipc_cgroups_cache_t` instance with a plain `nipc_client_ctx_t`;
+  - replaced `nipc_cgroups_cache_refresh()` and direct cache field reads with `nipc_client_refresh()`, `nipc_client_call_cgroups_snapshot_timeout()`, and `nipc_cgroups_resp_item()`;
+  - preserved existing failure behavior by returning before modifying `ebpf_cgroup_pids` on fetch or item-decode failure;
+  - preserved the 5000 ms timeout, shutdown abort path, empty-snapshot preservation behavior, and `mutex_cgroup_shm` publication boundary.
+- Netdata validation after the L2 switch:
+  - `git diff --check -- src/collectors/ebpf.plugin/ebpf_cgroup.c`: passed.
+  - Stale L3 field/type scan in `src/collectors/ebpf.plugin/ebpf_cgroup.c`: no `nipc_cgroups_cache`, `ebpf_cgroup_cache.*`, or removed cache-field usage remained.
+  - Fresh CMake build target `ebpf.plugin`: passed.
+  - Fresh CMake build targets `apps-lookup-netipc-lock-test`, `apps-cgroups-lookup-client-abort-test`, and `cgroup-lookup-netipc-test`: passed.
+  - Direct test binary runs for those three targets: passed.
+  - `/usr/bin/ctest --test-dir <fresh-build> -N`: zero registered tests in this temporary build, so the linked binaries were run directly.
+- Netdata branch, commit, and PR:
+  - branch: `netipc-vendor-bb7a73e`;
+  - commit: `705d587ec2` (`Update vendored NetIPC to bb7a73e`);
+  - draft PR: `netdata/netdata#22936` (`https://github.com/netdata/netdata/pull/22936`).
+  - initial PR check snapshot: 11 passing, 43 pending, 10 skipped, 0 failing.
+- PR `netdata/netdata#22936` later reported CI/scanner failures against commit `705d587ec2`:
+  - GitHub Actions Go toolchain jobs failed in the `go fix ./...` step because Go 1.26 rewrote `src/go/pkg/netipc/service/raw/cache_test.go`.
+  - Codacy Cloud reported three new issues: one Cppcheck unread variable in `src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`, and two Flawfinder `umask()` findings in `src/libnetdata/netipc/src/transport/posix/netipc_uds_lifecycle.c`.
+  - SonarCloud reported `strlen()` safety findings in `src/libnetdata/netipc/src/service/netipc_service_cgroups_cache_common.c`, one `strlen()` finding in Netdata-only `src/collectors/ebpf.plugin/ebpf_cgroup.c`, one `umask()` security finding, and a duplicated-lines quality-gate failure.
+- Source-side fixes prepared before re-vendoring:
+  - applied the Go 1.26 `go fix` rewrite in `src/go/pkg/netipc/service/raw/cache_test.go`;
+  - removed the duplicated Unix-only cache fallback/control test because `src/go/pkg/netipc/service/raw/cache_common_test.go` already covers the same behavior on all platforms;
+  - replaced scanner-flagged `strlen()` use in `src/libnetdata/netipc/src/service/netipc_service_cgroups_cache_common.c` with local NUL-terminated string length walking;
+  - added Flawfinder and Sonar suppressions to the intentional `umask()` hardening calls that bind UDS sockets as `0600` without a post-bind permission window;
+  - removed post-spin `observed = true` assignments in the Windows SHM receive loop that were no longer read after the loop branch exits.
+- Source-side validation for the CI/scanner repair:
+  - `go fmt ./pkg/netipc/service/raw && go fix ./pkg/netipc/service/raw && go test -count=1 ./pkg/netipc/service/raw`: passed.
+  - `go test -count=1 ./pkg/netipc/...`: passed.
+  - `flawfinder --minlevel=5 --error-level=5 src/libnetdata/netipc/src/transport/posix/netipc_uds_lifecycle.c`: passed with zero hits; two intentional `umask()` hits were suppressed.
+  - `cppcheck --enable=style --inline-suppr --quiet --suppress=missingIncludeSystem src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c`: no unread-variable finding remained; only const-style suggestions were reported.
+  - `cmake --build build --target netipc_uds`: passed.
+  - `cmake --build build --target netipc_service`: passed.
+  - `/usr/bin/ctest --test-dir build --output-on-failure -R 'uds|shm|service|cgroups|cache'`: 22/22 passed.
 
 ## Validation
 
@@ -206,9 +265,10 @@ Acceptance criteria evidence:
 
 - Selected Netdata checkout confirmed: `~/src/netdata-ktsaou.git`.
 - Source preflight completed before Netdata vendoring: CI/checks, GitHub code scanning, Dependabot, secret scanning, and Codacy Cloud were checked for `fe4e31633b5372b3c93e21f9e37b38f2407aaed1`.
+- Source post-backport preflight completed before Netdata vendoring: CI/checks, GitHub code scanning, Dependabot, secret scanning, and Codacy Cloud were checked for `bb7a73e0e2b871352eeb3c4403afbd69649a351d`.
 - Two-way gap analysis completed before vendoring and recorded in the 2026-07-01 execution log.
 - Valid Netdata-only vendored-source drift was backported to `plugin-ipc` before any Netdata copy.
-- Netdata vendoring, Netdata validation, Netdata commit, and post-vendor evidence are not started yet.
+- Netdata vendoring is implemented in the target checkout and the eBPF L2 adaptation builds; the first PR commit exposed CI/scanner findings that are being fixed source-first before re-vendoring.
 
 Tests or equivalent validation:
 
@@ -218,11 +278,14 @@ Tests or equivalent validation:
   - source same-pattern numeric lowercase `ull` search, no matches;
   - `git diff --check`;
   - SOW audit.
-- GitHub/Codacy validation for the new source backport commit is pending until the commit is pushed.
+- GitHub/Codacy validation for the new source backport commit passed as recorded above.
+- Source-side CI/scanner repair validation passed locally as recorded in the 2026-07-01 execution log. Remote source CI/scanner validation is pending until the repair commit is pushed.
 
 Real-use evidence:
 
-- Not started for Netdata; vendor copy has not been modified yet.
+- Netdata compile evidence exists from the fresh temporary CMake build:
+  - vendored NetIPC C target `netipc` built successfully;
+  - `ebpf.plugin` built successfully after switching the consumer to L2.
 
 Reviewer findings:
 
@@ -231,6 +294,7 @@ Reviewer findings:
 Same-failure scan:
 
 - Source same-pattern scan for lowercase numeric `ull` suffixes in `src/libnetdata/netipc` returned no matches.
+- Netdata eBPF same-failure scan found no remaining removed L3 cache field/type usage in `src/collectors/ebpf.plugin/ebpf_cgroup.c`.
 
 Sensitive data gate:
 
@@ -243,27 +307,27 @@ Artifact maintenance gate:
 - Specs: no update needed until implementation changes behavior.
 - End-user/operator docs: no update needed until implementation changes behavior.
 - End-user/operator skills: no update needed until implementation changes behavior.
-- SOW lifecycle: created as open in `.agents/sow/pending/`.
+- SOW lifecycle: moved from pending to current before source backport and Netdata vendoring; remains in progress until Netdata commit, post-vendor checks, and final review are complete.
 
 Specs update:
 
-- Not started.
+- No source spec update was needed for the Netdata-side L2 switch; it uses the existing cgroups-snapshot client API.
 
 Project skills update:
 
-- Not started.
+- Already updated earlier in this SOW family with the mandatory vendoring preflight and two-way gap analysis workflow; no additional skill change needed for the eBPF L2 consumer adaptation.
 
 End-user/operator docs update:
 
-- Not started.
+- No end-user/operator docs update needed; the Netdata eBPF plugin behavior and configuration stay the same.
 
 End-user/operator skills update:
 
-- Not started.
+- No end-user/operator skill update needed.
 
 Lessons:
 
-- None yet.
+- Not every consumer that iterates cgroups needs the NetIPC L3 cache. If the consumer is a single periodic importer that publishes its own protected derived table, direct L2 fetch/process can be simpler and avoids exposing an unnecessary cache enumeration API.
 
 Follow-up mapping:
 
@@ -271,11 +335,11 @@ Follow-up mapping:
 
 ## Outcome
 
-Pending.
+In progress. Source backport and pre-vendor checks are complete, Netdata vendoring is copied, and the eBPF consumer now builds against the vendored opaque NetIPC cache API by using direct L2 snapshot access. Draft PR `netdata/netdata#22936` is open; its first commit exposed Go fix, Codacy, and Sonar findings that are being repaired source-first before re-vendoring. Post-vendor CI/scanner checks and final SOW closure are not complete yet.
 
 ## Lessons Extracted
 
-Pending.
+- Avoid adding a public L3 enumeration API only to satisfy a single-threaded periodic importer; first check whether the consumer is actually a hot multi-threaded lookup user or just a fetch/process pipeline.
 
 ## Followup
 
