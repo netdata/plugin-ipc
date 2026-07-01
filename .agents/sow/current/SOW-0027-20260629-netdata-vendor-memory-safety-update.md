@@ -69,6 +69,22 @@ Risks:
 - Updating the wrong Netdata checkout can create unrelated branch drift.
 - Skipping the vendor diff can hide missing language-specific updates.
 
+### PR CI Follow-up - 2026-07-01
+
+Evidence:
+
+- Netdata PR `netdata/netdata#22936` passed Codacy after source commit `e2bd45254b9f7182692fda8ed7c811d57fd03397` was vendored.
+- SonarCloud then reported zero open issues, but the quality gate still failed on duplication density: `new_duplicated_lines_density=3.0010718113612005`, threshold `3`.
+- Sonar duplication evidence pointed to `src/go/pkg/netipc/protocol/cgroups_lookup.go`:
+  - duplicated block at lines 313-341 and 386-414: repeated cgroups lookup item-header parsing in validation and decode paths;
+  - smaller duplicated builder conversion blocks later in the same file and against `apps_lookup.go`.
+
+Plan:
+
+- Fix the largest duplicated source block in `plugin-ipc`, not directly in Netdata, by extracting private cgroups lookup item-header parsing into one helper.
+- Keep the wire format, public Go API, and validation semantics unchanged.
+- Run focused Go protocol tests in source, commit/push source, then re-vendor into Netdata and re-check Sonar.
+
 ## Pre-Implementation Gate
 
 Status: in-progress
