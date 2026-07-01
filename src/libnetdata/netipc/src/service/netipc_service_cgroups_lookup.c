@@ -194,8 +194,10 @@ cgroups_lookup_clone_oversized_request_item(const nipc_str_view_t *path,
   size_t item_start = nipc_align8(data);
   if (item_start < data)
     return NIPC_ERR_OVERFLOW;
+#if SIZE_MAX <= UINT32_MAX
   if ((size_t)path->len > SIZE_MAX - NIPC_CGROUPS_LOOKUP_ITEM_HDR_SIZE - 2u)
     return NIPC_ERR_OVERFLOW;
+#endif
 
   size_t item_size =
       NIPC_CGROUPS_LOOKUP_ITEM_HDR_SIZE + (size_t)path->len + 2u;

@@ -114,8 +114,10 @@ nipc_error_t nipc_cgroups_resp_item(const nipc_cgroups_resp_view_t *view,
 
     size_t dir_start = NIPC_CGROUPS_RESP_HDR_SIZE;
     size_t dir_size  = (size_t)view->item_count * NIPC_CGROUPS_DIR_ENTRY_SIZE;
+#if SIZE_MAX <= UINT32_MAX
     if (dir_start > SIZE_MAX - dir_size)
         return NIPC_ERR_BAD_ITEM_COUNT;
+#endif
     size_t packed_area_start = dir_start + dir_size;
     if (packed_area_start > view->_payload_len)
         return NIPC_ERR_TRUNCATED;

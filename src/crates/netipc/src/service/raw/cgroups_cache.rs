@@ -87,7 +87,9 @@ impl CgroupsCacheState {
 }
 
 fn lock_mutex<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
@@ -128,11 +130,7 @@ fn cache_build_buckets(items: &[CgroupsCacheItem]) -> Vec<CgroupsHashBucket> {
 }
 
 impl CgroupsCacheSnapshot {
-    fn from_items(
-        items: Vec<CgroupsCacheItem>,
-        systemd_enabled: u32,
-        generation: u64,
-    ) -> Self {
+    fn from_items(items: Vec<CgroupsCacheItem>, systemd_enabled: u32, generation: u64) -> Self {
         let buckets = cache_build_buckets(&items);
         Self {
             items,

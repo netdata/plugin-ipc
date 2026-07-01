@@ -4604,8 +4604,7 @@ fn test_cache_concurrent_readers_refresh() {
                 let guard = cache.read_lock();
                 match guard.get(1001, "docker-abc123") {
                     Some(view)
-                        if view.hash == 1001
-                            && view.path == "/sys/fs/cgroup/docker/abc123" =>
+                        if view.hash == 1001 && view.path == "/sys/fs/cgroup/docker/abc123" =>
                     {
                         let copy = guard.dup(view);
                         if copy.hash != view.hash || copy.name != view.name {
@@ -4894,8 +4893,7 @@ fn test_cache_refresh_preserves_old_cache_on_malformed_snapshot_item() {
         status.refresh_failure_count,
         old_status.refresh_failure_count + 1
     );
-    let preserved =
-        cache_dup(&cache, 1001, "docker-abc123").expect("old cache item should remain");
+    let preserved = cache_dup(&cache, 1001, "docker-abc123").expect("old cache item should remain");
     assert_eq!(preserved.hash, old_item.hash);
     assert_eq!(preserved.path, old_item.path);
     assert!(

@@ -62,7 +62,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME)
     target_include_directories(netipc_uds PUBLIC
         src/libnetdata/netipc/include
     )
-    target_link_libraries(netipc_uds PUBLIC netipc_protocol)
+    target_link_libraries(netipc_uds PUBLIC netipc_protocol Threads::Threads)
 
     # --- C library: L1 POSIX SHM transport (Linux only) ----------------------
 

@@ -265,10 +265,8 @@ void nipc_server_run(nipc_managed_server_t *server) {
       continue;
     }
 
-    /* The caller-owned server object stays live until destroy joins sessions.
-     */
-    // codeql[cpp/stack-address-escape]
-    sctx->server = server;
+    /* The caller-owned server object stays live until destroy joins sessions. */
+    sctx->server = server; // codeql[cpp/stack-address-escape]
     sctx->session = session;
     sctx->shm = shm;
     sctx->id = sid;

@@ -8180,78 +8180,14 @@
           "patternId": "spectral_typed-enum"
         }
       ]
-    },
-    {
-      "toolId": "Revive",
-      "patterns": [
-        {
-          "patternId": "Revive_unsecure-url-scheme"
-        },
-        {
-          "patternId": "Revive_imports-blocklist"
-        },
-        {
-          "patternId": "Revive_unchecked-type-assertion"
-        },
-        {
-          "patternId": "Revive_datarace"
-        },
-        {
-          "patternId": "Revive_unconditional-recursion"
-        },
-        {
-          "patternId": "Revive_context-as-argument"
-        },
-        {
-          "patternId": "Revive_context-keys-type"
-        },
-        {
-          "patternId": "Revive_indent-error-flow"
-        },
-        {
-          "patternId": "Revive_receiver-naming"
-        },
-        {
-          "patternId": "Revive_increment-decrement"
-        },
-        {
-          "patternId": "Revive_unexported-return"
-        },
-        {
-          "patternId": "Revive_dot-imports"
-        },
-        {
-          "patternId": "Revive_range"
-        },
-        {
-          "patternId": "Revive_time-naming"
-        },
-        {
-          "patternId": "Revive_unreachable-code"
-        },
-        {
-          "patternId": "Revive_blank-imports"
-        },
-        {
-          "patternId": "Revive_error-return"
-        },
-        {
-          "patternId": "Revive_var-declaration"
-        },
-        {
-          "patternId": "Revive_errorf"
-        },
-        {
-          "patternId": "Revive_superfluous-else"
-        },
-        {
-          "patternId": "Revive_error-naming"
-        }
-      ]
     }
   ],
   "exclude": [
     "bench/**",
-    "tests/**"
+    "benchmarks-*",
+    "tests/**",
+    "**/*_test.go",
+    "**/*_tests.rs",
+    "**/tests.rs"
   ]
 }

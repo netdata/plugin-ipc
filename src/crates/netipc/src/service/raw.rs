@@ -30,8 +30,7 @@ mod string_reverse;
 
 pub use apps_lookup::{apps_lookup_dispatch, AppsLookupHandler};
 pub use cgroups_cache::{
-    CgroupsCache, CgroupsCacheItem, CgroupsCacheItemView, CgroupsCacheReadGuard,
-    CgroupsCacheStatus,
+    CgroupsCache, CgroupsCacheItem, CgroupsCacheItemView, CgroupsCacheReadGuard, CgroupsCacheStatus,
 };
 pub use cgroups_lookup::{cgroups_lookup_dispatch, CgroupsLookupHandler};
 pub use cgroups_snapshot::{snapshot_dispatch, snapshot_max_items, SnapshotHandler};
