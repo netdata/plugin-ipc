@@ -257,7 +257,9 @@ Output/reference skills may also exist as docs or exported artifacts. Do not ren
 
 Runtime input skills:
 
-- None yet. The user requested incremental creation instead of bootstrap-generated `project-*` skills.
+- `.agents/skills/project-netdata-vendoring/SKILL.md`
+  Trigger: any work that copies, syncs, vendors, merges, or checks NetIPC source changes into a Netdata checkout.
+  Purpose: require source `plugin-ipc` CI and GitHub code/security scanner preflight before touching Netdata's vendored NetIPC copy.
 
 Output/reference skills:
 
@@ -275,6 +277,8 @@ Output/reference skills:
 - `tests/interop_codec.sh` configures `build/`; do not run it in parallel with CTest or another build-directory validation command.
 - Windows validation scripts are under `tests/run-*-windows*.sh` and `tests/test_*_win*.sh`; use the specific script matching the touched transport/API.
 - Benchmark generation: `bash tests/generate-benchmarks-posix.sh` or `bash tests/generate-benchmarks-windows.sh`
+- Netdata vendor diff: `bash ./diff-netdata-vendor.sh /path/to/netdata`
+- Netdata vendor copy: `bash ./vendor-to-netdata.sh /path/to/netdata`
 
 ### Project-specific overrides
 
@@ -283,6 +287,7 @@ Output/reference skills:
 - Cross-language interoperability is mandatory across C, Rust, and Go. Do not change one language implementation without checking the corresponding contract and other language implementations.
 - Go must remain pure Go without `cgo`.
 - Performance claims require benchmark evidence. Do not adjust benchmark floors or accept parity gaps without a fact-based analysis.
+- Before any Netdata vendoring work, load `.agents/skills/project-netdata-vendoring/SKILL.md` and complete its preflight even if the user did not explicitly ask for CI, scanner, or drift checks. Do not modify Netdata's vendored NetIPC copy until the active SOW records: the candidate `plugin-ipc` source commit; GitHub Actions/check-run evidence; GitHub code-scanning, Dependabot, and secret-scanning evidence; the last source-to-Netdata vendoring baseline; a two-way gap analysis of what changed in `plugin-ipc` since that baseline and what changed in Netdata's vendored NetIPC copy since that baseline; and a migration plan for every drift class. Failing, pending, cancelled, timed-out, or untriaged open scanner findings block vendoring unless they are fixed, documented as evidence-backed false positives, or explicitly risk-accepted by the user in the SOW. Unknown baseline, unexplained downstream drift, or no migration plan also blocks vendoring.
 - Archived TODO history under `.agents/sow/todo-history/TODO-*` is existing project memory. Do not move, delete, or rewrite those archived notes without explicit user approval; track future classification or migration through a SOW.
 
 ### Preservation Notes

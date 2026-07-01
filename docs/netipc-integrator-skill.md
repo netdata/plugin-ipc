@@ -131,6 +131,18 @@ Important current limitation:
   source-of-truth repository:
   - `github.com/netdata/plugin-ipc`
 - do not begin by editing only a vendored copy inside another repository
+- before copying source changes into Netdata's vendored NetIPC tree, verify the
+  source `plugin-ipc` commit has completed CI/check-run evidence and checked
+  GitHub code-scanning, Dependabot, and secret-scanning state
+- before copying source changes into Netdata's vendored NetIPC tree, identify
+  the last source-to-Netdata vendoring baseline and perform a two-way gap
+  analysis:
+  - what changed in `plugin-ipc` since the last vendoring
+  - what changed in Netdata's vendored NetIPC copy since the last vendoring
+- do not vendor until every gap class has a migration plan
+- if CI is failing/pending or scanners have untriaged open findings, stop before
+  vendoring unless the findings are fixed, documented as evidence-backed false
+  positives, or explicitly risk-accepted in the active SOW
 
 Non-negotiable rule:
 
@@ -869,7 +881,59 @@ Practical rule:
 
 - if the public typed API does not already expose your new service kind, do the
   upstream library work in `github.com/netdata/plugin-ipc` first
-- only then wire the provider and consumer into Netdata
+- only after the upstream source commit has passed or been explicitly triaged
+  through the Netdata vendoring preflight, wire the provider and consumer into
+  Netdata
+
+### Step 2.6: run the Netdata vendoring preflight
+
+Before copying, syncing, or merging NetIPC source files into a Netdata checkout,
+check the source repository state first. This check is mandatory even when the
+request only says to vendor or sync files.
+
+Required evidence:
+
+- candidate `plugin-ipc` source commit
+- GitHub Actions/check-run status for that commit
+- GitHub code-scanning open-alert summary
+- Dependabot open-alert summary
+- secret-scanning open-alert summary
+- last vendored baseline:
+  - matching `plugin-ipc` source commit
+  - matching Netdata vendoring commit
+- two-way gap analysis:
+  - upstream changes since the baseline
+  - downstream vendored-copy changes since the baseline
+- migration plan for every drift class
+
+Required outcome:
+
+- proceed only when CI/checks are green and scanner findings are absent or
+  already triaged
+- block vendoring when CI is failing, pending, cancelled, timed out, or scanner
+  findings are untriaged
+- block vendoring when the last vendored baseline is unknown, either direction
+  has unexplained NetIPC drift, or no migration plan exists
+- if the user accepts risk for a known false positive or open finding, record
+  the evidence and decision in the active SOW before touching Netdata
+
+Migration plan rules:
+
+- preserve Netdata-only wrappers, workspace/package files, and import-path
+  rewrites
+- backport any valid Netdata vendored-source fix into `plugin-ipc` before
+  copying source back to Netdata
+- overwrite obsolete downstream drift only after explaining why upstream source
+  is authoritative
+- stop for user decision when both sides changed the same behavior in different
+  ways
+
+After the preflight and migration plan pass, use the project vendor tools and
+record their results:
+
+- `bash ./diff-netdata-vendor.sh /path/to/netdata`
+- `bash ./vendor-to-netdata.sh /path/to/netdata`
+- `bash ./diff-netdata-vendor.sh /path/to/netdata`
 
 ### Step 3: add the typed codec in all three languages
 
@@ -1198,15 +1262,18 @@ it should:
    `github.com/netdata/plugin-ipc`.
    - Do not stop after editing only one language.
    - Do not wire only the vendored copy in Netdata and defer upstream work.
-6. Add the public typed facade, not just raw helpers.
-7. Add L3 only if the dataset needs local owned cache + lookup.
-8. Add tests for codec, L2, interop, and L3 if applicable.
-9. Add operational logs at the plugin boundary.
-10. Validate Linux and Windows behavior before claiming the integration is ready.
-11. State the provider synchronization model explicitly.
-12. State the client/cache ownership model explicitly.
-13. Verify view/reference validity boundaries before sharing any returned data.
-14. Check platform-specific data availability before finalizing the schema.
+6. Before vendoring into Netdata, check source CI and GitHub code/security
+   scanner status, run the two-way gap analysis, create a migration plan, and
+   record the result in the active SOW.
+7. Add the public typed facade, not just raw helpers.
+8. Add L3 only if the dataset needs local owned cache + lookup.
+9. Add tests for codec, L2, interop, and L3 if applicable.
+10. Add operational logs at the plugin boundary.
+11. Validate Linux and Windows behavior before claiming the integration is ready.
+12. State the provider synchronization model explicitly.
+13. State the client/cache ownership model explicitly.
+14. Verify view/reference validity boundaries before sharing any returned data.
+15. Check platform-specific data availability before finalizing the schema.
 
 ## Do Not Miss These
 
@@ -1216,6 +1283,13 @@ Before implementation is accepted, confirm all of these explicitly:
 - The service remains payload-agnostic at the skill level; plugin-specific
   schema content was decided separately by the integrator.
 - The upstream-vs-Netdata ownership split is clear.
+- Source CI and GitHub code/security scanner status were checked before any
+  Netdata vendoring, and any failures/findings were fixed, triaged, or
+  explicitly risk-accepted in the active SOW.
+- The last source-to-Netdata vendoring baseline was identified.
+- Upstream changes since the baseline and downstream vendored-copy changes since
+  the baseline were both analyzed.
+- A migration plan exists for every upstream and downstream drift class.
 - The provider's shared mutable data has an explicit synchronization model.
 - The client or cache object has an explicit ownership/concurrency model.
 - No code performs concurrent blocking typed calls on the same L2 client object
