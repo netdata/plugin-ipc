@@ -12,6 +12,7 @@ coverage/
 # Go binaries built outside build/
 tests/fixtures/go/netipc-*
 bench/drivers/go/netipc-*
+bench/drivers/go/go
 
 # Ad-hoc convenience scripts
 /run-*.sh
