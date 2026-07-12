@@ -122,10 +122,12 @@ jobs:
 
       - name: Require real tmpfs capacity-exhaustion regression
         run: |
+          ctest_bin="$(dirname "$(command -v cmake)")/ctest"
+          test -x "$ctest_bin"
           sudo env \
             PATH="$PATH" \
             NIPC_REQUIRE_TMPFS_TEST=1 \
-            /usr/bin/ctest \
+            "$ctest_bin" \
               --test-dir build-shm-regression \
               --output-on-failure \
               --no-tests=error \

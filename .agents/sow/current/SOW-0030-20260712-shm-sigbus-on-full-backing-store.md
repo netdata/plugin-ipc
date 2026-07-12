@@ -362,6 +362,14 @@ Open decisions:
   socket-permission-contract concern. It does not reintroduce the fixed pathname race
   or affect SHM allocation; pending SOW-0032 tracks its design and validation rather
   than expanding this production crash repair.
+- The first pull-request run of `SHM Full Backing Store` failed before executing the
+  regression: the runner installed CMake/CTest under `/usr/local/bin`, while the job
+  hard-coded `/usr/bin/ctest`. A plain `PATH` lookup is also unsafe when an environment
+  contains a stale wrapper. The workflow now derives and verifies `ctest` as the sibling
+  of the exact `cmake` selected by the job, then passes that absolute paired-tool path
+  through `sudo`. The rebuilt local CI directory passed that exact privileged command,
+  and actionlint plus the SOW audit remain clean. The entire candidate matrix must rerun
+  after this workflow fix.
 
 ## Validation
 
@@ -453,6 +461,11 @@ Reviewer findings:
   commit `d00beebb` eliminated the pathname operation. The review also identified the
   separate process-global `umask()`/cross-language permission-contract concern now
   tracked by pending SOW-0032.
+- CI failure review found that the required full-backing-store test did not execute on
+  its first pull-request run because the workflow assumed `/usr/bin/ctest`. The failure
+  was a CI portability defect, not a product-test result; tool resolution now uses the
+  verified sibling of the selected `cmake` and remains guarded by
+  `--no-tests=error`.
 
 Same-failure scan:
 
