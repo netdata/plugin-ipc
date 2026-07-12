@@ -237,8 +237,11 @@ handshake negotiates an SHM profile. The kernel object names are
 derived from the `session_id` assigned during the handshake.
 
 1. Derive kernel object names using `session_id` (see naming section).
-2. Create the file mapping via `CreateFileMappingW` using the derived
-   mapping name.
+2. Create a page-file-backed mapping via `CreateFileMappingW` using
+   `INVALID_HANDLE_VALUE`, `PAGE_READWRITE`, and the derived mapping name.
+   With no explicit allocation attribute, Windows assumes `SEC_COMMIT`: the
+   system must have enough committable pages for the complete mapping or
+   creation fails normally before the view is used.
 3. Map the view via `MapViewOfFile`.
 4. Write the header: magic, version, header_len, profile, offsets,
    capacities, spin_tries. Initialize all volatile fields to zero.
@@ -248,6 +251,10 @@ derived from the `session_id` assigned during the handshake.
    resets automatically, which matches the one-writer/one-reader-per-
    direction model.
 6. The region is now ready for the client.
+
+`CreateFileMappingW` and `MapViewOfFile` failures are SHM preparation errors. Managed
+servers remove Windows SHM profiles and continue over the Named Pipe baseline when it
+is configured. Windows does not use the Linux file-backed `fallocate` lifecycle.
 
 The server must track all active per-session SHM regions so they can
 be cleaned up on session close and server shutdown.

@@ -39,7 +39,14 @@ mod linux_only {
     }
 
     fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut ctx = ShmContext::server_create(run_dir, service, 1, 65536, 65536)?;
+        let mut ctx = match ShmContext::server_create(run_dir, service, 1, 65536, 65536) {
+            Ok(ctx) => ctx,
+            Err(netipc::transport::shm::ShmError::Allocate(libc::ENOSPC)) => {
+                eprintln!("NIPC_SHM_ALLOCATE_ENOSPC");
+                return Err(netipc::transport::shm::ShmError::Allocate(libc::ENOSPC).into());
+            }
+            Err(error) => return Err(error.into()),
+        };
 
         // Signal readiness
         println!("READY");

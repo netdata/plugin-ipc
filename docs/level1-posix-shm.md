@@ -24,7 +24,9 @@ Each session gets its own SHM region. Multiple concurrent clients each
 have independent regions with independent request/response areas,
 sequence numbers, and futex signal words.
 
-Created by the server via `open` + `ftruncate` on a filesystem path.
+Created by the server via `open` + native Linux `fallocate` on a filesystem path.
+The complete range is allocated before it is mapped, so capacity exhaustion is
+reported as a normal creation error instead of a later `SIGBUS` during mapped access.
 The client opens the same path after the handshake negotiates an SHM
 profile, using the `session_id` received in the hello-ack.
 
@@ -200,13 +202,41 @@ the `session_id` assigned during the handshake.
 1. Derive the region path: `{run_dir}/{service_name}-{session_id:016x}.ipcshm`.
 2. Create the file via `open(O_RDWR | O_CREAT | O_EXCL, 0600)`.
    `O_EXCL` ensures no collision with an existing region.
-3. `ftruncate` to the required size (header + request area + response
-   area).
+3. Allocate the required size (header + request area + response area) with
+   native Linux `fallocate(fd, 0, 0, size)`. Retry `EINTR`; any other failure
+   aborts SHM preparation, closes and unlinks the new region, and reports the
+   allocation-stage transport error. Do not fall back to sparse `ftruncate`
+   or an allocation mechanism without the same reservation guarantee.
 4. `mmap` the region with `MAP_SHARED`.
-5. Write the header: magic, version, header_len, owner_pid,
-   owner_generation, offsets, capacities. Initialize all atomic fields
-   to zero.
+5. Zero the complete mapped region, then write the header: magic, version,
+   header_len, owner_pid, owner_generation, offsets, capacities. Initialize
+   all atomic fields to zero.
 6. The region is now ready for the client.
+
+A successful native allocation guarantees that later writes within the region do not
+fail because the backing filesystem is out of space. `ENOSPC`, quota exhaustion,
+unsupported allocation, and other allocation failures are reported through the
+allocation-stage error (`NIPC_SHM_ERR_ALLOCATE`, `ShmError::Allocate`, or
+`ErrShmAllocate`). C preserves the allocation `errno`; Rust and Go carry the OS cause
+in their error values. Managed services remove SHM from that session's negotiation and
+continue over baseline when baseline is configured. An explicitly SHM-only service has
+no fallback transport and may reject or retry the session.
+
+Linux runtime sandboxes must allow the `fallocate` system call or arrange for it to
+return an ordinary error such as `EPERM`, `ENOSYS`, or `EOPNOTSUPP`. NetIPC can convert
+an error return into SHM disablement and baseline fallback. Seccomp `KILL_PROCESS` and
+`KILL_THREAD` terminate instead; `TRAP` delivers `SIGSYS` before NetIPC receives an
+error. NetIPC deliberately installs no process-global `SIGSYS` emulation handler, so it
+cannot automatically fall back for those actions. `USER_NOTIF` and `TRACE` behavior
+depends on an external supervisor or tracer and is outside this transport contract.
+Strict custom syscall allowlists must therefore add `fallocate` before enabling Linux
+SHM profiles.
+
+Client attach does not repeat allocation. Every conforming server allocates and zeroes
+the complete region before it publishes a valid header or completes SHM negotiation.
+An older server that fails while backing or zeroing the region cannot advertise a
+usable SHM session; an older server that successfully advertises SHM has already
+touched every region page.
 
 The server must track all active per-session SHM regions so they can
 be cleaned up on session close and server shutdown.

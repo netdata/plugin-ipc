@@ -292,6 +292,7 @@ The current validation story includes:
 - typed service tests
 - transport tests
 - shared-memory tests
+- a required Linux size-limited-tmpfs regression for graceful SHM allocation failure
 - coverage scripts for C, Go, and Rust
 - benchmark generators that reject incomplete matrices
 
@@ -300,10 +301,10 @@ The current validation story includes:
 Linux / POSIX:
 
 - build: passing
-- `ctest`: `46/46` passing
-- C coverage: `94.1%`
-- Go coverage: `95.8%`
-- Rust coverage: `98.57%`
+- `ctest`: `49/49` passing
+- C coverage (tracked C gate files): `91.8%`
+- Go coverage (overall source packages): `90.2%`
+- Rust coverage (Linux library, Windows-tagged files excluded): `92.63%`
   - measured with `cargo-llvm-cov`
   - Linux run now excludes Windows-tagged Rust files from the Linux total
   - Unix Rust service tests now live in a separate `cgroups_unix_tests.rs` file
@@ -441,6 +442,8 @@ This is the honest current state:
 - coverage thresholds are enforced, but they are **not** at `100%`
 - Linux and Windows are functionally close, but Windows still has less
   chaos / hardening / stress breadth
+- Linux SHM requires `fallocate` in strict syscall allowlists; seccomp policies that
+  kill or trap it cannot be converted automatically into NetIPC baseline fallback
 - some documented exclusions still require special infrastructure such as:
   - allocation-failure injection
   - kernel / OS failure injection

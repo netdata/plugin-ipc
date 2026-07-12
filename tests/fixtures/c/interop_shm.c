@@ -13,6 +13,7 @@
 #include "netipc/netipc_protocol.h"
 #include "interop_path.h"
 
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +26,8 @@ static int run_server(const char *run_dir, const char *service)
     nipc_shm_error_t err = nipc_shm_server_create(
         run_dir, service, 1, 65536, 65536, &shm);
     if (err != NIPC_SHM_OK) {
+        if (err == NIPC_SHM_ERR_ALLOCATE && errno == ENOSPC)
+            fprintf(stderr, "NIPC_SHM_ALLOCATE_ENOSPC\n");
         fprintf(stderr, "server: shm create failed: %d\n", err);
         return 1;
     }

@@ -2,9 +2,12 @@
 
 ## Status
 
-Status: in-progress
+Status: paused
 
-Sub-state: Netdata vendoring exposed a missing public L3 cache enumeration API required by the eBPF cgroup consumer; implementation is paused for a user design decision.
+Sub-state: paused on 2026-07-12 so SOW-0030 can take the active slot for the
+fleet-observed SHM SIGBUS crash. The earlier L3 API decision was resolved by using the
+direct L2 snapshot path; resume from final validation, artifact maintenance, review,
+and lifecycle closure for the already merged Netdata vendor update.
 
 ## Requirements
 

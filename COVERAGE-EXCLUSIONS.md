@@ -123,7 +123,7 @@ Verified on `2026-03-28`:
         - `ShmContext::receive()` waking successfully under a finite timeout budget
       - remaining Linux Rust misses are now dominated by:
         - fixed-size encode guards
-        - raw `socket` / `listen` / `ftruncate` / `mmap` / `fstat` failures
+        - raw `socket` / `listen` / `mmap` / `fstat` failures
         - a few send-break / teardown timing edges
         - one likely unreachable guard in `dispatch_cgroups_snapshot()` where `builder.finish()` would have to return `0`
 
@@ -257,6 +257,11 @@ Examples:
 These require deterministic allocation-failure injection to cover reliably.
 
 ### 3. OS / kernel failure branches
+
+Linux SHM backing-store allocation is no longer excluded: C, Rust, and Go inject
+`fallocate` failures deterministically, and the cross-language regression test runs the
+real creators against a size-limited tmpfs to prove `ENOSPC` returns normally without
+`SIGBUS`.
 
 Examples:
 
