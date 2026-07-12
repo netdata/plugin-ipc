@@ -2,11 +2,11 @@
 
 ## Status
 
-Status: in-progress
+Status: completed
 
-Sub-state: active; long-term-best design approved by the user and pre-implementation
-gate complete. Linux and native Windows/MSYS validation are complete. Source pull-request
-CI/scanner evidence and Netdata re-vendoring remain.
+Sub-state: delivered. Source PR #11 and downstream Netdata PR #23093 are merged. The
+reviewed source tree, merged source tree, and normalized downstream C, Rust, and Go
+vendor trees are identical.
 
 ## Requirements
 
@@ -370,14 +370,55 @@ Open decisions:
   through `sudo`. The rebuilt local CI directory passed that exact privileged command,
   and actionlint plus the SOW audit remain clean. The entire candidate matrix must rerun
   after this workflow fix.
+- Source PR #11 at `0b5ace0bacad7f8d7b77ecd1187054ccf2c916aa` passed all 28
+  applicable checks after the fix, including the real full-backing-store regression,
+  native Windows MSYS2 runtime, C/Go/Rust CodeQL on POSIX/Windows, Semgrep, gosec,
+  Codacy, dependency review, sanitizers, race detectors, static analysis, coverage, and
+  diff coverage. The pending WIP status is the intentional draft-PR gate; CodeQL's
+  aggregate check and schedule/manual-only Valgrind, OSV, and OpenSSF jobs are
+  conditionally skipped while their applicable matrix/security jobs passed.
+- Current PR SARIF contains zero results in every uploaded Semgrep, CodeQL, gosec,
+  Codacy category. Repository inventory remains zero open Dependabot and secret-scanning
+  alerts. The only repository-level open code-scanning item is the already-triaged stale
+  historical alert 7750 whose vulnerable operation was removed by `d00beebb`.
+- Mandatory source preflight is complete. The approved migration is to run the established
+  vendor script from source HEAD, preserve Netdata wrappers/Cargo packaging, normalize Go
+  imports, require a zero normalized diff, and validate downstream C/Rust/Go integration.
+- Created the downstream branch from freshly fetched `netdata/netdata` `origin/master` at
+  `2329145de31cd9f5ed25f12b1816415f02772a3e`, then ran the established vendor
+  script and Go import normalization. Exactly the planned six files changed; normalized
+  C, Rust, and Go comparisons each report `No differences`.
+- Downstream validation passed: Netdata built the C `netipc` target; Rust passed 380/380;
+  Go passed every `pkg/netipc` package including its long-running raw-service tests;
+  formatting, whitespace, sensitive-data, and local SOW audits are clean. Two independent
+  downstream reviews found no code, security, portability, packaging, equality, or
+  Windows-isolation defect.
+- Committed the Netdata vendor update as `7f6ccbadba9f9e1da4f36b016f97669395882c08`,
+  pushed `fix/netipc-shm-full-backing-store`, and opened draft Netdata PR #23093. Its
+  description includes the strict-seccomp requirement to allow `fallocate()`.
+
+### 2026-07-13
+
+- Verified Netdata PR #23093 merged as
+  `d5796cb0a841adaabdd68d427664155d8e30d46e`. Its final current check set contained
+  128 successful checks, 20 intentional skips, and no failures. One earlier Go job
+  failure was an unrelated Nagios collector test timeout and was superseded by the
+  final successful check set.
+- Fetched Netdata `origin/master` after merge and reran the established normalized
+  vendor comparison against that exact tree. C, Rust, and Go each reported
+  `No differences`.
+- Verified source PR #11 merged into `main` as
+  `37cce82d4b0e1e9d1fbee2ff2ab561cc9920ffa6`. A full-tree comparison between the
+  reviewed PR head `0b5ace0bacad7f8d7b77ecd1187054ccf2c916aa` and the merge commit
+  is empty, proving the merged source is exactly the reviewed candidate.
 
 ## Validation
 
 Acceptance criteria evidence:
 
-- Full Linux success-path and failure-path evidence is recorded below. The only pending
-  acceptance evidence is pull-request CI/scanner status and downstream Netdata
-  validation after the mandatory preflight passes.
+- Full Linux success-path and failure-path evidence is recorded below. Downstream
+  Netdata equality, integration validation, CI, and both source/downstream merge states
+  are complete.
 
 Tests or equivalent validation:
 
@@ -407,6 +448,15 @@ Tests or equivalent validation:
   Windows SHM, baseline and SHM snapshots, lookup, fixed 100k rates, and both C/Rust
   client/server directions. This is regression evidence only; no performance claim was
   changed.
+- Source GitHub validation: 28/28 applicable PR checks passed at
+  `0b5ace0bacad7f8d7b77ecd1187054ccf2c916aa`. All uploaded current-candidate
+  code-scanning categories report zero results; Dependabot and secret-scanning report
+  zero open alerts.
+- Downstream Netdata equality/integration: zero normalized C/Rust/Go drift; exactly six
+  planned files; C target built; Rust 380/380; all Go NetIPC packages passed.
+- Merge verification: the source merge tree is identical to reviewed PR head
+  `0b5ace0`; Netdata `origin/master` is identical to the source candidate after the
+  documented vendor normalization; both pull requests are merged.
 
 Real-use evidence:
 
@@ -489,8 +539,8 @@ Artifact maintenance gate:
 
 - `AGENTS.md`: unchanged; no project-wide responsibility or workflow rule changed.
 - Runtime project skill: unchanged; Netdata vendoring still follows the existing
-  mandatory `project-netdata-vendoring` workflow. Its read-only preflight and drift
-  classification are recorded above; no Netdata vendored source has been modified yet.
+  mandatory `project-netdata-vendoring` workflow. Its source CI/scanner, baseline,
+  two-way drift, migration, and downstream validation requirements were completed.
 - Specs: updated authoritative `docs/level1-posix-shm.md` and
   `docs/level1-windows-shm.md`; no `.agents/sow/specs/` duplicate is needed because
   `docs/` is authoritative for this transport contract.
@@ -499,32 +549,49 @@ Artifact maintenance gate:
   changed.
 - End-user/operator skill: updated `docs/netipc-integrator-skill.md` with the Linux
   allocation and Windows committed-mapping behavior.
-- SOW lifecycle: SOW-0027 remains paused; SOW-0030 is the sole active implementation;
-  pending SOW-0031 tracks the separate platform-gating issue and pending SOW-0032 tracks
-  the UDS permission contract. Completion/move remains pending source CI/scanners and
-  the required vendor workflow.
+- SOW lifecycle: SOW-0027 remains paused. SOW-0030 was the sole active implementation
+  during delivery and is now completed and moved to `done/`. Pending SOW-0031 tracks
+  the separate platform-gating issue; pending SOW-0032 tracks the UDS permission
+  contract.
 
 SOW lifecycle and follow-up mapping:
 
-- Netdata re-vendoring remains mandatory in this SOW after source commit, push, CI, and
-  scanner preflight. The separate CMake platform-gating discrepancy is represented by
-  pending SOW-0031; the separate UDS permission-contract issue is represented by pending
-  SOW-0032.
+- Netdata re-vendoring is complete and merged. The separate CMake platform-gating
+  discrepancy is represented by pending SOW-0031; the separate UDS permission-contract
+  issue is represented by pending SOW-0032. All historical uses of “pending,”
+  “follow-up,” or future-tense validation in this SOW are either completed above or map
+  to those two real pending SOWs.
 
 ## Outcome
 
-Pending.
+- Linux SHM creation now reserves the complete backing store before mapping it in C,
+  Rust, and Go. Full backing stores return a classified allocation error instead of
+  exposing the host process to SIGBUS during zero-fill.
+- Managed services fall back to baseline transport when configured; SHM-only behavior
+  remains intentionally fail-closed.
+- Linux/glibc, Linux/musl, sanitizer, coverage, interop, native Windows/MSYS, scanner,
+  source CI, and downstream Netdata integration evidence all passed.
+- Source PR #11 and Netdata PR #23093 are merged, with exact post-merge source and vendor
+  equality verified.
 
 ## Lessons Extracted
 
-Pending.
+- Real resource-exhaustion tests must assert the exact intended failure marker and
+  cleanup state; accepting any nonzero child exit can hide setup or permission defects.
+- Required CI should derive paired tools from the selected installation instead of
+  assuming distribution paths such as `/usr/bin/ctest`.
+- Allocation guarantees and syscall-policy implications belong in the public transport
+  contract. A graceful errno denial can fall back; kill/trap seccomp actions cannot be
+  recovered by an embeddable library without unsafe process-global behavior.
+- Post-vendoring equality must be checked against the actual merged downstream branch,
+  not only the pull-request working tree.
 
 ## Followup
 
-- Re-vendor the fix into netdata/netdata after merge (executed in the netdata
-  repository; the fleet crash volume there is the success metric — SIGBUS cluster in
-  `P[cglkupipc]` / `P[cgroupsipc]` threads should disappear in nightlies after the
-  vendor update).
+- No outstanding implementation follow-up belongs to this SOW. Netdata operational
+  release monitoring may independently observe whether the historical
+  `P[cglkupipc]` / `P[cgroupsipc]` SIGBUS cluster disappears, but that observation does
+  not change or gate the deterministic correctness evidence recorded here.
 
 ## Regression Log
 
