@@ -7189,6 +7189,59 @@ static void test_shm_negotiation_falls_back_to_baseline_on_obstructed_region(voi
     cleanup_all(svc);
 }
 
+static void test_shm_allocation_failure_falls_back_to_working_baseline(void)
+{
+    printf("Test: SHM allocation failure falls back to working baseline\n");
+    const char *svc = "svc_shm_alloc_fallback";
+    cleanup_all(svc);
+
+    shm_server_ctx_t sctx;
+    memset(&sctx, 0, sizeof(sctx));
+    sctx.service = svc;
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, shm_server_thread_fn, &sctx);
+    for (int i = 0; i < 2000
+         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
+         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
+        usleep(500);
+    check("allocation-fallback SHM server started",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_client_config_t ccfg = {
+        .supported_profiles         = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
+        .preferred_profiles         = NIPC_PROFILE_SHM_HYBRID,
+        .max_request_batch_items    = 1,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .auth_token                 = AUTH_TOKEN,
+    };
+
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+    nipc_shm_test_fault_set(NIPC_SHM_TEST_FAULT_ALLOCATE, ENOSPC);
+    bool changed = nipc_client_refresh(&client);
+    nipc_shm_test_fault_clear();
+
+    check("allocation failure refresh reports READY transition", changed);
+    check("allocation failure leaves client ready", nipc_client_ready(&client));
+    check("allocation failure selects baseline",
+          client.session_valid && client.shm == NULL &&
+          client.session.selected_profile == NIPC_PROFILE_BASELINE);
+
+    nipc_cgroups_resp_view_t view;
+    nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
+    check("baseline call succeeds after allocation failure", err == NIPC_OK);
+    if (err == NIPC_OK)
+        check("baseline response is valid after allocation failure",
+              view.item_count == 3);
+
+    nipc_client_close(&client);
+    nipc_server_stop(&sctx.server);
+    pthread_join(tid, NULL);
+    cleanup_session_shm(svc, 1);
+    cleanup_all(svc);
+}
+
 static void test_client_shm_attach_failure_falls_back_to_baseline(void)
 {
     printf("Test: Client-side SHM attach failure falls back to baseline\n");
@@ -7323,6 +7376,7 @@ int main(void)
     test_server_init_worker_floor_and_long_run_dir(); printf("\n");
     test_client_init_defaults_and_truncation(); printf("\n");
     test_shm_negotiation_falls_back_to_baseline_on_obstructed_region(); printf("\n");
+    test_shm_allocation_failure_falls_back_to_working_baseline(); printf("\n");
     test_client_shm_attach_failure_falls_back_to_baseline(); printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);

@@ -44,6 +44,9 @@ func buildMessage(kind, code uint16, messageID uint64, payload []byte) []byte {
 func runServer(runDir, service string) int {
 	ctx, err := posix.ShmServerCreate(runDir, service, 1, 65536, 65536)
 	if err != nil {
+		if errors.Is(err, posix.ErrShmAllocate) && errors.Is(err, syscall.ENOSPC) {
+			fmt.Fprintln(os.Stderr, "NIPC_SHM_ALLOCATE_ENOSPC")
+		}
 		fmt.Fprintf(os.Stderr, "server: shm create failed: %v\n", err)
 		return 1
 	}

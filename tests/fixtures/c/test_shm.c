@@ -369,7 +369,7 @@ static void test_negotiated_shm(void)
             if (serr == NIPC_SHM_OK)
                 break;
             /* Retryable: file doesn't exist, header not ready, or
-             * header not yet written (magic is 0 after ftruncate). */
+             * header not yet published (magic is still zero). */
             if (serr == NIPC_SHM_ERR_NOT_READY ||
                 serr == NIPC_SHM_ERR_OPEN ||
                 serr == NIPC_SHM_ERR_BAD_MAGIC)
@@ -983,6 +983,60 @@ static void test_server_create_validation(void)
           nipc_shm_server_create(TEST_RUN_DIR, "shm_resp_cap_overflow", 1,
                                  4096, UINT32_MAX - 1024,
                                  &ctx) == NIPC_SHM_ERR_BAD_PARAM);
+}
+
+static void test_server_create_allocation_failures(void)
+{
+    printf("Test: Server create allocation failures\n");
+    const char *svc = "shm_alloc_failure";
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s-%016" PRIx64 ".ipcshm",
+             TEST_RUN_DIR, svc, (uint64_t)1);
+    cleanup_shm(svc);
+
+    nipc_shm_ctx_t ctx;
+    nipc_shm_test_fault_set(NIPC_SHM_TEST_FAULT_ALLOCATE, ENOSPC);
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 4096, 4096, &ctx);
+    int allocation_errno = errno;
+    nipc_shm_test_fault_clear();
+
+    check("ENOSPC returns allocation error", err == NIPC_SHM_ERR_ALLOCATE);
+    check("ENOSPC preserves allocation errno", allocation_errno == ENOSPC);
+    check("ENOSPC leaves no mapped context",
+          ctx.fd == -1 && ctx.base == NULL && ctx.region_size == 0);
+    check("ENOSPC removes incomplete region", access(path, F_OK) != 0);
+
+    nipc_shm_test_fault_set(NIPC_SHM_TEST_FAULT_ALLOCATE, EOPNOTSUPP);
+    err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 4096, 4096, &ctx);
+    allocation_errno = errno;
+    nipc_shm_test_fault_clear();
+
+    check("unsupported allocation has no sparse fallback",
+          err == NIPC_SHM_ERR_ALLOCATE);
+    check("unsupported allocation preserves errno",
+          allocation_errno == EOPNOTSUPP);
+    check("unsupported allocation leaves no mapped context",
+          ctx.fd == -1 && ctx.base == NULL && ctx.region_size == 0);
+    check("unsupported allocation removes incomplete region",
+          access(path, F_OK) != 0);
+
+    nipc_shm_test_fault_set(NIPC_SHM_TEST_FAULT_ALLOCATE, EINTR);
+    err = nipc_shm_server_create(TEST_RUN_DIR, svc, 1, 4096, 4096, &ctx);
+    nipc_shm_test_fault_clear();
+
+    check("EINTR retries allocation", err == NIPC_SHM_OK);
+    if (err == NIPC_SHM_OK) {
+        nipc_shm_region_header_t *hdr =
+            (nipc_shm_region_header_t *)ctx.base;
+        check("EINTR retry initializes region header",
+              hdr->magic == NIPC_SHM_REGION_MAGIC &&
+              hdr->version == NIPC_SHM_REGION_VERSION);
+        nipc_shm_destroy(&ctx);
+    }
+    check("EINTR retry region is destroyed", access(path, F_OK) != 0);
+    cleanup_shm(svc);
 }
 
 static void test_client_attach_validation(void)
@@ -1798,6 +1852,7 @@ int main(void)
     test_addr_in_use();                printf("\n");
     test_multiple_roundtrips();        printf("\n");
     test_server_create_validation();   printf("\n");
+    test_server_create_allocation_failures(); printf("\n");
     test_client_attach_validation();   printf("\n");
     test_shm_close_null();             printf("\n");
     test_shm_send_bad_param();         printf("\n");

@@ -662,6 +662,27 @@ Implication:
 - shutdown paths can abort a blocked call, but normal shared-client access
   still needs external synchronization in C and Go
 
+### SHM preparation failure
+
+Current required behavior:
+
+- Linux servers allocate the complete file-backed SHM region before mapping or
+  publishing it
+- if backing-store allocation fails, including `ENOSPC`, SHM preparation returns a
+  normal allocation-stage error; it must not reach a mapped write or terminate the host
+  process with `SIGBUS`
+- managed servers remove SHM from that session's supported and preferred profiles and
+  continue over baseline when baseline is configured
+- an explicitly SHM-only configuration has no fallback transport and may reject or
+  retry the session
+- Linux sandbox/seccomp policy must allow `fallocate` or arrange an ordinary errno
+  return; `KILL_PROCESS`/`KILL_THREAD` terminate, and `TRAP` requires host-level
+  `SIGSYS` emulation that NetIPC does not install; `USER_NOTIF`/`TRACE` supervisor
+  behavior is outside the transport contract, so strict custom allowlists must include
+  `fallocate`
+- native Windows and `MSYSTEM=MSYS` use committed page-file-backed mappings; mapping
+  creation or view failures follow the existing Windows SHM preparation error path
+
 ### SHM attach failure
 
 Current required behavior:

@@ -290,7 +290,22 @@ endif()
 # --- L1 SHM transport tests (Linux only) -----------------------------------
 
 if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+    add_library(netipc_shm_fallocate_test_wrap OBJECT
+        tests/fixtures/c/shm_fallocate_wrap.c
+    )
+    target_compile_definitions(netipc_shm_fallocate_test_wrap PRIVATE
+        NIPC_INTERNAL_TESTING=1
+    )
+    target_include_directories(netipc_shm_fallocate_test_wrap PRIVATE
+        src/libnetdata/netipc/include
+    )
+
     add_executable(test_shm tests/fixtures/c/test_shm.c)
+    target_sources(test_shm PRIVATE
+        $<TARGET_OBJECTS:netipc_shm_fallocate_test_wrap>
+    )
+    target_compile_definitions(test_shm PRIVATE NIPC_INTERNAL_TESTING=1)
+    target_link_options(test_shm PRIVATE "LINKER:--wrap=fallocate")
     target_link_libraries(test_shm PRIVATE netipc_shm netipc_uds netipc_protocol Threads::Threads)
     add_test(NAME test_shm COMMAND test_shm)
     set_tests_properties(test_shm PROPERTIES TIMEOUT 30)
@@ -304,10 +319,14 @@ endif()
 
 if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     add_executable(test_service tests/fixtures/c/test_service.c)
+    target_sources(test_service PRIVATE
+        $<TARGET_OBJECTS:netipc_shm_fallocate_test_wrap>
+    )
     target_link_libraries(test_service PRIVATE
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
     )
     target_compile_definitions(test_service PRIVATE NIPC_INTERNAL_TESTING=1)
+    target_link_options(test_service PRIVATE "LINKER:--wrap=fallocate")
     add_test(NAME test_service COMMAND test_service)
     set_tests_properties(test_service PROPERTIES TIMEOUT 60)
 
@@ -559,6 +578,19 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
         TIMEOUT 60
         ENVIRONMENT "INTEROP_SHM_C=$<TARGET_FILE:interop_shm_c>;INTEROP_SHM_RS=${INTEROP_SHM_RS};INTEROP_SHM_GO=${INTEROP_SHM_GO}"
     )
+
+    if(GO_EXECUTABLE AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_test(NAME test_shm_full_backing_store
+            COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_shm_full_backing_store.sh"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        )
+        set_tests_properties(test_shm_full_backing_store PROPERTIES
+            TIMEOUT 60
+            RESOURCE_LOCK shm_full_backing_store
+            SKIP_RETURN_CODE 77
+            ENVIRONMENT "INTEROP_SHM_C=$<TARGET_FILE:interop_shm_c>;INTEROP_SHM_RS=${INTEROP_SHM_RS};INTEROP_SHM_GO=${INTEROP_SHM_GO}"
+        )
+    endif()
 endif()
 
 # --- Cross-language L2 service interop tests (Linux only) ------------------
