@@ -5,8 +5,8 @@
 Status: in-progress
 
 Sub-state: active; long-term-best design approved by the user and pre-implementation
-gate complete. Linux implementation and local validation are complete. Native Windows /
-MSYS runtime validation, source CI/scanner evidence, and Netdata re-vendoring remain.
+gate complete. Linux and native Windows/MSYS validation are complete. Source pull-request
+CI/scanner evidence and Netdata re-vendoring remain.
 
 ## Requirements
 
@@ -333,13 +333,43 @@ Open decisions:
 - Updated the Linux and Windows authoritative SHM documents, integrator guidance, and
   coverage exclusions. Added pending SOW-0031 for the pre-existing CMake Linux-gating
   discrepancy without mixing that separate scope into this repair.
+- Committed and pushed the reviewed implementation as
+  `dd3c546a90789c96c8eb31bd0b0f97c5a9b70a4c` on
+  `fix/shm-full-backing-store`.
+- Ran the complete native Windows/MSYS validation on `win11` from a dedicated checkout
+  pinned to that exact commit. The MSYS C build, native Rust and Go binaries, all 12
+  functional/stress/interop cases, and 10 consecutive `test_win_shm` runs passed. The
+  11-row paired MinGW/MSYS benchmark policy also passed, including C/Rust mixed SHM and
+  snapshot directions.
+- Began the mandatory Netdata vendoring preflight. The last source-to-Netdata baseline is
+  plugin-ipc `98ec474d103ab2a7ed150f88c37225b74e1a9d27` copied by Netdata commit
+  `ca9a5426a6b1cdf6e1b2c82d3d5710e9e0a66fed`. Netdata `origin/master` at
+  `2329145de31cd9f5ed25f12b1816415f02772a3e` has no downstream changes in normalized
+  vendored sources since that baseline; its only NetIPC-path change is the excluded
+  Netdata wrapper `netipc_netdata.h`.
+- Two-way drift is fully classified. Upstream changed exactly six vendored files since
+  the baseline: the C SHM header/implementation, Rust SHM implementation/tests, and Go
+  Linux SHM implementation/tests. `diff-netdata-vendor.sh` against current Netdata
+  reports exactly those same six differences and no unexplained C, Rust, or Go drift.
+- Repository scanners report zero open Dependabot alerts and zero open secret-scanning
+  alerts. The one open code-scanning alert, 7750, is a stale historical result rather
+  than a current defect: its last Semgrep analysis is commit `b4dfe405`, while
+  `d00beebb0538b478a9e8515b1e75439bc1efb208` removed the reported post-bind
+  `chmod(path)` race and is an ancestor of current `main`. Current source creates the
+  socket owner-only during `bind()` and contains no reported `chmod(path)` operation.
+  A current pull-request Semgrep run remains required to confirm the candidate SHA.
+- The scanner review exposed a separate process-global `umask()` and cross-language
+  socket-permission-contract concern. It does not reintroduce the fixed pathname race
+  or affect SHM allocation; pending SOW-0032 tracks its design and validation rather
+  than expanding this production crash repair.
 
 ## Validation
 
 Acceptance criteria evidence:
 
 - Full Linux success-path and failure-path evidence is recorded below. The only pending
-  acceptance evidence is native Windows/MSYS execution and post-push CI/scanner status.
+  acceptance evidence is pull-request CI/scanner status and downstream Netdata
+  validation after the mandatory preflight passes.
 
 Tests or equivalent validation:
 
@@ -361,6 +391,14 @@ Tests or equivalent validation:
 - Windows local compile isolation: Rust library and all binaries pass
   `cargo check --target x86_64-pc-windows-gnu`; all Go Windows packages and Windows
   interop fixtures cross-compile with `GOOS=windows GOARCH=amd64 CGO_ENABLED=0`.
+- Native Windows/MSYS runtime at source commit `dd3c546a90789c96c8eb31bd0b0f97c5a9b70a4c`:
+  the MSYS C configure/build and native Rust/Go builds passed; Named Pipe, Windows SHM,
+  service, payload-limit, extra-service, cache, stress, and every checked C/Rust/Go
+  interoperability case passed. `test_win_shm` passed 10/10 consecutive executions.
+- Windows toolchain comparison: all 11 policy rows passed. The rows cover named pipe,
+  Windows SHM, baseline and SHM snapshots, lookup, fixed 100k rates, and both C/Rust
+  client/server directions. This is regression evidence only; no performance claim was
+  changed.
 
 Real-use evidence:
 
@@ -409,6 +447,12 @@ Reviewer findings:
   states the exact NetIPC boundary: it installs no such handler and cannot automatically
   fall back, while external supervision remains outside scope. The final full review
   found no remaining issue and retained the production-grade code verdict.
+- Scanner-alert review classified GitHub code-scanning alert 7750 as stale/fixed, not a
+  false positive. The historical `bind()` then `chmod(path)` sequence was conditionally
+  raceable when an attacker could write the caller-provided runtime directory; current
+  commit `d00beebb` eliminated the pathname operation. The review also identified the
+  separate process-global `umask()`/cross-language permission-contract concern now
+  tracked by pending SOW-0032.
 
 Same-failure scan:
 
@@ -432,7 +476,8 @@ Artifact maintenance gate:
 
 - `AGENTS.md`: unchanged; no project-wide responsibility or workflow rule changed.
 - Runtime project skill: unchanged; Netdata vendoring still follows the existing
-  mandatory `project-netdata-vendoring` workflow and has not started.
+  mandatory `project-netdata-vendoring` workflow. Its read-only preflight and drift
+  classification are recorded above; no Netdata vendored source has been modified yet.
 - Specs: updated authoritative `docs/level1-posix-shm.md` and
   `docs/level1-windows-shm.md`; no `.agents/sow/specs/` duplicate is needed because
   `docs/` is authoritative for this transport contract.
@@ -442,14 +487,16 @@ Artifact maintenance gate:
 - End-user/operator skill: updated `docs/netipc-integrator-skill.md` with the Linux
   allocation and Windows committed-mapping behavior.
 - SOW lifecycle: SOW-0027 remains paused; SOW-0030 is the sole active implementation;
-  pending SOW-0031 tracks the separate platform-gating issue. Completion/move remains
-  pending Windows/MSYS runtime evidence and the required vendor workflow.
+  pending SOW-0031 tracks the separate platform-gating issue and pending SOW-0032 tracks
+  the UDS permission contract. Completion/move remains pending source CI/scanners and
+  the required vendor workflow.
 
 SOW lifecycle and follow-up mapping:
 
 - Netdata re-vendoring remains mandatory in this SOW after source commit, push, CI, and
   scanner preflight. The separate CMake platform-gating discrepancy is represented by
-  pending SOW-0031.
+  pending SOW-0031; the separate UDS permission-contract issue is represented by pending
+  SOW-0032.
 
 ## Outcome
 
