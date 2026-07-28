@@ -271,6 +271,9 @@ Output/reference skills:
 
 - Configure/build C plus available Rust and Go pieces: `make`
 - Explicit configure/build: `cmake -S . -B build` then `cmake --build build`
+- The standalone Rust package uses language edition 2024 with MSRV 1.91.
+  Validate both Rust 1.91.0 and latest stable. Keep style edition 2021 explicit
+  through `rustfmt.toml` until the coordinated SOW-0035 style migration.
 - Local validation and benchmark commands must run at low scheduler priority so the workstation desktop stays responsive. Prefer `tests/run-low-priority.sh <command> [args...]` for direct commands; project validation scripts under `tests/*.sh` already self-reexec through this helper. The helper uses `nice -n 19` plus `ionice -c 3` when available, and falls back on platforms without `ionice`.
 - Run CTest after configure/build: `tests/run-low-priority.sh ctest --test-dir build --output-on-failure`
 - POSIX coverage: `bash tests/run-coverage-c.sh`, `bash tests/run-coverage-rust.sh`, `bash tests/run-coverage-go.sh`

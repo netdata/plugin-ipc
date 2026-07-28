@@ -79,14 +79,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust components
-        run: rustup component add rustfmt clippy
+      - name: Select latest stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
 
       - name: Check Rust formatting
         run: cargo fmt --manifest-path src/crates/netipc/Cargo.toml --all --check
 
       - name: Build Rust test targets
-        run: cargo test --manifest-path src/crates/netipc/Cargo.toml --all-targets --all-features --no-run
+        run: cargo test --manifest-path src/crates/netipc/Cargo.toml --all-targets --all-features --no-run --locked
 
       - name: Run Clippy correctness gates
         run: |
@@ -94,6 +96,7 @@ jobs:
             --manifest-path src/crates/netipc/Cargo.toml \
             --all-targets \
             --all-features \
+            --locked \
             -- \
             -D clippy::correctness \
             -D clippy::suspicious
@@ -108,6 +111,24 @@ jobs:
         run: |
           cargo audit
           cargo deny check advisories bans sources
+
+  rust-msrv:
+    name: Rust MSRV (1.91.0)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Select Rust 1.91.0
+        run: |
+          rustup toolchain install 1.91.0 --profile minimal
+          rustup default 1.91.0
+
+      - name: Build every Rust target at MSRV
+        run: cargo test --manifest-path src/crates/netipc/Cargo.toml --all-targets --all-features --no-run --locked
 
   go-static:
     name: Go Static Analysis (${{ matrix.module }})

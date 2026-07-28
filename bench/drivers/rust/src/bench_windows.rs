@@ -83,7 +83,7 @@ mod ffi {
 
     pub type HANDLE = isize;
 
-    extern "system" {
+    unsafe extern "system" {
         pub fn GetProcessTimes(
             hProcess: HANDLE,
             lpCreationTime: *mut u64,
@@ -518,13 +518,13 @@ fn snapshot_handler() -> DispatchHandler {
             thread_local! {
                 static GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
             }
-            let gen = GEN.with(|g| {
+            let generation = GEN.with(|g| {
                 let v = g.get() + 1;
                 g.set(v);
                 v
             });
 
-            builder.set_header(1, gen);
+            builder.set_header(1, generation);
             for (i, (name, path)) in snapshot_template().iter().enumerate() {
                 if builder
                     .add(1000 + i as u32, 0, i as u32 % 2, name, path)
@@ -758,7 +758,8 @@ fn run_ping_pong_client(
 ) -> i32 {
     let mut session = None;
     for _ in 0..200 {
-        match NpSession::connect(run_dir, service, &client_config(profiles)) {
+        let attempt = NpSession::connect(run_dir, service, &client_config(profiles));
+        match attempt {
             Ok(s) => {
                 session = Some(s);
                 break;
@@ -1120,7 +1121,8 @@ fn run_batch_ping_pong_client(
 ) -> i32 {
     let mut session = None;
     for _ in 0..200 {
-        match NpSession::connect(run_dir, service, &batch_client_config(profiles)) {
+        let attempt = NpSession::connect(run_dir, service, &batch_client_config(profiles));
+        match attempt {
             Ok(s) => {
                 session = Some(s);
                 break;
@@ -1351,7 +1353,8 @@ fn run_pipeline_client(
 ) -> i32 {
     let mut session = None;
     for _ in 0..200 {
-        match NpSession::connect(run_dir, service, &client_config(PROFILE_NP)) {
+        let attempt = NpSession::connect(run_dir, service, &client_config(PROFILE_NP));
+        match attempt {
             Ok(s) => {
                 session = Some(s);
                 break;
@@ -1550,7 +1553,8 @@ fn run_pipeline_batch_client(
 ) -> i32 {
     let mut session = None;
     for _ in 0..200 {
-        match NpSession::connect(run_dir, service, &batch_client_config(PROFILE_NP)) {
+        let attempt = NpSession::connect(run_dir, service, &batch_client_config(PROFILE_NP));
+        match attempt {
             Ok(s) => {
                 session = Some(s);
                 break;

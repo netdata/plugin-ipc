@@ -191,12 +191,15 @@ Facts:
 
 ## win11 environment
 
-Use the native Windows Rust and Go toolchains plus MinGW64 GCC.
+Use Rust 1.91 or newer from the native Windows Rust toolchain, the native Go
+toolchain, and MinGW64 GCC. Use the latest stable Rust release for normal
+validation.
 
 Recommended environment:
 
 ```bash
-export PATH="/c/Users/costa/.cargo/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
+windows_cargo_home="$(cygpath -u "$USERPROFILE")/.cargo"
+export PATH="$windows_cargo_home/bin:/c/Program Files/Go/bin:/mingw64/bin:$PATH"
 export MSYSTEM=MINGW64
 export CC=/mingw64/bin/gcc
 export CXX=/mingw64/bin/g++
@@ -205,17 +208,28 @@ export CXX=/mingw64/bin/g++
 Sanity check:
 
 ```bash
-type -a cargo go gcc g++ cmake ninja gcov
+type -a cargo rustc go gcc g++ cmake ninja gcov
+rustc --version --verbose
+cargo --version
 ```
 
 Expected shape:
 
-- `cargo` from `/c/Users/costa/.cargo/bin`
+- `cargo` and `rustc` from the native Windows Rustup installation
 - `go` from `/c/Program Files/Go/bin`
 - `gcc` / `g++` / `gcov` from `/mingw64/bin`
 
-This remains the authoritative Windows coverage / sign-off environment. The
-separate MSYS transition lane is:
+This remains the authoritative Windows coverage / sign-off environment.
+
+Before native runtime validation, compile every Rust target, including the
+Windows benchmark and fixtures:
+
+```bash
+cargo check --manifest-path src/crates/netipc/Cargo.toml \
+  --all-targets --all-features --locked
+```
+
+The separate MSYS transition lane is:
 
 ```bash
 bash tests/run-windows-msys-validation.sh

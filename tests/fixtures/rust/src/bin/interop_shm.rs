@@ -78,7 +78,8 @@ mod linux_only {
         // Retry attach -- server may not be fully ready yet
         let mut ctx = None;
         for _ in 0..500 {
-            match ShmContext::client_attach(run_dir, service, 1) {
+            let attempt = ShmContext::client_attach(run_dir, service, 1);
+            match attempt {
                 Ok(c) => {
                     ctx = Some(c);
                     break;

@@ -469,6 +469,16 @@ Current public shapes:
 
 ### Rust
 
+The standalone Rust package uses edition 2024 and requires Rust 1.91 or newer.
+Use the latest stable Rust toolchain during normal development, and preserve
+compatibility with Rust 1.91 because Netdata's vendored source is compiled by
+that workspace policy. Validate the complete standalone target set with:
+
+```bash
+cargo check --manifest-path src/crates/netipc/Cargo.toml \
+  --all-targets --all-features --locked
+```
+
 Public typed service facade lives in:
 
 - [src/crates/netipc/src/service/cgroups_snapshot.rs](../src/crates/netipc/src/service/cgroups_snapshot.rs)

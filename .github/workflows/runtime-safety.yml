@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - CMakeLists.txt
+      - bench/**
       - src/**
       - tests/**
       - .github/workflows/runtime-safety.yml
@@ -14,6 +15,7 @@ on:
       - main
     paths:
       - CMakeLists.txt
+      - bench/**
       - src/**
       - tests/**
       - .github/workflows/runtime-safety.yml
@@ -176,6 +178,11 @@ jobs:
           fi
           windows_cargo_home="${windows_cargo_home:-$HOME/.cargo}"
           export PATH="$windows_cargo_home/bin:$PATH"
+          cargo check \
+            --manifest-path src/crates/netipc/Cargo.toml \
+            --all-targets \
+            --all-features \
+            --locked
           cmake -S . -B build-windows -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_C_COMPILER=/usr/bin/gcc \

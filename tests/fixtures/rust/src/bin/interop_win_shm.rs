@@ -78,7 +78,8 @@ fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Er
     // Retry attach -- server may not be fully ready yet
     let mut ctx = None;
     for _ in 0..500 {
-        match WinShmContext::client_attach(run_dir, service, AUTH_TOKEN, 1, PROFILE_HYBRID) {
+        let attempt = WinShmContext::client_attach(run_dir, service, AUTH_TOKEN, 1, PROFILE_HYBRID);
+        match attempt {
             Ok(c) => {
                 ctx = Some(c);
                 break;

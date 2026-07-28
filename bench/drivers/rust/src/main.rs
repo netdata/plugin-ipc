@@ -257,13 +257,13 @@ mod posix_only {
                 thread_local! {
                     static GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
                 }
-                let gen = GEN.with(|g| {
+                let generation = GEN.with(|g| {
                     let v = g.get() + 1;
                     g.set(v);
                     v
                 });
 
-                builder.set_header(1, gen);
+                builder.set_header(1, generation);
                 for (i, (name, path)) in snapshot_template().iter().enumerate() {
                     if builder
                         .add(1000 + i as u32, 0, i as u32 % 2, name, path)
@@ -397,7 +397,8 @@ mod posix_only {
     ) -> i32 {
         let mut session = None;
         for _ in 0..200 {
-            match UdsSession::connect(run_dir, service, &batch_client_config(profiles)) {
+            let attempt = UdsSession::connect(run_dir, service, &batch_client_config(profiles));
+            match attempt {
                 Ok(s) => {
                     session = Some(s);
                     break;
@@ -438,7 +439,8 @@ mod posix_only {
             if sp == PROFILE_SHM_HYBRID || sp == protocol::PROFILE_SHM_FUTEX {
                 let mut shm_ctx = None;
                 for _ in 0..200 {
-                    match ShmContext::client_attach(run_dir, service, session.session_id) {
+                    let attempt = ShmContext::client_attach(run_dir, service, session.session_id);
+                    match attempt {
                         Ok(ctx) => {
                             shm_ctx = Some(ctx);
                             break;
@@ -677,7 +679,8 @@ mod posix_only {
     ) -> i32 {
         let mut session = None;
         for _ in 0..200 {
-            match UdsSession::connect(run_dir, service, &client_config(PROFILE_UDS)) {
+            let attempt = UdsSession::connect(run_dir, service, &client_config(PROFILE_UDS));
+            match attempt {
                 Ok(s) => {
                     session = Some(s);
                     break;
@@ -815,7 +818,8 @@ mod posix_only {
     ) -> i32 {
         let mut session = None;
         for _ in 0..200 {
-            match UdsSession::connect(run_dir, service, &batch_client_config(PROFILE_UDS)) {
+            let attempt = UdsSession::connect(run_dir, service, &batch_client_config(PROFILE_UDS));
+            match attempt {
                 Ok(s) => {
                     session = Some(s);
                     break;
@@ -965,7 +969,8 @@ mod posix_only {
         // Direct L1 connection with retry (no CgroupsClient pre-connect)
         let mut session = None;
         for _ in 0..200 {
-            match UdsSession::connect(run_dir, service, &client_config(profiles)) {
+            let attempt = UdsSession::connect(run_dir, service, &client_config(profiles));
+            match attempt {
                 Ok(s) => {
                     session = Some(s);
                     break;
@@ -1004,7 +1009,8 @@ mod posix_only {
             if sp == PROFILE_SHM_HYBRID || sp == protocol::PROFILE_SHM_FUTEX {
                 let mut shm_ctx = None;
                 for _ in 0..200 {
-                    match ShmContext::client_attach(run_dir, service, session.session_id) {
+                    let attempt = ShmContext::client_attach(run_dir, service, session.session_id);
+                    match attempt {
                         Ok(ctx) => {
                             shm_ctx = Some(ctx);
                             break;

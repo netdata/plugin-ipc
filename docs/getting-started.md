@@ -386,15 +386,19 @@ if view := guard.Get(hash, "docker-abc123"); view != nil {
 
 ## Building
 
+The Rust implementation uses edition 2024 and requires Rust 1.91 or newer.
+Normal development should use the latest stable toolchain; the declared
+minimum is validated separately in CI.
+
 ```bash
 # Full build + tests
-mkdir build && cd build
-cmake ..
-cmake --build .
-ctest
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build
 
-# Rust
-cd src/crates/netipc && cargo test
+# Rust: build every declared target with the locked dependency set
+cargo test --manifest-path src/crates/netipc/Cargo.toml \
+  --all-targets --all-features --locked
 
 # Go
 cd src/go && go test ./...

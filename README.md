@@ -354,6 +354,12 @@ Recommended reading order:
 
 ## Building And Running
 
+The standalone Rust package uses Rust edition 2024 and requires Rust 1.91 or
+newer. Use the latest stable toolchain for normal development; CI also compiles
+every target with Rust 1.91.0 to enforce the minimum. The repository
+`rustfmt.toml` keeps formatting on style edition 2021 independently of the
+language edition.
+
 ### Linux / POSIX
 
 ```bash
@@ -373,7 +379,8 @@ bash tests/run-coverage-rust.sh
 ### Windows (`win11`)
 
 Use a `mingw64` shell with native Windows `cargo` and `go` ahead of any MSYS
-toolchain copies in `PATH`. This remains the native Windows sign-off path.
+toolchain copies in `PATH`. The native Rust toolchain must be Rust 1.91 or
+newer. This remains the native Windows sign-off path.
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
