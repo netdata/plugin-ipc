@@ -175,6 +175,16 @@ kernel-assisted blocking:
 3. The publisher always calls `futex(FUTEX_WAKE)` after advancing the
    sequence, regardless of whether the consumer is spinning or waiting.
 
+Futex timeout arguments must use the selected Linux syscall's ABI, not assume
+that libc's `struct timespec` has the same layout. In particular, 32-bit libc
+may use 64-bit seconds while the legacy syscall expects two 32-bit fields.
+All receive budgets are unsigned 32-bit milliseconds: their relative seconds
+fit in the legacy field, so implementations can retain the legacy syscall on
+older kernels by explicitly marshalling its fields. Time64-only syscall ABIs
+require two 64-bit fields. Timeout zero still means an infinite wait (a null
+timeout pointer). This is local syscall marshalling; the shared region layout
+and cross-language wire contract are unchanged.
+
 The spin count is a performance tuning parameter. The default of 128
 balances throughput against CPU usage on production VMs. Higher values
 increase maximum throughput but also increase CPU consumption at low
@@ -321,3 +331,37 @@ stale detection logic to the target path before attempting `O_EXCL`
 create. If a stale file exists and `{run_dir}` is safe, it is unlinked first.
 If a live file exists, or `{run_dir}` is unsafe for automatic stale unlink, the
 create fails with address-in-use.
+
+## Timeout ABI regression validation
+
+Run `bash tests/run-shm-timeout-abi.sh` for the native C ABI. To check a 32-bit
+ARM build with time64 libc, install an ARM GNU cross compiler and QEMU user
+emulation, then run:
+
+```sh
+NIPC_TEST_RUNNER=qemu-arm bash tests/run-shm-timeout-abi.sh \
+  arm-linux-gnueabihf-gcc -static -D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 \
+  -DNIPC_TEST_REQUIRE_TIME64_32
+```
+
+For an installed Zig toolchain with its bundled musl headers/libraries:
+
+```sh
+NIPC_TEST_RUNNER=qemu-arm bash tests/run-shm-timeout-abi.sh \
+  zig cc -target arm-linux-musleabihf -mcpu=arm1176jzf_s -static \
+  -DNIPC_TEST_REQUIRE_TIME64_32
+```
+
+The fixture checks elapsed time and CPU time for empty receives, including
+subsecond and multisecond budgets, and message wakeup with finite, infinite,
+and maximum API timeouts. For Rust, install `qemu-arm` and the rustup target
+`arm-unknown-linux-musleabihf`, then run
+`bash tests/run-rust-shm-timeout-abi.sh`. This runs the public-API fixture with
+both libc crate musl time layouts, using its `RUST_LIBC_UNSTABLE_MUSL_V1_2_3`
+test configuration for time64. The runner requires the fixture's compiled ABI
+diagnostic to report 4-byte pointers, 4/8-byte seconds fields and 8/16-byte
+timespecs for time32/time64 respectively; a missing or unexpected layout fails
+the run even when the timeout assertions pass. Runtime Safety CI checks both
+C ARM glibc layouts and both Rust ARM musl layouts. Emulation validates syscall ABI
+behavior; it does not establish production CPU usage or full C/Rust/Go support
+for that architecture.

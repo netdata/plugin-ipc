@@ -27,6 +27,17 @@ authoritative:
 - [docs/codec-cgroups-lookup.md](codec-cgroups-lookup.md)
 - [docs/codec-apps-lookup.md](codec-apps-lookup.md)
 
+## Linux 32-bit timeout validation
+
+When integrating on 32-bit Linux, run the target-libc timeout regression in
+[POSIX SHM validation](level1-posix-shm.md#timeout-abi-regression-validation).
+A timeout error alone does not prove that the thread blocked for its budget.
+Verify elapsed waiting and delayed-peer wakeup, especially with time64 libc.
+The Rust ABI runner also asserts the compiled layout for each requested mode;
+both timeout behavior and the expected ABI must pass.
+The C ABI fixture does not replace building and testing each language consumer
+for the target architecture or measuring the deployed service's CPU use.
+
 ## Core Reality
 
 Before adding anything, internalize these facts:

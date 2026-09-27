@@ -310,6 +310,11 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     add_test(NAME test_shm COMMAND test_shm)
     set_tests_properties(test_shm PROPERTIES TIMEOUT 30)
 
+    add_executable(test_shm_timeout tests/fixtures/c/test_shm_timeout.c)
+    target_link_libraries(test_shm_timeout PRIVATE netipc_shm)
+    add_test(NAME test_shm_timeout COMMAND test_shm_timeout)
+    set_tests_properties(test_shm_timeout PROPERTIES TIMEOUT 25)
+
     # C SHM interop binary
     add_executable(interop_shm_c tests/fixtures/c/interop_shm.c)
     target_link_libraries(interop_shm_c PRIVATE netipc_shm netipc_protocol)
