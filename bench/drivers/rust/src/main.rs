@@ -59,10 +59,7 @@ mod posix_only {
     // ---------------------------------------------------------------------------
 
     fn cpu_ns() -> u64 {
-        let mut ts = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
+        let mut ts = libc::timespec::default();
         unsafe {
             libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts);
         }

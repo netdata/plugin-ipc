@@ -31,6 +31,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  shm-timeout-abi:
+    name: ARM SHM timeout ABI
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install ARM compiler and emulator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf libc6-dev-armhf-cross qemu-user
+      - name: Check legacy and time64 libc layouts
+        env:
+          NIPC_TEST_RUNNER: qemu-arm
+        run: |
+          bash tests/run-shm-timeout-abi.sh arm-linux-gnueabihf-gcc -static
+          bash tests/run-shm-timeout-abi.sh arm-linux-gnueabihf-gcc -static -D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 -DNIPC_TEST_REQUIRE_TIME64_32
+
+      - name: Check Rust ARM musl legacy and time64 layouts
+        run: |
+          rustup target add arm-unknown-linux-musleabihf
+          bash tests/run-rust-shm-timeout-abi.sh
+
   asan-ubsan:
     name: ASAN/UBSAN
     runs-on: ubuntu-latest
