@@ -358,7 +358,10 @@ and maximum API timeouts. For Rust, install `qemu-arm` and the rustup target
 `arm-unknown-linux-musleabihf`, then run
 `bash tests/run-rust-shm-timeout-abi.sh`. This runs the public-API fixture with
 both libc crate musl time layouts, using its `RUST_LIBC_UNSTABLE_MUSL_V1_2_3`
-test configuration for time64. Runtime Safety CI checks both C ARM glibc
-layouts and both Rust ARM musl layouts. Emulation validates syscall ABI
+test configuration for time64. The runner requires the fixture's compiled ABI
+diagnostic to report 4-byte pointers, 4/8-byte seconds fields and 8/16-byte
+timespecs for time32/time64 respectively; a missing or unexpected layout fails
+the run even when the timeout assertions pass. Runtime Safety CI checks both
+C ARM glibc layouts and both Rust ARM musl layouts. Emulation validates syscall ABI
 behavior; it does not establish production CPU usage or full C/Rust/Go support
 for that architecture.
