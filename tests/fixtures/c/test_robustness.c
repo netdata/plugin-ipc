@@ -851,6 +851,8 @@ static void test_default_packet_size_carries_large_message(void)
           large_message_round_trip("rob_bigmsg_default", 0));
     check("control: 512 KiB message delivered with 64 KiB packet size",
           large_message_round_trip("rob_bigmsg_explicit", 65536));
+    check("512 KiB message delivered with an oversized 4 MiB packet size (clamped)",
+          large_message_round_trip("rob_bigmsg_oversized", 4u * 1024u * 1024u));
 }
 
 /* ------------------------------------------------------------------ */

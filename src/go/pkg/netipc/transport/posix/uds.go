@@ -25,6 +25,8 @@ const (
 	defaultBacklog                   = 16
 	defaultBatchItems                = 1
 	defaultPacketSizeFallback uint32 = 65536
+	packetSizeMax             uint32 = 262144
+	sndbufOverhead                   = 32
 	helloPayloadSize                 = 44
 	helloAckPayloadSize              = 48
 
@@ -102,13 +104,22 @@ func buildSocketPath(runDir, serviceName string) (string, error) {
 	return path, nil
 }
 
-// detectPacketSize reads SO_SNDBUF from the socket.
-func detectPacketSize(fd int) uint32 {
+// packetSizeLimit returns the packet size this side may propose: configured
+// (0 = no preference) capped by what the kernel accepts as one datagram.
+// Linux rejects a datagram larger than SO_SNDBUF minus 32 bytes of
+// accounting overhead with EMSGSIZE; very large buffers also hit ENOBUFS
+// near 1 MiB, hence the fixed cap.
+func packetSizeLimit(fd int, configured uint32) uint32 {
+	limit := defaultPacketSizeFallback
 	val, err := syscall.GetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF)
-	if err != nil || val <= 0 {
-		return defaultPacketSizeFallback
+	if err == nil && val > sndbufOverhead {
+		limit = uint32(val - sndbufOverhead) // #nosec G115 -- val is a positive int from the kernel.
 	}
-	return uint32(val)
+	limit = min(limit, packetSizeMax)
+	if configured != 0 && configured < limit {
+		return configured
+	}
+	return limit
 }
 
 // highestBit returns the highest set bit in a bitmask (0 if empty).

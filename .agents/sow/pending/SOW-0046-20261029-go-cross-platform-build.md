@@ -1,4 +1,4 @@
-# SOW-0046 - Go Linux arm64 Build
+# SOW-0046 - Go Cross-Platform Build
 
 ## Status
 
@@ -10,7 +10,7 @@ Sub-state: created 2026-10-29 from the SOW-0041 analysis round; awaiting its tur
 
 ### Purpose
 
-The pure-Go POSIX transport and service packages must build on every Linux architecture Netdata ships, including arm64.
+The pure-Go POSIX transport and service packages must build on every platform the docs claim and Netdata ships: Linux on all its architectures (including arm64 and 32-bit), FreeBSD and macOS.
 
 ### User Request
 
@@ -22,7 +22,14 @@ Facts:
 
 - `syscall.SYS_POLL` does not exist on linux/arm64 (and other newer architectures such as riscv64 and loong64, which only have `ppoll`), but is used by `src/go/pkg/netipc/transport/posix/uds_receive.go:91` and `src/go/pkg/netipc/service/raw/poll_unix.go:38`.
 - Verified 2026-10-29: `GOOS=linux GOARCH=arm64 go vet ./...` in `src/go` fails with `undefined: syscall.SYS_POLL`.
-- No CI job cross-builds Go for arm64, so nothing catches it.
+- Found 2026-10-29 during SOW-0042 validation (`GOOS=<os> GOARCH=<arch> go build ./...` in `src/go`): the Go POSIX transport builds only on linux amd64, ppc64le and s390x. Failures:
+  - linux/arm64, linux/riscv64: `undefined: syscall.SYS_POLL` (`uds_receive.go:91`, `service/raw/poll_unix.go:38`).
+  - linux/386, linux/arm: `cannot use iovlen (variable of type uint64) as uint32 value` (`uds.go:170`, `syscall.Msghdr.Iovlen` width differs); linux/386 also `undefined: syscall.SYS_SENDMSG` (socketcall architecture).
+  - freebsd/amd64: `Iovlen` is `int32` (`uds.go:170`).
+  - darwin/arm64: `Iovlen` is `int32` and `undefined: syscall.MSG_NOSIGNAL` (`uds.go:177`; macOS uses `SO_NOSIGPIPE`).
+- The code dates from 2026-03 (`git blame uds.go:165-172` -> 5372e97f1); `docs/level1-transport.md:463`, `:499` claim macOS/FreeBSD support.
+- No CI job cross-builds Go for other architectures or operating systems, so nothing catches it.
+- Unknown: whether C and Rust build on the same targets (Rust targets are not installed locally); to be checked when this SOW starts.
 
 Inferences:
 
@@ -34,7 +41,7 @@ Unknowns:
 
 ### Acceptance Criteria
 
-- `GOOS=linux GOARCH=arm64 go vet ./...` (and the other supported architectures) succeeds; Go stays pure (no cgo).
+- `go build ./...` and `go vet ./...` succeed for linux amd64/386/arm/arm64/riscv64/ppc64le/s390x, freebsd/amd64 and darwin/arm64 (final list decided with the user); Go stays pure (no cgo).
 - CI guards the cross-architecture build.
 
 ## Analysis

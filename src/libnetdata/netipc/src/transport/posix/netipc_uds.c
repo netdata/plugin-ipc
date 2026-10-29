@@ -21,16 +21,23 @@ bool nipc_uds_header_payload_len(size_t payload_len, size_t *msg_len_out)
     return true;
 }
 
-uint32_t nipc_uds_detect_packet_size(int fd)
+uint32_t nipc_uds_packet_size(int fd, uint32_t configured)
 {
+    /* Linux rejects a datagram larger than SO_SNDBUF minus 32 bytes of
+     * accounting overhead with EMSGSIZE; very large buffers also hit
+     * ENOBUFS near 1 MiB, hence the fixed cap. */
+    uint32_t limit = NIPC_UDS_PACKET_SIZE_FALLBACK;
     int val = 0;
     socklen_t len = sizeof(val);
-    if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &val, &len) < 0)
-        return 65536;
+    if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &val, &len) == 0 &&
+        val > NIPC_UDS_SNDBUF_OVERHEAD)
+        limit = (uint32_t)val - NIPC_UDS_SNDBUF_OVERHEAD;
 
-    if (val <= 0)
-        return 65536;
-    return (uint32_t)val;
+    if (limit > NIPC_UDS_PACKET_SIZE_MAX)
+        limit = NIPC_UDS_PACKET_SIZE_MAX;
+    if (configured != 0 && configured < limit)
+        return configured;
+    return limit;
 }
 
 nipc_uds_error_t nipc_uds_raw_send(int fd, const void *data, size_t len)

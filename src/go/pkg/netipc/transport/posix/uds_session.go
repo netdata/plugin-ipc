@@ -21,7 +21,7 @@ type ClientConfig struct {
 	MaxResponsePayloadBytes uint32
 	MaxResponseBatchItems   uint32
 	AuthToken               uint64
-	PacketSize              uint32 // 0 = auto-detect from SO_SNDBUF
+	PacketSize              uint32 // 0 = kernel limit; capped at SO_SNDBUF-32 and 256 KiB
 }
 
 // ServerConfig configures a listener and its accepted sessions.
@@ -33,7 +33,7 @@ type ServerConfig struct {
 	MaxResponsePayloadBytes uint32
 	MaxResponseBatchItems   uint32
 	AuthToken               uint64
-	PacketSize              uint32 // 0 = auto-detect from SO_SNDBUF
+	PacketSize              uint32 // 0 = kernel limit; capped at SO_SNDBUF-32 and 256 KiB
 	Backlog                 int    // 0 = default (16)
 }
 

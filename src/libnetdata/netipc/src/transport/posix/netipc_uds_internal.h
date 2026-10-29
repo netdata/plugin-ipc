@@ -12,8 +12,15 @@
 #define UDS_DEFAULT_BACKLOG 16
 #define UDS_DEFAULT_BATCH_ITEMS 1
 
+#define NIPC_UDS_PACKET_SIZE_FALLBACK 65536u
+#define NIPC_UDS_PACKET_SIZE_MAX 262144u
+#define NIPC_UDS_SNDBUF_OVERHEAD 32
+
 bool nipc_uds_header_payload_len(size_t payload_len, size_t *msg_len_out);
-uint32_t nipc_uds_detect_packet_size(int fd);
+
+/* Packet size this side may propose: the configured size (0 = no
+ * preference) capped by what the kernel accepts as one datagram. */
+uint32_t nipc_uds_packet_size(int fd, uint32_t configured);
 
 nipc_uds_error_t nipc_uds_raw_send(int fd, const void *data, size_t len);
 nipc_uds_error_t nipc_uds_raw_send_iov(int fd, const void *hdr, size_t hdr_len,

@@ -114,6 +114,7 @@ typedef enum {
     MALFORMED_ACK_INCOMPATIBLE_STATUS,
     MALFORMED_ACK_BAD_LAYOUT,
     MALFORMED_ACK_BAD_PAYLOAD,
+    MALFORMED_ACK_PACKET_ABOVE_PROPOSAL,
 } malformed_ack_mode_t;
 
 typedef struct {
@@ -449,6 +450,42 @@ static void *malformed_ack_server_thread(void *arg)
                     .payload_len = 4,
                 };
                 nipc_header_encode(&hdr, pkt, sizeof(pkt));
+                send(cfd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+                break;
+            }
+            case MALFORMED_ACK_PACKET_ABOVE_PROPOSAL: {
+                nipc_hello_t hello;
+                if (n < NIPC_HEADER_LEN ||
+                    nipc_hello_decode(buf + NIPC_HEADER_LEN, (size_t)n - NIPC_HEADER_LEN,
+                                      &hello) != NIPC_OK)
+                    break;
+                nipc_hello_ack_t ack = {
+                    .layout_version = 1,
+                    .server_supported_profiles = NIPC_PROFILE_BASELINE,
+                    .intersection_profiles = NIPC_PROFILE_BASELINE,
+                    .selected_profile = NIPC_PROFILE_BASELINE,
+                    .agreed_max_request_payload_bytes = hello.max_request_payload_bytes,
+                    .agreed_max_request_batch_items = hello.max_request_batch_items,
+                    .agreed_max_response_payload_bytes = hello.max_response_payload_bytes,
+                    .agreed_max_response_batch_items = hello.max_response_batch_items,
+                    .agreed_packet_size = hello.packet_size + 1,
+                    .session_id = 1,
+                };
+                uint8_t ack_buf[48];
+                uint8_t pkt[NIPC_HEADER_LEN + sizeof(ack_buf)];
+                nipc_header_t hdr = {
+                    .magic = NIPC_MAGIC_MSG,
+                    .version = NIPC_VERSION,
+                    .header_len = NIPC_HEADER_LEN,
+                    .kind = NIPC_KIND_CONTROL,
+                    .code = NIPC_CODE_HELLO_ACK,
+                    .transport_status = NIPC_STATUS_OK,
+                    .payload_len = sizeof(ack_buf),
+                    .item_count = 1,
+                };
+                nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
+                nipc_header_encode(&hdr, pkt, sizeof(pkt));
+                memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
                 send(cfd, pkt, sizeof(pkt), MSG_NOSIGNAL);
                 break;
             }
@@ -2557,6 +2594,8 @@ static void test_connect_malformed_hello_ack(void)
           "bad-layout HELLO_ACK rejected as incompatible" },
         { "test_ack_payload", MALFORMED_ACK_BAD_PAYLOAD, NIPC_UDS_ERR_PROTOCOL,
           "truncated HELLO_ACK payload rejected" },
+        { "test_ack_pkt_above", MALFORMED_ACK_PACKET_ABOVE_PROPOSAL, NIPC_UDS_ERR_PROTOCOL,
+          "HELLO_ACK packet size above the client proposal rejected" },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {

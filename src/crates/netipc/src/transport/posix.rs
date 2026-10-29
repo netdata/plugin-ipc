@@ -23,6 +23,8 @@ use std::time::{Duration, Instant};
 const DEFAULT_BACKLOG: i32 = 16;
 const DEFAULT_BATCH_ITEMS: u32 = 1;
 const DEFAULT_PACKET_SIZE_FALLBACK: u32 = 65536;
+const PACKET_SIZE_MAX: u32 = 262_144;
+const SNDBUF_OVERHEAD: u32 = 32;
 const HELLO_PAYLOAD_SIZE: usize = 44;
 const HELLO_ACK_PAYLOAD_SIZE: usize = 48;
 
@@ -154,7 +156,7 @@ pub struct ClientConfig {
     pub max_response_payload_bytes: u32,
     pub max_response_batch_items: u32,
     pub auth_token: u64,
-    /// 0 = auto-detect from SO_SNDBUF.
+    /// 0 = kernel limit; always capped at SO_SNDBUF - 32 and 256 KiB.
     pub packet_size: u32,
 }
 
@@ -183,7 +185,7 @@ pub struct ServerConfig {
     pub max_response_payload_bytes: u32,
     pub max_response_batch_items: u32,
     pub auth_token: u64,
-    /// 0 = auto-detect from SO_SNDBUF.
+    /// 0 = kernel limit; always capped at SO_SNDBUF - 32 and 256 KiB.
     pub packet_size: u32,
     /// listen() backlog, 0 = default (16).
     pub backlog: i32,
@@ -788,8 +790,13 @@ fn build_socket_path(run_dir: &str, service_name: &str) -> Result<String, UdsErr
     Ok(path)
 }
 
-/// Get SO_SNDBUF as packet size.
-fn detect_packet_size(fd: RawFd) -> u32 {
+/// Packet size this side may propose: `configured` (0 = no preference)
+/// capped by what the kernel accepts as one datagram.
+///
+/// Linux rejects a datagram larger than SO_SNDBUF minus 32 bytes of
+/// accounting overhead with EMSGSIZE; very large buffers also hit ENOBUFS
+/// near 1 MiB, hence the fixed cap.
+fn packet_size_limit(fd: RawFd, configured: u32) -> u32 {
     let mut val: libc::c_int = 0;
     let mut len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
 
@@ -803,10 +810,17 @@ fn detect_packet_size(fd: RawFd) -> u32 {
         )
     };
 
-    if rc < 0 || val <= 0 {
+    let limit = if rc < 0 || val <= SNDBUF_OVERHEAD as libc::c_int {
         DEFAULT_PACKET_SIZE_FALLBACK
     } else {
-        val as u32
+        val as u32 - SNDBUF_OVERHEAD
+    }
+    .min(PACKET_SIZE_MAX);
+
+    if configured != 0 && configured < limit {
+        configured
+    } else {
+        limit
     }
 }
 
@@ -1106,11 +1120,7 @@ fn connect_and_handshake(
 ) -> Result<UdsSession, UdsError> {
     connect_unix(fd, path)?;
 
-    let pkt_size = if config.packet_size == 0 {
-        detect_packet_size(fd)
-    } else {
-        config.packet_size
-    };
+    let pkt_size = packet_size_limit(fd, config.packet_size);
 
     let supported = if config.supported_profiles == 0 {
         PROFILE_BASELINE
@@ -1224,6 +1234,13 @@ fn connect_and_handshake(
     if ack.agreed_packet_size <= HEADER_SIZE as u32 {
         return Err(UdsError::Protocol("agreed packet_size too small".into()));
     }
+    // A server may only lower our proposal; a larger size could exceed what
+    // this side's kernel accepts as one datagram.
+    if ack.agreed_packet_size > pkt_size {
+        return Err(UdsError::Protocol(
+            "agreed packet_size exceeds proposal".into(),
+        ));
+    }
 
     Ok(UdsSession {
         fd,
@@ -1250,11 +1267,7 @@ fn server_handshake(
     config: &ServerConfig,
     session_id: u64,
 ) -> Result<UdsSession, UdsError> {
-    let server_pkt_size = if config.packet_size == 0 {
-        detect_packet_size(fd)
-    } else {
-        config.packet_size
-    };
+    let server_pkt_size = packet_size_limit(fd, config.packet_size);
 
     let s_req_pay = apply_default(config.max_request_payload_bytes, MAX_PAYLOAD_DEFAULT);
     let s_resp_pay = apply_default(config.max_response_payload_bytes, MAX_PAYLOAD_DEFAULT);

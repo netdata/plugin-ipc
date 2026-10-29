@@ -28,10 +28,7 @@ func connectAndHandshake(fd int, path string, config *ClientConfig) (*Session, e
 		return nil, wrapErr(ErrConnect, err.Error())
 	}
 
-	pktSize := config.PacketSize
-	if pktSize == 0 {
-		pktSize = detectPacketSize(fd)
-	}
+	pktSize := packetSizeLimit(fd, config.PacketSize)
 
 	ack, err := framing.ClientHandshake(framing.ClientHandshakeConfig{
 		Hello: framing.HelloConfig{
@@ -63,6 +60,11 @@ func connectAndHandshake(fd int, path string, config *ClientConfig) (*Session, e
 	})
 	if err != nil {
 		return nil, err
+	}
+	// A server may only lower our proposal; a larger size could exceed what
+	// this side's kernel accepts as one datagram.
+	if ack.AgreedPacketSize <= protocol.HeaderSize || ack.AgreedPacketSize > pktSize {
+		return nil, wrapErr(ErrProtocol, "agreed packet_size out of range")
 	}
 
 	return &Session{
@@ -97,10 +99,7 @@ func helloAckStatusError(status uint16) error {
 }
 
 func serverHandshake(fd int, config *ServerConfig, sessionID uint64) (*Session, error) {
-	serverPktSize := config.PacketSize
-	if serverPktSize == 0 {
-		serverPktSize = detectPacketSize(fd)
-	}
+	serverPktSize := packetSizeLimit(fd, config.PacketSize)
 
 	sRespPay := applyDefault(config.MaxResponsePayloadBytes, protocol.MaxPayloadDefault)
 	sReqPay := applyDefault(config.MaxRequestPayloadBytes, protocol.MaxPayloadDefault)

@@ -126,9 +126,7 @@ nipc_uds_error_t nipc_uds_client_handshake(int fd,
                                            const nipc_uds_client_config_t *cfg,
                                            nipc_uds_session_t *session) {
   uint8_t buf[128];
-  uint32_t pkt_size = cfg->packet_size;
-  if (pkt_size == 0)
-    pkt_size = nipc_uds_detect_packet_size(fd);
+  uint32_t pkt_size = nipc_uds_packet_size(fd, cfg->packet_size);
 
   nipc_hello_t hello = {
       .layout_version = 1,
@@ -190,7 +188,9 @@ nipc_uds_error_t nipc_uds_client_handshake(int fd,
     return NIPC_UDS_ERR_PROTOCOL;
 
   fill_client_session(session, fd, &ack);
-  if (session->packet_size <= NIPC_HEADER_LEN)
+  /* A server may only lower the client's proposal; a larger size could
+   * exceed what this side's kernel accepts. */
+  if (session->packet_size <= NIPC_HEADER_LEN || session->packet_size > pkt_size)
     return NIPC_UDS_ERR_PROTOCOL;
 
   return NIPC_UDS_OK;
@@ -201,9 +201,7 @@ nipc_uds_error_t nipc_uds_server_handshake(int fd,
                                            uint64_t session_id,
                                            nipc_uds_session_t *session) {
   uint8_t buf[128];
-  uint32_t server_pkt_size = cfg->packet_size;
-  if (server_pkt_size == 0)
-    server_pkt_size = nipc_uds_detect_packet_size(fd);
+  uint32_t server_pkt_size = nipc_uds_packet_size(fd, cfg->packet_size);
 
   uint32_t s_resp_pay =
       apply_default(cfg->max_response_payload_bytes, NIPC_MAX_PAYLOAD_DEFAULT);

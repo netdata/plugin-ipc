@@ -63,8 +63,20 @@ fallback.
 
 ## Packet size
 
-SEQPACKET has a kernel-imposed maximum message size. The transport
-determines its packet size from the socket's `SO_SNDBUF` option.
+SEQPACKET has a kernel-imposed maximum message size. On Linux a datagram
+larger than the sender's `SO_SNDBUF` value (as reported by
+`getsockopt`) minus 32 bytes of kernel accounting overhead fails with
+`EMSGSIZE`, and very large buffers also fail with `ENOBUFS` near 1 MiB.
+
+Each side derives the packet size it proposes as:
+
+```
+limit    = min(SO_SNDBUF - 32, 262144)   (65536 if SO_SNDBUF cannot be read)
+proposal = configured packet size, if non-zero and below limit; else limit
+```
+
+A configured packet size above the limit is clamped silently; it is a
+preference, not a requirement.
 
 The effective packet size for the connection is negotiated during
 handshake:
@@ -72,6 +84,10 @@ handshake:
 ```
 agreed_packet_size = min(client_packet_size, server_packet_size)
 ```
+
+The client must reject a HELLO_ACK whose `agreed_packet_size` exceeds its
+own proposal (or is not greater than the 32-byte header) as a protocol
+error: a larger size could exceed what the client's kernel accepts.
 
 Both sides use `agreed_packet_size` for chunking decisions.
 

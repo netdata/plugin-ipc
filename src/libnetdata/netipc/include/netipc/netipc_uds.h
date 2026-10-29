@@ -66,7 +66,7 @@ typedef struct {
     uint32_t max_response_payload_bytes;/* 0 = use default */
     uint32_t max_response_batch_items;  /* 0 = use default (1) */
     uint64_t auth_token;
-    uint32_t packet_size;              /* 0 = auto-detect from SO_SNDBUF */
+    uint32_t packet_size;              /* 0 = kernel limit; capped at SO_SNDBUF-32 and 256 KiB */
 } nipc_uds_client_config_t;
 
 /* ------------------------------------------------------------------ */
@@ -81,7 +81,7 @@ typedef struct {
     uint32_t max_response_payload_bytes; /* 0 = use default */
     uint32_t max_response_batch_items;   /* 0 = use default (1) */
     uint64_t auth_token;                 /* expected token from clients */
-    uint32_t packet_size;               /* 0 = auto-detect from SO_SNDBUF */
+    uint32_t packet_size;               /* 0 = kernel limit; capped at SO_SNDBUF-32 and 256 KiB */
     int      backlog;                   /* listen backlog, 0 = default (16) */
 } nipc_uds_server_config_t;
 

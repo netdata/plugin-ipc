@@ -219,6 +219,9 @@ establishes:
   server). Both sides use this single negotiated packet size for chunking on
   the connection. The negotiated packet size must be strictly greater than the
   header size (32 bytes); if it is not, the server rejects the handshake.
+  Each side's proposal must not exceed the largest message its own transport
+  can send in one packet, and the client rejects a negotiated size larger
+  than its proposal.
 
 ### Handshake strategy
 

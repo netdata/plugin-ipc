@@ -2861,8 +2861,126 @@ fn test_apply_default() {
 }
 
 #[test]
-fn test_detect_packet_size_invalid_fd_returns_fallback() {
-    assert_eq!(detect_packet_size(-1), DEFAULT_PACKET_SIZE_FALLBACK);
+fn test_packet_size_limit_invalid_fd_uses_fallback() {
+    assert_eq!(packet_size_limit(-1, 0), DEFAULT_PACKET_SIZE_FALLBACK);
+    assert_eq!(packet_size_limit(-1, 1000), 1000);
+    assert_eq!(
+        packet_size_limit(-1, DEFAULT_PACKET_SIZE_FALLBACK + 1),
+        DEFAULT_PACKET_SIZE_FALLBACK
+    );
+}
+
+fn set_sndbuf(fd: RawFd, bytes: libc::c_int) {
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &bytes as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(rc, 0, "setsockopt(SO_SNDBUF) failed: {}", errno());
+}
+
+#[test]
+fn test_packet_size_limit_matches_kernel_datagram_limit() {
+    // None keeps the system default SO_SNDBUF.
+    for sndbuf in [None, Some(4096), Some(65536)] {
+        let (fd0, fd1) = socketpair_seqpacket();
+        if let Some(bytes) = sndbuf {
+            set_sndbuf(fd0, bytes);
+        }
+        let limit = packet_size_limit(fd0, 0);
+        assert!(limit > HEADER_SIZE as u32 && limit <= PACKET_SIZE_MAX);
+        assert_eq!(packet_size_limit(fd0, u32::MAX), limit, "{sndbuf:?}");
+
+        let pkt = vec![0u8; limit as usize];
+        raw_send(fd0, &pkt).unwrap_or_else(|e| panic!("{sndbuf:?}: {limit} bytes: {e:?}"));
+        let mut buf = vec![0u8; limit as usize];
+        assert_eq!(raw_recv(fd1, &mut buf).expect("recv"), limit as usize);
+
+        if limit < PACKET_SIZE_MAX {
+            // Guards the SO_SNDBUF - 32 rule: one more byte must not fit.
+            let over = vec![0u8; limit as usize + 1];
+            assert!(raw_send(fd0, &over).is_err(), "{sndbuf:?}: {limit} + 1");
+        }
+        unsafe {
+            libc::close(fd0);
+            libc::close(fd1);
+        }
+    }
+}
+
+#[test]
+fn test_connect_rejects_agreed_packet_size_above_proposal() {
+    ensure_run_dir();
+    let svc = unique_service("rs_ack_pkt_above");
+    cleanup_socket(&svc);
+
+    let ready = Arc::new(AtomicBool::new(false));
+    let ready_clone = ready.clone();
+    let svc_clone = svc.clone();
+    let server = thread::spawn(move || {
+        let fd = raw_listener_fd(&svc_clone);
+        ready_clone.store(true, Ordering::Release);
+        let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert!(client_fd >= 0, "accept failed: {}", errno());
+
+        let mut hello_buf = [0u8; 128];
+        let n = raw_recv(client_fd, &mut hello_buf).expect("recv hello");
+        let hello = Hello::decode(&hello_buf[HEADER_SIZE..n]).expect("decode hello");
+
+        let ack = HelloAck {
+            layout_version: 1,
+            server_supported_profiles: PROFILE_BASELINE,
+            intersection_profiles: PROFILE_BASELINE,
+            selected_profile: PROFILE_BASELINE,
+            agreed_max_request_payload_bytes: 4096,
+            agreed_max_request_batch_items: 16,
+            agreed_max_response_payload_bytes: 4096,
+            agreed_max_response_batch_items: 16,
+            agreed_packet_size: hello.packet_size + 1,
+            session_id: 1,
+            ..HelloAck::default()
+        };
+        let mut ack_buf = [0u8; HELLO_ACK_PAYLOAD_SIZE];
+        ack.encode(&mut ack_buf);
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION,
+            header_len: protocol::HEADER_LEN,
+            kind: protocol::KIND_CONTROL,
+            flags: 0,
+            code: protocol::CODE_HELLO_ACK,
+            transport_status: protocol::STATUS_OK,
+            payload_len: HELLO_ACK_PAYLOAD_SIZE as u32,
+            item_count: 1,
+            message_id: 0,
+        };
+        let mut pkt = [0u8; HEADER_SIZE + HELLO_ACK_PAYLOAD_SIZE];
+        hdr.encode(&mut pkt[..HEADER_SIZE]);
+        pkt[HEADER_SIZE..].copy_from_slice(&ack_buf);
+        raw_send(client_fd, &pkt).expect("send ack");
+
+        unsafe {
+            libc::close(client_fd);
+            libc::close(fd);
+        }
+    });
+
+    while !ready.load(Ordering::Acquire) {
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
+        Ok(_) => panic!("agreed packet_size above the proposal must fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, UdsError::Protocol(_)), "got {err:?}");
+
+    server.join().expect("server join");
+    cleanup_socket(&svc);
 }
 
 #[test]
