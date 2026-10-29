@@ -28,15 +28,6 @@ const (
 	winFileFlagFirstPipeInstance = 0x00080000
 )
 
-// winSkipKnownBug skips tests that reproduce still-open bugs unless
-// NETIPC_REPRO_KNOWN_BUGS=1; each fix removes the gate from its tests.
-func winSkipKnownBug(t *testing.T, id string) {
-	t.Helper()
-	if os.Getenv("NETIPC_REPRO_KNOWN_BUGS") != "1" {
-		t.Skipf("reproduces open bug %s; set NETIPC_REPRO_KNOWN_BUGS=1 to run", id)
-	}
-}
-
 func winWithin(limit time.Duration, f func()) bool {
 	done := make(chan struct{})
 	go func() {
@@ -192,7 +183,6 @@ func TestWinRobustnessHelperProcess(t *testing.T) {
 
 // K2: SHM server must release a session once its client crashes.
 func TestWinRobustShmSessionReleasedAfterClientCrash(t *testing.T) {
-	winSkipKnownBug(t, "K2")
 	svc := uniqueWinService("go_wrob_shm_crash")
 	rs := startWinRobustServer(svc, testWinShmServerConfig(), protocol.MethodIncrement, winSlowIncrementDispatch(0), 2)
 
@@ -210,7 +200,6 @@ func TestWinRobustShmSessionReleasedAfterClientCrash(t *testing.T) {
 
 // K3: a client that opens the pipe but never sends HELLO.
 func TestWinRobustSilentClientDoesNotBlockOtherClients(t *testing.T) {
-	winSkipKnownBug(t, "K3")
 	svc := uniqueWinService("go_wrob_silent")
 	rs := startWinRobustServer(svc, testWinServerConfig(), protocol.MethodIncrement, winSlowIncrementDispatch(0), 4)
 
@@ -229,7 +218,6 @@ func TestWinRobustSilentClientDoesNotBlockOtherClients(t *testing.T) {
 }
 
 func TestWinRobustSilentClientDoesNotBlockShutdown(t *testing.T) {
-	winSkipKnownBug(t, "K3")
 	svc := uniqueWinService("go_wrob_silent_stop")
 	rs := startWinRobustServer(svc, testWinServerConfig(), protocol.MethodIncrement, winSlowIncrementDispatch(0), 4)
 
@@ -246,7 +234,6 @@ func TestWinRobustSilentClientDoesNotBlockShutdown(t *testing.T) {
 
 // K4: a client call must be bounded even when the server never answers HELLO.
 func TestWinRobustClientBoundedWhenServerNeverSendsHelloAck(t *testing.T) {
-	winSkipKnownBug(t, "K4")
 	svc := uniqueWinService("go_wrob_nohelloack")
 	name, err := windows.BuildPipeName(winTestRunDir, svc)
 	if err != nil {
@@ -298,7 +285,6 @@ func TestWinRobustPipeCallHonorsTimeoutLongerThan100ms(t *testing.T) {
 // N2: shutdown must not wait forever on a worker blocked writing a response
 // to a client that stopped reading.
 func TestWinRobustShutdownNotBlockedByNonReadingClient(t *testing.T) {
-	winSkipKnownBug(t, "N2")
 	const big = 8 * 1024 * 1024
 	svc := uniqueWinService("go_wrob_noread")
 	scfg := testWinServerConfig()
@@ -333,7 +319,6 @@ func TestWinRobustShutdownNotBlockedByNonReadingClient(t *testing.T) {
 
 // N3: Stop issued before Run must not be lost.
 func TestWinRobustStopBeforeRunIsHonored(t *testing.T) {
-	winSkipKnownBug(t, "N3")
 	svc := uniqueWinService("go_wrob_stop_first")
 	s := NewServerWithWorkers(winTestRunDir, svc, testWinServerConfig(), protocol.MethodIncrement, winSlowIncrementDispatch(0), 2)
 	s.Stop()
@@ -355,7 +340,6 @@ func TestWinRobustStopBeforeRunIsHonored(t *testing.T) {
 // N5: an SHM client must notice a crashed server instead of waiting out its
 // whole timeout.
 func TestWinRobustShmClientNoticesCrashedServer(t *testing.T) {
-	winSkipKnownBug(t, "N5")
 	svc := uniqueWinService("go_wrob_dead_server")
 	cmd := winSpawnHelper(t, "shm_server", svc)
 

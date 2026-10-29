@@ -279,7 +279,7 @@ Output/reference skills:
 - POSIX coverage: `bash tests/run-coverage-c.sh`, `bash tests/run-coverage-rust.sh`, `bash tests/run-coverage-go.sh`
 - POSIX interop examples: `bash tests/interop_codec.sh`, `bash tests/test_uds_interop.sh`, `bash tests/test_shm_interop.sh`, `bash tests/test_service_interop.sh`
 - `tests/interop_codec.sh` configures `build/`; do not run it in parallel with CTest or another build-directory validation command.
-- Robustness reproduction tests (C `test_robustness` / `test_win_robustness`, Rust `service::raw::tests::robustness` / `service::raw::windows_tests::robustness`, Go `TestRobust*` / `TestWinRobust*`) skip tests for still-open bugs unless `NETIPC_REPRO_KNOWN_BUGS=1`. A fix SOW removes the gate from the tests it fixes; guard tests for already-correct behavior always run.
+- Robustness reproduction tests: C `test_robustness` / `test_win_robustness`, Rust `service::raw::tests::robustness` / `service::raw::windows_tests::robustness`, Go `TestRobust*` / `TestWinRobust*`. They always run; there is no skip gate.
 - Windows validation scripts are under `tests/run-*-windows*.sh` and `tests/test_*_win*.sh`; use the specific script matching the touched transport/API.
 - Benchmark generation: `bash tests/generate-benchmarks-posix.sh` or `bash tests/generate-benchmarks-windows.sh`
 - Netdata vendor diff: `bash ./diff-netdata-vendor.sh /path/to/netdata`
@@ -293,6 +293,7 @@ Output/reference skills:
 - Go must remain pure Go without `cgo`.
 - Performance claims require benchmark evidence. Do not adjust benchmark floors or accept parity gaps without a fact-based analysis.
 - Before any Netdata vendoring work, load `.agents/skills/project-netdata-vendoring/SKILL.md` and complete its preflight even if the user did not explicitly ask for CI, scanner, or drift checks. Do not modify Netdata's vendored NetIPC copy until the active SOW records: the candidate `plugin-ipc` source commit; GitHub Actions/check-run evidence; GitHub code-scanning, Dependabot, and secret-scanning evidence; the last source-to-Netdata vendoring baseline; a two-way gap analysis of what changed in `plugin-ipc` since that baseline and what changed in Netdata's vendored NetIPC copy since that baseline; and a migration plan for every drift class. Failing, pending, cancelled, timed-out, or untriaged open scanner findings block vendoring unless they are fixed, documented as evidence-backed false positives, or explicitly risk-accepted by the user in the SOW. Unknown baseline, unexplained downstream drift, or no migration plan also blocks vendoring.
+- Zero-known-bug policy: confirmed bugs are fixed, not documented. A reproduction test exists to prove a bug is real and then to prove the fix; never land it behind a skip gate, environment switch, or "known bug" marker, and never close work with a confirmed bug left open. Fix design decisions still go to the user.
 - Archived TODO history under `.agents/sow/todo-history/TODO-*` is existing project memory. Do not move, delete, or rewrite those archived notes without explicit user approval; track future classification or migration through a SOW.
 
 ### Preservation Notes

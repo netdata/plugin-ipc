@@ -36,17 +36,6 @@
 static int g_pass = 0;
 static int g_fail = 0;
 
-/* Tests that reproduce still-open bugs run only when
- * NETIPC_REPRO_KNOWN_BUGS=1; each fix removes the gate from its tests. */
-static int skip_known_bug(const char *id)
-{
-    const char *v = getenv("NETIPC_REPRO_KNOWN_BUGS");
-    if (v && strcmp(v, "1") == 0)
-        return 0;
-    printf("  SKIP: reproduces open bug %s; set NETIPC_REPRO_KNOWN_BUGS=1 to run\n", id);
-    return 1;
-}
-
 static void check(const char *name, int cond)
 {
     printf("  %s: %s\n", cond ? "PASS" : "FAIL", name);
@@ -346,8 +335,6 @@ static void kill_helper(HANDLE process)
 static void test_shm_session_released_after_client_crash(void)
 {
     printf("K2: SHM session released after client crash\n");
-    if (skip_known_bug("K2"))
-        return;
     robust_server_t rs = {.service = svc_name("wrob_shm_crash"), .workers = 2, .shm = TRUE};
     if (!start_server(&rs)) {
         check("server started", 0);
@@ -376,8 +363,6 @@ static void test_shm_session_released_after_client_crash(void)
 static void test_silent_client_does_not_block_other_clients(void)
 {
     printf("K3: silent client does not block other clients\n");
-    if (skip_known_bug("K3"))
-        return;
     robust_server_t rs = {.service = svc_name("wrob_silent"), .workers = 4};
     if (!start_server(&rs)) {
         check("server started", 0);
@@ -404,8 +389,6 @@ static void test_silent_client_does_not_block_other_clients(void)
 static void test_silent_client_does_not_block_shutdown(void)
 {
     printf("K3: silent client does not block shutdown\n");
-    if (skip_known_bug("K3"))
-        return;
     robust_server_t rs = {.service = svc_name("wrob_silent_stop"), .workers = 4};
     if (!start_server(&rs)) {
         check("server started", 0);
@@ -447,8 +430,6 @@ static DWORD WINAPI bounded_client_fn(LPVOID arg)
 static void test_client_bounded_when_server_never_sends_hello_ack(void)
 {
     printf("K4: client bounded when server never sends HELLO_ACK\n");
-    if (skip_known_bug("K4"))
-        return;
     const char *svc = svc_name("wrob_nohelloack");
     wchar_t name[NIPC_NP_MAX_PIPE_NAME];
     nipc_np_build_pipe_name(name, NIPC_NP_MAX_PIPE_NAME, TEST_RUN_DIR, svc);
@@ -475,8 +456,6 @@ static void test_client_bounded_when_server_never_sends_hello_ack(void)
 static void test_shutdown_not_blocked_by_non_reading_client(void)
 {
     printf("N2: shutdown not blocked by a client that stopped reading\n");
-    if (skip_known_bug("N2"))
-        return;
     const uint32_t big = 8u * 1024u * 1024u;
     robust_server_t rs = {.service = svc_name("wrob_noread"), .workers = 2,
                           .max_payload = big, .opts = {.raw_len = 4u * 1024u * 1024u}};
@@ -528,8 +507,6 @@ static DWORD WINAPI run_only_fn(LPVOID arg)
 static void test_stop_before_run_is_honored(void)
 {
     printf("N3: stop before run is honored\n");
-    if (skip_known_bug("N3"))
-        return;
     robust_server_t rs = {.service = svc_name("wrob_stop_first"), .workers = 2};
     nipc_np_server_config_t scfg = robust_server_config(&rs);
     if (nipc_server_init(&rs.server, TEST_RUN_DIR, rs.service, &scfg, rs.workers,
@@ -583,8 +560,6 @@ static DWORD WINAPI dead_server_client_fn(LPVOID arg)
 static void test_shm_client_notices_crashed_server(void)
 {
     printf("N5: SHM client notices a crashed server before its timeout\n");
-    if (skip_known_bug("N5"))
-        return;
     const char *svc = svc_name("wrob_dead_server");
     HANDLE server = spawn_helper("--helper-shm-server", svc);
     check("server helper started", server != NULL);

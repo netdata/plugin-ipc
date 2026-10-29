@@ -13,18 +13,6 @@ use crate::protocol::{string_reverse_encode, STRING_REVERSE_HDR_SIZE};
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
-const KNOWN_BUGS_ENV: &str = "NETIPC_REPRO_KNOWN_BUGS";
-
-/// Tests that reproduce still-open bugs run only when NETIPC_REPRO_KNOWN_BUGS=1;
-/// each fix removes the gate from its tests.
-fn skip_known_bug(id: &str) -> bool {
-    if std::env::var_os(KNOWN_BUGS_ENV).is_some_and(|v| v == "1") {
-        return false;
-    }
-    eprintln!("skipped: reproduces open bug {id}; set {KNOWN_BUGS_ENV}=1 to run");
-    true
-}
-
 const HELPER_ENV: &str = "NETIPC_ROBUSTNESS_HELPER";
 const HELPER_TEST: &str = "service::raw::windows_tests::robustness::robustness_helper_process";
 const GENERIC_READ: Dword = 0x8000_0000;
@@ -218,9 +206,6 @@ fn robustness_helper_process() {
 // K2: SHM server must release a session once its client crashes.
 #[test]
 fn test_robust_win_shm_session_released_after_client_crash() {
-    if skip_known_bug("K2") {
-        return;
-    }
     let svc = unique_service("rs_wrob_shm_crash");
     let server = start_server(
         &svc,
@@ -249,9 +234,6 @@ fn test_robust_win_shm_session_released_after_client_crash() {
 // K3: a client that opens the pipe but never sends HELLO.
 #[test]
 fn test_robust_win_silent_client_does_not_block_other_clients() {
-    if skip_known_bug("K3") {
-        return;
-    }
     let svc = unique_service("rs_wrob_silent");
     let server = start_server(
         &svc,
@@ -281,9 +263,6 @@ fn test_robust_win_silent_client_does_not_block_other_clients() {
 
 #[test]
 fn test_robust_win_silent_client_does_not_block_shutdown() {
-    if skip_known_bug("K3") {
-        return;
-    }
     let svc = unique_service("rs_wrob_silent_stop");
     let server = start_server(
         &svc,
@@ -309,9 +288,6 @@ fn test_robust_win_silent_client_does_not_block_shutdown() {
 // K4: a client call must be bounded even when the server never answers HELLO.
 #[test]
 fn test_robust_win_client_bounded_when_server_never_sends_hello_ack() {
-    if skip_known_bug("K4") {
-        return;
-    }
     let svc = unique_service("rs_wrob_nohelloack");
     let name = build_pipe_name(TEST_RUN_DIR, &svc).expect("pipe name");
     let pipe = unsafe {
@@ -349,9 +325,6 @@ fn test_robust_win_client_bounded_when_server_never_sends_hello_ack() {
 // N1: the configured call timeout must be honored on the named-pipe path.
 #[test]
 fn test_robust_win_pipe_call_honors_timeout_longer_than_100ms() {
-    if skip_known_bug("N1") {
-        return;
-    }
     let svc = unique_service("rs_wrob_slow_handler");
     let server = start_server(
         &svc,
@@ -382,9 +355,6 @@ fn test_robust_win_pipe_call_honors_timeout_longer_than_100ms() {
 // to a client that stopped reading.
 #[test]
 fn test_robust_win_shutdown_not_blocked_by_non_reading_client() {
-    if skip_known_bug("N2") {
-        return;
-    }
     const BIG: u32 = 8 * 1024 * 1024;
     let svc = unique_service("rs_wrob_noread");
     let mut scfg = server_config();
@@ -424,9 +394,6 @@ fn test_robust_win_shutdown_not_blocked_by_non_reading_client() {
 // N3: stop() issued before run() must not be lost.
 #[test]
 fn test_robust_win_stop_before_run_is_honored() {
-    if skip_known_bug("N3") {
-        return;
-    }
     let svc = unique_service("rs_wrob_stop_first");
     ensure_run_dir();
     let mut server = ManagedServer::with_workers(
@@ -458,9 +425,6 @@ fn test_robust_win_stop_before_run_is_honored() {
 // whole timeout.
 #[test]
 fn test_robust_win_shm_client_notices_crashed_server() {
-    if skip_known_bug("N5") {
-        return;
-    }
     let svc = unique_service("rs_wrob_dead_server");
     let mut child = spawn_helper("shm_server", &svc);
 

@@ -33,10 +33,26 @@
 /*  Snapshot handler                                                   */
 /* ------------------------------------------------------------------ */
 
+/* NIPC_HANDLER_DELAY_MS makes every snapshot handler slow, so interop runs
+ * prove that clients wait past their internal 100 ms abort-poll slice. */
+static void handler_delay(void)
+{
+    const char *env = getenv("NIPC_HANDLER_DELAY_MS");
+    if (!env || !*env)
+        return;
+
+    char *end = NULL;
+    unsigned long ms = strtoul(env, &end, 10);
+    if (end && *end == '\0' && ms > 0 && ms <= 10000ul)
+        usleep((useconds_t)(ms * 1000ul));
+}
+
 static nipc_error_t handle_cgroups(const uint8_t *request_payload, size_t request_len,
                                    uint8_t *response_buf, size_t response_buf_size,
                                    size_t *response_len_out)
 {
+    handler_delay();
+
     nipc_cgroups_req_t req;
     nipc_error_t err = nipc_cgroups_req_decode(request_payload, request_len, &req);
     if (err != NIPC_OK)

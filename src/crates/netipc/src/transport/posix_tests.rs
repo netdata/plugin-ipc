@@ -1393,6 +1393,90 @@ fn test_receive_batch_count_exceeds_limit() {
     unsafe { libc::close(fd1) };
 }
 
+// -----------------------------------------------------------------------
+//  Receive: abort-poll slices must not end the wait (SOW-0041)
+// -----------------------------------------------------------------------
+
+/// Send a one-byte response for message 1 on `fd` after `delay`.
+fn send_response_after(fd: RawFd, delay: Duration) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        thread::sleep(delay);
+        let hdr = Header {
+            magic: MAGIC_MSG,
+            version: VERSION,
+            header_len: protocol::HEADER_LEN,
+            kind: KIND_RESPONSE,
+            code: 1,
+            flags: 0,
+            transport_status: protocol::STATUS_OK,
+            payload_len: 1,
+            item_count: 1,
+            message_id: 1,
+        };
+        let mut pkt = [0u8; HEADER_SIZE + 1];
+        hdr.encode(&mut pkt[..HEADER_SIZE]);
+        pkt[HEADER_SIZE] = 0x5A;
+        raw_send(fd, &pkt).expect("send delayed response");
+    })
+}
+
+#[test]
+fn test_receive_with_abort_waits_past_poll_slice() {
+    // (timeout_ms, label): 0 means wait indefinitely.
+    for (timeout_ms, label) in [(0u32, "infinite"), (2000u32, "2000 ms")] {
+        let (fd0, fd1) = socketpair_seqpacket();
+        let mut session = test_session(fd0, Role::Client, 4096);
+        session.inflight_ids.insert(1);
+        let abort = AtomicBool::new(false);
+        let sender = send_response_after(fd1, Duration::from_millis(300));
+
+        let mut buf = [0u8; 64];
+        let started = std::time::Instant::now();
+        let result = session
+            .receive_with_control(&mut buf, timeout_ms, Some(&abort))
+            .map(|(hdr, payload)| (hdr.message_id, payload.to_vec()));
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            result.expect(label),
+            (1, vec![0x5A]),
+            "{label}: delayed response must arrive"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(250),
+            "{label}: {elapsed:?}"
+        );
+        sender.join().expect("sender join");
+        unsafe { libc::close(fd1) };
+    }
+}
+
+#[test]
+fn test_receive_abort_after_poll_slice_reports_aborted() {
+    let (fd0, fd1) = socketpair_seqpacket();
+    let mut session = test_session(fd0, Role::Client, 4096);
+    session.inflight_ids.insert(1);
+    let abort = Arc::new(AtomicBool::new(false));
+    let abort_setter = abort.clone();
+    let setter = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(300));
+        abort_setter.store(true, Ordering::Release);
+    });
+
+    let mut buf = [0u8; 64];
+    let started = std::time::Instant::now();
+    let err = session
+        .receive_with_control(&mut buf, 5000, Some(&abort))
+        .expect_err("abort must end the wait");
+    let elapsed = started.elapsed();
+
+    assert!(matches!(err, UdsError::Aborted), "got {err:?}");
+    assert!(elapsed >= Duration::from_millis(250), "{elapsed:?}");
+    assert!(elapsed < Duration::from_millis(2000), "{elapsed:?}");
+    setter.join().expect("setter join");
+    unsafe { libc::close(fd1) };
+}
+
 #[test]
 fn test_directional_limit_negotiation() {
     ensure_run_dir();

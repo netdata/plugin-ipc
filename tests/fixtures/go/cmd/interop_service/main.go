@@ -248,9 +248,19 @@ func cgroupsLookupMixedHandler() cgroupslookup.Handler {
 	}
 }
 
+// handlerDelay honors NIPC_HANDLER_DELAY_MS so interop runs prove that
+// clients wait past their internal 100 ms abort-poll slice.
+func handlerDelay() {
+	ms, err := strconv.Atoi(os.Getenv("NIPC_HANDLER_DELAY_MS"))
+	if err == nil && ms > 0 && ms <= 10000 {
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+	}
+}
+
 func testHandler() cgroups.Handler {
 	return cgroups.Handler{
 		Handle: func(request *protocol.CgroupsRequest, builder *protocol.CgroupsBuilder) bool {
+			handlerDelay()
 			if request.LayoutVersion != 1 || request.Flags != 0 {
 				return false
 			}

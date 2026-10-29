@@ -312,10 +312,24 @@ fn cgroups_lookup_mixed_handler() -> cgroups_lookup::Handler {
     }
 }
 
+/// NIPC_HANDLER_DELAY_MS makes every snapshot handler slow, so interop runs
+/// prove that clients wait past their internal 100 ms abort-poll slice.
+#[cfg(windows)]
+fn handler_delay() {
+    if let Some(ms) = std::env::var("NIPC_HANDLER_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&ms| ms > 0 && ms <= 10_000)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 #[cfg(windows)]
 fn server_handler() -> Handler {
     Handler {
         handle: Some(std::sync::Arc::new(|request, builder| {
+            handler_delay();
             if request.layout_version != 1 || request.flags != 0 {
                 return false;
             }

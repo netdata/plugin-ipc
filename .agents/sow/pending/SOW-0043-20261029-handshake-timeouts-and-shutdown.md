@@ -27,6 +27,10 @@ Facts:
 - N3: stop before run is lost (run sets running=true unconditionally); reproduced everywhere. In C, drain/destroy before run can free state that a later run uses.
 - Code-review-only siblings to resolve here: N4 Rust Windows `stop()` closes a handle owned by `NpListener` (double close, `service/raw/server.rs:274-285`); N6 C Windows `CancelSynchronousIo` is one-shot and `sctx->thread` is written unlocked (`netipc_service_win_server.c:143-155`, `:320`); N7 C POSIX drain may `shutdown()` a reused fd (`netipc_service_posix_server.c:373-381`); N9 EINTR treated as disconnect (C `netipc_uds.c:38`, `:67`, `:76`, Rust `posix.rs:860`, `:884-889`); N10 Go `Stop()` closes the listener fd while `Run` may use it (`uds_listener.go:65-126`).
 - Design questions: handshake deadline value and whether accept/handshake become concurrent with a cap on in-handshake clients; idle authenticated clients holding worker slots indefinitely; over-limit clients receive HELLO_ACK then a disconnect; Rust Windows `run(&mut self)` prevents calling `stop()` from another thread.
+- Analysis 2026-10-29, worse than first described: C POSIX `drain()` before `run()` destroys `sessions_lock` that `run()` then locks (`netipc_service_posix_server.c:399-402`, `:231`); `destroy()` before `run()` makes `run()` poll fd -1 forever; C Windows `stop()` before `run()` closes the listener and `run()` spins on `Sleep(10)` forever.
+- Analysis 2026-10-29: Rust Windows `stop()` can close a live session's pipe handle or a reused handle value (`service/raw/server.rs:108-115`, `transport/windows.rs:1171`); Rust `run(&mut self)` blocks cross-thread `stop()` on Unix too (`server_unix.rs:18`).
+- Sibling bugs: C Windows `stop()` reads `server->listener.pipe` unlocked while accept replaces it, and `stop()` plus the end of `run()` can both close the listener (`netipc_service_win_server.c:129-135`, `:343-353`); C POSIX `destroy()` closes the listener before the accept loop exits (`netipc_service_posix_server.c:414-415`); `FlushFileBuffers` on server close blocks on a non-reading client (`netipc_named_pipe.c:942`, Go `pipe_session.go:140`, Rust client side `windows.rs:1082`).
+- Sibling bugs: C reconnects up to 20 times inside one call with a drain sleep (`netipc_service_posix_client_connect.c:158-170`) while Rust and Go reconnect once as the spec says (`docs/level2-typed-api.md:242-244`); a call on a non-READY client returns `NOT_READY` in C but `BadLayout` in Rust (`client_call.rs:21-23`) and Go (`client.go:159-162`); SHM regions are created before HELLO is read for every accepted connection (`netipc_service_posix_server.c:204-209`); the 5 s SHM attach retry ignores the caller's timeout (`netipc_service_posix_client_connect.c:122`).
 
 Inferences:
 
@@ -38,7 +42,7 @@ Unknowns:
 
 ### Acceptance Criteria
 
-- SOW-0040 K3, K4, N2, N3 tests (all languages, both platforms) pass with the gate removed.
+- SOW-0040 K3, K4, N2, N3 tests (all languages, both platforms) pass.
 - New tests for N8 retry accounting.
 - Specs updated: handshake timeout behavior, total call deadline semantics (connect + handshake + retries), stop/shutdown guarantees.
 
@@ -50,7 +54,7 @@ Sources checked:
 
 Current state:
 
-- Reproduction tests exist and are gated behind `NETIPC_REPRO_KNOWN_BUGS=1`.
+- Reproduction tests exist and run ungated (the `NETIPC_REPRO_KNOWN_BUGS` gate was removed in SOW-0041 under the zero-known-bug policy); they fail until this SOW lands.
 
 Risks:
 
@@ -90,7 +94,7 @@ Implementation plan:
 
 Validation plan:
 
-- Remove the known-bug gate from the covered SOW-0040 tests; they must pass on Linux and `costa-win11`.
+- The covered SOW-0040 reproduction tests must pass on Linux and `costa-win11`.
 
 Artifact impact plan:
 

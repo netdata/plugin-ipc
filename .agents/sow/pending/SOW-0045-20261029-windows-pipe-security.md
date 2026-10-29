@@ -25,6 +25,8 @@ Facts:
 - A read-only open is enough to occupy a pipe instance and block the accept loop (observed 7.4 s client delay against the C server), so any local principal can likely cause a denial of service. Not verified with a second user.
 - `PIPE_REJECT_REMOTE_CLIENTS` is not set; remote reachability over SMB is untested speculation.
 - The default DACL derives from the creating token, so a LocalSystem service may differ from the user-session result.
+- Analysis 2026-10-29: pipe squatting. Clients open the pipe without `SECURITY_SQOS_PRESENT` (C `netipc_named_pipe.c:903`, Rust `windows.rs:737-745`, Go `pipe_session.go:159-167`), so a server may impersonate them at full SecurityImpersonation level, and clients never verify the server's identity. A local user who creates the pipe name first (for example while the real server restarts) receives HELLO and the auth token.
+- Analysis 2026-10-29: Windows SHM mappings and events are also created with NULL security attributes (C `netipc_win_shm.c:349-356`, `:409`, `:423`; Rust `win_shm.rs:405-407`, `:453`, `:474`; Go `shm.go:198-205`, `:260`, `:283`).
 
 Inferences:
 
@@ -48,7 +50,7 @@ Sources checked:
 
 Current state:
 
-- Reproduction tests exist and are gated behind `NETIPC_REPRO_KNOWN_BUGS=1`.
+- No automated reproduction test exists yet; the DACL exposure was verified manually on `costa-win11` during SOW-0040. This SOW must add one (for example a `GetSecurityInfo` DACL assertion) before the fix.
 
 Risks:
 
@@ -88,7 +90,7 @@ Implementation plan:
 
 Validation plan:
 
-- Remove the known-bug gate from the covered SOW-0040 tests; they must pass on Linux and `costa-win11`.
+- Add an automated reproduction test, confirm it fails before the fix and passes after, on `costa-win11`.
 
 Artifact impact plan:
 

@@ -923,7 +923,7 @@ impl<'a> ReceiveWait<'a> {
                 deadline
                     .duration_since(now)
                     .as_millis()
-                    .min(i32::MAX as u128) as u64,
+                    .clamp(1, i32::MAX as u128) as u64,
             )
         } else {
             None
@@ -954,10 +954,9 @@ fn wait_fd_readable(fd: RawFd, wait: &ReceiveWait<'_>) -> Result<(), UdsError> {
             return Err(UdsError::Recv(err));
         }
         if rc == 0 {
-            if wait.aborted() {
-                return Err(UdsError::Aborted);
-            }
-            return Err(UdsError::Timeout);
+            // An empty slice only means the abort flag is due for a check;
+            // poll_timeout_ms() reports the real deadline.
+            continue;
         }
         if wait.aborted() {
             return Err(UdsError::Aborted);

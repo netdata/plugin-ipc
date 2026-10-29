@@ -25,6 +25,10 @@ Facts:
 - N5: SHM clients never notice a crashed server and wait the full call timeout (POSIX: `nipc_shm_owner_alive` exists at `netipc_shm.c:874` but is unused in the call loop; Windows: only `resp_server_closed`, `netipc_win_shm.c:893-906`). Reproduced in all languages on Linux and Windows (10 s with a 10 s timeout).
 - Amplifier: a client whose SHM attach fails falls back to a new baseline session (`netipc_service_posix_client_connect.c:138-150`, Go `client_unix.go:104-115`), leaking one slot per fallback on Rust/Go servers.
 - Related: refused or broken SHM sessions surface as `Truncated` / `buffer too short` instead of a disconnect error in Rust and Go.
+- Analysis 2026-10-29: no POSIX transport sets `SOCK_CLOEXEC`/`O_CLOEXEC` (C `netipc_uds_lifecycle.c:202,244,275`, Rust `posix.rs:266,646,712`, Go `uds_listener.go:34,98`, `uds_session.go:95`); a forking process (Netdata spawning plugins) leaks session sockets into children, which keeps the peer from ever seeing EOF and defeats socket-based dead-peer detection.
+- Analysis 2026-10-29: the `nipc_shm_owner_alive` generation check can never fail, because the cached generation is read from the same mapped header it is later compared against (`netipc_shm.c:621` vs `:887`); its `kill(pid, 0)` check breaks across PID namespaces.
+- Correction 2026-10-29: the "fallback leak" is not a separate client bug (C and Go close the session socket before the baseline retry); it leaks only because of K1. The error-code issue is cross-language: C also returns `NIPC_ERR_TRUNCATED` for every SHM/socket transport failure (`netipc_service_posix_client_call.c:101,124`), and no language has a "disconnected" error.
+- Sibling bug: the client's SHM attach retry waits its full 5 s even when the server already closed the session socket (refusal at capacity).
 
 Inferences:
 
@@ -36,7 +40,7 @@ Unknowns:
 
 ### Acceptance Criteria
 
-- SOW-0040 K1, K2, N5 tests pass with the gate removed; C guards keep passing.
+- SOW-0040 K1, K2, N5 tests pass; C guards keep passing.
 - Windows spec revised with a crash-detection rule (for example named-pipe break or process liveness).
 - Error codes for refused/broken SHM sessions reviewed for cross-language consistency.
 
@@ -48,7 +52,7 @@ Sources checked:
 
 Current state:
 
-- Reproduction tests exist and are gated behind `NETIPC_REPRO_KNOWN_BUGS=1`.
+- Reproduction tests exist and run ungated (the `NETIPC_REPRO_KNOWN_BUGS` gate was removed in SOW-0041 under the zero-known-bug policy); they fail until this SOW lands.
 
 Risks:
 
@@ -88,7 +92,7 @@ Implementation plan:
 
 Validation plan:
 
-- Remove the known-bug gate from the covered SOW-0040 tests; they must pass on Linux and `costa-win11`.
+- The covered SOW-0040 reproduction tests must pass on Linux and `costa-win11`.
 
 Artifact impact plan:
 

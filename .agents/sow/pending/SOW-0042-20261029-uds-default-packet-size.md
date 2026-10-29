@@ -24,6 +24,9 @@ Facts:
 - On Linux a SOCK_SEQPACKET datagram of exactly `SO_SNDBUF` bytes fails with EMSGSIZE (socketpair check: 212992 fails, 211968 succeeds), so every chunked message fails with the default configuration.
 - Reproduced (SOW-0040) in C, Rust and Go with a 512 KiB message; the same message with an explicit 64 KiB packet size passes.
 - Spec: `docs/level1-posix-uds.md:73-86` defines `agreed_packet_size` chunking but not how the local packet size is derived.
+- Analysis 2026-10-29 (measured, Linux 7.0 SEQPACKET socketpair): the largest sendable datagram is `getsockopt(SO_SNDBUF) - 32` (default 212992 -> 212960 works, 212992 fails); with a 1 MiB buffer sends fail with ENOBUFS above about 1.07 MiB. The peer's `SO_RCVBUF` does not matter.
+- Sibling bug: clients accept any agreed packet size from HELLO_ACK, even above their own proposal (C `netipc_uds_handshake.c:102`, Go `uds_handshake.go:75`, Rust `posix.rs:1225` checks only the lower bound).
+- Sibling bug: an explicitly configured `packet_size` is not capped by the kernel limit, so values above `SO_SNDBUF - 32` fail the same way.
 
 Inferences:
 
@@ -35,7 +38,7 @@ Unknowns:
 
 ### Acceptance Criteria
 
-- `test_robust_default_packet_size_carries_large_message` (Rust), `TestRobustDefaultPacketSizeCarriesLargeMessage` (Go) and the C `test_robustness` N11 check pass with the gate removed.
+- `test_robust_default_packet_size_carries_large_message` (Rust), `TestRobustDefaultPacketSizeCarriesLargeMessage` (Go) and the C `test_robustness` N11 check pass.
 - Packet-size derivation documented in `docs/level1-posix-uds.md`; interop across languages unchanged or migrated consistently.
 - Fix design (for example a safety margin below `SO_SNDBUF`, a fixed default, or raising `SO_SNDBUF`) decided by the user with benchmark evidence where throughput is affected.
 
@@ -47,7 +50,7 @@ Sources checked:
 
 Current state:
 
-- Reproduction tests exist and are gated behind `NETIPC_REPRO_KNOWN_BUGS=1`.
+- Reproduction tests exist and run ungated (the `NETIPC_REPRO_KNOWN_BUGS` gate was removed in SOW-0041 under the zero-known-bug policy); they fail until this SOW lands.
 
 Risks:
 
@@ -87,7 +90,7 @@ Implementation plan:
 
 Validation plan:
 
-- Remove the known-bug gate from the covered SOW-0040 tests; they must pass on Linux and `costa-win11`.
+- The covered SOW-0040 reproduction tests must pass on Linux and `costa-win11`.
 
 Artifact impact plan:
 

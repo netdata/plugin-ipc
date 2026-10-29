@@ -27,15 +27,6 @@ const robustHelperEnv = "NETIPC_ROBUSTNESS_HELPER"
 
 var robustCounter int
 
-// skipKnownBug skips tests that reproduce still-open bugs unless
-// NETIPC_REPRO_KNOWN_BUGS=1; each fix removes the gate from its tests.
-func skipKnownBug(t *testing.T, id string) {
-	t.Helper()
-	if os.Getenv("NETIPC_REPRO_KNOWN_BUGS") != "1" {
-		t.Skipf("reproduces open bug %s; set NETIPC_REPRO_KNOWN_BUGS=1 to run", id)
-	}
-}
-
 func robustService(prefix string) string {
 	robustCounter++
 	return fmt.Sprintf("%s_%d_%d", prefix, os.Getpid(), robustCounter)
@@ -233,7 +224,6 @@ func TestRobustnessHelperProcess(t *testing.T) {
 // K1: SHM server must release a session once its client leaves.
 
 func TestRobustShmSessionsReleasedAfterCleanClose(t *testing.T) {
-	skipKnownBug(t, "K1")
 	svc := robustService("go_rob_shm_clean")
 	rs := startRobustServer(svc, testUnixShmServerConfig(), protocol.MethodIncrement, robustIncrementDispatch(0), 2)
 	defer cleanupAll(svc)
@@ -256,7 +246,6 @@ func TestRobustShmSessionsReleasedAfterCleanClose(t *testing.T) {
 }
 
 func TestRobustShmSessionsReleasedAfterClientCrash(t *testing.T) {
-	skipKnownBug(t, "K1")
 	svc := robustService("go_rob_shm_crash")
 	rs := startRobustServer(svc, testUnixShmServerConfig(), protocol.MethodIncrement, robustIncrementDispatch(0), 2)
 	defer cleanupAll(svc)
@@ -282,7 +271,6 @@ func TestRobustShmSessionsReleasedAfterClientCrash(t *testing.T) {
 // shutdown.
 
 func TestRobustSilentClientDoesNotBlockOtherClients(t *testing.T) {
-	skipKnownBug(t, "K3")
 	svc := robustService("go_rob_silent")
 	rs := startRobustServer(svc, testServerConfig(), protocol.MethodIncrement, robustIncrementDispatch(0), 4)
 	defer cleanupAll(svc)
@@ -302,7 +290,6 @@ func TestRobustSilentClientDoesNotBlockOtherClients(t *testing.T) {
 }
 
 func TestRobustSilentClientDoesNotBlockShutdown(t *testing.T) {
-	skipKnownBug(t, "K3")
 	svc := robustService("go_rob_silent_stop")
 	rs := startRobustServer(svc, testServerConfig(), protocol.MethodIncrement, robustIncrementDispatch(0), 4)
 	defer cleanupAll(svc)
@@ -321,7 +308,6 @@ func TestRobustSilentClientDoesNotBlockShutdown(t *testing.T) {
 // K4: a client call must be bounded even when the server never answers HELLO.
 
 func TestRobustClientBoundedWhenServerNeverAccepts(t *testing.T) {
-	skipKnownBug(t, "K4")
 	svc := robustService("go_rob_noaccept")
 	listener := rawListener(t, svc)
 	defer cleanupAll(svc)
@@ -346,7 +332,6 @@ func TestRobustClientBoundedWhenServerNeverAccepts(t *testing.T) {
 }
 
 func TestRobustClientBoundedWhenServerNeverSendsHelloAck(t *testing.T) {
-	skipKnownBug(t, "K4")
 	svc := robustService("go_rob_nohelloack")
 	listener := rawListener(t, svc)
 	defer cleanupAll(svc)
@@ -400,7 +385,6 @@ func TestRobustUdsCallHonorsTimeoutLongerThan100ms(t *testing.T) {
 // to a client that stopped reading.
 
 func TestRobustShutdownNotBlockedByNonReadingClient(t *testing.T) {
-	skipKnownBug(t, "N2")
 	const big = 8 * 1024 * 1024
 	svc := robustService("go_rob_noread")
 	scfg := testServerConfig()
@@ -439,7 +423,6 @@ func TestRobustShutdownNotBlockedByNonReadingClient(t *testing.T) {
 // N3: Stop issued before Run must not be lost.
 
 func TestRobustStopBeforeRunIsHonored(t *testing.T) {
-	skipKnownBug(t, "N3")
 	svc := robustService("go_rob_stop_first")
 	ensureRunDir()
 	cleanupAll(svc)
@@ -467,7 +450,6 @@ func TestRobustStopBeforeRunIsHonored(t *testing.T) {
 // must still be delivered (chunked).
 
 func TestRobustDefaultPacketSizeCarriesLargeMessage(t *testing.T) {
-	skipKnownBug(t, "N11")
 	if err := robustLargeRoundTrip(0); err != nil {
 		t.Errorf("a 512 KiB request must round-trip with default packet size: %v", err)
 	}
@@ -514,7 +496,6 @@ func robustLargeRoundTrip(packetSize uint32) error {
 // whole timeout.
 
 func TestRobustShmClientNoticesCrashedServer(t *testing.T) {
-	skipKnownBug(t, "N5")
 	svc := robustService("go_rob_dead_server")
 	ensureRunDir()
 	cleanupAll(svc)

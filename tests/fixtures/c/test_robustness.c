@@ -51,17 +51,6 @@
 static int g_pass = 0;
 static int g_fail = 0;
 
-/* Tests that reproduce still-open bugs run only when
- * NETIPC_REPRO_KNOWN_BUGS=1; each fix removes the gate from its tests. */
-static int skip_known_bug(const char *id)
-{
-    const char *v = getenv("NETIPC_REPRO_KNOWN_BUGS");
-    if (v && strcmp(v, "1") == 0)
-        return 0;
-    printf("  SKIP: reproduces open bug %s; set NETIPC_REPRO_KNOWN_BUGS=1 to run\n", id);
-    return 1;
-}
-
 static void check(const char *name, int cond)
 {
     if (cond) {
@@ -472,8 +461,6 @@ static void test_shm_sessions_released_after_client_crash(void)
 static void test_silent_client_does_not_block_other_clients(void)
 {
     printf("K3: silent client does not block other clients\n");
-    if (skip_known_bug("K3"))
-        return;
     robust_server_t rs = {.service = "rob_silent", .workers = 4};
     if (!start_server(&rs)) {
         check("server started", 0);
@@ -502,8 +489,6 @@ static void test_silent_client_does_not_block_other_clients(void)
 static void test_silent_client_does_not_block_shutdown(void)
 {
     printf("K3: silent client does not block shutdown\n");
-    if (skip_known_bug("K3"))
-        return;
     robust_server_t rs = {.service = "rob_silent_stop", .workers = 4};
     if (!start_server(&rs)) {
         check("server started", 0);
@@ -547,8 +532,6 @@ static void *bounded_client_fn(void *arg)
 static void test_client_bounded_when_server_never_accepts(void)
 {
     printf("K4: client bounded when server never accepts\n");
-    if (skip_known_bug("K4"))
-        return;
     const char *svc = "rob_noaccept";
     int listener = raw_listener(svc);
     check("raw listener bound", listener >= 0);
@@ -585,8 +568,6 @@ static void *accept_and_hold_fn(void *arg)
 static void test_client_bounded_when_server_never_sends_hello_ack(void)
 {
     printf("K4: client bounded when server never sends HELLO_ACK\n");
-    if (skip_known_bug("K4"))
-        return;
     const char *svc = "rob_nohelloack";
     hold_job_t hold = {.listener = raw_listener(svc), .hold_ms = 8000};
     check("raw listener bound", hold.listener >= 0);
@@ -639,8 +620,6 @@ static void test_call_honors_timeout_longer_than_100ms(void)
 static void test_shutdown_not_blocked_by_non_reading_client(void)
 {
     printf("N2: shutdown not blocked by a client that stopped reading\n");
-    if (skip_known_bug("N2"))
-        return;
     const uint32_t big = 8u * 1024u * 1024u;
     robust_server_t rs = {.service = "rob_noread", .workers = 2,
                           .max_payload = big, .packet_size = 65536,
@@ -695,8 +674,6 @@ static void *run_only_fn(void *arg)
 static void test_stop_before_run_is_honored(void)
 {
     printf("N3: stop before run is honored\n");
-    if (skip_known_bug("N3"))
-        return;
     robust_server_t rs = {.service = "rob_stop_first", .workers = 2};
     cleanup_all(rs.service);
     nipc_uds_server_config_t scfg = robust_server_config(&rs);
@@ -753,8 +730,6 @@ static void *dead_server_client_fn(void *arg)
 static void test_shm_client_notices_crashed_server(void)
 {
     printf("N5: SHM client notices a crashed server before its timeout\n");
-    if (skip_known_bug("N5"))
-        return;
     const char *svc = "rob_dead_server";
     cleanup_all(svc);
     pid_t server = spawn_helper("--helper-shm-server", svc);
@@ -872,9 +847,8 @@ static bool large_message_round_trip(const char *service, uint32_t packet_size)
 static void test_default_packet_size_carries_large_message(void)
 {
     printf("N11: default packet size carries a 512 KiB message\n");
-    if (!skip_known_bug("N11"))
-        check("512 KiB message delivered with auto-detected packet size",
-              large_message_round_trip("rob_bigmsg_default", 0));
+    check("512 KiB message delivered with auto-detected packet size",
+          large_message_round_trip("rob_bigmsg_default", 0));
     check("control: 512 KiB message delivered with 64 KiB packet size",
           large_message_round_trip("rob_bigmsg_explicit", 65536));
 }

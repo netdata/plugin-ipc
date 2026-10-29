@@ -533,7 +533,7 @@ impl<'a> ReceiveWait<'a> {
             if now >= deadline {
                 return Err(NpError::Timeout);
             }
-            Some(deadline.duration_since(now).as_millis())
+            Some(deadline.duration_since(now).as_millis().max(1))
         } else {
             None
         };
@@ -630,12 +630,8 @@ fn raw_recv_with_wait(
     loop {
         let wait_ms = wait.wait_slice_ms()?;
         if !wait_pipe_readable(handle, wait_ms)? {
-            if wait.aborted() {
-                return Err(NpError::Aborted);
-            }
-            if wait.deadline.is_some() {
-                return Err(NpError::Timeout);
-            }
+            // An empty slice only means the abort flag is due for a check;
+            // wait_slice_ms() reports the real deadline.
             continue;
         }
         if wait.aborted() {
