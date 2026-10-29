@@ -279,6 +279,7 @@ Output/reference skills:
 - POSIX coverage: `bash tests/run-coverage-c.sh`, `bash tests/run-coverage-rust.sh`, `bash tests/run-coverage-go.sh`
 - POSIX interop examples: `bash tests/interop_codec.sh`, `bash tests/test_uds_interop.sh`, `bash tests/test_shm_interop.sh`, `bash tests/test_service_interop.sh`
 - `tests/interop_codec.sh` configures `build/`; do not run it in parallel with CTest or another build-directory validation command.
+- Robustness reproduction tests (C `test_robustness` / `test_win_robustness`, Rust `service::raw::tests::robustness` / `service::raw::windows_tests::robustness`, Go `TestRobust*` / `TestWinRobust*`) skip tests for still-open bugs unless `NETIPC_REPRO_KNOWN_BUGS=1`. A fix SOW removes the gate from the tests it fixes; guard tests for already-correct behavior always run.
 - Windows validation scripts are under `tests/run-*-windows*.sh` and `tests/test_*_win*.sh`; use the specific script matching the touched transport/API.
 - Benchmark generation: `bash tests/generate-benchmarks-posix.sh` or `bash tests/generate-benchmarks-windows.sh`
 - Netdata vendor diff: `bash ./diff-netdata-vendor.sh /path/to/netdata`

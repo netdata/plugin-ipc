@@ -413,6 +413,15 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_compile_definitions(test_hardening PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_hardening COMMAND test_hardening)
     set_tests_properties(test_hardening PROPERTIES TIMEOUT 120)
+
+    # Robustness reproduction tests (SOW-0040)
+    add_executable(test_robustness tests/fixtures/c/test_robustness.c)
+    target_link_libraries(test_robustness PRIVATE
+        netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
+    )
+    target_compile_definitions(test_robustness PRIVATE NIPC_INTERNAL_TESTING=1)
+    add_test(NAME test_robustness COMMAND test_robustness)
+    set_tests_properties(test_robustness PROPERTIES TIMEOUT 180)
 endif()
 
 # --- Rust UDS transport tests ---------------------------------------------
@@ -879,6 +888,18 @@ if(NETIPC_WINDOWS_RUNTIME)
     add_test(NAME test_win_service_payload_limits COMMAND test_win_service_payload_limits)
     set_tests_properties(test_win_service_payload_limits PROPERTIES
         TIMEOUT 120
+        RUN_SERIAL TRUE
+    )
+
+    # Robustness reproduction tests (SOW-0040)
+    add_executable(test_win_robustness tests/fixtures/c/test_win_robustness.c)
+    target_link_libraries(test_win_robustness PRIVATE
+        netipc_service_win netipc_win_shm netipc_named_pipe netipc_protocol
+    )
+    target_compile_definitions(test_win_robustness PRIVATE NIPC_INTERNAL_TESTING=1)
+    add_test(NAME test_win_robustness COMMAND test_win_robustness)
+    set_tests_properties(test_win_robustness PROPERTIES
+        TIMEOUT 180
         RUN_SERIAL TRUE
     )
 

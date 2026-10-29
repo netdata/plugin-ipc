@@ -3486,3 +3486,6 @@ fn test_call_increment_batch_rejects_wrong_item_count_windows() {
     client.close();
     server.wait();
 }
+
+#[path = "raw_robustness_windows_tests.rs"]
+mod robustness;

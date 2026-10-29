@@ -6554,3 +6554,7 @@ fn test_shm_batch_request_item_decode_failure_returns_bad_envelope() {
     server.stop();
     cleanup_all(svc);
 }
+
+#[cfg(target_os = "linux")]
+#[path = "raw_robustness_unix_tests.rs"]
+mod robustness;
