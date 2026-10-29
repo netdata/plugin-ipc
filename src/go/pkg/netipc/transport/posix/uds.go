@@ -158,24 +158,17 @@ func rawSendIov(fd int, hdr []byte, payload []byte) error {
 	iov[0].Base = unsafe.SliceData(hdr) // #nosec G103 -- sendmsg iovec needs the backing byte-slice pointer.
 	iov[0].SetLen(len(hdr))
 
-	iovlen := uint64(1)
+	// Msghdr.Iovlen is uint64, uint32 or int32 depending on the platform;
+	// untyped constants assign to all of them.
+	msg := syscall.Msghdr{Iov: &iov[0]}
+	msg.Iovlen = 1
 	if len(payload) > 0 {
 		iov[1].Base = unsafe.SliceData(payload) // #nosec G103 -- sendmsg iovec needs the backing byte-slice pointer.
 		iov[1].SetLen(len(payload))
-		iovlen = 2
+		msg.Iovlen = 2
 	}
 
-	msg := syscall.Msghdr{
-		Iov:    &iov[0],
-		Iovlen: iovlen,
-	}
-
-	n, _, errno := syscall.Syscall(
-		syscall.SYS_SENDMSG,
-		uintptr(fd),
-		uintptr(unsafe.Pointer(&msg)), // #nosec G103 -- raw sendmsg syscall requires a Msghdr pointer.
-		uintptr(syscall.MSG_NOSIGNAL),
-	)
+	n, errno := rawSendmsg(fd, &msg, syscall.MSG_NOSIGNAL)
 	if errno != 0 {
 		return wrapErr(ErrSend, errno.Error())
 	}

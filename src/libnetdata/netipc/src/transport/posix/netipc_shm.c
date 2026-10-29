@@ -586,6 +586,14 @@ nipc_shm_error_t nipc_shm_client_attach(const char *run_dir,
         return NIPC_SHM_ERR_BAD_SIZE;
     }
 
+    /* Guard against uint32 overflow in response_offset + response_capacity:
+     * a 32-bit size_t would wrap and let the file-size check pass. */
+    if (hdr->response_offset > UINT32_MAX - hdr->response_capacity) {
+        munmap(map, file_size);
+        close(fd);
+        return NIPC_SHM_ERR_BAD_SIZE;
+    }
+
     /* Validate region is large enough for the declared areas. */
     size_t needed = 0;
     size_t req_end  = (size_t)hdr->request_offset + hdr->request_capacity;

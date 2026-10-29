@@ -1243,6 +1243,35 @@ fn test_pid_alive() {
 // -----------------------------------------------------------------------
 
 #[test]
+fn test_client_attach_rejects_response_end_wrapping_u32() {
+    ensure_run_dir();
+    let svc = "rs_shm_badwrap";
+    let sid: u64 = 65;
+    cleanup_shm(svc, sid);
+
+    let mut server =
+        ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
+
+    // The end wraps to 0 in u32; on 32-bit usize the old check accepted it.
+    let hdr = server.base as *mut RegionHeader;
+    let (saved_off, saved_cap) = unsafe { ((*hdr).response_offset, (*hdr).response_capacity) };
+    unsafe {
+        (*hdr).response_offset = 0xFFFF_FFC0;
+        (*hdr).response_capacity = 0x40;
+    }
+
+    let result = ShmContext::client_attach(TEST_RUN_DIR, svc, sid);
+    assert!(matches!(result, Err(ShmError::BadSize)));
+
+    unsafe {
+        (*hdr).response_offset = saved_off;
+        (*hdr).response_capacity = saved_cap;
+    }
+    server.destroy();
+    cleanup_shm(svc, sid);
+}
+
+#[test]
 fn test_client_attach_nonexistent() {
     ensure_run_dir();
     let result = ShmContext::client_attach(TEST_RUN_DIR, "rs_shm_nofile", 99999);

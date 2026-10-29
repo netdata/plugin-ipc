@@ -1721,6 +1721,38 @@ static void test_shm_bad_size_alignment_file(void)
     cleanup_shm(svc);
 }
 
+static void test_shm_response_end_wraps_uint32(void)
+{
+    printf("Test: Client attach rejects response area whose end wraps uint32\n");
+    const char *svc = "shm_bad_size_wrap";
+    cleanup_shm(svc);
+
+    nipc_shm_ctx_t server;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 4096, 4096, &server);
+    check("server create", err == NIPC_SHM_OK);
+
+    if (err == NIPC_SHM_OK) {
+        nipc_shm_region_header_t *hdr =
+            (nipc_shm_region_header_t *)server.base;
+        uint32_t saved_resp_off = hdr->response_offset;
+        uint32_t saved_resp_cap = hdr->response_capacity;
+        /* The end wraps to 0; on 32-bit size_t the old check accepted it. */
+        hdr->response_offset = 0xFFFFFFC0u;
+        hdr->response_capacity = 0x40u;
+
+        nipc_shm_ctx_t client;
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
+        check("wrapping response end rejected", err == NIPC_SHM_ERR_BAD_SIZE);
+
+        hdr->response_offset = saved_resp_off;
+        hdr->response_capacity = saved_resp_cap;
+        nipc_shm_destroy(&server);
+    }
+
+    cleanup_shm(svc);
+}
+
 static void test_shm_declared_area_exceeds_file(void)
 {
     printf("Test: Client attach to file with declared area beyond file size\n");
@@ -1878,6 +1910,7 @@ int main(void)
     test_shm_bad_header_len_file();    printf("\n");
     test_shm_bad_size_alignment_file(); printf("\n");
     test_shm_declared_area_exceeds_file(); printf("\n");
+    test_shm_response_end_wraps_uint32(); printf("\n");
     test_shm_receive_zero_length_corruption(); printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);

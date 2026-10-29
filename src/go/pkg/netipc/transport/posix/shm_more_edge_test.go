@@ -9,7 +9,16 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"unsafe"
 )
+
+// alignedShmData returns an 8-byte aligned buffer standing in for the mmap'd
+// region: small byte slices may live on the stack unaligned, and atomics on
+// them fault on arm64 and panic on 32-bit architectures.
+func alignedShmData(n int) []byte {
+	words := make([]uint64, (n+7)/8)
+	return unsafe.Slice((*byte)(unsafe.Pointer(&words[0])), n)[:n:n] // #nosec G103 -- test-only aligned view.
+}
 
 func defaultShmLayout() (uint32, uint32, uint32, uint32) {
 	reqCap := shmAlign64(128)
@@ -166,7 +175,7 @@ func writeRawShmRegionFile(t *testing.T, runDir, service string, sessionID uint6
 }
 
 func TestShmOwnerAliveFalsePaths(t *testing.T) {
-	if (&ShmContext{data: make([]byte, 8)}).OwnerAlive() {
+	if (&ShmContext{data: alignedShmData(8)}).OwnerAlive() {
 		t.Fatal("short header should not be treated as alive")
 	}
 
@@ -293,6 +302,24 @@ func TestShmClientAttachRejectsMalformedHeaders(t *testing.T) {
 			want: ErrShmBadSize,
 		},
 		{
+			// The uint32 sum wraps to a small value; on 32-bit the old int
+			// arithmetic went negative and accepted the header.
+			name: "request-end-wraps-uint32",
+			size: validSize,
+			fill: func(data []byte) {
+				fillShmHeader(data, int32(os.Getpid()), 1, 0xFFFFFFC0, 0x80, respOff, respCap)
+			},
+			want: ErrShmBadSize,
+		},
+		{
+			name: "response-end-wraps-uint32",
+			size: validSize,
+			fill: func(data []byte) {
+				fillShmHeader(data, int32(os.Getpid()), 1, reqOff, reqCap, 0xFFFFFFC0, 0x40)
+			},
+			want: ErrShmBadSize,
+		},
+		{
 			name: "declared-region-beyond-file-size",
 			size: int(shmHeaderLen) + 64,
 			fill: func(data []byte) {
@@ -333,7 +360,7 @@ func TestShmSendBadParamGuards(t *testing.T) {
 
 	storeLenCtx := &ShmContext{
 		role:            ShmRoleClient,
-		data:            make([]byte, 39),
+		data:            alignedShmData(39),
 		requestCapacity: 64,
 	}
 	if err := storeLenCtx.ShmSend([]byte{1}); !errors.Is(err, ErrShmBadParam) {
@@ -342,7 +369,7 @@ func TestShmSendBadParamGuards(t *testing.T) {
 
 	addSeqCtx := &ShmContext{
 		role:            ShmRoleClient,
-		data:            make([]byte, 48),
+		data:            alignedShmData(48),
 		requestCapacity: 64,
 	}
 	if err := addSeqCtx.ShmSend([]byte{1}); !errors.Is(err, ErrShmBadParam) {
@@ -351,7 +378,7 @@ func TestShmSendBadParamGuards(t *testing.T) {
 
 	addSignalCtx := &ShmContext{
 		role:            ShmRoleClient,
-		data:            make([]byte, 56),
+		data:            alignedShmData(56),
 		requestCapacity: 64,
 	}
 	if err := addSignalCtx.ShmSend([]byte{1}); !errors.Is(err, ErrShmBadParam) {
@@ -364,13 +391,13 @@ func TestShmReceiveBadParamAndTimeoutPaths(t *testing.T) {
 		t.Fatalf("ShmReceive nil context = %v, want %v", err, ErrShmBadParam)
 	}
 
-	if _, err := (&ShmContext{data: make([]byte, 8)}).ShmReceive(nil, 1); !errors.Is(err, ErrShmBadParam) {
+	if _, err := (&ShmContext{data: alignedShmData(8)}).ShmReceive(nil, 1); !errors.Is(err, ErrShmBadParam) {
 		t.Fatalf("ShmReceive empty buffer = %v, want %v", err, ErrShmBadParam)
 	}
 
 	spinLoadSeqCtx := &ShmContext{
 		role:             ShmRoleClient,
-		data:             make([]byte, 8),
+		data:             alignedShmData(8),
 		responseCapacity: 64,
 		SpinTries:        1,
 	}
@@ -380,7 +407,7 @@ func TestShmReceiveBadParamAndTimeoutPaths(t *testing.T) {
 
 	spinLoadLenCtx := &ShmContext{
 		role:             ShmRoleClient,
-		data:             make([]byte, 48),
+		data:             alignedShmData(48),
 		responseCapacity: 64,
 		SpinTries:        1,
 	}
@@ -394,7 +421,7 @@ func TestShmReceiveBadParamAndTimeoutPaths(t *testing.T) {
 
 	futexLoadSignalCtx := &ShmContext{
 		role:             ShmRoleClient,
-		data:             make([]byte, 8),
+		data:             alignedShmData(8),
 		responseCapacity: 64,
 		SpinTries:        0,
 	}
@@ -404,7 +431,7 @@ func TestShmReceiveBadParamAndTimeoutPaths(t *testing.T) {
 
 	futexLoadSeqCtx := &ShmContext{
 		role:             ShmRoleClient,
-		data:             make([]byte, 48),
+		data:             alignedShmData(48),
 		responseCapacity: 64,
 		SpinTries:        0,
 	}

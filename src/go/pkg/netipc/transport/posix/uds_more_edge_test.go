@@ -269,10 +269,13 @@ func TestReceiveWaitTimeoutAndAbort(t *testing.T) {
 }
 
 func TestReceiveAndStaleDirectGuards(t *testing.T) {
-	if err := pollReadableForReceive(1<<31, newReceiveWait(1, nil)); !errors.Is(err, ErrBadParam) {
+	// Non-constant so 32-bit builds compile; there it wraps negative and still hits the guard.
+	var highFD64 int64 = 1 << 31
+	highFD := int(highFD64)
+	if err := pollReadableForReceive(highFD, newReceiveWait(1, nil)); !errors.Is(err, ErrBadParam) {
 		t.Fatalf("poll high fd error = %v, want ErrBadParam", err)
 	}
-	if _, err := rawRecvWithTimeout(1<<31, make([]byte, 1), newReceiveWait(1, nil)); !errors.Is(err, ErrBadParam) {
+	if _, err := rawRecvWithTimeout(highFD, make([]byte, 1), newReceiveWait(1, nil)); !errors.Is(err, ErrBadParam) {
 		t.Fatalf("recv high fd error = %v, want ErrBadParam", err)
 	}
 

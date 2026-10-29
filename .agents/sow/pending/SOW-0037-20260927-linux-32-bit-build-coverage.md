@@ -105,6 +105,16 @@ Investigate and complete the pre-implementation gate before starting edits.
 
 Recorded reproducible compile failures from SOW-0036.
 
+### 2026-10-29
+
+SOW-0046 delivered the Go part of this SOW: Go 386 `Iovlen` width, the
+missing `SYS_SENDMSG` (socketcall on linux/386), the oversized test literals,
+Go test execution on 386/arm/arm64 in Runtime Safety CI, and a 32-bit SHM
+attach overflow fix in C, Rust and Go. Remaining scope here: the Rust ARM musl
+`pthread_t` test compile failure, and executing the C and Rust test suites and
+interop on 32-bit targets (the C/Rust attach fix from SOW-0046 is verified on
+64-bit only, because no local 32-bit C/Rust toolchain exists).
+
 ## Validation
 
 This pending SOW records compiler evidence only; implementation acceptance,

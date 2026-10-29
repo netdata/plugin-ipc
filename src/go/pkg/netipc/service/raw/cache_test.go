@@ -373,11 +373,13 @@ func TestCacheOverflowGuards(t *testing.T) {
 		t.Skip("oversized slice-header guard requires 64-bit int")
 	}
 
-	if _, err := cacheBucketMaskForLen(int(uint64(^uint32(0)) + 2)); !errors.Is(err, protocol.ErrOverflow) {
+	// Non-constant so 32-bit builds compile; the skip above keeps it from running there.
+	maxU32 := uint64(^uint32(0))
+	if _, err := cacheBucketMaskForLen(int(maxU32 + 2)); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("unrepresentable bucket count error = %v, want ErrOverflow", err)
 	}
 
-	if got := cacheStatusItemCountForLen(int(uint64(^uint32(0)) + 1)); got != ^uint32(0) {
+	if got := cacheStatusItemCountForLen(int(maxU32 + 1)); got != ^uint32(0) {
 		t.Fatalf("overflow status item count = %d, want uint32 max", got)
 	}
 }

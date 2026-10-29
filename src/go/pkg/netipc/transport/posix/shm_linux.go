@@ -346,21 +346,23 @@ func ShmClientAttach(runDir, serviceName string, sessionID uint64) (*ShmContext,
 		return nil, ErrShmNotReady
 	}
 
+	// Region ends are computed in uint64: uint32 sums wrap, and int sums go
+	// negative on 32-bit, either of which would let a forged header pass.
+	const align = uint64(shmRegionAlignment)
+	reqEnd := uint64(reqOff) + uint64(reqCap)
+	respEnd := uint64(respOff) + uint64(respCap)
 	if reqOff%shmRegionAlignment != 0 ||
 		reqCap%shmRegionAlignment != 0 ||
 		respOff%shmRegionAlignment != 0 ||
 		respCap%shmRegionAlignment != 0 ||
-		respOff < shmAlign64(reqOff+reqCap) {
+		uint64(respOff) < (reqEnd+align-1)&^(align-1) {
 		_ = syscall.Munmap(data)
 		_ = f.Close()
 		return nil, ErrShmBadSize
 	}
 
 	// Validate region size
-	reqEnd := int(reqOff) + int(reqCap)
-	respEnd := int(respOff) + int(respCap)
-	needed := max(respEnd, reqEnd)
-	if fileSize < needed {
+	if uint64(fileSize) < max(respEnd, reqEnd) {
 		_ = syscall.Munmap(data)
 		_ = f.Close()
 		return nil, ErrShmBadSize
@@ -510,7 +512,9 @@ func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 		expectedSeq = c.localRespSeq + 1
 	}
 
-	// Limit copy to the smaller of caller buffer and SHM area capacity
+	// Limit copy to the smaller of caller buffer and SHM area capacity.
+	// mlen is compared as uint64: int(mlen) wraps negative on 32-bit, which
+	// would let a forged length pass the bound.
 	maxCopy := min(int(areaCap), len(buf))
 
 	// Phase 1: spin. Copy immediately on observing the advance.
@@ -526,7 +530,7 @@ func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 			if err != nil {
 				return 0, fmt.Errorf("%w: load msg_len: %v", ErrShmBadParam, err)
 			}
-			if mlen > 0 && int(mlen) <= maxCopy {
+			if mlen > 0 && uint64(mlen) <= uint64(maxCopy) {
 				copy(buf[:mlen], c.data[areaOff:areaOff+mlen])
 			}
 			observed = true
@@ -595,7 +599,7 @@ func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 		if lerr != nil {
 			return 0, fmt.Errorf("%w: load msg_len: %v", ErrShmBadParam, lerr)
 		}
-		if mlen > 0 && int(mlen) <= maxCopy {
+		if mlen > 0 && uint64(mlen) <= uint64(maxCopy) {
 			copy(buf[:mlen], c.data[areaOff:areaOff+mlen])
 		}
 	}
@@ -608,7 +612,7 @@ func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 	}
 
 	// Message larger than safe copy limit
-	if int(mlen) > maxCopy {
+	if uint64(mlen) > uint64(maxCopy) {
 		return int(mlen), ErrShmMsgTooLarge
 	}
 

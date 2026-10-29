@@ -63,8 +63,12 @@ func TestLookupCommonSizingHelpers(t *testing.T) {
 	if _, err := checkedLookupU32(-1); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("checkedLookupU32 negative error = %v", err)
 	}
-	if _, err := checkedLookupU32(int(uint64(^uint32(0)) + 1)); !errors.Is(err, protocol.ErrOverflow) {
-		t.Fatalf("checkedLookupU32 overflow error = %v", err)
+	// A 32-bit int cannot exceed uint32 max; non-constant so those builds compile.
+	if strconv.IntSize >= 64 {
+		maxU32 := uint64(^uint32(0))
+		if _, err := checkedLookupU32(int(maxU32 + 1)); !errors.Is(err, protocol.ErrOverflow) {
+			t.Fatalf("checkedLookupU32 overflow error = %v", err)
+		}
 	}
 }
 
@@ -376,7 +380,8 @@ func TestLookupReadyAndCapacityGuards(t *testing.T) {
 		t.Fatalf("negative request capacity error = %v", err)
 	}
 	if strconv.IntSize >= 64 {
-		if err := client.ensureLookupRequestCapacity(int(uint64(^uint32(0)) + 1)); !errors.Is(err, protocol.ErrOverflow) {
+		maxU32 := uint64(^uint32(0))
+		if err := client.ensureLookupRequestCapacity(int(maxU32 + 1)); !errors.Is(err, protocol.ErrOverflow) {
 			t.Fatalf("unrepresentable request capacity error = %v", err)
 		}
 	}
@@ -440,7 +445,8 @@ func TestIncrementBatchRejectsUnrepresentableItemCount(t *testing.T) {
 	if strconv.IntSize < 64 {
 		t.Skip("synthetic oversized slice guard requires 64-bit int")
 	}
-	if _, err := incrementBatchRequestSize(int(uint64(^uint32(0)) + 1)); !errors.Is(err, protocol.ErrOverflow) {
+	maxU32 := uint64(^uint32(0))
+	if _, err := incrementBatchRequestSize(int(maxU32 + 1)); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("huge increment batch error = %v, want ErrOverflow", err)
 	}
 }

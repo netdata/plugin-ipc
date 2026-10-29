@@ -37,6 +37,9 @@ The Rust ABI runner also asserts the compiled layout for each requested mode;
 both timeout behavior and the expected ABI must pass.
 The C ABI fixture does not replace building and testing each language consumer
 for the target architecture or measuring the deployed service's CPU use.
+Runtime Safety CI vets the Go packages on amd64, 386, arm, arm64, riscv64,
+loong64, ppc64le, s390x and mips64le Linux, runs the Go test suite on 386 and,
+under QEMU, on arm64 and arm, and checks the Rust library for aarch64 and armv7.
 
 ## Core Reality
 

@@ -262,7 +262,13 @@ place.
 3. Validate the file size (must be >= header_len).
 4. `mmap` the region.
 5. Validate the header: magic, version, header_len.
-6. Read offsets and capacities from the header.
+6. Read offsets and capacities from the header and validate them: both
+   offsets at or after the aligned header end, both capacities non-zero,
+   all four values 64-byte aligned, the response area starting at or after
+   the aligned end of the request area, and both areas ending within the
+   file. Area ends are computed without wrapping (for example in 64-bit
+   arithmetic), so a forged header cannot pass on 32-bit platforms. A
+   violation is a bad-size error.
 7. The client is now ready to publish requests and consume responses.
 
 If the file does not exist or is undersized (server has not yet

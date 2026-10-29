@@ -173,6 +173,11 @@ Open decisions:
 - Created as the real pending follow-up for the CMake/platform-contract discrepancy
   discovered during SOW-0030 research.
 
+### 2026-10-29
+
+- Overlap recorded: SOW-0048 (FreeBSD support) includes this C SHM build-gating fix;
+  merge the two before implementation.
+
 ## Validation
 
 Acceptance criteria evidence:

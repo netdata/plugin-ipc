@@ -443,11 +443,12 @@ impl ShmContext {
             return Err(ShmError::BadSize);
         }
 
-        // Validate region size
-        let req_end = req_off as usize + req_cap as usize;
-        let resp_end = resp_off as usize + resp_cap as usize;
+        // Validate region size in u64: usize sums wrap on 32-bit targets and
+        // would let a forged header pass the file-size check.
+        let req_end = u64::from(req_off) + u64::from(req_cap);
+        let resp_end = u64::from(resp_off) + u64::from(resp_cap);
         let needed = req_end.max(resp_end);
-        if file_size < needed {
+        if (file_size as u64) < needed {
             unsafe {
                 libc::munmap(base as *mut libc::c_void, file_size);
                 libc::close(fd);

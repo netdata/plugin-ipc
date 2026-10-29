@@ -6,31 +6,18 @@ import (
 	"errors"
 	"syscall"
 	"time"
-	"unsafe"
 
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/internal/syspoll"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/internal/framing"
 )
 
 const receiveAbortPollMs = 100
 
-const (
-	_pollIn   = 0x0001
-	_pollErr  = 0x0008
-	_pollHup  = 0x0010
-	_pollNval = 0x0020
-)
-
 type receiveWait struct {
 	infinite bool
 	deadline time.Time
 	abortCh  <-chan struct{}
-}
-
-type receivePollFd struct {
-	fd      int32
-	events  int16
-	revents int16
 }
 
 func newReceiveWait(timeoutMs uint32, abortCh <-chan struct{}) receiveWait {
@@ -83,17 +70,11 @@ func pollReadableForReceive(fd int, wait receiveWait) error {
 			return err
 		}
 
-		pfd := receivePollFd{
-			fd:     int32(fd), // #nosec G115 -- fd is checked against int32 range above.
-			events: _pollIn,
+		pfd := syspoll.PollFd{
+			Fd:     int32(fd), // #nosec G115 -- fd is checked against int32 range above.
+			Events: syspoll.In,
 		}
-		r, _, errno := syscall.Syscall(
-			syscall.SYS_POLL,
-			uintptr(unsafe.Pointer(&pfd)), // #nosec G103 -- raw poll syscall requires a pollfd pointer.
-			1,
-			uintptr(waitMs),
-		)
-		n := int(r)
+		n, errno := syspoll.Poll(&pfd, waitMs)
 		if n < 0 {
 			if errno == syscall.EINTR {
 				continue
@@ -103,10 +84,10 @@ func pollReadableForReceive(fd int, wait receiveWait) error {
 		if n == 0 {
 			continue
 		}
-		if pfd.revents&_pollIn != 0 {
+		if pfd.Revents&syspoll.In != 0 {
 			return nil
 		}
-		if pfd.revents&(_pollErr|_pollHup|_pollNval) != 0 {
+		if pfd.Revents&(syspoll.Err|syspoll.Hup|syspoll.Nval) != 0 {
 			return nil
 		}
 	}
