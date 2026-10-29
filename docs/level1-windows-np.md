@@ -101,9 +101,14 @@ The timeout-aware receive form must:
   caller-provided timeout
 - apply the same deadline to the first packet and all continuation
   packets that make up one logical message
-- observe an explicit abort event while waiting for pipe readability
+- observe the caller's abort signal while waiting for pipe readability,
+  either through an abort event or by waiting in slices of at most 100 ms
+  and checking an abort flag between slices; an abort is observed within
+  100 ms
+- treat the end of an abort-check slice as "keep waiting", never as the
+  deadline
 - return a distinct timeout error when the deadline expires
-- return a distinct aborted error when the abort event is signaled
+- return a distinct aborted error when the abort is observed
 
 Level 2 is responsible for deciding whether a timeout or abort should
 break the session. Level 1 reports timeout and abort distinctly; peer

@@ -675,6 +675,8 @@ L2 typed calls are also bounded:
 - timeout and abort have distinct errors, so shutdown handling does not need
   to guess whether the peer disconnected
 - abort is sticky until the caller clears it or closes the client/cache helper
+- a call blocked waiting for its response notices an abort within 100 ms on
+  every transport
 
 Implication:
 

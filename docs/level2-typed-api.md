@@ -269,7 +269,11 @@ Every Level 2 client context also exposes an abort signal that is safe to
 trigger from another thread while one thread is blocked in a typed call.
 Abort is sticky until the caller explicitly clears it or closes the
 client. A call that observes the abort signal returns a distinct aborted
-error and is not retried.
+error and is not retried. A call blocked waiting for its response
+observes an abort within 100 ms on every transport, including SHM
+response waits; an implementation may
+notice it sooner (for example C polls an abort descriptor together with
+the socket), but callers must not rely on faster than 100 ms.
 
 Negotiated request and response payload ceilings are configuration
 controlled. The library may provide documented defaults, but the effective
