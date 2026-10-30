@@ -768,7 +768,24 @@ static void test_long_running_stability(void)
                         8, 65536, 65536, 0, &stid);
     check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
-    /* Read initial VmRSS */
+    const int num_clients = 5;
+    pthread_t ctids[5];
+    stability_client_ctx_t cctxs[5];
+
+    for (int i = 0; i < num_clients; i++) {
+        cctxs[i].service = svc;
+        cctxs[i].total_refreshes = 0;
+        cctxs[i].total_errors = 0;
+        __atomic_store_n(&cctxs[i].running, 1, __ATOMIC_RELAXED);
+        pthread_create(&ctids[i], NULL, stability_client_fn, &cctxs[i]);
+    }
+
+    /* Baseline after a warm-up: thread stacks, allocator arenas and, under
+     * QEMU, the emulator's per-thread state and translation cache otherwise
+     * count as growth (QEMU's RSS also varies with the emulated CPU model). */
+    sleep(10);
+
+    /* Read baseline VmRSS */
     long vmrss_start = 0;
     {
         FILE *f = fopen("/proc/self/status", "r");
@@ -784,20 +801,8 @@ static void test_long_running_stability(void)
         }
     }
 
-    const int num_clients = 5;
-    pthread_t ctids[5];
-    stability_client_ctx_t cctxs[5];
-
-    for (int i = 0; i < num_clients; i++) {
-        cctxs[i].service = svc;
-        cctxs[i].total_refreshes = 0;
-        cctxs[i].total_errors = 0;
-        __atomic_store_n(&cctxs[i].running, 1, __ATOMIC_RELAXED);
-        pthread_create(&ctids[i], NULL, stability_client_fn, &cctxs[i]);
-    }
-
-    /* Run for 60 seconds */
-    sleep(60);
+    /* Run for the remaining 50 seconds */
+    sleep(50);
 
     /* Signal all clients to stop */
     for (int i = 0; i < num_clients; i++)

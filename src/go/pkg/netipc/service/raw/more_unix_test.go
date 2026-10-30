@@ -680,7 +680,6 @@ func TestUnixServerRejectsSessionAtWorkerCapacity(t *testing.T) {
 			released = true
 		}
 	}
-	defer releaseOnce()
 
 	var handlerCalls atomic.Int32
 	ts := startServerWithWorkersSocketReady(
@@ -700,6 +699,9 @@ func TestUnixServerRejectsSessionAtWorkerCapacity(t *testing.T) {
 		1,
 	)
 	defer ts.stop()
+	// Deferred after ts.stop so it runs first: a t.Fatal must unblock the
+	// handler, or stopping the server waits for it forever.
+	defer releaseOnce()
 
 	client1 := NewIncrementClient(testRunDir, svc, testClientConfig())
 	defer client1.Close()
@@ -766,13 +768,21 @@ func TestUnixServerRejectsSessionAtWorkerCapacity(t *testing.T) {
 	}
 	client1.Close()
 
-	time.Sleep(100 * time.Millisecond)
-
-	verify := NewIncrementClient(testRunDir, svc, testClientConfig())
-	defer verify.Close()
-	refreshUnixClientReady(t, verify)
-
-	got, err := verify.CallIncrement(1)
+	// The worker slot frees only when the first session goroutine exits, which
+	// can take well over 100 ms on slow or emulated hosts; until then the
+	// server accepts and drops new sessions, so retry within a deadline.
+	deadline := time.Now().Add(5 * time.Second)
+	var got uint64
+	for {
+		verify := NewIncrementClient(testRunDir, svc, testClientConfig())
+		refreshUnixClientReady(t, verify)
+		got, err = verify.CallIncrement(1)
+		verify.Close()
+		if err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if err != nil {
 		t.Fatalf("verification call after worker-capacity reject failed: %v", err)
 	}

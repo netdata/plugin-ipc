@@ -2,6 +2,13 @@
 #define _GNU_SOURCE
 #endif
 
+/* Run-directory scans and stats must survive 64-bit inode numbers and
+ * directory offsets; 32-bit glibc builds without LFS fail them with
+ * EOVERFLOW. Only file-local types are affected (no off_t/stat in headers). */
+#ifndef _FILE_OFFSET_BITS
+#define _FILE_OFFSET_BITS 64
+#endif
+
 /*
  * netipc_shm.c - L1 POSIX SHM transport (Linux only).
  *

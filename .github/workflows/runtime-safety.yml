@@ -57,9 +57,9 @@ jobs:
           bash tests/run-rust-shm-timeout-abi.sh
 
   linux-architectures:
-    name: Linux architectures (Go, Rust)
+    name: Linux architectures (Go vet)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -69,18 +69,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
-          go-version: "1.26.x"
+          go-version-file: src/go/go.mod
           cache: false
-
-      - name: Install emulator with binfmt registration
-        # binfmt is required, not just go test -exec: the robustness tests
-        # re-exec their own binary as a crash helper.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-user-binfmt
-          for handler in qemu-aarch64 qemu-arm; do
-            test -e "/proc/sys/fs/binfmt_misc/$handler" || { echo "missing binfmt handler $handler" >&2; exit 1; }
-          done
 
       - name: Vet Go on every Linux architecture
         working-directory: src/go
@@ -90,24 +80,67 @@ jobs:
             GOARCH=$arch go vet ./...
           done
 
-      - name: Test Go on 386
-        working-directory: src/go
-        run: GOARCH=386 go test ./...
+  linux-targets:
+    # Every Linux target Netdata ships: C, Rust and Go suites plus interop.
+    name: Linux target ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-musl
+          - i386-gnu
+          - i386-musl
+          - armv7-gnu
+          - armv7-gnu-time64
+          - armv7-musl
+          - armv6-musl
+          - aarch64-gnu
+          - aarch64-musl
+    env:
+      TARGET: ${{ matrix.target }}
+      ZIG_VERSION: 0.17.0
+      ZIG_SHA256: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
-      - name: Test Go on arm64 under qemu
-        working-directory: src/go
-        run: GOARCH=arm64 go test ./...
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: src/go/go.mod
+          cache: false
 
-      - name: Test Go on arm under qemu
-        working-directory: src/go
-        run: GOARCH=arm go test ./...
-
-      - name: Check Rust library on aarch64 and armv7
+      - name: Install cross compilers and emulator
+        # binfmt is required, not just a runner: tests re-exec their own
+        # binaries and interop scripts start foreign servers and clients.
         run: |
-          rustup target add aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf
-          for target in aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf; do
-            cargo check --manifest-path src/crates/netipc/Cargo.toml --lib --target "$target"
-          done
+          pkgs="cmake ninja-build qemu-user-binfmt"
+          case "$TARGET" in
+            i386-*) pkgs="$pkgs gcc-i686-linux-gnu libc6-dev-i386-cross" ;;
+            armv*) pkgs="$pkgs gcc-arm-linux-gnueabihf libc6-dev-armhf-cross" ;;
+            aarch64-*) pkgs="$pkgs gcc-aarch64-linux-gnu libc6-dev-arm64-cross" ;;
+          esac
+          sudo apt-get update
+          # shellcheck disable=SC2086
+          sudo apt-get install -y --no-install-recommends $pkgs
+
+      - name: Install Zig for musl C builds
+        if: contains(matrix.target, 'musl')
+        run: |
+          archive="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSLo "$RUNNER_TEMP/$archive" "https://ziglang.org/download/${ZIG_VERSION}/${archive}"
+          echo "${ZIG_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Build and test C, Rust, Go and interop
+        env:
+          NIPC_TARGET_RUSTUP_ADD: "1"
+        run: bash tests/run-linux-target.sh "$TARGET"
 
   asan-ubsan:
     name: ASAN/UBSAN

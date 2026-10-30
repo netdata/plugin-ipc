@@ -279,6 +279,7 @@ Output/reference skills:
 - POSIX coverage: `bash tests/run-coverage-c.sh`, `bash tests/run-coverage-rust.sh`, `bash tests/run-coverage-go.sh`
 - POSIX interop examples: `bash tests/interop_codec.sh`, `bash tests/test_uds_interop.sh`, `bash tests/test_shm_interop.sh`, `bash tests/test_service_interop.sh`
 - `tests/interop_codec.sh` configures `build/`; do not run it in parallel with CTest or another build-directory validation command.
+- Netdata Linux targets (32-bit, ARM, musl): `bash tests/run-linux-target.sh <target> [c] [rust] [go] [interop]`; targets and required cross toolchains are listed in the script header. C test fixtures use fixed `/tmp` paths: never run two targets in parallel on one host.
 - Robustness reproduction tests: C `test_robustness` / `test_win_robustness`, Rust `service::raw::tests::robustness` / `service::raw::windows_tests::robustness`, Go `TestRobust*` / `TestWinRobust*`. They always run; there is no skip gate.
 - Windows validation scripts are under `tests/run-*-windows*.sh` and `tests/test_*_win*.sh`; use the specific script matching the touched transport/API.
 - Benchmark generation: `bash tests/generate-benchmarks-posix.sh` or `bash tests/generate-benchmarks-windows.sh`

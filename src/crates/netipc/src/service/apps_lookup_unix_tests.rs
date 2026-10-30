@@ -44,11 +44,43 @@ fn wait_for_listener_bind(service: &str) {
     let sock = socket_path(service);
     for _ in 0..2000 {
         if sock.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_micros(500));
+    }
+
+    // The socket file appears at bind(), before listen(); a connect in that
+    // window is refused. Wait for the listening state without connecting, so
+    // tests that count sessions or inject first-session faults stay exact.
+    for _ in 0..2000 {
+        if socket_is_listening(&sock) {
             return;
         }
         thread::sleep(Duration::from_micros(500));
     }
-    panic!("listener did not bind for service {service}");
+    panic!("listener did not start listening for service {service}");
+}
+
+#[cfg(target_os = "linux")]
+fn socket_is_listening(sock: &std::path::Path) -> bool {
+    // /proc/net/unix flag 0x10000 is __SO_ACCEPTCON, set by listen().
+    let Some(path) = sock.to_str() else {
+        return false;
+    };
+    let Ok(table) = std::fs::read_to_string("/proc/net/unix") else {
+        return false;
+    };
+    table.lines().skip(1).any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        fields.len() >= 8
+            && fields[7] == path
+            && u32::from_str_radix(fields[3], 16).is_ok_and(|flags| flags & 0x10000 != 0)
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn socket_is_listening(sock: &std::path::Path) -> bool {
+    sock.exists()
 }
 
 fn server_config() -> ServerConfig {

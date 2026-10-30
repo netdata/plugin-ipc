@@ -1061,7 +1061,7 @@ func TestLookupTimeoutDuringFollowupSubcall(t *testing.T) {
 		ts := startLookupTestServerWithConfig(svc, protocol.MethodAppsLookup, AppsLookupDispatch(
 			func(req *protocol.AppsLookupRequestView, builder *protocol.AppsLookupBuilder) bool {
 				if calls.Add(1) == 2 {
-					time.Sleep(150 * time.Millisecond)
+					time.Sleep(2 * time.Second)
 				}
 				builder.SetGeneration(9)
 				for i := uint32(0); i < req.ItemCount; i++ {
@@ -1086,7 +1086,11 @@ func TestLookupTimeoutDuringFollowupSubcall(t *testing.T) {
 		defer client.Close()
 		refreshUnixClientReady(t, client)
 
-		_, err := client.CallAppsLookupWithTimeout([]uint32{11, 22, 33}, 30)
+		// The budget leaves slow or emulated runners room for the first subcall;
+
+		// only the much slower second subcall can expire it.
+
+		_, err := client.CallAppsLookupWithTimeout([]uint32{11, 22, 33}, 500)
 		if !errors.Is(err, protocol.ErrTimeout) {
 			t.Fatalf("apps follow-up timeout error = %v, want ErrTimeout", err)
 		}
@@ -1103,7 +1107,7 @@ func TestLookupTimeoutDuringFollowupSubcall(t *testing.T) {
 		ts := startLookupTestServerWithConfig(svc, protocol.MethodCgroupsLookup, CgroupsLookupDispatch(
 			func(req *protocol.CgroupsLookupRequestView, builder *protocol.CgroupsLookupBuilder) bool {
 				if calls.Add(1) == 2 {
-					time.Sleep(150 * time.Millisecond)
+					time.Sleep(2 * time.Second)
 				}
 				builder.SetGeneration(7)
 				for i := uint32(0); i < req.ItemCount; i++ {
@@ -1128,7 +1132,11 @@ func TestLookupTimeoutDuringFollowupSubcall(t *testing.T) {
 		defer client.Close()
 		refreshUnixClientReady(t, client)
 
-		_, err := client.CallCgroupsLookupWithTimeout([][]byte{[]byte("/a"), []byte("/huge"), []byte("/b")}, 30)
+		// The budget leaves slow or emulated runners room for the first subcall;
+
+		// only the much slower second subcall can expire it.
+
+		_, err := client.CallCgroupsLookupWithTimeout([][]byte{[]byte("/a"), []byte("/huge"), []byte("/b")}, 500)
 		if !errors.Is(err, protocol.ErrTimeout) {
 			t.Fatalf("cgroups follow-up timeout error = %v, want ErrTimeout", err)
 		}

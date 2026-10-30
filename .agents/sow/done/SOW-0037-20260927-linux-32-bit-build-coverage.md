@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: open
+Status: closed
 
-Sub-state: separately tracked build gaps discovered during SOW-0036; no implementation started.
+Sub-state: merged into SOW-0046 by user decision (2026-10-29). SOW-0046 delivered the Go part and owns all remaining scope; see `.agents/sow/current/SOW-0046-20261029-go-cross-platform-build.md`.
 
 ## Requirements
 
@@ -46,7 +46,7 @@ thread closure. SOW-0036 corrects the SHM Timespec construction separately.
 
 ## Pre-Implementation Gate
 
-Status: blocked
+Status: superseded; merged into SOW-0046, whose gate covers this scope.
 
 Problem / root-cause model: architecture-width assumptions and libc-dependent
 pthread_t types prevent cross-target compilation.
@@ -117,13 +117,13 @@ interop on 32-bit targets (the C/Rust attach fix from SOW-0046 is verified on
 
 ## Validation
 
-This pending SOW records compiler evidence only; implementation acceptance,
-real-use testing, review, same-failure scan and artifact gates remain required
-when activated. Status open agrees with pending directory.
+Closed without separate implementation; acceptance evidence, reviews, same-failure
+scan and artifact gates are recorded in SOW-0046. Status closed agrees with the
+done directory.
 
 ## Outcome
 
-Tracked; not implemented.
+Closed as merged into SOW-0046 (user decision 2026-10-29). No work remains here; acceptance criteria are validated in SOW-0046.
 
 ## Lessons Extracted
 

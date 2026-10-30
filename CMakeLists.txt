@@ -305,7 +305,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
         $<TARGET_OBJECTS:netipc_shm_fallocate_test_wrap>
     )
     target_compile_definitions(test_shm PRIVATE NIPC_INTERNAL_TESTING=1)
-    target_link_options(test_shm PRIVATE "LINKER:--wrap=fallocate")
+    target_link_options(test_shm PRIVATE "LINKER:--wrap=fallocate" "LINKER:--wrap=fallocate64")
     target_link_libraries(test_shm PRIVATE netipc_shm netipc_uds netipc_protocol Threads::Threads)
     add_test(NAME test_shm COMMAND test_shm)
     set_tests_properties(test_shm PROPERTIES TIMEOUT 30)
@@ -331,7 +331,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
     )
     target_compile_definitions(test_service PRIVATE NIPC_INTERNAL_TESTING=1)
-    target_link_options(test_service PRIVATE "LINKER:--wrap=fallocate")
+    target_link_options(test_service PRIVATE "LINKER:--wrap=fallocate" "LINKER:--wrap=fallocate64")
     add_test(NAME test_service COMMAND test_service)
     set_tests_properties(test_service PROPERTIES TIMEOUT 60)
 
@@ -449,8 +449,10 @@ if(CARGO_EXECUTABLE)
             COMMAND ${CARGO_EXECUTABLE} test shm -- --test-threads=1
             WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
         )
+        # The "shm" filter also selects the SHM robustness tests, whose
+        # bounded waits exceed 30 s when run serially.
         set_tests_properties(test_shm_rust PROPERTIES
-            TIMEOUT 30
+            TIMEOUT 120
             RESOURCE_LOCK rust_posix_transport_tests
         )
 

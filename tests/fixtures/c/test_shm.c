@@ -32,6 +32,9 @@ static int g_fail = 0;
 
 #define TEST_RUN_DIR  "/tmp/nipc_shm_test"
 #define AUTH_TOKEN    0xDEADBEEFCAFEBABEull
+/* Above every OS PID limit, so never a live process; a small fixed PID such
+ * as 99999 can be in use on hosts with a large pid_max. */
+#define DEAD_PID      INT32_MAX
 
 static void check(const char *name, int cond)
 {
@@ -567,7 +570,7 @@ static void test_stale_shm_recovery(void)
         /* Set owner_pid to a definitely-dead PID. */
         nipc_shm_region_header_t *hdr =
             (nipc_shm_region_header_t *)first.base;
-        hdr->owner_pid = 99999; /* very unlikely to be alive */
+        hdr->owner_pid = DEAD_PID;
 
         /* Don't destroy (unlink) -- just unmap and close. */
         nipc_shm_close(&first);
@@ -1329,7 +1332,7 @@ static void test_owner_dead_pid(void)
             /* Set owner_pid to a definitely-dead PID */
             nipc_shm_region_header_t *hdr =
                 (nipc_shm_region_header_t *)client.base;
-            hdr->owner_pid = 99999;
+            hdr->owner_pid = DEAD_PID;
 
             check("owner_alive with dead pid returns false",
                   !nipc_shm_owner_alive(&client));
@@ -1438,7 +1441,7 @@ static void test_cleanup_stale_with_files(void)
         /* Set owner to dead PID */
         nipc_shm_region_header_t *hdr =
             (nipc_shm_region_header_t *)server.base;
-        hdr->owner_pid = 99999;
+        hdr->owner_pid = DEAD_PID;
 
         /* Close without unlink (just close fd + munmap) */
         nipc_shm_close(&server);

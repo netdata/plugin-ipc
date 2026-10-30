@@ -9,6 +9,9 @@ use std::time::Duration;
 
 const TEST_RUN_DIR: &str = "/tmp/nipc_shm_rust_test";
 const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(2);
+// Above every OS PID limit, so never a live process; a small fixed PID such
+// as 99999 can be in use on hosts with a large pid_max.
+const DEAD_PID: i32 = i32::MAX;
 
 fn ensure_run_dir() {
     let _ = std::fs::create_dir_all(TEST_RUN_DIR);
@@ -175,7 +178,7 @@ fn test_stale_recovery() {
     let mut first =
         ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("first create");
     let hdr = first.base as *mut RegionHeader;
-    unsafe { (*hdr).owner_pid = 99999 }; // very unlikely alive
+    unsafe { (*hdr).owner_pid = DEAD_PID };
     first.close(); // close without unlink
 
     // cleanup_stale should remove the stale file
@@ -205,7 +208,7 @@ fn test_stale_recovery_in_group_writable_run_dir() {
 
     let mut first = ShmContext::server_create(&dir, svc, sid, 1024, 1024).expect("first create");
     let hdr = first.base as *mut RegionHeader;
-    unsafe { (*hdr).owner_pid = 99999 }; // very unlikely alive
+    unsafe { (*hdr).owner_pid = DEAD_PID };
     first.close(); // close without unlink
 
     // server_create must reclaim the dead-owner region through its EEXIST path
@@ -706,7 +709,7 @@ fn test_owner_alive_dead_pid() {
 
     // Forge a dead PID
     let hdr = server.base as *mut RegionHeader;
-    unsafe { (*hdr).owner_pid = 99999 };
+    unsafe { (*hdr).owner_pid = DEAD_PID };
 
     assert!(!server.owner_alive());
 
@@ -1234,8 +1237,7 @@ fn test_pid_alive() {
     assert!(!pid_alive(-1));
     // Current process should be alive
     assert!(pid_alive(unsafe { libc::getpid() }));
-    // Very unlikely PID
-    assert!(!pid_alive(99999));
+    assert!(!pid_alive(DEAD_PID));
 }
 
 // -----------------------------------------------------------------------

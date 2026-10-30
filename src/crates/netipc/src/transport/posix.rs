@@ -861,15 +861,11 @@ fn raw_send_iov(fd: RawFd, hdr: &[u8], payload: &[u8]) -> Result<(), UdsError> {
 
     let iovcnt = if payload.is_empty() { 1 } else { 2 };
 
-    let msg = libc::msghdr {
-        msg_name: std::ptr::null_mut(),
-        msg_namelen: 0,
-        msg_iov: iov.as_mut_ptr(),
-        msg_iovlen: iovcnt,
-        msg_control: std::ptr::null_mut(),
-        msg_controllen: 0,
-        msg_flags: 0,
-    };
+    // Zero-initialize: musl's 64-bit msghdr has private padding fields, so a
+    // struct literal does not compile there.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = iov.as_mut_ptr();
+    msg.msg_iovlen = iovcnt;
 
     let n = unsafe { libc::sendmsg(fd, &msg, libc::MSG_NOSIGNAL) };
     if n < 0 || n as usize != total {

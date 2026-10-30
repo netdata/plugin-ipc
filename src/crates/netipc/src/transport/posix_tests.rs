@@ -1250,6 +1250,10 @@ fn test_accept_on_closed_listener_returns_accept_error() {
     let fd = listener.fd;
     assert!(fd >= 0, "listener fd should be valid");
     assert_eq!(unsafe { libc::close(fd) }, 0, "close listener fd");
+    // A parallel test thread may reuse the closed number at once; accepting on
+    // it would succeed and a later close would hit that thread's fd. Point the
+    // listener at a number that is never open instead.
+    listener.fd = 1 << 30;
 
     let err = match listener.accept() {
         Ok(_) => panic!("accept on closed listener should fail"),

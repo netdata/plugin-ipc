@@ -3382,7 +3382,7 @@ static void test_lookup_timeout_during_followup_subcall(void)
         nipc_cgroups_lookup_resp_view_t view;
         nipc_error_t err =
             nipc_client_call_cgroups_lookup_timeout(&client, paths, 3, &view,
-                                                    75);
+                                                    200);
         check("cgroups follow-up timeout rejected", err == NIPC_ERR_TIMEOUT);
         check("cgroups follow-up timeout reached second subcall",
               state.calls >= 2);
@@ -3418,7 +3418,7 @@ static void test_lookup_timeout_during_followup_subcall(void)
         uint32_t pids[] = { 11, 22, 33 };
         nipc_apps_lookup_resp_view_t view;
         nipc_error_t err =
-            nipc_client_call_apps_lookup_timeout(&client, pids, 3, &view, 75);
+            nipc_client_call_apps_lookup_timeout(&client, pids, 3, &view, 200);
         check("apps follow-up timeout rejected", err == NIPC_ERR_TIMEOUT);
         check("apps follow-up timeout reached second subcall",
               state.calls >= 2);

@@ -326,6 +326,11 @@ behind by a previous server instance that crashed or was killed:
 3. Stale files are unlinked only in a safe `{run_dir}`. Live files and files in
    unsafe shared directories are left in place.
 
+The scan and its stat checks must work with 64-bit inode numbers and directory
+offsets on 32-bit platforms; the C transport sources enable large-file
+interfaces themselves, so 32-bit builds with the legacy `off_t` layout do not
+silently skip the scan.
+
 This cleanup runs once at server startup, before the listener begins
 accepting connections. It is the safety net for crashes and hard
 reboots.
@@ -369,5 +374,5 @@ diagnostic to report 4-byte pointers, 4/8-byte seconds fields and 8/16-byte
 timespecs for time32/time64 respectively; a missing or unexpected layout fails
 the run even when the timeout assertions pass. Runtime Safety CI checks both
 C ARM glibc layouts and both Rust ARM musl layouts. Emulation validates syscall ABI
-behavior; it does not establish production CPU usage or full C/Rust/Go support
-for that architecture.
+behavior; it does not establish production CPU usage. Full C/Rust/Go suites and
+interop for each Netdata Linux target run through `tests/run-linux-target.sh`.

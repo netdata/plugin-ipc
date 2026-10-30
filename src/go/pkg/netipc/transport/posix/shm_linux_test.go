@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"sync"
 	"testing"
@@ -16,6 +17,10 @@ import (
 )
 
 const testShmRunDir = "/tmp/nipc_shm_go_test"
+
+// testDeadPID is above every OS PID limit, so never a live process; a small
+// fixed PID such as 99999 can be in use on hosts with a large pid_max.
+const testDeadPID = math.MaxInt32
 
 func ensureShmRunDir(t *testing.T) {
 	t.Helper()
@@ -259,8 +264,8 @@ func TestShmStaleRecovery(t *testing.T) {
 	}
 
 	// Write a dead PID into the header
-	binary.NativeEndian.PutUint32(first.data[8:12], 99999) // very unlikely alive
-	first.ShmClose()                                       // close without unlink
+	binary.NativeEndian.PutUint32(first.data[8:12], testDeadPID)
+	first.ShmClose() // close without unlink
 
 	// Clean up stale regions (as production server would)
 	ShmCleanupStale(testShmRunDir, svc)
@@ -289,8 +294,8 @@ func TestShmStaleRecoveryInGroupWritableRunDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first create: %v", err)
 	}
-	binary.NativeEndian.PutUint32(first.data[8:12], 99999) // very unlikely alive
-	first.ShmClose()                                       // close without unlink
+	binary.NativeEndian.PutUint32(first.data[8:12], testDeadPID)
+	first.ShmClose() // close without unlink
 
 	// ServerCreate must reclaim the dead-owner region through its EEXIST path
 	second, err := ShmServerCreate(runDir, svc, 3, 1024, 1024)

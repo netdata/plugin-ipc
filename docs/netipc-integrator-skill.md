@@ -37,9 +37,16 @@ The Rust ABI runner also asserts the compiled layout for each requested mode;
 both timeout behavior and the expected ABI must pass.
 The C ABI fixture does not replace building and testing each language consumer
 for the target architecture or measuring the deployed service's CPU use.
+The C POSIX transport sources define `_FILE_OFFSET_BITS 64` themselves, so a
+32-bit consumer built with the legacy `off_t`/`time_t` layout needs no extra
+flags; no public header exposes `off_t` or `struct stat`.
 Runtime Safety CI vets the Go packages on amd64, 386, arm, arm64, riscv64,
-loong64, ppc64le, s390x and mips64le Linux, runs the Go test suite on 386 and,
-under QEMU, on arm64 and arm, and checks the Rust library for aarch64 and armv7.
+loong64, ppc64le, s390x and mips64le Linux. It also builds and runs the full C,
+Rust and Go suites plus C/Rust/Go interop on every Linux target Netdata ships:
+x86_64 musl, i386 glibc and musl, armv7 glibc (legacy and time64 layouts) and
+musl, armv6 musl and aarch64 glibc and musl, using QEMU for ARM. Run one target
+locally with `bash tests/run-linux-target.sh <target>`; the script header lists
+targets and required toolchains.
 
 ## Core Reality
 

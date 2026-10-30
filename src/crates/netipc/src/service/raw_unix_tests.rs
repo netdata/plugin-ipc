@@ -60,12 +60,43 @@ fn wait_for_listener_bind(service: &str) {
     let sock = socket_path(service);
     for _ in 0..2000 {
         if sock.exists() {
-            return;
+            break;
         }
         thread::sleep(Duration::from_micros(500));
     }
 
-    panic!("listener did not bind for service {service}");
+    // The socket file appears at bind(), before listen(); a connect in that
+    // window is refused. Wait for the listening state without connecting, so
+    // tests that count sessions or inject first-session faults stay exact.
+    for _ in 0..2000 {
+        if socket_is_listening(&sock) {
+            return;
+        }
+        thread::sleep(Duration::from_micros(500));
+    }
+    panic!("listener did not start listening for service {service}");
+}
+
+#[cfg(target_os = "linux")]
+fn socket_is_listening(sock: &std::path::Path) -> bool {
+    // /proc/net/unix flag 0x10000 is __SO_ACCEPTCON, set by listen().
+    let Some(path) = sock.to_str() else {
+        return false;
+    };
+    let Ok(table) = std::fs::read_to_string("/proc/net/unix") else {
+        return false;
+    };
+    table.lines().skip(1).any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        fields.len() >= 8
+            && fields[7] == path
+            && u32::from_str_radix(fields[3], 16).is_ok_and(|flags| flags & 0x10000 != 0)
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn socket_is_listening(sock: &std::path::Path) -> bool {
+    sock.exists()
 }
 
 fn server_config() -> ServerConfig {
@@ -694,9 +725,9 @@ fn start_raw_hello_ack_server(service: &str, packet: Vec<u8>) -> RawHelloAckServ
     ensure_run_dir();
     cleanup_all(service);
 
-    let svc = service.to_string();
+    // Listen before returning so the client's first connect cannot race it.
+    let fd = raw_listener_fd_for_service(service);
     let thread = thread::spawn(move || {
-        let fd = raw_listener_fd_for_service(&svc);
         let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
         if client_fd < 0 {
             unsafe { libc::close(fd) };
@@ -1362,7 +1393,7 @@ fn test_lookup_timeout_during_followup_subcall() {
     let handler_calls = calls.clone();
     let handler = apps_lookup_dispatch(Arc::new(move |req, builder| {
         if handler_calls.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
-            thread::sleep(Duration::from_millis(150));
+            thread::sleep(Duration::from_millis(2_000));
         }
         builder.set_generation(9);
         for i in 0..req.item_count {
@@ -1401,7 +1432,9 @@ fn test_lookup_timeout_during_followup_subcall() {
     let mut server = TestServer::start_with(&svc, cfg, METHOD_APPS_LOOKUP, Some(handler), 8);
     let mut client = apps_lookup_client(&svc, client_config());
     connect_ready(&mut client);
-    let err = match client.call_apps_lookup_with_timeout(&[11, 22, 33], 30) {
+    // The budget leaves slow or emulated runners room for the first subcall;
+    // only the much slower second subcall can expire it.
+    let err = match client.call_apps_lookup_with_timeout(&[11, 22, 33], 500) {
         Ok(_) => panic!("apps follow-up timeout should fail"),
         Err(err) => err,
     };
@@ -1418,7 +1451,7 @@ fn test_lookup_timeout_during_followup_subcall() {
     let handler_calls = calls.clone();
     let handler = cgroups_lookup_dispatch(Arc::new(move |req, builder| {
         if handler_calls.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
-            thread::sleep(Duration::from_millis(150));
+            thread::sleep(Duration::from_millis(2_000));
         }
         builder.set_generation(7);
         for i in 0..req.item_count {
@@ -1452,7 +1485,9 @@ fn test_lookup_timeout_during_followup_subcall() {
     let mut client = cgroups_lookup_client(&svc, client_config());
     connect_ready(&mut client);
     let paths: [&[u8]; 3] = [b"/a".as_slice(), b"/huge".as_slice(), b"/b".as_slice()];
-    let err = match client.call_cgroups_lookup_with_timeout(&paths, 30) {
+    // The budget leaves slow or emulated runners room for the first subcall;
+    // only the much slower second subcall can expire it.
+    let err = match client.call_cgroups_lookup_with_timeout(&paths, 500) {
         Ok(_) => panic!("cgroups follow-up timeout should fail"),
         Err(err) => err,
     };
@@ -4009,6 +4044,16 @@ fn test_server_rejects_session_at_worker_capacity() {
 
     let mut server = TestServer::start_with_workers(svc, METHOD_INCREMENT, Some(handler), 1);
 
+    // Declared after `server` so it drops first: a failed assertion must
+    // release the blocked handler, or dropping the server joins it forever.
+    struct ReleaseOnDrop(Arc<AtomicBool>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let _release_guard = ReleaseOnDrop(release.clone());
+
     let (call_tx, call_rx) = std::sync::mpsc::channel();
     let svc_name = svc.to_string();
     let caller = thread::spawn(move || {
@@ -4019,10 +4064,9 @@ fn test_server_rejects_session_at_worker_capacity() {
         call_tx.send(result).expect("send first call result");
     });
 
-    for _ in 0..500 {
-        if handler_calls.load(Ordering::Acquire) >= 1 {
-            break;
-        }
+    let entered_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while handler_calls.load(Ordering::Acquire) < 1 && std::time::Instant::now() < entered_deadline
+    {
         thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(
@@ -4070,16 +4114,25 @@ fn test_server_rejects_session_at_worker_capacity() {
     assert_eq!(first_result.expect("first call should succeed"), 42);
     caller.join().expect("caller join");
 
-    thread::sleep(Duration::from_millis(100));
-
-    let mut verify = increment_client(svc, client_config());
-    connect_ready(&mut verify);
+    // The worker slot frees only when the first session thread exits, which
+    // can take well over 100 ms on slow or emulated hosts; until then the
+    // server accepts and drops new sessions, so retry within a deadline.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let verified = loop {
+        let mut verify = increment_client(svc, client_config());
+        connect_ready(&mut verify);
+        let result = verify.call_increment(1);
+        verify.close();
+        if result.is_ok() || std::time::Instant::now() >= deadline {
+            break result;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
     assert_eq!(
-        verify.call_increment(1).expect("verification call"),
+        verified.expect("verification call"),
         2,
         "server should remain healthy after rejecting a session at capacity"
     );
-    verify.close();
 
     server.stop();
     cleanup_all(svc);
@@ -4087,21 +4140,9 @@ fn test_server_rejects_session_at_worker_capacity() {
 
 #[test]
 fn test_poll_fd_invalid_fd_returns_error() {
-    let mut fds = [0; 2];
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    assert_eq!(rc, 0, "pipe failed");
-
-    let read_fd = fds[0];
-    let write_fd = fds[1];
-    unsafe {
-        libc::close(read_fd);
-    }
-
-    let rc = poll_fd(read_fd, 0);
-    unsafe {
-        libc::close(write_fd);
-    }
-
+    // A just-closed fd can be reused by a parallel test thread before the
+    // poll; a number far above any open fd always reports POLLNVAL.
+    let rc = poll_fd(1 << 30, 0);
     assert_eq!(rc, -1);
 }
 
@@ -4147,10 +4188,14 @@ fn test_poll_fd_eintr_returns_timeout() {
         0
     );
 
-    let tid = unsafe { libc::pthread_self() };
+    // pthread_t is a pointer on musl and not Send; carry it as an integer.
+    let tid = unsafe { libc::pthread_self() } as usize;
     let signaler = thread::spawn(move || {
         thread::sleep(Duration::from_millis(50));
-        assert_eq!(unsafe { libc::pthread_kill(tid, libc::SIGUSR1) }, 0);
+        assert_eq!(
+            unsafe { libc::pthread_kill(tid as libc::pthread_t, libc::SIGUSR1) },
+            0
+        );
     });
 
     let rc = poll_fd(read_fd, 5000);

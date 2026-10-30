@@ -1436,7 +1436,7 @@ fn test_lookup_timeout_during_followup_subcall_windows() {
     let handler_calls = calls.clone();
     let handler = apps_lookup_dispatch(Arc::new(move |req, builder| {
         if handler_calls.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
-            thread::sleep(Duration::from_millis(150));
+            thread::sleep(Duration::from_millis(2_000));
         }
         builder.set_generation(9);
         for i in 0..req.item_count {
@@ -1476,7 +1476,9 @@ fn test_lookup_timeout_during_followup_subcall_windows() {
         TestServer::start_with(&svc, cfg, client_config(), METHOD_APPS_LOOKUP, handler, 8);
     let mut client = apps_lookup_client(&svc, client_config());
     connect_ready(&mut client);
-    let err = match client.call_apps_lookup_with_timeout(&[11, 22, 33], 30) {
+    // The budget leaves slow or emulated runners room for the first subcall;
+    // only the much slower second subcall can expire it.
+    let err = match client.call_apps_lookup_with_timeout(&[11, 22, 33], 500) {
         Ok(_) => panic!("apps follow-up timeout should fail"),
         Err(err) => err,
     };
@@ -1492,7 +1494,7 @@ fn test_lookup_timeout_during_followup_subcall_windows() {
     let handler_calls = calls.clone();
     let handler = cgroups_lookup_dispatch(Arc::new(move |req, builder| {
         if handler_calls.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
-            thread::sleep(Duration::from_millis(150));
+            thread::sleep(Duration::from_millis(2_000));
         }
         builder.set_generation(7);
         for i in 0..req.item_count {
@@ -1533,7 +1535,9 @@ fn test_lookup_timeout_during_followup_subcall_windows() {
     let mut client = cgroups_lookup_client(&svc, client_config());
     connect_ready(&mut client);
     let paths: [&[u8]; 3] = [b"/a".as_slice(), b"/huge".as_slice(), b"/b".as_slice()];
-    let err = match client.call_cgroups_lookup_with_timeout(&paths, 30) {
+    // The budget leaves slow or emulated runners room for the first subcall;
+    // only the much slower second subcall can expire it.
+    let err = match client.call_cgroups_lookup_with_timeout(&paths, 500) {
         Ok(_) => panic!("cgroups follow-up timeout should fail"),
         Err(err) => err,
     };
