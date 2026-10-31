@@ -798,7 +798,7 @@ fn validate_service_name(name: &str) -> Result<(), ShmError> {
                 return Err(ShmError::BadParam(format!(
                     "service name contains invalid character: {:?}",
                     c as char
-                )))
+                )));
             }
         }
     }

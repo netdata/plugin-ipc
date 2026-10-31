@@ -2,8 +2,8 @@ use super::*;
 #[cfg(target_os = "linux")]
 use crate::protocol::PROFILE_SHM_FUTEX;
 use crate::protocol::{CgroupsBuilder, NipcError, PROFILE_BASELINE};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const TEST_RUN_DIR: &str = "/tmp/nipc_cgroups_rust_test";

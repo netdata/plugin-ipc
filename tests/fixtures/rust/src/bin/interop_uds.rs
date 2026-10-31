@@ -226,9 +226,9 @@ mod posix_only {
         let args: Vec<String> = std::env::args().collect();
         if args.len() < 4 {
             eprintln!(
-            "Usage:\n  {} server <run_dir> <service>\n  {} client <run_dir> <service>\n  {} pipeline-server <run_dir> <service> <count>\n  {} pipeline-client <run_dir> <service> <count>",
-            args[0], args[0], args[0], args[0]
-        );
+                "Usage:\n  {} server <run_dir> <service>\n  {} client <run_dir> <service>\n  {} pipeline-server <run_dir> <service> <count>\n  {} pipeline-client <run_dir> <service> <count>",
+                args[0], args[0], args[0], args[0]
+            );
             std::process::exit(1);
         }
 

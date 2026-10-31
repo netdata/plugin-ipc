@@ -5,7 +5,7 @@
 //! Bounds are deliberately lenient so they do not dictate a fix design.
 
 use super::*;
-use crate::protocol::{string_reverse_encode, METHOD_STRING_REVERSE, STRING_REVERSE_HDR_SIZE};
+use crate::protocol::{METHOD_STRING_REVERSE, STRING_REVERSE_HDR_SIZE, string_reverse_encode};
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 

@@ -1,7 +1,7 @@
 use super::*;
 use crate::protocol::{CgroupsBuilder, NipcError, PROFILE_BASELINE, PROFILE_SHM_HYBRID};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const TEST_RUN_DIR: &str = r"C:\Temp\nipc_cgroups_rust_test";
 const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;

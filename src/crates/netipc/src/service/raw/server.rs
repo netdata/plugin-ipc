@@ -31,7 +31,7 @@ impl ListeningSignal {
 
     /// Whether the server has started listening.
     pub fn is_set(&self) -> bool {
-        *self.0 .0.lock().unwrap()
+        *self.0.0.lock().unwrap()
     }
 
     pub(super) fn set(&self) {

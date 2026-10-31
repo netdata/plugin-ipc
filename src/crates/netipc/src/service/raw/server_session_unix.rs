@@ -1,12 +1,12 @@
 #[cfg(target_os = "linux")]
 use super::common::ensure_client_scratch;
 use super::dispatch::{
-    dispatch_single_internal, method_supported_internal, server_note_payload_capacity,
-    DispatchError, DispatchHandler,
+    DispatchError, DispatchHandler, dispatch_single_internal, method_supported_internal,
+    server_note_payload_capacity,
 };
 use crate::protocol::{
-    self, batch_item_get, BatchBuilder, Header, FLAG_BATCH, HEADER_SIZE, KIND_REQUEST,
-    KIND_RESPONSE, STATUS_BAD_ENVELOPE, STATUS_INTERNAL_ERROR, STATUS_LIMIT_EXCEEDED, STATUS_OK,
+    self, BatchBuilder, FLAG_BATCH, HEADER_SIZE, Header, KIND_REQUEST, KIND_RESPONSE,
+    STATUS_BAD_ENVELOPE, STATUS_INTERNAL_ERROR, STATUS_LIMIT_EXCEEDED, STATUS_OK, batch_item_get,
 };
 #[cfg(target_os = "linux")]
 use crate::protocol::{MAGIC_MSG, VERSION};
@@ -15,8 +15,8 @@ use crate::transport::posix::UdsSession;
 #[cfg(target_os = "linux")]
 use crate::transport::shm::ShmContext;
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// POSIX: Handle one client session in its own thread.
 pub(super) fn handle_session_threaded(

@@ -357,8 +357,8 @@ Recommended reading order:
 The standalone Rust package uses Rust edition 2024 and requires Rust 1.91 or
 newer. Use the latest stable toolchain for normal development; CI also compiles
 every target with Rust 1.91.0 to enforce the minimum. The repository
-`rustfmt.toml` keeps formatting on style edition 2021 independently of the
-language edition.
+`rustfmt.toml` selects style edition 2024 explicitly, matching the language
+edition and Netdata's Rust workspace.
 
 ### Linux / POSIX
 

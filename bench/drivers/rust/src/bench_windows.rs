@@ -19,24 +19,24 @@ fn main() {
 
 #[cfg(windows)]
 use netipc::protocol::{
-    self, batch_item_get, increment_decode, increment_encode, BatchBuilder, Header, FLAG_BATCH,
-    HEADER_SIZE, INCREMENT_PAYLOAD_SIZE, KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG,
-    METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE, STATUS_OK, VERSION,
+    self, BatchBuilder, FLAG_BATCH, HEADER_SIZE, Header, INCREMENT_PAYLOAD_SIZE, KIND_REQUEST,
+    KIND_RESPONSE, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE,
+    STATUS_OK, VERSION, batch_item_get, increment_decode, increment_encode,
 };
 #[cfg(windows)]
 use netipc::service::cgroups::{CgroupsClient, ClientConfig as TypedClientConfig};
 #[cfg(windows)]
 use netipc::service::raw::{
-    increment_dispatch, snapshot_dispatch, CgroupsCache, CgroupsCacheItem, DispatchHandler,
-    ManagedServer,
+    CgroupsCache, CgroupsCacheItem, DispatchHandler, ManagedServer, increment_dispatch,
+    snapshot_dispatch,
 };
 #[cfg(windows)]
-use netipc::transport::win_shm::{WinShmContext, PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID};
+use netipc::transport::win_shm::{PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID, WinShmContext};
 #[cfg(windows)]
 use netipc::transport::windows::{ClientConfig, NpSession, ServerConfig};
 
 #[cfg(windows)]
-use std::sync::{atomic::Ordering, OnceLock};
+use std::sync::{OnceLock, atomic::Ordering};
 #[cfg(windows)]
 use std::time::{Duration, Instant};
 #[cfg(windows)]
@@ -938,11 +938,7 @@ fn run_ping_pong_client(
         eprintln!("client: {} errors", errors);
     }
 
-    if errors > 0 {
-        1
-    } else {
-        0
-    }
+    if errors > 0 { 1 } else { 0 }
 }
 
 #[cfg(windows)]
@@ -1098,11 +1094,7 @@ fn run_snapshot_client(
         eprintln!("client: {} errors", errors);
     }
 
-    if errors > 0 {
-        1
-    } else {
-        0
-    }
+    if errors > 0 { 1 } else { 0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -1331,11 +1323,7 @@ fn run_batch_ping_pong_client(
         );
     }
 
-    if errors > 0 {
-        1
-    } else {
-        0
-    }
+    if errors > 0 { 1 } else { 0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -1477,11 +1465,7 @@ fn run_pipeline_client(
         eprintln!("pipeline client: {} errors", errors);
     }
 
-    if errors > 0 {
-        1
-    } else {
-        0
-    }
+    if errors > 0 { 1 } else { 0 }
 }
 
 #[cfg(windows)]
@@ -1750,11 +1734,7 @@ fn run_pipeline_batch_client(
         eprintln!("pipeline-batch client: {} errors", errors);
     }
 
-    if errors > 0 {
-        1
-    } else {
-        0
-    }
+    if errors > 0 { 1 } else { 0 }
 }
 
 // ---------------------------------------------------------------------------

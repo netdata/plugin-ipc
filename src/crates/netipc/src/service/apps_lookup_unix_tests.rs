@@ -1,11 +1,11 @@
 use super::*;
 use crate::protocol::{
-    AppsLookupBuilder, AppsLookupRequestView, APPS_CGROUP_HOST_ROOT, APPS_CGROUP_KNOWN,
+    APPS_CGROUP_HOST_ROOT, APPS_CGROUP_KNOWN, AppsLookupBuilder, AppsLookupRequestView,
     NIPC_UID_UNSET, ORCHESTRATOR_DOCKER, PID_LOOKUP_KNOWN, PID_LOOKUP_UNKNOWN, PROFILE_BASELINE,
 };
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const TEST_RUN_DIR: &str = "/tmp/nipc_apps_lookup_rust_test";

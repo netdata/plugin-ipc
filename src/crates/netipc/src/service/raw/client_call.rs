@@ -1,11 +1,11 @@
 #[cfg(any(target_os = "linux", windows))]
 use super::client::CLIENT_ABORT_POLL_MS;
 use super::client::{ClientResponseRef, ClientResponseSource, ClientState, RawCallKind, RawClient};
-use super::common::{ensure_client_scratch, CACHE_RESPONSE_BUF_SIZE};
+use super::common::{CACHE_RESPONSE_BUF_SIZE, ensure_client_scratch};
 #[cfg(any(target_os = "linux", windows))]
 use crate::protocol::{self, MAGIC_MSG, VERSION};
 use crate::protocol::{
-    Header, NipcError, HEADER_SIZE, KIND_REQUEST, KIND_RESPONSE, STATUS_LIMIT_EXCEEDED, STATUS_OK,
+    HEADER_SIZE, Header, KIND_REQUEST, KIND_RESPONSE, NipcError, STATUS_LIMIT_EXCEEDED, STATUS_OK,
 };
 #[cfg(any(target_os = "linux", windows))]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -640,7 +640,7 @@ fn map_np_receive_error(
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
-    use crate::transport::win_shm::{WinShmContext, PROFILE_HYBRID};
+    use crate::transport::win_shm::{PROFILE_HYBRID, WinShmContext};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     static RAW_WIN_SHM_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);

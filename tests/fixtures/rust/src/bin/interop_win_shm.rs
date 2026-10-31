@@ -10,7 +10,7 @@
 #[cfg(windows)]
 use netipc::protocol::{self, Header};
 #[cfg(windows)]
-use netipc::transport::win_shm::{WinShmContext, PROFILE_HYBRID};
+use netipc::transport::win_shm::{PROFILE_HYBRID, WinShmContext};
 
 #[cfg(windows)]
 const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;

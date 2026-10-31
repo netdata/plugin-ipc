@@ -1,11 +1,11 @@
 use super::*;
 use crate::protocol::{
-    CgroupsLookupBuilder, CgroupsLookupRequestView, CGROUP_LOOKUP_KNOWN,
-    CGROUP_LOOKUP_UNKNOWN_RETRY_LATER, ORCHESTRATOR_K8S, PROFILE_BASELINE,
+    CGROUP_LOOKUP_KNOWN, CGROUP_LOOKUP_UNKNOWN_RETRY_LATER, CgroupsLookupBuilder,
+    CgroupsLookupRequestView, ORCHESTRATOR_K8S, PROFILE_BASELINE,
 };
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const TEST_RUN_DIR: &str = "/tmp/nipc_cgroups_lookup_rust_test";

@@ -15,28 +15,28 @@ fn main() {
 mod posix_only {
 
     use netipc::protocol::{
-        self, batch_item_get, dispatch_apps_lookup, dispatch_cgroups_lookup,
-        encode_apps_lookup_request, encode_cgroups_lookup_request, increment_decode,
-        increment_encode, AppsLookupBuilder, AppsLookupResponseView, BatchBuilder,
-        CgroupsLookupBuilder, CgroupsLookupResponseView, Header, APPS_CGROUP_KNOWN,
-        CGROUP_LOOKUP_KNOWN, CGROUP_LOOKUP_UNKNOWN_RETRY_LATER, FLAG_BATCH, HEADER_SIZE,
-        INCREMENT_PAYLOAD_SIZE, KIND_REQUEST, KIND_RESPONSE, METHOD_CGROUPS_SNAPSHOT,
-        METHOD_INCREMENT, NIPC_UID_UNSET, ORCHESTRATOR_DOCKER, ORCHESTRATOR_K8S, PID_LOOKUP_KNOWN,
-        PID_LOOKUP_UNKNOWN, PROFILE_BASELINE, PROFILE_SHM_HYBRID, STATUS_OK,
+        self, APPS_CGROUP_KNOWN, AppsLookupBuilder, AppsLookupResponseView, BatchBuilder,
+        CGROUP_LOOKUP_KNOWN, CGROUP_LOOKUP_UNKNOWN_RETRY_LATER, CgroupsLookupBuilder,
+        CgroupsLookupResponseView, FLAG_BATCH, HEADER_SIZE, Header, INCREMENT_PAYLOAD_SIZE,
+        KIND_REQUEST, KIND_RESPONSE, METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, NIPC_UID_UNSET,
+        ORCHESTRATOR_DOCKER, ORCHESTRATOR_K8S, PID_LOOKUP_KNOWN, PID_LOOKUP_UNKNOWN,
+        PROFILE_BASELINE, PROFILE_SHM_HYBRID, STATUS_OK, batch_item_get, dispatch_apps_lookup,
+        dispatch_cgroups_lookup, encode_apps_lookup_request, encode_cgroups_lookup_request,
+        increment_decode, increment_encode,
     };
     #[cfg(target_os = "linux")]
     use netipc::protocol::{MAGIC_MSG, VERSION};
     use netipc::service::cgroups::{CgroupsClient, ClientConfig as TypedClientConfig};
     use netipc::service::raw::{
-        increment_dispatch, snapshot_dispatch, CgroupsCache, CgroupsCacheItem, DispatchHandler,
-        ManagedServer,
+        CgroupsCache, CgroupsCacheItem, DispatchHandler, ManagedServer, increment_dispatch,
+        snapshot_dispatch,
     };
     use netipc::transport::posix::{ClientConfig, ServerConfig, UdsSession};
 
     #[cfg(target_os = "linux")]
     use netipc::transport::shm::ShmContext;
 
-    use std::sync::{atomic::Ordering, OnceLock};
+    use std::sync::{OnceLock, atomic::Ordering};
     use std::time::{Duration, Instant};
 
     // ---------------------------------------------------------------------------
@@ -450,9 +450,9 @@ mod posix_only {
                 }
                 if shm_ctx.is_none() {
                     eprintln!(
-                    "batch client: shm attach failed after retries (profile=0x{:x}, session={})",
-                    sp, session.session_id
-                );
+                        "batch client: shm attach failed after retries (profile=0x{:x}, session={})",
+                        sp, session.session_id
+                    );
                 }
                 shm_ctx
             } else {
@@ -656,11 +656,7 @@ mod posix_only {
             );
         }
 
-        if errors > 0 {
-            1
-        } else {
-            0
-        }
+        if errors > 0 { 1 } else { 0 }
     }
 
     // ---------------------------------------------------------------------------
@@ -795,11 +791,7 @@ mod posix_only {
             eprintln!("pipeline client: {} errors", errors);
         }
 
-        if errors > 0 {
-            1
-        } else {
-            0
-        }
+        if errors > 0 { 1 } else { 0 }
     }
 
     // ---------------------------------------------------------------------------
@@ -944,11 +936,7 @@ mod posix_only {
             eprintln!("pipeline-batch client: {} errors", errors);
         }
 
-        if errors > 0 {
-            1
-        } else {
-            0
-        }
+        if errors > 0 { 1 } else { 0 }
     }
 
     // ---------------------------------------------------------------------------
@@ -1189,11 +1177,7 @@ mod posix_only {
             eprintln!("client: {} errors", errors);
         }
 
-        if errors > 0 {
-            1
-        } else {
-            0
-        }
+        if errors > 0 { 1 } else { 0 }
     }
 
     // ---------------------------------------------------------------------------
@@ -1282,11 +1266,7 @@ mod posix_only {
             eprintln!("client: {} errors", errors);
         }
 
-        if errors > 0 {
-            1
-        } else {
-            0
-        }
+        if errors > 0 { 1 } else { 0 }
     }
 
     // ---------------------------------------------------------------------------

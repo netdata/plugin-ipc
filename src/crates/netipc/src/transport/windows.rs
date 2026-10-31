@@ -5,8 +5,8 @@
 //! in message mode. Wire-compatible with the C and Go implementations.
 
 use crate::protocol::{
-    self, align8, ChunkHeader, Header, Hello, HelloAck, FLAG_BATCH, HEADER_SIZE, KIND_REQUEST,
-    KIND_RESPONSE, MAGIC_CHUNK, MAGIC_MSG, MAX_PAYLOAD_DEFAULT, PROFILE_BASELINE, VERSION,
+    self, ChunkHeader, FLAG_BATCH, HEADER_SIZE, Header, Hello, HelloAck, KIND_REQUEST,
+    KIND_RESPONSE, MAGIC_CHUNK, MAGIC_MSG, MAX_PAYLOAD_DEFAULT, PROFILE_BASELINE, VERSION, align8,
 };
 use std::collections::HashSet;
 use std::ptr;
@@ -384,11 +384,7 @@ pub fn build_pipe_name(run_dir: &str, service_name: &str) -> Result<Vec<u16>, Np
 // ---------------------------------------------------------------------------
 
 fn apply_default(val: u32, def: u32) -> u32 {
-    if val == 0 {
-        def
-    } else {
-        val
-    }
+    if val == 0 { def } else { val }
 }
 
 fn min_u32(a: u32, b: u32) -> u32 {
@@ -1513,7 +1509,7 @@ fn client_handshake(
     let ack_hdr = match Header::decode(&ack_buf[..n]) {
         Ok(hdr) => hdr,
         Err(crate::protocol::NipcError::BadVersion) => {
-            return Err(NpError::Incompatible("ack header version mismatch".into()))
+            return Err(NpError::Incompatible("ack header version mismatch".into()));
         }
         Err(e) => return Err(NpError::Protocol(format!("ack header: {e}"))),
     };
@@ -1554,7 +1550,7 @@ fn client_handshake(
         {
             return Err(NpError::Incompatible(
                 "ack payload layout version mismatch".into(),
-            ))
+            ));
         }
         Err(e) => return Err(NpError::Protocol(format!("ack payload: {e}"))),
     };
