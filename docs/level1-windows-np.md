@@ -42,6 +42,38 @@ identical pipe names from the same inputs.
 Named Pipe is profile bit 0 (`0x01`), named `NAMED_PIPE`.
 This is the Windows baseline profile.
 
+## Access policy
+
+NetIPC services are local, and server and clients run as the same account
+(Netdata runs its agent and plugins as LocalSystem).
+
+- **Pipe DACL**: every pipe instance is created with an explicit, protected
+  security descriptor, `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;<server-SID>)`,
+  where `<server-SID>` is the user SID of the server process token. Only
+  SYSTEM, Administrators and the server's own account can open the pipe;
+  Everyone and Anonymous get no access, not even read-only. A client running
+  as another non-admin account fails to open the pipe with
+  `ERROR_ACCESS_DENIED`, which the client reports as a connect failure.
+- **Remote clients**: pipes are created with `PIPE_REJECT_REMOTE_CLIENTS`,
+  so opens through SMB (`\\host\pipe\...`, including `\\127.0.0.1`) are
+  refused.
+- **Client impersonation level**: clients open the pipe with
+  `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`. A server can identify
+  the client's account but never act as it.
+- **Server identity**: whoever creates a pipe name first owns it. Right after
+  opening the pipe, before HELLO, the client reads the pipe owner
+  (`GetSecurityInfo`, `OWNER_SECURITY_INFORMATION`) and continues only when
+  it is the client's own account, SYSTEM (`S-1-5-18`) or Administrators
+  (`S-1-5-32-544`). A non-admin account cannot assign any of those as owner,
+  so a pipe it squats is refused and receives neither HELLO nor the auth
+  token. The refusal is a distinct L1 error (C
+  `NIPC_NP_ERR_UNTRUSTED_SERVER`, Rust `NpError::UntrustedServer`, Go
+  `ErrUntrustedServer`); Level 2 clients report it as `AUTH_FAILED`.
+
+An elevated administrator creates objects owned by Administrators; a
+non-elevated user or a service account creates objects owned by its own SID.
+Both pass the client check when the client runs as the same account.
+
 ## Connection lifecycle
 
 1. **Server**: creates a Named Pipe instance with `CreateNamedPipeW`.

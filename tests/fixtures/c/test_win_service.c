@@ -736,6 +736,31 @@ static void test_client_auth_failure(void)
     stop_server(&sctx, server_thread);
 }
 
+static void test_client_untrusted_server(void)
+{
+    printf("--- Client untrusted server mapping ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_untrusted");
+
+    server_thread_ctx_t sctx;
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
+    if (!server_thread)
+        return;
+
+    /* BUILTIN\Users never owns the test pipe. */
+    nipc_np_set_trusted_owner_for_tests("S-1-5-32-545");
+    nipc_client_ctx_t client;
+    nipc_client_config_t ccfg = default_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    nipc_client_refresh(&client);
+    nipc_np_set_trusted_owner_for_tests(NULL);
+    check("untrusted server state is AUTH_FAILED", client.state == NIPC_CLIENT_AUTH_FAILED);
+
+    nipc_client_close(&client);
+    stop_server(&sctx, server_thread);
+}
+
 static void test_client_incompatible(void)
 {
     printf("--- Client incompatible profile mapping ---\n");
@@ -1037,6 +1062,7 @@ int main(void)
      * and poison the full ctest pass. */
     test_handler_failure();
     test_client_auth_failure();
+    test_client_untrusted_server();
     test_client_incompatible();
     test_client_protocol_version_incompatible();
     test_status_reporting();

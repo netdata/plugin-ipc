@@ -1131,7 +1131,8 @@ func TestWinIsErrorHelpers(t *testing.T) {
 		t.Fatal("non-connect errors should not match connect classification")
 	}
 
-	if !isAuthError(windows.ErrAuthFailed) || isAuthError(windows.ErrConnect) || isAuthError(nil) {
+	if !isAuthError(windows.ErrAuthFailed) || !isAuthError(windows.ErrUntrustedServer) ||
+		isAuthError(windows.ErrConnect) || isAuthError(nil) {
 		t.Fatal("auth error classification mismatch")
 	}
 

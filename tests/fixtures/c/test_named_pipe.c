@@ -10,6 +10,7 @@
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_protocol.h"
 #include "test_sync.h"
+#include "test_win_security.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -2756,6 +2757,172 @@ static void test_connect_waits_for_busy_pipe(void)
     nipc_np_close_listener(&listener);
 }
 
+
+/* ------------------------------------------------------------------ */
+/*  Test: access policy                                                */
+/* ------------------------------------------------------------------ */
+
+static void test_pipe_dacl_owner_only(void)
+{
+    printf("--- Pipe DACL grants only SYSTEM, Administrators and self ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_np_server_config_t cfg = default_server_config();
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, service, &cfg, &listener);
+    check("listen for DACL check", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK)
+        return;
+
+    check("first instance DACL is owner-only",
+          test_object_dacl_owner_only(listener.pipe, FILE_ALL_ACCESS));
+
+    /* Instances created after an accept carry the same DACL. */
+    wchar_t pipe_name[NIPC_NP_MAX_PIPE_NAME];
+    nipc_np_build_pipe_name(pipe_name, NIPC_NP_MAX_PIPE_NAME, TEST_RUN_DIR, service);
+    HANDLE client = CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                                OPEN_EXISTING, 0, NULL);
+    HANDLE session_pipe = INVALID_HANDLE_VALUE;
+    err = nipc_np_accept_pending(&listener, &session_pipe);
+    check("accept pending for DACL check", err == NIPC_NP_OK);
+    check("next instance DACL is owner-only",
+          err == NIPC_NP_OK &&
+          test_object_dacl_owner_only(listener.pipe, FILE_ALL_ACCESS));
+
+    if (session_pipe != INVALID_HANDLE_VALUE)
+        CloseHandle(session_pipe);
+    if (client != INVALID_HANDLE_VALUE)
+        CloseHandle(client);
+    nipc_np_close_listener(&listener);
+}
+
+static void test_remote_client_rejected(void)
+{
+    printf("--- Pipe rejects remote clients ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_np_server_config_t cfg = default_server_config();
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, service, &cfg, &listener);
+    check("listen for remote client check", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK)
+        return;
+
+    /* The same pipe through the SMB loopback is a remote client. */
+    wchar_t pipe_name[NIPC_NP_MAX_PIPE_NAME];
+    wchar_t remote_name[NIPC_NP_MAX_PIPE_NAME + 16];
+    nipc_np_build_pipe_name(pipe_name, NIPC_NP_MAX_PIPE_NAME, TEST_RUN_DIR, service);
+    wcscpy(remote_name, L"\\\\127.0.0.1\\");
+    wcscat(remote_name, pipe_name + 4);
+    HANDLE remote = CreateFileW(remote_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                                OPEN_EXISTING, 0, NULL);
+    check("remote open is refused", remote == INVALID_HANDLE_VALUE);
+    if (remote != INVALID_HANDLE_VALUE)
+        CloseHandle(remote);
+
+    nipc_np_close_listener(&listener);
+}
+
+typedef struct {
+    nipc_np_listener_t *listener;
+    int accept_ok;
+    SECURITY_IMPERSONATION_LEVEL level;
+} identify_ctx_t;
+
+/* Accept one client and record the impersonation level it granted. */
+static DWORD WINAPI identify_accept_thread(LPVOID arg)
+{
+    identify_ctx_t *ctx = (identify_ctx_t *)arg;
+    ctx->level = SecurityAnonymous;
+
+    nipc_np_session_t session;
+    if (nipc_np_accept(ctx->listener, 1, &session) != NIPC_NP_OK)
+        return 1;
+    ctx->accept_ok = 1;
+
+    if (ImpersonateNamedPipeClient(session.pipe)) {
+        HANDLE token;
+        if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token)) {
+            DWORD len = 0;
+            GetTokenInformation(token, TokenImpersonationLevel, &ctx->level,
+                                sizeof(ctx->level), &len);
+            CloseHandle(token);
+        }
+        RevertToSelf();
+    }
+    nipc_np_close_session(&session);
+    return 0;
+}
+
+static void test_untrusted_server_rejected(void)
+{
+    printf("--- Client refuses a pipe owned by an untrusted account ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_np_server_config_t scfg = default_server_config();
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, service, &scfg, &listener);
+    check("listen for owner check", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK)
+        return;
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_np_session_t session;
+
+    /* BUILTIN\Users never owns the test pipe. */
+    nipc_np_set_trusted_owner_for_tests("S-1-5-32-545");
+    /* Nobody accepts, so a client that skipped the check fails on the
+     * deadline instead of hanging. */
+    err = nipc_np_connect_timeout(TEST_RUN_DIR, service, &ccfg, 2000, NULL,
+                                  &session);
+    check("connect refuses the untrusted owner",
+          err == NIPC_NP_ERR_UNTRUSTED_SERVER);
+    if (err == NIPC_NP_OK)
+        nipc_np_close_session(&session);
+
+    /* The refused client left the only instance closing; start over. */
+    nipc_np_close_listener(&listener);
+    unique_service(service, sizeof(service));
+    err = nipc_np_listen(TEST_RUN_DIR, service, &scfg, &listener);
+    check("listen for trusted owner", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK) {
+        nipc_np_set_trusted_owner_for_tests(NULL);
+        return;
+    }
+
+    /* Trusting the real owner lets the client through, and the server sees
+     * only an identification-level token for it. */
+    char *owner = test_object_owner_sid(listener.pipe);
+    check("read pipe owner", owner != NULL);
+    nipc_np_set_trusted_owner_for_tests(owner);
+
+    identify_ctx_t ictx = { .listener = &listener };
+    HANDLE thread = test_create_thread(NULL, 0, identify_accept_thread, &ictx, 0, NULL);
+    err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("connect accepts the trusted owner", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK)
+        nipc_np_close_listener(&listener);
+    WaitForSingleObject(thread, TEST_WAIT_LIMIT_MS);
+    CloseHandle(thread);
+    if (err == NIPC_NP_OK) {
+        check("server accepted the trusted client", ictx.accept_ok);
+        check("server can only identify the client",
+              ictx.level == SecurityIdentification);
+        nipc_np_close_session(&session);
+    }
+
+    nipc_np_set_trusted_owner_for_tests(NULL);
+    if (owner)
+        LocalFree(owner);
+    nipc_np_close_listener(&listener);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Test: service name validation                                      */
 /* ------------------------------------------------------------------ */
@@ -2825,6 +2992,9 @@ int main(void)
     test_bad_params_and_noop_close();
     test_accept_on_closed_listener();
     test_connect_waits_for_busy_pipe();
+    test_pipe_dacl_owner_only();
+    test_remote_client_rejected();
+    test_untrusted_server_rejected();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

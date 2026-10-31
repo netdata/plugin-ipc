@@ -30,7 +30,8 @@ static void server_wake_listener(nipc_managed_server_t *server) {
 
   HANDLE wake =
       CreateFileW(server->listener.pipe_name, GENERIC_READ | GENERIC_WRITE, 0,
-                  NULL, OPEN_EXISTING, 0, NULL);
+                  NULL, OPEN_EXISTING,
+                  SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
   if (wake != INVALID_HANDLE_VALUE)
     CloseHandle(wake);
 }

@@ -15,6 +15,9 @@ pub mod windows;
 #[cfg(windows)]
 pub mod win_shm;
 
+#[cfg(windows)]
+pub(crate) mod win_security;
+
 /// True when a HELLO_ACK selected exactly one of the profiles a client offered.
 pub(crate) fn selected_profile_offered(selected: u32, offered: u32) -> bool {
     selected.is_power_of_two() && selected & offered != 0

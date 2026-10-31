@@ -8,6 +8,8 @@ use crate::protocol::{
     self, ChunkHeader, FLAG_BATCH, HEADER_SIZE, Header, Hello, HelloAck, KIND_REQUEST,
     KIND_RESPONSE, MAGIC_CHUNK, MAGIC_MSG, MAX_PAYLOAD_DEFAULT, PROFILE_BASELINE, VERSION, align8,
 };
+#[cfg(windows)]
+use crate::transport::win_security::{OwnerOnlyAttributes, owner_trusted};
 use std::collections::HashSet;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -35,6 +37,9 @@ mod ffi {
     pub const PIPE_TYPE_MESSAGE: DWORD = 0x00000004;
     pub const PIPE_READMODE_MESSAGE: DWORD = 0x00000002;
     pub const PIPE_WAIT: DWORD = 0x00000000;
+    pub const PIPE_REJECT_REMOTE_CLIENTS: DWORD = 0x00000008;
+    pub const SECURITY_SQOS_PRESENT: DWORD = 0x00100000;
+    pub const SECURITY_IDENTIFICATION: DWORD = 0x00010000;
     pub const PIPE_UNLIMITED_INSTANCES: DWORD = 255;
     pub const GENERIC_READ: DWORD = 0x80000000;
     pub const GENERIC_WRITE: DWORD = 0x40000000;
@@ -182,6 +187,8 @@ pub enum NpError {
     UnknownMsgId(u64),
     /// Peer disconnected (graceful).
     Disconnected,
+    /// The pipe owner is not this account, SYSTEM or Administrators.
+    UntrustedServer,
 }
 
 impl std::fmt::Display for NpError {
@@ -208,6 +215,7 @@ impl std::fmt::Display for NpError {
             NpError::DuplicateMsgId(id) => write!(f, "duplicate message_id: {id}"),
             NpError::UnknownMsgId(id) => write!(f, "unknown response message_id: {id}"),
             NpError::Disconnected => write!(f, "peer disconnected"),
+            NpError::UntrustedServer => write!(f, "pipe owned by an untrusted account"),
         }
     }
 }
@@ -744,6 +752,14 @@ impl NpSession {
         let pipe_name = build_pipe_name(run_dir, service_name)?;
         let handle = open_client_pipe(&pipe_name, &wait)?;
 
+        // Whoever created the pipe name first owns it. Send HELLO and the auth
+        // token only to a server running as this account, SYSTEM or
+        // Administrators; other accounts cannot take those as owner.
+        if !owner_trusted(handle) {
+            close_handle(handle);
+            return Err(NpError::UntrustedServer);
+        }
+
         // Set read mode to message mode
         let mode: u32 = ffi::PIPE_READMODE_MESSAGE;
         let ok = unsafe { ffi::SetNamedPipeHandleState(handle, &mode, ptr::null(), ptr::null()) };
@@ -1216,6 +1232,8 @@ impl Drop for NpListener {
     }
 }
 
+/// SECURITY_IDENTIFICATION lets the server identify the client but never act
+/// as it.
 #[cfg(windows)]
 fn create_client_pipe(pipe_name: &[u16]) -> ffi::HANDLE {
     unsafe {
@@ -1225,7 +1243,7 @@ fn create_client_pipe(pipe_name: &[u16]) -> ffi::HANDLE {
             0,
             ptr::null(),
             ffi::OPEN_EXISTING,
-            0,
+            ffi::SECURITY_SQOS_PRESENT | ffi::SECURITY_IDENTIFICATION,
             0,
         )
     }
@@ -1307,7 +1325,7 @@ impl NpListenerWaker {
                 0,
                 ptr::null(),
                 ffi::OPEN_EXISTING,
-                0,
+                ffi::SECURITY_SQOS_PRESENT | ffi::SECURITY_IDENTIFICATION,
                 0,
             )
         };
@@ -1403,16 +1421,20 @@ fn create_pipe_instance(
         open_mode |= ffi::FILE_FLAG_FIRST_PIPE_INSTANCE;
     }
 
+    let attrs = OwnerOnlyAttributes::new().map_err(NpError::CreatePipe)?;
     let handle = unsafe {
         ffi::CreateNamedPipeW(
             pipe_name.as_ptr(),
             open_mode,
-            ffi::PIPE_TYPE_MESSAGE | ffi::PIPE_READMODE_MESSAGE | ffi::PIPE_WAIT,
+            ffi::PIPE_TYPE_MESSAGE
+                | ffi::PIPE_READMODE_MESSAGE
+                | ffi::PIPE_WAIT
+                | ffi::PIPE_REJECT_REMOTE_CLIENTS,
             ffi::PIPE_UNLIMITED_INSTANCES,
             buf_size,
             buf_size,
             0,
-            ptr::null(),
+            attrs.as_ptr(),
         )
     };
 
@@ -2613,6 +2635,120 @@ mod tests {
 
         session.close();
         close_handle(holder);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_pipe_dacl_owner_only() {
+        use crate::transport::win_security::{object_dacl_sddl, process_user_sid};
+        ensure_run_dir();
+        let svc = unique_service("rs_dacl");
+        let mut listener =
+            NpListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("bind");
+        let me = process_user_sid().expect("process user SID");
+        let expected = format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{me})");
+        assert_eq!(
+            object_dacl_sddl(listener.handle).as_deref(),
+            Some(expected.as_str())
+        );
+
+        // Instances created after an accept carry the same DACL.
+        let pipe_name = build_pipe_name(TEST_RUN_DIR, &svc).expect("pipe name");
+        let client = create_client_pipe(&pipe_name);
+        let pending = listener.accept_pending().expect("accept pending");
+        assert_eq!(
+            object_dacl_sddl(listener.handle).as_deref(),
+            Some(expected.as_str())
+        );
+        drop(pending);
+        close_handle(client);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_remote_client_rejected() {
+        ensure_run_dir();
+        let svc = unique_service("rs_remote");
+        let _listener =
+            NpListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("bind");
+
+        // The same pipe through the SMB loopback is a remote client.
+        let pipe_name = build_pipe_name(TEST_RUN_DIR, &svc).expect("pipe name");
+        let mut remote: Vec<u16> = r"\\127.0.0.1\".encode_utf16().collect();
+        remote.extend_from_slice(&pipe_name[4..]);
+        let h = unsafe {
+            ffi::CreateFileW(
+                remote.as_ptr(),
+                ffi::GENERIC_READ | ffi::GENERIC_WRITE,
+                0,
+                ptr::null(),
+                ffi::OPEN_EXISTING,
+                0,
+                0,
+            )
+        };
+        if h != ffi::INVALID_HANDLE_VALUE {
+            close_handle(h);
+        }
+        assert_eq!(h, ffi::INVALID_HANDLE_VALUE, "remote open is refused");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_untrusted_server_rejected() {
+        use crate::transport::win_security::{
+            SECURITY_IDENTIFICATION_LEVEL, TRUSTED_OWNER_FOR_TESTS, client_impersonation_level,
+            object_owner_sid,
+        };
+        ensure_run_dir();
+        let svc = unique_service("rs_untrusted");
+        let listener = NpListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("bind");
+
+        // BUILTIN\Users never owns the test pipe. Nobody accepts, so a client
+        // that skipped the check fails on the deadline instead of hanging.
+        TRUSTED_OWNER_FOR_TESTS.with(|t| *t.borrow_mut() = Some("S-1-5-32-545".into()));
+        let result = NpSession::connect_with_timeout(
+            TEST_RUN_DIR,
+            &svc,
+            &default_client_config(),
+            2000,
+            None,
+        );
+        TRUSTED_OWNER_FOR_TESTS.with(|t| *t.borrow_mut() = None);
+        assert!(
+            matches!(result, Err(NpError::UntrustedServer)),
+            "got {:?}",
+            result.err()
+        );
+        drop(listener);
+
+        // Trusting the real owner lets the client through, and the server sees
+        // only an identification-level token for it.
+        let svc = unique_service("rs_trusted");
+        let mut listener =
+            NpListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("bind");
+        let owner = object_owner_sid(listener.handle).expect("pipe owner");
+        let server = thread::spawn(move || {
+            let session = listener.accept().ok()?;
+            client_impersonation_level(session.handle())
+        });
+        TRUSTED_OWNER_FOR_TESTS.with(|t| *t.borrow_mut() = Some(owner));
+        let result = NpSession::connect_with_timeout(
+            TEST_RUN_DIR,
+            &svc,
+            &default_client_config(),
+            10_000,
+            None,
+        );
+        TRUSTED_OWNER_FOR_TESTS.with(|t| *t.borrow_mut() = None);
+        let mut session = result.expect("connect accepts the trusted owner");
+        let level = server.join().expect("server join");
+        assert_eq!(
+            level,
+            Some(SECURITY_IDENTIFICATION_LEVEL),
+            "server can only identify the client"
+        );
+        session.close();
     }
 
     #[cfg(windows)]

@@ -93,6 +93,7 @@ nipc_client_state_t nipc_service_win_client_try_connect(nipc_client_ctx_t *ctx)
     case NIPC_NP_ERR_CONNECT:
         return NIPC_CLIENT_NOT_FOUND;
     case NIPC_NP_ERR_AUTH_FAILED:
+    case NIPC_NP_ERR_UNTRUSTED_SERVER:
         return NIPC_CLIENT_AUTH_FAILED;
     case NIPC_NP_ERR_NO_PROFILE:
     case NIPC_NP_ERR_INCOMPATIBLE:

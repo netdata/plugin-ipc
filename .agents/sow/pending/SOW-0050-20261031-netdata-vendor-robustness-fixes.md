@@ -28,6 +28,7 @@ Facts:
   - `src/collectors/apps.plugin/apps-cgroups-lookup-client.c:381-403`: `NIPC_CGROUP_LOOKUP_OVERSIZED_ITEM` already ends as a final non-retry state (only `UNKNOWN_RETRY_LATER` is re-requested) but is counted as a retry miss; count it separately;
   - `src/collectors/cgroups.plugin/cgroup-lookup-test/cgroup-lookup-test.c`: print names for `PAYLOAD_EXCEEDED` and `OVERSIZED_ITEM`.
 - SOW-0035 (2026-10-31) moved plugin-ipc to rustfmt style edition 2024, formatting-only. Its Netdata half (the same formatting in the vendored `src/crates/netipc/`) is delivered by this vendoring; the vendored copy must pass `rustfmt --edition 2024 --check`. Netdata's workspace already uses edition 2024 and has no `rustfmt.toml` (`ktsaou/netdata @ ae9113f2cc`, `src/crates/Cargo.toml:66`).
+- SOW-0045 (2026-10-31) added `src/libnetdata/netipc/src/transport/windows/netipc_win_security.c` (Windows access policy) and links it against `advapi32`. Netdata lists Windows NetIPC sources by hand: `netipc/src/transport/windows/netipc_win_security.c` must be added to `NETIPC_WINDOWS_TRANSPORT_FILES` (`ktsaou/netdata @ ae9113f2cc`, `src/libnetdata/SourceLists.cmake:472-475`). `advapi32` is already linked on Windows (`src/libnetdata/CMakeLists.txt:145`). The Windows plugins (apps.plugin server, network-viewer.plugin client) both run as LocalSystem, which the new access policy accepts.
 
 Inferences:
 

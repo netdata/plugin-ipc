@@ -323,7 +323,7 @@ func isConnectError(err error) bool {
 }
 
 func isAuthError(err error) bool {
-	return errors.Is(err, windows.ErrAuthFailed)
+	return errors.Is(err, windows.ErrAuthFailed) || errors.Is(err, windows.ErrUntrustedServer)
 }
 
 func isIncompatibleError(err error) bool {

@@ -80,6 +80,9 @@ var (
 	ErrDisconnected   = errors.New("peer disconnected")
 	ErrTimeout        = errors.New("receive deadline expired")
 	ErrAborted        = errors.New("receive aborted")
+	// ErrUntrustedServer: the pipe owner is not this account, SYSTEM or
+	// Administrators.
+	ErrUntrustedServer = errors.New("pipe owned by an untrusted account")
 )
 
 func wrapErr(sentinel error, detail string) error {
@@ -112,7 +115,7 @@ func waitNamedPipe(name *uint16, timeoutMs uint32) error {
 	return err
 }
 
-func createNamedPipe(name *uint16, openMode, pipeMode, maxInstances, outBufSize, inBufSize, defaultTimeout uint32) (syscall.Handle, error) {
+func createNamedPipe(name *uint16, openMode, pipeMode, maxInstances, outBufSize, inBufSize, defaultTimeout uint32, attrs uintptr) (syscall.Handle, error) {
 	r, _, err := procCreateNamedPipeW.Call(
 		uintptr(unsafe.Pointer(name)),
 		uintptr(openMode),
@@ -121,7 +124,7 @@ func createNamedPipe(name *uint16, openMode, pipeMode, maxInstances, outBufSize,
 		uintptr(outBufSize),
 		uintptr(inBufSize),
 		uintptr(defaultTimeout),
-		0, // NULL security attributes
+		attrs,
 	)
 	handle := syscall.Handle(r)
 	if handle == syscall.InvalidHandle {

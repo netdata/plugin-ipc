@@ -123,11 +123,12 @@ endif()
 if(NETIPC_WINDOWS_RUNTIME)
     add_library(netipc_named_pipe STATIC
         src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c
+        src/libnetdata/netipc/src/transport/windows/netipc_win_security.c
     )
     target_include_directories(netipc_named_pipe PUBLIC
         src/libnetdata/netipc/include
     )
-    target_link_libraries(netipc_named_pipe PUBLIC netipc_protocol)
+    target_link_libraries(netipc_named_pipe PUBLIC netipc_protocol advapi32)
 
     # --- C library: L1 Windows SHM transport --------------------------------
 

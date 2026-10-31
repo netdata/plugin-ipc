@@ -11,6 +11,7 @@
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_protocol.h"
 #include "test_sync.h"
+#include "test_win_security.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1047,6 +1048,31 @@ static void test_server_create_rejects_existing_objects(void)
     nipc_win_shm_destroy(&first);
 }
 
+static void test_server_objects_dacl_owner_only(void)
+{
+    printf("--- SHM mapping and events grant only SYSTEM, Administrators and self ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_win_shm_ctx_t ctx = {0};
+    nipc_win_shm_error_t err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, service, AUTH_TOKEN, 79,
+        NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &ctx);
+    check("server create for DACL check", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK)
+        return;
+
+    check("mapping DACL is owner-only",
+          test_object_dacl_owner_only(ctx.mapping, SECTION_ALL_ACCESS));
+    check("request event DACL is owner-only",
+          test_object_dacl_owner_only(ctx.req_event, EVENT_ALL_ACCESS));
+    check("response event DACL is owner-only",
+          test_object_dacl_owner_only(ctx.resp_event, EVENT_ALL_ACCESS));
+
+    nipc_win_shm_destroy(&ctx);
+}
+
 static void test_server_create_rejects_region_size_overflow(void)
 {
     printf("--- Server create rejects region size overflow ---\n");
@@ -1677,6 +1703,7 @@ int main(void)
     test_header_layout();
     test_service_name_validation();
     test_server_create_rejects_existing_objects();
+    test_server_objects_dacl_owner_only();
     test_server_create_rejects_region_size_overflow();
     test_client_attach_validation();
     test_win32_fault_injection();

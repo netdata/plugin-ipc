@@ -158,8 +158,11 @@ const ConnectBusyWaitMs = 1000
 // pipe instance busy, before it waits.
 var connectBusyHook func()
 
+// createClientPipe opens with SECURITY_IDENTIFICATION, so the server can
+// identify the client but never act as it.
 func createClientPipe(name *uint16) (syscall.Handle, error) {
-	return syscall.CreateFile(name, _GENERIC_READ|_GENERIC_WRITE, 0, nil, _OPEN_EXISTING, 0, 0)
+	return syscall.CreateFile(name, _GENERIC_READ|_GENERIC_WRITE, 0, nil, _OPEN_EXISTING,
+		_SECURITY_SQOS_PRESENT|_SECURITY_IDENTIFICATION, 0)
 }
 
 // connectBusySliceMs is the longest single busy-pipe wait, so an abort ends
@@ -232,6 +235,14 @@ func ConnectTimeout(runDir, serviceName string, config *ClientConfig, timeoutMs 
 	handle, err := openClientPipe(&pipeName[0], wait)
 	if err != nil {
 		return nil, err
+	}
+
+	// Whoever created the pipe name first owns it. Send HELLO and the auth
+	// token only to a server running as this account, SYSTEM or
+	// Administrators; other accounts cannot take those as owner.
+	if !ownerTrusted(handle) {
+		syscall.CloseHandle(handle)
+		return nil, ErrUntrustedServer
 	}
 
 	mode := uint32(_PIPE_READMODE_MESSAGE)

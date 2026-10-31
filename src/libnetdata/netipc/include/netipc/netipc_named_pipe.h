@@ -74,6 +74,8 @@ typedef enum {
     NIPC_NP_ERR_DISCONNECTED,       /* peer disconnected (graceful) */
     NIPC_NP_ERR_TIMEOUT,            /* receive deadline expired */
     NIPC_NP_ERR_ABORTED,            /* receive aborted by caller */
+    NIPC_NP_ERR_UNTRUSTED_SERVER,   /* pipe owner is not this account,
+                                       SYSTEM or Administrators */
 } nipc_np_error_t;
 
 /* ------------------------------------------------------------------ */
@@ -352,6 +354,10 @@ static inline HANDLE nipc_np_listener_handle(const nipc_np_listener_t *l) {
  * it waits for one. NULL removes the hook. */
 void nipc_np_set_connect_busy_hook_for_tests(void (*hook)(void *user),
                                              void *user);
+
+/* Clients trust only pipes owned by this SID string instead of their own
+ * account, SYSTEM and Administrators. NULL restores the default. */
+void nipc_np_set_trusted_owner_for_tests(const char *sid);
 #endif
 
 #ifdef __cplusplus

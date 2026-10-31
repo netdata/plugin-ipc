@@ -87,7 +87,7 @@ impl RawClient {
             }
             Err(e) => match e {
                 NpError::Connect(_) => ClientState::NotFound,
-                NpError::AuthFailed => ClientState::AuthFailed,
+                NpError::AuthFailed | NpError::UntrustedServer => ClientState::AuthFailed,
                 NpError::NoProfile => ClientState::Incompatible,
                 NpError::Incompatible(_) => ClientState::Incompatible,
                 _ => ClientState::Disconnected,

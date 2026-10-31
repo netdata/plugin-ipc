@@ -654,9 +654,10 @@ Operational meaning:
   - connection was previously READY and failed
   - `refresh()` will reconnect
 - `AUTH_FAILED`
-  - handshake auth check failed
+  - handshake auth check failed, or on Windows the pipe is owned by an
+    account other than the client's own, SYSTEM or Administrators
   - this is not a transient network condition
-  - fix config or auth token
+  - fix config or auth token, or run server and client as the same account
 - `INCOMPATIBLE`
   - protocol/layout/negotiation mismatch
   - this is not a transient network condition
@@ -1296,6 +1297,9 @@ Before you define a new service or integrate one into a plugin, answer these:
 
 - baseline transport is Named Pipe
 - fast path is Windows SHM
+- pipes and SHM objects grant access only to SYSTEM, Administrators and the
+  server's own account, and refuse remote (SMB) clients: run server and
+  clients as the same account (Netdata: LocalSystem)
 
 ### Cross-platform rule
 

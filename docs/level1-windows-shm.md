@@ -265,11 +265,14 @@ are derived from the `session_id` assigned to the handshake.
 3. Map the view via `MapViewOfFile`.
 4. Write the header: magic, version, header_len, profile, offsets,
    capacities, spin_tries. Initialize all volatile fields to zero.
+   The mapping takes the same protected owner-only DACL as the pipe
+   (SYSTEM, Administrators and the server's account; see the Named Pipe
+   access policy), so other accounts cannot open it.
 5. If SHM_HYBRID: create `req_event` and `resp_event` as auto-reset
    kernel events (`CreateEventW` with `bManualReset = FALSE`).
    Auto-reset is required: `SetEvent` wakes exactly one waiter and
    resets automatically, which matches the one-writer/one-reader-per-
-   direction model.
+   direction model. Both events take the owner-only DACL too.
 6. The region is now ready for the client.
 
 `CreateFileMappingW` and `MapViewOfFile` failures are SHM preparation errors. Managed

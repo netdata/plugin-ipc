@@ -204,7 +204,7 @@ func (l *Listener) Wake() {
 		0,
 		nil,
 		_OPEN_EXISTING,
-		0,
+		_SECURITY_SQOS_PRESENT|_SECURITY_IDENTIFICATION,
 		0,
 	)
 	if err == nil && wake != syscall.InvalidHandle && wake != 0 {
@@ -235,7 +235,7 @@ func (l *Listener) Close() {
 			0,
 			nil,
 			_OPEN_EXISTING,
-			0,
+			_SECURITY_SQOS_PRESENT|_SECURITY_IDENTIFICATION,
 			0,
 		)
 		if err == nil && wake != syscall.InvalidHandle && wake != 0 {
@@ -258,14 +258,21 @@ func createPipeInstance(pipeName []uint16, bufSize uint32, firstInstance bool) (
 		openMode |= _FILE_FLAG_FIRST_PIPE_INSTANCE
 	}
 
+	attrs, err := newOwnerOnlyAttributes()
+	if err != nil {
+		return syscall.InvalidHandle, wrapErr(ErrCreatePipe, err.Error())
+	}
+	defer attrs.free()
+
 	handle, err := createNamedPipe(
 		&pipeName[0],
 		openMode,
-		_PIPE_TYPE_MESSAGE|_PIPE_READMODE_MESSAGE|_PIPE_WAIT,
+		_PIPE_TYPE_MESSAGE|_PIPE_READMODE_MESSAGE|_PIPE_WAIT|_PIPE_REJECT_REMOTE_CLIENTS,
 		_PIPE_UNLIMITED_INSTANCES,
 		bufSize,
 		bufSize,
 		0,
+		attrs.ptr(),
 	)
 	if err != nil {
 		errno, ok := err.(syscall.Errno)

@@ -194,10 +194,18 @@ func WinShmServerCreate(runDir, serviceName string, authToken, sessionID uint64,
 	respOff := winShmAlignCacheline(reqOff + reqCap)
 	regionSize := uintptr(respOff + respCap)
 
+	// Session objects take the same owner-only DACL as the pipe, so other
+	// accounts cannot open them.
+	attrs, err := newOwnerOnlyAttributes()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrWinShmCreateMapping, err)
+	}
+	defer attrs.free()
+
 	// Create page-file backed mapping
 	r, _, callErr := winShmCreateFileMappingW(
 		uintptr(syscall.InvalidHandle), // page file
-		0,                              // NULL security
+		attrs.ptr(),
 		uintptr(_PAGE_READWRITE),
 		uintptr(regionSize>>32),
 		uintptr(regionSize&0xFFFFFFFF),
@@ -257,7 +265,7 @@ func WinShmServerCreate(runDir, serviceName string, authToken, sessionID uint64,
 			return nil, err
 		}
 
-		r, _, callErr := winShmCreateEventW(0, 0, 0,
+		r, _, callErr := winShmCreateEventW(attrs.ptr(), 0, 0,
 			uintptr(unsafe.Pointer(&reqEventName[0])))
 		if r == 0 {
 			procUnmapViewOfFile.Call(base)
@@ -280,7 +288,7 @@ func WinShmServerCreate(runDir, serviceName string, authToken, sessionID uint64,
 			return nil, err
 		}
 
-		r, _, callErr = winShmCreateEventW(0, 0, 0,
+		r, _, callErr = winShmCreateEventW(attrs.ptr(), 0, 0,
 			uintptr(unsafe.Pointer(&respEventName[0])))
 		if r == 0 {
 			syscall.CloseHandle(reqEvent)

@@ -10,6 +10,7 @@
 
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_protocol.h"
+#include "netipc_win_security.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -210,12 +211,19 @@ static HANDLE create_pipe_instance(const wchar_t *pipe_name, uint32_t buf_size,
   if (first_instance)
     open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
 
-  HANDLE h = CreateNamedPipeW(
-      pipe_name, open_mode,
-      PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-      NIPC_NP_MAX_INSTANCES, buf_size, buf_size, 0, /* default timeout */
-      NULL                                          /* default security */
-  );
+  SECURITY_ATTRIBUTES sa;
+  if (!nipc_win_security_attrs_init(&sa))
+    return INVALID_HANDLE_VALUE;
+
+  HANDLE h = CreateNamedPipeW(pipe_name, open_mode,
+                              PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE |
+                                  PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                              NIPC_NP_MAX_INSTANCES, buf_size, buf_size,
+                              0, /* default timeout */
+                              &sa);
+  DWORD err = GetLastError();
+  nipc_win_security_attrs_free(&sa);
+  SetLastError(err);
 
   return h;
 }
@@ -972,11 +980,14 @@ void nipc_np_set_connect_busy_hook_for_tests(void (*hook)(void *user),
   g_connect_busy_user = user;
 }
 
+/* SECURITY_IDENTIFICATION lets the server identify the client but never act
+ * as it. */
 static HANDLE create_client_pipe(const wchar_t *pipe_name) {
   return CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, /* no sharing */
-                     NULL,             /* default security */
-                     OPEN_EXISTING, 0, /* default attributes */
-                     NULL              /* no template */
+                     NULL, /* default security */
+                     OPEN_EXISTING,
+                     SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                     NULL /* no template */
   );
 }
 
@@ -1048,6 +1059,14 @@ nipc_np_error_t nipc_np_connect_timeout(const char *run_dir,
   if (h == INVALID_HANDLE_VALUE)
     return err;
 
+  /* Whoever created the pipe name first owns it. Send HELLO and the auth
+   * token only to a server running as this account, SYSTEM or Administrators;
+   * other accounts cannot take those as owner. */
+  if (!nipc_win_owner_trusted(h)) {
+    CloseHandle(h);
+    return NIPC_NP_ERR_UNTRUSTED_SERVER;
+  }
+
   /* Set read mode to message mode */
   DWORD mode = PIPE_READMODE_MESSAGE;
   if (!SetNamedPipeHandleState(h, &mode, NULL, NULL)) {
@@ -1109,7 +1128,8 @@ void nipc_np_close_listener(nipc_np_listener_t *listener) {
     if (listener->pipe_name[0] != L'\0') {
       HANDLE wake =
           CreateFileW(listener->pipe_name, GENERIC_READ | GENERIC_WRITE, 0,
-                      NULL, OPEN_EXISTING, 0, NULL);
+                      NULL, OPEN_EXISTING,
+                      SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
       if (wake != INVALID_HANDLE_VALUE)
         CloseHandle(wake);
     }

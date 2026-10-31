@@ -3493,6 +3493,29 @@ mod robustness;
 /// selects SHM, and falls back to baseline in the same handshake when they
 /// cannot be created.
 #[test]
+fn test_untrusted_server_is_auth_failed_windows() {
+    use crate::transport::win_security::TRUSTED_OWNER_FOR_TESTS;
+    let svc = unique_service("rs_win_untrusted");
+    let mut server = TestServer::start_with(
+        &svc,
+        server_config(),
+        client_config(),
+        METHOD_INCREMENT,
+        increment_dispatch_handler(),
+        8,
+    );
+
+    // BUILTIN\Users never owns the test pipe.
+    TRUSTED_OWNER_FOR_TESTS.with(|t| *t.borrow_mut() = Some("S-1-5-32-545".into()));
+    let mut client = increment_client(&svc, client_config());
+    client.refresh();
+    TRUSTED_OWNER_FOR_TESTS.with(|t| *t.borrow_mut() = None);
+    assert_eq!(client.state, ClientState::AuthFailed);
+    client.close();
+    server.stop();
+}
+
+#[test]
 fn test_shm_region_only_for_shm_sessions_windows() {
     let svc = unique_service("rs_win_shm_after_negotiation");
     let mut server = TestServer::start_with(
