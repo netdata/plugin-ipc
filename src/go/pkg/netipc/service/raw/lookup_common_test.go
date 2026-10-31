@@ -291,7 +291,7 @@ func TestClientTimeoutAbortCapacityAndRetryHelpers(t *testing.T) {
 	}
 
 	client.state = StateReady
-	if err := client.callWithRetry(func() error { return nil }); err != nil {
+	if err := client.callWithRetry(0, func() error { return nil }); err != nil {
 		t.Fatalf("successful retry wrapper error = %v", err)
 	}
 	if client.callCount != 1 {
@@ -299,13 +299,13 @@ func TestClientTimeoutAbortCapacityAndRetryHelpers(t *testing.T) {
 	}
 
 	client.Abort()
-	if err := client.callWithRetry(func() error { return nil }); !errors.Is(err, protocol.ErrAborted) {
+	if err := client.callWithRetry(0, func() error { return nil }); !errors.Is(err, protocol.ErrAborted) {
 		t.Fatalf("aborted retry wrapper error = %v, want ErrAborted", err)
 	}
 
 	client = NewIncrementClient("", "", testLookupClientConfig())
 	client.state = StateReady
-	if err := client.callWithRetry(func() error { return protocol.ErrTimeout }); !errors.Is(err, protocol.ErrTimeout) {
+	if err := client.callWithRetry(0, func() error { return protocol.ErrTimeout }); !errors.Is(err, protocol.ErrTimeout) {
 		t.Fatalf("timeout retry wrapper error = %v, want ErrTimeout", err)
 	}
 	if client.state != StateBroken {
@@ -314,7 +314,7 @@ func TestClientTimeoutAbortCapacityAndRetryHelpers(t *testing.T) {
 
 	client = NewIncrementClient("", "", testLookupClientConfig())
 	client.state = StateReady
-	if err := client.callWithRetry(func() error { return protocol.ErrBadLayout }); !errors.Is(err, protocol.ErrBadLayout) {
+	if err := client.callWithRetry(0, func() error { return protocol.ErrBadLayout }); !errors.Is(err, protocol.ErrBadLayout) {
 		t.Fatalf("non-overflow retry wrapper error = %v, want ErrBadLayout", err)
 	}
 	if client.errorCount == 0 {
@@ -323,7 +323,7 @@ func TestClientTimeoutAbortCapacityAndRetryHelpers(t *testing.T) {
 
 	client = NewIncrementClient("", "", testLookupClientConfig())
 	client.state = StateReady
-	if err := client.callWithRetry(func() error { return protocol.ErrOverflow }); !errors.Is(err, protocol.ErrOverflow) {
+	if err := client.callWithRetry(0, func() error { return protocol.ErrOverflow }); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("overflow retry wrapper error = %v, want ErrOverflow", err)
 	}
 	if client.errorCount == 0 {
@@ -359,7 +359,7 @@ func TestLookupClientCapacityAndWaitHelpers(t *testing.T) {
 
 func TestLookupReadyAndCapacityGuards(t *testing.T) {
 	client := &Client{abortCh: make(chan struct{})}
-	if err := client.ensureReadyForLogicalLookup(); !errors.Is(err, protocol.ErrBadLayout) {
+	if err := client.ensureReadyForLogicalLookup(); !errors.Is(err, protocol.ErrNotReady) {
 		t.Fatalf("not-ready logical lookup error = %v", err)
 	}
 	if client.errorCount != 1 {
@@ -376,31 +376,31 @@ func TestLookupReadyAndCapacityGuards(t *testing.T) {
 	}
 
 	client = &Client{abortCh: make(chan struct{})}
-	if err := client.ensureLookupRequestCapacity(-1); !errors.Is(err, protocol.ErrOverflow) {
+	if err := client.ensureLookupRequestCapacity(-1, time.Now().Add(time.Second)); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("negative request capacity error = %v", err)
 	}
 	if strconv.IntSize >= 64 {
 		maxU32 := uint64(^uint32(0))
-		if err := client.ensureLookupRequestCapacity(int(maxU32 + 1)); !errors.Is(err, protocol.ErrOverflow) {
+		if err := client.ensureLookupRequestCapacity(int(maxU32+1), time.Now().Add(time.Second)); !errors.Is(err, protocol.ErrOverflow) {
 			t.Fatalf("unrepresentable request capacity error = %v", err)
 		}
 	}
 	client = &Client{abortCh: make(chan struct{})}
-	if err := client.ensureLookupRequestCapacity(int(protocol.MaxPayloadDefault) + 1); !errors.Is(err, protocol.ErrOverflow) {
+	if err := client.ensureLookupRequestCapacity(int(protocol.MaxPayloadDefault)+1, time.Now().Add(time.Second)); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("default request capacity error = %v", err)
 	}
 	client.config.MaxRequestPayloadBytes = 8
-	if err := client.ensureLookupRequestCapacity(9); !errors.Is(err, protocol.ErrOverflow) {
+	if err := client.ensureLookupRequestCapacity(9, time.Now().Add(time.Second)); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("configured request capacity error = %v", err)
 	}
 	client.config.MaxRequestPayloadBytes = 16
-	if err := client.ensureLookupRequestCapacity(16); err != nil {
+	if err := client.ensureLookupRequestCapacity(16, time.Now().Add(time.Second)); err != nil {
 		t.Fatalf("sessionless request capacity = %v", err)
 	}
 
 	client = &Client{abortCh: make(chan struct{}), state: StateReady}
 	client.Abort()
-	if err := client.ensureLookupRequestCapacity(1); !errors.Is(err, protocol.ErrAborted) {
+	if err := client.ensureLookupRequestCapacity(1, time.Now().Add(time.Second)); !errors.Is(err, protocol.ErrAborted) {
 		t.Fatalf("aborted capacity growth error = %v, want ErrAborted", err)
 	}
 	if client.state != StateBroken || client.errorCount != 1 {

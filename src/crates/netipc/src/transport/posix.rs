@@ -263,6 +263,20 @@ impl UdsSession {
         service_name: &str,
         config: &ClientConfig,
     ) -> Result<Self, UdsError> {
+        Self::connect_with_timeout(run_dir, service_name, config, 0, None)
+    }
+
+    /// `connect()` bounded by `timeout_ms`: connect and the wait for
+    /// HELLO_ACK together end with `UdsError::Timeout` after `timeout_ms`
+    /// (0 = no deadline), and with `UdsError::Aborted` once `abort` is set.
+    pub fn connect_with_timeout(
+        run_dir: &str,
+        service_name: &str,
+        config: &ClientConfig,
+        timeout_ms: u32,
+        abort: Option<&AtomicBool>,
+    ) -> Result<Self, UdsError> {
+        let wait = ReceiveWait::new(timeout_ms, abort);
         let path = build_socket_path(run_dir, service_name)?;
 
         let fd = seqpacket_socket_cloexec();
@@ -270,7 +284,7 @@ impl UdsSession {
             return Err(UdsError::Socket(errno()));
         }
 
-        let result = connect_and_handshake(fd, &path, config);
+        let result = connect_and_handshake(fd, &path, config, &wait);
         if result.is_err() {
             unsafe {
                 libc::close(fd);
@@ -1184,12 +1198,67 @@ fn check_and_recover_stale(path: &str) -> StaleResult {
 //  Handshake: client side
 // ---------------------------------------------------------------------------
 
+/// Longest single connect wait, so an abort ends a connect promptly.
+const CONNECT_SLICE_MS: u64 = 100;
+
+fn set_send_timeout(fd: RawFd, ms: u64) {
+    let tv = libc::timeval {
+        tv_sec: (ms / 1000) as _,
+        tv_usec: ((ms % 1000) * 1000) as _,
+    };
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDTIMEO,
+            &tv as *const libc::timeval as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        );
+    }
+}
+
+/// A blocking AF_UNIX connect waits while the listener's backlog is full.
+/// On Linux SO_SNDTIMEO bounds that wait and the connect fails with EAGAIN
+/// when it expires; waiting in slices lets an abort end it. Other systems
+/// refuse a full backlog at once.
+fn connect_unix_bounded(fd: RawFd, path: &str, wait: &ReceiveWait<'_>) -> Result<(), UdsError> {
+    let result = loop {
+        if wait.aborted() {
+            break Err(UdsError::Aborted);
+        }
+        let mut slice = CONNECT_SLICE_MS;
+        if let Some(deadline) = wait.deadline {
+            let now = Instant::now();
+            if now >= deadline {
+                break Err(UdsError::Timeout);
+            }
+            let left = deadline.duration_since(now).as_millis().max(1) as u64;
+            slice = slice.min(left);
+        }
+        set_send_timeout(fd, slice);
+        match connect_unix(fd, path) {
+            Ok(()) => break Ok(()),
+            Err(UdsError::Connect(e)) if e == libc::EISCONN => break Ok(()),
+            Err(UdsError::Connect(e))
+                if e == libc::EAGAIN
+                    || e == libc::EWOULDBLOCK
+                    || e == libc::EINTR
+                    || e == libc::EALREADY => {}
+            Err(e) => break Err(e),
+        }
+    };
+    // Session sends block without a timeout.
+    set_send_timeout(fd, 0);
+    result
+}
+
 fn connect_and_handshake(
     fd: RawFd,
     path: &str,
     config: &ClientConfig,
+    wait: &ReceiveWait<'_>,
 ) -> Result<UdsSession, UdsError> {
-    connect_unix(fd, path)?;
+    connect_unix_bounded(fd, path, wait)?;
 
     let pkt_size = packet_size_limit(fd, config.packet_size);
 
@@ -1246,7 +1315,9 @@ fn connect_and_handshake(
     // Send HELLO
     raw_send(fd, &pkt)?;
 
-    // Receive HELLO_ACK
+    // Receive HELLO_ACK; a server that never answers must not hold the
+    // client past its deadline.
+    wait_fd_readable(fd, wait)?;
     let mut buf = [0u8; 128];
     let n = raw_recv(fd, &mut buf)?;
 

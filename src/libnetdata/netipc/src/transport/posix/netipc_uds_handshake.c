@@ -124,6 +124,7 @@ static void fill_server_session(nipc_uds_session_t *session, int fd,
 
 nipc_uds_error_t nipc_uds_client_handshake(int fd,
                                            const nipc_uds_client_config_t *cfg,
+                                           uint32_t timeout_ms, int abort_fd,
                                            nipc_uds_session_t *session) {
   uint8_t buf[128];
   uint32_t pkt_size = nipc_uds_packet_size(fd, cfg->packet_size);
@@ -156,6 +157,11 @@ nipc_uds_error_t nipc_uds_client_handshake(int fd,
 
   nipc_uds_error_t err =
       nipc_uds_raw_send(fd, buf, NIPC_HEADER_LEN + sizeof(hello_buf));
+  if (err != NIPC_UDS_OK)
+    return err;
+
+  /* A server that accepted but never answers must not hold the client. */
+  err = nipc_uds_wait_readable(fd, timeout_ms, abort_fd);
   if (err != NIPC_UDS_OK)
     return err;
 

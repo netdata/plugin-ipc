@@ -52,6 +52,7 @@ const (
 	_ERROR_PIPE_NOT_CONNECTED = 233
 	_ERROR_ACCESS_DENIED      = 5
 	_ERROR_PIPE_BUSY          = 231
+	_ERROR_SEM_TIMEOUT        = 121
 )
 
 // ---------------------------------------------------------------------------
@@ -101,10 +102,14 @@ var (
 	procWaitNamedPipeW          = modkernel32.NewProc("WaitNamedPipeW")
 )
 
-// waitNamedPipe waits up to timeoutMs for a free instance of pipe name.
-func waitNamedPipe(name *uint16, timeoutMs uint32) bool {
-	r, _, _ := procWaitNamedPipeW.Call(uintptr(unsafe.Pointer(name)), uintptr(timeoutMs))
-	return r != 0
+// waitNamedPipe waits up to timeoutMs for a free instance of pipe name. It
+// fails with ERROR_SEM_TIMEOUT when none became free in time.
+func waitNamedPipe(name *uint16, timeoutMs uint32) error {
+	r, _, err := procWaitNamedPipeW.Call(uintptr(unsafe.Pointer(name)), uintptr(timeoutMs))
+	if r != 0 {
+		return nil
+	}
+	return err
 }
 
 func createNamedPipe(name *uint16, openMode, pipeMode, maxInstances, outBufSize, inBufSize, defaultTimeout uint32) (syscall.Handle, error) {

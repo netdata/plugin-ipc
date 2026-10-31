@@ -26,7 +26,7 @@ func (c *Client) CallSnapshotWithTimeout(timeoutMs uint32) (*protocol.CgroupsRes
 
 	var result *protocol.CgroupsResponseView
 
-	err := c.callWithRetry(func() error {
+	err := c.callWithRetry(timeoutMs, func() error {
 		req := protocol.CgroupsRequest{LayoutVersion: 1, Flags: 0}
 		var reqBuf [4]byte
 		if req.Encode(reqBuf[:]) == 0 {

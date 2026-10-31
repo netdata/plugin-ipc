@@ -18,7 +18,7 @@ func (c *Client) CallStringReverseWithTimeout(requestStr string, timeoutMs uint3
 
 	var result *protocol.StringReverseView
 
-	err := c.callWithRetry(func() error {
+	err := c.callWithRetry(timeoutMs, func() error {
 		reqBuf := ensureClientScratch(&c.requestBuf, protocol.StringReverseHdrSize+len(requestStr)+1)
 		if protocol.StringReverseEncode(requestStr, reqBuf) == 0 {
 			return protocol.ErrTruncated

@@ -231,6 +231,19 @@ nipc_np_error_t nipc_np_connect(const char *run_dir,
                                  nipc_np_session_t *out);
 
 /*
+ * nipc_np_connect() bounded by timeout_ms: the busy-pipe wait and the wait
+ * for HELLO_ACK together end with NIPC_NP_ERR_TIMEOUT after timeout_ms
+ * (0 = no deadline), and with NIPC_NP_ERR_ABORTED once abort_event is
+ * signaled (NULL = no abort).
+ */
+nipc_np_error_t nipc_np_connect_timeout(const char *run_dir,
+                                        const char *service_name,
+                                        const nipc_np_client_config_t *config,
+                                        uint32_t timeout_ms,
+                                        HANDLE abort_event,
+                                        nipc_np_session_t *out);
+
+/*
  * Close a session. Releases pipe handle and internal buffers.
  * Safe to call on a zero-initialized session (no-op).
  */

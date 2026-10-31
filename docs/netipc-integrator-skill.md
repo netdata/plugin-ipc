@@ -405,7 +405,7 @@ as explicit assumptions, not as implementation details they can reinterpret.
     [level2-typed-api.md](level2-typed-api.md#readiness)) instead of
     polling or retrying connects.
   - On Windows, a connect that finds every pipe instance busy waits up to
-    1000 ms for one, then fails.
+    1000 ms for one, never past the call or refresh deadline, then fails.
   - Stop/destroy give sessions 1000 ms to finish, then interrupt their
     blocking I/O, so a client that stopped reading cannot hold shutdown.
   - Handler code must therefore assume concurrent execution.
@@ -685,6 +685,15 @@ L2 typed calls are also bounded:
 
 - a per-call timeout of zero uses the client context default
 - the default client context timeout is 30000 ms
+- one deadline covers the whole call, including the reconnect, handshake and
+  SHM attach between attempts; a reconnect cut short by the deadline reports
+  the timeout error
+- `refresh()` is bounded by the client context call timeout, so a server that
+  accepts but never answers cannot stall the caller's loop longer than that;
+  while an abort is pending `refresh()` does not connect
+- a call on a client that is not READY fails at once with the not-ready error
+  (C `NIPC_ERR_NOT_READY`, Rust `NipcError::NotReady`, Go
+  `protocol.ErrNotReady`)
 - payload budgets and logical-call ceilings come from initialization config or
   documented defaults, not scattered hardcoded literals
 - named defaults are not protocol hard limits; explicit initialization config

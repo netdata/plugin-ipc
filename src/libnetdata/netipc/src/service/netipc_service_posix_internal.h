@@ -9,8 +9,6 @@
 #include <stdint.h>
 
 #define CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS 5u
-#define CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS 5u
-#define CLIENT_CALL_RECONNECT_RETRIES 20u
 
 typedef struct {
     pthread_mutex_t lock;

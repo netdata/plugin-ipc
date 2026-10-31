@@ -47,6 +47,8 @@ type Client struct {
 	// shmAttachTimeout bounds the SHM attach retry after negotiation;
 	// tests shorten it per instance.
 	shmAttachTimeout time.Duration
+	// opDeadline bounds the call or refresh in progress; zero outside one.
+	opDeadline time.Time
 }
 
 func newClient(runDir, serviceName string, config posix.ClientConfig, expectedMethodCode uint16) *Client {
@@ -76,7 +78,11 @@ func (c *Client) disconnect() {
 }
 
 func (c *Client) tryConnect() ClientState {
-	session, err := posix.Connect(c.runDir, c.serviceName, &c.config)
+	remaining := c.opRemainingMs()
+	if remaining == 0 || c.abortRequested.Load() {
+		return StateDisconnected
+	}
+	session, err := posix.ConnectTimeout(c.runDir, c.serviceName, &c.config, remaining, c.abortSignal())
 	if err != nil {
 		switch {
 		case isConnectError(err):
@@ -95,7 +101,11 @@ func (c *Client) tryConnect() ClientState {
 		session.SelectedProfile == protocol.ProfileSHMFutex {
 		// Retry attach: the server prepared SHM before handshake, but the
 		// client may still race slightly with the peer exposing the region.
-		deadline := time.Now().Add(c.shmAttachTimeout)
+		// When the call deadline ends the wait first, SHM is not at fault
+		// and stays enabled for the next connect.
+		callLeft := time.Duration(c.opRemainingMs()) * time.Millisecond
+		callBound := callLeft < c.shmAttachTimeout
+		deadline := time.Now().Add(min(callLeft, c.shmAttachTimeout))
 		for {
 			shm, serr := posix.ShmClientAttach(c.runDir, c.serviceName, session.SessionID)
 			if serr == nil {
@@ -103,7 +113,15 @@ func (c *Client) tryConnect() ClientState {
 				break
 			}
 			if !time.Now().Before(deadline) {
+				if callBound {
+					session.Close()
+					return StateDisconnected
+				}
 				break
+			}
+			if c.abortRequested.Load() {
+				session.Close()
+				return StateDisconnected
 			}
 			// A server that refused or died closes the session socket; its
 			// SHM region will never appear. Not an SHM problem: keep SHM

@@ -5,6 +5,7 @@ package posix
 import (
 	"fmt"
 	"syscall"
+	"time"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/internal/framing"
@@ -22,13 +23,51 @@ func helloAckLayoutIncompatible(buf []byte) bool {
 	return framing.HelloAckLayoutIncompatible(buf)
 }
 
-func connectAndHandshake(fd int, path string, config *ClientConfig) (*Session, error) {
+// connectSliceMs is the longest single connect wait, so an abort ends a
+// connect promptly.
+const connectSliceMs = 100
+
+// connectBounded connects fd to path. A blocking AF_UNIX connect waits while
+// the listener's backlog is full. On Linux SO_SNDTIMEO bounds that wait and
+// the connect fails with EAGAIN when it expires; waiting in slices lets an
+// abort end it. Other systems refuse a full backlog at once.
+func connectBounded(fd int, path string, wait receiveWait) error {
 	sa := &syscall.SockaddrUnix{Name: path}
-	if err := syscall.Connect(fd, sa); err != nil {
-		return nil, wrapErr(ErrConnect, err.Error())
+	defer func() {
+		// Session sends block without a timeout.
+		_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &syscall.Timeval{})
+	}()
+	for {
+		sliceMs, err := wait.waitMs()
+		if err != nil {
+			return err
+		}
+		sliceMs = min(sliceMs, connectSliceMs)
+		tv := syscall.NsecToTimeval(int64(sliceMs) * int64(time.Millisecond))
+		_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &tv)
+
+		err = syscall.Connect(fd, sa)
+		switch err {
+		case nil, syscall.EISCONN:
+			return nil
+		case syscall.EAGAIN, syscall.EINTR, syscall.EALREADY:
+			continue
+		default:
+			return wrapErr(ErrConnect, err.Error())
+		}
+	}
+}
+
+func connectAndHandshake(fd int, path string, config *ClientConfig, wait receiveWait) (*Session, error) {
+	if err := connectBounded(fd, path, wait); err != nil {
+		return nil, err
 	}
 
 	pktSize := packetSizeLimit(fd, config.PacketSize)
+
+	// A server that never answers must not hold the client past its
+	// deadline; the wait's own error is the result, not a receive failure.
+	var waitErr error
 
 	ack, err := framing.ClientHandshake(framing.ClientHandshakeConfig{
 		Hello: framing.HelloConfig{
@@ -51,13 +90,22 @@ func connectAndHandshake(fd int, path string, config *ClientConfig) (*Session, e
 			}
 			return nil
 		},
-		Recv:            func(dst []byte) (int, error) { return rawRecv(fd, dst) },
+		Recv: func(dst []byte) (int, error) {
+			if err := pollReadableForReceive(fd, wait); err != nil {
+				waitErr = err
+				return 0, err
+			}
+			return rawRecv(fd, dst)
+		},
 		StatusError:     helloAckStatusError,
 		ErrSend:         func(msg string) error { return wrapErr(ErrSend, msg) },
 		ErrRecv:         func(msg string) error { return wrapErr(ErrRecv, msg) },
 		ErrProtocol:     func(msg string) error { return wrapErr(ErrProtocol, msg) },
 		ErrIncompatible: func(msg string) error { return wrapErr(ErrIncompatible, msg) },
 	})
+	if waitErr != nil {
+		return nil, waitErr
+	}
 	if err != nil {
 		return nil, err
 	}

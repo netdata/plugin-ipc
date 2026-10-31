@@ -87,6 +87,14 @@ func (s *Session) Close() {
 // Connect establishes a session to a server at {runDir}/{serviceName}.sock.
 // Performs the full handshake. Blocks until connected + handshake done.
 func Connect(runDir, serviceName string, config *ClientConfig) (*Session, error) {
+	return ConnectTimeout(runDir, serviceName, config, 0, nil)
+}
+
+// ConnectTimeout is Connect bounded by timeoutMs: connect and the wait for
+// HELLO_ACK together end with ErrTimeout after timeoutMs (0 = no deadline),
+// and with ErrAborted once abortCh is closed (nil = no abort).
+func ConnectTimeout(runDir, serviceName string, config *ClientConfig, timeoutMs uint32, abortCh <-chan struct{}) (*Session, error) {
+	wait := newReceiveWait(timeoutMs, abortCh)
 	path, err := buildSocketPath(runDir, serviceName)
 	if err != nil {
 		return nil, err
@@ -97,7 +105,7 @@ func Connect(runDir, serviceName string, config *ClientConfig) (*Session, error)
 		return nil, wrapErr(ErrSocket, err.Error())
 	}
 
-	session, herr := connectAndHandshake(fd, path, config)
+	session, herr := connectAndHandshake(fd, path, config, wait)
 	if herr != nil {
 		_ = syscall.Close(fd)
 		return nil, herr

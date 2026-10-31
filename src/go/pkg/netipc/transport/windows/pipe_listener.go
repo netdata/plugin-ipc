@@ -112,7 +112,6 @@ func (l *Listener) AcceptPending() (*PendingConn, error) {
 			l.handle = syscall.InvalidHandle
 		}
 		l.mu.Unlock()
-		disconnectNamedPipe(sessionHandle)
 		syscall.CloseHandle(sessionHandle)
 		return nil, wrapErr(ErrAccept, "listener closed")
 	}
@@ -124,7 +123,6 @@ func (l *Listener) AcceptPending() (*PendingConn, error) {
 			l.handle = syscall.InvalidHandle
 		}
 		l.mu.Unlock()
-		disconnectNamedPipe(sessionHandle)
 		syscall.CloseHandle(sessionHandle)
 		return nil, perr
 	}
@@ -156,7 +154,8 @@ func (p *PendingConn) Handshake(
 
 	session, err := serverHandshakeWait(handle, &config, sessionID, newReceiveWait(timeoutMs, abortCh))
 	if err != nil {
-		disconnectNamedPipe(handle)
+		// Close only: DisconnectNamedPipe would discard a rejection reply
+		// the client has not read yet.
 		syscall.CloseHandle(handle)
 		return nil, err
 	}
@@ -166,7 +165,6 @@ func (p *PendingConn) Handshake(
 // Close drops a connection that will not be handshaken.
 func (p *PendingConn) Close() {
 	if p.handle != syscall.InvalidHandle {
-		disconnectNamedPipe(p.handle)
 		syscall.CloseHandle(p.handle)
 		p.handle = syscall.InvalidHandle
 	}

@@ -20,7 +20,7 @@ impl RawClient {
     ) -> Result<ClientResponseRef, NipcError> {
         if self.state != ClientState::Ready {
             self.error_count += 1;
-            return Err(NipcError::BadLayout);
+            return Err(NipcError::NotReady);
         }
         if self.abort_requested() {
             self.disconnect();
@@ -29,7 +29,7 @@ impl RawClient {
             return Err(NipcError::Aborted);
         }
 
-        let timeout_ms = self.resolved_call_timeout(timeout_ms);
+        self.begin_op(timeout_ms);
 
         let mut overflow_retries = 0u32;
         loop {
@@ -38,7 +38,7 @@ impl RawClient {
             let prev_cfg_req = self.transport_config.max_request_payload_bytes;
             let prev_cfg_resp = self.transport_config.max_response_payload_bytes;
 
-            match self.do_raw_call(method_code, req_len, call, timeout_ms) {
+            match self.do_raw_call(method_code, req_len, call) {
                 Ok(payload) => {
                     self.call_count += 1;
                     return Ok(payload);
@@ -57,11 +57,11 @@ impl RawClient {
                         self.state = self.try_connect();
                         if self.state != ClientState::Ready {
                             self.error_count += 1;
-                            return Err(first_err);
+                            return Err(self.call_reconnect_failure(first_err));
                         }
                         self.reconnect_count += 1;
 
-                        match self.do_raw_call(method_code, req_len, call, timeout_ms) {
+                        match self.do_raw_call(method_code, req_len, call) {
                             Ok(payload) => {
                                 self.call_count += 1;
                                 return Ok(payload);
@@ -80,7 +80,7 @@ impl RawClient {
                     self.state = self.try_connect();
                     if self.state != ClientState::Ready {
                         self.error_count += 1;
-                        return Err(first_err);
+                        return Err(self.call_reconnect_failure(first_err));
                     }
                     self.reconnect_count += 1;
 
@@ -107,16 +107,19 @@ impl RawClient {
         }
     }
 
-    /// Single attempt at a raw call.
+    /// Single attempt at a raw call, bounded by the call deadline.
     fn do_raw_call(
         &mut self,
         method_code: u16,
         req_len: usize,
         call: RawCallKind,
-        timeout_ms: u32,
     ) -> Result<ClientResponseRef, NipcError> {
         if self.abort_requested() {
             return Err(NipcError::Aborted);
+        }
+        let timeout_ms = self.op_remaining_ms();
+        if timeout_ms == 0 {
+            return Err(NipcError::Timeout);
         }
 
         let mut hdr = Header {

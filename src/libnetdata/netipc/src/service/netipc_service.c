@@ -26,10 +26,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#define CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS 5u
-#define CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS 5u
-#define CLIENT_CALL_RECONNECT_RETRIES 20u
-
 static uint64_t g_posix_service_test_fault_state = 0;
 
 void nipc_service_posix_sleep_us(unsigned int usec) {

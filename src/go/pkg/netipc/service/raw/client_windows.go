@@ -42,6 +42,8 @@ type Client struct {
 	// shmAttachTimeout bounds the SHM attach retry after negotiation;
 	// tests shorten it per instance.
 	shmAttachTimeout time.Duration
+	// opDeadline bounds the call or refresh in progress; zero outside one.
+	opDeadline time.Time
 }
 
 func newClient(runDir, serviceName string, config windows.ClientConfig, expectedMethodCode uint16) *Client {
@@ -71,7 +73,11 @@ func (c *Client) disconnect() {
 }
 
 func (c *Client) tryConnect() ClientState {
-	session, err := windows.Connect(c.runDir, c.serviceName, &c.config)
+	remaining := c.opRemainingMs()
+	if remaining == 0 || c.abortRequested.Load() {
+		return StateDisconnected
+	}
+	session, err := windows.ConnectTimeout(c.runDir, c.serviceName, &c.config, remaining, c.abortSignal())
 	if err != nil {
 		switch {
 		case isConnectError(err):
@@ -88,7 +94,11 @@ func (c *Client) tryConnect() ClientState {
 	// Win SHM upgrade if negotiated
 	if session.SelectedProfile == windows.WinShmProfileHybrid ||
 		session.SelectedProfile == windows.WinShmProfileBusywait {
-		deadline := time.Now().Add(c.shmAttachTimeout)
+		// When the call deadline ends the wait first, WinSHM is not at
+		// fault and stays enabled for the next connect.
+		callLeft := time.Duration(c.opRemainingMs()) * time.Millisecond
+		callBound := callLeft < c.shmAttachTimeout
+		deadline := time.Now().Add(min(callLeft, c.shmAttachTimeout))
 		for {
 			shm, serr := windows.WinShmClientAttach(
 				c.runDir, c.serviceName,
@@ -101,7 +111,15 @@ func (c *Client) tryConnect() ClientState {
 				break
 			}
 			if !time.Now().Before(deadline) {
+				if callBound {
+					session.Close()
+					return StateDisconnected
+				}
 				break
+			}
+			if c.abortRequested.Load() {
+				session.Close()
+				return StateDisconnected
 			}
 			// A server that refused or died breaks the session pipe; its
 			// SHM objects will never appear. Not a WinSHM problem: keep it

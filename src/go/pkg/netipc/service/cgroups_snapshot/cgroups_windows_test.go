@@ -188,8 +188,8 @@ func TestClientNotReadyReturnsErrorWindows(t *testing.T) {
 		t.Fatalf("unexpected initial client status: %+v", status)
 	}
 
-	if _, err := client.CallSnapshot(); err != protocol.ErrBadLayout {
-		t.Fatalf("CallSnapshot err = %v, want %v", err, protocol.ErrBadLayout)
+	if _, err := client.CallSnapshot(); err != protocol.ErrNotReady {
+		t.Fatalf("CallSnapshot err = %v, want %v", err, protocol.ErrNotReady)
 	}
 
 	status = client.Status()

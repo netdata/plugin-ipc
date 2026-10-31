@@ -49,6 +49,17 @@ fallback.
 2. **Client**: connects to the socket path. The OS delivers a connected
    SEQPACKET file descriptor.
 
+   The bounded connect (C `nipc_uds_connect_timeout()`, Rust
+   `UdsSession::connect_with_timeout()`, Go `ConnectTimeout()`) takes a
+   timeout (0 = none) and an abort signal (C a descriptor, Rust an
+   `AtomicBool`, Go a channel). A blocking connect waits while the
+   listener's backlog is full; on Linux the bounded connect waits in
+   `SO_SNDTIMEO` slices of at most 100 ms, so an abort ends it promptly,
+   and resets the send timeout once connected. Other systems refuse a full
+   backlog at once. The wait for HELLO_ACK ends at the same deadline.
+   Expiry returns a timeout error, an abort an aborted error. `connect()`
+   is the bounded connect without a deadline or abort.
+
    On the server, accept is split: `nipc_uds_accept_pending()` (C),
    `UdsListener::accept_pending()` (Rust) and `Listener.AcceptPending()`
    (Go) take the connection without reading; `nipc_uds_accept_handshake()`,

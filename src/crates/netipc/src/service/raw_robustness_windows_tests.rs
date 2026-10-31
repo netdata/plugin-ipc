@@ -348,6 +348,90 @@ fn test_robust_win_client_bounded_when_server_never_sends_hello_ack() {
     );
 }
 
+/// A pipe that accepts clients but never answers HELLO.
+fn fake_server_pipe(service: &str) -> RawHandle {
+    let name = build_pipe_name(TEST_RUN_DIR, service).expect("pipe name");
+    let pipe = unsafe {
+        CreateNamedPipeW(
+            name.as_ptr(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            4,
+            RAW_PIPE_PACKET_SIZE,
+            RAW_PIPE_PACKET_SIZE,
+            0,
+            ptr::null(),
+        )
+    };
+    assert_ne!(pipe, INVALID_HANDLE_VALUE, "fake server pipe");
+    pipe
+}
+
+#[test]
+fn test_robust_win_call_reconnect_bounded_by_call_deadline() {
+    let svc = unique_service("rs_wrob_reconnect_noack");
+    let server = start_server(
+        &svc,
+        server_config(),
+        METHOD_INCREMENT,
+        increment_dispatch_handler(),
+        1,
+    );
+    let mut client = increment_client(&svc, client_config());
+    connect_ready(&mut client);
+    assert!(stop_within(server, Duration::from_secs(5)), "server stops");
+
+    // The call fails on the dead session and reconnects to a server that
+    // accepts but never sends HELLO_ACK.
+    let pipe = fake_server_pipe(&svc);
+    let (result, worker) = within(Duration::from_secs(6), move || {
+        let start = Instant::now();
+        let r = client.call_increment_with_timeout(1, 1000);
+        let elapsed = start.elapsed();
+        client.close();
+        (r, elapsed)
+    });
+
+    unsafe { CloseHandle(pipe) };
+    let _ = worker.join();
+    let (r, elapsed) = result.expect("a call with a 1s timeout must return within 6s");
+    assert_eq!(
+        r,
+        Err(NipcError::Timeout),
+        "call reports the timeout after {elapsed:?}"
+    );
+}
+
+#[test]
+fn test_robust_win_abort_ends_refresh_waiting_for_hello_ack() {
+    let svc = unique_service("rs_wrob_abort_refresh");
+    let pipe = fake_server_pipe(&svc);
+
+    let mut client = increment_client(&svc, client_config());
+    // Only an abort can end the wait early.
+    client.set_call_timeout(10_000);
+    let abort = client.abort_handle();
+    let (worker_tx, worker_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        client.refresh();
+        let _ = worker_tx.send(client.ready());
+        client.close();
+    });
+    let connected = unsafe { ConnectNamedPipe(pipe, ptr::null_mut()) } != 0
+        || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
+    assert!(connected, "client connected to the fake server");
+    abort.abort();
+    let ready = worker_rx.recv_timeout(Duration::from_secs(2));
+
+    unsafe { CloseHandle(pipe) };
+    let _ = worker.join();
+    assert_eq!(
+        ready,
+        Ok(false),
+        "refresh returns within 2s of the abort, not ready"
+    );
+}
+
 // N1: the configured call timeout must be honored on the named-pipe path.
 #[test]
 fn test_robust_win_pipe_call_honors_timeout_longer_than_100ms() {

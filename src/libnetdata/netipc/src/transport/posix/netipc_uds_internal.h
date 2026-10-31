@@ -40,8 +40,11 @@ int nipc_uds_check_and_recover_stale(const char *run_dir,
                                      const char *socket_name,
                                      const char *path);
 
+/* Waits at most timeout_ms for HELLO_ACK (0 = no deadline); abort_fd -1
+ * disables abort. */
 nipc_uds_error_t nipc_uds_client_handshake(int fd,
                                            const nipc_uds_client_config_t *cfg,
+                                           uint32_t timeout_ms, int abort_fd,
                                            nipc_uds_session_t *session);
 nipc_uds_error_t nipc_uds_server_handshake(int fd,
                                            const nipc_uds_server_config_t *cfg,

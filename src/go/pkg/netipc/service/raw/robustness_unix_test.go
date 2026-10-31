@@ -396,6 +396,103 @@ func TestRobustClientBoundedWhenServerNeverSendsHelloAck(t *testing.T) {
 	}
 }
 
+// acceptAndHold accepts one connection on listener and holds it without
+// replying until release is closed. accepted is closed once a client
+// connected; done once the holder released everything.
+func acceptAndHold(listener int) (release chan struct{}, accepted, done <-chan struct{}) {
+	rel := make(chan struct{})
+	acc := make(chan struct{})
+	fin := make(chan struct{})
+	go func() {
+		defer close(fin)
+		fd, _, err := syscall.Accept(listener)
+		close(acc)
+		<-rel
+		if err == nil {
+			syscall.Close(fd)
+		}
+		syscall.Close(listener)
+	}()
+	return rel, acc, fin
+}
+
+func TestRobustCallReconnectBoundedByCallDeadline(t *testing.T) {
+	svc := robustService("go_rob_reconnect_noack")
+	rs := startRobustServer(svc, testServerConfig(), protocol.MethodIncrement, robustIncrementDispatch(0), 1)
+	defer cleanupAll(svc)
+
+	c := NewIncrementClient(testRunDir, svc, testClientConfig())
+	c.Refresh()
+	if !c.Ready() {
+		t.Fatalf("client not ready: state %v", c.Status().State)
+	}
+	if !rs.stopWithin(5 * time.Second) {
+		t.Fatal("server did not stop")
+	}
+
+	// The call fails on the dead session and reconnects to a server that
+	// accepts but never sends HELLO_ACK.
+	release, _, held := acceptAndHold(rawListener(t, svc))
+	var err error
+	var elapsed time.Duration
+	done := make(chan struct{})
+	finished := within(6*time.Second, func() {
+		defer close(done)
+		start := time.Now()
+		_, err = c.CallIncrementWithTimeout(1, 1000)
+		elapsed = time.Since(start)
+		c.Close()
+	})
+
+	close(release)
+	<-held
+	<-done
+	if !finished {
+		t.Fatal("a call with a 1s timeout must return within 6s")
+	}
+	if !errors.Is(err, protocol.ErrTimeout) {
+		t.Errorf("call error = %v after %v, want ErrTimeout", err, elapsed)
+	}
+}
+
+func TestRobustAbortEndsRefreshWaitingForHelloAck(t *testing.T) {
+	svc := robustService("go_rob_abort_refresh")
+	release, accepted, held := acceptAndHold(rawListener(t, svc))
+	defer cleanupAll(svc)
+
+	c := NewIncrementClient(testRunDir, svc, testClientConfig())
+	// Only an abort can end the wait early.
+	c.SetCallTimeout(10000)
+	ready := make(chan bool, 1)
+	go func() {
+		c.Refresh()
+		ready <- c.Ready()
+	}()
+	select {
+	case <-accepted:
+	case <-time.After(testWaitLimit):
+		t.Fatal("server never accepted the connection")
+	}
+	c.Abort()
+	var got, returned bool
+	select {
+	case got = <-ready:
+		returned = true
+	case <-time.After(2 * time.Second):
+	}
+
+	close(release)
+	<-held
+	if !returned {
+		<-ready
+		t.Fatal("refresh must return within 2s of the abort")
+	}
+	c.Close()
+	if got {
+		t.Error("refresh after abort reported ready")
+	}
+}
+
 // N1 guard: the configured call timeout must be honored on the UDS path.
 
 func TestRobustUdsCallHonorsTimeoutLongerThan100ms(t *testing.T) {

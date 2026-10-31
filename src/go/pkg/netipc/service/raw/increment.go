@@ -18,7 +18,7 @@ func (c *Client) CallIncrementWithTimeout(requestValue uint64, timeoutMs uint32)
 
 	var result uint64
 
-	err := c.callWithRetry(func() error {
+	err := c.callWithRetry(timeoutMs, func() error {
 		var reqBuf [protocol.IncrementPayloadSize]byte
 		if protocol.IncrementEncode(requestValue, reqBuf[:]) == 0 {
 			return protocol.ErrTruncated
@@ -60,7 +60,7 @@ func (c *Client) CallIncrementBatchWithTimeout(values []uint64, timeoutMs uint32
 		return nil, err
 	}
 
-	err = c.callWithRetry(func() error {
+	err = c.callWithRetry(timeoutMs, func() error {
 		batchBufSize, err := incrementBatchRequestSize(len(values))
 		if err != nil {
 			return err
@@ -94,8 +94,11 @@ func (c *Client) CallIncrementBatchWithTimeout(values []uint64, timeoutMs uint32
 			return err
 		}
 
-		respHdr, respPayload, err := c.transportReceiveWithControl(
-			c.resolvedCallTimeout(timeoutMs), c.abortSignal())
+		waitMs := c.opRemainingMs()
+		if waitMs == 0 {
+			return protocol.ErrTimeout
+		}
+		respHdr, respPayload, err := c.transportReceiveWithControl(waitMs, c.abortSignal())
 		if err != nil {
 			return err
 		}

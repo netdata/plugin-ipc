@@ -116,6 +116,8 @@ pub enum NipcError {
     Aborted,
     /// The peer closed the session or its process exited.
     Disconnected,
+    /// The client is not connected; refresh it first.
+    NotReady,
 }
 
 impl core::fmt::Display for NipcError {
@@ -136,6 +138,7 @@ impl core::fmt::Display for NipcError {
             NipcError::Timeout => write!(f, "synchronous call timed out"),
             NipcError::Aborted => write!(f, "synchronous call aborted"),
             NipcError::Disconnected => write!(f, "peer disconnected"),
+            NipcError::NotReady => write!(f, "client not ready"),
         }
     }
 }

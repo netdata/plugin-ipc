@@ -3,6 +3,7 @@
 package windows
 
 import (
+	"errors"
 	"syscall"
 	"time"
 )
@@ -161,34 +162,76 @@ func createClientPipe(name *uint16) (syscall.Handle, error) {
 	return syscall.CreateFile(name, _GENERIC_READ|_GENERIC_WRITE, 0, nil, _OPEN_EXISTING, 0, 0)
 }
 
+// connectBusySliceMs is the longest single busy-pipe wait, so an abort ends
+// it promptly.
+const connectBusySliceMs = 100
+
 // openClientPipe opens the client end of a pipe. A server has no free pipe
 // instance between accepting one client and creating the next instance, and
-// connects in that window fail with ERROR_PIPE_BUSY. Wait, bounded, for an
-// instance, then try once more.
-func openClientPipe(name *uint16) (syscall.Handle, error) {
+// connects in that window fail with ERROR_PIPE_BUSY. Wait, bounded by
+// ConnectBusyWaitMs and the caller's deadline, for an instance, then try once
+// more.
+func openClientPipe(name *uint16, wait receiveWait) (syscall.Handle, error) {
 	handle, err := createClientPipe(name)
-	if errno, ok := err.(syscall.Errno); ok && errno == _ERROR_PIPE_BUSY {
-		if connectBusyHook != nil {
-			connectBusyHook()
+	if errno, ok := err.(syscall.Errno); !ok || errno != _ERROR_PIPE_BUSY {
+		if err != nil {
+			return handle, wrapErr(ErrConnect, err.Error())
 		}
-		if waitNamedPipe(name, ConnectBusyWaitMs) {
+		return handle, nil
+	}
+	if connectBusyHook != nil {
+		connectBusyHook()
+	}
+
+	busyDeadline := time.Now().Add(ConnectBusyWaitMs * time.Millisecond)
+	if !wait.infinite && wait.deadline.Before(busyDeadline) {
+		busyDeadline = wait.deadline
+	}
+	for {
+		if _, werr := wait.waitMs(); errors.Is(werr, ErrAborted) {
+			return syscall.InvalidHandle, werr
+		}
+		left := time.Until(busyDeadline)
+		if left <= 0 {
+			if !wait.infinite && !time.Now().Before(wait.deadline) {
+				return syscall.InvalidHandle, ErrTimeout
+			}
+			return syscall.InvalidHandle, wrapErr(ErrConnect, err.Error())
+		}
+		slice := boundedReceiveWaitMs(left, connectBusySliceMs)
+		werr := waitNamedPipe(name, slice)
+		if werr == nil {
 			handle, err = createClientPipe(name)
+			if err != nil {
+				return handle, wrapErr(ErrConnect, err.Error())
+			}
+			return handle, nil
+		}
+		if errno, ok := werr.(syscall.Errno); !ok || errno != _ERROR_SEM_TIMEOUT {
+			return syscall.InvalidHandle, wrapErr(ErrConnect, werr.Error())
 		}
 	}
-	return handle, err
 }
 
 // Connect establishes a session to a server pipe derived from runDir + serviceName.
 // When every pipe instance is busy it waits up to ConnectBusyWaitMs for one.
 func Connect(runDir, serviceName string, config *ClientConfig) (*Session, error) {
+	return ConnectTimeout(runDir, serviceName, config, 0, nil)
+}
+
+// ConnectTimeout is Connect bounded by timeoutMs: the busy-pipe wait and the
+// wait for HELLO_ACK together end with ErrTimeout after timeoutMs (0 = no
+// deadline), and with ErrAborted once abortCh is closed (nil = no abort).
+func ConnectTimeout(runDir, serviceName string, config *ClientConfig, timeoutMs uint32, abortCh <-chan struct{}) (*Session, error) {
+	wait := newReceiveWait(timeoutMs, abortCh)
 	pipeName, err := BuildPipeName(runDir, serviceName)
 	if err != nil {
 		return nil, err
 	}
 
-	handle, err := openClientPipe(&pipeName[0])
+	handle, err := openClientPipe(&pipeName[0], wait)
 	if err != nil {
-		return nil, wrapErr(ErrConnect, err.Error())
+		return nil, err
 	}
 
 	mode := uint32(_PIPE_READMODE_MESSAGE)
@@ -197,7 +240,7 @@ func Connect(runDir, serviceName string, config *ClientConfig) (*Session, error)
 		return nil, wrapErr(ErrConnect, "SetNamedPipeHandleState: "+err.Error())
 	}
 
-	session, herr := clientHandshake(handle, config)
+	session, herr := clientHandshake(handle, config, wait)
 	if herr != nil {
 		syscall.CloseHandle(handle)
 		return nil, herr

@@ -392,7 +392,7 @@ func TestClientHandshakeRejectsMalformedAck(t *testing.T) {
 				t.Fatalf("setNamedPipeHandleState failed: %v", err)
 			}
 
-			session, err := clientHandshake(clientHandle, defaultClientConfigPtr())
+			session, err := clientHandshake(clientHandle, defaultClientConfigPtr(), newReceiveWait(0, nil))
 			if err == nil {
 				session.Close()
 				t.Fatal("clientHandshake should fail")
@@ -419,7 +419,7 @@ func TestClientHandshakeTransportErrors(t *testing.T) {
 			t.Fatalf("CloseHandle(server) failed: %v", err)
 		}
 
-		_, err := clientHandshake(clientHandle, defaultClientConfigPtr())
+		_, err := clientHandshake(clientHandle, defaultClientConfigPtr(), newReceiveWait(0, nil))
 		if err == nil {
 			t.Fatal("clientHandshake should fail")
 		}
@@ -444,7 +444,7 @@ func TestClientHandshakeTransportErrors(t *testing.T) {
 			serverDone <- err
 		}()
 
-		_, err := clientHandshake(clientHandle, defaultClientConfigPtr())
+		_, err := clientHandshake(clientHandle, defaultClientConfigPtr(), newReceiveWait(0, nil))
 		if err == nil {
 			t.Fatal("clientHandshake should fail")
 		}

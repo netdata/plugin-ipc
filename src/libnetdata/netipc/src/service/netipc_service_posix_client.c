@@ -35,11 +35,6 @@ static nipc_uds_client_config_t service_client_config_to_transport(
     return transport;
 }
 
-static void client_sleep_ms(uint32_t ms)
-{
-    nipc_service_posix_sleep_us(ms * 1000u);
-}
-
 static void close_abort_pipe(nipc_client_ctx_t *ctx)
 {
     if (!ctx->abort_pipe_lock_initialized)
@@ -126,8 +121,6 @@ const nipc_service_common_client_ops_t *nipc_service_posix_client_ops(void)
         .disconnect = nipc_service_posix_client_disconnect,
         .try_connect = nipc_service_posix_client_try_connect,
         .reconnect_for_call = nipc_service_posix_client_reconnect_for_call,
-        .sleep_ms = client_sleep_ms,
-        .reconnect_retry_interval_ms = CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS,
     };
     return &ops;
 }

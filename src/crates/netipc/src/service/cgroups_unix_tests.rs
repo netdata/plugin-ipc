@@ -202,7 +202,7 @@ fn test_client_not_ready_returns_error_unix() {
 
     let mut client = CgroupsClient::new(TEST_RUN_DIR, &service, client_config());
     match client.call_snapshot() {
-        Err(NipcError::BadLayout) => {}
+        Err(NipcError::NotReady) => {}
         other => panic!("unexpected result: {other:?}"),
     }
 }

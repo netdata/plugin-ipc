@@ -21,9 +21,16 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <poll.h>
+#include <time.h>
+
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
+
+/* Longest single connect wait, so an abort ends a connect promptly. */
+#define UDS_CONNECT_SLICE_MS 100u
 
 static pthread_mutex_t bind_umask_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -327,13 +334,92 @@ nipc_uds_error_t nipc_uds_accept(nipc_uds_listener_t *listener,
                                      NIPC_SERVER_HANDSHAKE_TIMEOUT_MS, out);
 }
 
-nipc_uds_error_t nipc_uds_connect(const char *run_dir,
-                                   const char *service_name,
-                                   const nipc_uds_client_config_t *config,
-                                   nipc_uds_session_t *out)
+static uint64_t connect_monotonic_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+}
+
+static bool connect_abort_raised(int abort_fd)
+{
+    if (abort_fd < 0)
+        return false;
+    struct pollfd pfd = { .fd = abort_fd, .events = POLLIN, .revents = 0 };
+    return poll(&pfd, 1, 0) > 0;
+}
+
+/* Remaining time until deadline_ms (0 = no deadline) as a timeout for
+ * the next wait; false once the deadline passed. */
+static bool connect_remaining_ms(uint64_t deadline_ms, uint32_t *remaining)
+{
+    *remaining = 0;
+    if (deadline_ms == 0)
+        return true;
+    uint64_t now = connect_monotonic_ms();
+    if (now >= deadline_ms)
+        return false;
+    uint64_t left = deadline_ms - now;
+    *remaining = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
+    return true;
+}
+
+/* A blocking AF_UNIX connect waits while the listener's backlog is full.
+ * On Linux SO_SNDTIMEO bounds that wait and the connect fails with EAGAIN
+ * when it expires; waiting in slices lets an abort end it. Other systems
+ * refuse a full backlog at once. */
+static nipc_uds_error_t connect_bounded(int fd, const struct sockaddr_un *addr,
+                                        uint64_t deadline_ms, int abort_fd)
+{
+    nipc_uds_error_t result = NIPC_UDS_OK;
+    for (;;) {
+        if (connect_abort_raised(abort_fd)) {
+            result = NIPC_UDS_ERR_ABORTED;
+            break;
+        }
+        uint32_t slice = UDS_CONNECT_SLICE_MS;
+        uint32_t remaining;
+        if (!connect_remaining_ms(deadline_ms, &remaining)) {
+            result = NIPC_UDS_ERR_TIMEOUT;
+            break;
+        }
+        if (deadline_ms != 0 && remaining < slice)
+            slice = remaining;
+
+        struct timeval tv = {
+            .tv_sec = (time_t)(slice / 1000u),
+            .tv_usec = (suseconds_t)((slice % 1000u) * 1000u),
+        };
+        (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        if (connect(fd, (const struct sockaddr *)addr, sizeof(*addr)) == 0)
+            break;
+        if (errno == EISCONN)
+            break;
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR &&
+            errno != EALREADY) {
+            result = NIPC_UDS_ERR_CONNECT;
+            break;
+        }
+    }
+
+    /* Session sends block without a timeout. */
+    struct timeval none = { 0, 0 };
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &none, sizeof(none));
+    return result;
+}
+
+nipc_uds_error_t nipc_uds_connect_timeout(const char *run_dir,
+                                           const char *service_name,
+                                           const nipc_uds_client_config_t *config,
+                                           uint32_t timeout_ms,
+                                           int abort_fd,
+                                           nipc_uds_session_t *out)
 {
     memset(out, 0, sizeof(*out));
     out->fd = -1;
+
+    uint64_t deadline_ms = timeout_ms ? connect_monotonic_ms() + timeout_ms : 0;
 
     char path[sizeof(((struct sockaddr_un *)0)->sun_path)];
     int path_rc = nipc_uds_build_socket_path(path, sizeof(path), run_dir,
@@ -353,12 +439,19 @@ nipc_uds_error_t nipc_uds_connect(const char *run_dir,
         return NIPC_UDS_ERR_PATH_TOO_LONG;
     }
 
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    nipc_uds_error_t err = connect_bounded(fd, &addr, deadline_ms, abort_fd);
+    if (err != NIPC_UDS_OK) {
         close(fd);
-        return NIPC_UDS_ERR_CONNECT;
+        return err;
     }
 
-    nipc_uds_error_t err = nipc_uds_client_handshake(fd, config, out);
+    uint32_t remaining;
+    if (!connect_remaining_ms(deadline_ms, &remaining)) {
+        close(fd);
+        return NIPC_UDS_ERR_TIMEOUT;
+    }
+
+    err = nipc_uds_client_handshake(fd, config, remaining, abort_fd, out);
     if (err != NIPC_UDS_OK) {
         close(fd);
         out->fd = -1;
@@ -366,6 +459,14 @@ nipc_uds_error_t nipc_uds_connect(const char *run_dir,
     }
 
     return NIPC_UDS_OK;
+}
+
+nipc_uds_error_t nipc_uds_connect(const char *run_dir,
+                                   const char *service_name,
+                                   const nipc_uds_client_config_t *config,
+                                   nipc_uds_session_t *out)
+{
+    return nipc_uds_connect_timeout(run_dir, service_name, config, 0, -1, out);
 }
 
 void nipc_uds_close_session(nipc_uds_session_t *session)

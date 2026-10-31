@@ -803,7 +803,7 @@ func TestUnixCallWithRetryStopsWhenOverflowCannotGrowCapacity(t *testing.T) {
 	refreshUnixClientReady(t, client)
 
 	attempts := 0
-	err := client.callWithRetry(func() error {
+	err := client.callWithRetry(0, func() error {
 		attempts++
 		return protocol.ErrOverflow
 	})
@@ -829,7 +829,7 @@ func TestUnixCallWithRetryCapsOverflowGrowthRetries(t *testing.T) {
 	client.config.MaxRequestPayloadBytes = protocol.MaxPayloadDefault
 
 	attempts := 0
-	err := client.callWithRetry(func() error {
+	err := client.callWithRetry(0, func() error {
 		attempts++
 		client.config.MaxRequestPayloadBytes++
 		return protocol.ErrOverflow

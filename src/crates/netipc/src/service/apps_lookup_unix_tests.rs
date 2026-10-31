@@ -189,7 +189,7 @@ fn test_apps_lookup_facade_not_ready_and_abort_unix() {
     abort.abort();
     assert!(matches!(
         client.call_with_timeout(&[1], 1),
-        Err(NipcError::BadLayout)
+        Err(NipcError::NotReady)
     ));
     client.clear_abort();
     client.close();

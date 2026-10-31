@@ -928,7 +928,7 @@ func TestLookupLogicalLimits(t *testing.T) {
 		ccfg.MaxRequestPayloadBytes = 48
 		client := NewCgroupsLookupClient(testRunDir, "unused", ccfg)
 		_, err := client.CallCgroupsLookup([][]byte{[]byte("/request-key-too-large-for-configured-cap")})
-		if !errors.Is(err, protocol.ErrBadLayout) {
+		if !errors.Is(err, protocol.ErrNotReady) {
 			t.Fatalf("expected not-ready failure before local oversized response, got %v", err)
 		}
 		client.Close()
@@ -952,7 +952,7 @@ func TestLookupRequestCapacityReconnectPaths(t *testing.T) {
 	}
 
 	client.session.MaxRequestPayloadBytes = 64
-	if err := client.ensureLookupRequestCapacity(128); err != nil {
+	if err := client.ensureLookupRequestCapacity(128, time.Now().Add(time.Second)); err != nil {
 		t.Fatalf("capacity reconnect should succeed: %v", err)
 	}
 	if client.state != StateReady {
@@ -963,14 +963,14 @@ func TestLookupRequestCapacityReconnectPaths(t *testing.T) {
 	}
 
 	client.session.MaxRequestPayloadBytes = 256
-	if err := client.ensureLookupRequestCapacity(128); err != nil {
+	if err := client.ensureLookupRequestCapacity(128, time.Now().Add(time.Second)); err != nil {
 		t.Fatalf("already-large session capacity = %v", err)
 	}
 
 	ts.stop()
 	cleanupAll(svc)
 	client.session.MaxRequestPayloadBytes = 64
-	if err := client.ensureLookupRequestCapacity(128); !errors.Is(err, protocol.ErrOverflow) {
+	if err := client.ensureLookupRequestCapacity(128, time.Now().Add(time.Second)); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("capacity reconnect to stopped service = %v, want ErrOverflow", err)
 	}
 	if client.state == StateReady {
@@ -980,7 +980,7 @@ func TestLookupRequestCapacityReconnectPaths(t *testing.T) {
 	missing := NewAppsLookupClient(testRunDir, uniqueUnixService("go_svc_lookup_request_capacity_missing"), ccfg)
 	defer missing.Close()
 	missing.state = StateReady
-	if err := missing.ensureLookupRequestCapacity(128); err != nil {
+	if err := missing.ensureLookupRequestCapacity(128, time.Now().Add(time.Second)); err != nil {
 		t.Fatalf("sessionless configured capacity should not reconnect: %v", err)
 	}
 }
@@ -1951,8 +1951,8 @@ func TestLookupEndpointAbsentBeforeCall(t *testing.T) {
 		if client.state != StateNotFound {
 			t.Fatalf("apps absent state = %d, want StateNotFound", client.state)
 		}
-		if _, err := client.CallAppsLookupWithTimeout([]uint32{11, 22}, 1000); !errors.Is(err, protocol.ErrBadLayout) {
-			t.Fatalf("apps absent lookup error = %v, want ErrBadLayout", err)
+		if _, err := client.CallAppsLookupWithTimeout([]uint32{11, 22}, 1000); !errors.Is(err, protocol.ErrNotReady) {
+			t.Fatalf("apps absent lookup error = %v, want ErrNotReady", err)
 		}
 	})
 
@@ -1970,8 +1970,8 @@ func TestLookupEndpointAbsentBeforeCall(t *testing.T) {
 			t.Fatalf("cgroups absent state = %d, want StateNotFound", client.state)
 		}
 		paths := [][]byte{[]byte("/a"), []byte("/b")}
-		if _, err := client.CallCgroupsLookupWithTimeout(paths, 1000); !errors.Is(err, protocol.ErrBadLayout) {
-			t.Fatalf("cgroups absent lookup error = %v, want ErrBadLayout", err)
+		if _, err := client.CallCgroupsLookupWithTimeout(paths, 1000); !errors.Is(err, protocol.ErrNotReady) {
+			t.Fatalf("cgroups absent lookup error = %v, want ErrNotReady", err)
 		}
 	})
 }

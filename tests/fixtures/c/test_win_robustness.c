@@ -12,6 +12,8 @@
  *   K3  silent client does not block shutdown
  *   K3  silent client's worker is freed at the server handshake deadline
  *   K4  client bounded when server never sends HELLO_ACK
+ *   K4  a call's reconnect is bounded by the call deadline
+ *   K4  abort ends a refresh waiting for HELLO_ACK
  *   N2  shutdown not blocked by a client that stopped reading
  *   N3  stop before run is honored
  *   N5  SHM client notices a crashed server before its timeout
@@ -509,6 +511,99 @@ static void test_client_bounded_when_server_never_sends_hello_ack(void)
     check("refresh + call with 1s timeout return within 6s", finished);
 }
 
+/* A pipe that accepts clients but never answers HELLO. */
+static HANDLE fake_server_pipe(const char *service)
+{
+    wchar_t name[NIPC_NP_MAX_PIPE_NAME];
+    nipc_np_build_pipe_name(name, NIPC_NP_MAX_PIPE_NAME, TEST_RUN_DIR, service);
+    return CreateNamedPipeW(name, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                            4, 65536, 65536, 0, NULL);
+}
+
+typedef struct {
+    nipc_client_ctx_t *client;
+    nipc_error_t err;
+    ULONGLONG elapsed_ms;
+} call_job_t;
+
+static DWORD WINAPI snapshot_call_fn(LPVOID arg)
+{
+    call_job_t *job = (call_job_t *)arg;
+    nipc_cgroups_resp_view_t view;
+    ULONGLONG start = GetTickCount64();
+    job->err = nipc_client_call_cgroups_snapshot_timeout(job->client, &view, 1000);
+    job->elapsed_ms = GetTickCount64() - start;
+    return 0;
+}
+
+static void test_call_reconnect_bounded_by_call_deadline(void)
+{
+    printf("K4: a call's reconnect is bounded by the call deadline\n");
+    robust_server_t rs = {.service = svc_name("wrob_reconnect_noack"), .workers = 1};
+    if (!start_server(&rs)) {
+        check("server started", 0);
+        return;
+    }
+    nipc_client_config_t ccfg = client_config(FALSE, 1000);
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, rs.service, &ccfg);
+    nipc_client_refresh(&client);
+    check("client ready", nipc_client_ready(&client));
+    check("server stops", stop_server_within(&rs, 5000));
+
+    /* The call fails on the dead session and reconnects to a server that
+     * accepts but never sends HELLO_ACK. */
+    HANDLE pipe = fake_server_pipe(rs.service);
+    check("fake server pipe created", pipe != INVALID_HANDLE_VALUE);
+
+    call_job_t job = {.client = &client};
+    HANDLE t = test_create_thread(NULL, 0, snapshot_call_fn, &job, 0, NULL);
+    BOOL finished = WaitForSingleObject(t, 6000) == WAIT_OBJECT_0;
+
+    if (pipe != INVALID_HANDLE_VALUE)
+        CloseHandle(pipe);
+    WaitForSingleObject(t, INFINITE);
+    CloseHandle(t);
+    printf("    call took %llums\n", (unsigned long long)job.elapsed_ms);
+    check("call with 1s timeout returns within 6s", finished);
+    check("call reports the timeout", job.err == NIPC_ERR_TIMEOUT);
+    nipc_client_close(&client);
+}
+
+static DWORD WINAPI refresh_fn(LPVOID arg)
+{
+    nipc_client_refresh((nipc_client_ctx_t *)arg);
+    return 0;
+}
+
+static void test_abort_ends_refresh_waiting_for_hello_ack(void)
+{
+    printf("K4: abort ends a refresh waiting for HELLO_ACK\n");
+    const char *svc = svc_name("wrob_abort_refresh");
+    HANDLE pipe = fake_server_pipe(svc);
+    check("fake server pipe created", pipe != INVALID_HANDLE_VALUE);
+
+    /* Only an abort can end the wait early. */
+    nipc_client_config_t ccfg = client_config(FALSE, 10000);
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+
+    HANDLE t = test_create_thread(NULL, 0, refresh_fn, &client, 0, NULL);
+    BOOL connected = ConnectNamedPipe(pipe, NULL) || GetLastError() == ERROR_PIPE_CONNECTED;
+    check("client connected to the fake server", connected);
+    nipc_client_abort(&client);
+    BOOL finished = WaitForSingleObject(t, 2000) == WAIT_OBJECT_0;
+
+    if (pipe != INVALID_HANDLE_VALUE)
+        CloseHandle(pipe);
+    WaitForSingleObject(t, INFINITE);
+    CloseHandle(t);
+    check("refresh returns within 2s of the abort", finished);
+    check("client is not ready", !nipc_client_ready(&client));
+    nipc_client_close(&client);
+}
+
 /* ------------------------------------------------------------------ */
 /*  N2: shutdown with a worker blocked writing to a non-reading client */
 /* ------------------------------------------------------------------ */
@@ -703,6 +798,8 @@ int main(int argc, char **argv)
     test_silent_client_does_not_block_shutdown();
     test_silent_client_released_at_handshake_deadline();
     test_client_bounded_when_server_never_sends_hello_ack();
+    test_call_reconnect_bounded_by_call_deadline();
+    test_abort_ends_refresh_waiting_for_hello_ack();
     test_shutdown_not_blocked_by_non_reading_client();
     test_stop_before_run_is_honored();
     test_shm_client_notices_crashed_server();

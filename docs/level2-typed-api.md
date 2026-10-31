@@ -259,24 +259,36 @@ There are two important cases:
   powers of 2.
 
 If the session was NOT previously READY, the call fails immediately
-without attempting reconnection.
+without attempting reconnection, with a distinct not-ready error (C
+`NIPC_ERR_NOT_READY`, Rust `NipcError::NotReady`, Go
+`protocol.ErrNotReady`).
 
 If recovery fails, Level 2 reports failure to the caller.
 
 Every synchronous Level 2 client call is bounded. A per-call timeout of
 zero means "use the client context default"; the default is 30000 ms.
-The deadline applies to the complete logical response, including baseline
-transport chunk continuations and SHM response waits. A timeout returns a
-distinct timeout error rather than being collapsed into disconnect or
-protocol failure.
+One deadline covers the whole call: every attempt, the reconnect and
+handshake between attempts, any SHM attach after a reconnect, and every
+overflow-driven reconnect. The deadline applies to the complete logical
+response, including baseline transport chunk continuations and SHM
+response waits. A timeout returns a distinct timeout error rather than
+being collapsed into disconnect or protocol failure; a reconnect that ends
+because the deadline passed reports the timeout too.
+
+`refresh()` is bounded the same way, by the client context call timeout:
+its connect, handshake and SHM attach end once that timeout passes, so a
+server that accepts but never answers cannot hold the caller's loop. When
+the call deadline, not the SHM attach timeout, ends an SHM attach wait,
+SHM stays enabled for the next connect.
 
 Every Level 2 client context also exposes an abort signal that is safe to
 trigger from another thread while one thread is blocked in a typed call.
 Abort is sticky until the caller explicitly clears it or closes the
 client. A call that observes the abort signal returns a distinct aborted
-error and is not retried. A call blocked waiting for its response
-observes an abort within 100 ms on every transport, including SHM
-response waits; an implementation may
+error and is not retried. While an abort is pending, `refresh()` does not
+connect, and an abort raised during a connect or handshake ends it. A call
+or refresh blocked waiting for its peer observes an abort within 100 ms on
+every transport, including SHM response waits; an implementation may
 notice it sooner (for example C polls an abort descriptor together with
 the socket), but callers must not rely on faster than 100 ms.
 

@@ -176,17 +176,18 @@ nipc_error_t nipc_service_platform_do_raw_call(nipc_client_ctx_t *ctx,
 nipc_error_t nipc_service_platform_call_with_retry(
     nipc_client_ctx_t *ctx,
     nipc_service_platform_attempt_fn attempt,
-    void *state)
+    void *state,
+    uint32_t timeout_ms)
 {
     return nipc_service_common_call_with_retry(
-        ctx, attempt, state, nipc_service_win_client_ops());
+        ctx, attempt, state, timeout_ms, nipc_service_win_client_ops());
 }
 
 nipc_error_t nipc_service_platform_ensure_request_capacity(
-    nipc_client_ctx_t *ctx, size_t required_payload_bytes)
+    nipc_client_ctx_t *ctx, size_t required_payload_bytes, uint32_t timeout_ms)
 {
     return nipc_service_common_client_ensure_request_capacity(
-        ctx, required_payload_bytes, nipc_service_win_client_ops());
+        ctx, required_payload_bytes, timeout_ms, nipc_service_win_client_ops());
 }
 
 

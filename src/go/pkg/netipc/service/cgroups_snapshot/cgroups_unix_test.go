@@ -204,8 +204,8 @@ func TestClientNotReadyReturnsErrorUnix(t *testing.T) {
 	client := NewClient(testRunDirUnix, service, testUnixClientConfig())
 	defer client.Close()
 
-	if _, err := client.CallSnapshot(); err != protocol.ErrBadLayout {
-		t.Fatalf("CallSnapshot err = %v, want %v", err, protocol.ErrBadLayout)
+	if _, err := client.CallSnapshot(); err != protocol.ErrNotReady {
+		t.Fatalf("CallSnapshot err = %v, want %v", err, protocol.ErrNotReady)
 	}
 }
 

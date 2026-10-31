@@ -260,9 +260,11 @@ func TestWinRobustSilentClientReleasedAtHandshakeDeadline(t *testing.T) {
 }
 
 // K4: a client call must be bounded even when the server never answers HELLO.
-func TestWinRobustClientBoundedWhenServerNeverSendsHelloAck(t *testing.T) {
-	svc := uniqueWinService("go_wrob_nohelloack")
-	name, err := windows.BuildPipeName(winTestRunDir, svc)
+// winFakeServerPipe creates a pipe that accepts clients but never answers
+// HELLO.
+func winFakeServerPipe(t *testing.T, service string) syscall.Handle {
+	t.Helper()
+	name, err := windows.BuildPipeName(winTestRunDir, service)
 	if err != nil {
 		t.Fatalf("pipe name: %v", err)
 	}
@@ -275,6 +277,12 @@ func TestWinRobustClientBoundedWhenServerNeverSendsHelloAck(t *testing.T) {
 	if syscall.Handle(h) == syscall.InvalidHandle {
 		t.Fatalf("CreateNamedPipeW: %v", callErr)
 	}
+	return syscall.Handle(h)
+}
+
+func TestWinRobustClientBoundedWhenServerNeverSendsHelloAck(t *testing.T) {
+	svc := uniqueWinService("go_wrob_nohelloack")
+	h := winFakeServerPipe(t, svc)
 
 	done := make(chan struct{})
 	finished := winWithin(6*time.Second, func() {
@@ -286,10 +294,84 @@ func TestWinRobustClientBoundedWhenServerNeverSendsHelloAck(t *testing.T) {
 		c.Close()
 	})
 
-	syscall.CloseHandle(syscall.Handle(h))
+	syscall.CloseHandle(h)
 	<-done
 	if !finished {
 		t.Error("Refresh + call with a 1s timeout must return within 6s when the server never sends HELLO_ACK")
+	}
+}
+
+func TestWinRobustCallReconnectBoundedByCallDeadline(t *testing.T) {
+	svc := uniqueWinService("go_wrob_reconnect_noack")
+	rs := startWinRobustServer(svc, testWinServerConfig(), protocol.MethodIncrement, winSlowIncrementDispatch(0), 1)
+
+	c := NewIncrementClient(winTestRunDir, svc, testWinClientConfig())
+	c.Refresh()
+	if !c.Ready() {
+		t.Fatalf("client not ready: state %v", c.Status().State)
+	}
+	if !rs.stopWithin(5 * time.Second) {
+		t.Fatal("server did not stop")
+	}
+
+	// The call fails on the dead session and reconnects to a server that
+	// accepts but never sends HELLO_ACK.
+	h := winFakeServerPipe(t, svc)
+	var err error
+	var elapsed time.Duration
+	done := make(chan struct{})
+	finished := winWithin(6*time.Second, func() {
+		defer close(done)
+		start := time.Now()
+		_, err = c.CallIncrementWithTimeout(1, 1000)
+		elapsed = time.Since(start)
+		c.Close()
+	})
+
+	syscall.CloseHandle(h)
+	<-done
+	if !finished {
+		t.Fatal("a call with a 1s timeout must return within 6s")
+	}
+	if !errors.Is(err, protocol.ErrTimeout) {
+		t.Errorf("call error = %v after %v, want ErrTimeout", err, elapsed)
+	}
+}
+
+func TestWinRobustAbortEndsRefreshWaitingForHelloAck(t *testing.T) {
+	svc := uniqueWinService("go_wrob_abort_refresh")
+	h := winFakeServerPipe(t, svc)
+
+	c := NewIncrementClient(winTestRunDir, svc, testWinClientConfig())
+	// Only an abort can end the wait early.
+	c.SetCallTimeout(10000)
+	ready := make(chan bool, 1)
+	go func() {
+		c.Refresh()
+		ready <- c.Ready()
+	}()
+	if err := connectRawNamedPipe(h); err != nil {
+		if errno, ok := err.(syscall.Errno); !ok || errno != rawErrorPipeConnected {
+			syscall.CloseHandle(h)
+			t.Fatalf("client never connected to the fake server: %v", err)
+		}
+	}
+	c.Abort()
+	var got, returned bool
+	select {
+	case got = <-ready:
+		returned = true
+	case <-time.After(2 * time.Second):
+	}
+
+	syscall.CloseHandle(h)
+	if !returned {
+		<-ready
+		t.Fatal("refresh must return within 2s of the abort")
+	}
+	c.Close()
+	if got {
+		t.Error("refresh after abort reported ready")
 	}
 }
 

@@ -90,6 +90,8 @@ pub struct RawClient {
     pub(super) abort_requested: Arc<AtomicBool>,
     /// How long to retry attaching a negotiated SHM region; tests shorten it.
     pub(super) shm_attach_timeout: std::time::Duration,
+    /// Deadline of the call or refresh in progress.
+    pub(super) op_deadline: Instant,
 }
 
 /// Cloneable handle that can abort a blocking client call from another thread.
@@ -181,6 +183,40 @@ impl RawClient {
             shm_attach_timeout: std::time::Duration::from_millis(
                 CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS,
             ),
+            op_deadline: Instant::now(),
+        }
+    }
+
+    /// Start a call or refresh: one deadline, `timeout_ms` resolved as for
+    /// calls, bounds every connect, handshake, attach and retry inside it.
+    pub(super) fn begin_op(&mut self, timeout_ms: u32) {
+        self.op_deadline =
+            Instant::now() + Duration::from_millis(self.resolved_call_timeout(timeout_ms) as u64);
+    }
+
+    /// Time left before the current deadline; 0 once it passed. Rounded up,
+    /// so a wait given this time never ends before the deadline itself.
+    pub(super) fn op_remaining_ms(&self) -> u32 {
+        let now = Instant::now();
+        if now >= self.op_deadline {
+            return 0;
+        }
+        let left = self
+            .op_deadline
+            .duration_since(now)
+            .as_micros()
+            .div_ceil(1000);
+        left.min(u32::MAX as u128) as u32
+    }
+
+    /// A reconnect inside a call failed: report why the call ended.
+    pub(super) fn call_reconnect_failure(&self, err: NipcError) -> NipcError {
+        if self.abort_requested() {
+            NipcError::Aborted
+        } else if self.op_remaining_ms() == 0 {
+            NipcError::Timeout
+        } else {
+            err
         }
     }
 
@@ -228,7 +264,7 @@ impl RawClient {
     pub(super) fn ensure_ready_for_logical_lookup(&mut self) -> Result<(), NipcError> {
         if self.state != ClientState::Ready {
             self.error_count += 1;
-            return Err(NipcError::BadLayout);
+            return Err(NipcError::NotReady);
         }
         if self.abort_requested() {
             self.disconnect();
@@ -242,6 +278,7 @@ impl RawClient {
     pub(super) fn ensure_lookup_request_capacity(
         &mut self,
         required: usize,
+        deadline: Instant,
     ) -> Result<bool, NipcError> {
         if self.abort_requested() {
             self.disconnect();
@@ -263,12 +300,13 @@ impl RawClient {
         }
 
         let prev_req = self.session_max_request_payload_bytes();
+        self.op_deadline = deadline;
         self.disconnect();
         self.state = ClientState::Broken;
         self.state = self.try_connect();
         if self.state != ClientState::Ready {
             self.error_count += 1;
-            return Err(NipcError::Overflow);
+            return Err(self.call_reconnect_failure(NipcError::Overflow));
         }
         self.reconnect_count += 1;
         if self.session_max_request_payload_bytes() <= prev_req
@@ -312,6 +350,12 @@ impl RawClient {
     /// Returns true if the state changed.
     pub fn refresh(&mut self) -> bool {
         let old_state = self.state;
+
+        // A pending abort keeps the client offline until it is cleared.
+        if self.abort_requested() {
+            return false;
+        }
+        self.begin_op(0);
 
         match self.state {
             ClientState::Disconnected | ClientState::NotFound => {

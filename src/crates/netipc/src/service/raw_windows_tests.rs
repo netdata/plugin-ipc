@@ -2349,7 +2349,7 @@ fn test_lookup_logical_limits_windows() {
         client
             .call_cgroups_lookup(&[b"/request-key-too-large-for-configured-cap".as_slice()])
             .unwrap_err(),
-        NipcError::BadLayout
+        NipcError::NotReady
     );
 }
 
@@ -2761,7 +2761,7 @@ fn test_lookup_endpoint_absent_before_call_windows() {
     let err = client
         .call_apps_lookup_with_timeout(&[11, 22], 1_000)
         .expect_err("apps absent lookup should fail");
-    assert_eq!(err, NipcError::BadLayout);
+    assert_eq!(err, NipcError::NotReady);
     client.close();
 
     let svc = unique_service("rs_win_cgroups_lookup_absent");
@@ -2774,7 +2774,7 @@ fn test_lookup_endpoint_absent_before_call_windows() {
     let err = client
         .call_cgroups_lookup_with_timeout(&[b"/a".as_slice(), b"/b".as_slice()], 1_000)
         .expect_err("cgroups absent lookup should fail");
-    assert_eq!(err, NipcError::BadLayout);
+    assert_eq!(err, NipcError::NotReady);
     client.close();
 }
 

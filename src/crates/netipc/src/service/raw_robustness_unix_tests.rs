@@ -425,6 +425,96 @@ fn test_robust_client_bounded_when_server_never_sends_hello_ack() {
     );
 }
 
+/// Accept one connection on `listener` and hold it without replying until
+/// the returned sender is dropped. `accepted` fires once a client connected.
+fn accept_and_hold(
+    listener: i32,
+) -> (mpsc::Sender<()>, mpsc::Receiver<()>, thread::JoinHandle<()>) {
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let (accepted_tx, accepted_rx) = mpsc::channel::<()>();
+    let holder = thread::spawn(move || {
+        let fd = unsafe { libc::accept(listener, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let _ = accepted_tx.send(());
+        let _ = release_rx.recv();
+        if fd >= 0 {
+            unsafe { libc::close(fd) };
+        }
+        unsafe { libc::close(listener) };
+    });
+    (release_tx, accepted_rx, holder)
+}
+
+#[test]
+fn test_robust_call_reconnect_bounded_by_call_deadline() {
+    let svc = unique_service("rs_rob_reconnect_noack");
+    let server = start_server(
+        &svc,
+        server_config(),
+        METHOD_INCREMENT,
+        increment_dispatch_handler(),
+        1,
+    );
+    let mut client = increment_client(&svc, client_config());
+    connect_ready(&mut client);
+    assert!(stop_within(server, Duration::from_secs(5)), "server stops");
+
+    // The call fails on the dead session and reconnects to a server that
+    // accepts but never sends HELLO_ACK.
+    let (release_tx, _accepted, holder) = accept_and_hold(raw_listener_fd_for_service(&svc));
+    let (result, worker) = within(Duration::from_secs(6), move || {
+        let start = Instant::now();
+        let r = client.call_increment_with_timeout(1, 1000);
+        let elapsed = start.elapsed();
+        client.close();
+        (r, elapsed)
+    });
+
+    drop(release_tx);
+    let _ = holder.join();
+    let _ = worker.join();
+    cleanup_all(&svc);
+    let (r, elapsed) = result.expect("a call with a 1s timeout must return within 6s");
+    assert_eq!(
+        r,
+        Err(NipcError::Timeout),
+        "call reports the timeout after {elapsed:?}"
+    );
+}
+
+#[test]
+fn test_robust_abort_ends_refresh_waiting_for_hello_ack() {
+    let svc = unique_service("rs_rob_abort_refresh");
+    ensure_run_dir();
+    cleanup_all(&svc);
+    let (release_tx, accepted, holder) = accept_and_hold(raw_listener_fd_for_service(&svc));
+
+    let mut client = increment_client(&svc, client_config());
+    // Only an abort can end the wait early.
+    client.set_call_timeout(10_000);
+    let abort = client.abort_handle();
+    let (worker_tx, worker_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        client.refresh();
+        let _ = worker_tx.send(client.ready());
+        client.close();
+    });
+    accepted
+        .recv_timeout(server::TEST_WAIT_LIMIT)
+        .expect("server accepted the connection");
+    abort.abort();
+    let ready = worker_rx.recv_timeout(Duration::from_secs(2));
+
+    drop(release_tx);
+    let _ = holder.join();
+    let _ = worker.join();
+    cleanup_all(&svc);
+    assert_eq!(
+        ready,
+        Ok(false),
+        "refresh returns within 2s of the abort, not ready"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // N1: the configured call timeout must be honored on the UDS path.
 // ---------------------------------------------------------------------------

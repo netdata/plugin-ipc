@@ -42,6 +42,45 @@ func (c *Client) resolvedCallTimeout(timeoutMs uint32) uint32 {
 	return ClientCallTimeoutDefaultMs
 }
 
+// beginOp starts a call or refresh: one deadline, timeoutMs resolved as for
+// calls, bounds every connect, handshake, attach and retry inside it.
+func (c *Client) beginOp(timeoutMs uint32) {
+	c.opDeadline = time.Now().Add(time.Duration(c.resolvedCallTimeout(timeoutMs)) * time.Millisecond)
+}
+
+func (c *Client) endOp() {
+	c.opDeadline = time.Time{}
+}
+
+// opRemainingMs returns the time left before the current deadline, 0 once it
+// passed. It rounds up, so a wait given this time never ends before the
+// deadline itself. Outside a call or refresh it is the resolved call timeout.
+func (c *Client) opRemainingMs() uint32 {
+	if c.opDeadline.IsZero() {
+		return c.resolvedCallTimeout(0)
+	}
+	left := time.Until(c.opDeadline)
+	if left <= 0 {
+		return 0
+	}
+	ms := (left.Microseconds() + 999) / 1000
+	if ms > int64(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(ms)
+}
+
+// callReconnectFailure reports why a call ended when its reconnect failed.
+func (c *Client) callReconnectFailure(err error) error {
+	if c.abortRequested.Load() {
+		return protocol.ErrAborted
+	}
+	if c.opRemainingMs() == 0 {
+		return protocol.ErrTimeout
+	}
+	return err
+}
+
 func (c *Client) abortSignal() <-chan struct{} {
 	c.abortMu.Lock()
 	ch := c.abortCh
@@ -85,6 +124,13 @@ func (c *Client) ClearAbort() {
 // Returns true if the state changed.
 func (c *Client) Refresh() bool {
 	oldState := c.state
+
+	// A pending abort keeps the client offline until it is cleared.
+	if c.abortRequested.Load() {
+		return false
+	}
+	c.beginOp(0)
+	defer c.endOp()
 
 	switch c.state {
 	case StateDisconnected, StateNotFound:
@@ -156,17 +202,20 @@ func (c *Client) noteResponseCapacity(payloadLen uint32) {
 
 // callWithRetry manages reconnect-driven recovery for a typed call.
 // Ordinary failures retry once. Overflow-driven resize recovery may
-// reconnect more than once while negotiated capacities grow.
-func (c *Client) callWithRetry(attempt func() error) error {
+// reconnect more than once while negotiated capacities grow. One deadline,
+// from timeoutMs, bounds the attempts and every reconnect.
+func (c *Client) callWithRetry(timeoutMs uint32, attempt func() error) error {
 	// Fail fast if not READY
 	if c.state != StateReady {
 		c.errorCount++
-		return protocol.ErrBadLayout
+		return protocol.ErrNotReady
 	}
 	if c.abortRequested.Load() {
 		c.errorCount++
 		return protocol.ErrAborted
 	}
+	c.beginOp(timeoutMs)
+	defer c.endOp()
 
 	// Cap overflow-driven retries: payloads grow by powers of 2, so 8
 	// retries allows ~256x growth from the initial negotiated size.
@@ -197,7 +246,7 @@ func (c *Client) callWithRetry(attempt func() error) error {
 			c.state = c.tryConnect()
 			if c.state != StateReady {
 				c.errorCount++
-				return firstErr
+				return c.callReconnectFailure(firstErr)
 			}
 			c.reconnectCount++
 
@@ -219,7 +268,7 @@ func (c *Client) callWithRetry(attempt func() error) error {
 		c.state = c.tryConnect()
 		if c.state != StateReady {
 			c.errorCount++
-			return firstErr
+			return c.callReconnectFailure(firstErr)
 		}
 		c.reconnectCount++
 
@@ -249,7 +298,17 @@ func (c *Client) doRawCall(methodCode uint16, reqPayload []byte) (protocol.Heade
 	return c.doRawCallWithTimeout(methodCode, reqPayload, 0)
 }
 
+// doRawCallWithTimeout makes one attempt. Inside a call it waits only for
+// the time left before the call deadline; timeoutMs applies outside one.
 func (c *Client) doRawCallWithTimeout(methodCode uint16, reqPayload []byte, timeoutMs uint32) (protocol.Header, []byte, error) {
+	waitMs := c.resolvedCallTimeout(timeoutMs)
+	if !c.opDeadline.IsZero() {
+		waitMs = c.opRemainingMs()
+		if waitMs == 0 {
+			return protocol.Header{}, nil, protocol.ErrTimeout
+		}
+	}
+
 	hdr := protocol.Header{
 		Kind:            protocol.KindRequest,
 		Code:            methodCode,
@@ -263,7 +322,7 @@ func (c *Client) doRawCallWithTimeout(methodCode uint16, reqPayload []byte, time
 		return protocol.Header{}, nil, err
 	}
 
-	respHdr, payload, err := c.transportReceiveWithControl(c.resolvedCallTimeout(timeoutMs), c.abortSignal())
+	respHdr, payload, err := c.transportReceiveWithControl(waitMs, c.abortSignal())
 	if err != nil {
 		return protocol.Header{}, nil, err
 	}

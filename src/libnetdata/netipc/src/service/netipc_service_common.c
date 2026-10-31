@@ -1,4 +1,5 @@
 #include "netipc_service_common.h"
+#include "netipc_service_platform.h"
 
 #include "netipc/netipc_protocol.h"
 
@@ -196,9 +197,30 @@ bool nipc_service_common_client_abort_requested(const nipc_client_ctx_t *ctx) {
   return __atomic_load_n(&ctx->abort_requested, __ATOMIC_ACQUIRE) != 0;
 }
 
+void nipc_service_common_client_begin_op(nipc_client_ctx_t *ctx,
+                                         uint32_t timeout_ms) {
+  ctx->op_deadline_ms =
+      nipc_service_platform_monotonic_ms() +
+      nipc_service_common_client_call_timeout_ms(ctx, timeout_ms);
+}
+
+uint32_t
+nipc_service_common_client_op_remaining_ms(const nipc_client_ctx_t *ctx) {
+  uint64_t now = nipc_service_platform_monotonic_ms();
+  if (now >= ctx->op_deadline_ms)
+    return 0;
+  uint64_t left = ctx->op_deadline_ms - now;
+  return left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
+}
+
 bool nipc_service_common_client_refresh(
     nipc_client_ctx_t *ctx, const nipc_service_common_client_ops_t *ops) {
   nipc_client_state_t old_state = ctx->state;
+
+  /* A pending abort keeps the context offline until it is cleared. */
+  if (nipc_service_common_client_abort_requested(ctx))
+    return false;
+  nipc_service_common_client_begin_op(ctx, 0);
 
   switch (ctx->state) {
   case NIPC_CLIENT_DISCONNECTED:
@@ -326,6 +348,12 @@ nipc_error_t nipc_service_common_do_raw_call(
   if (nipc_service_common_client_abort_requested(ctx))
     return NIPC_ERR_ABORTED;
 
+  uint32_t remaining = nipc_service_common_client_op_remaining_ms(ctx);
+  if (remaining == 0)
+    return NIPC_ERR_TIMEOUT;
+  if (timeout_ms == 0 || timeout_ms > remaining)
+    timeout_ms = remaining;
+
   nipc_header_t hdr = {0};
   hdr.kind = NIPC_KIND_REQUEST;
   hdr.code = method_code;
@@ -353,13 +381,30 @@ nipc_error_t nipc_service_common_do_raw_call(
   return nipc_service_common_response_status_to_error(ctx, &resp_hdr);
 }
 
+/* A reconnect inside a call failed: report why the call ended. */
+static nipc_error_t call_reconnect_failure(const nipc_client_ctx_t *ctx,
+                                           nipc_error_t err) {
+  if (nipc_service_common_client_abort_requested(ctx))
+    return NIPC_ERR_ABORTED;
+  if (nipc_service_common_client_op_remaining_ms(ctx) == 0)
+    return NIPC_ERR_TIMEOUT;
+  return err;
+}
+
+static void call_mark_broken(nipc_client_ctx_t *ctx,
+                             const nipc_service_common_client_ops_t *ops) {
+  ops->disconnect(ctx);
+  ctx->state = NIPC_CLIENT_BROKEN;
+}
+
 nipc_error_t nipc_service_common_call_with_retry(
     nipc_client_ctx_t *ctx, nipc_service_common_attempt_fn attempt, void *state,
-    const nipc_service_common_client_ops_t *ops) {
+    uint32_t timeout_ms, const nipc_service_common_client_ops_t *ops) {
   if (ctx->state != NIPC_CLIENT_READY) {
     ctx->error_count++;
     return NIPC_ERR_NOT_READY;
   }
+  nipc_service_common_client_begin_op(ctx, timeout_ms);
 
   int overflow_retries = 0;
   for (;;) {
@@ -375,40 +420,34 @@ nipc_error_t nipc_service_common_call_with_retry(
     }
 
     if (err == NIPC_ERR_TIMEOUT || err == NIPC_ERR_ABORTED) {
-      ops->disconnect(ctx);
-      ctx->state = NIPC_CLIENT_BROKEN;
+      call_mark_broken(ctx, ops);
       ctx->error_count++;
       return err;
     }
 
     if (err != NIPC_ERR_OVERFLOW) {
-      ops->disconnect(ctx);
-      ctx->state = NIPC_CLIENT_BROKEN;
+      call_mark_broken(ctx, ops);
       if (!ops->reconnect_for_call(ctx)) {
         ctx->error_count++;
-        return err;
+        return call_reconnect_failure(ctx, err);
       }
 
       ctx->reconnect_count++;
-      if (ops->sleep_ms && ops->reconnect_retry_interval_ms > 0)
-        ops->sleep_ms(ops->reconnect_retry_interval_ms);
       err = attempt(ctx, state);
       if (err == NIPC_OK) {
         ctx->call_count++;
         return NIPC_OK;
       }
 
-      ops->disconnect(ctx);
-      ctx->state = NIPC_CLIENT_BROKEN;
+      call_mark_broken(ctx, ops);
       ctx->error_count++;
       return err;
     }
 
-    ops->disconnect(ctx);
-    ctx->state = NIPC_CLIENT_BROKEN;
+    call_mark_broken(ctx, ops);
     if (!ops->reconnect_for_call(ctx)) {
       ctx->error_count++;
-      return err;
+      return call_reconnect_failure(ctx, err);
     }
     ctx->reconnect_count++;
 
@@ -416,33 +455,28 @@ nipc_error_t nipc_service_common_call_with_retry(
         ctx->session.max_response_payload_bytes <= prev_resp &&
         ctx->transport_config.max_request_payload_bytes <= prev_cfg_req &&
         ctx->transport_config.max_response_payload_bytes <= prev_cfg_resp) {
-      ops->disconnect(ctx);
-      ctx->state = NIPC_CLIENT_BROKEN;
+      call_mark_broken(ctx, ops);
       ctx->error_count++;
       return err;
     }
 
     if (++overflow_retries >= 8) {
-      ops->disconnect(ctx);
-      ctx->state = NIPC_CLIENT_BROKEN;
+      call_mark_broken(ctx, ops);
       ctx->error_count++;
       return err;
     }
-    if (ops->sleep_ms && ops->reconnect_retry_interval_ms > 0)
-      ops->sleep_ms(ops->reconnect_retry_interval_ms);
   }
 }
 
 nipc_error_t nipc_service_common_client_ensure_request_capacity(
-    nipc_client_ctx_t *ctx, size_t required_payload_bytes,
+    nipc_client_ctx_t *ctx, size_t required_payload_bytes, uint32_t timeout_ms,
     const nipc_service_common_client_ops_t *ops) {
   if (ctx->state != NIPC_CLIENT_READY) {
     ctx->error_count++;
     return NIPC_ERR_NOT_READY;
   }
   if (nipc_service_common_client_abort_requested(ctx)) {
-    ops->disconnect(ctx);
-    ctx->state = NIPC_CLIENT_BROKEN;
+    call_mark_broken(ctx, ops);
     ctx->error_count++;
     return NIPC_ERR_ABORTED;
   }
@@ -455,19 +489,18 @@ nipc_error_t nipc_service_common_client_ensure_request_capacity(
   if (ctx->transport_config.max_request_payload_bytes < required)
     return NIPC_ERR_OVERFLOW;
 
+  nipc_service_common_client_begin_op(ctx, timeout_ms);
   uint32_t prev_req = ctx->session.max_request_payload_bytes;
-  ops->disconnect(ctx);
-  ctx->state = NIPC_CLIENT_BROKEN;
+  call_mark_broken(ctx, ops);
   if (!ops->reconnect_for_call(ctx)) {
     ctx->error_count++;
-    return NIPC_ERR_OVERFLOW;
+    return call_reconnect_failure(ctx, NIPC_ERR_OVERFLOW);
   }
   ctx->reconnect_count++;
 
   if (ctx->session.max_request_payload_bytes <= prev_req ||
       ctx->session.max_request_payload_bytes < required) {
-    ops->disconnect(ctx);
-    ctx->state = NIPC_CLIENT_BROKEN;
+    call_mark_broken(ctx, ops);
     ctx->error_count++;
     return NIPC_ERR_OVERFLOW;
   }

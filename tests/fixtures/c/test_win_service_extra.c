@@ -82,7 +82,7 @@ typedef struct {
     int calls;
     int disconnects;
     int reconnects;
-    int sleeps;
+    bool expire_deadline; /* first attempt uses up the call deadline */
     bool reconnect_ok;
     uint32_t reconnect_request_bytes;
     uint32_t reconnect_response_bytes;
@@ -92,9 +92,10 @@ static common_retry_mock_t *g_common_retry_mock;
 
 static nipc_error_t common_retry_attempt(nipc_client_ctx_t *ctx, void *state)
 {
-    (void)ctx;
     common_retry_mock_t *mock = (common_retry_mock_t *)state;
     mock->calls++;
+    if (mock->expire_deadline)
+        ctx->op_deadline_ms = 0;
     if (mock->calls <= mock->result_count)
         return mock->results[mock->calls - 1];
     return NIPC_OK;
@@ -129,21 +130,12 @@ static bool common_retry_reconnect_for_call(nipc_client_ctx_t *ctx)
     return false;
 }
 
-static void common_retry_sleep(uint32_t ms)
-{
-    (void)ms;
-    if (g_common_retry_mock)
-        g_common_retry_mock->sleeps++;
-}
-
 static nipc_service_common_client_ops_t common_retry_ops(void)
 {
     return (nipc_service_common_client_ops_t){
         .disconnect = common_retry_disconnect,
         .try_connect = common_retry_try_connect,
         .reconnect_for_call = common_retry_reconnect_for_call,
-        .sleep_ms = common_retry_sleep,
-        .reconnect_retry_interval_ms = 1,
     };
 }
 
@@ -4345,7 +4337,7 @@ static void test_common_helper_edges(void)
     memset(&client, 0, sizeof(client));
     check("retry helper rejects not-ready client",
           nipc_service_common_call_with_retry(
-              &client, common_retry_attempt, &mock, &ops) ==
+              &client, common_retry_attempt, &mock, 0, &ops) ==
               NIPC_ERR_NOT_READY &&
               client.error_count == 1);
 
@@ -4356,7 +4348,7 @@ static void test_common_helper_edges(void)
     mock.result_count = 1;
     check("retry helper counts successful call",
           nipc_service_common_call_with_retry(
-              &client, common_retry_attempt, &mock, &ops) == NIPC_OK &&
+              &client, common_retry_attempt, &mock, 0, &ops) == NIPC_OK &&
               client.call_count == 1);
 
     memset(&client, 0, sizeof(client));
@@ -4366,7 +4358,7 @@ static void test_common_helper_edges(void)
     mock.result_count = 1;
     check("retry helper breaks client on timeout",
           nipc_service_common_call_with_retry(
-              &client, common_retry_attempt, &mock, &ops) ==
+              &client, common_retry_attempt, &mock, 0, &ops) ==
               NIPC_ERR_TIMEOUT &&
               client.state == NIPC_CLIENT_BROKEN && client.error_count == 1 &&
               mock.disconnects == 1);
@@ -4380,9 +4372,32 @@ static void test_common_helper_edges(void)
     mock.reconnect_ok = true;
     check("retry helper retries one non-overflow failure",
           nipc_service_common_call_with_retry(
-              &client, common_retry_attempt, &mock, &ops) == NIPC_OK &&
+              &client, common_retry_attempt, &mock, 0, &ops) == NIPC_OK &&
               client.call_count == 1 && client.reconnect_count == 1 &&
-              mock.sleeps >= 1);
+              mock.reconnects == 1);
+
+    memset(&client, 0, sizeof(client));
+    memset(&mock, 0, sizeof(mock));
+    client.state = NIPC_CLIENT_READY;
+    mock.results[0] = NIPC_ERR_BAD_LAYOUT;
+    mock.result_count = 1;
+    mock.expire_deadline = true;
+    check("retry helper reports the call deadline when its reconnect fails",
+          nipc_service_common_call_with_retry(
+              &client, common_retry_attempt, &mock, 0, &ops) ==
+              NIPC_ERR_TIMEOUT &&
+              mock.reconnects == 1);
+
+    memset(&client, 0, sizeof(client));
+    memset(&mock, 0, sizeof(mock));
+    client.state = NIPC_CLIENT_READY;
+    mock.results[0] = NIPC_ERR_BAD_LAYOUT;
+    mock.result_count = 1;
+    check("retry helper keeps the attempt error when its reconnect fails in time",
+          nipc_service_common_call_with_retry(
+              &client, common_retry_attempt, &mock, 0, &ops) ==
+              NIPC_ERR_BAD_LAYOUT &&
+              mock.reconnects == 1);
 
     memset(&client, 0, sizeof(client));
     memset(&mock, 0, sizeof(mock));
@@ -4392,7 +4407,7 @@ static void test_common_helper_edges(void)
     mock.reconnect_ok = true;
     check("retry helper rejects overflow without learned growth",
           nipc_service_common_call_with_retry(
-              &client, common_retry_attempt, &mock, &ops) ==
+              &client, common_retry_attempt, &mock, 0, &ops) ==
               NIPC_ERR_OVERFLOW &&
               client.state == NIPC_CLIENT_BROKEN && client.error_count == 1);
 
@@ -4408,7 +4423,7 @@ static void test_common_helper_edges(void)
     mock.reconnect_request_bytes = 64;
     check("retry helper accepts overflow after learned growth",
           nipc_service_common_call_with_retry(
-              &client, common_retry_attempt, &mock, &ops) == NIPC_OK &&
+              &client, common_retry_attempt, &mock, 0, &ops) == NIPC_OK &&
               client.call_count == 1 && client.reconnect_count == 1);
 
     memset(&client, 0, sizeof(client));
@@ -4416,14 +4431,14 @@ static void test_common_helper_edges(void)
     __atomic_store_n(&client.abort_requested, 1u, __ATOMIC_RELEASE);
     check("ensure request capacity honors abort",
           nipc_service_common_client_ensure_request_capacity(
-              &client, 16, &ops) == NIPC_ERR_ABORTED &&
+              &client, 16, 0, &ops) == NIPC_ERR_ABORTED &&
               client.state == NIPC_CLIENT_BROKEN);
 
     memset(&client, 0, sizeof(client));
     client.state = NIPC_CLIENT_READY;
     check("ensure request capacity rejects impossible size",
           nipc_service_common_client_ensure_request_capacity(
-              &client, (size_t)UINT32_MAX + 1u, &ops) ==
+              &client, (size_t)UINT32_MAX + 1u, 0, &ops) ==
               NIPC_ERR_OVERFLOW);
 
     memset(&client, 0, sizeof(client));
@@ -4431,7 +4446,7 @@ static void test_common_helper_edges(void)
     client.session.max_request_payload_bytes = 32;
     check("ensure request capacity accepts current session cap",
           nipc_service_common_client_ensure_request_capacity(
-              &client, 16, &ops) == NIPC_OK);
+              &client, 16, 0, &ops) == NIPC_OK);
 
     memset(&client, 0, sizeof(client));
     client.state = NIPC_CLIENT_READY;
@@ -4439,7 +4454,7 @@ static void test_common_helper_edges(void)
     client.transport_config.max_request_payload_bytes = 32;
     check("ensure request capacity rejects configured cap",
           nipc_service_common_client_ensure_request_capacity(
-              &client, 64, &ops) == NIPC_ERR_OVERFLOW);
+              &client, 64, 0, &ops) == NIPC_ERR_OVERFLOW);
 
     memset(&client, 0, sizeof(client));
     memset(&mock, 0, sizeof(mock));
@@ -4450,7 +4465,7 @@ static void test_common_helper_edges(void)
     mock.reconnect_request_bytes = 64;
     check("ensure request capacity reconnects for learned cap",
           nipc_service_common_client_ensure_request_capacity(
-              &client, 64, &ops) == NIPC_OK &&
+              &client, 64, 0, &ops) == NIPC_OK &&
               client.reconnect_count == 1);
 
     g_common_retry_mock = NULL;

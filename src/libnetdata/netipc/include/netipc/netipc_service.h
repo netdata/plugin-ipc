@@ -164,6 +164,8 @@ typedef struct {
   uint32_t abort_requested;
   /* How long to retry attaching a negotiated SHM region; tests shorten it. */
   uint32_t shm_attach_timeout_ms;
+  /* Monotonic deadline of the call or refresh in progress (internal). */
+  uint64_t op_deadline_ms;
 
   /* Stats */
   uint32_t connect_count;

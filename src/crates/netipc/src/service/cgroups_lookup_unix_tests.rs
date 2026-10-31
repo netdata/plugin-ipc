@@ -163,7 +163,7 @@ fn test_cgroups_lookup_facade_not_ready_and_abort_unix() {
     let paths: [&[u8]; 1] = [b"/x".as_slice()];
     assert!(matches!(
         client.call_with_timeout(&paths, 1),
-        Err(NipcError::BadLayout)
+        Err(NipcError::NotReady)
     ));
     client.clear_abort();
     client.close();

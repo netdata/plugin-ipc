@@ -2497,7 +2497,7 @@ fn test_lookup_logical_limits() {
         client
             .call_cgroups_lookup(&[b"/request-key-too-large-for-configured-cap".as_slice()])
             .unwrap_err(),
-        crate::protocol::NipcError::BadLayout
+        crate::protocol::NipcError::NotReady
     );
 }
 
@@ -2896,7 +2896,7 @@ fn test_lookup_endpoint_absent_before_call_unix() {
     let err = client
         .call_apps_lookup_with_timeout(&[11, 22], 1_000)
         .expect_err("apps absent lookup should fail");
-    assert_eq!(err, NipcError::BadLayout);
+    assert_eq!(err, NipcError::NotReady);
     client.close();
     cleanup_all(&svc);
 
@@ -2911,7 +2911,7 @@ fn test_lookup_endpoint_absent_before_call_unix() {
     let err = client
         .call_cgroups_lookup_with_timeout(&[b"/a".as_slice(), b"/b".as_slice()], 1_000)
         .expect_err("cgroups absent lookup should fail");
-    assert_eq!(err, NipcError::BadLayout);
+    assert_eq!(err, NipcError::NotReady);
     client.close();
     cleanup_all(&svc);
 }

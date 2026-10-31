@@ -191,7 +191,7 @@ fn test_client_not_ready_returns_error_windows() {
     let service = unique_service("not_ready");
     let mut client = CgroupsClient::new(TEST_RUN_DIR, &service, client_config());
     match client.call_snapshot() {
-        Err(NipcError::BadLayout) => {}
+        Err(NipcError::NotReady) => {}
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -214,7 +214,7 @@ fn test_client_facade_controls_windows() {
     let abort = client.abort_handle();
     abort.abort();
     match client.call_snapshot_with_timeout(1) {
-        Err(NipcError::BadLayout) => {}
+        Err(NipcError::NotReady) => {}
         other => panic!("unexpected result: {other:?}"),
     }
 

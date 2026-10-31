@@ -14,6 +14,8 @@
  *   K3  silent client's worker is freed at the server handshake deadline
  *   K4  client bounded when server never accepts
  *   K4  client bounded when server never sends HELLO_ACK
+ *   K4  a call's reconnect is bounded by the call deadline
+ *   K4  abort ends a refresh waiting for HELLO_ACK
  *   N1  call honors a timeout longer than 100 ms (guard: C is correct)
  *   N2  shutdown not blocked by a client that stopped reading
  *   N3  stop before run is honored
@@ -610,13 +612,15 @@ static void test_client_bounded_when_server_never_accepts(void)
 
 typedef struct {
     int listener;
-    int release; /* __atomic */
+    int accepted; /* __atomic */
+    int release;  /* __atomic */
 } hold_job_t;
 
 static void *accept_and_hold_fn(void *arg)
 {
     hold_job_t *job = (hold_job_t *)arg;
     int fd = accept(job->listener, NULL, NULL);
+    test_flag_set(&job->accepted);
     /* Hold the session open without replying until the test releases it. */
     (void)test_flag_wait(&job->release);
     if (fd >= 0)
@@ -644,6 +648,102 @@ static void test_client_bounded_when_server_never_sends_hello_ack(void)
     if (!finished)
         pthread_join(tid, NULL);
     check("refresh + call with 1s timeout return within 6s", finished);
+    cleanup_all(svc);
+}
+
+typedef struct {
+    nipc_client_ctx_t *client;
+    nipc_error_t err;
+    uint64_t elapsed_ms;
+} call_job_t;
+
+static void *snapshot_call_fn(void *arg)
+{
+    call_job_t *job = (call_job_t *)arg;
+    nipc_cgroups_resp_view_t view;
+    uint64_t start = now_ms();
+    job->err = nipc_client_call_cgroups_snapshot_timeout(job->client, &view, 1000);
+    job->elapsed_ms = now_ms() - start;
+    return NULL;
+}
+
+static void test_call_reconnect_bounded_by_call_deadline(void)
+{
+    printf("K4: a call's reconnect is bounded by the call deadline\n");
+    robust_server_t rs = {.service = "rob_reconnect_noack", .workers = 1};
+    if (!start_server(&rs)) {
+        check("server started", 0);
+        return;
+    }
+    nipc_client_config_t ccfg = client_config(false);
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, rs.service, &ccfg);
+    nipc_client_refresh(&client);
+    check("client ready", nipc_client_ready(&client));
+    check("server stops", stop_server_within(&rs, 5000));
+
+    /* The call fails on the dead session and reconnects to a server that
+     * accepts but never sends HELLO_ACK. */
+    hold_job_t hold = {.listener = raw_listener(rs.service)};
+    check("raw listener bound", hold.listener >= 0);
+    pthread_t holder;
+    pthread_create(&holder, NULL, accept_and_hold_fn, &hold);
+
+    call_job_t job = {.client = &client};
+    pthread_t tid;
+    pthread_create(&tid, NULL, snapshot_call_fn, &job);
+    bool finished = join_within(tid, 6000);
+
+    test_flag_set(&hold.release);
+    pthread_join(holder, NULL);
+    if (!finished)
+        pthread_join(tid, NULL);
+    printf("    call took %llums\n", (unsigned long long)job.elapsed_ms);
+    check("call with 1s timeout returns within 6s", finished);
+    check("call reports the timeout", job.err == NIPC_ERR_TIMEOUT);
+    nipc_client_close(&client);
+    cleanup_all(rs.service);
+}
+
+typedef struct {
+    nipc_client_ctx_t *client;
+} refresh_job_t;
+
+static void *refresh_fn(void *arg)
+{
+    refresh_job_t *job = (refresh_job_t *)arg;
+    nipc_client_refresh(job->client);
+    return NULL;
+}
+
+static void test_abort_ends_refresh_waiting_for_hello_ack(void)
+{
+    printf("K4: abort ends a refresh waiting for HELLO_ACK\n");
+    const char *svc = "rob_abort_refresh";
+    hold_job_t hold = {.listener = raw_listener(svc)};
+    check("raw listener bound", hold.listener >= 0);
+    pthread_t holder;
+    pthread_create(&holder, NULL, accept_and_hold_fn, &hold);
+
+    nipc_client_config_t ccfg = client_config(false);
+    ccfg.call_timeout_ms = 10000; /* only an abort can end the wait early */
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+
+    refresh_job_t job = {.client = &client};
+    pthread_t tid;
+    pthread_create(&tid, NULL, refresh_fn, &job);
+    check("server accepted the connection", test_flag_wait(&hold.accepted));
+    nipc_client_abort(&client);
+    bool finished = join_within(tid, 2000);
+
+    test_flag_set(&hold.release);
+    pthread_join(holder, NULL);
+    if (!finished)
+        pthread_join(tid, NULL);
+    check("refresh returns within 2s of the abort", finished);
+    check("client is not ready", !nipc_client_ready(&client));
+    nipc_client_close(&client);
     cleanup_all(svc);
 }
 
@@ -1051,6 +1151,8 @@ int main(int argc, char **argv)
     test_silent_client_released_at_handshake_deadline();
     test_client_bounded_when_server_never_accepts();
     test_client_bounded_when_server_never_sends_hello_ack();
+    test_call_reconnect_bounded_by_call_deadline();
+    test_abort_ends_refresh_waiting_for_hello_ack();
     test_call_honors_timeout_longer_than_100ms();
     test_shutdown_not_blocked_by_non_reading_client();
     test_stop_before_run_is_honored();

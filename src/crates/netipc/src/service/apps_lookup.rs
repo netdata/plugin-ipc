@@ -307,7 +307,7 @@ mod tests {
         assert!(client.refresh());
         assert_eq!(client.status().state, ClientState::NotFound);
 
-        assert_eq!(client.call(&[123]).unwrap_err(), NipcError::BadLayout);
+        assert_eq!(client.call(&[123]).unwrap_err(), NipcError::NotReady);
         assert_eq!(client.status().error_count, 1);
 
         client.close();

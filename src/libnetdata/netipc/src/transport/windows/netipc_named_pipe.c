@@ -529,6 +529,7 @@ static void inflight_fail_all(nipc_np_session_t *s) {
 
 static nipc_np_error_t client_handshake(HANDLE pipe,
                                         const nipc_np_client_config_t *cfg,
+                                        const receive_wait_t *wait,
                                         nipc_np_session_t *session) {
   uint8_t buf[128];
 
@@ -580,7 +581,13 @@ static nipc_np_error_t client_handshake(HANDLE pipe,
   if (err != NIPC_NP_OK)
     return err;
 
-  /* Receive HELLO_ACK */
+  /* Receive HELLO_ACK; a server that never answers must not hold the
+   * client past its deadline. A server that rejects the client writes its
+   * reply and closes, so a disconnected pipe may still hold that reply. */
+  err = wait_readable_for_receive(pipe, wait, NULL);
+  if (err != NIPC_NP_OK && err != NIPC_NP_ERR_DISCONNECTED)
+    return err;
+
   DWORD bytes_read = 0;
   int rc = raw_recv(pipe, buf, sizeof(buf), &bytes_read);
   if (rc <= 0)
@@ -858,7 +865,6 @@ nipc_np_error_t nipc_np_accept_pending(nipc_np_listener_t *listener,
   HANDLE next = create_pipe_instance(listener->pipe_name, buf_size, FALSE);
   if (next == INVALID_HANDLE_VALUE) {
     /* Cannot create next instance — close the session pipe too. */
-    DisconnectNamedPipe(session_pipe);
     CloseHandle(session_pipe);
     return NIPC_NP_ERR_CREATE_PIPE;
   }
@@ -874,10 +880,8 @@ nipc_np_error_t nipc_np_accept_handshake(HANDLE pipe,
                                          uint32_t timeout_ms,
                                          nipc_np_session_t *out) {
   if (!out || !config || pipe == INVALID_HANDLE_VALUE || pipe == NULL) {
-    if (pipe != INVALID_HANDLE_VALUE && pipe != NULL) {
-      DisconnectNamedPipe(pipe);
+    if (pipe != INVALID_HANDLE_VALUE && pipe != NULL)
       CloseHandle(pipe);
-    }
     return NIPC_NP_ERR_BAD_PARAM;
   }
 
@@ -897,7 +901,8 @@ nipc_np_error_t nipc_np_accept_handshake(HANDLE pipe,
   if (herr == NIPC_NP_OK)
     herr = server_handshake(pipe, config, session_id, out);
   if (herr != NIPC_NP_OK) {
-    DisconnectNamedPipe(pipe);
+    /* Close only: DisconnectNamedPipe would discard a rejection reply the
+     * client has not read yet. */
     CloseHandle(pipe);
     out->pipe = INVALID_HANDLE_VALUE;
     return herr;
@@ -944,29 +949,61 @@ static HANDLE create_client_pipe(const wchar_t *pipe_name) {
   );
 }
 
+/* Longest single busy-pipe wait, so an abort ends it promptly. */
+#define NP_CONNECT_BUSY_SLICE_MS 100u
+
 /* A server has no free pipe instance between accepting one client and
  * creating the next instance, and connects in that window fail with
- * ERROR_PIPE_BUSY. Wait, bounded, for an instance, then try once more. */
-static HANDLE open_client_pipe(const wchar_t *pipe_name) {
+ * ERROR_PIPE_BUSY. Wait, bounded by NIPC_NP_CONNECT_BUSY_WAIT_MS and the
+ * caller's deadline, for an instance, then try once more. */
+static HANDLE open_client_pipe(const wchar_t *pipe_name,
+                               const receive_wait_t *wait,
+                               nipc_np_error_t *err_out) {
+  *err_out = NIPC_NP_ERR_CONNECT;
   HANDLE h = create_client_pipe(pipe_name);
   if (h != INVALID_HANDLE_VALUE || GetLastError() != ERROR_PIPE_BUSY)
     return h;
 
   if (g_connect_busy_hook)
     g_connect_busy_hook(g_connect_busy_user);
-  if (!WaitNamedPipeW(pipe_name, NIPC_NP_CONNECT_BUSY_WAIT_MS))
-    return INVALID_HANDLE_VALUE;
-  return create_client_pipe(pipe_name);
+
+  ULONGLONG busy_deadline = GetTickCount64() + NIPC_NP_CONNECT_BUSY_WAIT_MS;
+  if (!wait->infinite && wait->deadline < busy_deadline)
+    busy_deadline = wait->deadline;
+  for (;;) {
+    if (receive_wait_aborted(wait)) {
+      *err_out = NIPC_NP_ERR_ABORTED;
+      return INVALID_HANDLE_VALUE;
+    }
+    ULONGLONG now = GetTickCount64();
+    if (now >= busy_deadline) {
+      if (receive_wait_expired(wait))
+        *err_out = NIPC_NP_ERR_TIMEOUT;
+      return INVALID_HANDLE_VALUE;
+    }
+    ULONGLONG left = busy_deadline - now;
+    DWORD slice = left < NP_CONNECT_BUSY_SLICE_MS ? (DWORD)left
+                                                  : NP_CONNECT_BUSY_SLICE_MS;
+    if (WaitNamedPipeW(pipe_name, slice))
+      return create_client_pipe(pipe_name);
+    if (GetLastError() != ERROR_SEM_TIMEOUT)
+      return INVALID_HANDLE_VALUE;
+  }
 }
 
-nipc_np_error_t nipc_np_connect(const char *run_dir, const char *service_name,
-                                const nipc_np_client_config_t *config,
-                                nipc_np_session_t *out) {
+nipc_np_error_t nipc_np_connect_timeout(const char *run_dir,
+                                        const char *service_name,
+                                        const nipc_np_client_config_t *config,
+                                        uint32_t timeout_ms,
+                                        HANDLE abort_event,
+                                        nipc_np_session_t *out) {
   if (!config || !out)
     return NIPC_NP_ERR_BAD_PARAM;
 
   memset(out, 0, sizeof(*out));
   out->pipe = INVALID_HANDLE_VALUE;
+
+  receive_wait_t wait = receive_wait_init(timeout_ms, abort_event);
 
   /* Build pipe name */
   wchar_t pipe_name[NIPC_NP_MAX_PIPE_NAME];
@@ -975,9 +1012,10 @@ nipc_np_error_t nipc_np_connect(const char *run_dir, const char *service_name,
     return NIPC_NP_ERR_BAD_PARAM;
 
   /* Connect to the server pipe */
-  HANDLE h = open_client_pipe(pipe_name);
+  nipc_np_error_t err;
+  HANDLE h = open_client_pipe(pipe_name, &wait, &err);
   if (h == INVALID_HANDLE_VALUE)
-    return NIPC_NP_ERR_CONNECT;
+    return err;
 
   /* Set read mode to message mode */
   DWORD mode = PIPE_READMODE_MESSAGE;
@@ -987,7 +1025,7 @@ nipc_np_error_t nipc_np_connect(const char *run_dir, const char *service_name,
   }
 
   /* Perform handshake */
-  nipc_np_error_t err = client_handshake(h, config, out);
+  err = client_handshake(h, config, &wait, out);
   if (err != NIPC_NP_OK) {
     CloseHandle(h);
     out->pipe = INVALID_HANDLE_VALUE;
@@ -995,6 +1033,12 @@ nipc_np_error_t nipc_np_connect(const char *run_dir, const char *service_name,
   }
 
   return NIPC_NP_OK;
+}
+
+nipc_np_error_t nipc_np_connect(const char *run_dir, const char *service_name,
+                                const nipc_np_client_config_t *config,
+                                nipc_np_session_t *out) {
+  return nipc_np_connect_timeout(run_dir, service_name, config, 0, NULL, out);
 }
 
 /* ------------------------------------------------------------------ */

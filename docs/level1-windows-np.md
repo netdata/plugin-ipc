@@ -53,18 +53,30 @@ This is the Windows baseline profile.
 
    Between accepting one client and creating the next instance a server
    has no free instance, and `CreateFileW` fails with `ERROR_PIPE_BUSY`.
-   The client then waits once with `WaitNamedPipeW`, for at most 1000 ms
+   The client then waits with `WaitNamedPipeW`, for at most 1000 ms
    (C `NIPC_NP_CONNECT_BUSY_WAIT_MS`, Rust `CONNECT_BUSY_WAIT_MS`, Go
    `ConnectBusyWaitMs`), and tries `CreateFileW` once more. Any other
    failure, or a second failure, fails the connect.
+
+   The bounded connect (C `nipc_np_connect_timeout()`, Rust
+   `NpSession::connect_with_timeout()`, Go `ConnectTimeout()`) takes a
+   timeout (0 = none) and an abort signal (C an event handle, Rust an
+   `AtomicBool`, Go a channel). The busy wait then also ends at that
+   deadline, in `WaitNamedPipeW` slices of at most 100 ms so an abort ends
+   it promptly, and the wait for HELLO_ACK ends at the same deadline. Expiry
+   returns a timeout error, an abort an aborted error. `connect()` is the
+   bounded connect without a deadline or abort. A pipe that disconnected
+   while the client waits for HELLO_ACK is still read, because a server
+   that rejects the client writes its reply and then closes.
 
    On the server, accept is split: `nipc_np_accept_pending()` (C),
    `NpListener::accept_pending()` (Rust) and `Listener.AcceptPending()`
    (Go) return the connected pipe instance without reading;
    `nipc_np_accept_handshake()`, `PendingPipe::handshake()` and
    `PendingConn.Handshake()` then wait for HELLO with a timeout (0 = none)
-   and, in Rust and Go, an abort signal. A failed handshake disconnects and
-   closes the instance. `nipc_np_accept()` / `accept()` / `Accept()` do both
+   and, in Rust and Go, an abort signal. A failed handshake closes the
+   instance without `DisconnectNamedPipe`, which would discard a rejection
+   reply the client has not read yet. `nipc_np_accept()` / `accept()` / `Accept()` do both
    steps with the 5000 ms server handshake deadline. A server wakes a
    blocked `ConnectNamedPipe` by connecting to its own pipe name and
    closing at once (Rust

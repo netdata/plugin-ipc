@@ -25,10 +25,6 @@
 #include <string.h>
 #include <windows.h>
 
-#define CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS 5u
-#define CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS 5u
-#define CLIENT_CALL_RECONNECT_RETRIES 20u
-
 static uint64_t g_win_service_test_fault_state = 0;
 
 static uint64_t win_service_fault_state_make(int site, uint32_t skip_matches) {

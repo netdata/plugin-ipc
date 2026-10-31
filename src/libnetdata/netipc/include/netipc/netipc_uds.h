@@ -179,6 +179,19 @@ nipc_uds_error_t nipc_uds_connect(const char *run_dir,
                                    nipc_uds_session_t *out);
 
 /*
+ * nipc_uds_connect() bounded by timeout_ms: connect and the wait for
+ * HELLO_ACK together end with NIPC_UDS_ERR_TIMEOUT after timeout_ms
+ * (0 = no deadline), and with NIPC_UDS_ERR_ABORTED once abort_fd becomes
+ * readable (-1 = no abort).
+ */
+nipc_uds_error_t nipc_uds_connect_timeout(const char *run_dir,
+                                           const char *service_name,
+                                           const nipc_uds_client_config_t *config,
+                                           uint32_t timeout_ms,
+                                           int abort_fd,
+                                           nipc_uds_session_t *out);
+
+/*
  * Close a session. Releases socket and internal buffers.
  * Safe to call on a zero-initialized session (no-op).
  */

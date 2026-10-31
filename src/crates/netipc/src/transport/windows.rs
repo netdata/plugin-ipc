@@ -46,6 +46,7 @@ mod ffi {
     pub const ERROR_PIPE_NOT_CONNECTED: DWORD = 233;
     pub const ERROR_ACCESS_DENIED: DWORD = 5;
     pub const ERROR_PIPE_BUSY: DWORD = 231;
+    pub const ERROR_SEM_TIMEOUT: DWORD = 121;
 
     unsafe extern "system" {
         pub fn CreateNamedPipeW(
@@ -60,8 +61,6 @@ mod ffi {
         ) -> HANDLE;
 
         pub fn ConnectNamedPipe(hNamedPipe: HANDLE, lpOverlapped: *mut core::ffi::c_void) -> BOOL;
-
-        pub fn DisconnectNamedPipe(hNamedPipe: HANDLE) -> BOOL;
 
         pub fn CreateFileW(
             lpFileName: LPCWSTR,
@@ -732,8 +731,22 @@ impl NpSession {
         service_name: &str,
         config: &ClientConfig,
     ) -> Result<Self, NpError> {
+        Self::connect_with_timeout(run_dir, service_name, config, 0, None)
+    }
+
+    /// `connect()` bounded by `timeout_ms`: the busy-pipe wait and the wait
+    /// for HELLO_ACK together end with `NpError::Timeout` after `timeout_ms`
+    /// (0 = no deadline), and with `NpError::Aborted` once `abort` is set.
+    pub fn connect_with_timeout(
+        run_dir: &str,
+        service_name: &str,
+        config: &ClientConfig,
+        timeout_ms: u32,
+        abort: Option<&AtomicBool>,
+    ) -> Result<Self, NpError> {
+        let wait = ReceiveWait::new(timeout_ms, abort);
         let pipe_name = build_pipe_name(run_dir, service_name)?;
-        let handle = open_client_pipe(&pipe_name)?;
+        let handle = open_client_pipe(&pipe_name, &wait)?;
 
         // Set read mode to message mode
         let mode: u32 = ffi::PIPE_READMODE_MESSAGE;
@@ -744,7 +757,7 @@ impl NpSession {
             return Err(NpError::Connect(err));
         }
 
-        match client_handshake(handle, config) {
+        match client_handshake(handle, config, &wait) {
             Ok(session) => Ok(session),
             Err(e) => {
                 close_handle(handle);
@@ -1171,11 +1184,8 @@ impl NpListener {
         let next = match create_pipe_instance(&self.pipe_name, buf_size, false) {
             Ok(h) => h,
             Err(e) => {
-                // Failed to create replacement instance; disconnect and close
-                // the accepted client to avoid an orphaned connection.
-                unsafe {
-                    ffi::DisconnectNamedPipe(session_handle);
-                }
+                // Failed to create replacement instance; close the accepted
+                // client to avoid an orphaned connection.
                 close_handle(session_handle);
                 self.handle = ffi::INVALID_HANDLE_VALUE;
                 return Err(e);
@@ -1230,31 +1240,58 @@ fn create_client_pipe(pipe_name: &[u16]) -> ffi::HANDLE {
 pub(crate) static CONNECT_BUSY_HOOK: std::sync::Mutex<Option<Box<dyn Fn() + Send>>> =
     std::sync::Mutex::new(None);
 
+/// Longest single busy-pipe wait, so an abort ends it promptly.
+#[cfg(windows)]
+const CONNECT_BUSY_SLICE_MS: u64 = 100;
+
 /// A server has no free pipe instance between accepting one client and
 /// creating the next instance, and connects in that window fail with
-/// ERROR_PIPE_BUSY. Wait, bounded, for an instance, then try once more.
+/// ERROR_PIPE_BUSY. Wait, bounded by `CONNECT_BUSY_WAIT_MS` and the caller's
+/// deadline, for an instance, then try once more.
 #[cfg(windows)]
-fn open_client_pipe(pipe_name: &[u16]) -> Result<ffi::HANDLE, NpError> {
-    let mut handle = create_client_pipe(pipe_name);
-    if handle == ffi::INVALID_HANDLE_VALUE {
-        let mut err = last_error();
-        if err == ffi::ERROR_PIPE_BUSY {
-            #[cfg(test)]
-            if let Some(hook) = CONNECT_BUSY_HOOK.lock().unwrap().as_ref() {
-                hook();
-            }
-            if unsafe { ffi::WaitNamedPipeW(pipe_name.as_ptr(), CONNECT_BUSY_WAIT_MS) } != 0 {
-                handle = create_client_pipe(pipe_name);
-            }
-            if handle == ffi::INVALID_HANDLE_VALUE {
-                err = last_error();
-            }
+fn open_client_pipe(pipe_name: &[u16], wait: &ReceiveWait<'_>) -> Result<ffi::HANDLE, NpError> {
+    let handle = create_client_pipe(pipe_name);
+    if handle != ffi::INVALID_HANDLE_VALUE {
+        return Ok(handle);
+    }
+    let err = last_error();
+    if err != ffi::ERROR_PIPE_BUSY {
+        return Err(NpError::Connect(err));
+    }
+    #[cfg(test)]
+    if let Some(hook) = CONNECT_BUSY_HOOK.lock().unwrap().as_ref() {
+        hook();
+    }
+
+    let mut busy_deadline = Instant::now() + Duration::from_millis(CONNECT_BUSY_WAIT_MS as u64);
+    if let Some(deadline) = wait.deadline {
+        busy_deadline = busy_deadline.min(deadline);
+    }
+    loop {
+        if wait.aborted() {
+            return Err(NpError::Aborted);
         }
-        if handle == ffi::INVALID_HANDLE_VALUE {
+        let now = Instant::now();
+        if now >= busy_deadline {
+            if wait.deadline.is_some_and(|deadline| now >= deadline) {
+                return Err(NpError::Timeout);
+            }
+            return Err(NpError::Connect(ffi::ERROR_PIPE_BUSY));
+        }
+        let left = busy_deadline.duration_since(now).as_millis().max(1) as u64;
+        let slice = left.min(CONNECT_BUSY_SLICE_MS) as u32;
+        if unsafe { ffi::WaitNamedPipeW(pipe_name.as_ptr(), slice) } != 0 {
+            let handle = create_client_pipe(pipe_name);
+            if handle == ffi::INVALID_HANDLE_VALUE {
+                return Err(NpError::Connect(last_error()));
+            }
+            return Ok(handle);
+        }
+        let err = last_error();
+        if err != ffi::ERROR_SEM_TIMEOUT {
             return Err(NpError::Connect(err));
         }
     }
-    Ok(handle)
 }
 
 /// Wakes a listener blocked in `ConnectNamedPipe` by connecting to it.
@@ -1282,8 +1319,9 @@ impl NpListenerWaker {
     }
 }
 
-/// An accepted pipe whose handshake has not run yet. Dropping it disconnects
-/// and closes the pipe.
+/// An accepted pipe whose handshake has not run yet. Dropping it closes the
+/// pipe; DisconnectNamedPipe would discard a rejection reply the client has
+/// not read yet.
 #[cfg(windows)]
 #[derive(Debug)]
 pub struct PendingPipe {
@@ -1322,9 +1360,6 @@ impl PendingPipe {
 #[cfg(windows)]
 impl Drop for PendingPipe {
     fn drop(&mut self) {
-        unsafe {
-            ffi::DisconnectNamedPipe(self.handle);
-        }
         close_handle(self.handle);
     }
 }
@@ -1373,7 +1408,11 @@ fn create_pipe_instance(
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-fn client_handshake(handle: ffi::HANDLE, config: &ClientConfig) -> Result<NpSession, NpError> {
+fn client_handshake(
+    handle: ffi::HANDLE,
+    config: &ClientConfig,
+    wait: &ReceiveWait<'_>,
+) -> Result<NpSession, NpError> {
     let pkt_size = apply_default(config.packet_size, DEFAULT_PACKET_SIZE);
 
     let supported = if config.supported_profiles != 0 {
@@ -1426,7 +1465,20 @@ fn client_handshake(handle: ffi::HANDLE, config: &ClientConfig) -> Result<NpSess
 
     raw_write(handle, &pkt)?;
 
-    // Receive HELLO_ACK
+    // Receive HELLO_ACK; a server that never answers must not hold the
+    // client past its deadline. A server that rejects the client writes its
+    // reply and closes, so a disconnected pipe may still hold that reply.
+    loop {
+        let wait_ms = wait.wait_slice_ms()?;
+        match wait_pipe_readable(handle, wait_ms) {
+            Ok(true) | Err(NpError::Disconnected) => break,
+            Ok(false) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if wait.aborted() {
+        return Err(NpError::Aborted);
+    }
     let mut ack_buf = [0u8; 128];
     let n = raw_recv(handle, &mut ack_buf)?;
 

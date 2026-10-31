@@ -41,7 +41,7 @@ func (c *Client) SetLookupLogicalConfig(config LookupLogicalConfig) {
 func (c *Client) ensureReadyForLogicalLookup() error {
 	if c.state != StateReady {
 		c.errorCount++
-		return protocol.ErrBadLayout
+		return protocol.ErrNotReady
 	}
 	if c.abortRequested.Load() {
 		c.disconnect()
@@ -52,7 +52,9 @@ func (c *Client) ensureReadyForLogicalLookup() error {
 	return nil
 }
 
-func (c *Client) ensureLookupRequestCapacity(required int) error {
+// ensureLookupRequestCapacity reconnects for a larger request capacity when
+// needed, bounded by the lookup deadline.
+func (c *Client) ensureLookupRequestCapacity(required int, deadline time.Time) error {
 	if c.abortRequested.Load() {
 		c.disconnect()
 		c.state = StateBroken
@@ -73,12 +75,14 @@ func (c *Client) ensureLookupRequestCapacity(required int) error {
 		return nil
 	}
 	prevReq := c.sessionMaxRequestPayloadBytes()
+	c.opDeadline = deadline
+	defer c.endOp()
 	c.disconnect()
 	c.state = StateBroken
 	c.state = c.tryConnect()
 	if c.state != StateReady {
 		c.errorCount++
-		return protocol.ErrOverflow
+		return c.callReconnectFailure(protocol.ErrOverflow)
 	}
 	c.reconnectCount++
 	if c.sessionMaxRequestPayloadBytes() <= prevReq ||
