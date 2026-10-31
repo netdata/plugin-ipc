@@ -122,6 +122,8 @@ typedef struct {
     int                      fd;      /* listening socket */
     nipc_uds_server_config_t config;
     char                     path[108]; /* stored for cleanup */
+    bool                     has_lock; /* lock_fd holds the endpoint lock */
+    int                      lock_fd;  /* {service_name}.lock, flock'ed */
 } nipc_uds_listener_t;
 
 /* ------------------------------------------------------------------ */
@@ -130,8 +132,11 @@ typedef struct {
 
 /*
  * Create a listener on {run_dir}/{service_name}.sock.
- * Performs stale endpoint recovery: if the socket file exists and no
- * live server is connected, unlinks and recreates it.
+ * First takes an exclusive flock on {run_dir}/{service_name}.lock, held
+ * until nipc_uds_close_listener(); a held lock means another server owns
+ * the endpoint (NIPC_UDS_ERR_ADDR_IN_USE). With the lock held, an existing
+ * socket file no live server accepts on is stale: it is unlinked and
+ * recreated.
  */
 nipc_uds_error_t nipc_uds_listen(const char *run_dir,
                                   const char *service_name,
@@ -268,6 +273,12 @@ static inline int nipc_uds_session_fd(const nipc_uds_session_t *s) {
 static inline int nipc_uds_listener_fd(const nipc_uds_listener_t *l) {
     return l->fd;
 }
+
+#ifdef NIPC_INTERNAL_TESTING
+/* Run hook(user) inside nipc_uds_listen() between bind() and listen(), so
+ * tests can hold a listener in that window. Process-wide; NULL clears. */
+void nipc_uds_set_listen_hook_for_tests(void (*hook)(void *user), void *user);
+#endif
 
 #ifdef __cplusplus
 }

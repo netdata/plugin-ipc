@@ -172,36 +172,48 @@ func (c *Client) transportSend(hdr *protocol.Header, payload []byte) error {
 				c.noteRequestCapacity(uint32(len(payload)))
 				return protocol.ErrOverflow
 			}
-			return protocol.ErrTruncated
+			return c.shmSendFailure()
 		}
 		return nil
 	}
 
 	if c.session == nil {
-		return protocol.ErrTruncated
+		return protocol.ErrTransport
 	}
 	if err := c.session.Send(hdr, payload); err != nil {
 		if errors.Is(err, windows.ErrLimitExceeded) {
 			c.noteRequestCapacity(uint32(len(payload)))
 			return protocol.ErrOverflow
 		}
-		return c.pipeFailure(err)
+		return c.pipeFailure(err, protocol.ErrTransport)
 	}
 	return nil
 }
 
 // pipeFailure maps a pipe send/recv failure. A broken pipe is a disconnect;
 // a plain send/recv failure is one when the session probe says the server is
-// gone; protocol errors keep their own meaning.
-func (c *Client) pipeFailure(err error) error {
+// gone, and a transport failure otherwise; protocol errors keep their own
+// meaning.
+func (c *Client) pipeFailure(err error, otherwise error) error {
 	if errors.Is(err, windows.ErrDisconnected) {
 		return protocol.ErrDisconnected
 	}
-	if (errors.Is(err, windows.ErrSend) || errors.Is(err, windows.ErrRecv)) &&
-		c.session != nil && pipePeerDisconnected(c.session) {
+	if errors.Is(err, windows.ErrSend) || errors.Is(err, windows.ErrRecv) {
+		if c.session != nil && pipePeerDisconnected(c.session) {
+			return protocol.ErrDisconnected
+		}
+		return protocol.ErrTransport
+	}
+	return otherwise
+}
+
+// shmSendFailure maps a failed SHM send: a disconnect when the session probe
+// says the server is gone, a transport failure otherwise.
+func (c *Client) shmSendFailure() error {
+	if c.session != nil && pipePeerDisconnected(c.session) {
 		return protocol.ErrDisconnected
 	}
-	return protocol.ErrTruncated
+	return protocol.ErrTransport
 }
 
 // pipePeerDisconnected is a zero-wait probe of a session pipe. WinSHM sessions
@@ -253,7 +265,14 @@ func (c *Client) transportReceiveWithControl(timeoutMs uint32, abortCh <-chan st
 				if errors.Is(err, windows.ErrWinShmDisconnected) {
 					return protocol.Header{}, nil, protocol.ErrDisconnected
 				}
-				return protocol.Header{}, nil, protocol.ErrTruncated
+				if errors.Is(err, windows.ErrWinShmMsgTooLarge) {
+					return protocol.Header{}, nil, protocol.ErrOverflow
+				}
+				// A zero-length or corrupt slot is a truncated message.
+				if errors.Is(err, windows.ErrWinShmBadHeader) {
+					return protocol.Header{}, nil, protocol.ErrTruncated
+				}
+				return protocol.Header{}, nil, protocol.ErrTransport
 			}
 			if mlen < protocol.HeaderSize {
 				return protocol.Header{}, nil, protocol.ErrTruncated
@@ -268,7 +287,7 @@ func (c *Client) transportReceiveWithControl(timeoutMs uint32, abortCh <-chan st
 	}
 
 	if c.session == nil {
-		return protocol.Header{}, nil, protocol.ErrTruncated
+		return protocol.Header{}, nil, protocol.ErrTransport
 	}
 
 	hdr, payload, err := c.session.ReceiveTimeout(scratch, timeoutMs, abortCh)
@@ -279,7 +298,10 @@ func (c *Client) transportReceiveWithControl(timeoutMs uint32, abortCh <-chan st
 		if errors.Is(err, windows.ErrAborted) {
 			return protocol.Header{}, nil, protocol.ErrAborted
 		}
-		return protocol.Header{}, nil, c.pipeFailure(err)
+		if errors.Is(err, windows.ErrLimitExceeded) {
+			return protocol.Header{}, nil, protocol.ErrOverflow
+		}
+		return protocol.Header{}, nil, c.pipeFailure(err, protocol.ErrTruncated)
 	}
 	return hdr, payload, nil
 }

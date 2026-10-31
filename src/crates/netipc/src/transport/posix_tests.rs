@@ -85,6 +85,58 @@ fn raw_listener_fd(service: &str) -> RawFd {
     fd
 }
 
+/// A signal that interrupts a socket call before data moved must not fail
+/// the handshake or the session: each client send, sendmsg and recv below
+/// fails once with EINTR first.
+#[test]
+fn test_eintr_retried() {
+    ensure_run_dir();
+    let svc = unique_service("rs_eintr");
+    cleanup_socket(&svc);
+
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("listen");
+    let server_thread = thread::spawn(move || {
+        let mut session = listener.accept().expect("accept");
+        let mut buf = [0u8; 8192];
+        let (hdr, payload) = session.receive(&mut buf).expect("recv");
+        let payload = payload.to_vec();
+        let mut resp = hdr;
+        resp.kind = protocol::KIND_RESPONSE;
+        resp.transport_status = protocol::STATUS_OK;
+        session.send(&mut resp, &payload).expect("send");
+    });
+
+    // HELLO goes through send, the request through sendmsg; HELLO_ACK and
+    // the response through recv. Injection is per thread: only this
+    // client's calls fail.
+    eintr_inject::SEND.with(|c| c.set(1));
+    eintr_inject::SENDMSG.with(|c| c.set(1));
+    eintr_inject::RECV.with(|c| c.set(2));
+
+    let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config())
+        .expect("connect survives EINTR");
+    let payload = [0x05u8, 0x06];
+    let mut hdr = Header {
+        kind: protocol::KIND_REQUEST,
+        code: protocol::METHOD_INCREMENT,
+        item_count: 1,
+        message_id: 7,
+        ..Header::default()
+    };
+    session
+        .send(&mut hdr, &payload)
+        .expect("send survives EINTR");
+    let mut rbuf = [0u8; 4096];
+    let (rhdr, rpayload) = session.receive(&mut rbuf).expect("receive survives EINTR");
+    assert_eq!(rhdr.message_id, 7);
+    assert_eq!(rpayload, payload);
+    assert_eq!(eintr_inject::pending(), 0, "every injected EINTR was hit");
+
+    drop(session);
+    server_thread.join().unwrap();
+    cleanup_socket(&svc);
+}
+
 // -----------------------------------------------------------------------
 //  Test 1: Single client ping-pong
 // -----------------------------------------------------------------------
@@ -457,6 +509,67 @@ fn test_stale_recovery() {
     let listener = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config())
         .expect("listen should recover stale socket");
     drop(listener);
+    cleanup_socket(&svc);
+}
+
+/// A server between bind() and listen() refuses connects just like a dead
+/// server's leftover socket file. A second server starting in that window
+/// must not take the endpoint over: it fails with AddrInUse, and the first
+/// server stays reachable.
+#[test]
+fn test_listen_excludes_starting_server() {
+    use std::sync::mpsc;
+    ensure_run_dir();
+    let svc = unique_service("rs_listen_window");
+    cleanup_socket(&svc);
+    let path = format!("{TEST_RUN_DIR}/{svc}.sock");
+
+    let (bound_tx, bound_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    *LISTEN_HOOK.lock().unwrap() = Some((
+        path.clone(),
+        Box::new(move || {
+            let _ = bound_tx.send(());
+            let _ = release_rx.lock().unwrap().recv();
+        }),
+    ));
+    let svc_first = svc.clone();
+    let first =
+        thread::spawn(move || UdsListener::bind(TEST_RUN_DIR, &svc_first, default_server_config()));
+    bound_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("first server bound");
+
+    let second = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config());
+    assert!(
+        matches!(second, Err(UdsError::AddrInUse)),
+        "second server must get AddrInUse, got {:?}",
+        second.as_ref().map(|_| ())
+    );
+    drop(second);
+
+    release_tx.send(()).unwrap();
+    let first = first.join().unwrap().expect("first listen ok");
+
+    // A connect to the endpoint must reach the first server.
+    let cfd = seqpacket_socket_cloexec();
+    assert!(cfd >= 0);
+    connect_unix(cfd, &path).expect("connect to endpoint");
+    let mut pfd = libc::pollfd {
+        fd: first.fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut pfd, 1, 10_000) };
+    unsafe { libc::close(cfd) };
+    assert_eq!(ready, 1, "first server receives the connection");
+    drop(first);
+
+    // After the owner closed, the endpoint can be taken again.
+    let again = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config())
+        .expect("endpoint free after close");
+    drop(again);
     cleanup_socket(&svc);
 }
 

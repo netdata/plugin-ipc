@@ -1326,6 +1326,7 @@ fn nipc_error_display_all_variants() {
         (NipcError::BadItemCount, "item count inconsistent"),
         (NipcError::Overflow, "builder out of space"),
         (NipcError::HandlerFailed, "dispatch handler failed"),
+        (NipcError::Transport, "transport I/O failed"),
     ];
     for (err, expected) in cases {
         let msg = format!("{}", err);

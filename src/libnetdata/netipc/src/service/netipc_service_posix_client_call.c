@@ -19,15 +19,16 @@
 /* ------------------------------------------------------------------ */
 
 /* The UDS transport reports EOF, EPIPE and ECONNRESET as plain send/recv
- * failures; the session probe tells a gone server apart. Protocol errors
- * keep their own meaning. */
+ * failures; the session probe tells a gone server apart from any other I/O
+ * failure. Protocol errors keep their own meaning. */
 static nipc_error_t socket_failure(const nipc_client_ctx_t *ctx,
                                    nipc_uds_error_t uerr,
                                    nipc_error_t otherwise)
 {
-    if ((uerr == NIPC_UDS_ERR_SEND || uerr == NIPC_UDS_ERR_RECV) &&
-        nipc_service_posix_peer_disconnected(ctx->session.fd))
-        return NIPC_ERR_DISCONNECTED;
+    if (uerr == NIPC_UDS_ERR_SEND || uerr == NIPC_UDS_ERR_RECV)
+        return nipc_service_posix_peer_disconnected(ctx->session.fd)
+                   ? NIPC_ERR_DISCONNECTED
+                   : NIPC_ERR_TRANSPORT;
     return otherwise;
 }
 
@@ -57,7 +58,11 @@ static nipc_error_t transport_send(nipc_client_ctx_t *ctx,
                 ctx, (uint32_t)payload_len);
             return NIPC_ERR_OVERFLOW;
         }
-        return (serr == NIPC_SHM_OK) ? NIPC_OK : NIPC_ERR_NOT_READY;
+        if (serr == NIPC_SHM_OK)
+            return NIPC_OK;
+        return nipc_service_posix_peer_disconnected(ctx->session.fd)
+                   ? NIPC_ERR_DISCONNECTED
+                   : NIPC_ERR_TRANSPORT;
     }
 
     /* UDS path */
@@ -69,7 +74,7 @@ static nipc_error_t transport_send(nipc_client_ctx_t *ctx,
         return NIPC_ERR_OVERFLOW;
     }
     return (uerr == NIPC_UDS_OK) ? NIPC_OK
-                                 : socket_failure(ctx, uerr, NIPC_ERR_NOT_READY);
+                                 : socket_failure(ctx, uerr, NIPC_ERR_TRANSPORT);
 }
 
 /*
@@ -117,7 +122,12 @@ static nipc_error_t transport_receive(nipc_client_ctx_t *ctx,
                     return NIPC_ERR_DISCONNECTED;
                 continue;
             }
-            return NIPC_ERR_TRUNCATED;
+            if (serr == NIPC_SHM_ERR_MSG_TOO_LARGE)
+                return NIPC_ERR_OVERFLOW;
+            /* A zero-length or corrupt slot is a truncated message. */
+            if (serr == NIPC_SHM_ERR_BAD_HEADER)
+                return NIPC_ERR_TRUNCATED;
+            return NIPC_ERR_TRANSPORT;
         }
 
         return nipc_service_common_client_parse_shm_response(

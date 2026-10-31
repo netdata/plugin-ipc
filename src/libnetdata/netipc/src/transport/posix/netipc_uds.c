@@ -4,6 +4,7 @@
 
 #include "netipc_uds_internal.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -40,9 +41,14 @@ uint32_t nipc_uds_packet_size(int fd, uint32_t configured)
     return limit;
 }
 
+/* SOCK_SEQPACKET sends and receives whole messages or nothing, so a call a
+ * signal interrupted (EINTR) moved no data and is retried. */
 nipc_uds_error_t nipc_uds_raw_send(int fd, const void *data, size_t len)
 {
-    ssize_t n = send(fd, data, len, MSG_NOSIGNAL);
+    ssize_t n;
+    do {
+        n = send(fd, data, len, MSG_NOSIGNAL);
+    } while (n < 0 && errno == EINTR);
     if (n < 0 || (size_t)n != len)
         return NIPC_UDS_ERR_SEND;
     return NIPC_UDS_OK;
@@ -71,7 +77,10 @@ nipc_uds_error_t nipc_uds_raw_send_iov(int fd, const void *hdr, size_t hdr_len,
     msg.msg_iovlen = iovcnt;
 
     size_t total = hdr_len + payload_len;
-    ssize_t n = sendmsg(fd, &msg, MSG_NOSIGNAL);
+    ssize_t n;
+    do {
+        n = sendmsg(fd, &msg, MSG_NOSIGNAL);
+    } while (n < 0 && errno == EINTR);
     if (n < 0 || (size_t)n != total)
         return NIPC_UDS_ERR_SEND;
 
@@ -80,5 +89,9 @@ nipc_uds_error_t nipc_uds_raw_send_iov(int fd, const void *hdr, size_t hdr_len,
 
 ssize_t nipc_uds_raw_recv(int fd, void *buf, size_t buf_len)
 {
-    return recv(fd, buf, buf_len, 0);
+    ssize_t n;
+    do {
+        n = recv(fd, buf, buf_len, 0);
+    } while (n < 0 && errno == EINTR);
+    return n;
 }

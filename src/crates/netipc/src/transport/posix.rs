@@ -645,15 +645,64 @@ pub struct UdsListener {
     config: ServerConfig,
     path: PathBuf,
     next_session_id: AtomicU64,
+    /// `{service_name}.lock`, flock'ed for the listener's lifetime. Fields
+    /// drop after `Drop::drop` removed the socket file, so the endpoint is
+    /// released only once its socket file is gone.
+    _lock: std::fs::File,
+}
+
+/// Test-only hook run inside `UdsListener::bind` between bind() and
+/// listen() for the given socket path.
+#[cfg(test)]
+pub(crate) type ListenHook = (String, Box<dyn Fn() + Send>);
+#[cfg(test)]
+pub(crate) static LISTEN_HOOK: std::sync::Mutex<Option<ListenHook>> = std::sync::Mutex::new(None);
+
+/// Take the endpoint lock `{run_dir}/{service_name}.lock`. A server's
+/// socket file exists from bind() until listen(), and connects in that
+/// window are refused just as for a dead server's leftover file, so a
+/// connect probe alone cannot tell a starting server from a stale one. The
+/// lock can: its holder owns the endpoint, and the kernel drops it when that
+/// process dies. The file stays on disk; removing it would let a starter
+/// that already opened it lock an orphaned inode.
+fn acquire_endpoint_lock(run_dir: &str, service_name: &str) -> Result<std::fs::File, UdsError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    let lock_path = format!("{run_dir}/{service_name}.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&lock_path)
+        .map_err(|e| UdsError::Socket(e.raw_os_error().unwrap_or(0)))?;
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(file);
+        }
+        match errno() {
+            libc::EINTR => continue,
+            libc::EWOULDBLOCK => return Err(UdsError::AddrInUse),
+            e => return Err(UdsError::Socket(e)),
+        }
+    }
 }
 
 impl UdsListener {
     /// Create a listener on `{run_dir}/{service_name}.sock`.
-    /// Performs stale endpoint recovery.
+    /// First takes an exclusive flock on `{run_dir}/{service_name}.lock`,
+    /// held until the listener drops; a held lock means another server owns
+    /// the endpoint (`AddrInUse`). With the lock held, an existing socket
+    /// file no live server accepts on is stale and is replaced.
     pub fn bind(run_dir: &str, service_name: &str, config: ServerConfig) -> Result<Self, UdsError> {
         let path = build_socket_path(run_dir, service_name)?;
+        let lock = acquire_endpoint_lock(run_dir, service_name)?;
 
-        // Stale recovery
+        // The probe still guards against a live server that takes no lock
+        // (an older library version).
         match check_and_recover_stale(&path) {
             StaleResult::LiveServer => return Err(UdsError::AddrInUse),
             StaleResult::Stale | StaleResult::NotExist => { /* proceed */ }
@@ -670,6 +719,21 @@ impl UdsListener {
                 libc::close(fd);
             }
             return Err(e);
+        }
+
+        #[cfg(test)]
+        {
+            // Run the hook once, outside the lock: other binds go on.
+            let hook = {
+                let mut slot = LISTEN_HOOK.lock().unwrap();
+                match slot.as_ref() {
+                    Some((hook_path, _)) if *hook_path == path => slot.take(),
+                    _ => None,
+                }
+            };
+            if let Some((_, hook)) = hook {
+                hook();
+            }
         }
 
         let backlog = if config.backlog > 0 {
@@ -692,6 +756,7 @@ impl UdsListener {
             config,
             path: PathBuf::from(&path),
             next_session_id: AtomicU64::new(1),
+            _lock: lock,
         })
     }
 
@@ -956,36 +1021,104 @@ fn raw_send_iov(fd: RawFd, hdr: &[u8], payload: &[u8]) -> Result<(), UdsError> {
     msg.msg_iov = iov.as_mut_ptr();
     msg.msg_iovlen = iovcnt;
 
-    let n = unsafe { libc::sendmsg(fd, &msg, libc::MSG_NOSIGNAL) };
-    if n < 0 || n as usize != total {
-        return Err(UdsError::Send(errno()));
+    let n = retry_eintr(
+        #[cfg(test)]
+        &eintr_inject::SENDMSG,
+        || unsafe { libc::sendmsg(fd, &msg, libc::MSG_NOSIGNAL) },
+    );
+    match n {
+        Ok(n) if n as usize == total => Ok(()),
+        Ok(_) => Err(UdsError::Send(errno())),
+        Err(e) => Err(UdsError::Send(e)),
     }
-    Ok(())
+}
+
+/// Run a socket call, retrying EINTR. SOCK_SEQPACKET sends and receives
+/// whole messages or nothing, so an interrupted call moved no data.
+/// Returns the call's result, or the errno of a failed call.
+fn retry_eintr(
+    #[cfg(test)] inject: &'static std::thread::LocalKey<std::cell::Cell<u32>>,
+    mut call: impl FnMut() -> isize,
+) -> Result<isize, i32> {
+    loop {
+        #[cfg(test)]
+        let injected = eintr_inject::take(inject);
+        #[cfg(not(test))]
+        let injected = false;
+        let n = if injected { -1 } else { call() };
+        if n >= 0 {
+            return Ok(n);
+        }
+        let e = if injected { libc::EINTR } else { errno() };
+        if e != libc::EINTR {
+            return Err(e);
+        }
+    }
+}
+
+/// Test-only EINTR injection: the next N socket calls of a kind made on the
+/// current thread fail with EINTR before reaching the kernel.
+#[cfg(test)]
+pub(crate) mod eintr_inject {
+    use std::cell::Cell;
+    use std::thread::LocalKey;
+
+    thread_local! {
+        pub(crate) static SEND: Cell<u32> = const { Cell::new(0) };
+        pub(crate) static SENDMSG: Cell<u32> = const { Cell::new(0) };
+        pub(crate) static RECV: Cell<u32> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn take(counter: &'static LocalKey<Cell<u32>>) -> bool {
+        counter.with(|c| {
+            let left = c.get();
+            if left == 0 {
+                return false;
+            }
+            c.set(left - 1);
+            true
+        })
+    }
+
+    /// Injections on this thread not consumed yet.
+    pub(crate) fn pending() -> u32 {
+        SEND.with(Cell::get) + SENDMSG.with(Cell::get) + RECV.with(Cell::get)
+    }
 }
 
 /// Send a contiguous buffer as one SEQPACKET message.
 fn raw_send(fd: RawFd, data: &[u8]) -> Result<(), UdsError> {
-    let n = unsafe {
-        libc::send(
-            fd,
-            data.as_ptr() as *const libc::c_void,
-            data.len(),
-            libc::MSG_NOSIGNAL,
-        )
-    };
-    if n < 0 || n as usize != data.len() {
-        return Err(UdsError::Send(errno()));
+    let n = retry_eintr(
+        #[cfg(test)]
+        &eintr_inject::SEND,
+        || unsafe {
+            libc::send(
+                fd,
+                data.as_ptr() as *const libc::c_void,
+                data.len(),
+                libc::MSG_NOSIGNAL,
+            )
+        },
+    );
+    match n {
+        Ok(n) if n as usize == data.len() => Ok(()),
+        Ok(_) => Err(UdsError::Send(errno())),
+        Err(e) => Err(UdsError::Send(e)),
     }
-    Ok(())
 }
 
 /// Receive one SEQPACKET message. Returns bytes received.
 fn raw_recv(fd: RawFd, buf: &mut [u8]) -> Result<usize, UdsError> {
-    let n = unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
-    if n <= 0 {
-        return Err(UdsError::Recv(if n == 0 { 0 } else { errno() }));
+    let n = retry_eintr(
+        #[cfg(test)]
+        &eintr_inject::RECV,
+        || unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) },
+    );
+    match n {
+        Ok(0) => Err(UdsError::Recv(0)),
+        Ok(n) => Ok(n as usize),
+        Err(e) => Err(UdsError::Recv(e)),
     }
-    Ok(n as usize)
 }
 
 struct ReceiveWait<'a> {

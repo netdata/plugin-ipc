@@ -215,7 +215,7 @@ impl RawClient {
                         self.client_note_request_capacity(req_len as u32);
                         Err(NipcError::Overflow)
                     }
-                    Err(_) => Err(NipcError::Truncated),
+                    Err(_) => Err(shm_send_failure(self.session.as_ref())),
                 };
             }
         }
@@ -249,13 +249,13 @@ impl RawClient {
                         self.client_note_request_capacity(req_len as u32);
                         Err(NipcError::Overflow)
                     }
-                    Err(_) => Err(NipcError::Truncated),
+                    Err(_) => Err(shm_send_failure(self.session.as_ref())),
                 };
             }
         }
 
         let send_result = {
-            let session = self.session.as_mut().ok_or(NipcError::Truncated)?;
+            let session = self.session.as_mut().ok_or(NipcError::Transport)?;
             session.send(hdr, &self.request_buf[..req_len])
         };
         match send_result {
@@ -331,7 +331,7 @@ impl RawClient {
             }
         }
 
-        let session = self.session.as_mut().ok_or(NipcError::Truncated)?;
+        let session = self.session.as_mut().ok_or(NipcError::Transport)?;
 
         #[cfg(unix)]
         {
@@ -475,7 +475,9 @@ fn receive_posix_shm_with_control(
                 continue;
             }
             Err(ShmError::MsgTooLarge) => return Err(NipcError::Overflow),
-            Err(_) => return Err(NipcError::Truncated),
+            // A zero-length or corrupt slot is a truncated message.
+            Err(ShmError::BadHeader) => return Err(NipcError::Truncated),
+            Err(_) => return Err(NipcError::Transport),
         }
     }
 }
@@ -500,7 +502,9 @@ fn receive_win_shm_with_control(
         Ok(None) => {}
         Err(WinShmError::MsgTooLarge) => return Err(NipcError::Overflow),
         Err(WinShmError::Disconnected) => return Err(NipcError::Disconnected),
-        Err(_) => return Err(NipcError::Truncated),
+        // A zero-length or corrupt slot is a truncated message.
+        Err(WinShmError::BadHeader) => return Err(NipcError::Truncated),
+        Err(_) => return Err(NipcError::Transport),
     }
 
     let deadline = receive_deadline(timeout_ms);
@@ -517,7 +521,8 @@ fn receive_win_shm_with_control(
             }
             Err(WinShmError::MsgTooLarge) => return Err(NipcError::Overflow),
             Err(WinShmError::Disconnected) => return Err(NipcError::Disconnected),
-            Err(_) => return Err(NipcError::Truncated),
+            Err(WinShmError::BadHeader) => return Err(NipcError::Truncated),
+            Err(_) => return Err(NipcError::Transport),
         }
     }
 }
@@ -528,44 +533,90 @@ fn map_uds_receive_error(err: crate::transport::posix::UdsError, session_fd: i32
         crate::transport::posix::UdsError::Timeout => NipcError::Timeout,
         crate::transport::posix::UdsError::Aborted => NipcError::Aborted,
         crate::transport::posix::UdsError::LimitExceeded => NipcError::Overflow,
-        crate::transport::posix::UdsError::Recv(_) | crate::transport::posix::UdsError::Send(_)
-            if super::server_session_unix::peer_disconnected(session_fd) =>
-        {
-            NipcError::Disconnected
-        }
-        _ => NipcError::Truncated,
+        other => socket_failure(other, session_fd, NipcError::Truncated),
     }
 }
 
 /// The UDS transport reports EOF, EPIPE and ECONNRESET as plain send/recv
-/// failures; the session probe tells a gone server apart. Protocol errors keep
-/// their own meaning.
+/// failures; the session probe tells a gone server apart from any other I/O
+/// failure. Protocol errors keep their own meaning.
+#[cfg(unix)]
+fn socket_failure(
+    err: crate::transport::posix::UdsError,
+    session_fd: i32,
+    otherwise: NipcError,
+) -> NipcError {
+    match err {
+        crate::transport::posix::UdsError::Recv(_) | crate::transport::posix::UdsError::Send(_) => {
+            if super::server_session_unix::peer_disconnected(session_fd) {
+                NipcError::Disconnected
+            } else {
+                NipcError::Transport
+            }
+        }
+        _ => otherwise,
+    }
+}
+
 #[cfg(unix)]
 fn session_failure(
     err: crate::transport::posix::UdsError,
     session: Option<&crate::transport::posix::UdsSession>,
 ) -> NipcError {
-    session.map_or(NipcError::Truncated, |s| map_uds_receive_error(err, s.fd()))
+    session.map_or(NipcError::Transport, |s| {
+        socket_failure(err, s.fd(), NipcError::Transport)
+    })
+}
+
+/// A failed SHM send is a disconnect when the session probe says the server
+/// is gone, and a transport failure otherwise.
+#[cfg(target_os = "linux")]
+fn shm_send_failure(session: Option<&crate::transport::posix::UdsSession>) -> NipcError {
+    match session {
+        Some(s) if super::server_session_unix::peer_disconnected(s.fd()) => NipcError::Disconnected,
+        _ => NipcError::Transport,
+    }
+}
+
+#[cfg(windows)]
+fn shm_send_failure(session: Option<&crate::transport::windows::NpSession>) -> NipcError {
+    match session {
+        Some(s) if super::server_session_windows::peer_disconnected(s) => NipcError::Disconnected,
+        _ => NipcError::Transport,
+    }
 }
 
 /// A broken pipe is a disconnect; a plain send/recv failure is one when the
-/// session probe says the server is gone. Protocol errors keep their own
-/// meaning.
+/// session probe says the server is gone, and a transport failure otherwise.
+/// Protocol errors keep their own meaning.
+#[cfg(windows)]
+fn pipe_failure(
+    err: crate::transport::windows::NpError,
+    session: &crate::transport::windows::NpSession,
+    otherwise: NipcError,
+) -> NipcError {
+    match err {
+        crate::transport::windows::NpError::Disconnected => NipcError::Disconnected,
+        crate::transport::windows::NpError::Recv(_)
+        | crate::transport::windows::NpError::Send(_) => {
+            if super::server_session_windows::peer_disconnected(session) {
+                NipcError::Disconnected
+            } else {
+                NipcError::Transport
+            }
+        }
+        _ => otherwise,
+    }
+}
+
 #[cfg(windows)]
 fn session_failure(
     err: crate::transport::windows::NpError,
     session: Option<&crate::transport::windows::NpSession>,
 ) -> NipcError {
-    match (err, session) {
-        (crate::transport::windows::NpError::Disconnected, _) => NipcError::Disconnected,
-        (crate::transport::windows::NpError::Recv(_), Some(s))
-        | (crate::transport::windows::NpError::Send(_), Some(s))
-            if super::server_session_windows::peer_disconnected(s) =>
-        {
-            NipcError::Disconnected
-        }
-        _ => NipcError::Truncated,
-    }
+    session.map_or(NipcError::Transport, |s| {
+        pipe_failure(err, s, NipcError::Transport)
+    })
 }
 
 #[cfg(windows)]
@@ -577,7 +628,7 @@ fn map_np_receive_error(
         crate::transport::windows::NpError::Timeout => NipcError::Timeout,
         crate::transport::windows::NpError::Aborted => NipcError::Aborted,
         crate::transport::windows::NpError::LimitExceeded => NipcError::Overflow,
-        other => session_failure(other, Some(session)),
+        other => pipe_failure(other, session, NipcError::Truncated),
     }
 }
 

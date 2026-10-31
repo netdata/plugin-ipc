@@ -382,12 +382,12 @@ func TestWinClientTransportWithoutSession(t *testing.T) {
 		TransportStatus: protocol.StatusOK,
 	}
 
-	if err := client.transportSend(&hdr, nil); !errors.Is(err, protocol.ErrTruncated) {
-		t.Fatalf("transportSend without session = %v, want ErrTruncated", err)
+	if err := client.transportSend(&hdr, nil); !errors.Is(err, protocol.ErrTransport) {
+		t.Fatalf("transportSend without session = %v, want ErrTransport", err)
 	}
 
-	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTruncated) {
-		t.Fatalf("transportReceive without session = %v, want ErrTruncated", err)
+	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTransport) {
+		t.Fatalf("transportReceive without session = %v, want ErrTransport", err)
 	}
 }
 
@@ -398,8 +398,8 @@ func TestWinClientTransportReceiveWinShmError(t *testing.T) {
 	client.state = StateReady
 	client.shm = &windows.WinShmContext{}
 
-	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTruncated) {
-		t.Fatalf("transportReceive with invalid WinSHM context = %v, want %v", err, protocol.ErrTruncated)
+	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTransport) {
+		t.Fatalf("transportReceive with invalid WinSHM context = %v, want %v", err, protocol.ErrTransport)
 	}
 }
 

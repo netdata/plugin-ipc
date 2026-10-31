@@ -3279,11 +3279,11 @@ fn test_transport_without_session_windows() {
 
     assert_eq!(
         client.transport_send(&mut hdr, &[]),
-        Err(NipcError::Truncated)
+        Err(NipcError::Transport)
     );
     assert!(matches!(
         client.transport_receive(0),
-        Err(NipcError::Truncated)
+        Err(NipcError::Transport)
     ));
     client.close();
 }

@@ -24,6 +24,7 @@
 #include <poll.h>
 #include <time.h>
 
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -218,6 +219,50 @@ int nipc_uds_check_and_recover_stale(const char *run_dir,
     return ret;
 }
 
+static void (*g_listen_hook)(void *user);
+static void *g_listen_hook_user;
+
+void nipc_uds_set_listen_hook_for_tests(void (*hook)(void *user), void *user)
+{
+    g_listen_hook_user = user;
+    g_listen_hook = hook;
+}
+
+/* Take the endpoint lock {run_dir}/{service_name}.lock. A server's socket
+ * file exists from bind() until listen(), and connects in that window are
+ * refused just as for a dead server's leftover file, so a connect probe
+ * alone cannot tell a starting server from a stale one. The lock can: its
+ * holder owns the endpoint, and the kernel drops it when that process
+ * dies. The file stays on disk; removing it would let a starter that
+ * already opened it lock an orphaned inode.
+ * Returns 0 with *fd_out locked, 1 if another listener holds the lock,
+ * -1 on error. */
+static int acquire_endpoint_lock(const char *run_dir, const char *service_name,
+                                 int *fd_out)
+{
+    char lock_path[sizeof(((struct sockaddr_un *)0)->sun_path) + 8];
+    int n = snprintf(lock_path, sizeof(lock_path), "%s/%s.lock", run_dir,
+                     service_name);
+    if (n < 0 || (size_t)n >= sizeof(lock_path))
+        return -1;
+
+    int fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0)
+        return -1;
+
+    int rc;
+    do {
+        rc = flock(fd, LOCK_EX | LOCK_NB);
+    } while (rc < 0 && errno == EINTR);
+    if (rc < 0) {
+        int saved_errno = errno;
+        close(fd);
+        return (saved_errno == EWOULDBLOCK) ? 1 : -1;
+    }
+    *fd_out = fd;
+    return 0;
+}
+
 nipc_uds_error_t nipc_uds_listen(const char *run_dir,
                                   const char *service_name,
                                   const nipc_uds_server_config_t *config,
@@ -242,29 +287,48 @@ nipc_uds_error_t nipc_uds_listen(const char *run_dir,
     if (name_rc < 0)
         return NIPC_UDS_ERR_PATH_TOO_LONG;
 
-    int stale = nipc_uds_check_and_recover_stale(run_dir, socket_name, path);
-    if (stale == 1)
+    int lock_fd = -1;
+    int lock_rc = acquire_endpoint_lock(run_dir, service_name, &lock_fd);
+    if (lock_rc == 1)
         return NIPC_UDS_ERR_ADDR_IN_USE;
+    if (lock_rc < 0)
+        return NIPC_UDS_ERR_SOCKET;
+
+    /* The probe still guards against a live server that takes no lock (an
+     * older library version). */
+    int stale = nipc_uds_check_and_recover_stale(run_dir, socket_name, path);
+    if (stale == 1) {
+        close(lock_fd);
+        return NIPC_UDS_ERR_ADDR_IN_USE;
+    }
 
     int fd = seqpacket_socket_cloexec();
-    if (fd < 0)
+    if (fd < 0) {
+        close(lock_fd);
         return NIPC_UDS_ERR_SOCKET;
+    }
 
     struct sockaddr_un addr;
     if (fill_sockaddr_path(&addr, path) != 0) {
         close(fd);
+        close(lock_fd);
         return NIPC_UDS_ERR_PATH_TOO_LONG;
     }
 
     if (bind_owner_only_socket(fd, &addr) < 0) {
         close(fd);
+        close(lock_fd);
         return NIPC_UDS_ERR_SOCKET;
     }
+
+    if (g_listen_hook)
+        g_listen_hook(g_listen_hook_user);
 
     int backlog = config->backlog > 0 ? config->backlog : UDS_DEFAULT_BACKLOG;
     if (listen(fd, backlog) < 0) {
         close(fd);
         unlink(path);
+        close(lock_fd);
         return NIPC_UDS_ERR_SOCKET;
     }
 
@@ -273,10 +337,13 @@ nipc_uds_error_t nipc_uds_listen(const char *run_dir,
     if (copy_cstr_checked(out->path, sizeof(out->path), path) != 0) {
         close(fd);
         unlink(path);
+        close(lock_fd);
         memset(out, 0, sizeof(*out));
         out->fd = -1;
         return NIPC_UDS_ERR_PATH_TOO_LONG;
     }
+    out->lock_fd = lock_fd;
+    out->has_lock = true;
 
     return NIPC_UDS_OK;
 }
@@ -502,5 +569,12 @@ void nipc_uds_close_listener(nipc_uds_listener_t *listener)
     if (listener->path[0]) {
         unlink(listener->path);
         listener->path[0] = '\0';
+    }
+
+    /* Release the endpoint only after its socket file is gone. */
+    if (listener->has_lock) {
+        close(listener->lock_fd);
+        listener->has_lock = false;
+        listener->lock_fd = -1;
     }
 }

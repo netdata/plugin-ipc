@@ -6367,3 +6367,65 @@ fn test_shm_batch_request_item_decode_failure_returns_bad_envelope() {
 #[cfg(target_os = "linux")]
 #[path = "raw_robustness_unix_tests.rs"]
 mod robustness;
+
+#[test]
+fn test_send_failure_with_live_peer_is_transport_unix() {
+    ensure_run_dir();
+    let svc = unique_service("rs_unix_send_live_peer");
+    cleanup_all(&svc);
+
+    // The server accepts one session, then removes the endpoint so the
+    // client cannot reconnect, and keeps the session open until released.
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc, server_config()).expect("bind");
+    let (accepted_tx, accepted_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let server = thread::spawn(move || {
+        let session = listener.accept().expect("accept");
+        drop(listener);
+        accepted_tx.send(()).expect("signal accepted");
+        let _ = release_rx.recv();
+        drop(session);
+    });
+
+    let mut client = increment_client(&svc, client_config());
+    client.refresh();
+    assert_eq!(client.state, ClientState::Ready);
+    accepted_rx.recv().expect("server accepted");
+
+    // Our own write shutdown makes send fail with EPIPE while the server
+    // still holds the session open.
+    let fd = client.session.as_ref().expect("session").fd();
+    assert_eq!(unsafe { libc::shutdown(fd, libc::SHUT_WR) }, 0);
+    assert_eq!(client.call_increment(1), Err(NipcError::Transport));
+
+    release_tx.send(()).expect("release server");
+    client.close();
+    server.join().expect("server thread");
+    cleanup_all(&svc);
+}
+
+#[test]
+fn test_transport_without_session_unix() {
+    let svc = unique_service("rs_unix_transport");
+    let mut client = increment_client(&svc, client_config());
+
+    let mut hdr = Header {
+        kind: KIND_REQUEST,
+        code: METHOD_INCREMENT,
+        flags: 0,
+        item_count: 1,
+        message_id: 1,
+        transport_status: STATUS_OK,
+        ..Header::default()
+    };
+
+    assert_eq!(
+        client.transport_send(&mut hdr, &[]),
+        Err(NipcError::Transport)
+    );
+    assert!(matches!(
+        client.transport_receive(0),
+        Err(NipcError::Transport)
+    ));
+    client.close();
+}

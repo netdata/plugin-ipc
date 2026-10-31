@@ -785,11 +785,11 @@ func TestUnixClientTransportWithoutSession(t *testing.T) {
 		TransportStatus: protocol.StatusOK,
 	}
 
-	if err := client.transportSend(&hdr, nil); !errors.Is(err, protocol.ErrTruncated) {
-		t.Fatalf("transportSend without session = %v, want ErrTruncated", err)
+	if err := client.transportSend(&hdr, nil); !errors.Is(err, protocol.ErrTransport) {
+		t.Fatalf("transportSend without session = %v, want ErrTransport", err)
 	}
-	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTruncated) {
-		t.Fatalf("transportReceive without session = %v, want ErrTruncated", err)
+	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTransport) {
+		t.Fatalf("transportReceive without session = %v, want ErrTransport", err)
 	}
 }
 
@@ -852,8 +852,8 @@ func TestUnixClientTransportReceiveShmError(t *testing.T) {
 	client.state = StateReady
 	client.shm = &posix.ShmContext{}
 
-	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTruncated) {
-		t.Fatalf("transportReceive with invalid SHM context = %v, want %v", err, protocol.ErrTruncated)
+	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTransport) {
+		t.Fatalf("transportReceive with invalid SHM context = %v, want %v", err, protocol.ErrTransport)
 	}
 }
 
@@ -1636,4 +1636,54 @@ func TestUnixCallIncrementBatchRejectsMalformedPayload(t *testing.T) {
 		srv.wait(t)
 		cleanupAll(svc)
 	})
+}
+
+func TestUnixSendFailureWithLivePeerIsTransport(t *testing.T) {
+	ensureRunDir()
+	svc := uniqueUnixService("go_unix_send_live_peer")
+	cleanupAll(svc)
+	defer cleanupAll(svc)
+
+	// The server accepts one session, then removes the endpoint so the client
+	// cannot reconnect, and keeps the session open until released.
+	listener, err := posix.Listen(testRunDir, svc, testServerConfig())
+	if err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+	accepted := make(chan error, 1)
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		session, err := listener.Accept()
+		listener.Close()
+		accepted <- err
+		if err != nil {
+			return
+		}
+		<-release
+		session.Close()
+	}()
+
+	client := NewIncrementClient(testRunDir, svc, testClientConfig())
+	defer client.Close()
+	client.Refresh()
+	if client.state != StateReady {
+		t.Fatalf("client state = %d, want StateReady", client.state)
+	}
+	if err := <-accepted; err != nil {
+		t.Fatalf("Accept failed: %v", err)
+	}
+
+	// Our own write shutdown makes send fail with EPIPE while the server still
+	// holds the session open.
+	if err := syscall.Shutdown(client.session.Fd(), syscall.SHUT_WR); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if _, err := client.CallIncrement(1); !errors.Is(err, protocol.ErrTransport) {
+		t.Fatalf("CallIncrement with live peer = %v, want ErrTransport", err)
+	}
+
+	close(release)
+	<-done
 }

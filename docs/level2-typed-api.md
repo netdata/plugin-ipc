@@ -247,6 +247,14 @@ There are two important cases:
   error (C `NIPC_ERR_DISCONNECTED`, Rust `NipcError::Disconnected`, Go
   `protocol.ErrDisconnected`). Protocol violations keep their own errors
   even if the peer closes right after sending them.
+- Any other send/receive I/O failure, with the peer still present, is a
+  distinct transport error (C `NIPC_ERR_TRANSPORT`, Rust
+  `NipcError::Transport`, Go `protocol.ErrTransport`). The same error
+  covers an SHM send or receive that fails for a reason other than
+  message size, and a READY client that has no session. An SHM response
+  larger than the negotiated capacity is an overflow, as a baseline
+  response over the limit is; an SHM message shorter than a header
+  (including zero length) is a truncated message.
 - Timeout and caller-requested abort are terminal for the current call:
   Level 2 reports the explicit error, disconnects or marks the current
   session broken, and does not reconnect/retry that same request.

@@ -6104,7 +6104,7 @@ static void test_shm_client_rejects_malformed_responses(void)
         const char *label;
         nipc_error_t expected;
     } cases[] = {
-        { FAKE_SHM_RESP_TOO_LARGE, "svc_shm_resp_big", "oversize SHM response", NIPC_ERR_TRUNCATED },
+        { FAKE_SHM_RESP_TOO_LARGE, "svc_shm_resp_big", "oversize SHM response", NIPC_ERR_OVERFLOW },
         { FAKE_SHM_RESP_SHORT, "svc_shm_resp_short", "short SHM response", NIPC_ERR_TRUNCATED },
         { FAKE_SHM_RESP_BAD_MAGIC, "svc_shm_resp_magic", "bad SHM response header", NIPC_ERR_BAD_MAGIC },
         { FAKE_SHM_RESP_BAD_KIND, "svc_shm_resp_kind", "wrong SHM response kind", NIPC_ERR_BAD_KIND },
@@ -6159,6 +6159,96 @@ static void test_shm_client_rejects_malformed_responses(void)
         cleanup_all(cases[i].service);
         cleanup_session_shm(cases[i].service, 1);
     }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Classification: a send failure with a live peer is a transport error */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    const char *service;
+    int ready;
+    int accepted;
+    int release;
+    int done;
+} live_peer_server_ctx_t;
+
+/* Accepts one session, then removes the endpoint so the client cannot
+ * reconnect, and keeps the session open until released. */
+static void *live_peer_server_thread_fn(void *arg)
+{
+    live_peer_server_ctx_t *ctx = (live_peer_server_ctx_t *)arg;
+    nipc_uds_listener_t listener;
+    nipc_uds_session_t session;
+    nipc_uds_server_config_t scfg = default_server_config();
+
+    memset(&listener, 0, sizeof(listener));
+    memset(&session, 0, sizeof(session));
+    listener.fd = -1;
+    session.fd = -1;
+
+    if (nipc_uds_listen(TEST_RUN_DIR, ctx->service, &scfg, &listener) !=
+        NIPC_UDS_OK)
+        goto out;
+
+    test_flag_set(&ctx->ready);
+
+    if (accept_with_timeout(&listener, 1, 30000, &session) != NIPC_UDS_OK)
+        goto out;
+
+    nipc_uds_close_listener(&listener);
+    listener.fd = -1;
+    test_flag_set(&ctx->accepted);
+    (void)test_flag_wait(&ctx->release);
+
+out:
+    if (session.fd != -1)
+        nipc_uds_close_session(&session);
+    if (listener.fd != -1)
+        nipc_uds_close_listener(&listener);
+    test_flag_set(&ctx->done);
+    return NULL;
+}
+
+static void test_send_failure_with_live_peer_is_transport(void)
+{
+    const char *service = "svc_send_live_peer";
+    live_peer_server_ctx_t sctx;
+    pthread_t tid;
+    nipc_client_config_t ccfg = default_client_config();
+    nipc_client_ctx_t client;
+
+    printf("Test: send failure with a live peer is a transport error\n");
+
+    cleanup_all(service);
+    memset(&sctx, 0, sizeof(sctx));
+    sctx.service = service;
+    pthread_create(&tid, NULL, live_peer_server_thread_fn, &sctx);
+
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
+    check("live peer: server started",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    nipc_client_refresh(&client);
+    check("live peer: client ready", nipc_client_ready(&client));
+    check("live peer: endpoint removed", test_flag_wait(&sctx.accepted));
+
+    if (nipc_client_ready(&client)) {
+        /* Our own write shutdown makes send fail with EPIPE while the
+         * server still holds the session open. */
+        shutdown(client.session.fd, SHUT_WR);
+
+        nipc_cgroups_resp_view_t view;
+        nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
+        check("live peer: call returns NIPC_ERR_TRANSPORT",
+              err == NIPC_ERR_TRANSPORT);
+    }
+
+    test_flag_set(&sctx.release);
+    nipc_client_close(&client);
+    pthread_join(tid, NULL);
+    cleanup_all(service);
 }
 
 /* ------------------------------------------------------------------ */
@@ -7348,6 +7438,7 @@ int main(void)
     test_non_request_terminates_session(); printf("\n");
     test_shm_l2_service();         printf("\n");
     test_shm_client_rejects_malformed_responses(); printf("\n");
+    test_send_failure_with_live_peer_is_transport(); printf("\n");
     test_shm_server_rejects_malformed_requests(); printf("\n");
     test_shm_request_resize_retry(); printf("\n");
     test_shm_response_resize_retry(); printf("\n");

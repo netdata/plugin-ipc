@@ -38,13 +38,14 @@ fallback.
 
 ## Connection lifecycle
 
-1. **Server**: creates and binds the socket, listens for connections.
+1. **Server**: takes the endpoint lock (see "Stale endpoint recovery"),
+   then creates and binds the socket and listens for connections.
    If a stale socket file exists from a dead process, the server
    unlinks it and recreates. If the socket is actively held by a live
    process, the server fails with address-in-use.
-   If two servers start concurrently for the same service name, one may
-   lose the probe/bind race and fail with address-in-use. The contract is
-   one owner per service endpoint.
+   If two servers start concurrently for the same service name, exactly
+   one gets the lock; the other fails with address-in-use. The contract
+   is one owner per service endpoint.
 
 2. **Client**: connects to the socket path. The OS delivers a connected
    SEQPACKET file descriptor.
@@ -181,11 +182,38 @@ client must close that session and reconnect baseline-only. If a later reconnect
 larger capacities, it establishes a new session with a new `session_id`
 and therefore a different SHM file path.
 
+## Interrupted system calls
+
+`send()`, `sendmsg()` and `recv()` calls that fail with `EINTR` are
+retried inside the transport. A SEQPACKET call moves a whole message or
+nothing, so a retry can neither duplicate nor split a message. Signals
+delivered to the process therefore never surface as send/receive
+failures.
+
 ## Stale endpoint recovery
+
+### Endpoint lock
+
+- Before it touches the socket path, the server takes an exclusive,
+  non-blocking `flock` on `{run_dir}/{service_name}.lock`. The file is
+  created owner-only (0600) with `O_CLOEXEC | O_NOFOLLOW`.
+- If another listener holds the lock, the server fails with
+  address-in-use. This closes the window between one server's `bind()`
+  and `listen()`, where a connect probe would see a refused socket and
+  unlink a live endpoint.
+- The listener holds the lock for its whole life and releases it after
+  it unlinks the socket at close. The kernel releases it when the
+  process dies. The lock file itself is never deleted: deleting it would
+  let a server that already opened the old file and a server that
+  creates a new one both hold "the" lock.
+- All three implementations use the same lock file, so C, Rust and Go
+  servers exclude each other.
 
 ### Socket file
 
-- Server checks if the socket path exists before bind.
+- Server checks if the socket path exists before bind. The connect
+  probe below stays as a guard against servers of older versions,
+  which take no lock.
 - If it exists: attempt to connect to it. If connection succeeds, a
   live server owns it — fail with address-in-use. If connection fails
   with ENOENT, nothing is there. Any other connect failure

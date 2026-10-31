@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -723,6 +724,68 @@ static void test_ping_pong(void)
     pthread_join(tid, NULL);
     cleanup_socket(svc);
 }
+
+#ifdef NIPC_TEST_EINTR_WRAP
+#include "uds_eintr_wrap.h"
+
+/* A signal that interrupts a socket call before data moved must not fail
+ * the handshake or the session: every send, sendmsg and recv below fails
+ * once with EINTR first. */
+static void test_eintr_retried(void)
+{
+    printf("Test: EINTR on send, sendmsg and recv is retried\n");
+    const char *svc = "test_eintr";
+    cleanup_socket(svc);
+
+    server_ctx_t sctx = {
+        .service      = svc,
+        .config       = default_server_config(),
+        .accept_count = 1,
+        .echo_count   = 1,
+    };
+    pthread_t tid = start_echo_server(&sctx);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    /* HELLO and HELLO_ACK go through send and recv, the request and the
+     * response through sendmsg and recv. */
+    uds_eintr_wrap_set(2, 2, 4);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect survives EINTR", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        uint8_t payload[] = {0x05, 0x06};
+        nipc_header_t hdr = {
+            .kind       = NIPC_KIND_REQUEST,
+            .code       = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = 7,
+        };
+        err = nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+        check("send survives EINTR", err == NIPC_UDS_OK);
+
+        uint8_t rbuf[4096];
+        nipc_header_t rhdr;
+        const void *rpayload;
+        size_t rpayload_len;
+        err = nipc_uds_receive(&session, rbuf, sizeof(rbuf),
+                                &rhdr, &rpayload, &rpayload_len);
+        check("receive survives EINTR", err == NIPC_UDS_OK);
+        check("response matches",
+              err == NIPC_UDS_OK && rhdr.message_id == 7 &&
+              rpayload_len == sizeof(payload) &&
+              memcmp(rpayload, payload, sizeof(payload)) == 0);
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    check("every injected EINTR was hit", uds_eintr_wrap_pending() == 0);
+    uds_eintr_wrap_set(0, 0, 0);
+    cleanup_socket(svc);
+}
+#endif
 
 /* ------------------------------------------------------------------ */
 /*  Test 2: Multi-client concurrent sessions                           */
@@ -2438,6 +2501,85 @@ static void test_stale_live_server(void)
     cleanup_socket(svc);
 }
 
+/* A server between bind() and listen() refuses connects just like a dead
+ * server's leftover socket file. A second server starting in that window
+ * must not take the endpoint over: it fails with ADDR_IN_USE, and the
+ * first server stays reachable. */
+typedef struct {
+    const char *service;
+    int bound;
+    int release;
+    int listened;
+    nipc_uds_error_t err;
+    nipc_uds_listener_t listener;
+} held_listen_t;
+
+static void hold_after_bind(void *user)
+{
+    held_listen_t *held = (held_listen_t *)user;
+    test_flag_set(&held->bound);
+    (void)test_flag_wait(&held->release);
+}
+
+static void *held_listen_thread(void *arg)
+{
+    held_listen_t *held = (held_listen_t *)arg;
+    nipc_uds_server_config_t scfg = default_server_config();
+    held->err = nipc_uds_listen(TEST_RUN_DIR, held->service, &scfg,
+                                &held->listener);
+    test_flag_set(&held->listened);
+    return NULL;
+}
+
+static void test_listen_excludes_starting_server(void)
+{
+    printf("Test: a server between bind and listen keeps its endpoint\n");
+    const char *svc = "test_listen_window";
+    cleanup_socket(svc);
+
+    held_listen_t held = {.service = svc};
+    nipc_uds_set_listen_hook_for_tests(hold_after_bind, &held);
+    pthread_t tid;
+    pthread_create(&tid, NULL, held_listen_thread, &held);
+    check("first server bound", test_flag_wait(&held.bound));
+    nipc_uds_set_listen_hook_for_tests(NULL, NULL);
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_uds_listener_t second;
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &second);
+    check("second server gets ADDR_IN_USE", err == NIPC_UDS_ERR_ADDR_IN_USE);
+    if (err == NIPC_UDS_OK)
+        nipc_uds_close_listener(&second);
+
+    test_flag_set(&held.release);
+    check("first server listens", test_flag_wait(&held.listened));
+    pthread_join(tid, NULL);
+    check("first listen ok", held.err == NIPC_UDS_OK);
+
+    if (held.err == NIPC_UDS_OK) {
+        /* A connect to the endpoint must reach the first server. */
+        struct sockaddr_un addr = {.sun_family = AF_UNIX};
+        snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/%s.sock",
+                 TEST_RUN_DIR, svc);
+        int cfd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+        check("connect to endpoint",
+              cfd >= 0 && connect(cfd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+        struct pollfd pfd = {.fd = held.listener.fd, .events = POLLIN};
+        check("first server receives the connection",
+              poll(&pfd, 1, (int)TEST_WAIT_LIMIT_MS) == 1);
+        if (cfd >= 0)
+            close(cfd);
+        nipc_uds_close_listener(&held.listener);
+    }
+
+    /* After the owner closed, the endpoint can be taken again. */
+    err = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &second);
+    check("endpoint free after close", err == NIPC_UDS_OK);
+    if (err == NIPC_UDS_OK)
+        nipc_uds_close_listener(&second);
+    cleanup_socket(svc);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Coverage: listen on invalid path (bind failure)                     */
 /* ------------------------------------------------------------------ */
@@ -3228,6 +3370,9 @@ int main(void)
     printf("=== L1 POSIX UDS SEQPACKET Transport Tests ===\n\n");
 
     test_ping_pong();              printf("\n");
+#ifdef NIPC_TEST_EINTR_WRAP
+    test_eintr_retried();          printf("\n");
+#endif
     test_multi_client();           printf("\n");
     test_pipelining();             printf("\n");
     test_chunking();               printf("\n");
@@ -3257,6 +3402,7 @@ int main(void)
     test_receive_payload_exceeds_limit(); printf("\n");
     test_receive_unknown_message_id(); printf("\n");
     test_stale_live_server();      printf("\n");
+    test_listen_excludes_starting_server(); printf("\n");
     test_listen_bind_failure();    printf("\n");
     test_batch_corrupt_dir();      printf("\n");
     test_connect_malformed_hello_ack(); printf("\n");

@@ -183,34 +183,46 @@ func (c *Client) transportSend(hdr *protocol.Header, payload []byte) error {
 				c.noteRequestCapacity(payloadLen)
 				return protocol.ErrOverflow
 			}
-			return protocol.ErrTruncated
+			return c.shmSendFailure()
 		}
 		return nil
 	}
 
 	// UDS path
 	if c.session == nil {
-		return protocol.ErrTruncated
+		return protocol.ErrTransport
 	}
 	if err := c.session.Send(hdr, payload); err != nil {
 		if errors.Is(err, posix.ErrLimitExceeded) {
 			c.noteRequestCapacity(payloadLen)
 			return protocol.ErrOverflow
 		}
-		return c.socketFailure(err)
+		return c.socketFailure(err, protocol.ErrTransport)
 	}
 	return nil
 }
 
 // socketFailure maps a socket send/recv failure. The transport reports EOF,
 // EPIPE and ECONNRESET as plain send/recv failures, so the session probe tells
-// a gone server apart; protocol errors keep their own meaning.
-func (c *Client) socketFailure(err error) error {
-	if (errors.Is(err, posix.ErrSend) || errors.Is(err, posix.ErrRecv)) &&
-		c.session != nil && peerDisconnected(c.session.Fd()) {
+// a gone server apart from any other I/O failure; protocol errors keep their
+// own meaning.
+func (c *Client) socketFailure(err error, otherwise error) error {
+	if errors.Is(err, posix.ErrSend) || errors.Is(err, posix.ErrRecv) {
+		if c.session != nil && peerDisconnected(c.session.Fd()) {
+			return protocol.ErrDisconnected
+		}
+		return protocol.ErrTransport
+	}
+	return otherwise
+}
+
+// shmSendFailure maps a failed SHM send: a disconnect when the session probe
+// says the server is gone, a transport failure otherwise.
+func (c *Client) shmSendFailure() error {
+	if c.session != nil && peerDisconnected(c.session.Fd()) {
 		return protocol.ErrDisconnected
 	}
-	return protocol.ErrTruncated
+	return protocol.ErrTransport
 }
 
 func (c *Client) transportReceive() (protocol.Header, []byte, error) {
@@ -251,7 +263,10 @@ func (c *Client) transportReceiveWithControl(timeoutMs uint32, abortCh <-chan st
 					}
 					continue
 				}
-				return protocol.Header{}, nil, protocol.ErrTruncated
+				if errors.Is(err, posix.ErrShmMsgTooLarge) {
+					return protocol.Header{}, nil, protocol.ErrOverflow
+				}
+				return protocol.Header{}, nil, protocol.ErrTransport
 			}
 			if mlen < protocol.HeaderSize {
 				return protocol.Header{}, nil, protocol.ErrTruncated
@@ -267,7 +282,7 @@ func (c *Client) transportReceiveWithControl(timeoutMs uint32, abortCh <-chan st
 
 	// UDS path: receive returns (Header, payload, error)
 	if c.session == nil {
-		return protocol.Header{}, nil, protocol.ErrTruncated
+		return protocol.Header{}, nil, protocol.ErrTransport
 	}
 
 	hdr, payload, err := c.session.ReceiveTimeout(scratch, timeoutMs, abortCh)
@@ -278,7 +293,10 @@ func (c *Client) transportReceiveWithControl(timeoutMs uint32, abortCh <-chan st
 		if errors.Is(err, posix.ErrAborted) {
 			return protocol.Header{}, nil, protocol.ErrAborted
 		}
-		return protocol.Header{}, nil, c.socketFailure(err)
+		if errors.Is(err, posix.ErrLimitExceeded) {
+			return protocol.Header{}, nil, protocol.ErrOverflow
+		}
+		return protocol.Header{}, nil, c.socketFailure(err, protocol.ErrTruncated)
 	}
 	return hdr, payload, nil
 }

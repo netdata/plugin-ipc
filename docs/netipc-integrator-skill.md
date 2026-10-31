@@ -372,6 +372,10 @@ Netdata-specific integration rules:
 - stale socket/SHM paths from dead processes are reclaimed automatically on
   server start, regardless of run-dir permissions; only a live server's
   endpoint blocks a new server (address-in-use)
+- on POSIX each server also holds an exclusive lock on
+  `{run_dir}/{service}.lock` for its whole life; the file stays after the
+  server exits and must not be deleted while a server may be starting, so
+  two servers that start at the same time cannot both claim the endpoint
 - if provider and consumer do not agree on auth token or run dir, the client
   will stay in `AUTH_FAILED` or `NOT_FOUND`
 
@@ -716,6 +720,10 @@ L2 typed calls are also bounded:
   `NipcError::Disconnected`, Go `protocol.ErrDisconnected`) after the one
   reconnect retry also fails; earlier releases reported it as `TRUNCATED` /
   "buffer too short"
+- any other send/receive I/O failure is a distinct transport error (C
+  `NIPC_ERR_TRANSPORT`, Rust `NipcError::Transport`, Go
+  `protocol.ErrTransport`); earlier releases reported it as `TRUNCATED` or
+  `NOT_READY`. `TRUNCATED` now means a short or corrupt message only
 - SHM calls notice a crashed server within about 100 ms instead of waiting for
   the call timeout, and SHM servers free the worker of a crashed client within
   about 100 ms; both rely on the session socket/pipe, so do not close or

@@ -106,6 +106,7 @@ typedef enum {
   NIPC_ERR_TIMEOUT,        /* synchronous call deadline expired */
   NIPC_ERR_ABORTED,        /* synchronous call aborted by caller */
   NIPC_ERR_DISCONNECTED,   /* peer closed the session or its process exited */
+  NIPC_ERR_TRANSPORT,      /* send/receive I/O failed, not a peer disconnect */
 } nipc_error_t;
 
 /* ------------------------------------------------------------------ */

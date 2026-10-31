@@ -287,6 +287,15 @@ endif()
 if(NOT NETIPC_WINDOWS_RUNTIME)
     add_executable(test_uds tests/fixtures/c/test_uds.c)
     target_link_libraries(test_uds PRIVATE netipc_uds netipc_protocol Threads::Threads)
+    target_compile_definitions(test_uds PRIVATE NIPC_INTERNAL_TESTING=1)
+    if(NOT APPLE)
+        # Deterministic EINTR injection; ld64 has no --wrap.
+        target_sources(test_uds PRIVATE tests/fixtures/c/uds_eintr_wrap.c)
+        target_compile_definitions(test_uds PRIVATE NIPC_TEST_EINTR_WRAP=1)
+        target_link_options(test_uds PRIVATE
+            "LINKER:--wrap=send" "LINKER:--wrap=sendmsg" "LINKER:--wrap=__sendmsg64"
+            "LINKER:--wrap=recv")
+    endif()
     add_test(NAME test_uds COMMAND test_uds)
     set_tests_properties(test_uds PROPERTIES TIMEOUT 30)
 

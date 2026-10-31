@@ -221,8 +221,8 @@ func TestUdsListenFailsWhenRunDirMissing(t *testing.T) {
 	if !errors.Is(err, ErrSocket) {
 		t.Fatalf("Listen(missing runDir) = %v, want ErrSocket", err)
 	}
-	if !containsErrText(err, "bind:") {
-		t.Fatalf("Listen(missing runDir) = %v, want bind failure detail", err)
+	if !containsErrText(err, "lock open:") {
+		t.Fatalf("Listen(missing runDir) = %v, want lock open failure detail", err)
 	}
 }
 
@@ -1017,4 +1017,79 @@ func TestPacketSizeLimitMatchesKernelDatagramLimit(t *testing.T) {
 		syscall.Close(fds[0])
 		syscall.Close(fds[1])
 	}
+}
+
+// A server between bind() and listen() refuses connects just like a dead
+// server's leftover socket file. A second server starting in that window
+// must not take the endpoint over: it fails with ErrAddrInUse, and the
+// first server stays reachable.
+func TestListenExcludesStartingServer(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	path := filepath.Join(runDir, service+".sock")
+	_ = os.Remove(path)
+
+	bound := make(chan struct{})
+	release := make(chan struct{})
+	hook := func(p string) {
+		if p != path {
+			return
+		}
+		close(bound)
+		<-release
+	}
+	listenHook.Store(&hook)
+
+	type result struct {
+		l   *Listener
+		err error
+	}
+	first := make(chan result, 1)
+	go func() {
+		l, err := Listen(runDir, service, defaultServerConfig())
+		first <- result{l, err}
+	}()
+	select {
+	case <-bound:
+	case <-time.After(10 * time.Second):
+		t.Fatal("first server never bound")
+	}
+	listenHook.Store(nil)
+
+	second, err := Listen(runDir, service, defaultServerConfig())
+	if !errors.Is(err, ErrAddrInUse) {
+		if second != nil {
+			second.Close()
+		}
+		close(release)
+		<-first
+		t.Fatalf("second server error = %v, want ErrAddrInUse", err)
+	}
+
+	close(release)
+	r := <-first
+	if r.err != nil {
+		t.Fatalf("first listen: %v", r.err)
+	}
+
+	// A connect to the endpoint must reach the first server.
+	cfd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+	if err != nil {
+		t.Fatalf("socket: %v", err)
+	}
+	defer syscall.Close(cfd)
+	if err := syscall.Connect(cfd, &syscall.SockaddrUnix{Name: path}); err != nil {
+		t.Fatalf("connect to endpoint: %v", err)
+	}
+	if err := pollReadableForReceive(r.l.Fd(), newReceiveWait(10000, nil)); err != nil {
+		t.Fatalf("first server never received the connection: %v", err)
+	}
+	r.l.Close()
+
+	// After the owner closed, the endpoint can be taken again.
+	again, err := Listen(runDir, service, defaultServerConfig())
+	if err != nil {
+		t.Fatalf("endpoint not free after close: %v", err)
+	}
+	again.Close()
 }

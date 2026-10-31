@@ -102,6 +102,7 @@ var (
 	ErrAborted       = errors.New("synchronous call aborted")
 	ErrDisconnected  = errors.New("peer disconnected")
 	ErrNotReady      = errors.New("client not ready")
+	ErrTransport     = errors.New("transport I/O failed")
 )
 
 // ---------------------------------------------------------------------------

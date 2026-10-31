@@ -18,30 +18,53 @@ type Listener struct {
 	config        ServerConfig
 	path          string
 	nextSessionID atomic.Uint64
+	// lock holds {serviceName}.lock flock'ed until Close.
+	lock *os.File
 }
 
+// listenHook, when set by tests, runs inside Listen between bind() and
+// listen(), with the socket path.
+var listenHook atomic.Pointer[func(path string)]
+
 // Listen creates a listener on {runDir}/{serviceName}.sock.
-// Performs stale endpoint recovery.
+// It first takes an exclusive flock on {runDir}/{serviceName}.lock, held
+// until Close; a held lock means another server owns the endpoint
+// (ErrAddrInUse). With the lock held, an existing socket file no live
+// server accepts on is stale and is replaced.
 func Listen(runDir, serviceName string, config ServerConfig) (*Listener, error) {
 	path, err := buildSocketPath(runDir, serviceName)
 	if err != nil {
 		return nil, err
 	}
 
+	lock, err := acquireEndpointLock(runDir, serviceName)
+	if err != nil {
+		return nil, err
+	}
+
+	// The probe still guards against a live server that takes no lock (an
+	// older library version).
 	stale := checkAndRecoverStale(path)
 	if stale == staleLiveServer {
+		_ = lock.Close()
 		return nil, ErrAddrInUse
 	}
 
 	fd, err := seqpacketSocket()
 	if err != nil {
+		_ = lock.Close()
 		return nil, wrapErr(ErrSocket, err.Error())
 	}
 
 	sa := &syscall.SockaddrUnix{Name: path}
 	if err := syscall.Bind(fd, sa); err != nil {
 		_ = syscall.Close(fd)
+		_ = lock.Close()
 		return nil, wrapErr(ErrSocket, "bind: "+err.Error())
+	}
+
+	if hook := listenHook.Load(); hook != nil {
+		(*hook)(path)
 	}
 
 	backlog := config.Backlog
@@ -52,6 +75,7 @@ func Listen(runDir, serviceName string, config ServerConfig) (*Listener, error) 
 	if err := syscall.Listen(fd, backlog); err != nil {
 		_ = syscall.Close(fd)
 		_ = os.Remove(path)
+		_ = lock.Close()
 		return nil, wrapErr(ErrSocket, "listen: "+err.Error())
 	}
 
@@ -59,6 +83,7 @@ func Listen(runDir, serviceName string, config ServerConfig) (*Listener, error) 
 		fd:     fd,
 		config: config,
 		path:   path,
+		lock:   lock,
 	}, nil
 }
 
@@ -163,8 +188,10 @@ func (l *Listener) Close() {
 	l.mu.Lock()
 	fd := l.fd
 	path := l.path
+	lock := l.lock
 	l.fd = -1
 	l.path = ""
+	l.lock = nil
 	l.mu.Unlock()
 
 	if fd >= 0 {
@@ -172,5 +199,9 @@ func (l *Listener) Close() {
 	}
 	if path != "" {
 		_ = os.Remove(path)
+	}
+	// Release the endpoint only after its socket file is gone.
+	if lock != nil {
+		_ = lock.Close()
 	}
 }
