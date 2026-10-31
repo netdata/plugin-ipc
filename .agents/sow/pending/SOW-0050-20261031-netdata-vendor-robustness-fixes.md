@@ -4,7 +4,7 @@
 
 Status: open
 
-Sub-state: waiting for SOW-0043 to complete; vendoring runs after both robustness fix SOWs land.
+Sub-state: SOW-0043 and SOW-0044 are done; runs after SOW-0045, SOW-0058 and the pre-vendoring benchmark run (user ordering 2026-10-31).
 
 ## Requirements
 
