@@ -23,6 +23,10 @@ Facts:
 - Netdata consumes NetIPC through vendored copies of `src/libnetdata/netipc`, `src/crates/netipc` and `src/go/pkg/netipc` (`vendor-to-netdata.sh`, `diff-netdata-vendor.sh`).
 - The current Netdata consumers are C on Linux using SHM_FUTEX with a 5 s call timeout (survey recorded in SOW-0044, `ktsaou/netdata @ ae9113f2cc`). N5 (SHM client waits the full timeout after the server dies) affects them today.
 - `.agents/skills/project-netdata-vendoring/SKILL.md` is mandatory before touching a Netdata checkout.
+- Netdata consumer fixes carried from SOW-0021's downstream plan (checked 2026-10-31 against `ktsaou/netdata @ ae9113f2cc`; the statuses are already vendored there, the consumers were never adapted):
+  - confirmed bug: `src/collectors/network-viewer.plugin/network-viewer-apps-lookup-client.c:503-537` special-cases only `NIPC_PID_LOOKUP_UNKNOWN`. An `NIPC_PID_LOOKUP_OVERSIZED_ITEM` item carries `cgroup_status == KNOWN (0)`, `starttime == 0` and empty strings (`docs/codec-apps-lookup.md`, "Field Semantics"), so it is cached as a known PID with empty data. It must be handled as not enriched and not cached; an escaped `PAYLOAD_EXCEEDED` must be treated as a contract failure, not as data;
+  - `src/collectors/apps.plugin/apps-cgroups-lookup-client.c:381-403`: `NIPC_CGROUP_LOOKUP_OVERSIZED_ITEM` already ends as a final non-retry state (only `UNKNOWN_RETRY_LATER` is re-requested) but is counted as a retry miss; count it separately;
+  - `src/collectors/cgroups.plugin/cgroup-lookup-test/cgroup-lookup-test.c`: print names for `PAYLOAD_EXCEEDED` and `OVERSIZED_ITEM`.
 - SOW-0035 (2026-10-31) moved plugin-ipc to rustfmt style edition 2024, formatting-only. Its Netdata half (the same formatting in the vendored `src/crates/netipc/`) is delivered by this vendoring; the vendored copy must pass `rustfmt --edition 2024 --check`. Netdata's workspace already uses edition 2024 and has no `rustfmt.toml` (`ktsaou/netdata @ ae9113f2cc`, `src/crates/Cargo.toml:66`).
 
 Inferences:
