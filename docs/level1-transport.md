@@ -512,7 +512,12 @@ batch level (one batch message in flight containing multiple items) or fall
 back to the baseline transport.
 
 FreeBSD and macOS do not have SHM backends. They always use the baseline UDS
-transport.
+transport: on those platforms the POSIX handshake masks both the client's
+offered profiles and the server's supported and preferred profiles to the
+baseline bit, whatever the caller configured, so a misconfigured peer can
+never negotiate an SHM profile there. The SHM API still exists in C and Go and
+reports "unsupported"; the Rust crate does not compile the POSIX SHM module
+outside Linux.
 
 ### Transport selection
 

@@ -41,6 +41,7 @@ static void test_typed_request_overflow_reconnect_guards(void)
         stop_server_drain(&sctx, tid);
     }
 
+#if defined(__linux__)
     {
         char service[64];
         unique_service(service, sizeof(service), "svc_typed_hybrid_req_overflow");
@@ -78,7 +79,9 @@ static void test_typed_request_overflow_reconnect_guards(void)
         nipc_client_close(&client);
         stop_server_drain(&sctx, tid);
     }
+#endif
 
+#if defined(__linux__)
     {
         char service[64];
         unique_service(service, sizeof(service), "svc_typed_hybrid_no_growth");
@@ -113,6 +116,7 @@ static void test_typed_request_overflow_reconnect_guards(void)
         nipc_client_close(&client);
         stop_server_drain(&sctx, tid);
     }
+#endif
 }
 
 static void test_typed_response_overflow_reconnect_guards(void)
@@ -156,6 +160,7 @@ static void test_typed_response_overflow_reconnect_guards(void)
         stop_server_drain(&sctx, tid);
     }
 
+#if defined(__linux__)
     {
         char service[64];
         unique_service(service, sizeof(service), "svc_typed_hybrid_resp_overflow");
@@ -192,6 +197,7 @@ static void test_typed_response_overflow_reconnect_guards(void)
         nipc_client_close(&client);
         stop_server_drain(&sctx, tid);
     }
+#endif
 }
 
 static void test_typed_dispatch_overflow_reconnect_guard(void)

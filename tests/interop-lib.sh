@@ -57,14 +57,17 @@ interop_command_binary() {
 # Report whether PID still runs BINARY. A server that exited may have been
 # reaped already and its PID reused, so a kill must check identity first.
 # Under a binfmt interpreter (QEMU for the cross targets) /proc/PID/exe names
-# the interpreter, and the program path is argv[1].
+# the interpreter, and the program path is argv[1]. Systems without a Linux
+# style /proc (FreeBSD, macOS) report the command line through ps.
 interop_pid_runs() {
     local pid="$1"
     local binary="${2%.exe}"
     local exe=""
     local -a argv=()
     [[ -n "$binary" ]] || return 1
-    if [[ -r "/proc/$pid/exename" ]]; then
+    if [[ ! -d "/proc/$pid" ]]; then
+        read -r exe _ < <(ps -o args= -p "$pid" 2>/dev/null) || exe=""
+    elif [[ -r "/proc/$pid/exename" ]]; then
         exe="$(cat "/proc/$pid/exename" 2>/dev/null)" || exe=""
     else
         exe="$(readlink "/proc/$pid/exe" 2>/dev/null)" || exe=""

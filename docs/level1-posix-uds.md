@@ -101,14 +101,18 @@ fallback.
 SEQPACKET has a kernel-imposed maximum message size. On Linux a datagram
 larger than the sender's `SO_SNDBUF` value (as reported by
 `getsockopt`) minus 32 bytes of kernel accounting overhead fails with
-`EMSGSIZE`, and very large buffers also fail with `ENOBUFS` near 1 MiB.
+`EMSGSIZE`, and very large buffers also fail with `ENOBUFS` near 1 MiB. On
+FreeBSD the largest datagram equals `SO_SNDBUF` exactly (no overhead; the
+default is 8192 bytes, `net.local.seqpacket.maxseqpacket`).
 
 Each side derives the packet size it proposes as:
 
 ```
-limit    = min(SO_SNDBUF - 32, 262144)   (65536 if SO_SNDBUF cannot be read)
+limit    = min(SO_SNDBUF - overhead, 262144)   (65536 if SO_SNDBUF cannot be read)
 proposal = configured packet size, if non-zero and below limit; else limit
 ```
+
+`overhead` is 0 on FreeBSD and 32 elsewhere.
 
 A configured packet size above the limit is clamped silently; it is a
 preference, not a requirement.

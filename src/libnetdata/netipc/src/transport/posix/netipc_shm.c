@@ -19,6 +19,77 @@
 
 #include "netipc/netipc_shm.h"
 
+#if !defined(__linux__)
+
+/* POSIX SHM needs Linux futexes. The handshake never selects an SHM profile
+ * on other systems, so these entry points only report that. */
+
+nipc_shm_error_t nipc_shm_server_create(const char *run_dir,
+                                        const char *service_name,
+                                        uint64_t session_id,
+                                        uint32_t req_capacity,
+                                        uint32_t resp_capacity,
+                                        nipc_shm_ctx_t *out) {
+  (void)run_dir;
+  (void)service_name;
+  (void)session_id;
+  (void)req_capacity;
+  (void)resp_capacity;
+  (void)out;
+  return NIPC_SHM_ERR_UNSUPPORTED;
+}
+
+void nipc_shm_destroy(nipc_shm_ctx_t *ctx) { (void)ctx; }
+
+nipc_shm_error_t nipc_shm_client_attach(const char *run_dir,
+                                        const char *service_name,
+                                        uint64_t session_id,
+                                        nipc_shm_ctx_t *out) {
+  (void)run_dir;
+  (void)service_name;
+  (void)session_id;
+  (void)out;
+  return NIPC_SHM_ERR_UNSUPPORTED;
+}
+
+void nipc_shm_close(nipc_shm_ctx_t *ctx) { (void)ctx; }
+
+nipc_shm_error_t nipc_shm_send(nipc_shm_ctx_t *ctx, const void *msg,
+                               size_t msg_len) {
+  (void)ctx;
+  (void)msg;
+  (void)msg_len;
+  return NIPC_SHM_ERR_UNSUPPORTED;
+}
+
+nipc_shm_error_t nipc_shm_receive(nipc_shm_ctx_t *ctx, void *buf,
+                                  size_t buf_size, size_t *msg_len_out,
+                                  uint32_t timeout_ms) {
+  (void)ctx;
+  (void)buf;
+  (void)buf_size;
+  (void)msg_len_out;
+  (void)timeout_ms;
+  return NIPC_SHM_ERR_UNSUPPORTED;
+}
+
+void nipc_shm_cleanup_stale(const char *run_dir, const char *service_name) {
+  (void)run_dir;
+  (void)service_name;
+}
+
+#ifdef NIPC_INTERNAL_TESTING
+void nipc_shm_test_fault_set(nipc_shm_test_fault_site_t site,
+                             int error_number) {
+  (void)site;
+  (void)error_number;
+}
+
+void nipc_shm_test_fault_clear(void) {}
+#endif
+
+#else /* __linux__ */
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -931,3 +1002,5 @@ void nipc_shm_cleanup_stale(const char *run_dir, const char *service_name)
 
     closedir(dir);
 }
+
+#endif /* __linux__ */

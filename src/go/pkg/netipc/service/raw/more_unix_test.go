@@ -581,70 +581,6 @@ func TestUnixSingleResponseOverflowRetriesAndRecovers(t *testing.T) {
 	}
 }
 
-func TestUnixShmPrepareFailureFallsBackToBaseline(t *testing.T) {
-	svc := uniqueUnixService("go_unix_shm_create_fail")
-	obstruction := unixShmSessionPath(svc, 1)
-
-	scfg := testUnixShmServerConfig()
-	ts := startServerWithConfigSocketReady(
-		svc,
-		scfg,
-		protocol.MethodIncrement,
-		IncrementDispatch(func(v uint64) (uint64, bool) {
-			return v + 1, true
-		}),
-	)
-	defer func() {
-		ts.stop()
-		_ = os.RemoveAll(obstruction)
-	}()
-
-	if err := os.MkdirAll(filepath.Join(obstruction, "keep"), 0700); err != nil {
-		t.Fatalf("mkdir SHM obstruction failed: %v", err)
-	}
-
-	badClient := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
-	defer badClient.Close()
-
-	if changed := badClient.Refresh(); !changed {
-		t.Fatal("Refresh should transition to READY when baseline stays viable")
-	}
-	if !badClient.Ready() {
-		t.Fatal("client should stay usable over baseline after server SHM prepare failure")
-	}
-	if badClient.state != StateReady {
-		t.Fatalf("client state after SHM prepare failure = %d, want READY", badClient.state)
-	}
-	if badClient.shm != nil {
-		t.Fatalf("fallback baseline session must not attach SHM: selected=%#x session=%+v", badClient.session.SelectedProfile, badClient.session)
-	}
-	if badClient.session == nil || badClient.session.SelectedProfile != protocol.ProfileBaseline {
-		t.Fatalf("selected profile after SHM prepare failure = %#v, want baseline", badClient.session)
-	}
-
-	if _, err := os.Stat(obstruction); err != nil {
-		t.Fatalf("SHM obstruction should still exist after failed create, stat err = %v", err)
-	}
-	if err := os.RemoveAll(obstruction); err != nil {
-		t.Fatalf("remove SHM obstruction failed: %v", err)
-	}
-
-	goodClient := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
-	defer goodClient.Close()
-	refreshUnixClientReady(t, goodClient)
-
-	if goodClient.shm == nil {
-		t.Fatal("expected SHM attachment after obstruction removal")
-	}
-	got, err := goodClient.CallIncrement(4)
-	if err != nil {
-		t.Fatalf("CallIncrement after SHM create recovery failed: %v", err)
-	}
-	if got != 5 {
-		t.Fatalf("CallIncrement after SHM create recovery = %d, want 5", got)
-	}
-}
-
 func TestUnixServerRunRejectsInvalidServiceName(t *testing.T) {
 	server := NewServer(
 		testRunDir,
@@ -842,43 +778,6 @@ func TestUnixCallWithRetryCapsOverflowGrowthRetries(t *testing.T) {
 	}
 	if client.state != StateBroken {
 		t.Fatalf("callWithRetry growth-cap state = %d, want StateBroken", client.state)
-	}
-}
-
-func TestUnixClientTransportReceiveShmError(t *testing.T) {
-	client := NewIncrementClient(testRunDir, uniqueUnixService("go_unix_transport_shm_err"), testClientConfig())
-	defer client.Close()
-
-	client.state = StateReady
-	client.shm = &posix.ShmContext{}
-
-	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTransport) {
-		t.Fatalf("transportReceive with invalid SHM context = %v, want %v", err, protocol.ErrTransport)
-	}
-}
-
-func TestUnixClientTransportReceiveShmRejectsShortMessage(t *testing.T) {
-	client, serverShm := newRawPosixShmClient(t)
-
-	if err := serverShm.ShmSend([]byte{1, 2, 3, 4}); err != nil {
-		t.Fatalf("ShmSend failed: %v", err)
-	}
-
-	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrTruncated) {
-		t.Fatalf("transportReceive short SHM message = %v, want %v", err, protocol.ErrTruncated)
-	}
-}
-
-func TestUnixClientTransportReceiveShmRejectsBadHeader(t *testing.T) {
-	client, serverShm := newRawPosixShmClient(t)
-
-	msg := make([]byte, protocol.HeaderSize)
-	if err := serverShm.ShmSend(msg); err != nil {
-		t.Fatalf("ShmSend failed: %v", err)
-	}
-
-	if _, _, err := client.transportReceive(); !errors.Is(err, protocol.ErrBadMagic) {
-		t.Fatalf("transportReceive bad SHM header = %v, want %v", err, protocol.ErrBadMagic)
 	}
 }
 

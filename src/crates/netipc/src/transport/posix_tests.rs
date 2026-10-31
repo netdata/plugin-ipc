@@ -2116,6 +2116,12 @@ fn test_profile_preference_selects_shm_futex() {
     ensure_run_dir();
     let svc = unique_service("rs_pref_prof");
     cleanup_socket(&svc);
+    // Without POSIX SHM the platform limit leaves baseline on both sides.
+    let want = if cfg!(target_os = "linux") {
+        protocol::PROFILE_SHM_FUTEX
+    } else {
+        PROFILE_BASELINE
+    };
 
     let svc_clone = svc.clone();
     let scfg = ServerConfig {
@@ -2126,7 +2132,7 @@ fn test_profile_preference_selects_shm_futex() {
     let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
     let server_thread = thread::spawn(move || {
         let session = listener.accept().expect("accept");
-        assert_eq!(session.selected_profile, protocol::PROFILE_SHM_FUTEX);
+        assert_eq!(session.selected_profile, want);
     });
 
     let ccfg = ClientConfig {
@@ -2135,7 +2141,7 @@ fn test_profile_preference_selects_shm_futex() {
         ..default_client_config()
     };
     let session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
-    assert_eq!(session.selected_profile, protocol::PROFILE_SHM_FUTEX);
+    assert_eq!(session.selected_profile, want);
 
     drop(session);
     server_thread.join().expect("server join");
@@ -2246,6 +2252,82 @@ fn test_connect_rejects_bad_hello_ack_kind() {
 
     server.join().expect("server join");
     cleanup_socket(&svc);
+}
+
+#[test]
+fn test_connect_rejects_selected_profile_not_offered() {
+    ensure_run_dir();
+    // The client offers baseline only.
+    for (i, selected) in [
+        protocol::PROFILE_SHM_HYBRID,
+        0,
+        PROFILE_BASELINE | protocol::PROFILE_SHM_HYBRID,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let svc = unique_service(&format!("rs_ack_selected_{i}"));
+        cleanup_socket(&svc);
+
+        let fd = raw_listener_fd(&svc);
+        let server = thread::spawn(move || {
+            let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+            assert!(client_fd >= 0, "accept failed: {}", errno());
+
+            let mut buf = [0u8; 128];
+            let n = raw_recv(client_fd, &mut buf).expect("recv hello");
+            let hello = Hello::decode(&buf[HEADER_SIZE..n]).expect("decode hello");
+
+            let ack = HelloAck {
+                layout_version: 1,
+                server_supported_profiles: PROFILE_BASELINE | protocol::PROFILE_SHM_HYBRID,
+                intersection_profiles: PROFILE_BASELINE,
+                selected_profile: selected,
+                agreed_max_request_payload_bytes: hello.max_request_payload_bytes,
+                agreed_max_request_batch_items: hello.max_request_batch_items,
+                agreed_max_response_payload_bytes: hello.max_response_payload_bytes,
+                agreed_max_response_batch_items: hello.max_response_batch_items,
+                agreed_packet_size: hello.packet_size,
+                session_id: 1,
+                ..HelloAck::default()
+            };
+            let mut ack_buf = [0u8; HELLO_ACK_PAYLOAD_SIZE];
+            ack.encode(&mut ack_buf);
+            let hdr = Header {
+                magic: MAGIC_MSG,
+                version: VERSION,
+                header_len: protocol::HEADER_LEN,
+                kind: protocol::KIND_CONTROL,
+                flags: 0,
+                code: protocol::CODE_HELLO_ACK,
+                transport_status: protocol::STATUS_OK,
+                payload_len: HELLO_ACK_PAYLOAD_SIZE as u32,
+                item_count: 1,
+                message_id: 0,
+            };
+            let mut pkt = [0u8; HEADER_SIZE + HELLO_ACK_PAYLOAD_SIZE];
+            hdr.encode(&mut pkt[..HEADER_SIZE]);
+            pkt[HEADER_SIZE..].copy_from_slice(&ack_buf);
+            raw_send(client_fd, &pkt).expect("send ack");
+
+            unsafe {
+                libc::close(client_fd);
+                libc::close(fd);
+            }
+        });
+
+        let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
+            Ok(_) => panic!("HELLO_ACK selecting 0x{selected:x} should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, UdsError::Protocol(msg) if msg.contains("not offered")),
+            "selected 0x{selected:x}: {err:?}"
+        );
+
+        server.join().expect("server join");
+        cleanup_socket(&svc);
+    }
 }
 
 #[test]

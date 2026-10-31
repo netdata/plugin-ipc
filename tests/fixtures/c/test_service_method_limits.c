@@ -40,6 +40,7 @@ static void test_typed_unsupported_method_response_guard(void)
         stop_server_drain(&sctx, tid);
     }
 
+#if defined(__linux__)
     {
         char service[64];
         unique_service(service, sizeof(service), "svc_typed_hybrid_unsupported");
@@ -74,6 +75,7 @@ static void test_typed_unsupported_method_response_guard(void)
         nipc_client_close(&client);
         stop_server_drain(&sctx, tid);
     }
+#endif
 }
 
 int main(void)

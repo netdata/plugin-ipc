@@ -112,6 +112,13 @@ func validHelloAckPacket(status uint16) []byte {
 	}, payload)
 }
 
+// helloAckSelecting is a valid HELLO_ACK whose selected_profile is profile.
+func helloAckSelecting(profile uint32) []byte {
+	ack := validHelloAckPacket(protocol.StatusOK)
+	binary.NativeEndian.PutUint32(ack[protocol.HeaderSize+12:protocol.HeaderSize+16], profile)
+	return ack
+}
+
 func validHelloPacket() []byte {
 	hello := protocol.Hello{
 		LayoutVersion:           1,
@@ -758,6 +765,30 @@ func TestUdsClientHandshakeRejectsMalformedAck(t *testing.T) {
 			},
 			want:     ErrIncompatible,
 			wantText: "ack payload",
+		},
+		{
+			name: "selected profile not offered",
+			packetFn: func() []byte {
+				return helloAckSelecting(protocol.ProfileSHMHybrid)
+			},
+			want:     ErrProtocol,
+			wantText: "selected profile was not offered",
+		},
+		{
+			name: "no selected profile",
+			packetFn: func() []byte {
+				return helloAckSelecting(0)
+			},
+			want:     ErrProtocol,
+			wantText: "selected profile was not offered",
+		},
+		{
+			name: "two selected profiles",
+			packetFn: func() []byte {
+				return helloAckSelecting(protocol.ProfileBaseline | protocol.ProfileSHMHybrid)
+			},
+			want:     ErrProtocol,
+			wantText: "selected profile was not offered",
 		},
 	}
 

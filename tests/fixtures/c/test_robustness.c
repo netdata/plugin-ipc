@@ -38,10 +38,14 @@
 #include "test_sync.h"
 
 #include <dirent.h>
+#include <limits.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#if defined(__FreeBSD__)
+#include <pthread_np.h>
+#endif
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,6 +60,9 @@
 #define TEST_RUN_DIR      "/tmp/nipc_robustness_test"
 #define AUTH_TOKEN        0xDEADBEEFCAFEBABEull
 #define RESPONSE_BUF_SIZE 65536
+
+/* Absolute path of this binary, for re-executing it in helper mode. */
+static char g_self_path[PATH_MAX];
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -106,6 +113,7 @@ static bool join_within(pthread_t tid, unsigned limit_ms)
     return pthread_timedjoin_np(tid, NULL, &ts) == 0;
 }
 
+#if defined(__linux__)
 static int count_shm_files(const char *service)
 {
     DIR *d = opendir(TEST_RUN_DIR);
@@ -123,6 +131,7 @@ static int count_shm_files(const char *service)
     closedir(d);
     return n;
 }
+#endif
 
 /* ------------------------------------------------------------------ */
 /*  Server                                                             */
@@ -326,6 +335,7 @@ static int raw_listener(const char *service)
 /*  Crash helper (child process)                                       */
 /* ------------------------------------------------------------------ */
 
+#if defined(__linux__)
 static int helper_shm_client(const char *service)
 {
     nipc_client_config_t ccfg = client_config(true);
@@ -342,6 +352,7 @@ static int helper_shm_client(const char *service)
     for (;;)
         pause();
 }
+#endif
 
 /* Server whose handler stalls, so a client call is in flight when the
  * parent kills this process. */
@@ -400,7 +411,7 @@ static pid_t spawn_helper(const char *mode, const char *service, int *out_fd)
         dup2(pipefd[1], STDOUT_FILENO);
         close(pipefd[0]);
         close(pipefd[1]);
-        execl("/proc/self/exe", "test_robustness", mode, service, (char *)NULL);
+        execl(g_self_path, "test_robustness", mode, service, (char *)NULL);
         _exit(127);
     }
     close(pipefd[1]);
@@ -426,6 +437,7 @@ static pid_t spawn_helper(const char *mode, const char *service, int *out_fd)
 /*  K1: SHM sessions released after the client leaves                  */
 /* ------------------------------------------------------------------ */
 
+#if defined(__linux__)
 static void test_shm_sessions_released_after_clean_close(void)
 {
     printf("K1: SHM sessions released after clean close\n");
@@ -450,7 +462,9 @@ static void test_shm_sessions_released_after_clean_close(void)
     stop_server_within(&rs, 5000);
     cleanup_all(rs.service);
 }
+#endif
 
+#if defined(__linux__)
 static void test_shm_sessions_released_after_client_crash(void)
 {
     printf("K1: SHM sessions released after client crash\n");
@@ -481,6 +495,7 @@ static void test_shm_sessions_released_after_client_crash(void)
     stop_server_within(&rs, 5000);
     cleanup_all(rs.service);
 }
+#endif
 
 /* ------------------------------------------------------------------ */
 /*  K3: silent client                                                  */
@@ -920,11 +935,13 @@ static void client_notices_crashed_server(bool shm)
     cleanup_all(svc);
 }
 
+#if defined(__linux__)
 static void test_shm_client_notices_crashed_server(void)
 {
     printf("N5: SHM client notices a crashed server before its timeout\n");
     client_notices_crashed_server(true);
 }
+#endif
 
 static void test_uds_client_reports_crashed_server_as_disconnected(void)
 {
@@ -932,6 +949,7 @@ static void test_uds_client_reports_crashed_server_as_disconnected(void)
     client_notices_crashed_server(false);
 }
 
+#if defined(__linux__)
 /* A server at worker capacity completes the handshake, then closes the
  * session and removes the prepared SHM region. The client must not spend
  * its attach retry budget (5 s) on a region that will never appear, and
@@ -968,36 +986,30 @@ static void test_shm_attach_stops_when_server_closes_session(void)
     nipc_client_close(&refused);
     check("server stops", stop_server_within(&rs, 5000));
 }
+#endif
 
 /* Sockets and pipes must not leak into children a consumer forks and
  * execs: an inherited session socket keeps the peer from seeing EOF. */
 static bool all_ipc_fds_cloexec(int *checked)
 {
-    DIR *d = opendir("/proc/self/fd");
-    if (!d)
-        return false;
+    long max_fd = sysconf(_SC_OPEN_MAX);
+    if (max_fd < 0 || max_fd > 4096)
+        max_fd = 4096;
     bool ok = true;
-    struct dirent *e;
-    while ((e = readdir(d)) != NULL) {
-        int fd = atoi(e->d_name);
-        if (fd <= 2 || fd == dirfd(d))
+    for (int fd = 3; fd < (int)max_fd; fd++) {
+        struct stat st;
+        if (fstat(fd, &st) < 0)
             continue;
-        char link[64], target[128];
-        snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
-        ssize_t n = readlink(link, target, sizeof(target) - 1);
-        if (n <= 0)
-            continue;
-        target[n] = '\0';
-        if (strncmp(target, "socket:", 7) != 0 && strncmp(target, "pipe:", 5) != 0)
+        if (!S_ISSOCK(st.st_mode) && !S_ISFIFO(st.st_mode))
             continue;
         (*checked)++;
         int flags = fcntl(fd, F_GETFD);
         if (flags < 0 || !(flags & FD_CLOEXEC)) {
-            printf("    fd %d (%s) is not close-on-exec\n", fd, target);
+            printf("    fd %d (%s) is not close-on-exec\n", fd,
+                   S_ISSOCK(st.st_mode) ? "socket" : "pipe");
             ok = false;
         }
     }
-    closedir(d);
     return ok;
 }
 
@@ -1133,19 +1145,27 @@ static void test_default_packet_size_carries_large_message(void)
 
 int main(int argc, char **argv)
 {
+#if defined(__linux__)
     if (argc == 3 && strcmp(argv[1], "--helper-shm-client") == 0)
         return helper_shm_client(argv[2]);
+#endif
     if (argc == 3 && strcmp(argv[1], "--helper-shm-server") == 0)
         return helper_stalled_server(argv[2], true);
     if (argc == 3 && strcmp(argv[1], "--helper-uds-server") == 0)
         return helper_stalled_server(argv[2], false);
 
+    if (!realpath(argv[0], g_self_path)) {
+        perror("realpath");
+        return 1;
+    }
     signal(SIGPIPE, SIG_IGN);
     mkdir(TEST_RUN_DIR, 0700);
     setvbuf(stdout, NULL, _IOLBF, 0);
 
+#if defined(__linux__)
     test_shm_sessions_released_after_clean_close();
     test_shm_sessions_released_after_client_crash();
+#endif
     test_silent_client_does_not_block_other_clients();
     test_silent_client_does_not_block_shutdown();
     test_silent_client_released_at_handshake_deadline();
@@ -1156,9 +1176,13 @@ int main(int argc, char **argv)
     test_call_honors_timeout_longer_than_100ms();
     test_shutdown_not_blocked_by_non_reading_client();
     test_stop_before_run_is_honored();
+#if defined(__linux__)
     test_shm_client_notices_crashed_server();
+#endif
     test_uds_client_reports_crashed_server_as_disconnected();
+#if defined(__linux__)
     test_shm_attach_stops_when_server_closes_session();
+#endif
     test_ipc_fds_are_cloexec();
     test_default_packet_size_carries_large_message();
 

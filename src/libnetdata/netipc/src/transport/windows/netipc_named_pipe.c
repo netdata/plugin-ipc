@@ -627,6 +627,12 @@ static nipc_np_error_t client_handshake(HANDLE pipe,
   if (perr != NIPC_OK)
     return NIPC_NP_ERR_PROTOCOL;
 
+  /* The server must pick exactly one of the profiles this client offered. */
+  if (ack.selected_profile == 0 ||
+      (ack.selected_profile & (ack.selected_profile - 1)) != 0 ||
+      (ack.selected_profile & hello.supported_profiles) == 0)
+    return NIPC_NP_ERR_PROTOCOL;
+
   /* Fill session */
   session->pipe = pipe;
   session->role = NIPC_NP_ROLE_CLIENT;

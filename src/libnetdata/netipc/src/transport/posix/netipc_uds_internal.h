@@ -14,7 +14,21 @@
 
 #define NIPC_UDS_PACKET_SIZE_FALLBACK 65536u
 #define NIPC_UDS_PACKET_SIZE_MAX 262144u
+/* Bytes the kernel keeps from SO_SNDBUF for a SEQPACKET datagram: Linux
+ * accepts SO_SNDBUF - 32, FreeBSD the full SO_SNDBUF. */
+#if defined(__FreeBSD__)
+#define NIPC_UDS_SNDBUF_OVERHEAD 0
+#else
 #define NIPC_UDS_SNDBUF_OVERHEAD 32
+#endif
+
+/* Profiles this platform can provide. POSIX SHM needs Linux futexes, so other
+ * POSIX systems offer and accept the baseline profile only. */
+#if defined(__linux__)
+#define NIPC_UDS_PLATFORM_PROFILES 0xFFFFFFFFu
+#else
+#define NIPC_UDS_PLATFORM_PROFILES NIPC_PROFILE_BASELINE
+#endif
 
 bool nipc_uds_header_payload_len(size_t payload_len, size_t *msg_len_out);
 

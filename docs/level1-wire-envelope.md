@@ -215,6 +215,10 @@ The server does not return partial success. A successful handshake means:
 - all session-operational fields in `HELLO_ACK` are final for that session
 - `selected_profile` is final and locked for that session
 
+The client must reject, as a protocol error, a successful `HELLO_ACK` whose
+`selected_profile` is not exactly one profile bit or is a profile the client
+did not offer in `supported_profiles`.
+
 If `selected_profile` is an SHM profile, the server must not send successful
 `HELLO_ACK` until the SHM resources for that session are already ready on the
 server side. If the client later cannot attach the negotiated SHM transport,

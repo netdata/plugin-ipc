@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 use super::common::ensure_client_scratch;
 use super::dispatch::{
     dispatch_single_internal, method_supported_internal, server_note_payload_capacity,
@@ -5,9 +6,10 @@ use super::dispatch::{
 };
 use crate::protocol::{
     self, batch_item_get, BatchBuilder, Header, FLAG_BATCH, HEADER_SIZE, KIND_REQUEST,
-    KIND_RESPONSE, MAGIC_MSG, STATUS_BAD_ENVELOPE, STATUS_INTERNAL_ERROR, STATUS_LIMIT_EXCEEDED,
-    STATUS_OK, VERSION,
+    KIND_RESPONSE, STATUS_BAD_ENVELOPE, STATUS_INTERNAL_ERROR, STATUS_LIMIT_EXCEEDED, STATUS_OK,
 };
+#[cfg(target_os = "linux")]
+use crate::protocol::{MAGIC_MSG, VERSION};
 use crate::transport::posix::UdsSession;
 
 #[cfg(target_os = "linux")]
@@ -33,6 +35,7 @@ pub(super) fn handle_session_threaded(
     let mut recv_buf = vec![0u8; HEADER_SIZE + session.max_request_payload_bytes as usize];
     let mut resp_buf = vec![0u8; session.max_response_payload_bytes as usize];
     let mut item_resp_buf = vec![0u8; session.max_response_payload_bytes as usize];
+    #[cfg(target_os = "linux")]
     let mut msg_buf = vec![0u8; HEADER_SIZE + session.max_response_payload_bytes as usize];
 
     while running.load(Ordering::Acquire) {
@@ -365,7 +368,7 @@ pub(super) fn poll_fd(fd: i32, timeout_ms: i32) -> i32 {
     let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
 
     if ret < 0 {
-        let errno = unsafe { *libc::__errno_location() };
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
         if errno == libc::EINTR {
             return 0;
         }

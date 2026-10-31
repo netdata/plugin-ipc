@@ -24,9 +24,21 @@ const DEFAULT_BACKLOG: i32 = 16;
 const DEFAULT_BATCH_ITEMS: u32 = 1;
 const DEFAULT_PACKET_SIZE_FALLBACK: u32 = 65536;
 const PACKET_SIZE_MAX: u32 = 262_144;
+/// Bytes the kernel keeps from SO_SNDBUF for a SEQPACKET datagram: Linux
+/// accepts SO_SNDBUF - 32, FreeBSD the full SO_SNDBUF.
+#[cfg(target_os = "freebsd")]
+const SNDBUF_OVERHEAD: u32 = 0;
+#[cfg(not(target_os = "freebsd"))]
 const SNDBUF_OVERHEAD: u32 = 32;
 const HELLO_PAYLOAD_SIZE: usize = 44;
 const HELLO_ACK_PAYLOAD_SIZE: usize = 48;
+
+/// Profiles this platform can provide. POSIX SHM needs Linux futexes, so
+/// other POSIX systems offer and accept the baseline profile only.
+#[cfg(target_os = "linux")]
+const PLATFORM_PROFILES: u32 = u32::MAX;
+#[cfg(not(target_os = "linux"))]
+const PLATFORM_PROFILES: u32 = PROFILE_BASELINE;
 
 // ---------------------------------------------------------------------------
 //  Errors
@@ -1427,14 +1439,14 @@ fn connect_and_handshake(
         PROFILE_BASELINE
     } else {
         config.supported_profiles
-    };
+    } & PLATFORM_PROFILES;
 
     // Build HELLO
     let hello = Hello {
         layout_version: 1,
         flags: 0,
         supported_profiles: supported,
-        preferred_profiles: config.preferred_profiles,
+        preferred_profiles: config.preferred_profiles & PLATFORM_PROFILES,
         max_request_payload_bytes: apply_default(
             config.max_request_payload_bytes,
             MAX_PAYLOAD_DEFAULT,
@@ -1533,6 +1545,12 @@ fn connect_and_handshake(
         Err(e) => return Err(UdsError::Protocol(format!("ack payload: {e}"))),
     };
 
+    if !super::selected_profile_offered(ack.selected_profile, supported) {
+        return Err(UdsError::Protocol(
+            "selected profile was not offered".into(),
+        ));
+    }
+
     // Sanity: reject a packet_size too small for chunking arithmetic
     if ack.agreed_packet_size <= HEADER_SIZE as u32 {
         return Err(UdsError::Protocol("agreed packet_size too small".into()));
@@ -1579,8 +1597,8 @@ fn server_handshake(
         PROFILE_BASELINE
     } else {
         config.supported_profiles
-    };
-    let s_preferred = config.preferred_profiles;
+    } & PLATFORM_PROFILES;
+    let s_preferred = config.preferred_profiles & PLATFORM_PROFILES;
 
     let send_rejection = |status: u16| -> Result<(), UdsError> {
         let ack = HelloAck {

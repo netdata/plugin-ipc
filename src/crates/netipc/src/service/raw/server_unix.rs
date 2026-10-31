@@ -96,12 +96,14 @@ impl ManagedServer {
             let session_id = self.next_session_id;
             self.next_session_id += 1;
             let accept = AcceptContext {
+                #[cfg(target_os = "linux")]
                 run_dir: self.run_dir.clone(),
+                #[cfg(target_os = "linux")]
                 service_name: self.service_name.clone(),
                 base_config: self.server_config.clone(),
                 session_id,
                 handshake_ms: self.timings.handshake_ms,
-                #[cfg(test)]
+                #[cfg(all(test, target_os = "linux"))]
                 hooks: self.test_hooks.clone(),
             };
             let socket = Arc::new(WorkerSocket::default());
@@ -187,12 +189,14 @@ fn stop_workers(workers: Vec<Worker>, grace: Duration) {
 
 /// What a worker needs to run the server side of one handshake.
 struct AcceptContext {
+    #[cfg(target_os = "linux")]
     run_dir: String,
+    #[cfg(target_os = "linux")]
     service_name: String,
     base_config: ServerConfig,
     session_id: u64,
     handshake_ms: u32,
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     hooks: TestHooks,
 }
 

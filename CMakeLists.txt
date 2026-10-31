@@ -36,6 +36,20 @@ if(WIN32 OR CYGWIN OR CMAKE_SYSTEM_NAME STREQUAL "MSYS")
     set(NETIPC_WINDOWS_RUNTIME ON)
 endif()
 
+# POSIX service stack: every non-Windows system except macOS, which builds only
+# the protocol and UDS transport so far.
+set(NETIPC_POSIX_RUNTIME OFF)
+if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+    set(NETIPC_POSIX_RUNTIME ON)
+endif()
+
+# POSIX SHM data plane: Linux only, it needs futexes. Other POSIX systems build
+# the SHM API as stubs and negotiate the baseline profile.
+set(NETIPC_POSIX_SHM OFF)
+if(NETIPC_POSIX_RUNTIME AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(NETIPC_POSIX_SHM ON)
+endif()
+
 
 # --- C library: protocol (Codec + L1 wire envelope) ----------------------
 
@@ -68,9 +82,9 @@ if(NOT NETIPC_WINDOWS_RUNTIME)
     )
     target_link_libraries(netipc_uds PUBLIC netipc_protocol Threads::Threads)
 
-    # --- C library: L1 POSIX SHM transport (Linux only) ----------------------
+    # --- C library: L1 POSIX SHM transport (stubs off Linux) ----------------
 
-    if(NOT APPLE)
+    if(NETIPC_POSIX_RUNTIME)
         add_library(netipc_shm STATIC
             src/libnetdata/netipc/src/transport/posix/netipc_shm.c
         )
@@ -79,7 +93,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME)
         )
         target_link_libraries(netipc_shm PUBLIC netipc_protocol)
 
-        # --- C library: L2 service orchestration (Linux only, needs SHM+UDS) ----
+        # --- C library: L2 service orchestration --------------------------------
 
         add_library(netipc_service STATIC
             src/libnetdata/netipc/src/service/netipc_service_common.c
@@ -306,7 +320,7 @@ endif()
 
 # --- L1 SHM transport tests (Linux only) -----------------------------------
 
-if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+if(NETIPC_POSIX_SHM)
     add_library(netipc_shm_fallocate_test_wrap OBJECT
         tests/fixtures/c/shm_fallocate_wrap.c
     )
@@ -337,18 +351,20 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
     target_link_libraries(interop_shm_c PRIVATE netipc_shm netipc_protocol)
 endif()
 
-# --- L2 service orchestration tests (Linux only) ---------------------------
+# --- L2 service orchestration tests ----------------------------------------
 
-if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+if(NETIPC_POSIX_RUNTIME)
     add_executable(test_service tests/fixtures/c/test_service.c)
-    target_sources(test_service PRIVATE
-        $<TARGET_OBJECTS:netipc_shm_fallocate_test_wrap>
-    )
     target_link_libraries(test_service PRIVATE
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
     )
     target_compile_definitions(test_service PRIVATE NIPC_INTERNAL_TESTING=1)
-    target_link_options(test_service PRIVATE "LINKER:--wrap=fallocate" "LINKER:--wrap=fallocate64")
+    if(NETIPC_POSIX_SHM)
+        target_sources(test_service PRIVATE
+            $<TARGET_OBJECTS:netipc_shm_fallocate_test_wrap>
+        )
+        target_link_options(test_service PRIVATE "LINKER:--wrap=fallocate" "LINKER:--wrap=fallocate64")
+    endif()
     add_test(NAME test_service COMMAND test_service)
     set_tests_properties(test_service PROPERTIES TIMEOUT 60)
 
@@ -475,7 +491,7 @@ if(CARGO_EXECUTABLE)
     )
 
     # Rust SHM transport tests (Linux only)
-    if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+    if(NETIPC_POSIX_SHM)
         add_test(NAME test_shm_rust
             COMMAND ${CARGO_EXECUTABLE} test transport::shm::
             WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
@@ -491,7 +507,9 @@ if(CARGO_EXECUTABLE)
             WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
             COMMENT "Building Rust SHM interop binary"
         )
+    endif()
 
+    if(NETIPC_POSIX_RUNTIME)
         # Rust typed L2 service facades
         add_test(NAME test_service_typed_rust
             COMMAND ${CARGO_EXECUTABLE} test --
@@ -545,7 +563,7 @@ if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
     )
 
     # Go SHM transport tests (Linux only)
-    if(NOT APPLE)
+    if(NETIPC_POSIX_SHM)
         add_test(NAME test_shm_go
             COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
                 ${GO_EXECUTABLE} test -count=1 -timeout=60s
@@ -606,7 +624,7 @@ endif()
 
 # --- Cross-language SHM interop tests (Linux only) -------------------------
 
-if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
+if(NETIPC_POSIX_SHM AND CARGO_EXECUTABLE)
     set(INTEROP_SHM_RS "${NETIPC_RUST_CRATE_DIR}/target/debug/interop_shm")
     set(INTEROP_SHM_GO "${CMAKE_BINARY_DIR}/bin/interop_shm_go")
 
@@ -633,9 +651,9 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
     endif()
 endif()
 
-# --- Cross-language L2 service interop tests (Linux only) ------------------
+# --- Cross-language L2 service interop tests --------------------------------
 
-if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
+if(NETIPC_POSIX_RUNTIME AND CARGO_EXECUTABLE)
     set(INTEROP_SVC_RS "${NETIPC_RUST_CRATE_DIR}/target/debug/interop_service")
     set(INTEROP_SVC_GO "${CMAKE_BINARY_DIR}/bin/interop_service_go")
 
@@ -660,9 +678,9 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
     endif()
 endif()
 
-# --- L3 cache tests (Linux only) -------------------------------------------
+# --- L3 cache tests ---------------------------------------------------------
 
-if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+if(NETIPC_POSIX_RUNTIME)
     add_executable(test_cache tests/fixtures/c/test_cache.c)
     target_link_libraries(test_cache PRIVATE
         netipc_service netipc_shm netipc_uds netipc_protocol Threads::Threads
@@ -681,7 +699,7 @@ endif()
 
 # --- Rust L3 cache tests ---------------------------------------------------
 
-if(CARGO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+if(CARGO_EXECUTABLE AND NETIPC_POSIX_RUNTIME)
     # Build the Rust L3 interop binary
     add_custom_target(interop_cache_rs ALL
         COMMAND ${CARGO_EXECUTABLE} build --bin interop_cache
@@ -731,7 +749,7 @@ endif()
 
 # --- Rust stress tests (Phase H4) -------------------------------------------
 
-if(CARGO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND NETIPC_EXTENDED_TESTS)
+if(CARGO_EXECUTABLE AND NETIPC_POSIX_RUNTIME AND NETIPC_EXTENDED_TESTS)
     add_test(NAME test_stress_rust
         COMMAND ${CARGO_EXECUTABLE} test test_stress -- --ignored --test-threads=1
         WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
@@ -744,7 +762,7 @@ endif()
 
 # --- Cross-language L2 service SHM interop tests (Linux only) ---------------
 
-if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
+if(NETIPC_POSIX_SHM AND CARGO_EXECUTABLE)
     add_test(NAME test_service_shm_interop
         COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_service_shm_interop.sh"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
@@ -766,9 +784,9 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
     endif()
 endif()
 
-# --- Cross-language L3 cache interop tests (Linux only) ---------------------
+# --- Cross-language L3 cache interop tests ----------------------------------
 
-if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
+if(NETIPC_POSIX_RUNTIME AND CARGO_EXECUTABLE)
     set(INTEROP_CACHE_RS "${NETIPC_RUST_CRATE_DIR}/target/debug/interop_cache")
     set(INTEROP_CACHE_GO "${CMAKE_BINARY_DIR}/bin/interop_cache_go")
 
@@ -782,14 +800,16 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE AND CARGO_EXECUTABLE)
     )
 
     # SHM variant
-    add_test(NAME test_cache_shm_interop
-        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_cache_shm_interop.sh"
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    )
-    set_tests_properties(test_cache_shm_interop PROPERTIES
-        TIMEOUT 120
-        ENVIRONMENT "INTEROP_CACHE_C=$<TARGET_FILE:interop_cache_c>;INTEROP_CACHE_RS=${INTEROP_CACHE_RS};INTEROP_CACHE_GO=${INTEROP_CACHE_GO}"
-    )
+    if(NETIPC_POSIX_SHM)
+        add_test(NAME test_cache_shm_interop
+            COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_cache_shm_interop.sh"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        )
+        set_tests_properties(test_cache_shm_interop PROPERTIES
+            TIMEOUT 120
+            ENVIRONMENT "INTEROP_CACHE_C=$<TARGET_FILE:interop_cache_c>;INTEROP_CACHE_RS=${INTEROP_CACHE_RS};INTEROP_CACHE_GO=${INTEROP_CACHE_GO}"
+        )
+    endif()
 endif()
 
 # --- L1 Windows Named Pipe transport tests ---------------------------------
@@ -1140,8 +1160,9 @@ if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
 endif()
 
 # --- Benchmarks (Phase 13) ------------------------------------------------
+# POSIX benchmarks cover the SHM profiles, so they build on Linux only.
 
-if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+if(NETIPC_POSIX_SHM)
     # C benchmark binary
     add_executable(bench_posix_c bench/drivers/c/bench_posix.c)
     target_include_directories(bench_posix_c PRIVATE
@@ -1154,7 +1175,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
 endif()
 
 # Rust benchmark binary (release build for accurate performance)
-if(CARGO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+if(CARGO_EXECUTABLE AND NETIPC_POSIX_SHM)
     add_custom_target(bench_posix_rs
         COMMAND ${CARGO_EXECUTABLE} build --release --bin bench_posix
         WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
@@ -1163,7 +1184,7 @@ if(CARGO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
 endif()
 
 # Go benchmark binary
-if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
+if(GO_EXECUTABLE AND NETIPC_POSIX_SHM)
     add_custom_target(bench_posix_go ALL
         COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
             ${GO_EXECUTABLE} build -o "${CMAKE_BINARY_DIR}/bin/bench_posix_go" .
@@ -1173,7 +1194,7 @@ if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
 endif()
 
 # Benchmark runner (not CTest — too slow for CI)
-if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+if(NETIPC_POSIX_SHM)
     add_custom_target(run-posix-bench
         COMMAND bash "${CMAKE_SOURCE_DIR}/tests/run-posix-bench.sh"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"

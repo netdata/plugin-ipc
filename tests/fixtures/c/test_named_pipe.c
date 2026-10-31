@@ -98,6 +98,9 @@ typedef enum {
     FAKE_ACK_GOOD_THEN_ZERO_MESSAGE,
     FAKE_ACK_GOOD_THEN_TRAILING_RESPONSE,
     FAKE_ACK_CLOSE_BEFORE_ACK,
+    FAKE_ACK_SELECTED_NOT_OFFERED,
+    FAKE_ACK_SELECTED_NONE,
+    FAKE_ACK_SELECTED_TWO,
 } fake_ack_mode_t;
 
 typedef enum {
@@ -384,6 +387,17 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
         }
         if (ctx->mode == FAKE_ACK_BAD_PAYLOAD)
             payload_len = 8;
+        if (ctx->mode == FAKE_ACK_SELECTED_NOT_OFFERED ||
+            ctx->mode == FAKE_ACK_SELECTED_NONE ||
+            ctx->mode == FAKE_ACK_SELECTED_TWO) {
+            /* The client offers baseline only; selected_profile is at offset 12. */
+            uint32_t selected =
+                ctx->mode == FAKE_ACK_SELECTED_NOT_OFFERED ? NIPC_PROFILE_SHM_HYBRID
+                : ctx->mode == FAKE_ACK_SELECTED_NONE
+                    ? 0
+                    : (NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID);
+            memcpy(payload + 12, &selected, sizeof(selected));
+        }
         msg_len = build_control_packet(msg, sizeof(msg),
                                        NIPC_KIND_CONTROL, NIPC_CODE_HELLO_ACK,
                                        NIPC_STATUS_OK, payload, payload_len);
@@ -1734,6 +1748,9 @@ static void test_client_handshake_rejections(void)
         { "bad HELLO_ACK layout", FAKE_ACK_BAD_LAYOUT, NIPC_NP_ERR_INCOMPATIBLE, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
         { "bad HELLO_ACK payload", FAKE_ACK_BAD_PAYLOAD, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
         { "peer closes before HELLO_ACK", FAKE_ACK_CLOSE_BEFORE_ACK, NIPC_NP_ERR_RECV, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "HELLO_ACK selecting an unoffered profile", FAKE_ACK_SELECTED_NOT_OFFERED, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "HELLO_ACK selecting no profile", FAKE_ACK_SELECTED_NONE, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "HELLO_ACK selecting two profiles", FAKE_ACK_SELECTED_TWO, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {

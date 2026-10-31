@@ -298,6 +298,7 @@ Output/reference skills:
 - POSIX interop examples: `bash tests/interop_codec.sh`, `bash tests/test_uds_interop.sh`, `bash tests/test_shm_interop.sh`, `bash tests/test_service_interop.sh`
 - `tests/interop_codec.sh` configures `build/`; do not run it in parallel with CTest or another build-directory validation command.
 - Netdata Linux targets (32-bit, ARM, musl): `bash tests/run-linux-target.sh <target> [c] [rust] [go] [interop]`; targets and required cross toolchains are listed in the script header. C test fixtures use fixed `/tmp` paths: never run two targets in parallel on one host.
+- FreeBSD (no CI runner; run manually on a FreeBSD host before vendoring and after any change to POSIX transport, service, build or test code): with `cmake`, `ninja`, `bash`, Rust and Go installed, run `cmake -S . -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure`, then `cargo test` in `src/crates/netipc` and `go test ./...` in `src/go`. FreeBSD has no SHM, so the SHM suites are not built there.
 - Extended (non-correctness) suites, before vendoring only: `bash tests/run-extended-fuzz.sh`, `bash tests/run-extended-stress.sh`
 - Interop scripts share `tests/interop-lib.sh` (start a fixture server, block on its READY line, stop it with an identity check).
 - Robustness reproduction tests: C `test_robustness` / `test_win_robustness`, Rust `service::raw::tests::robustness` / `service::raw::windows_tests::robustness`, Go `TestRobust*` / `TestWinRobust*`. They always run; there is no skip gate.

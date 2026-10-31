@@ -20,10 +20,12 @@ mod posix_only {
         increment_encode, AppsLookupBuilder, AppsLookupResponseView, BatchBuilder,
         CgroupsLookupBuilder, CgroupsLookupResponseView, Header, APPS_CGROUP_KNOWN,
         CGROUP_LOOKUP_KNOWN, CGROUP_LOOKUP_UNKNOWN_RETRY_LATER, FLAG_BATCH, HEADER_SIZE,
-        INCREMENT_PAYLOAD_SIZE, KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT,
+        INCREMENT_PAYLOAD_SIZE, KIND_REQUEST, KIND_RESPONSE, METHOD_CGROUPS_SNAPSHOT,
         METHOD_INCREMENT, NIPC_UID_UNSET, ORCHESTRATOR_DOCKER, ORCHESTRATOR_K8S, PID_LOOKUP_KNOWN,
-        PID_LOOKUP_UNKNOWN, PROFILE_BASELINE, PROFILE_SHM_HYBRID, STATUS_OK, VERSION,
+        PID_LOOKUP_UNKNOWN, PROFILE_BASELINE, PROFILE_SHM_HYBRID, STATUS_OK,
     };
+    #[cfg(target_os = "linux")]
+    use netipc::protocol::{MAGIC_MSG, VERSION};
     use netipc::service::cgroups::{CgroupsClient, ClientConfig as TypedClientConfig};
     use netipc::service::raw::{
         increment_dispatch, snapshot_dispatch, CgroupsCache, CgroupsCacheItem, DispatchHandler,
@@ -426,6 +428,7 @@ mod posix_only {
 
         let mut req_buf = vec![0u8; BENCH_BATCH_BUF_SIZE];
         let mut recv_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
+        #[cfg(target_os = "linux")]
         let mut msg_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
         let mut expected = vec![0u64; BENCH_MAX_BATCH_ITEMS as usize];
 
@@ -456,8 +459,6 @@ mod posix_only {
                 None
             }
         };
-        #[cfg(not(target_os = "linux"))]
-        let shm: Option<()> = None;
 
         #[cfg(target_os = "linux")]
         if (session.selected_profile == PROFILE_SHM_HYBRID
@@ -1021,9 +1022,6 @@ mod posix_only {
             }
         };
 
-        #[cfg(not(target_os = "linux"))]
-        let shm: Option<()> = None;
-
         #[cfg(target_os = "linux")]
         if (session.selected_profile == PROFILE_SHM_HYBRID
             || session.selected_profile == protocol::PROFILE_SHM_FUTEX)
@@ -1034,7 +1032,9 @@ mod posix_only {
             return 1;
         }
 
+        #[cfg(target_os = "linux")]
         let mut msg_buf = vec![0u8; HEADER_SIZE + 8];
+        #[cfg(target_os = "linux")]
         let mut resp_shm_buf = vec![0u8; HEADER_SIZE + 64];
         let mut recv_buf = vec![0u8; 256];
 

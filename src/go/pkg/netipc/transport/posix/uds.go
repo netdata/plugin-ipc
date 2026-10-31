@@ -26,7 +26,6 @@ const (
 	defaultBatchItems                = 1
 	defaultPacketSizeFallback uint32 = 65536
 	packetSizeMax             uint32 = 262144
-	sndbufOverhead                   = 32
 	helloPayloadSize                 = 44
 	helloAckPayloadSize              = 48
 

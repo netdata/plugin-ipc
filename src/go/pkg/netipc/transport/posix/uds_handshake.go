@@ -73,6 +73,7 @@ func connectAndHandshake(fd int, path string, config *ClientConfig, wait receive
 		Hello: framing.HelloConfig{
 			SupportedProfiles:       config.SupportedProfiles,
 			PreferredProfiles:       config.PreferredProfiles,
+			PlatformProfiles:        platformProfiles,
 			MaxRequestPayloadBytes:  applyDefault(config.MaxRequestPayloadBytes, protocol.MaxPayloadDefault),
 			MaxRequestBatchItems:    applyDefault(config.MaxRequestBatchItems, defaultBatchItems),
 			MaxResponsePayloadBytes: applyDefault(config.MaxResponsePayloadBytes, protocol.MaxPayloadDefault),
@@ -163,6 +164,7 @@ func serverHandshakeWait(fd int, config *ServerConfig, sessionID uint64, wait re
 			SupportedProfiles:       config.SupportedProfiles,
 			PreferredProfiles:       config.PreferredProfiles,
 			AuthToken:               config.AuthToken,
+			PlatformProfiles:        platformProfiles,
 		},
 		SessionID:       sessionID,
 		Prepare:         prepare,

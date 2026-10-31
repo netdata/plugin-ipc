@@ -1,13 +1,15 @@
-use super::client::{
-    ClientResponseRef, ClientResponseSource, ClientState, RawCallKind, RawClient,
-    CLIENT_ABORT_POLL_MS,
-};
+#[cfg(any(target_os = "linux", windows))]
+use super::client::CLIENT_ABORT_POLL_MS;
+use super::client::{ClientResponseRef, ClientResponseSource, ClientState, RawCallKind, RawClient};
 use super::common::{ensure_client_scratch, CACHE_RESPONSE_BUF_SIZE};
+#[cfg(any(target_os = "linux", windows))]
+use crate::protocol::{self, MAGIC_MSG, VERSION};
 use crate::protocol::{
-    self, Header, NipcError, HEADER_SIZE, KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG,
-    STATUS_LIMIT_EXCEEDED, STATUS_OK, VERSION,
+    Header, NipcError, HEADER_SIZE, KIND_REQUEST, KIND_RESPONSE, STATUS_LIMIT_EXCEEDED, STATUS_OK,
 };
+#[cfg(any(target_os = "linux", windows))]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(any(target_os = "linux", windows))]
 use std::time::{Duration, Instant};
 
 impl RawClient {
@@ -184,6 +186,7 @@ impl RawClient {
         hdr: &mut Header,
         req_len: usize,
     ) -> Result<(), NipcError> {
+        #[cfg(any(target_os = "linux", windows))]
         let max_request_payload_bytes = self.session_max_request_payload_bytes();
 
         #[cfg(target_os = "linux")]
@@ -425,10 +428,12 @@ impl RawClient {
     }
 }
 
+#[cfg(any(target_os = "linux", windows))]
 fn receive_deadline(timeout_ms: u32) -> Option<Instant> {
     (timeout_ms != 0).then(|| Instant::now() + Duration::from_millis(timeout_ms as u64))
 }
 
+#[cfg(any(target_os = "linux", windows))]
 fn receive_wait_slice_ms(deadline: Option<Instant>, abort: &AtomicBool) -> Result<u32, NipcError> {
     if abort.load(Ordering::Acquire) {
         return Err(NipcError::Aborted);

@@ -1,4 +1,5 @@
 use super::client::{ClientState, RawClient};
+#[cfg(target_os = "linux")]
 use super::common::CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS;
 #[cfg(target_os = "linux")]
 use crate::protocol::{PROFILE_SHM_FUTEX, PROFILE_SHM_HYBRID};

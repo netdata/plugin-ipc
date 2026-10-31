@@ -117,6 +117,9 @@ typedef enum {
     MALFORMED_ACK_BAD_LAYOUT,
     MALFORMED_ACK_BAD_PAYLOAD,
     MALFORMED_ACK_PACKET_ABOVE_PROPOSAL,
+    MALFORMED_ACK_SELECTED_NOT_OFFERED,
+    MALFORMED_ACK_SELECTED_NONE,
+    MALFORMED_ACK_SELECTED_TWO,
 } malformed_ack_mode_t;
 
 typedef struct {
@@ -455,7 +458,10 @@ static void *malformed_ack_server_thread(void *arg)
                 send(cfd, pkt, sizeof(pkt), MSG_NOSIGNAL);
                 break;
             }
-            case MALFORMED_ACK_PACKET_ABOVE_PROPOSAL: {
+            case MALFORMED_ACK_PACKET_ABOVE_PROPOSAL:
+            case MALFORMED_ACK_SELECTED_NOT_OFFERED:
+            case MALFORMED_ACK_SELECTED_NONE:
+            case MALFORMED_ACK_SELECTED_TWO: {
                 nipc_hello_t hello;
                 if (n < NIPC_HEADER_LEN ||
                     nipc_hello_decode(buf + NIPC_HEADER_LEN, (size_t)n - NIPC_HEADER_LEN,
@@ -473,6 +479,15 @@ static void *malformed_ack_server_thread(void *arg)
                     .agreed_packet_size = hello.packet_size + 1,
                     .session_id = 1,
                 };
+                if (ctx->mode != MALFORMED_ACK_PACKET_ABOVE_PROPOSAL) {
+                    /* The client offers baseline only. */
+                    ack.agreed_packet_size = hello.packet_size;
+                    ack.selected_profile =
+                        ctx->mode == MALFORMED_ACK_SELECTED_NOT_OFFERED ? NIPC_PROFILE_SHM_HYBRID
+                        : ctx->mode == MALFORMED_ACK_SELECTED_NONE
+                            ? 0
+                            : (NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID);
+                }
                 uint8_t ack_buf[48];
                 uint8_t pkt[NIPC_HEADER_LEN + sizeof(ack_buf)];
                 nipc_header_t hdr = {
@@ -1124,6 +1139,49 @@ static void test_profile_mismatch(void)
 
     if (err == NIPC_UDS_OK)
         nipc_uds_close_session(&session);
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* Both peers configured for SHM: only Linux may select it; elsewhere the
+ * platform mask leaves baseline on both sides. */
+static void test_platform_profile_mask(void)
+{
+    printf("Test 6b: Platform profile mask\n");
+    const char *svc = "test_platprofile";
+    cleanup_socket(svc);
+#if defined(__linux__)
+    const uint32_t want = NIPC_PROFILE_SHM_HYBRID;
+#else
+    const uint32_t want = NIPC_PROFILE_BASELINE;
+#endif
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    scfg.supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID;
+    scfg.preferred_profiles = NIPC_PROFILE_SHM_HYBRID;
+
+    server_ctx_t sctx = {
+        .service      = svc,
+        .config       = scfg,
+        .accept_count = 1,
+        .echo_count   = 0,
+    };
+
+    pthread_t tid = start_echo_server(&sctx);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    ccfg.supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID;
+    ccfg.preferred_profiles = NIPC_PROFILE_SHM_HYBRID;
+
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("client connect", err == NIPC_UDS_OK);
+    if (err == NIPC_UDS_OK) {
+        check("selected profile matches the platform", session.selected_profile == want);
+        nipc_uds_close_session(&session);
+    }
 
     pthread_join(tid, NULL);
     cleanup_socket(svc);
@@ -2704,6 +2762,12 @@ static void test_connect_malformed_hello_ack(void)
           "truncated HELLO_ACK payload rejected" },
         { "test_ack_pkt_above", MALFORMED_ACK_PACKET_ABOVE_PROPOSAL, NIPC_UDS_ERR_PROTOCOL,
           "HELLO_ACK packet size above the client proposal rejected" },
+        { "test_ack_sel_unoffered", MALFORMED_ACK_SELECTED_NOT_OFFERED, NIPC_UDS_ERR_PROTOCOL,
+          "HELLO_ACK selecting a profile the client did not offer rejected" },
+        { "test_ack_sel_none", MALFORMED_ACK_SELECTED_NONE, NIPC_UDS_ERR_PROTOCOL,
+          "HELLO_ACK selecting no profile rejected" },
+        { "test_ack_sel_two", MALFORMED_ACK_SELECTED_TWO, NIPC_UDS_ERR_PROTOCOL,
+          "HELLO_ACK selecting two profiles rejected" },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -3378,6 +3442,7 @@ int main(void)
     test_chunking();               printf("\n");
     test_bad_auth();               printf("\n");
     test_profile_mismatch();       printf("\n");
+    test_platform_profile_mask();  printf("\n");
     test_request_payload_over_cap(); printf("\n");
     test_stale_recovery();         printf("\n");
     test_stale_recovery_reclaims_regular_file(); printf("\n");

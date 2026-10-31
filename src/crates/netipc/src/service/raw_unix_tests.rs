@@ -271,6 +271,7 @@ fn fill_test_cgroups_snapshot(builder: &mut CgroupsBuilder<'_>) -> bool {
     true
 }
 
+#[cfg(target_os = "linux")]
 fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     match payload.downcast::<String>() {
         Ok(msg) => *msg,
@@ -6364,7 +6365,6 @@ fn test_shm_batch_request_item_decode_failure_returns_bad_envelope() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
 #[path = "raw_robustness_unix_tests.rs"]
 mod robustness;
 

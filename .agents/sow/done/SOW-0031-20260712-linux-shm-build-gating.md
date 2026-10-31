@@ -2,10 +2,11 @@
 
 ## Status
 
-Status: open
+Status: closed
 
-Sub-state: tracked follow-up discovered by SOW-0030; execution must wait until the
-active SOW completes.
+Sub-state: merged into SOW-0048 (FreeBSD support) on 2026-10-31, before any
+implementation. Its requirements and acceptance criteria live there; the FreeBSD build
+is where the `NOT APPLE` gate fails.
 
 ## Requirements
 
@@ -230,11 +231,13 @@ Lessons:
 
 Follow-up mapping:
 
-- This file is the tracked follow-up from SOW-0030.
+- All requirements are tracked by SOW-0048.
 
 ## Outcome
 
-Pending.
+Closed without implementation: merged into
+`.agents/sow/current/SOW-0048-20261029-freebsd-support.md`, as the overlap note of
+2026-10-29 required (AGENTS.md "One SOW At A Time": merge before implementation).
 
 ## Lessons Extracted
 

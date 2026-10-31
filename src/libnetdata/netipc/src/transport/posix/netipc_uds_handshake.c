@@ -131,9 +131,10 @@ nipc_uds_error_t nipc_uds_client_handshake(int fd,
 
   nipc_hello_t hello = {
       .layout_version = 1,
-      .supported_profiles = cfg->supported_profiles ? cfg->supported_profiles
-                                                    : NIPC_PROFILE_BASELINE,
-      .preferred_profiles = cfg->preferred_profiles,
+      .supported_profiles = (cfg->supported_profiles ? cfg->supported_profiles
+                                                     : NIPC_PROFILE_BASELINE) &
+                            NIPC_UDS_PLATFORM_PROFILES,
+      .preferred_profiles = cfg->preferred_profiles & NIPC_UDS_PLATFORM_PROFILES,
       .max_request_payload_bytes = apply_default(cfg->max_request_payload_bytes,
                                                  NIPC_MAX_PAYLOAD_DEFAULT),
       .max_request_batch_items =
@@ -193,6 +194,12 @@ nipc_uds_error_t nipc_uds_client_handshake(int fd,
   if (perr != NIPC_OK)
     return NIPC_UDS_ERR_PROTOCOL;
 
+  /* The server must pick exactly one of the profiles this client offered. */
+  if (ack.selected_profile == 0 ||
+      (ack.selected_profile & (ack.selected_profile - 1)) != 0 ||
+      (ack.selected_profile & hello.supported_profiles) == 0)
+    return NIPC_UDS_ERR_PROTOCOL;
+
   fill_client_session(session, fd, &ack);
   /* A server may only lower the client's proposal; a larger size could
    * exceed what this side's kernel accepts. */
@@ -216,8 +223,9 @@ nipc_uds_error_t nipc_uds_server_handshake(int fd,
   uint32_t s_req_pay =
       apply_default(cfg->max_request_payload_bytes, NIPC_MAX_PAYLOAD_DEFAULT);
   uint32_t s_profiles =
-      cfg->supported_profiles ? cfg->supported_profiles : NIPC_PROFILE_BASELINE;
-  uint32_t s_preferred = cfg->preferred_profiles;
+      (cfg->supported_profiles ? cfg->supported_profiles : NIPC_PROFILE_BASELINE) &
+      NIPC_UDS_PLATFORM_PROFILES;
+  uint32_t s_preferred = cfg->preferred_profiles & NIPC_UDS_PLATFORM_PROFILES;
 
   ssize_t n = nipc_uds_raw_recv(fd, buf, sizeof(buf));
   if (n <= 0)

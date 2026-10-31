@@ -84,7 +84,7 @@ Before adding anything, internalize these facts:
 Current implemented layers:
 
 - L1 transport
-  - POSIX: UDS baseline + POSIX SHM fast path
+  - POSIX: UDS baseline + POSIX SHM fast path (SHM on Linux only)
   - Windows: Named Pipe baseline + Win SHM fast path
 - Codec
   - typed encode/decode
@@ -1283,7 +1283,12 @@ Before you define a new service or integrate one into a plugin, answer these:
 ### Linux / POSIX
 
 - baseline transport is UDS `SOCK_SEQPACKET`
-- fast path is POSIX SHM
+- fast path is POSIX SHM, on Linux only
+- on FreeBSD (and other non-Linux POSIX systems) every session uses the UDS
+  baseline: the handshake drops SHM profiles from any configuration, so the
+  same caller configuration works on Linux and FreeBSD
+- FreeBSD's default `SO_SNDBUF` is 8192 bytes, so larger messages are chunked
+  more often there than on Linux
 
 ### Windows
 

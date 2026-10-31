@@ -43,12 +43,14 @@ pub(crate) use server::RunningTestServer;
 pub use server::{ListeningSignal, ManagedServer};
 pub use string_reverse::{string_reverse_dispatch, StringReverseHandler};
 
+#[cfg(all(test, target_os = "linux"))]
+use crate::protocol::STATUS_BAD_ENVELOPE;
 #[cfg(all(test, unix))]
 use crate::protocol::{
     self, batch_item_get, increment_decode, string_reverse_decode, string_reverse_encode,
     CgroupsRequest, Header, NipcError, FLAG_BATCH, HEADER_SIZE, INCREMENT_PAYLOAD_SIZE,
     KIND_REQUEST, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, METHOD_STRING_REVERSE,
-    STATUS_BAD_ENVELOPE, STATUS_INTERNAL_ERROR, VERSION,
+    STATUS_INTERNAL_ERROR, VERSION,
 };
 #[cfg(all(test, unix))]
 use crate::transport::posix::{ClientConfig, ServerConfig, UdsListener, UdsSession};

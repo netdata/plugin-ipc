@@ -1559,6 +1559,10 @@ fn client_handshake(
         Err(e) => return Err(NpError::Protocol(format!("ack payload: {e}"))),
     };
 
+    if !super::selected_profile_offered(ack.selected_profile, supported) {
+        return Err(NpError::Protocol("selected profile was not offered".into()));
+    }
+
     // Reject packet sizes too small for a header
     if ack.agreed_packet_size <= HEADER_SIZE as u32 {
         return Err(NpError::Handshake(
@@ -2021,6 +2025,74 @@ mod tests {
         let long_name = "a".repeat(300);
         let result = build_pipe_name("/var/run", &long_name);
         assert!(matches!(result, Err(NpError::PipeName(_))));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_connect_rejects_selected_profile_not_offered() {
+        ensure_run_dir();
+        // The client offers baseline only.
+        for selected in [
+            protocol::PROFILE_SHM_HYBRID,
+            0,
+            PROFILE_BASELINE | protocol::PROFILE_SHM_HYBRID,
+        ] {
+            let svc = unique_service("rs_ack_selected");
+            let pipe_name = build_pipe_name(TEST_RUN_DIR, &svc).expect("pipe name");
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let server = thread::spawn(move || {
+                let handle =
+                    create_pipe_instance(&pipe_name, pipe_buffer_size(DEFAULT_PACKET_SIZE), true)
+                        .expect("create pipe");
+                ready_tx.send(()).expect("signal ready");
+                unsafe { ffi::ConnectNamedPipe(handle, std::ptr::null_mut()) };
+
+                let mut buf = [0u8; 128];
+                let n = raw_recv(handle, &mut buf).expect("recv hello");
+                let hello = Hello::decode(&buf[HEADER_SIZE..n]).expect("decode hello");
+                let ack = HelloAck {
+                    layout_version: 1,
+                    server_supported_profiles: PROFILE_BASELINE | protocol::PROFILE_SHM_HYBRID,
+                    intersection_profiles: PROFILE_BASELINE,
+                    selected_profile: selected,
+                    agreed_max_request_payload_bytes: hello.max_request_payload_bytes,
+                    agreed_max_request_batch_items: hello.max_request_batch_items,
+                    agreed_max_response_payload_bytes: hello.max_response_payload_bytes,
+                    agreed_max_response_batch_items: hello.max_response_batch_items,
+                    agreed_packet_size: hello.packet_size,
+                    session_id: 1,
+                    ..HelloAck::default()
+                };
+                let mut pkt = [0u8; HEADER_SIZE + HELLO_ACK_PAYLOAD_SIZE];
+                Header {
+                    magic: MAGIC_MSG,
+                    version: VERSION,
+                    header_len: protocol::HEADER_LEN,
+                    kind: protocol::KIND_CONTROL,
+                    flags: 0,
+                    code: protocol::CODE_HELLO_ACK,
+                    transport_status: protocol::STATUS_OK,
+                    payload_len: HELLO_ACK_PAYLOAD_SIZE as u32,
+                    item_count: 1,
+                    message_id: 0,
+                }
+                .encode(&mut pkt[..HEADER_SIZE]);
+                ack.encode(&mut pkt[HEADER_SIZE..]);
+                raw_write(handle, &pkt).expect("send ack");
+                close_handle(handle);
+            });
+
+            ready_rx.recv().expect("server ready");
+            let err = match NpSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
+                Ok(_) => panic!("HELLO_ACK selecting 0x{selected:x} should fail"),
+                Err(err) => err,
+            };
+            assert!(
+                matches!(&err, NpError::Protocol(msg) if msg.contains("not offered")),
+                "selected 0x{selected:x}: {err:?}"
+            );
+            server.join().expect("server join");
+        }
     }
 
     #[cfg(windows)]

@@ -8,7 +8,9 @@ All implementations (C, Rust, Go) must use this exact layout and
 synchronization protocol to interoperate on the same shared region.
 
 This transport is Linux-only. FreeBSD and macOS fall back to UDS
-baseline.
+baseline. Outside Linux the C and Go SHM APIs remain available and return
+an "unsupported" error (`NIPC_SHM_ERR_UNSUPPORTED`, `ErrShmUnsupported`);
+the Rust crate compiles the POSIX SHM module only on Linux.
 
 ## Region file path
 

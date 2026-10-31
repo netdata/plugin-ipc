@@ -26,7 +26,9 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__linux__)
 #include <linux/futex.h>
+#endif
 
 /* ------------------------------------------------------------------ */
 /*  Test infrastructure                                                */
@@ -182,6 +184,7 @@ static void cleanup_all(const char *service)
     cleanup_shm(service);
 }
 
+#if defined(__linux__)
 static void publish_raw_shm_message(nipc_shm_ctx_t *ctx,
                                     const void *msg,
                                     size_t copy_len,
@@ -218,6 +221,7 @@ static void publish_raw_shm_message(nipc_shm_ctx_t *ctx,
     else
         ctx->local_resp_seq++;
 }
+#endif
 
 static nipc_uds_server_config_t default_server_config(void)
 {
@@ -765,6 +769,7 @@ static void start_raw_lookup_partial_disconnect(
     (void)test_flag_wait_any(&ctx->ready, &ctx->done);
 }
 
+#if defined(__linux__)
 static nipc_server_config_t default_shm_service_server_config(void)
 {
     return (nipc_server_config_t){
@@ -786,6 +791,7 @@ static nipc_client_config_t default_shm_service_client_config(void)
         .auth_token = AUTH_TOKEN,
     };
 }
+#endif
 
 typedef struct {
     const char *service;
@@ -3201,6 +3207,7 @@ static void test_apps_lookup_rejects_mixed_generation_retry(void)
     cleanup_all(svc);
 }
 
+#if defined(__linux__)
 static void test_cgroups_lookup_call_shm(void)
 {
     printf("Test 3g: Typed cgroups lookup call over SHM/futex\n");
@@ -3386,6 +3393,7 @@ static void test_shm_lookup_session_closes_after_client_disconnect(void)
     cleanup_all(svc);
 }
 
+#endif
 /* Internal liveness probe; exercised directly so each outcome is covered
  * without racing the session's poll cadence. */
 bool nipc_service_posix_peer_disconnected(int fd);
@@ -5692,6 +5700,7 @@ static void test_non_request_terminates_session(void)
     cleanup_all(svc);
 }
 
+#if defined(__linux__)
 /* ------------------------------------------------------------------ */
 /*  SHM-mode snapshot service coverage                                 */
 /* ------------------------------------------------------------------ */
@@ -6161,6 +6170,7 @@ static void test_shm_client_rejects_malformed_responses(void)
     }
 }
 
+#endif
 /* ------------------------------------------------------------------ */
 /*  Classification: a send failure with a live peer is a transport error */
 /* ------------------------------------------------------------------ */
@@ -6251,6 +6261,7 @@ static void test_send_failure_with_live_peer_is_transport(void)
     cleanup_all(service);
 }
 
+#if defined(__linux__)
 /* ------------------------------------------------------------------ */
 /*  Coverage: SHM server rejects malformed raw requests                */
 /* ------------------------------------------------------------------ */
@@ -6456,6 +6467,7 @@ static void test_shm_response_resize_retry(void)
     cleanup_session_shm(svc, 1);
 }
 
+#endif
 /* ------------------------------------------------------------------ */
 /*  Test: Refresh failure preserves cache                               */
 /* ------------------------------------------------------------------ */
@@ -7227,6 +7239,7 @@ static void test_client_init_defaults_and_truncation(void)
     nipc_client_close(&client);
 }
 
+#if defined(__linux__)
 /* ------------------------------------------------------------------ */
 /*  Coverage: negotiated SHM obstruction rejects the session            */
 /* ------------------------------------------------------------------ */
@@ -7386,6 +7399,7 @@ static void test_client_shm_attach_failure_falls_back_to_baseline(void)
     cleanup_all(svc);
 }
 
+#endif
 /* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
@@ -7414,9 +7428,11 @@ int main(void)
     test_lookup_logical_limits(); printf("\n");
     test_cgroups_lookup_rejects_mixed_generation_retry(); printf("\n");
     test_apps_lookup_rejects_mixed_generation_retry(); printf("\n");
+#if defined(__linux__)
     test_cgroups_lookup_call_shm(); printf("\n");
     test_apps_lookup_call_shm();   printf("\n");
     test_shm_lookup_session_closes_after_client_disconnect(); printf("\n");
+#endif
     test_peer_disconnected_probe(); printf("\n");
     test_lookup_init_guards();     printf("\n");
     test_lookup_client_invalid_requests(); printf("\n");
@@ -7436,12 +7452,16 @@ int main(void)
     test_status_reporting();       printf("\n");
     test_graceful_drain();         printf("\n");
     test_non_request_terminates_session(); printf("\n");
+#if defined(__linux__)
     test_shm_l2_service();         printf("\n");
     test_shm_client_rejects_malformed_responses(); printf("\n");
+#endif
     test_send_failure_with_live_peer_is_transport(); printf("\n");
+#if defined(__linux__)
     test_shm_server_rejects_malformed_requests(); printf("\n");
     test_shm_request_resize_retry(); printf("\n");
     test_shm_response_resize_retry(); printf("\n");
+#endif
     test_cache_refresh_failure_preserves(); printf("\n");
     test_malformed_response_handling(); printf("\n");
 
@@ -7461,9 +7481,11 @@ int main(void)
     test_server_init_long_strings();    printf("\n");
     test_server_init_worker_floor_and_long_run_dir(); printf("\n");
     test_client_init_defaults_and_truncation(); printf("\n");
+#if defined(__linux__)
     test_shm_negotiation_falls_back_to_baseline_on_obstructed_region(); printf("\n");
     test_shm_allocation_failure_falls_back_to_working_baseline(); printf("\n");
     test_client_shm_attach_failure_falls_back_to_baseline(); printf("\n");
+#endif
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

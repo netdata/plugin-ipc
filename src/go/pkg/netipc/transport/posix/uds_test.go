@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -881,9 +882,14 @@ func TestProfileSelection(t *testing.T) {
 	server := sr.session
 	defer server.Close()
 
-	// Preferred intersection = SHMFutex (0x04), highest bit = 0x04
-	if client.SelectedProfile != protocol.ProfileSHMFutex {
-		t.Errorf("selected = 0x%x, want 0x%x (SHMFutex)", client.SelectedProfile, protocol.ProfileSHMFutex)
+	// Preferred intersection = SHMFutex (0x04), highest bit = 0x04. Without
+	// POSIX SHM the platform limit leaves baseline on both sides.
+	want := uint32(protocol.ProfileSHMFutex)
+	if runtime.GOOS != "linux" {
+		want = protocol.ProfileBaseline
+	}
+	if client.SelectedProfile != want || server.SelectedProfile != want {
+		t.Errorf("selected = 0x%x/0x%x, want 0x%x", client.SelectedProfile, server.SelectedProfile, want)
 	}
 }
 
