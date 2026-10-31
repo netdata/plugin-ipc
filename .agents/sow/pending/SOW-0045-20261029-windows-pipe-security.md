@@ -4,7 +4,7 @@
 
 Status: open
 
-Sub-state: created from SOW-0040 reproduction results; awaiting prioritization and design decisions.
+Sub-state: user decisions 1-5 recorded 2026-10-31; next to execute.
 
 ## Requirements
 
@@ -28,9 +28,18 @@ Facts:
 - Analysis 2026-10-29: pipe squatting. Clients open the pipe without `SECURITY_SQOS_PRESENT` (C `netipc_named_pipe.c:903`, Rust `windows.rs:737-745`, Go `pipe_session.go:159-167`), so a server may impersonate them at full SecurityImpersonation level, and clients never verify the server's identity. A local user who creates the pipe name first (for example while the real server restarts) receives HELLO and the auth token.
 - Analysis 2026-10-29: Windows SHM mappings and events are also created with NULL security attributes (C `netipc_win_shm.c:349-356`, `:409`, `:423`; Rust `win_shm.rs:405-407`, `:453`, `:474`; Go `shm.go:198-205`, `:260`, `:283`).
 
+- Analysis 2026-10-31, Netdata usage (`netdata/netdata @ ae9113f2cc`):
+  - Windows consumers: `apps.plugin` serves apps lookup (`src/collectors/apps.plugin/apps-lookup-netipc.c:318-352`), and `network-viewer.plugin` is a client (`src/collectors/network-viewer.plugin/network-viewer-apps-lookup-client.c:727-730`).
+  - The auth token comes from the agent invocation ID (`src/libnetdata/netipc/netipc_netdata.c:9-12`), so only children of one agent share it.
+  - The Windows service has no `Account` attribute (`packaging/windows/netdata.wxs.in:347-369`), so it runs as LocalSystem and its plugins inherit that account. Server and clients therefore always run as the same principal in production.
+- Analysis 2026-10-31, current code:
+  - Servers already use `FILE_FLAG_FIRST_PIPE_INSTANCE` (C `netipc_named_pipe.c:211`, Rust `windows.rs:1407`, Go `pipe_listener.go:258`), so an attacker cannot add instances to a pipe the server already owns. Squatting needs the attacker to create the name first.
+  - The Windows SHM creators already reject an existing name (`ERROR_ALREADY_EXISTS`: C `netipc_win_shm.c:358,415,430`; Rust `win_shm.rs:418,462`; Go `shm.go:210,268,292`), so a pre-created mapping or event fails that session instead of being used.
+  - With `FR` for Everyone, an unprivileged user can only open the pipe read-only. That cannot send HELLO, so it gets no data, but it occupies an instance (the DoS observed in SOW-0040).
+
 Inferences:
 
-- Downstream Netdata consumers are likely affected; not yet verified against Netdata usage.
+- In production the risk is local: any user on a Netdata Windows host can occupy pipe instances, and can squat the pipe name while the agent restarts to collect the auth token. The token only grants apps lookup data, and it changes with every agent invocation.
 
 Unknowns:
 
@@ -111,7 +120,13 @@ Open decisions:
 
 ## Implications And Decisions
 
-None yet.
+User decisions (2026-10-31, user):
+
+1. Pipe DACL: explicit descriptor granting full access to the server's own account, SYSTEM and Administrators only.
+2. Always set `PIPE_REJECT_REMOTE_CLIENTS`.
+3. Clients open with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` and, before sending HELLO, verify the pipe owner is the client's own account, SYSTEM or Administrators; otherwise the connect fails.
+4. The same DACL applies to Windows SHM mappings and events.
+5. Validation may create, on the Windows test host, a temporary non-admin local user and a scheduled task running a test server as SYSTEM; both are removed afterwards.
 
 ## Plan
 

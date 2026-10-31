@@ -4,7 +4,7 @@
 
 Status: open
 
-Sub-state: created from SOW-0015 close-out; needs the user's priority call (before or after the next Netdata vendoring).
+Sub-state: scheduled after SOW-0050 (user decision 2026-10-31).
 
 ## Requirements
 
@@ -92,7 +92,7 @@ Open decisions:
 
 ## Implications And Decisions
 
-None yet.
+User decision (2026-10-31, user): do this after the SOW-0050 Netdata vendoring; benchmark it in the following cycle.
 
 ## Plan
 

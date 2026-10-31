@@ -4,7 +4,7 @@
 
 Status: open
 
-Sub-state: waiting for a FreeBSD 15 test host from the user.
+Sub-state: waiting for the FreeBSD 15.1 VM the user will provide.
 
 ## Requirements
 
@@ -94,7 +94,7 @@ Open decisions:
 
 ## Implications And Decisions
 
-None yet.
+User decision (2026-10-31, user): the user will provide a FreeBSD 15.1 VM; validate there when it is available.
 
 ## Plan
 

@@ -4,7 +4,7 @@
 
 Status: open
 
-Sub-state: split from SOW-0046 by the 2026-10-29 platform-scope decision; needs a transport design decision from the user.
+Sub-state: transport decided (stream + framing) 2026-10-31; scheduled after SOW-0050.
 
 ## Requirements
 
@@ -23,7 +23,8 @@ Facts:
 - macOS has no AF_UNIX `SOCK_SEQPACKET` (apple-oss-distributions/xnu `bsd/kern/uipc_proto.c` registers only stream and datagram unix protocols), so the documented UDS SEQPACKET baseline (`docs/level1-transport.md:466`) cannot work as specified.
 - Go: darwin lacks `syscall.MSG_NOSIGNAL` (`transport/posix/uds.go`; macOS uses `SO_NOSIGPIPE`); `service/raw/client_unix.go` and `server_unix.go` reference Linux-only SHM types.
 - Rust: same Linux-only symbols as FreeBSD (`server_session_unix.rs:299` `__errno_location`, `server_unix.rs:43`).
-- A macOS host is reachable for testing.
+- A macOS host is reachable for testing (macOS 26.5, arm64; has clang, cargo/rustc and bash 3.2; no cmake, ninja or go; checked 2026-10-31).
+- Measured on that host (2026-10-31): `socket(AF_UNIX, SOCK_SEQPACKET, 0)` fails with "Protocol not supported"; `fchmod()` on an unbound AF_UNIX stream socket fails with EINVAL, and the socket file is created `0777 & ~umask`. The SOW-0032 owner-only mechanism (`fchmod` before `bind`) therefore fails closed on macOS, so the macOS listener needs its own owner-only mechanism.
 
 Inferences:
 
@@ -32,7 +33,6 @@ Inferences:
 Unknowns:
 
 - The transport design choice (user decision).
-- Whether macOS honors `fchmod` on an unbound unix socket, which the POSIX listener uses to create owner-only sockets (SOW-0032, `docs/level1-posix-uds.md` "Socket permissions"). If it does not, the listener fails closed with a socket error and macOS needs its own owner-only mechanism.
 
 ### Acceptance Criteria
 
@@ -108,7 +108,11 @@ Open decisions:
 
 ## Implications And Decisions
 
-None yet.
+User decisions (2026-10-31, user):
+
+1. macOS baseline transport: AF_UNIX `SOCK_STREAM` with explicit message framing for the NetIPC envelope (new spec section; C, Rust and Go).
+2. cmake, ninja and Go (latest stable) may be installed on the macOS test host.
+3. Scheduling: after the SOW-0050 Netdata vendoring (Netdata does not build NetIPC on macOS).
 
 ## Plan
 

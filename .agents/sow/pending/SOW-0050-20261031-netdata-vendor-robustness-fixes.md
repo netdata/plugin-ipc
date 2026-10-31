@@ -109,7 +109,7 @@ Open decisions:
 
 ## Implications And Decisions
 
-None yet.
+Ordering (2026-10-31, user): the full POSIX and Windows benchmark run happens after SOW-0045 and SOW-0058 land, and before this vendoring. SOW-0057 waits until after this vendoring.
 
 ## Plan
 
