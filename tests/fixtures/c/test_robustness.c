@@ -10,6 +10,7 @@
  *   K1  SHM sessions released after client crash (guard: C is correct)
  *   K3  silent client does not block other clients
  *   K3  silent client does not block shutdown
+ *   K3  silent client's worker is freed at the server handshake deadline
  *   K4  client bounded when server never accepts
  *   K4  client bounded when server never sends HELLO_ACK
  *   N1  call honors a timeout longer than 100 ms (guard: C is correct)
@@ -512,6 +513,31 @@ static void test_silent_client_does_not_block_shutdown(void)
     cleanup_all(rs.service);
 }
 
+static void test_silent_client_released_at_handshake_deadline(void)
+{
+    printf("K3: silent client released at the handshake deadline\n");
+    robust_server_t rs = {.service = "rob_silent_deadline", .workers = 1};
+    if (!start_server(&rs)) {
+        check("server started", 0);
+        return;
+    }
+
+    int silent = raw_socket_connect(rs.service);
+    check("silent client connected", silent >= 0);
+    bool served = served_within(rs.service, false, NIPC_SERVER_HANDSHAKE_TIMEOUT_MS + 4000);
+    check("the only worker serves a new client once the silent one misses the deadline",
+          served);
+
+    if (silent >= 0) {
+        char ch;
+        ssize_t n = recv(silent, &ch, 1, MSG_DONTWAIT);
+        check("server closed the silent connection at the deadline", n == 0);
+        close(silent);
+    }
+    stop_server_within(&rs, 5000);
+    cleanup_all(rs.service);
+}
+
 /* ------------------------------------------------------------------ */
 /*  K4: client bounded when the server never completes HELLO           */
 /* ------------------------------------------------------------------ */
@@ -997,6 +1023,7 @@ int main(int argc, char **argv)
     test_shm_sessions_released_after_client_crash();
     test_silent_client_does_not_block_other_clients();
     test_silent_client_does_not_block_shutdown();
+    test_silent_client_released_at_handshake_deadline();
     test_client_bounded_when_server_never_accepts();
     test_client_bounded_when_server_never_sends_hello_ack();
     test_call_honors_timeout_longer_than_100ms();

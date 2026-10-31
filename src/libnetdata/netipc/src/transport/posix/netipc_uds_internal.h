@@ -27,6 +27,10 @@ nipc_uds_error_t nipc_uds_raw_send_iov(int fd, const void *hdr, size_t hdr_len,
                                        const void *payload, size_t payload_len);
 ssize_t nipc_uds_raw_recv(int fd, void *buf, size_t buf_len);
 
+/* Wait until fd is readable or hung up. timeout_ms 0 waits without a
+ * deadline; abort_fd -1 disables abort. */
+nipc_uds_error_t nipc_uds_wait_readable(int fd, uint32_t timeout_ms, int abort_fd);
+
 int nipc_uds_build_socket_name(char *dst, size_t dst_len,
                                const char *service_name);
 int nipc_uds_build_socket_path(char *dst, size_t dst_len,

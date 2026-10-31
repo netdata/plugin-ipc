@@ -136,10 +136,10 @@ func (s *Session) WaitReadable(timeoutMs uint32) (bool, error) {
 // Close closes the session and releases resources.
 func (s *Session) Close() {
 	if s.handle != syscall.InvalidHandle {
-		if s.role == RoleServer {
-			flushFileBuffers(s.handle)
-			disconnectNamedPipe(s.handle)
-		}
+		// Close only. The peer still reads every message written before the
+		// close, then sees ERROR_BROKEN_PIPE. FlushFileBuffers would block on
+		// a peer that stopped reading, and neither CancelSynchronousIo nor
+		// DisconnectNamedPipe from another thread releases it.
 		syscall.CloseHandle(s.handle)
 		s.handle = syscall.InvalidHandle
 	}

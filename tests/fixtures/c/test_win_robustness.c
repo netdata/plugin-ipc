@@ -9,6 +9,7 @@
  *   K2  SHM session released after client crash
  *   K3  silent client does not block other clients
  *   K3  silent client does not block shutdown
+ *   K3  silent client's worker is freed at the server handshake deadline
  *   K4  client bounded when server never sends HELLO_ACK
  *   N2  shutdown not blocked by a client that stopped reading
  *   N3  stop before run is honored
@@ -407,6 +408,26 @@ static void test_silent_client_does_not_block_shutdown(void)
     check("server stop + destroy finish within 3s while a silent client is connected", stopped);
 }
 
+static void test_silent_client_released_at_handshake_deadline(void)
+{
+    printf("K3: silent client released at the handshake deadline\n");
+    robust_server_t rs = {.service = svc_name("wrob_silent_deadline"), .workers = 1};
+    if (!start_server(&rs)) {
+        check("server started", 0);
+        return;
+    }
+
+    HANDLE silent = open_pipe_silently(rs.service);
+    check("silent client opened the pipe", silent != INVALID_HANDLE_VALUE);
+    BOOL served = served_within(rs.service, FALSE, NIPC_SERVER_HANDSHAKE_TIMEOUT_MS + 4000);
+    check("the only worker serves a new client once the silent one misses the deadline",
+          served);
+
+    if (silent != INVALID_HANDLE_VALUE)
+        CloseHandle(silent);
+    stop_server_within(&rs, 5000);
+}
+
 /* ------------------------------------------------------------------ */
 /*  K4: client bounded when the server never sends HELLO_ACK           */
 /* ------------------------------------------------------------------ */
@@ -649,6 +670,7 @@ int main(int argc, char **argv)
     test_shm_session_released_after_client_crash();
     test_silent_client_does_not_block_other_clients();
     test_silent_client_does_not_block_shutdown();
+    test_silent_client_released_at_handshake_deadline();
     test_client_bounded_when_server_never_sends_hello_ack();
     test_shutdown_not_blocked_by_non_reading_client();
     test_stop_before_run_is_honored();

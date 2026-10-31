@@ -1,4 +1,10 @@
 pub(super) const SERVER_POLL_TIMEOUT_MS: u32 = 100;
+/// How long a stopping server waits for session workers to finish their
+/// current message before forcing them out of blocking I/O.
+pub(super) const SERVER_STOP_GRACE_MS: u64 = 1_000;
+/// How long a connection waits for a worker slot before it is refused. Two
+/// poll slices: a worker whose client left exits within one.
+pub(super) const SERVER_SLOT_WAIT_MS: u64 = 2 * SERVER_POLL_TIMEOUT_MS as u64;
 pub(super) const CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS: u64 = 5;
 pub(super) const CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS: u64 = 5_000;
 pub(super) const CACHE_RESPONSE_BUF_SIZE: usize = 65536;
@@ -43,6 +49,29 @@ impl LookupLogicalConfig {
                 self.max_response_bytes
             },
         }
+    }
+}
+
+/// When all workers are busy, wait up to `SERVER_SLOT_WAIT_MS` for one to
+/// finish, so a client that reconnects right after closing is not refused
+/// while its old worker exits. The accept loop has nothing else to serve
+/// while full, so waiting costs nothing. Returns whether a slot is free.
+pub(super) fn wait_for_worker_slot(
+    running: &std::sync::atomic::AtomicBool,
+    mut has_slot: impl FnMut() -> bool,
+) -> bool {
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(SERVER_SLOT_WAIT_MS);
+    loop {
+        if has_slot() {
+            return true;
+        }
+        if !running.load(std::sync::atomic::Ordering::Acquire)
+            || std::time::Instant::now() >= deadline
+        {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 

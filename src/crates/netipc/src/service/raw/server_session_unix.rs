@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 /// POSIX: Handle one client session in its own thread.
 pub(super) fn handle_session_threaded(
-    mut session: UdsSession,
+    session: &mut UdsSession,
     #[cfg(target_os = "linux")] mut shm: Option<ShmContext>,
     #[cfg(not(target_os = "linux"))] _shm: Option<()>,
     expected_method_code: u16,
@@ -288,7 +288,6 @@ pub(super) fn handle_session_threaded(
             shm_ctx.destroy();
         }
     }
-    drop(session);
 }
 
 /// Zero-wait probe of a session socket. SHM sessions keep the socket open for

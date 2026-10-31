@@ -704,25 +704,62 @@ impl UdsListener {
     }
 
     /// Accept one client using a caller-provided per-session server config
-    /// and session ID.
+    /// and session ID. The handshake waits at most
+    /// `SERVER_HANDSHAKE_TIMEOUT_MS` for HELLO.
     pub fn accept_with_config(
         &self,
         session_id: u64,
         config: ServerConfig,
     ) -> Result<UdsSession, UdsError> {
-        let client_fd = accept_cloexec(self.fd);
-        if client_fd < 0 {
+        self.accept_pending()?.handshake(
+            session_id,
+            &config,
+            protocol::SERVER_HANDSHAKE_TIMEOUT_MS,
+            None,
+        )
+    }
+
+    /// Accept one connection without handshaking, so the caller can run the
+    /// handshake on another thread. Blocks until a client connects.
+    pub fn accept_pending(&self) -> Result<PendingConnection, UdsError> {
+        let fd = accept_cloexec(self.fd);
+        if fd < 0 {
             return Err(UdsError::Accept(errno()));
         }
+        Ok(PendingConnection { fd })
+    }
+}
 
-        match server_handshake(client_fd, &config, session_id) {
-            Ok(session) => Ok(session),
-            Err(e) => {
-                unsafe {
-                    libc::close(client_fd);
-                }
-                Err(e)
-            }
+/// An accepted connection whose handshake has not run yet. Dropping it
+/// closes the connection.
+#[derive(Debug)]
+pub struct PendingConnection {
+    fd: RawFd,
+}
+
+impl PendingConnection {
+    /// Complete the server side of the handshake. Waits at most `timeout_ms`
+    /// for HELLO (`UdsError::Timeout`; 0 waits without a deadline) and returns
+    /// `UdsError::Aborted` once `abort` is set.
+    pub fn handshake(
+        self,
+        session_id: u64,
+        config: &ServerConfig,
+        timeout_ms: u32,
+        abort: Option<&AtomicBool>,
+    ) -> Result<UdsSession, UdsError> {
+        wait_fd_readable(self.fd, &ReceiveWait::new(timeout_ms, abort))?;
+        let session = server_handshake(self.fd, config, session_id)?;
+        // The session owns the descriptor now.
+        std::mem::forget(self);
+        Ok(session)
+    }
+}
+
+impl Drop for PendingConnection {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.fd);
         }
     }
 }

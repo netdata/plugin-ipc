@@ -5,6 +5,8 @@ package raw
 import (
 	"sync"
 	"sync/atomic"
+	"syscall"
+	"time"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
@@ -26,8 +28,12 @@ type Server struct {
 	nextSessionID                atomic.Uint64
 	workerCount                  int
 	wg                           sync.WaitGroup
-	listenerMu                   sync.Mutex
-	listener                     *posix.Listener
+	stopRequested                atomic.Bool
+	stopInit                     sync.Once
+	stopClose                    sync.Once
+	stopCh                       chan struct{}
+	sessionFdsMu                 sync.Mutex
+	sessionFds                   map[int]struct{}
 }
 
 // NewServer creates a new managed server. workerCount limits the
@@ -92,20 +98,28 @@ func (s *Server) prepareAcceptConfig() (uint64, posix.ServerConfig, *posix.ShmCo
 	return sessionID, cfg, nil, true
 }
 
-// Run starts the acceptor loop. Blocking. Accepts clients, spawns a
-// goroutine per session (up to workerCount concurrently).
-// Returns when Stop() is called or on fatal error.
+// Run starts the acceptor loop. Blocking. Accepts clients and runs each
+// connection, handshake included, in its own goroutine (up to workerCount
+// concurrently). Returns when Stop() is called or on fatal error. The server
+// is single-use: a Stop before Run makes Run return at once.
 func (s *Server) Run() error {
+	if s.stopRequested.Load() {
+		return nil
+	}
+
 	posix.ShmCleanupStale(s.runDir, s.serviceName)
 
 	listener, err := posix.Listen(s.runDir, s.serviceName, s.config)
 	if err != nil {
 		return err
 	}
-	s.setListener(listener)
-	defer s.closeListener(listener)
+	defer listener.Close()
 
 	s.running.Store(true)
+	// Stop may have run between the check above and the store.
+	if s.stopRequested.Load() {
+		s.running.Store(false)
+	}
 
 	/* Semaphore channel limits concurrent sessions */
 	sem := make(chan struct{}, s.workerCount)
@@ -120,81 +134,117 @@ func (s *Server) Run() error {
 			continue
 		}
 
-		sessionID, acceptCfg, precreatedShm, ok := s.prepareAcceptConfig()
-		if !ok {
-			s.retryAcceptAfter(nil)
-			continue
-		}
-
-		session, err := listener.AcceptWithConfig(sessionID, acceptCfg)
+		pending, err := listener.AcceptPending()
 		if err != nil {
-			if !s.retryAcceptAfter(func() {
-				if precreatedShm != nil {
-					precreatedShm.ShmDestroy()
-				}
-			}) {
+			if !s.retryAcceptAfter(nil) {
 				break
 			}
 			continue
 		}
 
-		if !s.acquireWorkerSlot(sem, func() {
-			if precreatedShm != nil {
-				precreatedShm.ShmDestroy()
-			}
-		}, session.Close) {
+		// Over capacity: close before HELLO_ACK so the client sees a
+		// failed connect instead of a session that dies on first use.
+		if !s.acquireWorkerSlot(sem, nil, pending.Close) {
 			continue
 		}
 
-		var shm *posix.ShmContext
-		if session.SelectedProfile == protocol.ProfileSHMHybrid ||
-			session.SelectedProfile == protocol.ProfileSHMFutex {
-			if precreatedShm == nil {
-				session.Close()
-				<-sem
-				continue
-			}
-			shm = precreatedShm
-		} else if precreatedShm != nil {
-			precreatedShm.ShmDestroy()
-		}
-
 		s.startSessionWorker(sem, func() {
-			s.handleSession(session, shm)
+			s.serveConnection(pending)
 		})
 	}
 
-	// Wait for all active session goroutines to finish
-	s.wg.Wait()
+	s.markStopped()
+	s.stopSessionWorkers()
 
 	return nil
 }
 
-// Stop signals the server to stop and unblocks Accept by closing the listener.
+// Stop signals the server to stop. Run owns the listener and closes it on
+// exit, so Stop never touches a descriptor Run may still be polling.
 func (s *Server) Stop() {
-	s.running.Store(false)
-	s.closeListener(nil)
+	s.markStopped()
 }
 
-func (s *Server) setListener(listener *posix.Listener) {
-	s.listenerMu.Lock()
-	s.listener = listener
-	s.listenerMu.Unlock()
+func (s *Server) serveConnection(pending *posix.PendingConn) {
+	sessionID, acceptCfg, precreatedShm, ok := s.prepareAcceptConfig()
+	if !ok {
+		pending.Close()
+		return
+	}
+
+	session, err := pending.Handshake(
+		sessionID, acceptCfg, protocol.ServerHandshakeTimeoutMs, s.stopChan())
+	if err != nil {
+		if precreatedShm != nil {
+			precreatedShm.ShmDestroy()
+		}
+		return
+	}
+
+	var shm *posix.ShmContext
+	if session.SelectedProfile == protocol.ProfileSHMHybrid ||
+		session.SelectedProfile == protocol.ProfileSHMFutex {
+		if precreatedShm == nil {
+			session.Close()
+			return
+		}
+		shm = precreatedShm
+	} else if precreatedShm != nil {
+		precreatedShm.ShmDestroy()
+	}
+
+	s.trackSessionFd(session.Fd())
+	s.handleSession(session, shm)
 }
 
-func (s *Server) closeListener(listener *posix.Listener) {
-	s.listenerMu.Lock()
-	target := listener
-	if target == nil {
-		target = s.listener
+func (s *Server) trackSessionFd(fd int) {
+	s.sessionFdsMu.Lock()
+	if s.sessionFds == nil {
+		s.sessionFds = make(map[int]struct{})
 	}
-	if target != nil && s.listener == target {
-		s.listener = nil
-	}
-	s.listenerMu.Unlock()
+	s.sessionFds[fd] = struct{}{}
+	s.sessionFdsMu.Unlock()
+}
 
-	if target != nil {
-		target.Close()
+// closeTrackedSession closes a session under the same lock the stopper uses
+// to shut sessions down, so a shutdown never reaches a reused fd number.
+func (s *Server) closeTrackedSession(session *posix.Session) {
+	s.sessionFdsMu.Lock()
+	delete(s.sessionFds, session.Fd())
+	session.Close()
+	s.sessionFdsMu.Unlock()
+}
+
+// stopSessionWorkers gives workers a grace period to finish on their own,
+// then shuts their sockets down so a worker blocked writing to a client that
+// stopped reading wakes up.
+func (s *Server) stopSessionWorkers() {
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return
+	case <-time.After(serverStopGrace):
+	}
+
+	ticker := time.NewTicker(serverStopRetry)
+	defer ticker.Stop()
+	for {
+		s.sessionFdsMu.Lock()
+		for fd := range s.sessionFds {
+			_ = syscall.Shutdown(fd, syscall.SHUT_RDWR)
+		}
+		s.sessionFdsMu.Unlock()
+
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -254,7 +304,7 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 			if shm != nil {
 				shm.ShmDestroy()
 			}
-			session.Close()
+			s.closeTrackedSession(session)
 		},
 	})
 }

@@ -274,6 +274,43 @@ nipc_uds_error_t nipc_uds_listen(const char *run_dir,
     return NIPC_UDS_OK;
 }
 
+nipc_uds_error_t nipc_uds_accept_pending(nipc_uds_listener_t *listener,
+                                          int *fd_out)
+{
+    if (!listener || !fd_out)
+        return NIPC_UDS_ERR_BAD_PARAM;
+
+    *fd_out = accept_cloexec(listener->fd);
+    return *fd_out < 0 ? NIPC_UDS_ERR_ACCEPT : NIPC_UDS_OK;
+}
+
+nipc_uds_error_t nipc_uds_accept_handshake(int fd,
+                                            const nipc_uds_server_config_t *config,
+                                            uint64_t session_id,
+                                            uint32_t timeout_ms,
+                                            nipc_uds_session_t *out)
+{
+    if (!out || !config || fd < 0) {
+        if (fd >= 0)
+            close(fd);
+        return NIPC_UDS_ERR_BAD_PARAM;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->fd = -1;
+
+    nipc_uds_error_t err = nipc_uds_wait_readable(fd, timeout_ms, -1);
+    if (err == NIPC_UDS_OK)
+        err = nipc_uds_server_handshake(fd, config, session_id, out);
+    if (err != NIPC_UDS_OK) {
+        close(fd);
+        out->fd = -1;
+        return err;
+    }
+
+    return NIPC_UDS_OK;
+}
+
 nipc_uds_error_t nipc_uds_accept(nipc_uds_listener_t *listener,
                                   uint64_t session_id,
                                   nipc_uds_session_t *out)
@@ -281,19 +318,13 @@ nipc_uds_error_t nipc_uds_accept(nipc_uds_listener_t *listener,
     memset(out, 0, sizeof(*out));
     out->fd = -1;
 
-    int client_fd = accept_cloexec(listener->fd);
-    if (client_fd < 0)
-        return NIPC_UDS_ERR_ACCEPT;
-
-    nipc_uds_error_t err = nipc_uds_server_handshake(
-        client_fd, &listener->config, session_id, out);
-    if (err != NIPC_UDS_OK) {
-        close(client_fd);
-        out->fd = -1;
+    int client_fd;
+    nipc_uds_error_t err = nipc_uds_accept_pending(listener, &client_fd);
+    if (err != NIPC_UDS_OK)
         return err;
-    }
 
-    return NIPC_UDS_OK;
+    return nipc_uds_accept_handshake(client_fd, &listener->config, session_id,
+                                     NIPC_SERVER_HANDSHAKE_TIMEOUT_MS, out);
 }
 
 nipc_uds_error_t nipc_uds_connect(const char *run_dir,

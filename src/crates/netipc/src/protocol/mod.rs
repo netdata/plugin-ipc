@@ -48,6 +48,10 @@ pub const STATUS_INTERNAL_ERROR: u16 = 6;
 pub const CODE_HELLO: u16 = 1;
 pub const CODE_HELLO_ACK: u16 = 2;
 
+/// How long an accepted connection may take to send HELLO before the server
+/// drops it. Bounds what a stalled client can hold on the server.
+pub const SERVER_HANDSHAKE_TIMEOUT_MS: u32 = 5000;
+
 // Method codes
 pub const METHOD_INCREMENT: u16 = 1;
 pub const METHOD_CGROUPS_SNAPSHOT: u16 = 2;

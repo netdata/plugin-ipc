@@ -9,6 +9,12 @@
 #include <stdint.h>
 
 #define SERVER_POLL_TIMEOUT_MS 100
+/* How long destroy waits for session threads to finish their current
+ * message before shutting their sockets down. */
+#define SERVER_STOP_GRACE_MS 1000u
+/* How long a connection waits for a worker slot before it is refused. Two
+ * poll slices: a worker whose client left exits within one. */
+#define SERVER_SLOT_WAIT_MS (2u * SERVER_POLL_TIMEOUT_MS)
 #define CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS 5u
 #define CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS 5000u
 #define CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS 5u
@@ -21,6 +27,7 @@ typedef struct {
     bool copied;
     nipc_managed_server_t *server;
     nipc_session_ctx_t *session;
+    int fd; /* accepted connection, handshake still pending */
 } nipc_posix_session_start_arg_t;
 
 enum {
@@ -56,6 +63,8 @@ bool nipc_service_posix_ensure_buffer(uint8_t **buf, size_t *buf_size,
 int nipc_service_posix_poll_with_shutdown(int fd, bool *running);
 void *nipc_service_posix_session_handler_thread(void *arg);
 void nipc_service_posix_server_reap_sessions_locked(nipc_managed_server_t *server);
+bool nipc_service_posix_server_wait_sessions(nipc_managed_server_t *server,
+                                             uint32_t grace_ms);
 int nipc_service_posix_pthread_create(pthread_t *thread,
                                       const pthread_attr_t *attr,
                                       void *(*start_routine)(void *),

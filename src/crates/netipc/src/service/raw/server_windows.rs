@@ -1,16 +1,29 @@
+use super::common::{wait_for_worker_slot, SERVER_STOP_GRACE_MS};
 use super::server::{ManagedServer, ServerConfig};
 use super::server_session_windows::handle_session_win_threaded;
-use crate::protocol::{NipcError, HEADER_SIZE};
+use crate::protocol::{NipcError, HEADER_SIZE, SERVER_HANDSHAKE_TIMEOUT_MS};
 use crate::transport::win_shm::{
     WinShmContext, PROFILE_BUSYWAIT as WIN_SHM_PROFILE_BUSYWAIT,
     PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID,
 };
-use crate::transport::windows::{NpListener, NpSession};
-use std::sync::atomic::Ordering;
+use crate::transport::windows::{NpListener, NpSession, PendingPipe};
+use std::os::windows::io::AsRawHandle;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+unsafe extern "system" {
+    fn CancelSynchronousIo(thread: isize) -> i32;
+}
 
 impl ManagedServer {
     /// Windows: run the acceptor loop over Named Pipes.
     pub fn run(&mut self) -> Result<(), NipcError> {
+        // A stop before run must win; the server is single-use.
+        if self.stop_requested.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
         let mut listener = NpListener::bind(
             &self.run_dir,
             &self.service_name,
@@ -18,29 +31,21 @@ impl ManagedServer {
         )
         .map_err(|_| NipcError::BadLayout)?;
 
-        self.remember_windows_listener_handle(&listener);
+        *self.listener_waker.lock().unwrap() = Some(listener.waker());
 
         self.running.store(true, Ordering::Release);
+        if self.stop_requested.load(Ordering::Acquire) {
+            self.running.store(false, Ordering::Release);
+        }
 
-        let mut session_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
+        let mut session_threads: Vec<JoinHandle<()>> = Vec::new();
 
         while self.running.load(Ordering::Acquire) {
-            let (session_id, accept_cfg, prepared_shm, ready) = self.prepare_windows_accept();
-            if !ready {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                continue;
-            }
-
-            self.remember_windows_listener_handle(&listener);
-            let accepted = listener.accept_with_config(session_id, accept_cfg);
-            self.remember_windows_listener_handle(&listener);
-
-            let session = match accepted {
-                Ok(s) => s,
+            // The handshake runs on the worker, so a client that never sends
+            // HELLO cannot stall this loop.
+            let pending = match listener.accept_pending() {
+                Ok(p) => p,
                 Err(_) => {
-                    if let Some(mut prepared) = prepared_shm {
-                        prepared.destroy_all();
-                    }
                     if !self.running.load(Ordering::Acquire) {
                         break;
                     }
@@ -49,32 +54,48 @@ impl ManagedServer {
                 }
             };
 
-            session_threads.retain(|t| !t.is_finished());
-            if session_threads.len() >= self.worker_count {
-                if let Some(mut prepared) = prepared_shm {
-                    prepared.destroy_all();
-                }
-                drop(session);
+            // Stop wakes ConnectNamedPipe with a throwaway connection.
+            if !self.running.load(Ordering::Acquire) {
+                break;
+            }
+
+            // A connection holds its slot from accept, handshake included.
+            // Refuse before HELLO_ACK so the client's connect fails instead of
+            // a later call.
+            let worker_count = self.worker_count;
+            if !wait_for_worker_slot(&self.running, || {
+                session_threads.retain(|t| !t.is_finished());
+                session_threads.len() < worker_count
+            }) {
+                drop(pending);
                 continue;
             }
 
-            let shm = self.finalize_windows_shm(&session, prepared_shm);
-            if shm.is_none()
-                && (session.selected_profile == WIN_SHM_PROFILE_HYBRID
-                    || session.selected_profile == WIN_SHM_PROFILE_BUSYWAIT)
-            {
-                drop(session);
-                continue;
-            }
-
+            let session_id = self.next_session_id;
+            self.next_session_id += 1;
+            let accept = AcceptContext {
+                run_dir: self.run_dir.clone(),
+                service_name: self.service_name.clone(),
+                base_config: self.server_config.clone(),
+                session_id,
+            };
             let expected_method_code = self.expected_method_code;
             let handler = self.handler.clone();
             let running = self.running.clone();
+            let stop_requested = self.stop_requested.clone();
             let learned_request_payload_bytes = self.learned_request_payload_bytes.clone();
             let learned_response_payload_bytes = self.learned_response_payload_bytes.clone();
             let request_payload_growth_ceiling = self.request_payload_growth_ceiling;
             let response_payload_growth_ceiling = self.response_payload_growth_ceiling;
             let t = std::thread::spawn(move || {
+                let Some((session, shm)) = accept.handshake(
+                    pending,
+                    &stop_requested,
+                    &learned_request_payload_bytes,
+                    &learned_response_payload_bytes,
+                ) else {
+                    return;
+                };
                 handle_session_win_threaded(
                     session,
                     shm,
@@ -90,41 +111,100 @@ impl ManagedServer {
             session_threads.push(t);
         }
 
-        *self.listener_handle.lock().unwrap() = None;
-
-        for t in session_threads {
-            let _ = t.join();
-        }
+        *self.listener_waker.lock().unwrap() = None;
+        self.stop_requested.store(true, Ordering::Release);
+        self.running.store(false, Ordering::Release);
+        drop(listener);
+        stop_workers(session_threads);
 
         Ok(())
     }
+}
 
-    fn remember_windows_listener_handle(&self, listener: &NpListener) {
-        let handle = listener.handle();
-        let stored = if handle == 0 || handle == -1 {
-            None
-        } else {
-            Some(handle as usize)
-        };
-        *self.listener_handle.lock().unwrap() = stored;
+/// Give workers a grace to finish their current message, then cancel the
+/// pipe I/O of the ones still blocked until they exit, and join them all. A
+/// single cancel can land before a thread enters its next blocking call, so
+/// it repeats.
+fn stop_workers(workers: Vec<JoinHandle<()>>) {
+    let deadline = Instant::now() + Duration::from_millis(SERVER_STOP_GRACE_MS);
+    while Instant::now() < deadline && workers.iter().any(|t| !t.is_finished()) {
+        std::thread::sleep(Duration::from_millis(5));
     }
 
-    fn prepare_windows_accept(&mut self) -> (u64, ServerConfig, Option<PreparedWinShm>, bool) {
-        let session_id = self.next_session_id;
-        self.next_session_id += 1;
+    while workers.iter().any(|t| !t.is_finished()) {
+        for t in workers.iter().filter(|t| !t.is_finished()) {
+            // The JoinHandle keeps the thread handle valid until join.
+            unsafe {
+                CancelSynchronousIo(t.as_raw_handle() as isize);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
-        let mut cfg = self.server_config.clone();
-        cfg.max_request_payload_bytes = self.learned_request_payload_bytes.load(Ordering::Acquire);
-        cfg.max_response_payload_bytes =
-            self.learned_response_payload_bytes.load(Ordering::Acquire);
+    for t in workers {
+        let _ = t.join();
+    }
+}
 
+/// What a worker needs to run the server side of one handshake.
+struct AcceptContext {
+    run_dir: String,
+    service_name: String,
+    base_config: ServerConfig,
+    session_id: u64,
+}
+
+impl AcceptContext {
+    /// Prepare the per-session config and SHM, then handshake. Returns `None`
+    /// if the session must not start.
+    fn handshake(
+        self,
+        pending: PendingPipe,
+        stop_requested: &AtomicBool,
+        learned_request_payload_bytes: &AtomicU32,
+        learned_response_payload_bytes: &AtomicU32,
+    ) -> Option<(NpSession, Option<WinShmContext>)> {
+        let mut cfg = self.base_config.clone();
+        cfg.max_request_payload_bytes = learned_request_payload_bytes.load(Ordering::Acquire);
+        cfg.max_response_payload_bytes = learned_response_payload_bytes.load(Ordering::Acquire);
+
+        let mut prepared = self.prepare_shm(&mut cfg)?;
+
+        let session = match pending.handshake(
+            self.session_id,
+            &cfg,
+            SERVER_HANDSHAKE_TIMEOUT_MS,
+            Some(stop_requested),
+        ) {
+            Ok(session) => session,
+            Err(_) => {
+                prepared.destroy_all();
+                return None;
+            }
+        };
+
+        let profile = session.selected_profile;
+        if profile != WIN_SHM_PROFILE_HYBRID && profile != WIN_SHM_PROFILE_BUSYWAIT {
+            prepared.destroy_all();
+            return Some((session, None));
+        }
+        // Keep the negotiated context and destroy every unused prepared
+        // context. SHM profile guarantee: no prepared context, no session.
+        let selected = prepared.take(profile);
+        prepared.destroy_all();
+        selected.map(|shm| (session, Some(shm)))
+    }
+
+    /// Create the session's SHM objects before HELLO is read, dropping each
+    /// profile whose objects fail. Returns `None` if no profile is left.
+    fn prepare_shm(&self, cfg: &mut ServerConfig) -> Option<PreparedWinShm> {
+        let mut prepared = PreparedWinShm::default();
         let shm_profiles =
             cfg.supported_profiles & (WIN_SHM_PROFILE_HYBRID | WIN_SHM_PROFILE_BUSYWAIT);
         if shm_profiles == 0 {
-            return (session_id, cfg, None, true);
+            return Some(prepared);
         }
 
-        let mut prepared = PreparedWinShm::default();
         for profile in [WIN_SHM_PROFILE_HYBRID, WIN_SHM_PROFILE_BUSYWAIT] {
             if cfg.supported_profiles & profile == 0 {
                 continue;
@@ -133,8 +213,8 @@ impl ManagedServer {
             match WinShmContext::server_create(
                 &self.run_dir,
                 &self.service_name,
-                self.server_config.auth_token,
-                session_id,
+                self.base_config.auth_token,
+                self.session_id,
                 profile,
                 cfg.max_request_payload_bytes + HEADER_SIZE as u32,
                 cfg.max_response_payload_bytes + HEADER_SIZE as u32,
@@ -149,33 +229,10 @@ impl ManagedServer {
 
         if cfg.supported_profiles == 0 {
             prepared.destroy_all();
-            return (session_id, cfg, None, false);
-        }
-
-        if prepared.is_empty() {
-            return (session_id, cfg, None, true);
-        }
-
-        (session_id, cfg, Some(prepared), true)
-    }
-
-    fn finalize_windows_shm(
-        &self,
-        session: &NpSession,
-        mut prepared: Option<PreparedWinShm>,
-    ) -> Option<WinShmContext> {
-        let profile = session.selected_profile;
-        if profile != WIN_SHM_PROFILE_HYBRID && profile != WIN_SHM_PROFILE_BUSYWAIT {
-            if let Some(ref mut prepared) = prepared {
-                prepared.destroy_all();
-            }
             return None;
         }
-        let mut prepared = prepared?;
-        // Keep the negotiated context and destroy every unused prepared context.
-        let selected = prepared.take(profile);
-        prepared.destroy_all();
-        selected
+
+        Some(prepared)
     }
 }
 
@@ -211,9 +268,5 @@ impl PreparedWinShm {
         if let Some(mut ctx) = self.busywait.take() {
             ctx.destroy();
         }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.hybrid.is_none() && self.busywait.is_none()
     }
 }

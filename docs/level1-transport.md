@@ -185,7 +185,12 @@ Level 1 manages the full lifecycle of transport connections:
   clients. One listener serves one service endpoint.
 - **Accept**: accept incoming client connections on a listener. Each accepted
   connection becomes an independent session after completing the handshake.
-  A listener must support multiple concurrent sessions.
+  A listener must support multiple concurrent sessions. Accept is split in
+  two steps: taking the connection (no bytes read), then running the server
+  handshake with a deadline and an abort signal. This lets a server run the
+  handshake outside its accept loop, so one stalled client cannot block
+  others. The one-step accept remains as a convenience; it applies the
+  server handshake deadline below without an abort signal.
 - **Close**: tear down a session or a listener. Closing a session releases
   its transport resources. Closing a listener stops accepting new connections
   but does not forcibly terminate existing sessions (that is a higher-level
@@ -194,8 +199,15 @@ Level 1 manages the full lifecycle of transport connections:
 ### Handshake
 
 Every new session begins with a handshake over the baseline transport. The
-handshake is a single request-response exchange using control messages. It
-establishes:
+handshake is a single request-response exchange using control messages.
+
+The server bounds its wait for HELLO. The managed server (Level 2) drops a
+connection that has not delivered HELLO within 5000 ms
+(`NIPC_SERVER_HANDSHAKE_TIMEOUT_MS` in C, `SERVER_HANDSHAKE_TIMEOUT_MS` in
+Rust, `ServerHandshakeTimeoutMs` in Go), and abandons the wait at once when
+it is stopped.
+
+The handshake establishes:
 
 - **Authorization**: the client presents a caller-supplied auth token. The
   server verifies it. If verification fails, the session is rejected. The

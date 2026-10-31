@@ -49,6 +49,32 @@ func (s *Server) initCommon(
 	s.learnedResponsePayloadBytes.Store(maxResponsePayloadBytes)
 }
 
+const (
+	// serverStopGrace is how long stop waits for workers to exit on their
+	// own before interrupting their blocking I/O.
+	serverStopGrace = 1000 * time.Millisecond
+	serverStopRetry = 50 * time.Millisecond
+	// serverSlotWait is how long a connection waits for a worker slot
+	// before it is refused. Two poll slices: a worker whose client left
+	// exits within one.
+	serverSlotWait = 2 * serverPollTimeoutMs * time.Millisecond
+)
+
+// stopChan is closed once a stop is requested; handshakes wait on it.
+func (s *Server) stopChan() <-chan struct{} {
+	s.stopInit.Do(func() { s.stopCh = make(chan struct{}) })
+	return s.stopCh
+}
+
+// markStopped records a stop request. The flag is never cleared, so a stop
+// that lands before Run starts still stops it.
+func (s *Server) markStopped() {
+	s.stopRequested.Store(true)
+	s.running.Store(false)
+	s.stopChan()
+	s.stopClose.Do(func() { close(s.stopCh) })
+}
+
 func (s *Server) retryAcceptAfter(cleanup func()) bool {
 	if cleanup != nil {
 		cleanup()
@@ -60,17 +86,30 @@ func (s *Server) retryAcceptAfter(cleanup func()) bool {
 	return true
 }
 
+// acquireWorkerSlot waits up to serverSlotWait for a free worker, so a
+// client that reconnects right after closing is not refused while its old
+// worker exits. The accept loop has nothing else to serve while full, so
+// waiting costs nothing.
 func (s *Server) acquireWorkerSlot(sem chan struct{}, cleanup func(), closeSession func()) bool {
 	select {
 	case sem <- struct{}{}:
 		return true
 	default:
-		if cleanup != nil {
-			cleanup()
-		}
-		closeSession()
-		return false
 	}
+
+	timer := time.NewTimer(serverSlotWait)
+	defer timer.Stop()
+	select {
+	case sem <- struct{}{}:
+		return true
+	case <-timer.C:
+	case <-s.stopChan():
+	}
+	if cleanup != nil {
+		cleanup()
+	}
+	closeSession()
+	return false
 }
 
 func (s *Server) startSessionWorker(sem chan struct{}, run func()) {

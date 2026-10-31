@@ -52,6 +52,10 @@ extern "C" {
 #define NIPC_CODE_HELLO 1u
 #define NIPC_CODE_HELLO_ACK 2u
 
+/* How long an accepted connection may take to send HELLO before the server
+ * drops it. Bounds what a stalled client can hold on the server. */
+#define NIPC_SERVER_HANDSHAKE_TIMEOUT_MS 5000u
+
 /* Method codes */
 #define NIPC_METHOD_INCREMENT 1u
 #define NIPC_METHOD_CGROUPS_SNAPSHOT 2u

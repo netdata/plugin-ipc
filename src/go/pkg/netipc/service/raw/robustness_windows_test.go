@@ -233,6 +233,24 @@ func TestWinRobustSilentClientDoesNotBlockShutdown(t *testing.T) {
 	}
 }
 
+// A silent client holds a worker only until the server handshake deadline.
+func TestWinRobustSilentClientReleasedAtHandshakeDeadline(t *testing.T) {
+	svc := uniqueWinService("go_wrob_silent_deadline")
+	rs := startWinRobustServer(svc, testWinServerConfig(), protocol.MethodIncrement, winSlowIncrementDispatch(0), 1)
+
+	silent := winOpenPipeSilently(t, svc)
+	defer syscall.CloseHandle(silent)
+	start := time.Now()
+	limit := time.Duration(protocol.ServerHandshakeTimeoutMs)*time.Millisecond + 4*time.Second
+	served := winServedWithin(svc, testWinClientConfig(), limit)
+	elapsed := time.Since(start)
+
+	rs.stopWithin(5 * time.Second)
+	if served != nil {
+		t.Errorf("the only worker must be freed once the silent client misses the handshake deadline: %v (after %v)", served, elapsed)
+	}
+}
+
 // K4: a client call must be bounded even when the server never answers HELLO.
 func TestWinRobustClientBoundedWhenServerNeverSendsHelloAck(t *testing.T) {
 	svc := uniqueWinService("go_wrob_nohelloack")

@@ -21,6 +21,9 @@ pub struct ManagedServer {
     pub(super) expected_method_code: u16,
     pub(super) handler: Option<DispatchHandler>,
     pub(super) running: Arc<AtomicBool>,
+    /// Set by `stop()` and when `run()` exits, never cleared: `run()` after a
+    /// stop returns at once, and pending handshakes abort on it.
+    pub(super) stop_requested: Arc<AtomicBool>,
     pub(super) learned_request_payload_bytes: Arc<AtomicU32>,
     pub(super) learned_response_payload_bytes: Arc<AtomicU32>,
     pub(super) request_payload_growth_ceiling: u32,
@@ -28,7 +31,8 @@ pub struct ManagedServer {
     pub(super) next_session_id: u64,
     pub(super) worker_count: usize,
     #[cfg(windows)]
-    pub(super) listener_handle: Arc<std::sync::Mutex<Option<usize>>>,
+    pub(super) listener_waker:
+        Arc<std::sync::Mutex<Option<crate::transport::windows::NpListenerWaker>>>,
 }
 
 impl ManagedServer {
@@ -87,6 +91,7 @@ impl ManagedServer {
             expected_method_code,
             handler,
             running: Arc::new(AtomicBool::new(false)),
+            stop_requested: Arc::new(AtomicBool::new(false)),
             learned_request_payload_bytes: Arc::new(AtomicU32::new(learned_request)),
             learned_response_payload_bytes: Arc::new(AtomicU32::new(learned_response)),
             request_payload_growth_ceiling,
@@ -94,26 +99,19 @@ impl ManagedServer {
             next_session_id: 1,
             worker_count: if worker_count < 1 { 1 } else { worker_count },
             #[cfg(windows)]
-            listener_handle: Arc::new(std::sync::Mutex::new(None)),
+            listener_waker: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
-    /// Signal shutdown. On Windows, also closes the listener pipe to
-    /// unblock ConnectNamedPipe in the accept loop.
+    /// Signal shutdown. On Windows, also wakes the accept loop blocked in
+    /// ConnectNamedPipe; it never touches a handle the loop owns.
     pub fn stop(&self) {
+        self.stop_requested.store(true, Ordering::Release);
         self.running.store(false, Ordering::Release);
 
         #[cfg(windows)]
-        {
-            let mut guard = self.listener_handle.lock().unwrap();
-            if let Some(h) = guard.take() {
-                unsafe extern "system" {
-                    fn CloseHandle(h: isize) -> i32;
-                }
-                unsafe {
-                    CloseHandle(h as isize);
-                }
-            }
+        if let Some(waker) = self.listener_waker.lock().unwrap().as_ref() {
+            waker.wake();
         }
     }
 

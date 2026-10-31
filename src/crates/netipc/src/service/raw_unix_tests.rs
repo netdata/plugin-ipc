@@ -4075,39 +4075,18 @@ fn test_server_rejects_session_at_worker_capacity() {
         "first client should occupy the only worker slot"
     );
 
-    let mut session2 =
-        UdsSession::connect(TEST_RUN_DIR, svc, &client_config()).expect("second connect");
-    let mut req_hdr = Header {
-        kind: KIND_REQUEST,
-        code: METHOD_INCREMENT,
-        item_count: 1,
-        message_id: 1,
-        ..Header::default()
-    };
-    let mut req_payload = [0u8; INCREMENT_PAYLOAD_SIZE];
-    assert_eq!(
-        increment_encode(9, &mut req_payload),
-        INCREMENT_PAYLOAD_SIZE,
-        "IncrementEncode should fill the request buffer"
-    );
-
-    let send_err = session2.send(&mut req_hdr, &req_payload).err();
-    let recv_ok = if send_err.is_none() {
-        let mut recv_buf = [0u8; HEADER_SIZE + 64];
-        session2.receive(&mut recv_buf).is_ok()
-    } else {
-        false
-    };
+    // Over-capacity connections are refused before HELLO_ACK, so the
+    // connect itself fails instead of the first call.
+    let second = UdsSession::connect(TEST_RUN_DIR, svc, &client_config());
     assert!(
-        !(send_err.is_none() && recv_ok),
-        "second session should be rejected while the server is at worker capacity"
+        second.is_err(),
+        "second connect should be refused while the server is at worker capacity"
     );
     assert_eq!(
         handler_calls.load(Ordering::Acquire),
         1,
         "second session should not enter the handler while the first session is active"
     );
-    drop(session2);
 
     release.store(true, Ordering::Release);
     let first_result = call_rx.recv().expect("first call result");

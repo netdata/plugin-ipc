@@ -274,6 +274,39 @@ fn test_robust_silent_client_does_not_block_other_clients() {
     );
 }
 
+/// A silent client holds a worker only until the server handshake deadline.
+#[test]
+fn test_robust_silent_client_released_at_handshake_deadline() {
+    let svc = unique_service("rs_rob_silent_deadline");
+    let (server, handle) = start_server(
+        &svc,
+        server_config(),
+        METHOD_INCREMENT,
+        increment_dispatch_handler(),
+        1,
+    );
+
+    let silent = silent_connect(&svc);
+    let limit =
+        Duration::from_millis(u64::from(crate::protocol::SERVER_HANDSHAKE_TIMEOUT_MS) + 4000);
+    let served = served_within(&svc, client_config(), limit);
+
+    let mut ch = 0u8;
+    let n = unsafe { libc::recv(silent, (&mut ch as *mut u8).cast(), 1, libc::MSG_DONTWAIT) };
+    unsafe { libc::close(silent) };
+    stop(&server);
+    let _ = handle.join();
+    cleanup_all(&svc);
+    assert!(
+        served.is_ok(),
+        "the only worker must be freed once the silent client misses the handshake deadline: {served:?}"
+    );
+    assert_eq!(
+        n, 0,
+        "server must close the silent connection at the deadline"
+    );
+}
+
 #[test]
 fn test_robust_silent_client_does_not_block_shutdown() {
     let svc = unique_service("rs_rob_silent_stop");

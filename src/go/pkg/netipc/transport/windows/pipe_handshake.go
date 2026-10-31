@@ -80,6 +80,11 @@ func helloAckStatusError(status uint16) error {
 }
 
 func serverHandshake(handle syscall.Handle, config *ServerConfig, sessionID uint64) (*Session, error) {
+	return serverHandshakeWait(handle, config, sessionID, newReceiveWait(0, nil))
+}
+
+func serverHandshakeWait(handle syscall.Handle, config *ServerConfig, sessionID uint64, wait receiveWait) (*Session, error) {
+	pending := &Session{handle: handle, role: RoleServer}
 	serverPktSize := applyDefault(config.PacketSize, defaultPacketSize)
 	sRespPay := applyDefault(config.MaxResponsePayloadBytes, protocol.MaxPayloadDefault)
 	sReqPay := applyDefault(config.MaxRequestPayloadBytes, protocol.MaxPayloadDefault)
@@ -94,7 +99,7 @@ func serverHandshake(handle syscall.Handle, config *ServerConfig, sessionID uint
 			AuthToken:               config.AuthToken,
 		},
 		SessionID:       sessionID,
-		Recv:            func(dst []byte) (int, error) { return rawRecv(handle, dst) },
+		Recv:            func(dst []byte) (int, error) { return pending.rawRecvWithTimeout(dst, wait) },
 		SendAck:         func(status uint16, ack protocol.HelloAck) error { return sendHelloAck(handle, status, ack) },
 		StatusError:     helloAckStatusError,
 		ErrRecv:         func(msg string) error { return wrapErr(ErrRecv, msg) },

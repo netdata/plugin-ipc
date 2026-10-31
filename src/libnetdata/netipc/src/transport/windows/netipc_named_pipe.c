@@ -831,15 +831,13 @@ nipc_np_error_t nipc_np_listen(const char *run_dir, const char *service_name,
 /*  Public API: accept                                                 */
 /* ------------------------------------------------------------------ */
 
-nipc_np_error_t nipc_np_accept(nipc_np_listener_t *listener,
-                               uint64_t session_id, nipc_np_session_t *out) {
-  if (!listener || !out)
+nipc_np_error_t nipc_np_accept_pending(nipc_np_listener_t *listener,
+                                       HANDLE *pipe_out) {
+  if (!listener || !pipe_out)
     return NIPC_NP_ERR_BAD_PARAM;
+  *pipe_out = INVALID_HANDLE_VALUE;
   if (listener->pipe == INVALID_HANDLE_VALUE || listener->pipe == NULL)
     return NIPC_NP_ERR_ACCEPT;
-
-  memset(out, 0, sizeof(*out));
-  out->pipe = INVALID_HANDLE_VALUE;
 
   /* Wait for client to connect to the current pipe instance */
   BOOL connected = ConnectNamedPipe(listener->pipe, NULL);
@@ -866,17 +864,63 @@ nipc_np_error_t nipc_np_accept(nipc_np_listener_t *listener,
   }
   listener->pipe = next;
 
-  /* Perform handshake */
-  nipc_np_error_t herr =
-      server_handshake(session_pipe, &listener->config, session_id, out);
+  *pipe_out = session_pipe;
+  return NIPC_NP_OK;
+}
+
+nipc_np_error_t nipc_np_accept_handshake(HANDLE pipe,
+                                         const nipc_np_server_config_t *config,
+                                         uint64_t session_id,
+                                         uint32_t timeout_ms,
+                                         nipc_np_session_t *out) {
+  if (!out || !config || pipe == INVALID_HANDLE_VALUE || pipe == NULL) {
+    if (pipe != INVALID_HANDLE_VALUE && pipe != NULL) {
+      DisconnectNamedPipe(pipe);
+      CloseHandle(pipe);
+    }
+    return NIPC_NP_ERR_BAD_PARAM;
+  }
+
+  memset(out, 0, sizeof(*out));
+  out->pipe = INVALID_HANDLE_VALUE;
+
+  bool readable = false;
+  nipc_np_error_t herr;
+  do {
+    herr = wait_readable(pipe, timeout_ms ? timeout_ms : 1000u, &readable);
+  } while (herr == NIPC_NP_OK && !readable && timeout_ms == 0);
+  if (herr == NIPC_NP_OK && !readable)
+    herr = NIPC_NP_ERR_TIMEOUT;
+  /* A peer gone before HELLO is a failed HELLO read, as without the wait. */
+  if (herr == NIPC_NP_ERR_DISCONNECTED)
+    herr = NIPC_NP_ERR_RECV;
+  if (herr == NIPC_NP_OK)
+    herr = server_handshake(pipe, config, session_id, out);
   if (herr != NIPC_NP_OK) {
-    DisconnectNamedPipe(session_pipe);
-    CloseHandle(session_pipe);
+    DisconnectNamedPipe(pipe);
+    CloseHandle(pipe);
     out->pipe = INVALID_HANDLE_VALUE;
     return herr;
   }
 
   return NIPC_NP_OK;
+}
+
+nipc_np_error_t nipc_np_accept(nipc_np_listener_t *listener,
+                               uint64_t session_id, nipc_np_session_t *out) {
+  if (!listener || !out)
+    return NIPC_NP_ERR_BAD_PARAM;
+
+  memset(out, 0, sizeof(*out));
+  out->pipe = INVALID_HANDLE_VALUE;
+
+  HANDLE session_pipe;
+  nipc_np_error_t err = nipc_np_accept_pending(listener, &session_pipe);
+  if (err != NIPC_NP_OK)
+    return err;
+
+  return nipc_np_accept_handshake(session_pipe, &listener->config, session_id,
+                                  NIPC_SERVER_HANDSHAKE_TIMEOUT_MS, out);
 }
 
 /* ------------------------------------------------------------------ */
@@ -936,12 +980,10 @@ void nipc_np_close_session(nipc_np_session_t *session) {
     return;
 
   if (session->pipe != INVALID_HANDLE_VALUE && session->pipe != NULL) {
-    /* Only the server side should flush before disconnecting.
-     * Client-side flush on a broken session can block shutdown. */
-    if (session->role == NIPC_NP_ROLE_SERVER) {
-      FlushFileBuffers(session->pipe);
-      DisconnectNamedPipe(session->pipe);
-    }
+    /* Close only. The peer still reads every message written before the
+     * close, then sees ERROR_BROKEN_PIPE. FlushFileBuffers would block on a
+     * peer that stopped reading, and neither CancelSynchronousIo nor
+     * DisconnectNamedPipe from another thread releases it. */
     CloseHandle(session->pipe);
   }
   session->pipe = INVALID_HANDLE_VALUE;

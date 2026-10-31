@@ -185,12 +185,35 @@ nipc_np_error_t nipc_np_listen(const char *run_dir,
  * Accept one client on a listener. Performs the full handshake.
  * session_id is placed into the hello-ack so the client can attach
  * to the correct per-session SHM region.
- * Blocks until a client connects and the handshake completes.
+ * Blocks until a client connects; the handshake then waits at most
+ * NIPC_SERVER_HANDSHAKE_TIMEOUT_MS for HELLO.
  * After accepting, creates a new pipe instance for subsequent clients.
  */
 nipc_np_error_t nipc_np_accept(nipc_np_listener_t *listener,
                                 uint64_t session_id,
                                 nipc_np_session_t *out);
+
+/*
+ * Accept one connection without handshaking, so the caller can run the
+ * handshake on another thread. Blocks until a client connects, then
+ * creates a new pipe instance for subsequent clients. The caller owns
+ * *pipe_out and passes it to nipc_np_accept_handshake().
+ */
+nipc_np_error_t nipc_np_accept_pending(nipc_np_listener_t *listener,
+                                       HANDLE *pipe_out);
+
+/*
+ * Complete the server side of the handshake on a pipe returned by
+ * nipc_np_accept_pending(). Waits at most timeout_ms for HELLO
+ * (NIPC_NP_ERR_TIMEOUT); 0 waits without a deadline. Takes ownership of
+ * pipe: on success it belongs to *out, on failure it is disconnected
+ * and closed.
+ */
+nipc_np_error_t nipc_np_accept_handshake(HANDLE pipe,
+                                         const nipc_np_server_config_t *config,
+                                         uint64_t session_id,
+                                         uint32_t timeout_ms,
+                                         nipc_np_session_t *out);
 
 /*
  * Connect to a server pipe derived from run_dir + service_name.

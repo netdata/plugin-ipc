@@ -51,6 +51,26 @@ This is the Windows baseline profile.
 2. **Client**: connects to the pipe with `CreateFileW`. The connection
    is established when the server's `ConnectNamedPipe` completes.
 
+   On the server, accept is split: `nipc_np_accept_pending()` (C),
+   `NpListener::accept_pending()` (Rust) and `Listener.AcceptPending()`
+   (Go) return the connected pipe instance without reading;
+   `nipc_np_accept_handshake()`, `PendingPipe::handshake()` and
+   `PendingConn.Handshake()` then wait for HELLO with a timeout (0 = none)
+   and, in Rust and Go, an abort signal. A failed handshake disconnects and
+   closes the instance. `nipc_np_accept()` / `accept()` / `Accept()` do both
+   steps with the 5000 ms server handshake deadline. A server wakes a
+   blocked `ConnectNamedPipe` by connecting to its own pipe name and
+   closing at once (Rust
+   `NpListenerWaker`, Go `Listener.Wake()`); it never closes a handle the
+   accepting thread may still use.
+
+   Closing a session only closes its handle, in both roles. The peer still
+   reads every message written before the close, then sees
+   `ERROR_BROKEN_PIPE`. Sessions do not call `FlushFileBuffers` or
+   `DisconnectNamedPipe` on close: a flush blocks while the peer is not
+   reading, and on a synchronous pipe handle neither `CancelSynchronousIo`
+   nor `DisconnectNamedPipe` from another thread releases it.
+
 3. **Handshake**: immediately after connection, the client sends a
    HELLO control message and the server responds with HELLO_ACK, as
    defined in the wire envelope spec. Handshake messages travel over

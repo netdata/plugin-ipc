@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -16,6 +17,16 @@ import (
 
 func rawPipePair(t *testing.T) (syscall.Handle, syscall.Handle) {
 	t.Helper()
+	clientHandle, serverHandle, _, _ := rawPipePairWithClosers(t)
+	return clientHandle, serverHandle
+}
+
+// rawPipePairWithClosers also returns closers for tests that close an end
+// early. Closing a handle again in cleanup could close a value Windows has
+// since reused, such as a Go runtime event, and crash the test binary.
+func rawPipePairWithClosers(t *testing.T) (syscall.Handle, syscall.Handle, func() error, func() error) {
+	t.Helper()
+	var clientClosed, serverClosed atomic.Bool
 
 	service := uniquePipeService(t)
 	pipeName, err := BuildPipeName(testPipeRunDir, service)
@@ -28,7 +39,7 @@ func rawPipePair(t *testing.T) (syscall.Handle, syscall.Handle) {
 		t.Fatalf("createPipeInstance failed: %v", err)
 	}
 	t.Cleanup(func() {
-		if serverHandle != syscall.InvalidHandle && serverHandle != 0 {
+		if !serverClosed.Load() && serverHandle != syscall.InvalidHandle && serverHandle != 0 {
 			disconnectNamedPipe(serverHandle)
 			syscall.CloseHandle(serverHandle)
 		}
@@ -52,7 +63,7 @@ func rawPipePair(t *testing.T) (syscall.Handle, syscall.Handle) {
 		t.Fatalf("CreateFile failed: %v", err)
 	}
 	t.Cleanup(func() {
-		if clientHandle != syscall.InvalidHandle && clientHandle != 0 {
+		if !clientClosed.Load() && clientHandle != syscall.InvalidHandle && clientHandle != 0 {
 			syscall.CloseHandle(clientHandle)
 		}
 	})
@@ -66,7 +77,15 @@ func rawPipePair(t *testing.T) (syscall.Handle, syscall.Handle) {
 		t.Fatalf("connectNamedPipe failed: %v", err)
 	}
 
-	return clientHandle, serverHandle
+	closeClient := func() error {
+		clientClosed.Store(true)
+		return syscall.CloseHandle(clientHandle)
+	}
+	closeServer := func() error {
+		serverClosed.Store(true)
+		return syscall.CloseHandle(serverHandle)
+	}
+	return clientHandle, serverHandle, closeClient, closeServer
 }
 
 func sessionPair(t *testing.T, sCfg ServerConfig, cCfg ClientConfig) (*Session, *Session) {
@@ -226,18 +245,16 @@ func TestRawRecvMoreData(t *testing.T) {
 }
 
 func TestRawPipeDisconnectErrors(t *testing.T) {
-	clientHandle, serverHandle := rawPipePair(t)
+	clientHandle, _, _, closeServer := rawPipePairWithClosers(t)
 
-	syscall.CloseHandle(serverHandle)
-	serverHandle = syscall.InvalidHandle
+	closeServer()
 
 	if err := rawWrite(clientHandle, []byte("x")); !errors.Is(err, ErrDisconnected) {
 		t.Fatalf("rawWrite after peer close = %v, want ErrDisconnected", err)
 	}
 
-	clientHandle2, serverHandle2 := rawPipePair(t)
-	syscall.CloseHandle(clientHandle2)
-	clientHandle2 = syscall.InvalidHandle
+	_, serverHandle2, closeClient2, _ := rawPipePairWithClosers(t)
+	closeClient2()
 
 	buf := make([]byte, 32)
 	if _, err := rawRecv(serverHandle2, buf); !errors.Is(err, ErrDisconnected) {
@@ -396,9 +413,9 @@ func TestClientHandshakeRejectsMalformedAck(t *testing.T) {
 
 func TestClientHandshakeTransportErrors(t *testing.T) {
 	t.Run("hello send disconnected", func(t *testing.T) {
-		clientHandle, serverHandle := rawPipePair(t)
+		clientHandle, _, _, closeServer := rawPipePairWithClosers(t)
 
-		if err := syscall.CloseHandle(serverHandle); err != nil {
+		if err := closeServer(); err != nil {
 			t.Fatalf("CloseHandle(server) failed: %v", err)
 		}
 
@@ -415,14 +432,14 @@ func TestClientHandshakeTransportErrors(t *testing.T) {
 	})
 
 	t.Run("hello ack recv disconnected", func(t *testing.T) {
-		clientHandle, serverHandle := rawPipePair(t)
+		clientHandle, serverHandle, _, closeServer := rawPipePairWithClosers(t)
 
 		serverDone := make(chan error, 1)
 		go func() {
 			var helloBuf [128]byte
 			_, err := rawRecv(serverHandle, helloBuf[:])
 			if err == nil {
-				err = syscall.CloseHandle(serverHandle)
+				err = closeServer()
 			}
 			serverDone <- err
 		}()
@@ -510,12 +527,12 @@ func TestServerHandshakeRejectsMalformedHello(t *testing.T) {
 }
 
 func TestServerHandshakeHelloAckSendFailure(t *testing.T) {
-	clientHandle, serverHandle := rawPipePair(t)
+	clientHandle, serverHandle, closeClient, _ := rawPipePairWithClosers(t)
 
 	if err := rawWrite(clientHandle, validHelloPacket()); err != nil {
 		t.Fatalf("rawWrite(hello) failed: %v", err)
 	}
-	if err := syscall.CloseHandle(clientHandle); err != nil {
+	if err := closeClient(); err != nil {
 		t.Fatalf("CloseHandle(client) failed: %v", err)
 	}
 

@@ -85,6 +85,12 @@ static nipc_uds_error_t wait_for_readable(int fd, const receive_wait_t *wait)
     }
 }
 
+nipc_uds_error_t nipc_uds_wait_readable(int fd, uint32_t timeout_ms, int abort_fd)
+{
+    receive_wait_t wait = receive_wait_init(timeout_ms, abort_fd);
+    return wait_for_readable(fd, &wait);
+}
+
 static nipc_uds_error_t ensure_recv_buf(nipc_uds_session_t *session,
                                         size_t needed)
 {

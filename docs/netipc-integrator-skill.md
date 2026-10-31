@@ -393,6 +393,13 @@ as explicit assumptions, not as implementation details they can reinterpret.
 - Managed servers are concurrent.
   - The server accept loop can run multiple client sessions concurrently up to
     `worker_count`.
+  - When all workers are busy, a new connection waits up to 200 ms for a
+    worker to finish, then is closed before HELLO_ACK, so the client's
+    connect fails and it retries on its next refresh; size
+    `worker_count` for the number of long-lived clients you expect.
+  - A connection that never sends HELLO holds a worker for at most 5000 ms.
+  - Stop/destroy give sessions 1000 ms to finish, then interrupt their
+    blocking I/O, so a client that stopped reading cannot hold shutdown.
   - Handler code must therefore assume concurrent execution.
   - Evidence:
     - [netipc_service.h](../src/libnetdata/netipc/include/netipc/netipc_service.h)

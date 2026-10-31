@@ -95,7 +95,6 @@ var (
 	procCreateNamedPipeW        = modkernel32.NewProc("CreateNamedPipeW")
 	procConnectNamedPipe        = modkernel32.NewProc("ConnectNamedPipe")
 	procDisconnectNamedPipe     = modkernel32.NewProc("DisconnectNamedPipe")
-	procFlushFileBuffers        = modkernel32.NewProc("FlushFileBuffers")
 	procPeekNamedPipe           = modkernel32.NewProc("PeekNamedPipe")
 	procSetNamedPipeHandleState = modkernel32.NewProc("SetNamedPipeHandleState")
 	procSwitchToThread          = modkernel32.NewProc("SwitchToThread")
@@ -129,10 +128,6 @@ func connectNamedPipe(handle syscall.Handle) error {
 
 func disconnectNamedPipe(handle syscall.Handle) {
 	procDisconnectNamedPipe.Call(uintptr(handle))
-}
-
-func flushFileBuffers(handle syscall.Handle) {
-	procFlushFileBuffers.Call(uintptr(handle))
 }
 
 func peekNamedPipeAvailable(handle syscall.Handle) (uint32, error) {

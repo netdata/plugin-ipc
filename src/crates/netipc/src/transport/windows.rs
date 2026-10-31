@@ -62,7 +62,6 @@ mod ffi {
         pub fn ConnectNamedPipe(hNamedPipe: HANDLE, lpOverlapped: *mut core::ffi::c_void) -> BOOL;
 
         pub fn DisconnectNamedPipe(hNamedPipe: HANDLE) -> BOOL;
-        pub fn FlushFileBuffers(hFile: HANDLE) -> BOOL;
 
         pub fn CreateFileW(
             lpFileName: LPCWSTR,
@@ -1073,15 +1072,11 @@ impl NpSession {
     /// Close the session.
     pub fn close(&mut self) {
         if self.handle != ffi::INVALID_HANDLE_VALUE && self.handle != 0 {
-            // Flush pending writes so the peer reads all data
-            unsafe {
-                ffi::FlushFileBuffers(self.handle);
-            }
-            if self.role == Role::Server {
-                unsafe {
-                    ffi::DisconnectNamedPipe(self.handle);
-                }
-            }
+            // Close only. The peer still reads every message written before
+            // the close, then sees ERROR_BROKEN_PIPE. FlushFileBuffers would
+            // block on a peer that stopped reading, and neither
+            // CancelSynchronousIo nor DisconnectNamedPipe from another thread
+            // releases it.
             close_handle(self.handle);
             self.handle = ffi::INVALID_HANDLE_VALUE;
         }
@@ -1150,12 +1145,25 @@ impl NpListener {
     }
 
     /// Accept one client using a caller-provided per-session server config
-    /// and session ID.
+    /// and session ID. The handshake waits at most
+    /// `SERVER_HANDSHAKE_TIMEOUT_MS` for HELLO.
     pub fn accept_with_config(
         &mut self,
         session_id: u64,
         config: ServerConfig,
     ) -> Result<NpSession, NpError> {
+        self.accept_pending()?.handshake(
+            session_id,
+            &config,
+            crate::protocol::SERVER_HANDSHAKE_TIMEOUT_MS,
+            None,
+        )
+    }
+
+    /// Accept one connection without handshaking, so the caller can run the
+    /// handshake on another thread. Blocks until a client connects, then
+    /// creates a new pipe instance for subsequent clients.
+    pub fn accept_pending(&mut self) -> Result<PendingPipe, NpError> {
         // Wait for client
         let connected = unsafe { ffi::ConnectNamedPipe(self.handle, ptr::null_mut()) };
         if connected == 0 {
@@ -1184,16 +1192,16 @@ impl NpListener {
         };
         self.handle = next;
 
-        // Perform handshake
-        match server_handshake(session_handle, &config, session_id) {
-            Ok(session) => Ok(session),
-            Err(e) => {
-                unsafe {
-                    ffi::DisconnectNamedPipe(session_handle);
-                }
-                close_handle(session_handle);
-                Err(e)
-            }
+        Ok(PendingPipe {
+            handle: session_handle,
+        })
+    }
+
+    /// A waker that unblocks `accept_pending()` from another thread. It uses
+    /// only the pipe name, so it never touches a handle the accept loop owns.
+    pub fn waker(&self) -> NpListenerWaker {
+        NpListenerWaker {
+            pipe_name: self.pipe_name.clone(),
         }
     }
 
@@ -1208,6 +1216,78 @@ impl NpListener {
 impl Drop for NpListener {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+/// Wakes a listener blocked in `ConnectNamedPipe` by connecting to it.
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+pub struct NpListenerWaker {
+    pipe_name: Vec<u16>,
+}
+
+#[cfg(windows)]
+impl NpListenerWaker {
+    pub fn wake(&self) {
+        let h = unsafe {
+            ffi::CreateFileW(
+                self.pipe_name.as_ptr(),
+                ffi::GENERIC_READ | ffi::GENERIC_WRITE,
+                0,
+                ptr::null(),
+                ffi::OPEN_EXISTING,
+                0,
+                0,
+            )
+        };
+        close_handle(h);
+    }
+}
+
+/// An accepted pipe whose handshake has not run yet. Dropping it disconnects
+/// and closes the pipe.
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct PendingPipe {
+    handle: ffi::HANDLE,
+}
+
+#[cfg(windows)]
+impl PendingPipe {
+    /// Complete the server side of the handshake. Waits at most `timeout_ms`
+    /// for HELLO (`NpError::Timeout`; 0 waits without a deadline) and returns
+    /// `NpError::Aborted` once `abort` is set.
+    pub fn handshake(
+        self,
+        session_id: u64,
+        config: &ServerConfig,
+        timeout_ms: u32,
+        abort: Option<&AtomicBool>,
+    ) -> Result<NpSession, NpError> {
+        let wait = ReceiveWait::new(timeout_ms, abort);
+        loop {
+            let wait_ms = wait.wait_slice_ms()?;
+            if wait_pipe_readable(self.handle, wait_ms)? {
+                break;
+            }
+        }
+        if wait.aborted() {
+            return Err(NpError::Aborted);
+        }
+        let session = server_handshake(self.handle, config, session_id)?;
+        // The session owns the handle now.
+        std::mem::forget(self);
+        Ok(session)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PendingPipe {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::DisconnectNamedPipe(self.handle);
+        }
+        close_handle(self.handle);
     }
 }
 

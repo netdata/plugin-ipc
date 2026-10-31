@@ -49,6 +49,15 @@ fallback.
 2. **Client**: connects to the socket path. The OS delivers a connected
    SEQPACKET file descriptor.
 
+   On the server, accept is split: `nipc_uds_accept_pending()` (C),
+   `UdsListener::accept_pending()` (Rust) and `Listener.AcceptPending()`
+   (Go) take the connection without reading; `nipc_uds_accept_handshake()`,
+   `PendingConnection::handshake()` and `PendingConn.Handshake()` then wait
+   for HELLO with a timeout (0 = none) and, in Rust and Go, an abort signal.
+   A failed handshake closes the connection. `nipc_uds_accept()` /
+   `accept()` / `Accept()` do both steps with the 5000 ms server handshake
+   deadline.
+
 3. **Handshake**: immediately after connection, the client sends a
    HELLO control message and the server responds with HELLO_ACK, as
    defined in the wire envelope spec. The handshake determines the

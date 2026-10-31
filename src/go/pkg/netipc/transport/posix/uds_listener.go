@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 )
 
 // Listener is a listening UDS SEQPACKET endpoint.
@@ -86,8 +88,26 @@ func (l *Listener) Accept() (*Session, error) {
 }
 
 // AcceptWithConfig accepts one client connection using a caller-provided
-// per-session server config and session ID.
+// per-session server config and session ID. The handshake waits at most
+// protocol.ServerHandshakeTimeoutMs for HELLO; servers that must not block
+// their accept loop use AcceptPending and PendingConn.Handshake instead.
 func (l *Listener) AcceptWithConfig(sessionID uint64, config ServerConfig) (*Session, error) {
+	pending, err := l.AcceptPending()
+	if err != nil {
+		return nil, err
+	}
+	return pending.Handshake(sessionID, config, protocol.ServerHandshakeTimeoutMs, nil)
+}
+
+// PendingConn is an accepted connection whose handshake has not run yet.
+// Splitting accept from handshake lets a server bound the handshake and run
+// it outside its accept loop.
+type PendingConn struct {
+	fd int
+}
+
+// AcceptPending accepts one connection without reading HELLO.
+func (l *Listener) AcceptPending() (*PendingConn, error) {
 	l.mu.Lock()
 	fd := l.fd
 	l.mu.Unlock()
@@ -99,13 +119,43 @@ func (l *Listener) AcceptWithConfig(sessionID uint64, config ServerConfig) (*Ses
 	if err != nil {
 		return nil, wrapErr(ErrAccept, err.Error())
 	}
+	return &PendingConn{fd: nfd}, nil
+}
 
-	session, herr := serverHandshake(nfd, &config, sessionID)
-	if herr != nil {
-		_ = syscall.Close(nfd)
-		return nil, herr
+// Fd returns the connection's file descriptor, or -1 once consumed.
+func (p *PendingConn) Fd() int {
+	return p.fd
+}
+
+// Handshake reads HELLO and answers it. timeoutMs bounds the wait for HELLO
+// (0 = no deadline) and abortCh, when non-nil, cancels it. The connection is
+// consumed: on success the Session owns the fd, on failure it is closed.
+func (p *PendingConn) Handshake(
+	sessionID uint64,
+	config ServerConfig,
+	timeoutMs uint32,
+	abortCh <-chan struct{},
+) (*Session, error) {
+	fd := p.fd
+	if fd < 0 {
+		return nil, wrapErr(ErrAccept, "connection already consumed")
+	}
+	p.fd = -1
+
+	session, err := serverHandshakeWait(fd, &config, sessionID, newReceiveWait(timeoutMs, abortCh))
+	if err != nil {
+		_ = syscall.Close(fd)
+		return nil, err
 	}
 	return session, nil
+}
+
+// Close drops a connection that will not be handshaken.
+func (p *PendingConn) Close() {
+	if p.fd >= 0 {
+		_ = syscall.Close(p.fd)
+		p.fd = -1
+	}
 }
 
 // Close closes the listener, stops accepting, and unlinks the socket file.

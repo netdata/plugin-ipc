@@ -310,6 +310,30 @@ func TestRobustSilentClientDoesNotBlockShutdown(t *testing.T) {
 	}
 }
 
+// A silent client holds a worker only until the server handshake deadline.
+func TestRobustSilentClientReleasedAtHandshakeDeadline(t *testing.T) {
+	svc := robustService("go_rob_silent_deadline")
+	rs := startRobustServer(svc, testServerConfig(), protocol.MethodIncrement, robustIncrementDispatch(0), 1)
+	defer cleanupAll(svc)
+
+	silent := silentConnect(t, svc)
+	defer syscall.Close(silent)
+	start := time.Now()
+	limit := time.Duration(protocol.ServerHandshakeTimeoutMs)*time.Millisecond + 4*time.Second
+	served := servedWithin(svc, testClientConfig(), limit)
+	elapsed := time.Since(start)
+
+	var buf [1]byte
+	n, _, rerr := syscall.Recvfrom(silent, buf[:], syscall.MSG_DONTWAIT)
+	rs.stopWithin(5 * time.Second)
+	if served != nil {
+		t.Errorf("the only worker must be freed once the silent client misses the handshake deadline: %v (after %v)", served, elapsed)
+	}
+	if n != 0 || rerr != nil {
+		t.Errorf("server must close the silent connection at the deadline (recv n=%d err=%v)", n, rerr)
+	}
+}
+
 // K4: a client call must be bounded even when the server never answers HELLO.
 
 func TestRobustClientBoundedWhenServerNeverAccepts(t *testing.T) {

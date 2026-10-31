@@ -142,11 +142,32 @@ nipc_uds_error_t nipc_uds_listen(const char *run_dir,
  * Accept one client on a listener. Performs the full handshake.
  * session_id is placed into the hello-ack so the client can attach
  * to the correct per-session SHM region.
- * Blocks until a client connects and the handshake completes (or fails).
+ * Blocks until a client connects; the handshake then waits at most
+ * NIPC_SERVER_HANDSHAKE_TIMEOUT_MS for HELLO.
  */
 nipc_uds_error_t nipc_uds_accept(nipc_uds_listener_t *listener,
                                   uint64_t session_id,
                                   nipc_uds_session_t *out);
+
+/*
+ * Accept one connection without handshaking, so the caller can run the
+ * handshake on another thread. Blocks until a client connects. The
+ * caller owns *fd_out and passes it to nipc_uds_accept_handshake().
+ */
+nipc_uds_error_t nipc_uds_accept_pending(nipc_uds_listener_t *listener,
+                                          int *fd_out);
+
+/*
+ * Complete the server side of the handshake on a connection returned by
+ * nipc_uds_accept_pending(). Waits at most timeout_ms for HELLO
+ * (NIPC_UDS_ERR_TIMEOUT); 0 waits without a deadline. Takes ownership
+ * of fd: on success it belongs to *out, on failure it is closed.
+ */
+nipc_uds_error_t nipc_uds_accept_handshake(int fd,
+                                            const nipc_uds_server_config_t *config,
+                                            uint64_t session_id,
+                                            uint32_t timeout_ms,
+                                            nipc_uds_session_t *out);
 
 /*
  * Connect to a server at {run_dir}/{service_name}.sock.

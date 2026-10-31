@@ -723,40 +723,16 @@ func TestUnixServerRejectsSessionAtWorkerCapacity(t *testing.T) {
 		t.Fatal("first client did not occupy the only worker slot")
 	}
 
+	// Over capacity the server closes before HELLO_ACK, so the connect fails.
 	ccfg := testClientConfig()
 	session2, err := posix.Connect(testRunDir, svc, &ccfg)
-	if err != nil {
-		t.Fatalf("second raw connect failed: %v", err)
-	}
-	defer session2.Close()
-
-	time.Sleep(100 * time.Millisecond)
-
-	reqHdr := &protocol.Header{
-		Kind:            protocol.KindRequest,
-		Code:            protocol.MethodIncrement,
-		ItemCount:       1,
-		MessageID:       1,
-		TransportStatus: protocol.StatusOK,
-	}
-	var reqPayload [protocol.IncrementPayloadSize]byte
-	if protocol.IncrementEncode(9, reqPayload[:]) == 0 {
-		t.Fatal("IncrementEncode failed")
-	}
-
-	sendErr := session2.Send(reqHdr, reqPayload[:])
-	var recvErr error
-	if sendErr == nil {
-		recvBuf := make([]byte, protocol.HeaderSize+64)
-		_, _, recvErr = session2.Receive(recvBuf)
-	}
-	if sendErr == nil && recvErr == nil {
-		t.Fatal("second session should be rejected while the server is at worker capacity")
+	if err == nil {
+		session2.Close()
+		t.Fatal("second connect should fail while the server is at worker capacity")
 	}
 	if handlerCalls.Load() != 1 {
 		t.Fatalf("handler entered %d times, want 1 while second session is rejected", handlerCalls.Load())
 	}
-	session2.Close()
 
 	releaseOnce()
 	res := <-callDone
@@ -770,7 +746,7 @@ func TestUnixServerRejectsSessionAtWorkerCapacity(t *testing.T) {
 
 	// The worker slot frees only when the first session goroutine exits, which
 	// can take well over 100 ms on slow or emulated hosts; until then the
-	// server accepts and drops new sessions, so retry within a deadline.
+	// server refuses new sessions, so retry within a deadline.
 	deadline := time.Now().Add(5 * time.Second)
 	var got uint64
 	for {

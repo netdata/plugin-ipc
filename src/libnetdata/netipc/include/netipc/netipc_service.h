@@ -362,8 +362,10 @@ struct nipc_managed_server {
   volatile LONG running;
   volatile LONG accept_loop_active;
   volatile LONG accept_loop_thread_id;
+  volatile LONG stop_requested; /* set by stop/drain/destroy, never cleared */
 #else
   bool running;
+  bool stop_requested; /* set by stop/drain/destroy, never cleared */
 #endif
 
   /* Session tracking */
@@ -480,14 +482,18 @@ void nipc_posix_service_test_fault_clear(void);
 
 /*
  * Run the acceptor loop. Blocking. Accepts clients, reads requests,
- * dispatches to the handler, sends responses.
+ * dispatches to the handler, sends responses. Each connection's handshake
+ * runs in its worker with a NIPC_SERVER_HANDSHAKE_TIMEOUT_MS deadline; a
+ * connection over the worker limit is closed before HELLO_ACK.
  *
- * Returns when nipc_server_stop() is called or on fatal error.
+ * Returns when nipc_server_stop() is called or on fatal error. A stop
+ * issued before run makes run return at once; the server is single-use.
  */
 void nipc_server_run(nipc_managed_server_t *server);
 
 /*
- * Signal shutdown. The acceptor loop will exit after current work.
+ * Signal shutdown. Only signals and wakes the acceptor loop; run owns the
+ * listener and closes it on exit.
  */
 void nipc_server_stop(nipc_managed_server_t *server);
 
@@ -504,7 +510,8 @@ void nipc_server_stop(nipc_managed_server_t *server);
 bool nipc_server_drain(nipc_managed_server_t *server, uint32_t timeout_ms);
 
 /*
- * Cleanup: close listener, free workers. Safe after stop.
+ * Cleanup: stop, close listener, free workers. Sessions get a 1000 ms grace
+ * to finish, then their blocking I/O is interrupted until they exit.
  */
 void nipc_server_destroy(nipc_managed_server_t *server);
 

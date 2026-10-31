@@ -500,9 +500,17 @@ one service kind only.
 The managed server internally:
 
 1. Creates a Level 1 listener for the service endpoint
-2. Runs an acceptor loop that accepts incoming Level 1 sessions
-3. Spawns a thread (C, Rust) or goroutine (Go) per accepted session,
-   up to the configured maximum concurrent sessions. In Go, each
+2. Runs an acceptor loop that accepts incoming Level 1 connections
+   without reading from them
+3. Spawns a thread (C, Rust) or goroutine (Go) per accepted connection,
+   up to the configured maximum concurrent sessions. The worker runs the
+   handshake with the server handshake deadline (5000 ms, see Level 1),
+   so a client that never sends HELLO holds its worker only until then.
+   When all workers are busy, the server waits up to 200 ms (two poll
+   slices) for one to finish, so a client that reconnects right after
+   closing is not refused while its old worker exits. If none frees, the
+   server closes the new connection before HELLO_ACK: the client's connect
+   fails, and it retries on its next refresh. In Go, each
    session goroutine recovers from panics so that a single malformed
    request cannot crash the entire server process. In Rust, thread
    panics are contained by default — a panicking session thread dies
@@ -572,9 +580,24 @@ gets `transport_status = INTERNAL_ERROR` with empty payload.
 
 ### Shutdown
 
-The caller signals shutdown explicitly. The managed server stops accepting
-new connections and cleans up resources. The exact drain/abort mechanics
-are implementation details.
+The caller signals shutdown explicitly (C `nipc_server_stop()`,
+`nipc_server_destroy()` or `nipc_server_drain()`; Rust `stop()`; Go
+`Stop()`). The managed server stops accepting new connections and cleans
+up resources:
+
+- A stop is remembered: a stop issued before the run loop starts makes it
+  return at once. A managed server is single-use.
+- Stop only signals; the run loop owns the listener and closes it when it
+  exits.
+- Handshakes in progress observe the stop and end at once.
+- Sessions get a 1000 ms grace period to finish on their own. After it,
+  the server interrupts blocking session I/O, so a worker blocked sending
+  to a client that stopped reading cannot hold shutdown: POSIX shuts the
+  session socket down (`shutdown(SHUT_RDWR)`), Windows cancels the worker
+  thread's pipe I/O (`CancelSynchronousIo`), repeated until every worker
+  has exited.
+- C `nipc_server_drain()` keeps its own caller-supplied wait for in-flight
+  requests before this step.
 
 ## Testing requirements
 

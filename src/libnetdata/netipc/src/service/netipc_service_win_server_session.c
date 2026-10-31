@@ -204,33 +204,256 @@ static void server_handle_session(nipc_managed_server_t *server,
 /*  Internal: per-session handler thread                                */
 /* ------------------------------------------------------------------ */
 
-/* Thread function: handles one client session from accept to disconnect. */
+typedef struct {
+    nipc_win_shm_ctx_t *hybrid;
+    nipc_win_shm_ctx_t *busywait;
+} prepared_win_shm_t;
+
+static void server_destroy_prepared_win_shm(prepared_win_shm_t *prepared) {
+    if (!prepared)
+        return;
+    if (prepared->hybrid) {
+        nipc_win_shm_destroy(prepared->hybrid);
+        free(prepared->hybrid);
+        prepared->hybrid = NULL;
+    }
+    if (prepared->busywait) {
+        nipc_win_shm_destroy(prepared->busywait);
+        free(prepared->busywait);
+        prepared->busywait = NULL;
+    }
+}
+
+static nipc_win_shm_ctx_t *
+server_take_prepared_win_shm(prepared_win_shm_t *prepared, uint32_t profile) {
+    if (!prepared)
+        return NULL;
+    if (profile == NIPC_WIN_SHM_PROFILE_HYBRID) {
+        nipc_win_shm_ctx_t *ctx = prepared->hybrid;
+        prepared->hybrid = NULL;
+        return ctx;
+    }
+    if (profile == NIPC_WIN_SHM_PROFILE_BUSYWAIT) {
+        nipc_win_shm_ctx_t *ctx = prepared->busywait;
+        prepared->busywait = NULL;
+        return ctx;
+    }
+    return NULL;
+}
+
+static bool server_prepare_accept_config(nipc_managed_server_t *server,
+                                                                                  uint64_t sid,
+                                                                                  nipc_np_server_config_t *cfg_out,
+                                                                                  prepared_win_shm_t *prepared) {
+    *cfg_out = server->base_config;
+    cfg_out->max_request_payload_bytes = server->learned_request_payload_bytes;
+    cfg_out->max_response_payload_bytes = server->learned_response_payload_bytes;
+    memset(prepared, 0, sizeof(*prepared));
+
+    uint32_t shm_profiles =
+            cfg_out->supported_profiles &
+            (NIPC_WIN_SHM_PROFILE_HYBRID | NIPC_WIN_SHM_PROFILE_BUSYWAIT);
+    if (shm_profiles == 0)
+        return true;
+
+    uint32_t request_capacity;
+    uint32_t response_capacity;
+    if (!nipc_service_common_header_payload_len_u32(
+                    cfg_out->max_request_payload_bytes, &request_capacity) ||
+            !nipc_service_common_header_payload_len_u32(
+                    cfg_out->max_response_payload_bytes, &response_capacity)) {
+        cfg_out->supported_profiles &= ~shm_profiles;
+        cfg_out->preferred_profiles &= ~shm_profiles;
+        return cfg_out->supported_profiles != 0;
+    }
+
+    const uint32_t profiles[] = {
+            NIPC_WIN_SHM_PROFILE_HYBRID,
+            NIPC_WIN_SHM_PROFILE_BUSYWAIT,
+    };
+    for (size_t i = 0; i < sizeof(profiles) / sizeof(profiles[0]); i++) {
+        uint32_t profile = profiles[i];
+        if (!(cfg_out->supported_profiles & profile))
+            continue;
+
+        nipc_win_shm_ctx_t *ctx = nipc_service_win_calloc(
+                1, sizeof(nipc_win_shm_ctx_t),
+                NIPC_WIN_SERVICE_TEST_FAULT_SERVER_SHM_CTX_CALLOC_INTERNAL);
+        if (!ctx)
+            continue;
+
+        /* HELLO has not been read yet, so the request segment must cover any
+          * client proposal the handshake may legally echo back. */
+        nipc_win_shm_error_t serr = nipc_win_shm_server_create(
+                server->run_dir, server->service_name, server->auth_token, sid, profile,
+                request_capacity, response_capacity, ctx);
+        if (serr == NIPC_WIN_SHM_OK) {
+            if (profile == NIPC_WIN_SHM_PROFILE_HYBRID)
+                prepared->hybrid = ctx;
+            else
+                prepared->busywait = ctx;
+            continue;
+        }
+
+        free(ctx);
+        cfg_out->supported_profiles &= ~profile;
+        cfg_out->preferred_profiles &= ~profile;
+    }
+
+    return cfg_out->supported_profiles != 0;
+}
+
+/* Wait for HELLO without outliving a server stop or the handshake
+ * deadline. */
+static bool server_wait_hello(nipc_managed_server_t *server, HANDLE pipe)
+{
+    ULONGLONG deadline = GetTickCount64() + NIPC_SERVER_HANDSHAKE_TIMEOUT_MS;
+    for (;;) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL))
+            return false;
+        if (available > 0)
+            return true;
+        if (!InterlockedCompareExchange(&server->running, 0, 0) ||
+            GetTickCount64() >= deadline)
+            return false;
+        Sleep(1);
+    }
+}
+
+/* Run the handshake for an accepted pipe and publish the session.
+ * Takes ownership of pipe. Returns false if the session must not start. */
+static bool server_session_handshake(nipc_managed_server_t *server,
+                                     nipc_session_ctx_t *sctx, HANDLE pipe)
+{
+    nipc_np_server_config_t cfg;
+    prepared_win_shm_t prepared;
+    if (!server_prepare_accept_config(server, sctx->id, &cfg, &prepared) ||
+        !server_wait_hello(server, pipe)) {
+        server_destroy_prepared_win_shm(&prepared);
+        DisconnectNamedPipe(pipe);
+        CloseHandle(pipe);
+        return false;
+    }
+
+    /* HELLO is readable, so this does not block on the client. */
+    nipc_np_session_t session;
+    if (nipc_np_accept_handshake(pipe, &cfg, sctx->id, SERVER_POLL_TIMEOUT_MS,
+                                 &session) != NIPC_NP_OK) {
+        server_destroy_prepared_win_shm(&prepared);
+        return false;
+    }
+
+    nipc_service_common_server_note_request_capacity(
+        server, session.max_request_payload_bytes);
+    nipc_service_common_server_note_response_capacity(
+        server, session.max_response_payload_bytes);
+
+    /* SHM profile guarantee: only negotiate SHM for sessions backed by
+     * prepared per-session kernel objects for the selected profile. */
+    nipc_win_shm_ctx_t *shm = NULL;
+    if (session.selected_profile == NIPC_WIN_SHM_PROFILE_HYBRID ||
+        session.selected_profile == NIPC_WIN_SHM_PROFILE_BUSYWAIT) {
+        shm = server_take_prepared_win_shm(&prepared, session.selected_profile);
+        server_destroy_prepared_win_shm(&prepared);
+        if (!shm) {
+            nipc_np_close_session(&session);
+            return false;
+        }
+    } else {
+        server_destroy_prepared_win_shm(&prepared);
+    }
+
+    EnterCriticalSection(&server->sessions_lock);
+    sctx->session = session;
+    sctx->shm = shm;
+    LeaveCriticalSection(&server->sessions_lock);
+    return true;
+}
+
 unsigned __stdcall nipc_service_win_session_handler_thread(void *arg)
 {
     nipc_session_ctx_t *sctx = (nipc_session_ctx_t *)arg;
     nipc_managed_server_t *server = sctx->server;
-    /* Allocate a per-session response buffer */
-    size_t resp_size = (size_t)sctx->session.max_response_payload_bytes;
-    if (resp_size < NIPC_SERVICE_MIN_PAYLOAD_BUFFER_BYTES)
-        resp_size = NIPC_SERVICE_MIN_PAYLOAD_BUFFER_BYTES;
-    uint8_t *resp_buf = nipc_service_win_malloc(
-        resp_size, NIPC_WIN_SERVICE_TEST_FAULT_SERVER_RESP_BUF_MALLOC_INTERNAL);
-    if (resp_buf) {
-        server_handle_session(server, &sctx->session, sctx->shm,
-                              resp_buf, resp_size);
-        free(resp_buf);
+    HANDLE pipe = sctx->session.pipe;
+    sctx->session.pipe = INVALID_HANDLE_VALUE;
+
+    if (server_session_handshake(server, sctx, pipe)) {
+        /* Allocate a per-session response buffer */
+        size_t resp_size = (size_t)sctx->session.max_response_payload_bytes;
+        if (resp_size < NIPC_SERVICE_MIN_PAYLOAD_BUFFER_BYTES)
+            resp_size = NIPC_SERVICE_MIN_PAYLOAD_BUFFER_BYTES;
+        uint8_t *resp_buf = nipc_service_win_malloc(
+            resp_size, NIPC_WIN_SERVICE_TEST_FAULT_SERVER_RESP_BUF_MALLOC_INTERNAL);
+        if (resp_buf) {
+            server_handle_session(server, &sctx->session, sctx->shm,
+                                  resp_buf, resp_size);
+            free(resp_buf);
+        }
     }
 
     /* Cleanup SHM and session */
     if (sctx->shm) {
         nipc_win_shm_destroy(sctx->shm);
         free(sctx->shm);
+        sctx->shm = NULL;
     }
     nipc_np_close_session(&sctx->session);
 
     /* Mark inactive; the reap/destroy path owns removal from the array */
     InterlockedExchange(&sctx->active, 0);
     return 0;
+}
+
+/* Ask active session threads to leave synchronous ReadFile/WriteFile
+ * waits. Targets thread handles, which stay valid until the
+ * owner joins them, never pipe handles. Returns the number still active. */
+static int server_cancel_active_session_io_locked(nipc_managed_server_t *server)
+{
+    int active = 0;
+    for (int i = 0; i < server->session_count; i++) {
+        nipc_session_ctx_t *s = server->sessions[i];
+        if (!s || !InterlockedCompareExchange(&s->active, 0, 0))
+            continue;
+        active++;
+        if (s->thread != NULL && s->thread != INVALID_HANDLE_VALUE)
+            CancelSynchronousIo(s->thread);
+    }
+    return active;
+}
+
+/* Wait up to grace_ms for session threads to finish on their own, then
+ * cancel their pipe I/O until they exit. A single cancel can land before a
+ * thread enters its next blocking call, so it repeats. Returns true if all
+ * finished within the grace. */
+bool nipc_service_win_server_wait_sessions(nipc_managed_server_t *server,
+                                           uint32_t grace_ms)
+{
+    ULONGLONG deadline = GetTickCount64() + grace_ms;
+    for (;;) {
+        EnterCriticalSection(&server->sessions_lock);
+        int active_count = 0;
+        for (int i = 0; i < server->session_count; i++) {
+            if (InterlockedCompareExchange(&server->sessions[i]->active, 0, 0))
+                active_count++;
+        }
+        LeaveCriticalSection(&server->sessions_lock);
+
+        if (active_count == 0)
+            return true;
+        if (GetTickCount64() >= deadline)
+            break;
+        Sleep(5); /* 5ms poll interval */
+    }
+
+    for (;;) {
+        EnterCriticalSection(&server->sessions_lock);
+        int active = server_cancel_active_session_io_locked(server);
+        LeaveCriticalSection(&server->sessions_lock);
+        if (active == 0)
+            return false;
+        Sleep(10);
+    }
 }
 
 /* ------------------------------------------------------------------ */

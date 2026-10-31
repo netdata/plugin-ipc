@@ -12,6 +12,12 @@
 #include <windows.h>
 
 #define SERVER_POLL_TIMEOUT_MS 100
+/* How long destroy waits for session threads to finish their current
+ * message before cancelling their pipe I/O. */
+#define SERVER_STOP_GRACE_MS 1000u
+/* How long a connection waits for a worker slot before it is refused. Two
+ * poll slices: a worker whose client left exits within one. */
+#define SERVER_SLOT_WAIT_MS (2u * SERVER_POLL_TIMEOUT_MS)
 #define CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS 5u
 #define CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS 5000u
 #define CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS 5u
@@ -54,6 +60,8 @@ bool nipc_service_win_ensure_buffer(uint8_t **buf, size_t *buf_size,
                                     size_t need, int fault_site);
 unsigned __stdcall nipc_service_win_session_handler_thread(void *arg);
 void nipc_service_win_server_reap_sessions_locked(nipc_managed_server_t *server);
+bool nipc_service_win_server_wait_sessions(nipc_managed_server_t *server,
+                                           uint32_t grace_ms);
 uintptr_t nipc_service_win_beginthreadex(void *security,
                                          unsigned stack_size,
                                          unsigned (__stdcall *start_address)(void *),
