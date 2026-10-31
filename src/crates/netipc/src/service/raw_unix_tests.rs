@@ -6429,3 +6429,59 @@ fn test_transport_without_session_unix() {
     ));
     client.close();
 }
+
+/// The server creates a session's SHM region only when the handshake selects
+/// SHM, and falls back to baseline in the same handshake when the region
+/// cannot be created.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_shm_region_only_for_shm_sessions_unix() {
+    let svc = unique_service("rs_unix_shm_after_negotiation");
+    let mut server = TestServer::start_with(
+        &svc,
+        shm_server_config(),
+        METHOD_INCREMENT,
+        Some(increment_dispatch_handler()),
+        8,
+    );
+
+    let mut client = increment_client(&svc, client_config());
+    client.refresh();
+    assert_eq!(client.state, ClientState::Ready);
+    assert!(client.shm.is_none());
+    assert_eq!(client.call_increment(1), Ok(2));
+    assert_eq!(server.events().take_shm_created(), 0, "baseline session");
+    client.close();
+
+    let mut bad_auth = shm_client_config();
+    bad_auth.auth_token = AUTH_TOKEN + 1;
+    let mut client = increment_client(&svc, bad_auth);
+    client.refresh();
+    assert_eq!(client.state, ClientState::AuthFailed);
+    assert_eq!(server.events().take_shm_created(), 0, "rejected client");
+    client.close();
+
+    let mut client = increment_client(&svc, shm_client_config());
+    client.refresh();
+    assert_eq!(client.state, ClientState::Ready);
+    assert!(client.shm.is_some(), "expected SHM to be negotiated");
+    assert_eq!(client.call_increment(1), Ok(2));
+    assert_eq!(server.events().take_shm_created(), 1, "SHM session");
+    client.close();
+
+    server.events().set_fail_shm_create(true);
+    let mut client = increment_client(&svc, shm_client_config());
+    client.refresh();
+    assert_eq!(client.state, ClientState::Ready);
+    assert!(client.shm.is_none(), "expected the baseline fallback");
+    assert_eq!(
+        client.session.as_ref().map(|s| s.selected_profile),
+        Some(PROFILE_BASELINE)
+    );
+    server.events().set_fail_shm_create(false);
+    assert_eq!(client.call_increment(1), Ok(2));
+    assert_eq!(server.events().take_shm_created(), 0, "failed creation");
+    client.close();
+
+    server.stop();
+}

@@ -161,13 +161,31 @@ func (p *PendingConn) Handshake(
 	timeoutMs uint32,
 	abortCh <-chan struct{},
 ) (*Session, error) {
+	return p.HandshakePrepared(sessionID, config, timeoutMs, abortCh, nil)
+}
+
+// ProfilePrepare sets up a selected profile's resources (an SHM region)
+// during the server handshake, once the payload limits are agreed and
+// before HELLO_ACK is sent. Returning false drops that profile and the
+// handshake selects again; with no profile left the client is rejected as
+// unsupported.
+type ProfilePrepare func(profile, maxRequestPayloadBytes, maxResponsePayloadBytes uint32) bool
+
+// HandshakePrepared is Handshake with a prepare step; prepare may be nil.
+func (p *PendingConn) HandshakePrepared(
+	sessionID uint64,
+	config ServerConfig,
+	timeoutMs uint32,
+	abortCh <-chan struct{},
+	prepare ProfilePrepare,
+) (*Session, error) {
 	fd := p.fd
 	if fd < 0 {
 		return nil, wrapErr(ErrAccept, "connection already consumed")
 	}
 	p.fd = -1
 
-	session, err := serverHandshakeWait(fd, &config, sessionID, newReceiveWait(timeoutMs, abortCh))
+	session, err := serverHandshakeWait(fd, &config, sessionID, newReceiveWait(timeoutMs, abortCh), prepare)
 	if err != nil {
 		_ = syscall.Close(fd)
 		return nil, err

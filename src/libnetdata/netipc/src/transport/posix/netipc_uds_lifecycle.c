@@ -364,6 +364,15 @@ nipc_uds_error_t nipc_uds_accept_handshake(int fd,
                                             uint32_t timeout_ms,
                                             nipc_uds_session_t *out)
 {
+    return nipc_uds_accept_handshake_prepared(fd, config, session_id,
+                                              timeout_ms, NULL, NULL, out);
+}
+
+nipc_uds_error_t nipc_uds_accept_handshake_prepared(
+    int fd, const nipc_uds_server_config_t *config, uint64_t session_id,
+    uint32_t timeout_ms, nipc_uds_profile_prepare_fn prepare, void *user,
+    nipc_uds_session_t *out)
+{
     if (!out || !config || fd < 0) {
         if (fd >= 0)
             close(fd);
@@ -375,7 +384,8 @@ nipc_uds_error_t nipc_uds_accept_handshake(int fd,
 
     nipc_uds_error_t err = nipc_uds_wait_readable(fd, timeout_ms, -1);
     if (err == NIPC_UDS_OK)
-        err = nipc_uds_server_handshake(fd, config, session_id, out);
+        err = nipc_uds_server_handshake(fd, config, session_id, prepare, user,
+                                        out);
     if (err != NIPC_UDS_OK) {
         close(fd);
         out->fd = -1;

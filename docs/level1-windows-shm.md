@@ -248,9 +248,13 @@ throughput.
 
 ### Server creates a per-session region
 
-The server creates one SHM region per accepted session, after the
-handshake negotiates an SHM profile. The kernel object names are
-derived from the `session_id` assigned during the handshake.
+The server creates one SHM region per accepted session, inside the
+handshake: after HELLO validation, authorization, profile selection and
+the limit checks pick an SHM profile, and before HELLO_ACK. It creates the
+objects for the selected profile only; baseline sessions and rejected
+handshakes create none. The region is sized from the final request and
+response payload limits plus the message header. The kernel object names
+are derived from the `session_id` assigned to the handshake.
 
 1. Derive kernel object names using `session_id` (see naming section).
 2. Create a page-file-backed mapping via `CreateFileMappingW` using
@@ -269,8 +273,8 @@ derived from the `session_id` assigned during the handshake.
 6. The region is now ready for the client.
 
 `CreateFileMappingW` and `MapViewOfFile` failures are SHM preparation errors. Managed
-servers remove Windows SHM profiles and continue over the Named Pipe baseline when it
-is configured. Windows does not use the Linux file-backed `fallocate` lifecycle.
+servers remove the failed Windows SHM profile from that handshake and select again,
+continuing over the Named Pipe baseline when it is configured. Windows does not use the Linux file-backed `fallocate` lifecycle.
 
 The server must track all active per-session SHM regions so they can
 be cleaned up on session close and server shutdown.

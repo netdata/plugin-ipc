@@ -37,6 +37,8 @@ type Server struct {
 	listeningOnce                sync.Once
 	sessionExited                chan struct{} // test hook, nil in production: signalled after a worker frees its slot
 	handshakeStarted             chan struct{} // test hook, nil in production: signalled before a worker waits for HELLO
+	shmCreated                   chan struct{} // test hook, nil in production: signalled once a session's SHM region exists
+	failShmCreate                atomic.Bool   // test hook: makes SHM region creation fail
 	sessionFdsMu                 sync.Mutex
 	sessionFds                   map[int]struct{}
 }
@@ -75,32 +77,30 @@ func NewServerWithWorkers(
 
 const posixShmProfiles = protocol.ProfileSHMHybrid | protocol.ProfileSHMFutex
 
-func (s *Server) prepareAcceptConfig() (uint64, posix.ServerConfig, *posix.ShmContext, bool) {
+func (s *Server) prepareAcceptConfig() (uint64, posix.ServerConfig) {
 	sessionID := s.nextSessionID.Add(1)
 	cfg := s.config
 	cfg.MaxRequestPayloadBytes = s.learnedRequestPayloadBytes.Load()
 	cfg.MaxResponsePayloadBytes = s.learnedResponsePayloadBytes.Load()
+	return sessionID, cfg
+}
 
-	if cfg.SupportedProfiles&posixShmProfiles == 0 {
-		return sessionID, cfg, nil, true
+// createShm creates a session's SHM region for the agreed payload limits.
+func (s *Server) createShm(sessionID uint64, requestPayload, responsePayload uint32) *posix.ShmContext {
+	if s.failShmCreate.Load() {
+		return nil
 	}
-
-	shm, err := posix.ShmServerCreate(
-		s.runDir, s.serviceName, sessionID,
-		cfg.MaxRequestPayloadBytes+uint32(protocol.HeaderSize),
-		cfg.MaxResponsePayloadBytes+uint32(protocol.HeaderSize),
-	)
-	if err == nil {
-		return sessionID, cfg, shm, true
+	reqCap, reqOK := headerPayloadLen(requestPayload)
+	respCap, respOK := headerPayloadLen(responsePayload)
+	if !reqOK || !respOK {
+		return nil
 	}
-
-	cfg.SupportedProfiles &^= posixShmProfiles
-	cfg.PreferredProfiles &^= posixShmProfiles
-	if cfg.SupportedProfiles == 0 {
-		return sessionID, cfg, nil, false
+	shm, err := posix.ShmServerCreate(s.runDir, s.serviceName, sessionID, reqCap, respCap)
+	if err != nil {
+		return nil
 	}
-
-	return sessionID, cfg, nil, true
+	s.notifyTestHook(s.shmCreated)
+	return shm
 }
 
 // Run starts the acceptor loop. Blocking. Accepts clients and runs each
@@ -172,32 +172,38 @@ func (s *Server) Stop() {
 }
 
 func (s *Server) serveConnection(pending *posix.PendingConn) {
-	sessionID, acceptCfg, precreatedShm, ok := s.prepareAcceptConfig()
-	if !ok {
-		pending.Close()
-		return
-	}
+	sessionID, acceptCfg := s.prepareAcceptConfig()
 	s.notifyTestHook(s.handshakeStarted)
 
-	session, err := pending.Handshake(
-		sessionID, acceptCfg, s.timings.handshakeMs, s.stopChan())
+	// The region is created inside the handshake, only once SHM is selected.
+	var shm *posix.ShmContext
+	prepare := func(profile, requestPayload, responsePayload uint32) bool {
+		if profile&posixShmProfiles == 0 {
+			return true
+		}
+		shm = s.createShm(sessionID, requestPayload, responsePayload)
+		return shm != nil
+	}
+	session, err := pending.HandshakePrepared(
+		sessionID, acceptCfg, s.timings.handshakeMs, s.stopChan(), prepare)
 	if err != nil {
-		if precreatedShm != nil {
-			precreatedShm.ShmDestroy()
+		if shm != nil {
+			shm.ShmDestroy()
 		}
 		return
 	}
 
-	var shm *posix.ShmContext
 	if session.SelectedProfile == protocol.ProfileSHMHybrid ||
 		session.SelectedProfile == protocol.ProfileSHMFutex {
-		if precreatedShm == nil {
+		// SHM profile guarantee: the prepare step created the region before
+		// the ACK selected SHM.
+		if shm == nil {
 			session.Close()
 			return
 		}
-		shm = precreatedShm
-	} else if precreatedShm != nil {
-		precreatedShm.ShmDestroy()
+	} else if shm != nil {
+		shm.ShmDestroy()
+		shm = nil
 	}
 
 	s.trackSessionFd(session.Fd())

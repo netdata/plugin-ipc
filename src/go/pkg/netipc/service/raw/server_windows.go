@@ -39,6 +39,8 @@ type Server struct {
 	listeningOnce                sync.Once
 	sessionExited                chan struct{} // test hook, nil in production: signalled after a worker frees its slot
 	handshakeStarted             chan struct{} // test hook, nil in production: signalled before a worker waits for HELLO
+	shmCreated                   chan struct{} // test hook, nil in production: signalled once a session's SHM objects exist
+	failShmCreate                atomic.Bool   // test hook: makes SHM object creation fail
 	workerThreadsMu              sync.Mutex
 	workerThreads                map[syscall.Handle]struct{}
 }
@@ -74,90 +76,34 @@ func NewServerWithWorkers(
 	return s
 }
 
-type preparedWinShm struct {
-	hybrid   *windows.WinShmContext
-	busywait *windows.WinShmContext
-}
-
-func (p *preparedWinShm) take(profile uint32) *windows.WinShmContext {
-	if p == nil {
-		return nil
-	}
-	switch profile {
-	case windows.WinShmProfileHybrid:
-		ctx := p.hybrid
-		p.hybrid = nil
-		return ctx
-	case windows.WinShmProfileBusywait:
-		ctx := p.busywait
-		p.busywait = nil
-		return ctx
-	default:
-		return nil
-	}
-}
-
-func (p *preparedWinShm) destroyAll() {
-	if p == nil {
-		return
-	}
-	if p.hybrid != nil {
-		p.hybrid.WinShmDestroy()
-		p.hybrid = nil
-	}
-	if p.busywait != nil {
-		p.busywait.WinShmDestroy()
-		p.busywait = nil
-	}
-}
-
 const winShmProfiles = windows.WinShmProfileHybrid | windows.WinShmProfileBusywait
 
-func (s *Server) prepareAcceptConfig() (uint64, windows.ServerConfig, *preparedWinShm, bool) {
+func (s *Server) prepareAcceptConfig() (uint64, windows.ServerConfig) {
 	sessionID := s.nextSessionID.Add(1)
 	cfg := s.config
 	cfg.MaxRequestPayloadBytes = s.learnedRequestPayloadBytes.Load()
 	cfg.MaxResponsePayloadBytes = s.learnedResponsePayloadBytes.Load()
+	return sessionID, cfg
+}
 
-	if cfg.SupportedProfiles&winShmProfiles == 0 {
-		return sessionID, cfg, nil, true
+// createShm creates a session's SHM objects for one profile and the agreed
+// payload limits.
+func (s *Server) createShm(sessionID uint64, profile, requestPayload, responsePayload uint32) *windows.WinShmContext {
+	if s.failShmCreate.Load() {
+		return nil
 	}
-
-	prepared := &preparedWinShm{}
-	for _, profile := range []uint32{windows.WinShmProfileHybrid, windows.WinShmProfileBusywait} {
-		if cfg.SupportedProfiles&profile == 0 {
-			continue
-		}
-		shm, err := windows.WinShmServerCreate(
-			s.runDir, s.serviceName,
-			cfg.AuthToken,
-			sessionID,
-			profile,
-			cfg.MaxRequestPayloadBytes+uint32(protocol.HeaderSize),
-			cfg.MaxResponsePayloadBytes+uint32(protocol.HeaderSize),
-		)
-		if err != nil {
-			cfg.SupportedProfiles &^= profile
-			cfg.PreferredProfiles &^= profile
-			continue
-		}
-		if profile == windows.WinShmProfileHybrid {
-			prepared.hybrid = shm
-		} else {
-			prepared.busywait = shm
-		}
+	reqCap, reqOK := headerPayloadLen(requestPayload)
+	respCap, respOK := headerPayloadLen(responsePayload)
+	if !reqOK || !respOK {
+		return nil
 	}
-
-	if cfg.SupportedProfiles == 0 {
-		prepared.destroyAll()
-		return sessionID, cfg, nil, false
+	shm, err := windows.WinShmServerCreate(
+		s.runDir, s.serviceName, s.config.AuthToken, sessionID, profile, reqCap, respCap)
+	if err != nil {
+		return nil
 	}
-
-	if prepared.hybrid == nil && prepared.busywait == nil {
-		return sessionID, cfg, nil, true
-	}
-
-	return sessionID, cfg, prepared, true
+	s.notifyTestHook(s.shmCreated)
+	return shm
 }
 
 // Run starts the acceptor loop. Blocking. Accepts clients and runs each
@@ -259,36 +205,39 @@ func (s *Server) serveConnection(pending *windows.PendingConn) {
 	thread := s.trackWorkerThread()
 	defer s.untrackWorkerThread(thread)
 
-	sessionID, acceptCfg, preparedShm, ok := s.prepareAcceptConfig()
-	if !ok {
-		pending.Close()
-		return
-	}
+	sessionID, acceptCfg := s.prepareAcceptConfig()
 	s.notifyTestHook(s.handshakeStarted)
 
-	session, err := pending.Handshake(
-		sessionID, acceptCfg, s.timings.handshakeMs, s.stopChan())
+	// The SHM objects are created inside the handshake, only for the
+	// selected SHM profile.
+	var shm *windows.WinShmContext
+	prepare := func(profile, requestPayload, responsePayload uint32) bool {
+		if profile&winShmProfiles == 0 {
+			return true
+		}
+		shm = s.createShm(sessionID, profile, requestPayload, responsePayload)
+		return shm != nil
+	}
+	session, err := pending.HandshakePrepared(
+		sessionID, acceptCfg, s.timings.handshakeMs, s.stopChan(), prepare)
 	if err != nil {
-		if preparedShm != nil {
-			preparedShm.destroyAll()
+		if shm != nil {
+			shm.WinShmDestroy()
 		}
 		return
 	}
 
-	var shm *windows.WinShmContext
 	if session.SelectedProfile == windows.WinShmProfileHybrid ||
 		session.SelectedProfile == windows.WinShmProfileBusywait {
-		shm = preparedShm.take(session.SelectedProfile)
+		// SHM profile guarantee: the prepare step created the selected
+		// profile's objects before the ACK selected it.
 		if shm == nil {
-			if preparedShm != nil {
-				preparedShm.destroyAll()
-			}
 			session.Close()
 			return
 		}
-	}
-	if preparedShm != nil {
-		preparedShm.destroyAll()
+	} else if shm != nil {
+		shm.WinShmDestroy()
+		shm = nil
 	}
 
 	s.handleSession(session, shm)

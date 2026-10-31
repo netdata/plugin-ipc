@@ -147,10 +147,10 @@ func helloAckStatusError(status uint16) error {
 }
 
 func serverHandshake(fd int, config *ServerConfig, sessionID uint64) (*Session, error) {
-	return serverHandshakeWait(fd, config, sessionID, newReceiveWait(0, nil))
+	return serverHandshakeWait(fd, config, sessionID, newReceiveWait(0, nil), nil)
 }
 
-func serverHandshakeWait(fd int, config *ServerConfig, sessionID uint64, wait receiveWait) (*Session, error) {
+func serverHandshakeWait(fd int, config *ServerConfig, sessionID uint64, wait receiveWait, prepare ProfilePrepare) (*Session, error) {
 	serverPktSize := packetSizeLimit(fd, config.PacketSize)
 
 	sRespPay := applyDefault(config.MaxResponsePayloadBytes, protocol.MaxPayloadDefault)
@@ -165,6 +165,7 @@ func serverHandshakeWait(fd int, config *ServerConfig, sessionID uint64, wait re
 			AuthToken:               config.AuthToken,
 		},
 		SessionID:       sessionID,
+		Prepare:         prepare,
 		Recv:            func(dst []byte) (int, error) { return rawRecvWithTimeout(fd, dst, wait) },
 		SendAck:         func(status uint16, ack protocol.HelloAck) error { return sendHelloAck(fd, status, ack) },
 		StatusError:     helloAckStatusError,

@@ -82,6 +82,8 @@ impl ManagedServer {
                 base_config: self.server_config.clone(),
                 session_id,
                 handshake_ms: self.timings.handshake_ms,
+                #[cfg(test)]
+                hooks: self.test_hooks.clone(),
             };
             let expected_method_code = self.expected_method_code;
             let handler = self.handler.clone();
@@ -165,6 +167,8 @@ struct AcceptContext {
     base_config: ServerConfig,
     session_id: u64,
     handshake_ms: u32,
+    #[cfg(test)]
+    hooks: TestHooks,
 }
 
 /// Reports a session worker's exit, after its pipe closed, however the
@@ -180,8 +184,9 @@ impl Drop for SessionExitNotice {
 }
 
 impl AcceptContext {
-    /// Prepare the per-session config and SHM, then handshake. Returns `None`
-    /// if the session must not start.
+    /// Run the handshake with the per-session config; the session's SHM
+    /// objects are created inside it, only for the selected SHM profile.
+    /// Returns `None` if the session must not start.
     fn handshake(
         self,
         pending: PendingPipe,
@@ -193,105 +198,69 @@ impl AcceptContext {
         cfg.max_request_payload_bytes = learned_request_payload_bytes.load(Ordering::Acquire);
         cfg.max_response_payload_bytes = learned_response_payload_bytes.load(Ordering::Acquire);
 
-        let mut prepared = self.prepare_shm(&mut cfg)?;
-
-        let session = match pending.handshake(
-            self.session_id,
-            &cfg,
-            self.handshake_ms,
-            Some(stop_requested),
-        ) {
+        let mut shm: Option<WinShmContext> = None;
+        let result = {
+            let mut prepare = |profile: u32, request: u32, response: u32| -> bool {
+                if profile != WIN_SHM_PROFILE_HYBRID && profile != WIN_SHM_PROFILE_BUSYWAIT {
+                    return true;
+                }
+                shm = self.create_shm(profile, request, response);
+                shm.is_some()
+            };
+            pending.handshake_prepared(
+                self.session_id,
+                &cfg,
+                self.handshake_ms,
+                Some(stop_requested),
+                &mut prepare,
+            )
+        };
+        let session = match result {
             Ok(session) => session,
             Err(_) => {
-                prepared.destroy_all();
+                if let Some(mut shm) = shm {
+                    shm.destroy();
+                }
                 return None;
             }
         };
 
         let profile = session.selected_profile;
         if profile != WIN_SHM_PROFILE_HYBRID && profile != WIN_SHM_PROFILE_BUSYWAIT {
-            prepared.destroy_all();
+            if let Some(mut shm) = shm {
+                shm.destroy();
+            }
             return Some((session, None));
         }
-        // Keep the negotiated context and destroy every unused prepared
-        // context. SHM profile guarantee: no prepared context, no session.
-        let selected = prepared.take(profile);
-        prepared.destroy_all();
-        selected.map(|shm| (session, Some(shm)))
+        // SHM profile guarantee: the prepare step created the selected
+        // profile's objects before the ACK selected it.
+        shm.map(|shm| (session, Some(shm)))
     }
 
-    /// Create the session's SHM objects before HELLO is read, dropping each
-    /// profile whose objects fail. Returns `None` if no profile is left.
-    fn prepare_shm(&self, cfg: &mut ServerConfig) -> Option<PreparedWinShm> {
-        let mut prepared = PreparedWinShm::default();
-        let shm_profiles =
-            cfg.supported_profiles & (WIN_SHM_PROFILE_HYBRID | WIN_SHM_PROFILE_BUSYWAIT);
-        if shm_profiles == 0 {
-            return Some(prepared);
-        }
-
-        for profile in [WIN_SHM_PROFILE_HYBRID, WIN_SHM_PROFILE_BUSYWAIT] {
-            if cfg.supported_profiles & profile == 0 {
-                continue;
-            }
-
-            match WinShmContext::server_create(
-                &self.run_dir,
-                &self.service_name,
-                self.base_config.auth_token,
-                self.session_id,
-                profile,
-                cfg.max_request_payload_bytes + HEADER_SIZE as u32,
-                cfg.max_response_payload_bytes + HEADER_SIZE as u32,
-            ) {
-                Ok(ctx) => prepared.insert(profile, ctx),
-                Err(_) => {
-                    cfg.supported_profiles &= !profile;
-                    cfg.preferred_profiles &= !profile;
-                }
-            }
-        }
-
-        if cfg.supported_profiles == 0 {
-            prepared.destroy_all();
+    /// Create the session's SHM objects for one profile and the agreed
+    /// payload limits.
+    fn create_shm(
+        &self,
+        profile: u32,
+        request_payload: u32,
+        response_payload: u32,
+    ) -> Option<WinShmContext> {
+        #[cfg(test)]
+        if self.hooks.fail_shm_create.load(Ordering::Acquire) {
             return None;
         }
-
-        Some(prepared)
-    }
-}
-
-#[derive(Default)]
-struct PreparedWinShm {
-    hybrid: Option<WinShmContext>,
-    busywait: Option<WinShmContext>,
-}
-
-impl PreparedWinShm {
-    fn insert(&mut self, profile: u32, ctx: WinShmContext) {
-        if profile == WIN_SHM_PROFILE_HYBRID {
-            self.hybrid = Some(ctx);
-        } else if profile == WIN_SHM_PROFILE_BUSYWAIT {
-            self.busywait = Some(ctx);
-        }
-    }
-
-    fn take(&mut self, profile: u32) -> Option<WinShmContext> {
-        if profile == WIN_SHM_PROFILE_HYBRID {
-            self.hybrid.take()
-        } else if profile == WIN_SHM_PROFILE_BUSYWAIT {
-            self.busywait.take()
-        } else {
-            None
-        }
-    }
-
-    fn destroy_all(&mut self) {
-        if let Some(mut ctx) = self.hybrid.take() {
-            ctx.destroy();
-        }
-        if let Some(mut ctx) = self.busywait.take() {
-            ctx.destroy();
-        }
+        let ctx = WinShmContext::server_create(
+            &self.run_dir,
+            &self.service_name,
+            self.base_config.auth_token,
+            self.session_id,
+            profile,
+            request_payload.checked_add(HEADER_SIZE as u32)?,
+            response_payload.checked_add(HEADER_SIZE as u32)?,
+        )
+        .ok()?;
+        #[cfg(test)]
+        TestHooks::notify(&self.hooks.shm_created);
+        Some(ctx)
     }
 }

@@ -348,6 +348,7 @@ typedef struct nipc_session_ctx {
 enum {
   NIPC_SERVER_TEST_EVENT_HANDSHAKE_STARTED = 1,
   NIPC_SERVER_TEST_EVENT_SESSION_EXITED = 2,
+  NIPC_SERVER_TEST_EVENT_SHM_CREATED = 3,
 };
 
 struct nipc_managed_server {
@@ -414,7 +415,8 @@ struct nipc_managed_server {
 
   /* Test-only event notifications, NULL in production. Events:
    * NIPC_SERVER_TEST_EVENT_HANDSHAKE_STARTED, a worker waits for HELLO;
-   * NIPC_SERVER_TEST_EVENT_SESSION_EXITED, a worker freed its slot. */
+   * NIPC_SERVER_TEST_EVENT_SESSION_EXITED, a worker freed its slot;
+   * NIPC_SERVER_TEST_EVENT_SHM_CREATED, a session's SHM region exists. */
   void (*test_event_hook)(void *user, int event);
   void *test_event_user;
 };

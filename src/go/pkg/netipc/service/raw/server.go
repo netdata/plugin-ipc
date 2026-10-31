@@ -2,6 +2,7 @@ package raw
 
 import (
 	"errors"
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -84,6 +85,15 @@ func (t serverTimings) slotWait() time.Duration {
 // clients can connect. It stays open if Run fails or returns before binding.
 func (s *Server) Listening() <-chan struct{} {
 	return s.listening
+}
+
+// headerPayloadLen returns the SHM area size for a payload limit, or false
+// when header plus payload does not fit in uint32.
+func headerPayloadLen(payload uint32) (uint32, bool) {
+	if payload > math.MaxUint32-uint32(protocol.HeaderSize) {
+		return 0, false
+	}
+	return payload + uint32(protocol.HeaderSize), true
 }
 
 // notifyTestHook signals a test hook channel; production servers leave the

@@ -577,3 +577,56 @@ func TestUnixShmBatchResponseOverflowRespectsConfiguredCeiling(t *testing.T) {
 		t.Fatalf("expected reconnect_count >= 1 after capped SHM batch overflow, got %d", client.reconnectCount)
 	}
 }
+
+func TestUnixShmRegionOnlyForShmSessions(t *testing.T) {
+	svc := uniqueUnixService("go_unix_shm_only_selected")
+	ts := startServerWithConfigSocketReady(svc, testUnixShmServerConfig(), protocol.MethodIncrement,
+		IncrementDispatch(func(v uint64) (uint64, bool) { return v + 1, true }))
+	defer ts.stop()
+	s := ts.server
+
+	baseline := NewIncrementClient(testRunDir, svc, testClientConfig())
+	baseline.config.SupportedProfiles = protocol.ProfileBaseline
+	baseline.config.PreferredProfiles = protocol.ProfileBaseline
+	defer baseline.Close()
+	baseline.Refresh()
+	if !baseline.Ready() {
+		t.Fatalf("baseline client not ready, state=%d", baseline.state)
+	}
+	if n := shmCreatedCount(s); n != 0 {
+		t.Fatalf("baseline session created %d SHM regions, want 0", n)
+	}
+
+	badAuth := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
+	badAuth.config.AuthToken++
+	defer badAuth.Close()
+	badAuth.Refresh()
+	if badAuth.Ready() {
+		t.Fatal("client with a wrong auth token must not become ready")
+	}
+	if n := shmCreatedCount(s); n != 0 {
+		t.Fatalf("rejected handshake created %d SHM regions, want 0", n)
+	}
+
+	shmClient := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
+	defer shmClient.Close()
+	shmClient.Refresh()
+	if !shmClient.Ready() || shmClient.session.SelectedProfile != protocol.ProfileSHMHybrid {
+		t.Fatalf("SHM client not ready over SHM, state=%d session=%+v", shmClient.state, shmClient.session)
+	}
+	if n := shmCreatedCount(s); n != 1 {
+		t.Fatalf("SHM session created %d SHM regions, want 1", n)
+	}
+
+	s.failShmCreate.Store(true)
+	fallback := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
+	defer fallback.Close()
+	fallback.Refresh()
+	if !fallback.Ready() || fallback.session.SelectedProfile != protocol.ProfileBaseline {
+		t.Fatalf("client after SHM create failure not ready over baseline, state=%d session=%+v",
+			fallback.state, fallback.session)
+	}
+	if n := shmCreatedCount(s); n != 0 {
+		t.Fatalf("failed SHM create reported %d regions, want 0", n)
+	}
+}

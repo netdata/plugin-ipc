@@ -175,6 +175,23 @@ nipc_uds_error_t nipc_uds_accept_handshake(int fd,
                                             nipc_uds_session_t *out);
 
 /*
+ * Called by the server handshake once a profile is selected and the
+ * payload limits are agreed, before HELLO_ACK is sent, so the caller can
+ * set up profile resources (an SHM region) only for sessions that use
+ * them. Returning false drops that profile and the handshake selects
+ * again; with no profile left the client is rejected as unsupported.
+ */
+typedef bool (*nipc_uds_profile_prepare_fn)(void *user, uint32_t profile,
+                                            uint32_t max_request_payload_bytes,
+                                            uint32_t max_response_payload_bytes);
+
+/* nipc_uds_accept_handshake() with a prepare step; prepare may be NULL. */
+nipc_uds_error_t nipc_uds_accept_handshake_prepared(
+    int fd, const nipc_uds_server_config_t *config, uint64_t session_id,
+    uint32_t timeout_ms, nipc_uds_profile_prepare_fn prepare, void *user,
+    nipc_uds_session_t *out);
+
+/*
  * Connect to a server at {run_dir}/{service_name}.sock.
  * Performs the full handshake. Blocks until connected + handshake done.
  */

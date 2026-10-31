@@ -49,6 +49,11 @@ type ServerHandshakeConfig struct {
 	ServerHelloConfig
 	SessionID uint64
 
+	// Prepare, when set, runs once a profile is selected and the payload
+	// limits are agreed, before HELLO_ACK is sent. Returning false drops
+	// that profile and the handshake selects again.
+	Prepare func(profile, maxRequestPayloadBytes, maxResponsePayloadBytes uint32) bool
+
 	Recv        func([]byte) (int, error)
 	SendAck     func(uint16, protocol.HelloAck) error
 	StatusError func(uint16) error
@@ -258,6 +263,23 @@ func ServerHandshake(config ServerHandshakeConfig) (protocol.HelloAck, error) {
 		return protocol.HelloAck{}, config.StatusError(status)
 	}
 	ack.SessionID = config.SessionID
+
+	// Set up the selected profile before the ACK promises it. A profile the
+	// caller cannot prepare is dropped, as if the server never offered it.
+	for config.Prepare != nil && !config.Prepare(ack.SelectedProfile,
+		ack.AgreedMaxRequestPayloadBytes, ack.AgreedMaxResponsePayloadBytes) {
+		ack.ServerSupportedProfiles &^= ack.SelectedProfile
+		ack.IntersectionProfiles &^= ack.SelectedProfile
+		if ack.IntersectionProfiles == 0 {
+			sendRejection(config.SendAck, protocol.StatusUnsupported)
+			return protocol.HelloAck{}, config.StatusError(protocol.StatusUnsupported)
+		}
+		preferred := ack.IntersectionProfiles & hello.PreferredProfiles & config.PreferredProfiles
+		ack.SelectedProfile = highestBit(ack.IntersectionProfiles)
+		if preferred != 0 {
+			ack.SelectedProfile = highestBit(preferred)
+		}
+	}
 
 	if err := config.SendAck(protocol.StatusOK, ack); err != nil {
 		return protocol.HelloAck{}, config.ErrSend("hello_ack send: " + err.Error())

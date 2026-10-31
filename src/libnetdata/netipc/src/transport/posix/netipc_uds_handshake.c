@@ -205,6 +205,8 @@ nipc_uds_error_t nipc_uds_client_handshake(int fd,
 nipc_uds_error_t nipc_uds_server_handshake(int fd,
                                            const nipc_uds_server_config_t *cfg,
                                            uint64_t session_id,
+                                           nipc_uds_profile_prepare_fn prepare,
+                                           void *prepare_user,
                                            nipc_uds_session_t *session) {
   uint8_t buf[128];
   uint32_t server_pkt_size = nipc_uds_packet_size(fd, cfg->packet_size);
@@ -277,6 +279,21 @@ nipc_uds_error_t nipc_uds_server_handshake(int fd,
   if (agreed_pkt <= NIPC_HEADER_LEN) {
     send_rejection_ack(fd, NIPC_STATUS_INCOMPATIBLE);
     return NIPC_UDS_ERR_INCOMPATIBLE;
+  }
+
+  /* Set up the selected profile before the ACK promises it. A profile the
+   * caller cannot prepare is dropped, as if the server never offered it. */
+  while (prepare &&
+         !prepare(prepare_user, selected, agreed_req_pay, agreed_resp_pay)) {
+    s_profiles &= ~selected;
+    intersection &= ~selected;
+    if (intersection == 0) {
+      send_rejection_ack(fd, NIPC_STATUS_UNSUPPORTED);
+      return NIPC_UDS_ERR_NO_PROFILE;
+    }
+    preferred_intersection = intersection & hello.preferred_profiles & s_preferred;
+    selected = preferred_intersection != 0 ? highest_bit(preferred_intersection)
+                                           : highest_bit(intersection);
   }
 
   nipc_hello_ack_t ack = {

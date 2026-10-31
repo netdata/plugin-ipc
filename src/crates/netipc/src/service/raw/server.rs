@@ -48,6 +48,10 @@ impl ListeningSignal {
 pub(super) struct TestHooks {
     pub(super) session_exited: Option<std::sync::mpsc::Sender<()>>,
     pub(super) handshake_started: Option<std::sync::mpsc::Sender<()>>,
+    /// A session's SHM region was created.
+    pub(super) shm_created: Option<std::sync::mpsc::Sender<()>>,
+    /// Makes SHM region creation fail, to exercise the baseline fallback.
+    pub(super) fail_shm_create: std::sync::Arc<AtomicBool>,
 }
 
 #[cfg(test)]
@@ -229,6 +233,8 @@ pub(crate) const TEST_WAIT_LIMIT: Duration = Duration::from_secs(10);
 pub(crate) struct TestEvents {
     session_exited: std::sync::mpsc::Receiver<()>,
     handshake_started: std::sync::mpsc::Receiver<()>,
+    shm_created: std::sync::mpsc::Receiver<()>,
+    fail_shm_create: std::sync::Arc<AtomicBool>,
 }
 
 #[cfg(test)]
@@ -240,6 +246,17 @@ impl TestEvents {
                 .recv_timeout(TEST_WAIT_LIMIT)
                 .expect("session worker did not exit");
         }
+    }
+
+    /// Number of SHM regions created since the last call. A region exists
+    /// before HELLO_ACK, so a READY client's region is already counted.
+    pub(crate) fn take_shm_created(&self) -> usize {
+        self.shm_created.try_iter().count()
+    }
+
+    /// Make the server's SHM region creation fail (or succeed again).
+    pub(crate) fn set_fail_shm_create(&self, fail: bool) {
+        self.fail_shm_create.store(fail, Ordering::Release);
     }
 
     /// Wait until `n` workers are waiting for HELLO.
@@ -258,14 +275,20 @@ impl ManagedServer {
     pub(crate) fn use_test_timings(&mut self) -> TestEvents {
         let (exit_tx, session_exited) = std::sync::mpsc::channel();
         let (hello_tx, handshake_started) = std::sync::mpsc::channel();
+        let (shm_tx, shm_created) = std::sync::mpsc::channel();
+        let fail_shm_create = std::sync::Arc::new(AtomicBool::new(false));
         self.timings = TEST_SERVER_TIMINGS;
         self.test_hooks = TestHooks {
             session_exited: Some(exit_tx),
             handshake_started: Some(hello_tx),
+            shm_created: Some(shm_tx),
+            fail_shm_create: fail_shm_create.clone(),
         };
         TestEvents {
             session_exited,
             handshake_started,
+            shm_created,
+            fail_shm_create,
         }
     }
 

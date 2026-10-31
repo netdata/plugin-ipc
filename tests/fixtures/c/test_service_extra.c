@@ -137,6 +137,7 @@ typedef struct {
     nipc_server_config_t config;
     nipc_cgroups_service_handler_t service_handler;
     nipc_managed_server_t server;
+    test_server_events_t events;
     int ready;
     int done;
     int init_ok;
@@ -158,7 +159,7 @@ static void *managed_server_thread(void *arg)
     }
 
     __atomic_store_n(&ctx->init_ok, 1, __ATOMIC_RELEASE);
-    test_server_use_test_timings(&ctx->server, NULL);
+    test_server_use_test_timings(&ctx->server, &ctx->events);
     test_flag_set(&ctx->ready);
     nipc_server_run(&ctx->server);
     test_flag_set(&ctx->done);
@@ -228,6 +229,73 @@ static int refresh_to_state(nipc_client_ctx_t *client,
 static void clear_test_faults(void)
 {
     nipc_posix_service_test_fault_clear();
+}
+
+static int shm_regions_created(server_thread_ctx_t *ctx)
+{
+    test_sync_lock();
+    int n = ctx->events.shm_created;
+    test_sync_unlock();
+    return n;
+}
+
+/* The server creates a session's SHM region only when the handshake
+ * selects SHM, and falls back to baseline in the same handshake when the
+ * region cannot be created. The region exists before HELLO_ACK, so a
+ * client that is READY has already been counted. */
+static void test_shm_region_only_for_shm_sessions(void)
+{
+    printf("--- SHM region created only for SHM sessions ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_shm_after_negotiation");
+
+    server_thread_ctx_t sctx;
+    pthread_t tid;
+    nipc_server_config_t scfg = default_typed_hybrid_server_config();
+    if (!start_server_named(&sctx, service, 4, &scfg, &full_service_handler, &tid))
+        return;
+
+    nipc_client_ctx_t client;
+    nipc_cgroups_resp_view_t view;
+
+    nipc_client_config_t baseline_cfg = default_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &baseline_cfg);
+    check("baseline client ready", refresh_ready(&client) && client.shm == NULL);
+    check("baseline client call works",
+          nipc_client_call_cgroups_snapshot(&client, &view) == NIPC_OK);
+    check("baseline session created no SHM region", shm_regions_created(&sctx) == 0);
+    nipc_client_close(&client);
+
+    nipc_client_config_t bad_auth_cfg = default_typed_hybrid_client_config();
+    bad_auth_cfg.auth_token = AUTH_TOKEN + 1;
+    nipc_client_init(&client, TEST_RUN_DIR, service, &bad_auth_cfg);
+    check("rejected client reports auth failure",
+          refresh_to_state(&client, NIPC_CLIENT_AUTH_FAILED));
+    check("rejected client created no SHM region", shm_regions_created(&sctx) == 0);
+    nipc_client_close(&client);
+
+    nipc_client_config_t shm_cfg = default_typed_hybrid_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &shm_cfg);
+    check("SHM client ready on SHM", refresh_ready(&client) && client.shm != NULL);
+    check("SHM client call works",
+          nipc_client_call_cgroups_snapshot(&client, &view) == NIPC_OK);
+    check("SHM session created one region", shm_regions_created(&sctx) == 1);
+    nipc_client_close(&client);
+
+    nipc_posix_service_test_fault_set(
+        NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_SHM_CTX_CALLOC, 0);
+    nipc_client_init(&client, TEST_RUN_DIR, service, &shm_cfg);
+    check("failed region falls back to baseline in one handshake",
+          refresh_ready(&client) && client.shm == NULL &&
+          client.session.selected_profile == NIPC_PROFILE_BASELINE);
+    clear_test_faults();
+    check("fallback session call works",
+          nipc_client_call_cgroups_snapshot(&client, &view) == NIPC_OK);
+    check("failed region was not counted", shm_regions_created(&sctx) == 1);
+    nipc_client_close(&client);
+
+    stop_server_drain(&sctx, tid);
 }
 
 static void ensure_run_dir(void)
@@ -562,6 +630,7 @@ int main(void)
     test_common_service_helpers();
     test_lookup_remaining_timeout_helpers();
     test_client_fault_injection_disconnects_and_recovers();
+    test_shm_region_only_for_shm_sessions();
     test_server_init_fault_injection();
     test_cache_fault_injection();
 

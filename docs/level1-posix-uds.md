@@ -66,7 +66,14 @@ fallback.
    (Go) take the connection without reading; `nipc_uds_accept_handshake()`,
    `PendingConnection::handshake()` and `PendingConn.Handshake()` then wait
    for HELLO with a timeout (0 = none) and, in Rust and Go, an abort signal.
-   A failed handshake closes the connection. `nipc_uds_accept()` /
+   A failed handshake closes the connection. `nipc_uds_accept_handshake_prepared()`,
+   `PendingConnection::handshake_prepared()` and `PendingConn.HandshakePrepared()`
+   also take a prepare callback. The server calls it with the selected profile
+   and the final request and response payload limits after the HELLO checks
+   and before HELLO_ACK; on false it drops that profile and selects again from
+   the rest of the intersection, rejecting with UNSUPPORTED when none is left.
+   Level 2 servers create the session's SHM region in this callback.
+   `nipc_uds_accept()` /
    `accept()` / `Accept()` do both steps with the 5000 ms server handshake
    deadline.
 

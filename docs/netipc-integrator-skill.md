@@ -750,8 +750,11 @@ Current required behavior:
 - if backing-store allocation fails, including `ENOSPC`, SHM preparation returns a
   normal allocation-stage error; it must not reach a mapped write or terminate the host
   process with `SIGBUS`
-- managed servers remove SHM from that session's supported and preferred profiles and
-  continue over baseline when baseline is configured
+- managed servers create SHM only for a handshake that selected an SHM profile, after
+  authorization and limit checks and before HELLO_ACK, sized from the final limits;
+  baseline sessions and rejected clients create no region
+- on preparation failure, managed servers drop that profile within the same handshake
+  and select again, continuing over baseline when baseline is configured
 - an explicitly SHM-only configuration has no fallback transport and may reject or
   retry the session
 - Linux sandbox/seccomp policy must allow `fallocate` or arrange an ordinary errno

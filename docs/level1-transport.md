@@ -295,8 +295,8 @@ sequenceDiagram
     S->>S: Validate HELLO and auth
     S->>S: Choose selected_profile = SHM
     S->>S: Compute final session limits
-    S->>S: Provision SHM resources for this session
-    S->>S: Allocate session_id tied to this SHM session
+    S->>S: Allocate session_id for this session
+    S->>S: Provision SHM resources named by session_id
     S-->>C: HELLO_ACK(status=OK,\nselected_profile=SHM,\nfinal limits, packet_size, session_id)
     Note over C,S: Server-side SHM is already prepared for immediate client attach
 ```

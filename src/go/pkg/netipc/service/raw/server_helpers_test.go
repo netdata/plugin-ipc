@@ -27,6 +27,7 @@ func runServerForTest(s *Server) chan struct{} {
 	s.timings = testServerTimings
 	s.sessionExited = make(chan struct{}, 64)
 	s.handshakeStarted = make(chan struct{}, 64)
+	s.shmCreated = make(chan struct{}, 64)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -77,6 +78,21 @@ func waitSessionExits(s *Server, n int) {
 		case <-s.sessionExited:
 		case <-time.After(testWaitLimit):
 			panic(fmt.Sprintf("server %s: session worker did not exit within %v", s.serviceName, testWaitLimit))
+		}
+	}
+}
+
+// shmCreatedCount drains and counts the SHM creations s has reported. A
+// server creates the objects before it sends HELLO_ACK, so every creation for
+// a handshake the client finished is already reported.
+func shmCreatedCount(s *Server) int {
+	n := 0
+	for {
+		select {
+		case <-s.shmCreated:
+			n++
+		default:
+			return n
 		}
 	}
 }

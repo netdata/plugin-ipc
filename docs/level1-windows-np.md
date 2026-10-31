@@ -76,7 +76,14 @@ This is the Windows baseline profile.
    `PendingConn.Handshake()` then wait for HELLO with a timeout (0 = none)
    and, in Rust and Go, an abort signal. A failed handshake closes the
    instance without `DisconnectNamedPipe`, which would discard a rejection
-   reply the client has not read yet. `nipc_np_accept()` / `accept()` / `Accept()` do both
+   reply the client has not read yet. `nipc_np_accept_handshake_prepared()`,
+   `PendingPipe::handshake_prepared()` and `PendingConn.HandshakePrepared()`
+   also take a prepare callback with the selected profile and the final
+   payload limits, called after the HELLO checks and before HELLO_ACK; on
+   false the server drops that profile and selects again, rejecting with
+   UNSUPPORTED when none is left. Level 2 servers create the session's SHM
+   objects for the selected profile only in this callback.
+   `nipc_np_accept()` / `accept()` / `Accept()` do both
    steps with the 5000 ms server handshake deadline. A server wakes a
    blocked `ConnectNamedPipe` by connecting to its own pipe name and
    closing at once (Rust

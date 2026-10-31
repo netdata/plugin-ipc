@@ -205,9 +205,13 @@ protocol prohibition.
 
 ### Server creates a per-session region
 
-The server creates one SHM region per accepted session, after the
-handshake negotiates an SHM profile. The region path is derived from
-the `session_id` assigned during the handshake.
+The server creates one SHM region per accepted session, inside the
+handshake: after HELLO validation, authorization, profile selection and
+the limit checks pick an SHM profile, and before HELLO_ACK. Baseline
+sessions and rejected handshakes create no region. The region is sized
+from the final request and response payload limits plus the message
+header. The region path is derived from the `session_id` assigned to
+the handshake.
 
 1. Derive the region path: `{run_dir}/{service_name}-{session_id:016x}.ipcshm`.
 2. Create the file via `open(O_RDWR | O_CREAT | O_EXCL, 0600)`.

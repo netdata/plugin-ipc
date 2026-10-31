@@ -283,31 +283,50 @@ static void server_destroy_precreated_shm(nipc_shm_ctx_t **shm) {
 }
 
 static bool server_prepare_accept_config(nipc_managed_server_t *server,
-                                                                                  uint64_t sid,
-                                                                                  nipc_uds_server_config_t *cfg_out,
-                                                                                  nipc_shm_ctx_t **shm_out) {
+                                         nipc_uds_server_config_t *cfg_out) {
     *cfg_out = server->base_config;
     cfg_out->max_request_payload_bytes =
             __atomic_load_n(&server->learned_request_payload_bytes, __ATOMIC_ACQUIRE);
     cfg_out->max_response_payload_bytes = __atomic_load_n(
             &server->learned_response_payload_bytes, __ATOMIC_ACQUIRE);
-    *shm_out = NULL;
 
     uint32_t shm_profiles = cfg_out->supported_profiles &
                                                     (NIPC_PROFILE_SHM_HYBRID | NIPC_PROFILE_SHM_FUTEX);
-    if (shm_profiles == 0)
+    uint32_t request_capacity;
+    uint32_t response_capacity;
+    if (shm_profiles != 0 &&
+            (!nipc_service_common_header_payload_len_u32(
+                    cfg_out->max_request_payload_bytes, &request_capacity) ||
+             !nipc_service_common_header_payload_len_u32(
+                    cfg_out->max_response_payload_bytes, &response_capacity))) {
+        cfg_out->supported_profiles &= ~shm_profiles;
+        cfg_out->preferred_profiles &= ~shm_profiles;
+    }
+    return cfg_out->supported_profiles != 0;
+}
+
+typedef struct {
+    nipc_managed_server_t *server;
+    uint64_t session_id;
+    nipc_shm_ctx_t *shm;
+} server_shm_prepare_t;
+
+/* Handshake prepare step: create the session's SHM region once the
+ * negotiation selected SHM, sized for the agreed limits. */
+static bool server_prepare_profile(void *user, uint32_t profile,
+                                   uint32_t max_request_payload_bytes,
+                                   uint32_t max_response_payload_bytes) {
+    server_shm_prepare_t *prep = (server_shm_prepare_t *)user;
+    if (profile != NIPC_PROFILE_SHM_HYBRID && profile != NIPC_PROFILE_SHM_FUTEX)
         return true;
 
     uint32_t request_capacity;
     uint32_t response_capacity;
-    if (!nipc_service_common_header_payload_len_u32(
-                    cfg_out->max_request_payload_bytes, &request_capacity) ||
-            !nipc_service_common_header_payload_len_u32(
-                    cfg_out->max_response_payload_bytes, &response_capacity)) {
-        cfg_out->supported_profiles &= ~shm_profiles;
-        cfg_out->preferred_profiles &= ~shm_profiles;
-        return cfg_out->supported_profiles != 0;
-    }
+    if (!nipc_service_common_header_payload_len_u32(max_request_payload_bytes,
+                                                    &request_capacity) ||
+        !nipc_service_common_header_payload_len_u32(max_response_payload_bytes,
+                                                    &response_capacity))
+        return false;
 
     nipc_shm_ctx_t *shm = nipc_service_posix_calloc(
             1, sizeof(nipc_shm_ctx_t),
@@ -315,22 +334,19 @@ static bool server_prepare_accept_config(nipc_managed_server_t *server,
     if (!shm)
         return false;
 
-    /* HELLO has not been read yet, so the request segment must cover any
-      * client proposal the handshake may legally echo back. */
-    nipc_shm_error_t serr =
-            nipc_shm_server_create(server->run_dir, server->service_name, sid,
-                                                          request_capacity, response_capacity, shm);
-    if (serr == NIPC_SHM_OK) {
-        *shm_out = shm;
-        return true;
+    nipc_managed_server_t *server = prep->server;
+    if (nipc_shm_server_create(server->run_dir, server->service_name,
+                               prep->session_id, request_capacity,
+                               response_capacity, shm) != NIPC_SHM_OK) {
+        free(shm);
+        return false;
     }
 
-    free(shm);
-    cfg_out->supported_profiles &=
-            ~(NIPC_PROFILE_SHM_HYBRID | NIPC_PROFILE_SHM_FUTEX);
-    cfg_out->preferred_profiles &=
-            ~(NIPC_PROFILE_SHM_HYBRID | NIPC_PROFILE_SHM_FUTEX);
-    return cfg_out->supported_profiles != 0;
+    prep->shm = shm;
+    if (server->test_event_hook)
+        server->test_event_hook(server->test_event_user,
+                                NIPC_SERVER_TEST_EVENT_SHM_CREATED);
+    return true;
 }
 
 /* Wait for HELLO without outliving a server stop or the handshake
@@ -360,8 +376,7 @@ static bool server_session_handshake(nipc_managed_server_t *server,
                                      nipc_session_ctx_t *sctx, int fd)
 {
     nipc_uds_server_config_t cfg;
-    nipc_shm_ctx_t *shm = NULL;
-    if (!server_prepare_accept_config(server, sctx->id, &cfg, &shm)) {
+    if (!server_prepare_accept_config(server, &cfg)) {
         close(fd);
         return false;
     }
@@ -370,26 +385,28 @@ static bool server_session_handshake(nipc_managed_server_t *server,
         server->test_event_hook(server->test_event_user,
                                 NIPC_SERVER_TEST_EVENT_HANDSHAKE_STARTED);
     if (!server_wait_hello(server, fd)) {
-        server_destroy_precreated_shm(&shm);
         close(fd);
         return false;
     }
 
     /* HELLO is readable, so this does not block on the client. */
+    server_shm_prepare_t prep = { .server = server, .session_id = sctx->id };
     nipc_uds_session_t session;
-    if (nipc_uds_accept_handshake(fd, &cfg, sctx->id, server->poll_ms,
-                                  &session) != NIPC_UDS_OK) {
-        server_destroy_precreated_shm(&shm);
+    if (nipc_uds_accept_handshake_prepared(fd, &cfg, sctx->id, server->poll_ms,
+                                           server_prepare_profile, &prep,
+                                           &session) != NIPC_UDS_OK) {
+        server_destroy_precreated_shm(&prep.shm);
         return false;
     }
+    nipc_shm_ctx_t *shm = prep.shm;
 
     nipc_service_common_server_note_request_capacity(
         server, session.max_request_payload_bytes);
     nipc_service_common_server_note_response_capacity(
         server, session.max_response_payload_bytes);
 
-    /* SHM profile guarantee: only negotiate SHM for sessions that already
-     * have a prepared per-session SHM region. */
+    /* SHM profile guarantee: the prepare step created the region before the
+     * ACK selected SHM. */
     if (session.selected_profile == NIPC_PROFILE_SHM_HYBRID ||
         session.selected_profile == NIPC_PROFILE_SHM_FUTEX) {
         if (!shm) {

@@ -49,6 +49,8 @@ nipc_uds_error_t nipc_uds_client_handshake(int fd,
 nipc_uds_error_t nipc_uds_server_handshake(int fd,
                                            const nipc_uds_server_config_t *cfg,
                                            uint64_t session_id,
+                                           nipc_uds_profile_prepare_fn prepare,
+                                           void *prepare_user,
                                            nipc_uds_session_t *session);
 
 int nipc_uds_inflight_add(nipc_uds_session_t *s, uint64_t id);

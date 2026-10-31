@@ -316,6 +316,7 @@ typedef struct {
     HANDLE ready_event;
     volatile LONG init_ok;
     nipc_managed_server_t server;
+    test_server_events_t events;
 } server_thread_ctx_t;
 
 static DWORD WINAPI managed_server_thread(LPVOID arg)
@@ -333,8 +334,8 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
     }
 
     InterlockedExchange(&ctx->init_ok, 1);
+    test_server_use_test_timings(&ctx->server, &ctx->events);
     SetEvent(ctx->ready_event);
-    test_server_use_test_timings(&ctx->server, NULL);
     nipc_server_run(&ctx->server);
     return 0;
 }
@@ -3814,6 +3815,73 @@ static void test_client_fault_injection_disconnects_and_recovers(void)
     }
 }
 
+static int shm_regions_created(server_thread_ctx_t *ctx)
+{
+    test_sync_lock();
+    int n = ctx->events.shm_created;
+    test_sync_unlock();
+    return n;
+}
+
+/* The server creates a session's SHM objects only when the handshake
+ * selects SHM, and falls back to baseline in the same handshake when they
+ * cannot be created. They exist before HELLO_ACK, so a client that is
+ * READY has already been counted. */
+static void test_shm_region_only_for_shm_sessions(void)
+{
+    printf("--- SHM region created only for SHM sessions ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_shm_after_negotiation");
+
+    server_thread_ctx_t sctx;
+    nipc_server_config_t scfg = default_typed_hybrid_server_config();
+    HANDLE server_thread = start_server_named(&sctx, service, 4, &scfg, &full_service_handler);
+    if (!server_thread)
+        return;
+
+    nipc_client_ctx_t client;
+    nipc_cgroups_resp_view_t view;
+
+    nipc_client_config_t baseline_cfg = default_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &baseline_cfg);
+    check("baseline client ready", refresh_ready(&client) && client.shm == NULL);
+    check("baseline client call works",
+          nipc_client_call_cgroups_snapshot(&client, &view) == NIPC_OK);
+    check("baseline session created no SHM region", shm_regions_created(&sctx) == 0);
+    nipc_client_close(&client);
+
+    nipc_client_config_t bad_auth_cfg = default_typed_hybrid_client_config();
+    bad_auth_cfg.auth_token = AUTH_TOKEN + 1;
+    nipc_client_init(&client, TEST_RUN_DIR, service, &bad_auth_cfg);
+    check("rejected client reports auth failure",
+          refresh_to_state(&client, NIPC_CLIENT_AUTH_FAILED));
+    check("rejected client created no SHM region", shm_regions_created(&sctx) == 0);
+    nipc_client_close(&client);
+
+    nipc_client_config_t shm_cfg = default_typed_hybrid_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &shm_cfg);
+    check("SHM client ready on SHM", refresh_ready(&client) && client.shm != NULL);
+    check("SHM client call works",
+          nipc_client_call_cgroups_snapshot(&client, &view) == NIPC_OK);
+    check("SHM session created one region", shm_regions_created(&sctx) == 1);
+    nipc_client_close(&client);
+
+    nipc_win_service_test_fault_set(
+        NIPC_WIN_SERVICE_TEST_FAULT_SERVER_SHM_CTX_CALLOC, 0);
+    nipc_client_init(&client, TEST_RUN_DIR, service, &shm_cfg);
+    check("failed region falls back to baseline in one handshake",
+          refresh_ready(&client) && client.shm == NULL &&
+          client.session.selected_profile == NIPC_PROFILE_BASELINE);
+    clear_test_faults();
+    check("fallback session call works",
+          nipc_client_call_cgroups_snapshot(&client, &view) == NIPC_OK);
+    check("failed region was not counted", shm_regions_created(&sctx) == 1);
+    nipc_client_close(&client);
+
+    stop_server_drain(&sctx, server_thread);
+}
+
 static void test_server_init_fault_injection(void)
 {
     printf("--- Server init fault injection ---\n");
@@ -4909,6 +4977,7 @@ int main(void)
     RUN_TEST(test_lookup_stitched_response_buffer_fault_edges);
     RUN_TEST(test_lookup_missing_handler_dispatch);
     RUN_TEST(test_client_fault_injection_disconnects_and_recovers);
+    RUN_TEST(test_shm_region_only_for_shm_sessions);
     RUN_TEST(test_server_init_fault_injection);
     RUN_TEST(test_refresh_from_broken_state);
     RUN_TEST(test_retry_on_broken_session);

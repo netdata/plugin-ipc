@@ -101,6 +101,8 @@ impl ManagedServer {
                 base_config: self.server_config.clone(),
                 session_id,
                 handshake_ms: self.timings.handshake_ms,
+                #[cfg(test)]
+                hooks: self.test_hooks.clone(),
             };
             let socket = Arc::new(WorkerSocket::default());
             let worker_socket = socket.clone();
@@ -190,6 +192,8 @@ struct AcceptContext {
     base_config: ServerConfig,
     session_id: u64,
     handshake_ms: u32,
+    #[cfg(test)]
+    hooks: TestHooks,
 }
 
 /// Reports a session worker's exit, after its socket closed, however the
@@ -210,8 +214,9 @@ type WorkerShm = Option<ShmContext>;
 type WorkerShm = Option<()>;
 
 impl AcceptContext {
-    /// Prepare the per-session config and SHM, then handshake. Returns `None`
-    /// if the session must not start.
+    /// Run the handshake with the per-session config; the session's SHM
+    /// region is created inside it, only once SHM is selected. Returns
+    /// `None` if the session must not start.
     fn handshake(
         self,
         pending: PendingConnection,
@@ -224,34 +229,40 @@ impl AcceptContext {
         cfg.max_response_payload_bytes = learned_response_payload_bytes.load(Ordering::Acquire);
 
         #[cfg(target_os = "linux")]
-        let precreated_shm = self.prepare_shm(&mut cfg)?;
-        #[cfg(not(target_os = "linux"))]
-        let precreated_shm: WorkerShm = None;
-
-        let session = match pending.handshake(
-            self.session_id,
-            &cfg,
-            self.handshake_ms,
-            Some(stop_requested),
-        ) {
-            Ok(session) => session,
-            Err(_) => {
-                #[cfg(target_os = "linux")]
-                if let Some(mut shm) = precreated_shm {
-                    shm.destroy();
-                }
-                return None;
-            }
-        };
-
-        #[cfg(target_os = "linux")]
         {
+            let mut shm: WorkerShm = None;
+            let result = {
+                let mut prepare = |profile: u32, request: u32, response: u32| -> bool {
+                    if profile != PROFILE_SHM_HYBRID && profile != PROFILE_SHM_FUTEX {
+                        return true;
+                    }
+                    shm = self.create_shm(request, response);
+                    shm.is_some()
+                };
+                pending.handshake_prepared(
+                    self.session_id,
+                    &cfg,
+                    self.handshake_ms,
+                    Some(stop_requested),
+                    &mut prepare,
+                )
+            };
+            let session = match result {
+                Ok(session) => session,
+                Err(_) => {
+                    if let Some(mut shm) = shm {
+                        shm.destroy();
+                    }
+                    return None;
+                }
+            };
+
             let profile = session.selected_profile;
             let wants_shm = profile == PROFILE_SHM_HYBRID || profile == PROFILE_SHM_FUTEX;
-            match (wants_shm, precreated_shm) {
+            match (wants_shm, shm) {
                 (true, Some(shm)) => Some((session, Some(shm))),
-                // SHM profile guarantee: only negotiate SHM for sessions that
-                // already have a prepared per-session SHM region.
+                // SHM profile guarantee: the prepare step created the region
+                // before the ACK selected SHM.
                 (true, None) => None,
                 (false, shm) => {
                     if let Some(mut shm) = shm {
@@ -262,31 +273,36 @@ impl AcceptContext {
             }
         }
         #[cfg(not(target_os = "linux"))]
-        Some((session, precreated_shm))
+        {
+            let session = pending
+                .handshake(
+                    self.session_id,
+                    &cfg,
+                    self.handshake_ms,
+                    Some(stop_requested),
+                )
+                .ok()?;
+            Some((session, None))
+        }
     }
 
-    /// Create the session's SHM region before HELLO is read, or drop the SHM
-    /// profiles if that fails. Returns `None` if no profile is left.
+    /// Create the session's SHM region for the agreed payload limits.
     #[cfg(target_os = "linux")]
-    fn prepare_shm(&self, cfg: &mut ServerConfig) -> Option<Option<ShmContext>> {
-        let shm_profiles = cfg.supported_profiles & (PROFILE_SHM_HYBRID | PROFILE_SHM_FUTEX);
-        if shm_profiles == 0 {
-            return Some(None);
+    fn create_shm(&self, request_payload: u32, response_payload: u32) -> Option<ShmContext> {
+        #[cfg(test)]
+        if self.hooks.fail_shm_create.load(Ordering::Acquire) {
+            return None;
         }
-
-        match ShmContext::server_create(
+        let ctx = ShmContext::server_create(
             &self.run_dir,
             &self.service_name,
             self.session_id,
-            cfg.max_request_payload_bytes + HEADER_SIZE as u32,
-            cfg.max_response_payload_bytes + HEADER_SIZE as u32,
-        ) {
-            Ok(ctx) => Some(Some(ctx)),
-            Err(_) => {
-                cfg.supported_profiles &= !(PROFILE_SHM_HYBRID | PROFILE_SHM_FUTEX);
-                cfg.preferred_profiles &= !(PROFILE_SHM_HYBRID | PROFILE_SHM_FUTEX);
-                (cfg.supported_profiles != 0).then_some(None)
-            }
-        }
+            request_payload.checked_add(HEADER_SIZE as u32)?,
+            response_payload.checked_add(HEADER_SIZE as u32)?,
+        )
+        .ok()?;
+        #[cfg(test)]
+        TestHooks::notify(&self.hooks.shm_created);
+        Some(ctx)
     }
 }

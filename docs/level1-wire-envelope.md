@@ -301,9 +301,15 @@ Bit 0 is always the baseline profile for the platform.
      `(intersection & client_preferred & server_preferred)`
    - fallback choice: highest bit in `intersection`
 6. Server computes the final session limits using the matrix above.
-7. If the final profile is SHM, the server makes SHM for that session ready
-   before sending successful `HELLO_ACK`.
-8. Server allocates `session_id`.
+7. Server allocates `session_id`.
+8. If the final profile is SHM, the server makes SHM for that session ready
+   before sending successful `HELLO_ACK`, sized for the final limits. The
+   server creates SHM only for the selected profile and only after steps 2-6
+   succeed, so baseline sessions and rejected handshakes create none. If SHM
+   preparation fails, the server removes that profile from its supported set
+   and the intersection and repeats step 5 in the same handshake, keeping the
+   final limits and `session_id`; with no profile left it rejects with
+   `UNSUPPORTED`.
 9. Server sends `HELLO_ACK` with `transport_status = OK`.
 10. Both sides use the returned `HELLO_ACK` values for the rest of the session.
 

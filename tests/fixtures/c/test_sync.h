@@ -218,6 +218,7 @@ typedef struct {
     int handshakes_consumed;
     int sessions_exited;
     int exits_consumed;
+    int shm_created;
 } test_server_events_t;
 
 static inline void test_server_event_hook(void *user, int event)
@@ -228,6 +229,8 @@ static inline void test_server_event_hook(void *user, int event)
         ev->handshakes_started++;
     else if (event == NIPC_SERVER_TEST_EVENT_SESSION_EXITED)
         ev->sessions_exited++;
+    else if (event == NIPC_SERVER_TEST_EVENT_SHM_CREATED)
+        ev->shm_created++;
     test_sync_broadcast();
     test_sync_unlock();
 }

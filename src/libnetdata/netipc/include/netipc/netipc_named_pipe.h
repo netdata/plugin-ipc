@@ -220,6 +220,23 @@ nipc_np_error_t nipc_np_accept_handshake(HANDLE pipe,
                                          nipc_np_session_t *out);
 
 /*
+ * Called by the server handshake once a profile is selected and the
+ * payload limits are agreed, before HELLO_ACK is sent, so the caller can
+ * set up profile resources (an SHM region) only for sessions that use
+ * them. Returning false drops that profile and the handshake selects
+ * again; with no profile left the client is rejected as unsupported.
+ */
+typedef bool (*nipc_np_profile_prepare_fn)(void *user, uint32_t profile,
+                                           uint32_t max_request_payload_bytes,
+                                           uint32_t max_response_payload_bytes);
+
+/* nipc_np_accept_handshake() with a prepare step; prepare may be NULL. */
+nipc_np_error_t nipc_np_accept_handshake_prepared(
+    HANDLE pipe, const nipc_np_server_config_t *config, uint64_t session_id,
+    uint32_t timeout_ms, nipc_np_profile_prepare_fn prepare, void *user,
+    nipc_np_session_t *out);
+
+/*
  * Connect to a server pipe derived from run_dir + service_name.
  * Performs the full handshake. Blocks until connected + handshake done.
  * When every pipe instance is busy, waits up to NIPC_NP_CONNECT_BUSY_WAIT_MS

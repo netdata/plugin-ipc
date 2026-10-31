@@ -651,6 +651,8 @@ static nipc_np_error_t client_handshake(HANDLE pipe,
 static nipc_np_error_t server_handshake(HANDLE pipe,
                                         const nipc_np_server_config_t *cfg,
                                         uint64_t session_id,
+                                        nipc_np_profile_prepare_fn prepare,
+                                        void *prepare_user,
                                         nipc_np_session_t *session) {
   uint8_t buf[128];
 
@@ -738,6 +740,21 @@ static nipc_np_error_t server_handshake(HANDLE pipe,
   if (agreed_pkt <= NIPC_HEADER_LEN) {
     send_rejection_ack(pipe, NIPC_STATUS_INCOMPATIBLE);
     return NIPC_NP_ERR_INCOMPATIBLE;
+  }
+
+  /* Set up the selected profile before the ACK promises it. A profile the
+   * caller cannot prepare is dropped, as if the server never offered it. */
+  while (prepare &&
+         !prepare(prepare_user, selected, agreed_req_pay, agreed_resp_pay)) {
+    s_profiles &= ~selected;
+    intersection &= ~selected;
+    if (intersection == 0) {
+      send_rejection_ack(pipe, NIPC_STATUS_UNSUPPORTED);
+      return NIPC_NP_ERR_NO_PROFILE;
+    }
+    preferred_intersection = intersection & hello.preferred_profiles & s_preferred;
+    selected = preferred_intersection != 0 ? highest_bit(preferred_intersection)
+                                           : highest_bit(intersection);
   }
 
   /* Send HELLO_ACK (success) */
@@ -879,6 +896,14 @@ nipc_np_error_t nipc_np_accept_handshake(HANDLE pipe,
                                          uint64_t session_id,
                                          uint32_t timeout_ms,
                                          nipc_np_session_t *out) {
+  return nipc_np_accept_handshake_prepared(pipe, config, session_id,
+                                           timeout_ms, NULL, NULL, out);
+}
+
+nipc_np_error_t nipc_np_accept_handshake_prepared(
+    HANDLE pipe, const nipc_np_server_config_t *config, uint64_t session_id,
+    uint32_t timeout_ms, nipc_np_profile_prepare_fn prepare, void *user,
+    nipc_np_session_t *out) {
   if (!out || !config || pipe == INVALID_HANDLE_VALUE || pipe == NULL) {
     if (pipe != INVALID_HANDLE_VALUE && pipe != NULL)
       CloseHandle(pipe);
@@ -899,7 +924,7 @@ nipc_np_error_t nipc_np_accept_handshake(HANDLE pipe,
   if (herr == NIPC_NP_ERR_DISCONNECTED)
     herr = NIPC_NP_ERR_RECV;
   if (herr == NIPC_NP_OK)
-    herr = server_handshake(pipe, config, session_id, out);
+    herr = server_handshake(pipe, config, session_id, prepare, user, out);
   if (herr != NIPC_NP_OK) {
     /* Close only: DisconnectNamedPipe would discard a rejection reply the
      * client has not read yet. */

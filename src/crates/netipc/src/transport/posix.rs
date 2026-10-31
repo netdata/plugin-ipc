@@ -827,8 +827,36 @@ impl PendingConnection {
         timeout_ms: u32,
         abort: Option<&AtomicBool>,
     ) -> Result<UdsSession, UdsError> {
+        self.handshake_inner(session_id, config, timeout_ms, abort, None)
+    }
+
+    /// [`handshake`](Self::handshake) with a prepare step. Once a profile is
+    /// selected and the payload limits are agreed, and before HELLO_ACK is
+    /// sent, `prepare(profile, max_request_payload_bytes,
+    /// max_response_payload_bytes)` sets up that profile's resources (an SHM
+    /// region). Returning false drops the profile and the handshake selects
+    /// again; with no profile left the client is rejected as unsupported.
+    pub fn handshake_prepared(
+        self,
+        session_id: u64,
+        config: &ServerConfig,
+        timeout_ms: u32,
+        abort: Option<&AtomicBool>,
+        prepare: &mut dyn FnMut(u32, u32, u32) -> bool,
+    ) -> Result<UdsSession, UdsError> {
+        self.handshake_inner(session_id, config, timeout_ms, abort, Some(prepare))
+    }
+
+    fn handshake_inner(
+        self,
+        session_id: u64,
+        config: &ServerConfig,
+        timeout_ms: u32,
+        abort: Option<&AtomicBool>,
+        prepare: Option<&mut dyn FnMut(u32, u32, u32) -> bool>,
+    ) -> Result<UdsSession, UdsError> {
         wait_fd_readable(self.fd, &ReceiveWait::new(timeout_ms, abort))?;
-        let session = server_handshake(self.fd, config, session_id)?;
+        let session = server_handshake(self.fd, config, session_id, prepare)?;
         // The session owns the descriptor now.
         std::mem::forget(self);
         Ok(session)
@@ -1541,12 +1569,13 @@ fn server_handshake(
     fd: RawFd,
     config: &ServerConfig,
     session_id: u64,
+    mut prepare: Option<&mut dyn FnMut(u32, u32, u32) -> bool>,
 ) -> Result<UdsSession, UdsError> {
     let server_pkt_size = packet_size_limit(fd, config.packet_size);
 
     let s_req_pay = apply_default(config.max_request_payload_bytes, MAX_PAYLOAD_DEFAULT);
     let s_resp_pay = apply_default(config.max_response_payload_bytes, MAX_PAYLOAD_DEFAULT);
-    let s_profiles = if config.supported_profiles == 0 {
+    let mut s_profiles = if config.supported_profiles == 0 {
         PROFILE_BASELINE
     } else {
         config.supported_profiles
@@ -1616,7 +1645,7 @@ fn server_handshake(
     };
 
     // Compute intersection
-    let intersection = hello.supported_profiles & s_profiles;
+    let mut intersection = hello.supported_profiles & s_profiles;
 
     // Check intersection
     if intersection == 0 {
@@ -1632,7 +1661,7 @@ fn server_handshake(
 
     // Select profile
     let preferred_intersection = intersection & hello.preferred_profiles & s_preferred;
-    let selected = if preferred_intersection != 0 {
+    let mut selected = if preferred_intersection != 0 {
         highest_bit(preferred_intersection)
     } else {
         highest_bit(intersection)
@@ -1659,6 +1688,25 @@ fn server_handshake(
         return Err(UdsError::Incompatible(
             "packet size too small for negotiated session".into(),
         ));
+    }
+
+    // Set up the selected profile before the ACK promises it. A profile the
+    // caller cannot prepare is dropped, as if the server never offered it.
+    if let Some(prepare) = prepare.as_mut() {
+        while !prepare(selected, agreed_req_pay, agreed_resp_pay) {
+            s_profiles &= !selected;
+            intersection &= !selected;
+            if intersection == 0 {
+                send_rejection(protocol::STATUS_UNSUPPORTED)?;
+                return Err(UdsError::NoProfile);
+            }
+            let preferred = intersection & hello.preferred_profiles & s_preferred;
+            selected = if preferred != 0 {
+                highest_bit(preferred)
+            } else {
+                highest_bit(intersection)
+            };
+        }
     }
 
     // Send HELLO_ACK (success)

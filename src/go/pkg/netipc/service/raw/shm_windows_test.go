@@ -456,3 +456,55 @@ func TestWinShmBatchResponseOverflowRespectsConfiguredCeiling(t *testing.T) {
 		t.Fatalf("expected reconnect_count >= 1 after capped WinSHM batch overflow, got %d", client.reconnectCount)
 	}
 }
+
+func TestWinShmRegionOnlyForShmSessions(t *testing.T) {
+	svc := uniqueWinService("go_win_shm_only_selected")
+	ts := startTestIncrementServerWinWithConfig(svc, testWinShmServerConfig())
+	defer ts.stop()
+	s := ts.server
+
+	baseline := NewIncrementClient(winTestRunDir, svc, testWinClientConfig())
+	baseline.config.SupportedProfiles = protocol.ProfileBaseline
+	baseline.config.PreferredProfiles = protocol.ProfileBaseline
+	defer baseline.Close()
+	baseline.Refresh()
+	if !baseline.Ready() {
+		t.Fatalf("baseline client not ready, state=%d", baseline.state)
+	}
+	if n := shmCreatedCount(s); n != 0 {
+		t.Fatalf("baseline session created %d SHM regions, want 0", n)
+	}
+
+	badAuth := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
+	badAuth.config.AuthToken++
+	defer badAuth.Close()
+	badAuth.Refresh()
+	if badAuth.Ready() {
+		t.Fatal("client with a wrong auth token must not become ready")
+	}
+	if n := shmCreatedCount(s); n != 0 {
+		t.Fatalf("rejected handshake created %d SHM regions, want 0", n)
+	}
+
+	shmClient := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
+	defer shmClient.Close()
+	shmClient.Refresh()
+	if !shmClient.Ready() || shmClient.session.SelectedProfile != protocol.ProfileSHMHybrid {
+		t.Fatalf("SHM client not ready over SHM, state=%d session=%+v", shmClient.state, shmClient.session)
+	}
+	if n := shmCreatedCount(s); n != 1 {
+		t.Fatalf("SHM session created %d SHM regions, want 1", n)
+	}
+
+	s.failShmCreate.Store(true)
+	fallback := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
+	defer fallback.Close()
+	fallback.Refresh()
+	if !fallback.Ready() || fallback.session.SelectedProfile != protocol.ProfileBaseline {
+		t.Fatalf("client after SHM create failure not ready over baseline, state=%d session=%+v",
+			fallback.state, fallback.session)
+	}
+	if n := shmCreatedCount(s); n != 0 {
+		t.Fatalf("failed SHM create reported %d regions, want 0", n)
+	}
+}
