@@ -9,6 +9,7 @@
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/run-low-priority.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/interop-lib.sh"
 netipc_low_priority_self "$@"
 
 RED='\033[0;31m'
@@ -74,41 +75,6 @@ check_binaries() {
     fi
 }
 
-wait_for_server() {
-    local server_pid="$1"
-    local server_log="$2"
-    local service="$3"
-    local waited=0
-
-    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
-        if ! kill -0 "$server_pid" 2>/dev/null; then
-            return 1
-        fi
-        if grep -q "^READY$" "$server_log" 2>/dev/null; then
-            break
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-    if [[ $waited -ge $((TIMEOUT * 10)) ]]; then
-        return 2
-    fi
-
-    waited=0
-    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
-        if ! kill -0 "$server_pid" 2>/dev/null; then
-            return 3
-        fi
-        if [[ -S "${RUN_DIR}/${service}.sock" ]]; then
-            return 0
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    return 4
-}
-
 run_lookup_test() {
     local method="$1"
     local name="$2"
@@ -130,19 +96,17 @@ run_lookup_test() {
     rm -f "${RUN_DIR}/${service}-"*.ipcshm
 
     local server_log="${RUN_DIR}/${service}.server.log"
-    env NIPC_PROFILE="${NIPC_PROFILE:-}" \
+    if ! interop_start_server "$TIMEOUT" "$server_log" \
+        env NIPC_PROFILE="${NIPC_PROFILE:-}" \
         NIPC_LOOKUP_SCALE_ITEMS="$LOOKUP_ITEMS" \
-        "$server_bin" "$server_mode" "$RUN_DIR" "$service" >"$server_log" 2>&1 &
-    local server_pid=$!
-    SERVER_PIDS+=("$server_pid")
-
-    if ! wait_for_server "$server_pid" "$server_log" "$service"; then
-        local rc=$?
-        echo -e "${RED}FAIL${NC} (server readiness rc=${rc})"
+        "$server_bin" "$server_mode" "$RUN_DIR" "$service"; then
+        echo -e "${RED}FAIL${NC} (server not ready)"
         cat "$server_log" >&2 2>/dev/null || true
+        interop_stop_server
         FAIL=$((FAIL + 1))
         return
     fi
+    SERVER_PIDS+=("$INTEROP_SERVER_PID")
 
     local client_out
     if client_out=$(env NIPC_PROFILE="${NIPC_PROFILE:-}" \
@@ -160,10 +124,7 @@ run_lookup_test() {
         FAIL=$((FAIL + 1))
     fi
 
-    if kill -0 "$server_pid" 2>/dev/null; then
-        kill "$server_pid" 2>/dev/null || true
-        wait "$server_pid" 2>/dev/null || true
-    fi
+    interop_stop_server
 }
 
 run_matrix_for_method() {

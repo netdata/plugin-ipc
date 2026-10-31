@@ -34,6 +34,11 @@ type Server struct {
 	stopInit                     sync.Once
 	stopClose                    sync.Once
 	stopCh                       chan struct{}
+	timings                      serverTimings
+	listening                    chan struct{} // closed once the listener accepts
+	listeningOnce                sync.Once
+	sessionExited                chan struct{} // test hook, nil in production: signalled after a worker frees its slot
+	handshakeStarted             chan struct{} // test hook, nil in production: signalled before a worker waits for HELLO
 	workerThreadsMu              sync.Mutex
 	workerThreads                map[syscall.Handle]struct{}
 }
@@ -176,6 +181,7 @@ func (s *Server) Run() error {
 	if s.stopRequested.Load() {
 		s.running.Store(false)
 	}
+	s.markListening()
 	sem := make(chan struct{}, s.workerCount)
 
 	for s.running.Load() {
@@ -258,9 +264,10 @@ func (s *Server) serveConnection(pending *windows.PendingConn) {
 		pending.Close()
 		return
 	}
+	s.notifyTestHook(s.handshakeStarted)
 
 	session, err := pending.Handshake(
-		sessionID, acceptCfg, protocol.ServerHandshakeTimeoutMs, s.stopChan())
+		sessionID, acceptCfg, s.timings.handshakeMs, s.stopChan())
 	if err != nil {
 		if preparedShm != nil {
 			preparedShm.destroyAll()
@@ -338,7 +345,7 @@ func (s *Server) stopSessionWorkers() {
 	select {
 	case <-done:
 		return
-	case <-time.After(serverStopGrace):
+	case <-time.After(s.timings.stopGrace):
 	}
 
 	ticker := time.NewTicker(serverStopRetry)
@@ -364,7 +371,7 @@ func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmCont
 		maxResponsePayloadBytes: session.MaxResponsePayloadBytes,
 		receive: func(recvBuf []byte) (protocol.Header, []byte, serverReceiveAction) {
 			if shm != nil {
-				mlen, err := shm.WinShmReceive(recvBuf, serverPollTimeoutMs)
+				mlen, err := shm.WinShmReceive(recvBuf, s.timings.pollMs)
 				if err != nil {
 					if err == windows.ErrWinShmTimeout {
 						// A crashed client never sets the close flag; its
@@ -386,7 +393,7 @@ func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmCont
 				return hdr, recvBuf[protocol.HeaderSize:mlen], serverReceiveOK
 			}
 
-			ready, waitErr := session.WaitReadable(serverPollTimeoutMs)
+			ready, waitErr := session.WaitReadable(s.timings.pollMs)
 			if waitErr != nil {
 				return protocol.Header{}, nil, serverReceiveStop
 			}

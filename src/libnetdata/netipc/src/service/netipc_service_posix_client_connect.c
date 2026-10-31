@@ -120,7 +120,7 @@ nipc_client_state_t nipc_service_posix_client_try_connect(nipc_client_ctx_t *ctx
              * the UDS handshake, so it may not exist yet. */
             nipc_shm_error_t serr = NIPC_SHM_ERR_NOT_READY;
             bool server_gone = false;
-            uint64_t deadline_ms = nipc_service_platform_monotonic_ms() + CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS;
+            uint64_t deadline_ms = nipc_service_platform_monotonic_ms() + ctx->shm_attach_timeout_ms;
             for (;;) {
                 serr = nipc_shm_client_attach(
                     ctx->run_dir, ctx->service_name,

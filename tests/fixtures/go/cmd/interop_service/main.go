@@ -286,16 +286,26 @@ func testHandler() cgroups.Handler {
 	}
 }
 
-func waitForSocket(runDir, service string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	path := fmt.Sprintf("%s/%s.sock", runDir, service)
-	for time.Now().Before(deadline) {
-		if info, err := os.Stat(path); err == nil && info.Mode()&os.ModeSocket != 0 { // #nosec G703 -- interop fixture probes caller-provided temporary socket path.
-			return true
-		}
-		time.Sleep(10 * time.Millisecond)
+type listeningServer interface {
+	Listening() <-chan struct{}
+	Stop()
+}
+
+// waitListening reports whether server accepts connections. On false it
+// has reported why and Run has returned.
+func waitListening(server listeningServer, serverErr chan error) bool {
+	select {
+	case <-server.Listening():
+		return true
+	case err := <-serverErr:
+		fmt.Fprintf(os.Stderr, "server: Run returned before listening: %v\n", err)
+		return false
+	case <-time.After(5 * time.Second):
+		server.Stop()
+		<-serverErr
+		fmt.Fprintf(os.Stderr, "server: not listening after 5s\n")
+		return false
 	}
-	return false
 }
 
 func runServer(runDir, service string) int {
@@ -312,13 +322,7 @@ func runServer(runDir, service string) int {
 		serverErr <- server.Run()
 	}()
 
-	if !waitForSocket(runDir, service, 5*time.Second) {
-		server.Stop()
-		if err := <-serverErr; err != nil {
-			fmt.Fprintf(os.Stderr, "server: %v\n", err)
-		} else {
-			fmt.Fprintf(os.Stderr, "server: socket not ready\n")
-		}
+	if !waitListening(server, serverErr) {
 		return 1
 	}
 
@@ -333,6 +337,7 @@ func runServer(runDir, service string) int {
 
 type stoppableServer interface {
 	Run() error
+	Listening() <-chan struct{}
 	Stop()
 }
 
@@ -347,13 +352,7 @@ func runLookupServer(server stoppableServer, runDir, service string) int {
 		serverErr <- server.Run()
 	}()
 
-	if !waitForSocket(runDir, service, 5*time.Second) {
-		server.Stop()
-		if err := <-serverErr; err != nil {
-			fmt.Fprintf(os.Stderr, "server: %v\n", err)
-		} else {
-			fmt.Fprintf(os.Stderr, "server: socket not ready\n")
-		}
+	if !waitListening(server, serverErr) {
 		return 1
 	}
 
@@ -416,26 +415,16 @@ func largeLookupPaths(count int) [][]byte {
 	return paths
 }
 
+// The server printed READY after binding, so one refresh connects.
 func waitAppsClientReady(client *appslookup.Client) bool {
-	for i := 0; i < 200; i++ {
-		client.Refresh()
-		if client.Ready() {
-			return true
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return false
+	client.Refresh()
+	return client.Ready()
 }
 
+// The server printed READY after binding, so one refresh connects.
 func waitCgroupsLookupClientReady(client *cgroupslookup.Client) bool {
-	for i := 0; i < 200; i++ {
-		client.Refresh()
-		if client.Ready() {
-			return true
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return false
+	client.Refresh()
+	return client.Ready()
 }
 
 func runAppsClient(runDir, service string) int {
@@ -631,13 +620,7 @@ func runCgroupsMixedClient(runDir, service string) int {
 
 func runClient(runDir, service string) int {
 	client := cgroups.NewClient(runDir, service, clientConfig())
-	for i := 0; i < 200; i++ {
-		client.Refresh()
-		if client.Ready() {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	client.Refresh()
 
 	if !client.Ready() {
 		fmt.Fprintf(os.Stderr, "client: not ready\n")

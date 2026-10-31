@@ -35,7 +35,6 @@ typedef struct {
   nipc_client_state_t (*try_connect)(nipc_client_ctx_t *ctx);
   bool (*reconnect_for_call)(nipc_client_ctx_t *ctx);
   void (*sleep_ms)(uint32_t ms);
-  uint32_t reconnect_drain_ms;
   uint32_t reconnect_retry_interval_ms;
 } nipc_service_common_client_ops_t;
 

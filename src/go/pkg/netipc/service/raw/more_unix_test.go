@@ -119,7 +119,6 @@ func startRawPosixHelloAckServer(t *testing.T, service string, packet []byte) *u
 		srv.doneCh <- nil
 	}()
 
-	time.Sleep(100 * time.Millisecond)
 	return srv
 }
 
@@ -177,7 +176,6 @@ func startRawPosixSessionServerN(
 		srv.doneCh <- nil
 	}()
 
-	time.Sleep(200 * time.Millisecond)
 	return srv
 }
 
@@ -198,28 +196,27 @@ func (s *unixRawSessionServer) wait(t *testing.T) {
 	}
 }
 
+// refreshUnixClientReady refreshes once: servers in these tests are already
+// listening, so a single connect must succeed.
 func refreshUnixClientReady(t *testing.T, client *Client) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		client.Refresh()
-		if client.Ready() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatalf("client not ready after one refresh, state=%d", client.state)
 	}
-	t.Fatalf("client not ready, state=%d", client.state)
 }
 
 func TestUnixClientCallTimeoutOnWedgedPeer(t *testing.T) {
 	cfg := testServerConfig()
 	svc := uniqueUnixService("go_unix_call_timeout")
+	// The peer holds the request unanswered until the client has timed out.
+	timedOut := make(chan struct{})
 	srv := startRawPosixSessionServer(t, svc, cfg,
 		func(session *posix.Session, hdr protocol.Header, payload []byte) error {
 			_ = session
 			_ = hdr
 			_ = payload
-			time.Sleep(150 * time.Millisecond)
+			<-timedOut
 			return nil
 		})
 
@@ -230,6 +227,7 @@ func TestUnixClientCallTimeoutOnWedgedPeer(t *testing.T) {
 	start := time.Now()
 	_, err := client.CallIncrementWithTimeout(41, 30)
 	elapsed := time.Since(start)
+	close(timedOut)
 	if !errors.Is(err, protocol.ErrTimeout) {
 		t.Fatalf("CallIncrementWithTimeout error = %v, want %v", err, protocol.ErrTimeout)
 	}
@@ -410,14 +408,7 @@ func startServerWithWorkersSocketReady(
 		handler,
 		workers,
 	)
-	doneCh := make(chan struct{})
-
-	go func() {
-		defer close(doneCh)
-		s.Run()
-	}()
-
-	waitUnixSocketReady(service)
+	doneCh := runServerForTest(s)
 	return &testServer{server: s, doneCh: doneCh}
 }
 
@@ -431,14 +422,7 @@ func startServerWithConfigSocketReady(
 	cleanupAll(service)
 
 	s := NewServer(testRunDir, service, cfg, expectedMethodCode, handler)
-	doneCh := make(chan struct{})
-
-	go func() {
-		defer close(doneCh)
-		s.Run()
-	}()
-
-	waitUnixSocketReady(service)
+	doneCh := runServerForTest(s)
 	return &testServer{server: s, doneCh: doneCh}
 }
 
@@ -457,12 +441,17 @@ func TestUnixServerStopWhileIdle(t *testing.T) {
 		testSnapshotDispatch(),
 	)
 
+	server.timings = testServerTimings
 	done := make(chan error, 1)
 	go func() {
 		done <- server.Run()
 	}()
 
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-server.Listening():
+	case <-time.After(testWaitLimit):
+		t.Fatal("server never started listening")
+	}
 	server.Stop()
 
 	select {
@@ -744,21 +733,12 @@ func TestUnixServerRejectsSessionAtWorkerCapacity(t *testing.T) {
 	}
 	client1.Close()
 
-	// The worker slot frees only when the first session goroutine exits, which
-	// can take well over 100 ms on slow or emulated hosts; until then the
-	// server refuses new sessions, so retry within a deadline.
-	deadline := time.Now().Add(5 * time.Second)
-	var got uint64
-	for {
-		verify := NewIncrementClient(testRunDir, svc, testClientConfig())
-		refreshUnixClientReady(t, verify)
-		got, err = verify.CallIncrement(1)
-		verify.Close()
-		if err == nil || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	// The slot frees when the first session's worker exits.
+	waitSessionExits(ts.server, 1)
+	verify := NewIncrementClient(testRunDir, svc, testClientConfig())
+	refreshUnixClientReady(t, verify)
+	got, err := verify.CallIncrement(1)
+	verify.Close()
 	if err != nil {
 		t.Fatalf("verification call after worker-capacity reject failed: %v", err)
 	}
@@ -778,8 +758,7 @@ func TestUnixIdlePeerDisconnectKeepsServerHealthy(t *testing.T) {
 		t.Fatalf("raw connect failed: %v", err)
 	}
 	session.Close()
-
-	time.Sleep(200 * time.Millisecond)
+	waitSessionExits(ts.server, 1)
 
 	verify := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	defer verify.Close()
@@ -969,8 +948,8 @@ func TestUnixNonRequestTerminatesSession(t *testing.T) {
 		t.Fatalf("send non-request failed: %v", err)
 	}
 
-	time.Sleep(200 * time.Millisecond)
-
+	// The server ends the session on the bad message, so the receive below
+	// fails instead of returning a response.
 	req := protocol.CgroupsRequest{LayoutVersion: 1, Flags: 0}
 	var reqBuf [4]byte
 	if req.Encode(reqBuf[:]) == 0 {
@@ -1018,10 +997,8 @@ func TestUnixTruncatedRawRequestKeepsServerHealthy(t *testing.T) {
 		session.Close()
 		t.Fatalf("send truncated raw request failed: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
 	session.Close()
-
-	time.Sleep(200 * time.Millisecond)
+	waitSessionExits(ts.server, 1)
 
 	verify := NewSnapshotClient(testRunDir, svc, testClientConfig())
 	defer verify.Close()
@@ -1038,12 +1015,17 @@ func TestUnixTruncatedRawRequestKeepsServerHealthy(t *testing.T) {
 
 func TestUnixPeerDisconnectDuringResponseKeepsServerHealthy(t *testing.T) {
 	svc := uniqueUnixService("go_unix_send_fail")
+	// The first request is answered only after its client has gone, so the
+	// response send fails.
+	clientGone := make(chan struct{})
 	ts := startTestServerUnixWithConfig(
 		svc,
 		testServerConfig(),
 		protocol.MethodIncrement,
 		IncrementDispatch(func(v uint64) (uint64, bool) {
-			time.Sleep(100 * time.Millisecond)
+			if v == 41 {
+				<-clientGone
+			}
 			return v + 1, true
 		}),
 	)
@@ -1070,8 +1052,8 @@ func TestUnixPeerDisconnectDuringResponseKeepsServerHealthy(t *testing.T) {
 		t.Fatalf("send increment request failed: %v", err)
 	}
 	session.Close()
-
-	time.Sleep(250 * time.Millisecond)
+	close(clientGone)
+	waitSessionExits(ts.server, 1)
 
 	verify := NewIncrementClient(testRunDir, svc, testClientConfig())
 	defer verify.Close()
@@ -1121,12 +1103,7 @@ func TestUnixCallIncrementBatchWithMalformedTransportState(t *testing.T) {
 		protocol.MethodIncrement,
 		pingPongIncrementDispatch(),
 	)
-	doneCh := make(chan struct{})
-	go func() {
-		defer close(doneCh)
-		s.Run()
-	}()
-	time.Sleep(100 * time.Millisecond)
+	doneCh := runServerForTest(s)
 	defer func() {
 		s.Stop()
 		<-doneCh

@@ -835,10 +835,12 @@ func TestWinLookupTimeoutDuringFollowupSubcall(t *testing.T) {
 		cfg := testWinServerConfig()
 		cfg.MaxResponsePayloadBytes = 320
 		var calls atomic.Uint32
+		// The second subcall is held until the client has given up on it.
+		release := make(chan struct{})
 		ts := startTestServerWinWithConfig(svc, cfg, protocol.MethodAppsLookup, AppsLookupDispatch(
 			func(req *protocol.AppsLookupRequestView, builder *protocol.AppsLookupBuilder) bool {
 				if calls.Add(1) == 2 {
-					time.Sleep(2 * time.Second)
+					<-release
 				}
 				builder.SetGeneration(9)
 				for i := uint32(0); i < req.ItemCount; i++ {
@@ -858,14 +860,14 @@ func TestWinLookupTimeoutDuringFollowupSubcall(t *testing.T) {
 			},
 		))
 		defer ts.stop()
+		defer close(release)
 
 		client := NewAppsLookupClient(winTestRunDir, svc, testWinClientConfig())
 		defer client.Close()
 		waitWinClientReady(t, client)
 
-		// The budget leaves slow or emulated runners room for the first subcall;
-
-		// only the much slower second subcall can expire it.
+		// The budget leaves slow or emulated runners room for the first
+		// subcall; only the held second subcall can expire it.
 
 		_, err := client.CallAppsLookupWithTimeout([]uint32{11, 22, 33}, 500)
 		if !errors.Is(err, protocol.ErrTimeout) {
@@ -881,10 +883,12 @@ func TestWinLookupTimeoutDuringFollowupSubcall(t *testing.T) {
 		cfg := testWinServerConfig()
 		cfg.MaxResponsePayloadBytes = 160
 		var calls atomic.Uint32
+		// The second subcall is held until the client has given up on it.
+		release := make(chan struct{})
 		ts := startTestServerWinWithConfig(svc, cfg, protocol.MethodCgroupsLookup, CgroupsLookupDispatch(
 			func(req *protocol.CgroupsLookupRequestView, builder *protocol.CgroupsLookupBuilder) bool {
 				if calls.Add(1) == 2 {
-					time.Sleep(2 * time.Second)
+					<-release
 				}
 				builder.SetGeneration(7)
 				for i := uint32(0); i < req.ItemCount; i++ {
@@ -904,14 +908,14 @@ func TestWinLookupTimeoutDuringFollowupSubcall(t *testing.T) {
 			},
 		))
 		defer ts.stop()
+		defer close(release)
 
 		client := NewCgroupsLookupClient(winTestRunDir, svc, testWinClientConfig())
 		defer client.Close()
 		waitWinClientReady(t, client)
 
-		// The budget leaves slow or emulated runners room for the first subcall;
-
-		// only the much slower second subcall can expire it.
+		// The budget leaves slow or emulated runners room for the first
+		// subcall; only the held second subcall can expire it.
 
 		_, err := client.CallCgroupsLookupWithTimeout([][]byte{[]byte("/a"), []byte("/huge"), []byte("/b")}, 500)
 		if !errors.Is(err, protocol.ErrTimeout) {
@@ -929,12 +933,14 @@ func TestWinLookupAbortDuringFollowupSubcall(t *testing.T) {
 		cfg := testWinServerConfig()
 		cfg.MaxResponsePayloadBytes = 320
 		var calls atomic.Uint32
+		// The second subcall is held until the client has given up on it.
+		release := make(chan struct{})
 		secondCall := make(chan struct{}, 1)
 		ts := startTestServerWinWithConfig(svc, cfg, protocol.MethodAppsLookup, AppsLookupDispatch(
 			func(req *protocol.AppsLookupRequestView, builder *protocol.AppsLookupBuilder) bool {
 				if calls.Add(1) == 2 {
 					secondCall <- struct{}{}
-					time.Sleep(250 * time.Millisecond)
+					<-release
 				}
 				builder.SetGeneration(9)
 				for i := uint32(0); i < req.ItemCount; i++ {
@@ -954,6 +960,7 @@ func TestWinLookupAbortDuringFollowupSubcall(t *testing.T) {
 			},
 		))
 		defer ts.stop()
+		defer close(release)
 
 		client := NewAppsLookupClient(winTestRunDir, svc, testWinClientConfig())
 		defer client.Close()
@@ -987,12 +994,14 @@ func TestWinLookupAbortDuringFollowupSubcall(t *testing.T) {
 		cfg := testWinServerConfig()
 		cfg.MaxResponsePayloadBytes = 160
 		var calls atomic.Uint32
+		// The second subcall is held until the client has given up on it.
+		release := make(chan struct{})
 		secondCall := make(chan struct{}, 1)
 		ts := startTestServerWinWithConfig(svc, cfg, protocol.MethodCgroupsLookup, CgroupsLookupDispatch(
 			func(req *protocol.CgroupsLookupRequestView, builder *protocol.CgroupsLookupBuilder) bool {
 				if calls.Add(1) == 2 {
 					secondCall <- struct{}{}
-					time.Sleep(250 * time.Millisecond)
+					<-release
 				}
 				builder.SetGeneration(7)
 				for i := uint32(0); i < req.ItemCount; i++ {
@@ -1012,6 +1021,7 @@ func TestWinLookupAbortDuringFollowupSubcall(t *testing.T) {
 			},
 		))
 		defer ts.stop()
+		defer close(release)
 
 		client := NewCgroupsLookupClient(winTestRunDir, svc, testWinClientConfig())
 		defer client.Close()

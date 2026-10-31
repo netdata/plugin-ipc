@@ -140,6 +140,7 @@ void nipc_service_common_client_init(nipc_client_ctx_t *ctx,
   ctx->session_valid = false;
   ctx->shm = NULL;
   ctx->call_timeout_ms = NIPC_CLIENT_CALL_TIMEOUT_DEFAULT_MS;
+  ctx->shm_attach_timeout_ms = NIPC_CLIENT_SHM_ATTACH_TIMEOUT_DEFAULT_MS;
   nipc_service_common_copy_cstr_field(ctx->run_dir, sizeof(ctx->run_dir),
                                       run_dir);
   nipc_service_common_copy_cstr_field(ctx->service_name,
@@ -383,8 +384,6 @@ nipc_error_t nipc_service_common_call_with_retry(
     if (err != NIPC_ERR_OVERFLOW) {
       ops->disconnect(ctx);
       ctx->state = NIPC_CLIENT_BROKEN;
-      if (ops->reconnect_drain_ms > 0 && ops->sleep_ms)
-        ops->sleep_ms(ops->reconnect_drain_ms);
       if (!ops->reconnect_for_call(ctx)) {
         ctx->error_count++;
         return err;
@@ -459,8 +458,6 @@ nipc_error_t nipc_service_common_client_ensure_request_capacity(
   uint32_t prev_req = ctx->session.max_request_payload_bytes;
   ops->disconnect(ctx);
   ctx->state = NIPC_CLIENT_BROKEN;
-  if (ops->reconnect_drain_ms > 0 && ops->sleep_ms)
-    ops->sleep_ms(ops->reconnect_drain_ms);
   if (!ops->reconnect_for_call(ctx)) {
     ctx->error_count++;
     return NIPC_ERR_OVERFLOW;
@@ -497,6 +494,9 @@ nipc_error_t nipc_service_common_server_init_base(
   server->handler = handler;
   server->handler_user = user;
   server->worker_count = worker_count;
+  server->poll_ms = NIPC_SERVER_POLL_DEFAULT_MS;
+  server->stop_grace_ms = NIPC_SERVER_STOP_GRACE_DEFAULT_MS;
+  server->handshake_ms = NIPC_SERVER_HANDSHAKE_TIMEOUT_MS;
   server->expected_method_code = expected_method_code;
   server->learned_request_payload_bytes = max_request_payload_bytes > 0
                                               ? max_request_payload_bytes
@@ -643,4 +643,24 @@ void nipc_service_common_apply_dispatch_result(
     *response_len = 0;
     break;
   }
+}
+
+void nipc_server_set_timings_for_tests(nipc_managed_server_t *server,
+                                       uint32_t poll_ms, uint32_t stop_grace_ms,
+                                       uint32_t handshake_ms) {
+  server->poll_ms = poll_ms;
+  server->stop_grace_ms = stop_grace_ms;
+  server->handshake_ms = handshake_ms;
+}
+
+void nipc_server_set_event_hook_for_tests(nipc_managed_server_t *server,
+                                          void (*fn)(void *user, int event),
+                                          void *user) {
+  server->test_event_hook = fn;
+  server->test_event_user = user;
+}
+
+void nipc_client_set_shm_attach_timeout_for_tests(nipc_client_ctx_t *ctx,
+                                                  uint32_t timeout_ms) {
+  ctx->shm_attach_timeout_ms = timeout_ms;
 }

@@ -1,7 +1,9 @@
-use super::common::{wait_for_worker_slot, SERVER_POLL_TIMEOUT_MS, SERVER_STOP_GRACE_MS};
+use super::common::wait_for_worker_slot;
+#[cfg(test)]
+use super::server::TestHooks;
 use super::server::{ManagedServer, ServerConfig};
 use super::server_session_unix::{handle_session_threaded, poll_fd};
-use crate::protocol::{NipcError, SERVER_HANDSHAKE_TIMEOUT_MS};
+use crate::protocol::NipcError;
 #[cfg(target_os = "linux")]
 use crate::protocol::{HEADER_SIZE, PROFILE_SHM_FUTEX, PROFILE_SHM_HYBRID};
 use crate::transport::posix::{PendingConnection, UdsListener, UdsSession};
@@ -52,11 +54,12 @@ impl ManagedServer {
         if self.stop_requested.load(Ordering::Acquire) {
             self.running.store(false, Ordering::Release);
         }
+        self.listening.set();
 
         let mut workers: Vec<Worker> = Vec::new();
 
         while self.running.load(Ordering::Acquire) {
-            let ready = poll_fd(listener.fd(), SERVER_POLL_TIMEOUT_MS as i32);
+            let ready = poll_fd(listener.fd(), self.timings.poll_ms as i32);
             if ready < 0 {
                 break;
             }
@@ -82,7 +85,7 @@ impl ManagedServer {
             // Refuse before HELLO_ACK so the client's connect fails instead of
             // a later call.
             let worker_count = self.worker_count;
-            if !wait_for_worker_slot(&self.running, || {
+            if !wait_for_worker_slot(&self.running, self.timings.slot_wait(), || {
                 workers.retain(|w| !w.thread.is_finished());
                 workers.len() < worker_count
             }) {
@@ -97,12 +100,16 @@ impl ManagedServer {
                 service_name: self.service_name.clone(),
                 base_config: self.server_config.clone(),
                 session_id,
+                handshake_ms: self.timings.handshake_ms,
             };
             let socket = Arc::new(WorkerSocket::default());
             let worker_socket = socket.clone();
             let expected_method_code = self.expected_method_code;
             let handler = self.handler.clone();
             let running = self.running.clone();
+            let poll_ms = self.timings.poll_ms;
+            #[cfg(test)]
+            let hooks = self.test_hooks.clone();
             let stop_requested = self.stop_requested.clone();
             let learned_request_payload_bytes = self.learned_request_payload_bytes.clone();
             let learned_response_payload_bytes = self.learned_response_payload_bytes.clone();
@@ -110,6 +117,10 @@ impl ManagedServer {
             let response_payload_growth_ceiling = self.response_payload_growth_ceiling;
 
             let thread = std::thread::spawn(move || {
+                #[cfg(test)]
+                let _exit = SessionExitNotice(hooks.session_exited.clone());
+                #[cfg(test)]
+                TestHooks::notify(&hooks.handshake_started);
                 let Some((mut session, shm)) = accept.handshake(
                     pending,
                     &stop_requested,
@@ -126,6 +137,7 @@ impl ManagedServer {
                     expected_method_code,
                     handler,
                     running,
+                    poll_ms,
                     learned_request_payload_bytes,
                     learned_response_payload_bytes,
                     request_payload_growth_ceiling,
@@ -141,7 +153,7 @@ impl ManagedServer {
 
         self.stop_requested.store(true, Ordering::Release);
         self.running.store(false, Ordering::Release);
-        stop_workers(workers);
+        stop_workers(workers, self.timings.stop_grace);
 
         Ok(())
     }
@@ -149,8 +161,8 @@ impl ManagedServer {
 
 /// Give workers a grace to finish their current message, then shut down the
 /// sockets of the ones still blocked in send/recv, and join them all.
-fn stop_workers(workers: Vec<Worker>) {
-    let deadline = Instant::now() + Duration::from_millis(SERVER_STOP_GRACE_MS);
+fn stop_workers(workers: Vec<Worker>, grace: Duration) {
+    let deadline = Instant::now() + grace;
     while Instant::now() < deadline && workers.iter().any(|w| !w.thread.is_finished()) {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -177,6 +189,19 @@ struct AcceptContext {
     service_name: String,
     base_config: ServerConfig,
     session_id: u64,
+    handshake_ms: u32,
+}
+
+/// Reports a session worker's exit, after its socket closed, however the
+/// worker returns.
+#[cfg(test)]
+struct SessionExitNotice(Option<std::sync::mpsc::Sender<()>>);
+
+#[cfg(test)]
+impl Drop for SessionExitNotice {
+    fn drop(&mut self) {
+        TestHooks::notify(&self.0);
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -206,7 +231,7 @@ impl AcceptContext {
         let session = match pending.handshake(
             self.session_id,
             &cfg,
-            SERVER_HANDSHAKE_TIMEOUT_MS,
+            self.handshake_ms,
             Some(stop_requested),
         ) {
             Ok(session) => session,

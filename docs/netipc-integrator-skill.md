@@ -398,6 +398,14 @@ as explicit assumptions, not as implementation details they can reinterpret.
     connect fails and it retries on its next refresh; size
     `worker_count` for the number of long-lived clients you expect.
   - A connection that never sends HELLO holds a worker for at most 5000 ms.
+  - Clients can connect once the server listens. C `nipc_server_init()`
+    creates the listener before it returns; Rust and Go create it inside
+    `run()` / `Run()`, so code that starts a server and then its clients
+    waits for Rust `listening_signal()` / Go `Listening()` (see
+    [level2-typed-api.md](level2-typed-api.md#readiness)) instead of
+    polling or retrying connects.
+  - On Windows, a connect that finds every pipe instance busy waits up to
+    1000 ms for one, then fails.
   - Stop/destroy give sessions 1000 ms to finish, then interrupt their
     blocking I/O, so a client that stopped reading cannot hold shutdown.
   - Handler code must therefore assume concurrent execution.
@@ -1343,6 +1351,10 @@ it should:
 7. Add the public typed facade, not just raw helpers.
 8. Add L3 only if the dataset needs local owned cache + lookup.
 9. Add tests for codec, L2, interop, and L3 if applicable.
+   - Correctness tests synchronize on events (listening signal, handler
+     flags, session exits), never on sleeps or retry loops; fuzz and
+     stress tests go behind `tests/run-extended-fuzz.sh` /
+     `tests/run-extended-stress.sh`.
 10. Add operational logs at the plugin boundary.
 11. Validate Linux and Windows behavior before claiming the integration is ready.
    - Run long local validation and benchmarks through

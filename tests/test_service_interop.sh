@@ -17,6 +17,7 @@
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/run-low-priority.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/interop-lib.sh"
 netipc_low_priority_self "$@"
 
 RED='\033[0;31m'
@@ -103,56 +104,13 @@ run_test() {
     rm -f "${RUN_DIR}/${service}-"*.ipcshm
 
     # Start server in background, wait for READY
-    local server_pid
     local server_log="${RUN_DIR}/${service}.server.log"
-    env NIPC_PROFILE="${NIPC_PROFILE:-}" NIPC_HANDLER_DELAY_MS="$HANDLER_DELAY_MS" "$server_bin" server "$RUN_DIR" "$service" > "$server_log" 2>&1 &
-    server_pid=$!
-
-    # Wait for READY line (up to TIMEOUT seconds)
-    local waited=0
-    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
-        if ! kill -0 "$server_pid" 2>/dev/null; then
-            echo -e "${RED}FAIL${NC} (server exited early)"
-            cat "$server_log" >&2 2>/dev/null || true
-            FAIL=$((FAIL + 1))
-            return
-        fi
-        if grep -q "^READY$" "$server_log" 2>/dev/null; then
-            break
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    if [[ $waited -ge $((TIMEOUT * 10)) ]]; then
-        echo -e "${RED}FAIL${NC} (server not ready after ${TIMEOUT}s)"
-        kill "$server_pid" 2>/dev/null || true
-        wait "$server_pid" 2>/dev/null || true
-        FAIL=$((FAIL + 1))
-        return
-    fi
-
-    # READY alone is not enough for the Go/Rust fixtures: they emit READY
-    # just before entering server.Run(), so the socket may not exist yet.
-    waited=0
-    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
-        if ! kill -0 "$server_pid" 2>/dev/null; then
-            echo -e "${RED}FAIL${NC} (server exited before socket bind)"
-            cat "$server_log" >&2 2>/dev/null || true
-            FAIL=$((FAIL + 1))
-            return
-        fi
-        if [[ -S "${RUN_DIR}/${service}.sock" ]]; then
-            break
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    if [[ $waited -ge $((TIMEOUT * 10)) ]]; then
-        echo -e "${RED}FAIL${NC} (socket not ready after ${TIMEOUT}s)"
-        kill "$server_pid" 2>/dev/null || true
-        wait "$server_pid" 2>/dev/null || true
+    if ! interop_start_server "$TIMEOUT" "$server_log" \
+        env NIPC_PROFILE="${NIPC_PROFILE:-}" NIPC_HANDLER_DELAY_MS="$HANDLER_DELAY_MS" \
+        "$server_bin" server "$RUN_DIR" "$service"; then
+        echo -e "${RED}FAIL${NC} (server not ready)"
+        cat "$server_log" >&2 2>/dev/null || true
+        interop_stop_server
         FAIL=$((FAIL + 1))
         return
     fi
@@ -172,9 +130,7 @@ run_test() {
         FAIL=$((FAIL + 1))
     fi
 
-    # Kill server and wait
-    kill "$server_pid" 2>/dev/null || true
-    wait "$server_pid" 2>/dev/null || true
+    interop_stop_server
 }
 
 # Run all 9 directed pairs; HANDLER_DELAY_MS slows every server handler.

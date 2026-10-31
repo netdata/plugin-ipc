@@ -208,6 +208,11 @@ impl ManagedServer {
         self.inner.stop();
     }
 
+    /// Returns a signal that is set once `run()` accepts connections.
+    pub fn listening_signal(&self) -> raw::ListeningSignal {
+        self.inner.listening_signal()
+    }
+
     pub fn running_flag(&self) -> Arc<AtomicBool> {
         self.inner.running_flag()
     }

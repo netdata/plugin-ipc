@@ -2,6 +2,7 @@
 
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_protocol.h"
+#include "test_sync.h"
 #include "netipc_service_common.h"
 
 #include <pthread.h>
@@ -152,14 +153,15 @@ static void *managed_server_thread(void *arg)
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed for %s: %d\n", ctx->service, err);
         __atomic_store_n(&ctx->init_ok, 0, __ATOMIC_RELEASE);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
     __atomic_store_n(&ctx->init_ok, 1, __ATOMIC_RELEASE);
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_server_use_test_timings(&ctx->server, NULL);
+    test_flag_set(&ctx->ready);
     nipc_server_run(&ctx->server);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -182,10 +184,7 @@ static int start_server_named(server_thread_ctx_t *ctx,
     }
 
     check("server thread created", 1);
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&ctx->ready, &ctx->done);
 
     check("server ready", __atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE) == 1);
     check("server init ok", __atomic_load_n(&ctx->init_ok, __ATOMIC_ACQUIRE) == 1);
@@ -211,30 +210,18 @@ static void stop_server_drain(server_thread_ctx_t *ctx, pthread_t tid)
     nipc_server_destroy(&ctx->server);
 }
 
-static int refresh_until_ready(nipc_client_ctx_t *client, int max_tries, useconds_t sleep_us)
+/* One refresh, then report whether the client is ready. */
+static int refresh_ready(nipc_client_ctx_t *client)
 {
-    for (int i = 0; i < max_tries; i++) {
-        nipc_client_refresh(client);
-        if (nipc_client_ready(client))
-            return 1;
-        usleep(sleep_us);
-    }
-
-    return 0;
+    nipc_client_refresh(client);
+    return nipc_client_ready(client);
 }
 
-static int refresh_until_state(nipc_client_ctx_t *client,
-                               nipc_client_state_t target_state,
-                               int max_tries,
-                               useconds_t sleep_us)
+/* One refresh, then report whether the client reached target_state. */
+static int refresh_to_state(nipc_client_ctx_t *client,
+                            nipc_client_state_t target_state)
 {
-    for (int i = 0; i < max_tries; i++) {
-        nipc_client_refresh(client);
-        if (client->state == target_state)
-            return 1;
-        usleep(sleep_us);
-    }
-
+    nipc_client_refresh(client);
     return client->state == target_state;
 }
 
@@ -414,12 +401,12 @@ static void test_client_fault_injection_disconnects_and_recovers(void)
         nipc_posix_service_test_fault_set(
             NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_RESPONSE_BUF_REALLOC, 0);
         check("response buffer alloc fault disconnects client",
-              refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 20, 10000));
+              refresh_to_state(&client, NIPC_CLIENT_DISCONNECTED));
         check("response buffer alloc fault leaves client not ready",
               !nipc_client_ready(&client));
         clear_test_faults();
         check("response buffer alloc fault recovers",
-              refresh_until_ready(&client, 100, 10000));
+              refresh_ready(&client));
 
         nipc_client_close(&client);
         stop_server_drain(&sctx, tid);
@@ -442,10 +429,10 @@ static void test_client_fault_injection_disconnects_and_recovers(void)
         nipc_posix_service_test_fault_set(
             NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC, 0);
         check("send buffer alloc fault disconnects hybrid client",
-              refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 20, 10000));
+              refresh_to_state(&client, NIPC_CLIENT_DISCONNECTED));
         clear_test_faults();
         check("send buffer alloc fault recovers",
-              refresh_until_ready(&client, 200, 10000) && client.shm != NULL);
+              refresh_ready(&client) && client.shm != NULL);
 
         nipc_client_close(&client);
         stop_server_drain(&sctx, tid);
@@ -468,12 +455,12 @@ static void test_client_fault_injection_disconnects_and_recovers(void)
         nipc_posix_service_test_fault_set(
             NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_SHM_CTX_CALLOC, 0);
         check("client SHM ctx alloc fault disconnects hybrid client",
-              refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 20, 10000));
+              refresh_to_state(&client, NIPC_CLIENT_DISCONNECTED));
         check("client SHM ctx alloc fault leaves session invalid",
               !client.session_valid && client.shm == NULL);
         clear_test_faults();
         check("client SHM ctx alloc fault recovers",
-              refresh_until_ready(&client, 200, 10000) && client.shm != NULL);
+              refresh_ready(&client) && client.shm != NULL);
 
         nipc_client_close(&client);
         stop_server_drain(&sctx, tid);

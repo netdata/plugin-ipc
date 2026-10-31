@@ -87,17 +87,26 @@ fn run_server(run_dir: &str, service: &str) -> i32 {
         ..ClientConfig::default()
     };
 
+    let listening = server.listening_signal();
+    let runner = std::thread::spawn(move || server.run());
+    if !listening.wait(std::time::Duration::from_secs(5)) {
+        stop_flag.store(false, std::sync::atomic::Ordering::Release);
+        let _ = runner.join();
+        eprintln!("server: not listening after 5s");
+        return 1;
+    }
     println!("READY");
 
-    let sf = stop_flag.clone();
+    // Stop after 10 s if the test never kills this process; the wake call
+    // unblocks the pending accept.
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(10));
-        sf.store(false, std::sync::atomic::Ordering::Release);
+        stop_flag.store(false, std::sync::atomic::Ordering::Release);
         let mut wake = CgroupsClient::new(&wake_run_dir, &wake_service, wake_config);
         let _ = wake.refresh();
     });
 
-    let _ = server.run();
+    let _ = runner.join();
     0
 }
 
@@ -114,16 +123,13 @@ fn run_client(run_dir: &str, service: &str) -> i32 {
 
     let cache = CgroupsCache::new(run_dir, service, config);
 
-    let mut updated = false;
-    for _ in 0..200 {
-        if cache.refresh() {
-            updated = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let updated = cache.refresh();
     if !updated || !cache.ready() {
-        eprintln!("client: cache not ready after refresh");
+        let status = cache.status();
+        eprintln!(
+            "client: cache not ready after refresh (connection {:?}, failures {})",
+            status.connection_state, status.refresh_failure_count
+        );
         cache.close();
         println!("FAIL");
         return 1;

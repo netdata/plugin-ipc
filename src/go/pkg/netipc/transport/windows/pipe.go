@@ -98,7 +98,14 @@ var (
 	procPeekNamedPipe           = modkernel32.NewProc("PeekNamedPipe")
 	procSetNamedPipeHandleState = modkernel32.NewProc("SetNamedPipeHandleState")
 	procSwitchToThread          = modkernel32.NewProc("SwitchToThread")
+	procWaitNamedPipeW          = modkernel32.NewProc("WaitNamedPipeW")
 )
+
+// waitNamedPipe waits up to timeoutMs for a free instance of pipe name.
+func waitNamedPipe(name *uint16, timeoutMs uint32) bool {
+	r, _, _ := procWaitNamedPipeW.Call(uintptr(unsafe.Pointer(name)), uintptr(timeoutMs))
+	return r != 0
+}
 
 func createNamedPipe(name *uint16, openMode, pipeMode, maxInstances, outBufSize, inBufSize, defaultTimeout uint32) (syscall.Handle, error) {
 	r, _, err := procCreateNamedPipeW.Call(

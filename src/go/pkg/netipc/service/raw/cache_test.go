@@ -123,7 +123,6 @@ func TestCacheRefreshFailurePreserves(t *testing.T) {
 	// Kill server
 	ts.stop()
 	cleanupAll(svc)
-	time.Sleep(50 * time.Millisecond)
 
 	// Refresh fails, old cache preserved
 	updated := cache.Refresh()
@@ -275,7 +274,6 @@ func TestCacheReconnectRebuilds(t *testing.T) {
 	// Kill and restart server
 	ts1.stop()
 	cleanupAll(svc)
-	time.Sleep(50 * time.Millisecond)
 
 	ts2 := startTestServer(svc, testSnapshotDispatch())
 	defer ts2.stop()
@@ -420,12 +418,7 @@ func TestCacheLargeDataset(t *testing.T) {
 	cfg.MaxResponsePayloadBytes = 256 * N
 
 	s := NewServer(testRunDir, svc, cfg, protocol.MethodCgroupsSnapshot, largeHandler)
-	doneCh := make(chan struct{})
-	go func() {
-		defer close(doneCh)
-		s.Run()
-	}()
-	time.Sleep(100 * time.Millisecond)
+	doneCh := runServerForTest(s)
 
 	defer func() {
 		s.Stop()

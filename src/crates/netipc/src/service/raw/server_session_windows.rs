@@ -1,4 +1,4 @@
-use super::common::{ensure_client_scratch, SERVER_POLL_TIMEOUT_MS};
+use super::common::ensure_client_scratch;
 use super::dispatch::{
     dispatch_single_internal, method_supported_internal, server_note_payload_capacity,
     DispatchError, DispatchHandler,
@@ -21,6 +21,7 @@ pub(super) fn handle_session_win_threaded(
     expected_method_code: u16,
     handler: Option<DispatchHandler>,
     running: Arc<AtomicBool>,
+    poll_ms: u32,
     learned_request_payload_bytes: Arc<AtomicU32>,
     learned_response_payload_bytes: Arc<AtomicU32>,
     request_payload_growth_ceiling: u32,
@@ -34,7 +35,7 @@ pub(super) fn handle_session_win_threaded(
     while running.load(Ordering::Acquire) {
         let (hdr, payload) = {
             if let Some(ref mut shm_ctx) = shm {
-                match shm_ctx.receive(&mut recv_buf, SERVER_POLL_TIMEOUT_MS) {
+                match shm_ctx.receive(&mut recv_buf, poll_ms) {
                     Ok(mlen) => {
                         if mlen < HEADER_SIZE {
                             break;
@@ -57,7 +58,7 @@ pub(super) fn handle_session_win_threaded(
                     Err(_) => break,
                 }
             } else {
-                match session.wait_readable(SERVER_POLL_TIMEOUT_MS) {
+                match session.wait_readable(poll_ms) {
                     Ok(true) => {}
                     Ok(false) => continue,
                     Err(_) => break,

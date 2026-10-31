@@ -96,14 +96,10 @@ fn test_ping_pong() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
 
+    let listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
     let server_thread = thread::spawn(move || {
-        let listener =
-            UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
-        ready_clone.store(true, Ordering::Release);
-
         let mut session = listener.accept().expect("accept");
 
         let mut buf = [0u8; 8192];
@@ -118,9 +114,6 @@ fn test_ping_pong() {
     });
 
     // Wait for server
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let mut session =
         UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
@@ -161,14 +154,10 @@ fn test_multi_client() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
 
+    let listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
     let server_thread = thread::spawn(move || {
-        let listener =
-            UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
-        ready_clone.store(true, Ordering::Release);
-
         for _ in 0..2 {
             let mut session = listener.accept().expect("accept");
             let mut buf = [0u8; 8192];
@@ -180,10 +169,6 @@ fn test_multi_client() {
             session.send(&mut resp, &payload).expect("send");
         }
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let results: Vec<_> = (0..2)
         .map(|i| {
@@ -230,14 +215,10 @@ fn test_pipelining() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
 
+    let listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
     let server_thread = thread::spawn(move || {
-        let listener =
-            UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
-        ready_clone.store(true, Ordering::Release);
-
         let mut session = listener.accept().expect("accept");
 
         for _ in 0..3 {
@@ -250,10 +231,6 @@ fn test_pipelining() {
             session.send(&mut resp, &payload).expect("send");
         }
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let mut session =
         UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
@@ -295,19 +272,14 @@ fn test_chunking() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
-
+    let scfg = ServerConfig {
+        packet_size: 128,
+        max_request_payload_bytes: 65536,
+        max_response_payload_bytes: 65536,
+        ..default_server_config()
+    };
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
     let server_thread = thread::spawn(move || {
-        let scfg = ServerConfig {
-            packet_size: 128,
-            max_request_payload_bytes: 65536,
-            max_response_payload_bytes: 65536,
-            ..default_server_config()
-        };
-        let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
-        ready_clone.store(true, Ordering::Release);
-
         let mut session = listener.accept().expect("accept");
 
         let mut buf = [0u8; 256]; // small buf, forces recv_buf usage
@@ -318,10 +290,6 @@ fn test_chunking() {
         resp.kind = protocol::KIND_RESPONSE;
         session.send(&mut resp, &payload).expect("send");
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let ccfg = ClientConfig {
         packet_size: 128,
@@ -369,20 +337,13 @@ fn test_bad_auth() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
 
+    let listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
     let server_thread = thread::spawn(move || {
-        let listener =
-            UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
-        ready_clone.store(true, Ordering::Release);
         // accept will fail due to auth mismatch
         let _ = listener.accept();
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let ccfg = ClientConfig {
         auth_token: 0xBAD,
@@ -407,22 +368,14 @@ fn test_profile_mismatch() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
-
+    let scfg = ServerConfig {
+        supported_profiles: protocol::PROFILE_SHM_FUTEX,
+        ..default_server_config()
+    };
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
     let server_thread = thread::spawn(move || {
-        let scfg = ServerConfig {
-            supported_profiles: protocol::PROFILE_SHM_FUTEX,
-            ..default_server_config()
-        };
-        let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
-        ready_clone.store(true, Ordering::Release);
         let _ = listener.accept();
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let ccfg = ClientConfig {
         supported_profiles: PROFILE_BASELINE,
@@ -443,20 +396,13 @@ fn test_request_payload_over_cap() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
 
+    let listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
     let server_thread = thread::spawn(move || {
-        let listener =
-            UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
-        ready_clone.store(true, Ordering::Release);
         let result = listener.accept();
         assert!(matches!(result, Err(UdsError::LimitExceeded)));
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let ccfg = ClientConfig {
         max_request_payload_bytes: protocol::MAX_PAYLOAD_CAP + 1,
@@ -560,24 +506,16 @@ fn test_disconnect_detection() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
 
+    let listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
     let server_thread = thread::spawn(move || {
-        let listener =
-            UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
-        ready_clone.store(true, Ordering::Release);
-
         let mut session = listener.accept().expect("accept");
         // Read request then close without responding
         let mut buf = [0u8; 4096];
         let _ = session.receive(&mut buf);
         drop(session); // close socket
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let mut session =
         UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
@@ -617,14 +555,10 @@ fn test_batch() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
 
+    let listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
     let server_thread = thread::spawn(move || {
-        let listener =
-            UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
-        ready_clone.store(true, Ordering::Release);
-
         let mut session = listener.accept().expect("accept");
         let mut buf = [0u8; 8192];
         let (hdr, payload) = session.receive(&mut buf).expect("recv");
@@ -634,10 +568,6 @@ fn test_batch() {
         resp.transport_status = protocol::STATUS_OK;
         session.send(&mut resp, &payload).expect("send");
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let mut session =
         UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
@@ -705,19 +635,14 @@ fn test_chunked_pipelining() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
-
+    let scfg = ServerConfig {
+        packet_size: 128,
+        max_request_payload_bytes: 65536,
+        max_response_payload_bytes: 65536,
+        ..default_server_config()
+    };
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
     let server_thread = thread::spawn(move || {
-        let scfg = ServerConfig {
-            packet_size: 128,
-            max_request_payload_bytes: 65536,
-            max_response_payload_bytes: 65536,
-            ..default_server_config()
-        };
-        let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
-        ready_clone.store(true, Ordering::Release);
-
         let mut session = listener.accept().expect("accept");
 
         // Echo 3 messages
@@ -730,10 +655,6 @@ fn test_chunked_pipelining() {
             session.send(&mut resp, &payload).expect("send");
         }
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let ccfg = ClientConfig {
         packet_size: 128,
@@ -782,14 +703,10 @@ fn test_pipeline_10() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
 
+    let listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
     let server_thread = thread::spawn(move || {
-        let listener =
-            UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
-        ready_clone.store(true, Ordering::Release);
-
         let mut session = listener.accept().expect("accept");
 
         for _ in 0..10 {
@@ -802,10 +719,6 @@ fn test_pipeline_10() {
             session.send(&mut resp, &payload).expect("send");
         }
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let mut session =
         UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
@@ -849,18 +762,13 @@ fn test_pipeline_100() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
-
+    let scfg = ServerConfig {
+        max_request_payload_bytes: 65536,
+        max_response_payload_bytes: 65536,
+        ..default_server_config()
+    };
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
     let server_thread = thread::spawn(move || {
-        let scfg = ServerConfig {
-            max_request_payload_bytes: 65536,
-            max_response_payload_bytes: 65536,
-            ..default_server_config()
-        };
-        let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
-        ready_clone.store(true, Ordering::Release);
-
         let mut session = listener.accept().expect("accept");
 
         for _ in 0..100 {
@@ -873,10 +781,6 @@ fn test_pipeline_100() {
             session.send(&mut resp, &payload).expect("send");
         }
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let ccfg = ClientConfig {
         max_request_payload_bytes: 65536,
@@ -923,21 +827,17 @@ fn test_pipeline_mixed_sizes() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
 
     let sizes = [8usize, 256, 1024, 8, 256, 1024, 8, 256, 1024];
     let count = sizes.len();
 
+    let scfg = ServerConfig {
+        max_request_payload_bytes: 65536,
+        max_response_payload_bytes: 65536,
+        ..default_server_config()
+    };
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
     let server_thread = thread::spawn(move || {
-        let scfg = ServerConfig {
-            max_request_payload_bytes: 65536,
-            max_response_payload_bytes: 65536,
-            ..default_server_config()
-        };
-        let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
-        ready_clone.store(true, Ordering::Release);
-
         let mut session = listener.accept().expect("accept");
 
         for _ in 0..count {
@@ -950,10 +850,6 @@ fn test_pipeline_mixed_sizes() {
             session.send(&mut resp, &payload).expect("send");
         }
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let ccfg = ClientConfig {
         max_request_payload_bytes: 65536,
@@ -1001,22 +897,18 @@ fn test_pipeline_chunked_multi() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
 
     let sizes = [200usize, 500, 300, 800, 150];
     let count = sizes.len();
 
+    let scfg = ServerConfig {
+        packet_size: 128,
+        max_request_payload_bytes: 65536,
+        max_response_payload_bytes: 65536,
+        ..default_server_config()
+    };
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
     let server_thread = thread::spawn(move || {
-        let scfg = ServerConfig {
-            packet_size: 128,
-            max_request_payload_bytes: 65536,
-            max_response_payload_bytes: 65536,
-            ..default_server_config()
-        };
-        let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
-        ready_clone.store(true, Ordering::Release);
-
         let mut session = listener.accept().expect("accept");
 
         for _ in 0..count {
@@ -1028,10 +920,6 @@ fn test_pipeline_chunked_multi() {
             session.send(&mut resp, &payload).expect("send");
         }
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let ccfg = ClientConfig {
         packet_size: 128,
@@ -1161,20 +1049,13 @@ fn test_session_role() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
 
+    let listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
     let server_thread = thread::spawn(move || {
-        let listener =
-            UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
-        ready_clone.store(true, Ordering::Release);
         let session = listener.accept().expect("accept");
         assert_eq!(session.role(), Role::Server);
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let session =
         UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
@@ -1196,19 +1077,12 @@ fn test_send_on_closed_session() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
 
+    let listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
     let server_thread = thread::spawn(move || {
-        let listener =
-            UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
-        ready_clone.store(true, Ordering::Release);
         let _session = listener.accept().expect("accept");
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let mut session =
         UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
@@ -1277,21 +1151,15 @@ fn test_duplicate_message_id() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
 
+    let listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     let server_thread = thread::spawn(move || {
-        let listener =
-            UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
-        ready_clone.store(true, Ordering::Release);
         let _session = listener.accept().expect("accept");
-        // Hold connection open while client tests
-        thread::sleep(Duration::from_millis(500));
+        // Hold the connection open until the client is done.
+        let _ = done_rx.recv();
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let mut session =
         UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
@@ -1318,6 +1186,7 @@ fn test_duplicate_message_id() {
     assert!(matches!(result, Err(UdsError::DuplicateMsgId(42))));
 
     drop(session);
+    drop(done_tx);
     server_thread.join().expect("server join");
     cleanup_socket(&svc);
 }
@@ -1488,20 +1357,15 @@ fn test_directional_limit_negotiation() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
-
+    let scfg = ServerConfig {
+        max_request_payload_bytes: 4096,
+        max_request_batch_items: 8,
+        max_response_payload_bytes: 8192,
+        max_response_batch_items: 32,
+        ..default_server_config()
+    };
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
     let server_thread = thread::spawn(move || {
-        let scfg = ServerConfig {
-            max_request_payload_bytes: 4096,
-            max_request_batch_items: 8,
-            max_response_payload_bytes: 8192,
-            max_response_batch_items: 32,
-            ..default_server_config()
-        };
-        let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
-        ready_clone.store(true, Ordering::Release);
-
         let session = listener.accept().expect("accept");
         assert_eq!(session.max_request_payload_bytes, 4096);
         assert_eq!(session.max_request_batch_items, 16);
@@ -1509,10 +1373,6 @@ fn test_directional_limit_negotiation() {
         assert_eq!(session.max_response_batch_items, 16);
         assert_ne!(session.session_id, 0);
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let ccfg = ClientConfig {
         max_request_payload_bytes: 4096,
@@ -2145,24 +2005,16 @@ fn test_profile_preference_selects_shm_futex() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
-
+    let scfg = ServerConfig {
+        supported_profiles: PROFILE_BASELINE | protocol::PROFILE_SHM_FUTEX,
+        preferred_profiles: protocol::PROFILE_SHM_FUTEX,
+        ..default_server_config()
+    };
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
     let server_thread = thread::spawn(move || {
-        let scfg = ServerConfig {
-            supported_profiles: PROFILE_BASELINE | protocol::PROFILE_SHM_FUTEX,
-            preferred_profiles: protocol::PROFILE_SHM_FUTEX,
-            ..default_server_config()
-        };
-        let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
-        ready_clone.store(true, Ordering::Release);
         let session = listener.accept().expect("accept");
         assert_eq!(session.selected_profile, protocol::PROFILE_SHM_FUTEX);
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let ccfg = ClientConfig {
         supported_profiles: PROFILE_BASELINE | protocol::PROFILE_SHM_FUTEX,
@@ -2184,24 +2036,16 @@ fn test_zero_supported_profiles_defaults_to_baseline() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
-
+    let scfg = ServerConfig {
+        supported_profiles: 0,
+        preferred_profiles: 0,
+        ..default_server_config()
+    };
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
     let server_thread = thread::spawn(move || {
-        let scfg = ServerConfig {
-            supported_profiles: 0,
-            preferred_profiles: 0,
-            ..default_server_config()
-        };
-        let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
-        ready_clone.store(true, Ordering::Release);
         let session = listener.accept().expect("accept");
         assert_eq!(session.selected_profile, PROFILE_BASELINE);
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let ccfg = ClientConfig {
         supported_profiles: 0,
@@ -2242,12 +2086,9 @@ fn test_connect_rejects_bad_hello_ack_kind() {
     let svc = unique_service("rs_bad_ack_kind");
     cleanup_socket(&svc);
 
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
     let svc_clone = svc.clone();
+    let fd = raw_listener_fd(&svc_clone);
     let server = thread::spawn(move || {
-        let fd = raw_listener_fd(&svc_clone);
-        ready_clone.store(true, Ordering::Release);
         let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert!(client_fd >= 0, "accept failed: {}", errno());
 
@@ -2284,10 +2125,6 @@ fn test_connect_rejects_bad_hello_ack_kind() {
         }
     });
 
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
-
     let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
         Ok(_) => panic!("bad hello ack kind should fail"),
         Err(err) => err,
@@ -2304,12 +2141,9 @@ fn test_connect_rejects_bad_hello_ack_status() {
     let svc = unique_service("rs_bad_ack_status");
     cleanup_socket(&svc);
 
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
     let svc_clone = svc.clone();
+    let fd = raw_listener_fd(&svc_clone);
     let server = thread::spawn(move || {
-        let fd = raw_listener_fd(&svc_clone);
-        ready_clone.store(true, Ordering::Release);
         let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert!(client_fd >= 0, "accept failed: {}", errno());
 
@@ -2345,10 +2179,6 @@ fn test_connect_rejects_bad_hello_ack_status() {
         }
     });
 
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
-
     let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
         Ok(_) => panic!("bad hello ack status should fail"),
         Err(err) => err,
@@ -2365,12 +2195,9 @@ fn test_connect_rejects_bad_hello_ack_version_as_incompatible() {
     let svc = unique_service("rs_bad_ack_version");
     cleanup_socket(&svc);
 
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
     let svc_clone = svc.clone();
+    let fd = raw_listener_fd(&svc_clone);
     let server = thread::spawn(move || {
-        let fd = raw_listener_fd(&svc_clone);
-        ready_clone.store(true, Ordering::Release);
         let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert!(client_fd >= 0, "accept failed: {}", errno());
 
@@ -2406,10 +2233,6 @@ fn test_connect_rejects_bad_hello_ack_version_as_incompatible() {
         }
     });
 
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
-
     let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
         Ok(_) => panic!("bad hello ack version should fail"),
         Err(err) => err,
@@ -2426,12 +2249,9 @@ fn test_connect_rejects_incompatible_hello_ack_status() {
     let svc = unique_service("rs_ack_incompat_status");
     cleanup_socket(&svc);
 
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
     let svc_clone = svc.clone();
+    let fd = raw_listener_fd(&svc_clone);
     let server = thread::spawn(move || {
-        let fd = raw_listener_fd(&svc_clone);
-        ready_clone.store(true, Ordering::Release);
         let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert!(client_fd >= 0, "accept failed: {}", errno());
 
@@ -2467,10 +2287,6 @@ fn test_connect_rejects_incompatible_hello_ack_status() {
         }
     });
 
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
-
     let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
         Ok(_) => panic!("incompatible hello ack status should fail"),
         Err(err) => err,
@@ -2487,12 +2303,9 @@ fn test_connect_rejects_bad_hello_ack_layout_as_incompatible() {
     let svc = unique_service("rs_bad_ack_layout");
     cleanup_socket(&svc);
 
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
     let svc_clone = svc.clone();
+    let fd = raw_listener_fd(&svc_clone);
     let server = thread::spawn(move || {
-        let fd = raw_listener_fd(&svc_clone);
-        ready_clone.store(true, Ordering::Release);
         let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert!(client_fd >= 0, "accept failed: {}", errno());
 
@@ -2528,10 +2341,6 @@ fn test_connect_rejects_bad_hello_ack_layout_as_incompatible() {
         }
     });
 
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
-
     let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
         Ok(_) => panic!("bad hello ack layout should fail"),
         Err(err) => err,
@@ -2548,12 +2357,9 @@ fn test_connect_rejects_truncated_hello_ack() {
     let svc = unique_service("rs_bad_ack_trunc");
     cleanup_socket(&svc);
 
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
     let svc_clone = svc.clone();
+    let fd = raw_listener_fd(&svc_clone);
     let server = thread::spawn(move || {
-        let fd = raw_listener_fd(&svc_clone);
-        ready_clone.store(true, Ordering::Release);
         let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert!(client_fd >= 0, "accept failed: {}", errno());
 
@@ -2581,10 +2387,6 @@ fn test_connect_rejects_truncated_hello_ack() {
             libc::close(fd);
         }
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
         Ok(_) => panic!("truncated hello ack should fail"),
@@ -2784,14 +2586,10 @@ fn test_unknown_response_msg_id() {
     cleanup_socket(&svc);
 
     let svc_clone = svc.clone();
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
 
+    let listener =
+        UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
     let server_thread = thread::spawn(move || {
-        let listener =
-            UdsListener::bind(TEST_RUN_DIR, &svc_clone, default_server_config()).expect("listen");
-        ready_clone.store(true, Ordering::Release);
-
         let mut session = listener.accept().expect("accept");
         let mut buf = [0u8; 8192];
         let (hdr, payload) = session.receive(&mut buf).expect("recv");
@@ -2808,10 +2606,6 @@ fn test_unknown_response_msg_id() {
         };
         session.send(&mut resp, &payload).expect("send");
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let mut session =
         UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
@@ -2922,12 +2716,9 @@ fn test_connect_rejects_agreed_packet_size_above_proposal() {
     let svc = unique_service("rs_ack_pkt_above");
     cleanup_socket(&svc);
 
-    let ready = Arc::new(AtomicBool::new(false));
-    let ready_clone = ready.clone();
     let svc_clone = svc.clone();
+    let fd = raw_listener_fd(&svc_clone);
     let server = thread::spawn(move || {
-        let fd = raw_listener_fd(&svc_clone);
-        ready_clone.store(true, Ordering::Release);
         let client_fd = unsafe { libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
         assert!(client_fd >= 0, "accept failed: {}", errno());
 
@@ -2972,10 +2763,6 @@ fn test_connect_rejects_agreed_packet_size_above_proposal() {
             libc::close(fd);
         }
     });
-
-    while !ready.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(1));
-    }
 
     let err = match UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()) {
         Ok(_) => panic!("agreed packet_size above the proposal must fail"),

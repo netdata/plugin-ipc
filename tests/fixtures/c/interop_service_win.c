@@ -13,6 +13,7 @@
 #if defined(_WIN32) || defined(__MSYS__)
 
 #include "netipc/netipc_service.h"
+#include "test_sync.h"
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_win_shm.h"
@@ -367,7 +368,7 @@ static int run_server(const char *run_dir, const char *service)
         return 1;
     }
 
-    HANDLE server_thread = CreateThread(NULL, 0, server_thread_main, &state, 0, NULL);
+    HANDLE server_thread = test_create_thread(NULL, 0, server_thread_main, &state, 0, NULL);
     if (!server_thread) {
         fprintf(stderr, "server thread create failed: %lu\n", (unsigned long)GetLastError());
         nipc_server_destroy(&state.server);
@@ -509,16 +510,11 @@ static int run_cgroups_mixed_server(const char *run_dir, const char *service)
 /*  Client mode                                                        */
 /* ------------------------------------------------------------------ */
 
+/* The server printed READY after binding, so one refresh connects. */
 static int wait_client_ready(nipc_client_ctx_t *client)
 {
-    for (int i = 0; i < 200; i++) {
-        nipc_client_refresh(client);
-        if (nipc_client_ready(client))
-            return 1;
-        Sleep(10);
-    }
-
-    return 0;
+    nipc_client_refresh(client);
+    return nipc_client_ready(client);
 }
 
 static int run_apps_client(const char *run_dir, const char *service)
@@ -768,12 +764,7 @@ static int run_client(const char *run_dir, const char *service)
 
     nipc_client_ctx_t client;
     nipc_client_init(&client, run_dir, service, &ccfg);
-    for (int i = 0; i < 200; i++) {
-        nipc_client_refresh(&client);
-        if (nipc_client_ready(&client))
-            break;
-        Sleep(10);
-    }
+    nipc_client_refresh(&client);
 
     if (!nipc_client_ready(&client)) {
         fprintf(stderr, "client: not ready\n");

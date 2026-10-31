@@ -1,4 +1,4 @@
-use super::common::{ensure_client_scratch, SERVER_POLL_TIMEOUT_MS};
+use super::common::ensure_client_scratch;
 use super::dispatch::{
     dispatch_single_internal, method_supported_internal, server_note_payload_capacity,
     DispatchError, DispatchHandler,
@@ -24,6 +24,7 @@ pub(super) fn handle_session_threaded(
     expected_method_code: u16,
     handler: Option<DispatchHandler>,
     running: Arc<AtomicBool>,
+    poll_ms: u32,
     learned_request_payload_bytes: Arc<AtomicU32>,
     learned_response_payload_bytes: Arc<AtomicU32>,
     request_payload_growth_ceiling: u32,
@@ -39,7 +40,7 @@ pub(super) fn handle_session_threaded(
             #[cfg(target_os = "linux")]
             {
                 if let Some(ref mut shm_ctx) = shm {
-                    match shm_ctx.receive(&mut recv_buf, SERVER_POLL_TIMEOUT_MS) {
+                    match shm_ctx.receive(&mut recv_buf, poll_ms) {
                         Ok(mlen) => {
                             if mlen < HEADER_SIZE {
                                 break;
@@ -62,7 +63,7 @@ pub(super) fn handle_session_threaded(
                         Err(_) => break,
                     }
                 } else {
-                    let ready = poll_fd(session.fd(), SERVER_POLL_TIMEOUT_MS as i32);
+                    let ready = poll_fd(session.fd(), poll_ms as i32);
                     if ready < 0 {
                         break;
                     }
@@ -79,7 +80,7 @@ pub(super) fn handle_session_threaded(
 
             #[cfg(not(target_os = "linux"))]
             {
-                let ready = poll_fd(session.fd(), SERVER_POLL_TIMEOUT_MS as i32);
+                let ready = poll_fd(session.fd(), poll_ms as i32);
                 if ready < 0 {
                     break;
                 }

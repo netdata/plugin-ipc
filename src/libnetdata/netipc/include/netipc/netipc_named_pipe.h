@@ -39,6 +39,10 @@ extern "C" {
 /* Max concurrent pipe instances */
 #define NIPC_NP_MAX_INSTANCES PIPE_UNLIMITED_INSTANCES
 
+/* How long a connect waits for a free pipe instance when every instance is
+ * busy (ERROR_PIPE_BUSY). */
+#define NIPC_NP_CONNECT_BUSY_WAIT_MS 1000
+
 /* FNV-1a 64-bit constants */
 #define NIPC_FNV1A_OFFSET_BASIS 0xcbf29ce484222325ULL
 #define NIPC_FNV1A_PRIME        0x00000100000001B3ULL
@@ -218,6 +222,8 @@ nipc_np_error_t nipc_np_accept_handshake(HANDLE pipe,
 /*
  * Connect to a server pipe derived from run_dir + service_name.
  * Performs the full handshake. Blocks until connected + handshake done.
+ * When every pipe instance is busy, waits up to NIPC_NP_CONNECT_BUSY_WAIT_MS
+ * for a free one.
  */
 nipc_np_error_t nipc_np_connect(const char *run_dir,
                                  const char *service_name,
@@ -310,6 +316,13 @@ static inline HANDLE nipc_np_session_handle(const nipc_np_session_t *s) {
 static inline HANDLE nipc_np_listener_handle(const nipc_np_listener_t *l) {
     return l->pipe;
 }
+
+#ifdef NIPC_INTERNAL_TESTING
+/* Call hook(user) whenever a connect finds every pipe instance busy, before
+ * it waits for one. NULL removes the hook. */
+void nipc_np_set_connect_busy_hook_for_tests(void (*hook)(void *user),
+                                             void *user);
+#endif
 
 #ifdef __cplusplus
 }

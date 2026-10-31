@@ -4,7 +4,6 @@ package raw
 
 import (
 	"testing"
-	"time"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	windows "github.com/netdata/plugin-ipc/go/pkg/netipc/transport/windows"
@@ -50,22 +49,12 @@ type winTestServer struct {
 // and starts it in a background goroutine. Returns a handle for cleanup.
 func startTestServerWin(service string, expectedMethodCode uint16, handler DispatchHandler) *winTestServer {
 	s := NewServer(winTestRunDir, service, testWinServerConfig(), expectedMethodCode, handler)
-	doneCh := make(chan struct{})
-
-	go func() {
-		defer close(doneCh)
-		s.Run()
-	}()
-
-	// Allow the Named Pipe listener to start
-	time.Sleep(200 * time.Millisecond)
-
-	return &winTestServer{server: s, doneCh: doneCh}
+	return &winTestServer{server: s, doneCh: runServerForTest(s)}
 }
 
 func (ts *winTestServer) stop() {
 	ts.server.Stop()
-	<-ts.doneCh
+	waitClosed(ts.doneCh, "server "+ts.server.serviceName+" Run")
 }
 
 func winPingPongIncrementDispatch() DispatchHandler {

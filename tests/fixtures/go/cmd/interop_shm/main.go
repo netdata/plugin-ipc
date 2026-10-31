@@ -18,7 +18,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
@@ -88,22 +87,8 @@ func runServer(runDir, service string) int {
 }
 
 func runClient(runDir, service string) int {
-	// Retry attach -- server may not be fully ready yet
-	var ctx *posix.ShmContext
-	var err error
-	for i := 0; i < 500; i++ {
-		ctx, err = posix.ShmClientAttach(runDir, service, 1)
-		if err == nil {
-			break
-		}
-		if errors.Is(err, posix.ErrShmNotReady) ||
-			errors.Is(err, posix.ErrShmOpen) ||
-			errors.Is(err, posix.ErrShmBadMagic) {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		break
-	}
+	// The server prints READY only after creating the region.
+	ctx, err := posix.ShmClientAttach(runDir, service, 1)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "client: attach failed: %v\n", err)
 		return 1

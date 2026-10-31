@@ -11,6 +11,7 @@
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_win_shm.h"
+#include "test_sync.h"
 #include "netipc_service_common.h"
 
 #include <stdio.h>
@@ -142,7 +143,6 @@ static nipc_service_common_client_ops_t common_retry_ops(void)
         .try_connect = common_retry_try_connect,
         .reconnect_for_call = common_retry_reconnect_for_call,
         .sleep_ms = common_retry_sleep,
-        .reconnect_drain_ms = 1,
         .reconnect_retry_interval_ms = 1,
     };
 }
@@ -332,6 +332,7 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
 
     InterlockedExchange(&ctx->init_ok, 1);
     SetEvent(ctx->ready_event);
+    test_server_use_test_timings(&ctx->server, NULL);
     nipc_server_run(&ctx->server);
     return 0;
 }
@@ -350,7 +351,7 @@ static HANDLE start_server_named(server_thread_ctx_t *ctx,
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     InterlockedExchange(&ctx->init_ok, 0);
 
-    HANDLE thread = CreateThread(NULL, 0, managed_server_thread, ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, managed_server_thread, ctx, 0, NULL);
     check("server thread created", thread != NULL);
     if (!thread)
         return NULL;
@@ -421,6 +422,7 @@ static DWORD WINAPI lookup_server_thread(LPVOID arg)
 
     InterlockedExchange(&ctx->init_ok, 1);
     SetEvent(ctx->ready_event);
+    test_server_use_test_timings(&ctx->server, NULL);
     nipc_server_run(&ctx->server);
     return 0;
 }
@@ -444,7 +446,7 @@ static HANDLE start_lookup_server_named(
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     InterlockedExchange(&ctx->init_ok, 0);
 
-    HANDLE thread = CreateThread(NULL, 0, lookup_server_thread, ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, lookup_server_thread, ctx, 0, NULL);
     check("lookup server thread created", thread != NULL);
     if (!thread)
         return NULL;
@@ -482,30 +484,18 @@ static void stop_lookup_server_drain(lookup_server_thread_ctx_t *ctx, HANDLE thr
     check("lookup server drain completed", nipc_server_drain(&ctx->server, 10000));
 }
 
-static bool refresh_until_ready(nipc_client_ctx_t *client, int max_tries, DWORD sleep_ms)
+/* One refresh, then report whether the client is ready. */
+static bool refresh_ready(nipc_client_ctx_t *client)
 {
-    for (int i = 0; i < max_tries; i++) {
-        nipc_client_refresh(client);
-        if (nipc_client_ready(client))
-            return true;
-        Sleep(sleep_ms);
-    }
-
-    return false;
+    nipc_client_refresh(client);
+    return nipc_client_ready(client);
 }
 
-static bool refresh_until_state(nipc_client_ctx_t *client,
-                                nipc_client_state_t target_state,
-                                int max_tries,
-                                DWORD sleep_ms)
+/* One refresh, then report whether the client reached target_state. */
+static bool refresh_to_state(nipc_client_ctx_t *client,
+                             nipc_client_state_t target_state)
 {
-    for (int i = 0; i < max_tries; i++) {
-        nipc_client_refresh(client);
-        if (client->state == target_state)
-            return true;
-        Sleep(sleep_ms);
-    }
-
+    nipc_client_refresh(client);
     return client->state == target_state;
 }
 
@@ -666,7 +656,7 @@ static void test_client_response_buffer_minimum(void)
     ccfg.max_response_payload_bytes = 1;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
 
-    check("small response client reaches READY", refresh_until_ready(&client, 100, 10));
+    check("small response client reaches READY", refresh_ready(&client));
     check("small response client buffer rounded up to minimum",
           client.response_buf_size >= NIPC_HEADER_LEN + 1024u);
 
@@ -750,7 +740,8 @@ static bool apps_lookup_test_handler(void *user,
 typedef struct {
     volatile LONG calls;
     volatile LONG max_items_seen;
-    volatile LONG second_call_entered;
+    int second_call_entered; /* __atomic */
+    int release_second_call; /* __atomic */
     int mixed_generation;
     int slow_second_call;
     int signal_second_call;
@@ -775,9 +766,9 @@ static void lookup_scale_after_call(lookup_scale_state_t *state, LONG call)
         return;
 
     if (state->signal_second_call)
-        InterlockedExchange(&state->second_call_entered, 1);
+        test_flag_set(&state->second_call_entered);
     if (state->slow_second_call)
-        Sleep(250);
+        (void)test_flag_wait(&state->release_second_call);
 }
 
 typedef struct {
@@ -812,13 +803,7 @@ static DWORD WINAPI lookup_call_thread(LPVOID arg)
 
 static int lookup_scale_wait_for_second_call(lookup_scale_state_t *state)
 {
-    for (int i = 0; i < 5000; i++) {
-        if (InterlockedCompareExchange(&state->second_call_entered, 0, 0) != 0)
-            return 1;
-        Sleep(1);
-    }
-
-    return 0;
+    return test_flag_wait(&state->second_call_entered) ? 1 : 0;
 }
 
 static bool cgroups_lookup_scale_handler(void *user,
@@ -1702,7 +1687,7 @@ static HANDLE start_raw_lookup_partial_disconnect(
         return NULL;
 
     HANDLE thread =
-        CreateThread(NULL, 0, raw_lookup_partial_disconnect_thread, ctx, 0,
+        test_create_thread(NULL, 0, raw_lookup_partial_disconnect_thread, ctx, 0,
                      NULL);
     check("partial-disconnect raw server thread created", thread != NULL);
     if (!thread) {
@@ -1740,7 +1725,7 @@ static void test_lookup_typed_calls(void)
         nipc_client_ctx_t client;
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("cgroups lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("cgroups lookup client ready", refresh_ready(&client));
 
         nipc_str_view_t paths[] = {
             { .ptr = "/known", .len = 6 },
@@ -1806,7 +1791,7 @@ static void test_lookup_typed_calls(void)
         nipc_client_ctx_t client;
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("apps lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("apps lookup client ready", refresh_ready(&client));
 
         uint32_t pids[] = {1234, 0, 9999};
         nipc_apps_lookup_resp_view_t view;
@@ -1882,7 +1867,7 @@ static void test_lookup_zero_item_calls(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("zero cgroups lookup client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         nipc_cgroups_lookup_resp_view_t view;
         nipc_error_t err =
@@ -1914,7 +1899,7 @@ static void test_lookup_zero_item_calls(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("zero apps lookup client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         nipc_apps_lookup_resp_view_t view;
         nipc_error_t err = nipc_client_call_apps_lookup(&client, NULL, 0, &view);
@@ -1951,7 +1936,7 @@ static void test_lookup_payload_exceeded_retry(void)
         nipc_client_ctx_t client;
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("cgroups scale lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("cgroups scale lookup client ready", refresh_ready(&client));
 
         nipc_str_view_t paths[] = {
             { .ptr = "/a", .len = 2 },
@@ -2018,7 +2003,7 @@ static void test_lookup_payload_exceeded_retry(void)
         nipc_client_ctx_t client;
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("apps scale lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("apps scale lookup client ready", refresh_ready(&client));
 
         uint32_t pids[] = {11, 22, 44, 33};
         nipc_apps_lookup_resp_view_t view;
@@ -2090,7 +2075,7 @@ static void run_cgroups_lookup_request_boundary_case(
     nipc_client_config_t ccfg = default_client_config();
     ccfg.max_request_payload_bytes = request_cap;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("cgroups split lookup client ready", refresh_until_ready(&client, 100, 10));
+    check("cgroups split lookup client ready", refresh_ready(&client));
 
     nipc_str_view_t paths[] = {
         { .ptr = "/bbbbbb", .len = 7 },
@@ -2152,7 +2137,7 @@ static void run_apps_lookup_request_boundary_case(
     nipc_client_config_t ccfg = default_client_config();
     ccfg.max_request_payload_bytes = request_cap;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("apps split lookup client ready", refresh_until_ready(&client, 100, 10));
+    check("apps split lookup client ready", refresh_ready(&client));
 
     uint32_t pids[] = {4, 1, 4, 7, 1, 9, 7};
     nipc_apps_lookup_resp_view_t view;
@@ -2235,7 +2220,7 @@ static void test_apps_lookup_large_logical_case(const char *prefix,
     nipc_client_config_t ccfg = default_client_config();
     ccfg.max_request_payload_bytes = LOOKUP_SCALE_REQUEST_PAYLOAD_BYTES;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("apps large client ready", refresh_until_ready(&client, 100, 10));
+    check("apps large client ready", refresh_ready(&client));
 
     nipc_apps_lookup_resp_view_t view;
     nipc_error_t err =
@@ -2307,7 +2292,7 @@ static void test_cgroups_lookup_large_logical_case(const char *prefix,
     nipc_client_config_t ccfg = default_client_config();
     ccfg.max_request_payload_bytes = LOOKUP_SCALE_REQUEST_PAYLOAD_BYTES;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("cgroups large client ready", refresh_until_ready(&client, 100, 10));
+    check("cgroups large client ready", refresh_ready(&client));
 
     nipc_cgroups_lookup_resp_view_t view;
     nipc_error_t err =
@@ -2389,7 +2374,7 @@ static void test_apps_lookup_large_response_split_case(const char *prefix)
         LOOKUP_RESPONSE_SPLIT_RESPONSE_PAYLOAD_BYTES;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("apps response-split client ready",
-          refresh_until_ready(&client, 100, 10));
+          refresh_ready(&client));
 
     nipc_apps_lookup_resp_view_t view;
     nipc_error_t err = nipc_client_call_apps_lookup(
@@ -2473,7 +2458,7 @@ static void test_cgroups_lookup_large_response_split_case(const char *prefix)
         LOOKUP_RESPONSE_SPLIT_RESPONSE_PAYLOAD_BYTES;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("cgroups response-split client ready",
-          refresh_until_ready(&client, 100, 10));
+          refresh_ready(&client));
 
     nipc_cgroups_lookup_resp_view_t view;
     nipc_error_t err = nipc_client_call_cgroups_lookup(
@@ -2543,7 +2528,7 @@ static void test_cgroups_lookup_oversized_request_key(void)
     ccfg.max_request_payload_bytes = 48;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("cgroups oversized request-key client ready",
-          refresh_until_ready(&client, 100, 10));
+          refresh_ready(&client));
 
     nipc_str_view_t paths[] = {
         { .ptr = "/request-key-too-large-for-configured-cap", .len = 41 },
@@ -2601,7 +2586,7 @@ static void test_lookup_logical_limits(void)
     nipc_client_config_t ccfg = default_client_config();
     ccfg.max_logical_lookup_items = 2;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("logical limit lookup client ready", refresh_until_ready(&client, 100, 10));
+    check("logical limit lookup client ready", refresh_ready(&client));
 
     uint32_t pids[] = {1, 2, 3};
     nipc_apps_lookup_resp_view_t view;
@@ -2651,7 +2636,7 @@ static void test_lookup_logical_limits(void)
     response_cfg.max_logical_lookup_response_bytes = 1;
     nipc_client_init(&client, TEST_RUN_DIR, service, &response_cfg);
     check("apps logical response-limit client ready",
-          refresh_until_ready(&client, 100, 10));
+          refresh_ready(&client));
     uint32_t response_pid = 1234;
     err = nipc_client_call_apps_lookup(&client, &response_pid, 1, &view);
     check("apps logical response limit rejected", err == NIPC_ERR_OVERFLOW);
@@ -2675,7 +2660,7 @@ static void test_lookup_logical_limits(void)
     response_cfg.max_logical_lookup_response_bytes = 1;
     nipc_client_init(&client, TEST_RUN_DIR, service, &response_cfg);
     check("cgroups logical response-limit client ready",
-          refresh_until_ready(&client, 100, 10));
+          refresh_ready(&client));
     nipc_str_view_t response_path = { .ptr = "/ok", .len = 3 };
     err = nipc_client_call_cgroups_lookup(&client, &response_path, 1,
                                           &cgroups_view);
@@ -2699,7 +2684,7 @@ static void test_lookup_logical_limits(void)
     subcall_cfg.max_logical_lookup_subcalls = 1;
     nipc_client_init(&client, TEST_RUN_DIR, service, &subcall_cfg);
     check("cgroups logical subcall-limit client ready",
-          refresh_until_ready(&client, 100, 10));
+          refresh_ready(&client));
     nipc_str_view_t subcall_paths[] = {
         { .ptr = "/a", .len = 2 },
         { .ptr = "/huge", .len = 5 },
@@ -2732,7 +2717,7 @@ static void test_lookup_logical_limits(void)
     subcall_cfg.max_logical_lookup_subcalls = 1;
     nipc_client_init(&client, TEST_RUN_DIR, service, &subcall_cfg);
     check("apps logical subcall-limit client ready",
-          refresh_until_ready(&client, 100, 10));
+          refresh_ready(&client));
     uint32_t subcall_pids[] = {11, 22, 33};
     err = nipc_client_call_apps_lookup(&client, subcall_pids, 3, &view);
     check("apps logical subcall limit rejected", err == NIPC_ERR_OVERFLOW);
@@ -2765,7 +2750,7 @@ static void test_lookup_rejects_no_progress_payload_exceeded(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("cgroups no-progress client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         nipc_str_view_t paths[] = {
             { .ptr = "/a", .len = 2 },
@@ -2800,7 +2785,7 @@ static void test_lookup_rejects_no_progress_payload_exceeded(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("apps no-progress client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         uint32_t pids[] = {10, 11};
         nipc_apps_lookup_resp_view_t view;
@@ -2839,7 +2824,7 @@ static void run_cgroups_lookup_bad_response_case(
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("cgroups malformed first-response client ready",
-          refresh_until_ready(&client, 100, 10));
+          refresh_ready(&client));
 
     nipc_str_view_t paths[] = {
         { .ptr = "/a", .len = 2 },
@@ -2880,7 +2865,7 @@ static void run_cgroups_lookup_bad_suffix_case(
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("cgroups malformed payload suffix client ready",
-          refresh_until_ready(&client, 100, 10));
+          refresh_ready(&client));
 
     nipc_str_view_t paths[] = {
         { .ptr = "/a", .len = 2 },
@@ -2923,7 +2908,7 @@ static void run_apps_lookup_bad_response_case(
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("apps malformed first-response client ready",
-          refresh_until_ready(&client, 100, 10));
+          refresh_ready(&client));
 
     uint32_t pids[] = {77, 78};
     nipc_apps_lookup_resp_view_t view;
@@ -3009,7 +2994,7 @@ static void test_lookup_rejects_mixed_generation_retry(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("cgroups mixed-generation client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         nipc_str_view_t paths[] = {
             { .ptr = "/a", .len = 2 },
@@ -3046,7 +3031,7 @@ static void test_lookup_rejects_mixed_generation_retry(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("apps mixed-generation client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         uint32_t pids[] = {11, 22, 33};
         nipc_apps_lookup_resp_view_t view;
@@ -3083,7 +3068,7 @@ static void test_lookup_rejects_malformed_followup_response(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("cgroups bad-followup client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         nipc_str_view_t paths[] = {
             { .ptr = "/a", .len = 2 },
@@ -3121,7 +3106,7 @@ static void test_lookup_rejects_malformed_followup_response(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("apps bad-followup client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         uint32_t pids[] = {11, 22, 33};
         nipc_apps_lookup_resp_view_t view;
@@ -3158,7 +3143,7 @@ static void test_lookup_endpoint_gone_after_partial_progress(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("apps partial-disconnect client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         uint32_t pids[] = { 11, 22, 33 };
         nipc_apps_lookup_resp_view_t view;
@@ -3193,7 +3178,7 @@ static void test_lookup_endpoint_gone_after_partial_progress(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("cgroups partial-disconnect client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         nipc_str_view_t paths[] = {
             { .ptr = "/a", .len = 2 },
@@ -3238,7 +3223,7 @@ static void test_lookup_endpoint_gone_before_first_subcall(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("apps before-call client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         stop_lookup_server_drain(&sctx, server_thread);
 
@@ -3273,7 +3258,7 @@ static void test_lookup_endpoint_gone_before_first_subcall(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("cgroups before-call client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         stop_lookup_server_drain(&sctx, server_thread);
 
@@ -3372,7 +3357,7 @@ static void test_lookup_timeout_during_followup_subcall(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("cgroups follow-up timeout client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         nipc_str_view_t paths[] = {
             { .ptr = "/a", .len = 2 },
@@ -3384,6 +3369,7 @@ static void test_lookup_timeout_during_followup_subcall(void)
             nipc_client_call_cgroups_lookup_timeout(&client, paths, 3, &view,
                                                     200);
         check("cgroups follow-up timeout rejected", err == NIPC_ERR_TIMEOUT);
+        test_flag_set(&state.release_second_call);
         check("cgroups follow-up timeout reached second subcall",
               state.calls >= 2);
 
@@ -3413,13 +3399,14 @@ static void test_lookup_timeout_during_followup_subcall(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("apps follow-up timeout client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         uint32_t pids[] = { 11, 22, 33 };
         nipc_apps_lookup_resp_view_t view;
         nipc_error_t err =
             nipc_client_call_apps_lookup_timeout(&client, pids, 3, &view, 200);
         check("apps follow-up timeout rejected", err == NIPC_ERR_TIMEOUT);
+        test_flag_set(&state.release_second_call);
         check("apps follow-up timeout reached second subcall",
               state.calls >= 2);
 
@@ -3457,7 +3444,7 @@ static void test_lookup_abort_during_followup_subcall(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("cgroups follow-up abort client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         nipc_str_view_t paths[] = {
             { .ptr = "/a", .len = 2 },
@@ -3473,7 +3460,7 @@ static void test_lookup_abort_during_followup_subcall(void)
         call_ctx.timeout_ms = 5000;
 
         HANDLE call_thread =
-            CreateThread(NULL, 0, lookup_call_thread, &call_ctx, 0, NULL);
+            test_create_thread(NULL, 0, lookup_call_thread, &call_ctx, 0, NULL);
         check("cgroups follow-up abort call thread created",
               call_thread != NULL);
         if (call_thread) {
@@ -3482,6 +3469,7 @@ static void test_lookup_abort_during_followup_subcall(void)
             nipc_client_abort(&client);
             check("cgroups follow-up abort call thread exited",
                   WaitForSingleObject(call_thread, 10000) == WAIT_OBJECT_0);
+            test_flag_set(&state.release_second_call);
             CloseHandle(call_thread);
             check("cgroups follow-up abort rejected",
                   call_ctx.err == NIPC_ERR_ABORTED);
@@ -3518,7 +3506,7 @@ static void test_lookup_abort_during_followup_subcall(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("apps follow-up abort client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         uint32_t pids[] = { 11, 22, 33 };
         lookup_call_thread_ctx_t call_ctx;
@@ -3530,7 +3518,7 @@ static void test_lookup_abort_during_followup_subcall(void)
         call_ctx.timeout_ms = 5000;
 
         HANDLE call_thread =
-            CreateThread(NULL, 0, lookup_call_thread, &call_ctx, 0, NULL);
+            test_create_thread(NULL, 0, lookup_call_thread, &call_ctx, 0, NULL);
         check("apps follow-up abort call thread created", call_thread != NULL);
         if (call_thread) {
             check("apps follow-up abort reached second subcall",
@@ -3538,6 +3526,7 @@ static void test_lookup_abort_during_followup_subcall(void)
             nipc_client_abort(&client);
             check("apps follow-up abort call thread exited",
                   WaitForSingleObject(call_thread, 10000) == WAIT_OBJECT_0);
+            test_flag_set(&state.release_second_call);
             CloseHandle(call_thread);
             check("apps follow-up abort rejected",
                   call_ctx.err == NIPC_ERR_ABORTED);
@@ -3665,7 +3654,7 @@ static void test_lookup_init_and_client_guards(void)
         nipc_client_ctx_t client;
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("bad cgroups lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("bad cgroups lookup client ready", refresh_ready(&client));
 
         nipc_cgroups_lookup_resp_view_t view;
         nipc_error_t err = nipc_client_call_cgroups_lookup(&client, NULL, 1, &view);
@@ -3673,7 +3662,7 @@ static void test_lookup_init_and_client_guards(void)
         nipc_client_close(&client);
 
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("second bad cgroups lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("second bad cgroups lookup client ready", refresh_ready(&client));
 
         nipc_str_view_t bad_paths[] = {
             { .ptr = NULL, .len = 1 },
@@ -3683,7 +3672,7 @@ static void test_lookup_init_and_client_guards(void)
         nipc_client_close(&client);
 
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("faulted cgroups lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("faulted cgroups lookup client ready", refresh_ready(&client));
 
         nipc_str_view_t valid_paths[] = {
             { .ptr = "/known", .len = 6 },
@@ -3715,7 +3704,7 @@ static void test_lookup_init_and_client_guards(void)
         nipc_client_ctx_t client;
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("bad apps lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("bad apps lookup client ready", refresh_ready(&client));
 
         nipc_apps_lookup_resp_view_t view;
         uint32_t pids[] = {1234};
@@ -3727,7 +3716,7 @@ static void test_lookup_init_and_client_guards(void)
         nipc_client_close(&client);
 
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("second bad apps lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("second bad apps lookup client ready", refresh_ready(&client));
 
         err = nipc_client_call_apps_lookup(&client, NULL, 1, &view);
         check("bad apps lookup request rejected", err == NIPC_ERR_BAD_LAYOUT);
@@ -3757,12 +3746,12 @@ static void test_client_fault_injection_disconnects_and_recovers(void)
         nipc_win_service_test_fault_set(
             NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_RESPONSE_BUF_REALLOC, 0);
         check("response buffer alloc fault disconnects client",
-              refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 20, 10));
+              refresh_to_state(&client, NIPC_CLIENT_DISCONNECTED));
         check("response buffer alloc fault leaves client not ready",
               !nipc_client_ready(&client));
         clear_test_faults();
         check("response buffer alloc fault recovers",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         nipc_client_close(&client);
         stop_server_drain(&sctx, server_thread);
@@ -3785,10 +3774,10 @@ static void test_client_fault_injection_disconnects_and_recovers(void)
         nipc_win_service_test_fault_set(
             NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC, 0);
         check("send buffer alloc fault disconnects hybrid client",
-              refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 20, 10));
+              refresh_to_state(&client, NIPC_CLIENT_DISCONNECTED));
         clear_test_faults();
         check("send buffer alloc fault recovers",
-              refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+              refresh_ready(&client) && client.shm != NULL);
 
         nipc_client_close(&client);
         stop_server_drain(&sctx, server_thread);
@@ -3811,12 +3800,12 @@ static void test_client_fault_injection_disconnects_and_recovers(void)
         nipc_win_service_test_fault_set(
             NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_SHM_CTX_CALLOC, 0);
         check("client SHM ctx alloc fault disconnects hybrid client",
-              refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 20, 10));
+              refresh_to_state(&client, NIPC_CLIENT_DISCONNECTED));
         check("client SHM ctx alloc fault leaves session invalid",
               !client.session_valid);
         clear_test_faults();
         check("client SHM ctx alloc fault recovers",
-              refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+              refresh_ready(&client) && client.shm != NULL);
 
         nipc_client_close(&client);
         stop_server_drain(&sctx, server_thread);
@@ -3857,7 +3846,7 @@ static void test_refresh_from_broken_state(void)
     nipc_client_ctx_t client;
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("client reaches READY", refresh_until_ready(&client, 100, 10));
+    check("client reaches READY", refresh_ready(&client));
 
     if (nipc_client_ready(&client)) {
         if (client.session_valid) {
@@ -3893,7 +3882,7 @@ static void test_retry_on_broken_session(void)
     nipc_client_ctx_t client;
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("client ready", refresh_until_ready(&client, 100, 10));
+    check("client ready", refresh_ready(&client));
 
     if (nipc_client_ready(&client)) {
         nipc_cgroups_resp_view_t view;
@@ -3954,7 +3943,7 @@ static void test_handler_failure(void)
     nipc_client_ctx_t client;
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("client ready", refresh_until_ready(&client, 100, 10));
+    check("client ready", refresh_ready(&client));
 
     if (nipc_client_ready(&client)) {
         nipc_cgroups_resp_view_t view;
@@ -4131,7 +4120,7 @@ static void test_server_shm_create_fault_falls_back_and_recovers(void)
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
 
     check("server SHM create fault reaches READY via baseline",
-          refresh_until_ready(&client, 40, 10));
+          refresh_ready(&client));
     check("server SHM create fault keeps client ready",
           nipc_client_ready(&client));
     check("server SHM create fault leaves session on baseline",
@@ -4141,7 +4130,7 @@ static void test_server_shm_create_fault_falls_back_and_recovers(void)
     nipc_client_close(&client);
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("server SHM create fault recovers after reconnect",
-          refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+          refresh_ready(&client) && client.shm != NULL);
 
     nipc_client_close(&client);
     stop_server_drain(&sctx, server_thread);
@@ -4585,7 +4574,7 @@ static void test_lookup_request_capacity_reconnect_edges(void)
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("apps reqcap reconnect client ready",
-          refresh_until_ready(&client, 100, 10));
+          refresh_ready(&client));
     nipc_client_clear_abort(&client);
     client.session.max_request_payload_bytes = 1;
     uint32_t pid = 1234;
@@ -4614,7 +4603,7 @@ static void test_lookup_request_capacity_reconnect_edges(void)
     nipc_client_config_t cgroups_ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &cgroups_ccfg);
     check("cgroups reqcap reconnect client ready",
-          refresh_until_ready(&client, 100, 10));
+          refresh_ready(&client));
     nipc_client_clear_abort(&client);
     client.session.max_request_payload_bytes = 1;
     nipc_str_view_t path = {.ptr = "/ok", .len = 3};
@@ -4704,7 +4693,7 @@ static void test_lookup_stitched_response_buffer_fault_edges(void)
         ccfg.max_response_payload_bytes = 1200;
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("apps stitched-response fault client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         uint32_t pids[] = {1, 2, 3, 4};
         nipc_apps_lookup_resp_view_t view;
@@ -4743,7 +4732,7 @@ static void test_lookup_stitched_response_buffer_fault_edges(void)
         ccfg.max_response_payload_bytes = 1200;
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("cgroups stitched-response fault client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         nipc_str_view_t paths[] = {
             {.ptr = "/a", .len = 2},
@@ -4784,7 +4773,7 @@ static void test_lookup_missing_handler_dispatch(void)
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("apps missing-handler client ready",
-          refresh_until_ready(&client, 100, 10));
+          refresh_ready(&client));
     uint32_t pid = 1234;
     nipc_apps_lookup_resp_view_t apps_view;
     check("apps missing handler fails call",
@@ -4802,7 +4791,7 @@ static void test_lookup_missing_handler_dispatch(void)
 
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("cgroups missing-handler client ready",
-          refresh_until_ready(&client, 100, 10));
+          refresh_ready(&client));
     nipc_str_view_t path = {.ptr = "/ok", .len = 3};
     nipc_cgroups_lookup_resp_view_t cgroups_view;
     check("cgroups missing handler fails call",

@@ -13,6 +13,7 @@
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_uds.h"
+#include "test_sync.h"
 
 #include <pthread.h>
 #include <signal.h>
@@ -184,14 +185,15 @@ static void *server_thread_fn(void *arg)
 
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed for %s: %d\n", ctx->service, err);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_server_use_test_timings(&ctx->server, NULL);
+    test_flag_set(&ctx->ready);
     nipc_server_run(&ctx->server);
     nipc_server_destroy(&ctx->server);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -212,13 +214,7 @@ static void start_typed_server(server_thread_ctx_t *ctx,
 
     pthread_create(tid, NULL, server_thread_fn, ctx);
 
-    for (int i = 0;
-         i < 2000 &&
-         !__atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE) &&
-         !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE);
-         i++) {
-        usleep(500);
-    }
+    (void)test_flag_wait_any(&ctx->ready, &ctx->done);
 }
 
 static void start_typed_server_with_service_handler(server_thread_ctx_t *ctx,
@@ -239,13 +235,7 @@ static void start_typed_server_with_service_handler(server_thread_ctx_t *ctx,
 
     pthread_create(tid, NULL, server_thread_fn, ctx);
 
-    for (int i = 0;
-         i < 2000 &&
-         !__atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE) &&
-         !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE);
-         i++) {
-        usleep(500);
-    }
+    (void)test_flag_wait_any(&ctx->ready, &ctx->done);
 }
 
 static void start_raw_server(server_thread_ctx_t *ctx,
@@ -268,13 +258,7 @@ static void start_raw_server(server_thread_ctx_t *ctx,
 
     pthread_create(tid, NULL, server_thread_fn, ctx);
 
-    for (int i = 0;
-         i < 2000 &&
-         !__atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE) &&
-         !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE);
-         i++) {
-        usleep(500);
-    }
+    (void)test_flag_wait_any(&ctx->ready, &ctx->done);
 }
 
 static void stop_server(server_thread_ctx_t *ctx, pthread_t tid)
@@ -356,8 +340,6 @@ static void run_bad_header_session_test(const char *service,
         ssize_t raw_send = send(session.fd, &bad_hdr, sizeof(bad_hdr), MSG_NOSIGNAL);
         snprintf(msg, sizeof(msg), "%s: send malformed header", prefix);
         check(msg, raw_send == (ssize_t)sizeof(bad_hdr));
-
-        usleep(200000);
 
         memset(&good_hdr, 0, sizeof(good_hdr));
         good_hdr.kind = NIPC_KIND_REQUEST;
@@ -583,8 +565,8 @@ static void test_internal_session_table_growth(void)
     server.sessions = shrunk;
     server.session_capacity = 1;
 
+    test_server_use_test_timings(&server, NULL);
     pthread_create(&server_tid, NULL, (void *(*)(void *))nipc_server_run, &server);
-    usleep(50000);
 
     for (int i = 0; i < 3; i++) {
         nipc_client_config_t ccfg = default_client_config();
@@ -595,15 +577,11 @@ static void test_internal_session_table_growth(void)
     }
     check("growth: three clients connected", ready_clients == 3);
 
-    for (int i = 0; i < 200; i++) {
-        pthread_mutex_lock(&server.sessions_lock);
-        observed_capacity = server.session_capacity;
-        observed_count = server.session_count;
-        pthread_mutex_unlock(&server.sessions_lock);
-        if (observed_count >= 3 && observed_capacity >= 4)
-            break;
-        usleep(5000);
-    }
+    /* A ready client completed HELLO, so its session is in the table. */
+    pthread_mutex_lock(&server.sessions_lock);
+    observed_capacity = server.session_capacity;
+    observed_count = server.session_count;
+    pthread_mutex_unlock(&server.sessions_lock);
 
     /* The reaper may reclaim slots between accepts, so the table may
      * not need to grow beyond the initial allocation.  The important

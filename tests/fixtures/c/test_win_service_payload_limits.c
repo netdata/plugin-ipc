@@ -9,6 +9,7 @@
 
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_service.h"
+#include "test_sync.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -133,6 +134,7 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
 
     InterlockedExchange(&ctx->init_ok, 1);
     SetEvent(ctx->ready_event);
+    test_server_use_test_timings(&ctx->server, NULL);
     nipc_server_run(&ctx->server);
     return 0;
 }
@@ -149,7 +151,7 @@ static HANDLE start_server_named(server_thread_ctx_t *ctx,
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     InterlockedExchange(&ctx->init_ok, 0);
 
-    HANDLE thread = CreateThread(NULL, 0, managed_server_thread, ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, managed_server_thread, ctx, 0, NULL);
     check("payload-limit server thread created", thread != NULL);
     if (!thread)
         return NULL;
@@ -181,16 +183,11 @@ static void stop_server_drain(server_thread_ctx_t *ctx, HANDLE thread)
           nipc_server_drain(&ctx->server, 10000));
 }
 
-static bool refresh_until_ready(nipc_client_ctx_t *client, int max_tries, DWORD sleep_ms)
+/* One refresh, then report whether the client is ready. */
+static bool refresh_ready(nipc_client_ctx_t *client)
 {
-    for (int i = 0; i < max_tries; i++) {
-        nipc_client_refresh(client);
-        if (nipc_client_ready(client))
-            return true;
-        Sleep(sleep_ms);
-    }
-
-    return false;
+    nipc_client_refresh(client);
+    return nipc_client_ready(client);
 }
 
 static void test_response_limit_reconnect(bool hybrid)
@@ -220,7 +217,7 @@ static void test_response_limit_reconnect(bool hybrid)
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
 
     check("payload-limit client negotiated expected profile",
-          refresh_until_ready(&client, 200, 10) &&
+          refresh_ready(&client) &&
           (hybrid ? client.shm != NULL : client.shm == NULL));
 
     if (nipc_client_ready(&client)) {

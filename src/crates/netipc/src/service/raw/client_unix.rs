@@ -1,5 +1,5 @@
 use super::client::{ClientState, RawClient};
-use super::common::{CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS, CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS};
+use super::common::CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS;
 #[cfg(target_os = "linux")]
 use crate::protocol::{PROFILE_SHM_FUTEX, PROFILE_SHM_HYBRID};
 use crate::transport::posix::UdsSession;
@@ -24,8 +24,7 @@ impl RawClient {
                         || selected_profile == PROFILE_SHM_FUTEX
                     {
                         let mut shm_ok = false;
-                        let deadline = std::time::Instant::now()
-                            + std::time::Duration::from_millis(CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS);
+                        let deadline = std::time::Instant::now() + self.shm_attach_timeout;
                         loop {
                             match ShmContext::client_attach(
                                 &self.run_dir,

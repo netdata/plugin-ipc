@@ -11,6 +11,7 @@
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_service.h"
+#include "test_sync.h"
 #include "test_win_raw_client_helpers.h"
 
 #include <stdio.h>
@@ -478,6 +479,7 @@ typedef struct {
     HANDLE ready_event;
     volatile LONG init_ok;
     nipc_managed_server_t server;
+    test_server_events_t events;
 } server_thread_ctx_t;
 
 static DWORD WINAPI managed_server_thread(LPVOID arg)
@@ -505,6 +507,7 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
 
     InterlockedExchange(&ctx->init_ok, 1);
     SetEvent(ctx->ready_event);
+    test_server_use_test_timings(&ctx->server, &ctx->events);
     nipc_server_run(&ctx->server);
     return 0;
 }
@@ -524,7 +527,7 @@ static HANDLE start_server_named(server_thread_ctx_t *ctx,
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     InterlockedExchange(&ctx->init_ok, 0);
 
-    HANDLE thread = CreateThread(NULL, 0, managed_server_thread, ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, managed_server_thread, ctx, 0, NULL);
     check("extra guard server thread created", thread != NULL);
     if (!thread)
         return NULL;
@@ -562,7 +565,7 @@ static HANDLE start_raw_server_named(server_thread_ctx_t *ctx,
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     InterlockedExchange(&ctx->init_ok, 0);
 
-    HANDLE thread = CreateThread(NULL, 0, managed_server_thread, ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, managed_server_thread, ctx, 0, NULL);
     check("extra guard raw server thread created", thread != NULL);
     if (!thread)
         return NULL;
@@ -593,37 +596,21 @@ static void stop_server_drain(server_thread_ctx_t *ctx, HANDLE thread)
           nipc_server_drain(&ctx->server, 10000));
 }
 
-static bool refresh_until_ready(nipc_client_ctx_t *client, int max_tries, DWORD sleep_ms)
+/* One refresh, then report whether the client is ready. */
+static bool refresh_ready(nipc_client_ctx_t *client)
 {
-    for (int i = 0; i < max_tries; i++) {
-        nipc_client_refresh(client);
-        if (nipc_client_ready(client))
-            return true;
-        Sleep(sleep_ms);
-    }
-
-    return false;
+    nipc_client_refresh(client);
+    return nipc_client_ready(client);
 }
 
-static bool wait_for_server_sessions(nipc_managed_server_t *server,
-                                     int target_count,
-                                     int max_tries,
-                                     DWORD sleep_ms)
+/* Callers wait for a handler or handshake first, so the sessions they
+ * count are already registered. */
+static bool server_has_sessions(nipc_managed_server_t *server, int target_count)
 {
-    for (int i = 0; i < max_tries; i++) {
-        int count;
-
-        EnterCriticalSection(&server->sessions_lock);
-        count = server->session_count;
-        LeaveCriticalSection(&server->sessions_lock);
-
-        if (count >= target_count)
-            return true;
-
-        Sleep(sleep_ms);
-    }
-
-    return false;
+    EnterCriticalSection(&server->sessions_lock);
+    int count = server->session_count;
+    LeaveCriticalSection(&server->sessions_lock);
+    return count >= target_count;
 }
 
 typedef struct {
@@ -640,7 +627,7 @@ static DWORD WINAPI blocking_client_thread(LPVOID arg)
     nipc_client_config_t ccfg = default_typed_client_config();
 
     nipc_client_init(&client, TEST_RUN_DIR, ctx->service, &ccfg);
-    if (refresh_until_ready(&client, 100, 10))
+    if (refresh_ready(&client))
         ctx->err = test_win_client_call_increment_raw(&client, 41, &ctx->value_out);
     else
         ctx->err = NIPC_ERR_NOT_READY;
@@ -712,12 +699,12 @@ static void test_worker_limit_rejects_extra_client(void)
     };
     strncpy(client_ctx.service, service, sizeof(client_ctx.service) - 1);
 
-    HANDLE client_thread = CreateThread(NULL, 0, blocking_client_thread, &client_ctx, 0, NULL);
+    HANDLE client_thread = test_create_thread(NULL, 0, blocking_client_thread, &client_ctx, 0, NULL);
     check("worker-limit client thread created", client_thread != NULL);
     check("worker-limit handler entered",
           client_thread != NULL && WaitForSingleObject(g_block_entered, 10000) == WAIT_OBJECT_0);
     check("worker-limit server tracks active session",
-          wait_for_server_sessions(&sctx.server, 1, 100, 10));
+          server_has_sessions(&sctx.server, 1));
 
     nipc_np_client_config_t ccfg = default_client_config();
     nipc_np_session_t second = { .pipe = INVALID_HANDLE_VALUE };
@@ -789,7 +776,7 @@ static void test_session_thread_create_fault_recovers(void)
 
     nipc_client_init(&first_client, TEST_RUN_DIR, service, &ccfg);
     check("thread-create skip client ready",
-          refresh_until_ready(&first_client, 100, 10));
+          refresh_ready(&first_client));
     check("thread-create skip increment succeeds",
           test_win_client_call_increment_raw(&first_client, 10, &value) == NIPC_OK &&
           value == 11);
@@ -808,7 +795,7 @@ static void test_session_thread_create_fault_recovers(void)
     value = 0;
     nipc_client_init(&recovery_client, TEST_RUN_DIR, service, &ccfg);
     check("thread-create recovery client ready",
-          refresh_until_ready(&recovery_client, 100, 10));
+          refresh_ready(&recovery_client));
     check("thread-create recovery increment succeeds",
           test_win_client_call_increment_raw(&recovery_client, 20, &value) == NIPC_OK &&
           value == 21);
@@ -842,12 +829,12 @@ static void test_server_destroy_joins_active_session(void)
     };
     strncpy(client_ctx.service, service, sizeof(client_ctx.service) - 1);
 
-    HANDLE client_thread = CreateThread(NULL, 0, blocking_client_thread, &client_ctx, 0, NULL);
+    HANDLE client_thread = test_create_thread(NULL, 0, blocking_client_thread, &client_ctx, 0, NULL);
     check("destroy-join client thread created", client_thread != NULL);
     check("destroy-join handler entered",
           client_thread != NULL && WaitForSingleObject(g_block_entered, 10000) == WAIT_OBJECT_0);
     check("destroy-join server tracks active session",
-          wait_for_server_sessions(&sctx.server, 1, 100, 10));
+          server_has_sessions(&sctx.server, 1));
 
     nipc_server_stop(&sctx.server);
     check("destroy-join server thread exits after stop",
@@ -857,10 +844,9 @@ static void test_server_destroy_joins_active_session(void)
         .server = &sctx.server,
         .done_event = CreateEvent(NULL, TRUE, FALSE, NULL),
     };
-    HANDLE destroy_thread = CreateThread(NULL, 0, destroy_thread_proc, &destroy_ctx, 0, NULL);
+    HANDLE destroy_thread = test_create_thread(NULL, 0, destroy_thread_proc, &destroy_ctx, 0, NULL);
     check("destroy-join destroy thread created", destroy_thread != NULL);
 
-    Sleep(50);
     SetEvent(g_block_release);
 
     check("destroy-join destroy finished",
@@ -923,7 +909,9 @@ static void test_named_pipe_send_failure_recovers(void)
         SetEvent(g_block_release);
     }
 
-    Sleep(100);
+    /* The only worker frees its slot once its send to the closed pipe fails. */
+    check("send-failure session exited",
+          test_server_wait_session_exits(&sctx.events, 1));
 
     {
         nipc_client_ctx_t client;
@@ -931,7 +919,7 @@ static void test_named_pipe_send_failure_recovers(void)
         uint64_t value_out = 0;
         nipc_client_init(&client, TEST_RUN_DIR, service, &typed_ccfg);
         check("send-failure replacement client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
         if (nipc_client_ready(&client)) {
             nipc_error_t err = test_win_client_call_increment_raw(&client, 5, &value_out);
             check("send-failure replacement increment succeeds",
@@ -1199,7 +1187,7 @@ static void test_lookup_client_rejects_bad_responses(void)
 
         nipc_client_ctx_t client;
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("short cgroups lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("short cgroups lookup client ready", refresh_ready(&client));
         nipc_str_view_t paths[] = {{ .ptr = "/known", .len = 6 }};
         nipc_cgroups_lookup_resp_view_t view;
         check("short cgroups lookup response rejected",
@@ -1220,7 +1208,7 @@ static void test_lookup_client_rejects_bad_responses(void)
 
         nipc_client_ctx_t client;
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("count cgroups lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("count cgroups lookup client ready", refresh_ready(&client));
         nipc_str_view_t paths[] = {
             { .ptr = "/known", .len = 6 },
             { .ptr = "/missing", .len = 8 },
@@ -1244,7 +1232,7 @@ static void test_lookup_client_rejects_bad_responses(void)
 
         nipc_client_ctx_t client;
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("path cgroups lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("path cgroups lookup client ready", refresh_ready(&client));
         nipc_str_view_t paths[] = {{ .ptr = "/known", .len = 6 }};
         nipc_cgroups_lookup_resp_view_t view;
         check("path cgroups lookup response rejected",
@@ -1265,7 +1253,7 @@ static void test_lookup_client_rejects_bad_responses(void)
 
         nipc_client_ctx_t client;
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("short apps lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("short apps lookup client ready", refresh_ready(&client));
         uint32_t pids[] = {1};
         nipc_apps_lookup_resp_view_t view;
         check("short apps lookup response rejected",
@@ -1286,7 +1274,7 @@ static void test_lookup_client_rejects_bad_responses(void)
 
         nipc_client_ctx_t client;
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("count apps lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("count apps lookup client ready", refresh_ready(&client));
         uint32_t pids[] = {1, 2};
         nipc_apps_lookup_resp_view_t view;
         check("count apps lookup response rejected",
@@ -1307,7 +1295,7 @@ static void test_lookup_client_rejects_bad_responses(void)
 
         nipc_client_ctx_t client;
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check("pid apps lookup client ready", refresh_until_ready(&client, 100, 10));
+        check("pid apps lookup client ready", refresh_ready(&client));
         uint32_t pids[] = {1};
         nipc_apps_lookup_resp_view_t view;
         check("pid apps lookup response rejected",
@@ -1371,7 +1359,7 @@ static void test_drain_timeout_on_blocked_handler(void)
     };
     strncpy(client_ctx.service, service, sizeof(client_ctx.service) - 1);
 
-    HANDLE client_thread = CreateThread(NULL, 0, blocking_client_thread, &client_ctx, 0, NULL);
+    HANDLE client_thread = test_create_thread(NULL, 0, blocking_client_thread, &client_ctx, 0, NULL);
     check("blocking client thread created", client_thread != NULL);
     check("blocking handler entered",
           client_thread != NULL && WaitForSingleObject(g_block_entered, 10000) == WAIT_OBJECT_0);
@@ -1381,10 +1369,9 @@ static void test_drain_timeout_on_blocked_handler(void)
         .done_event = CreateEvent(NULL, TRUE, FALSE, NULL),
         .drained = TRUE,
     };
-    HANDLE drain_thread = CreateThread(NULL, 0, drain_thread_proc, &drain_ctx, 0, NULL);
+    HANDLE drain_thread = test_create_thread(NULL, 0, drain_thread_proc, &drain_ctx, 0, NULL);
     check("drain thread created", drain_thread != NULL);
 
-    Sleep(50);
     SetEvent(g_block_release);
 
     check("drain thread finished",

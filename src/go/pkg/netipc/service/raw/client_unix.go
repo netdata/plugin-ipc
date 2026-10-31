@@ -44,6 +44,9 @@ type Client struct {
 	abortRequested                atomic.Bool
 	abortMu                       sync.Mutex
 	abortCh                       chan struct{}
+	// shmAttachTimeout bounds the SHM attach retry after negotiation;
+	// tests shorten it per instance.
+	shmAttachTimeout time.Duration
 }
 
 func newClient(runDir, serviceName string, config posix.ClientConfig, expectedMethodCode uint16) *Client {
@@ -55,6 +58,7 @@ func newClient(runDir, serviceName string, config posix.ClientConfig, expectedMe
 		config:             config,
 		callTimeoutMs:      ClientCallTimeoutDefaultMs,
 		abortCh:            make(chan struct{}),
+		shmAttachTimeout:   clientShmAttachRetryTimeout,
 	}
 	client.SetLookupLogicalConfig(LookupLogicalConfig{})
 	return client
@@ -91,7 +95,7 @@ func (c *Client) tryConnect() ClientState {
 		session.SelectedProfile == protocol.ProfileSHMFutex {
 		// Retry attach: the server prepared SHM before handshake, but the
 		// client may still race slightly with the peer exposing the region.
-		deadline := time.Now().Add(clientShmAttachRetryTimeout)
+		deadline := time.Now().Add(c.shmAttachTimeout)
 		for {
 			shm, serr := posix.ShmClientAttach(c.runDir, c.serviceName, session.SessionID)
 			if serr == nil {

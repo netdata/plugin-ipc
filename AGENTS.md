@@ -214,13 +214,16 @@ Generic "N/A" is invalid.
 
 ### Test Cadence
 
-Validation has two classes with different costs and triggers.
+Validation has three classes with different costs and triggers.
 
 1. Correctness tests (unit, robustness, interop, Netdata Linux targets, Windows suites):
+   - are deterministic and take seconds: they synchronize threads and processes on events (listening signals, handler flags, server test events, READY lines), never on sleeps, polling or retry loops, and pass or fail in one run. A sleep is allowed only as a stimulus whose length the outcome does not depend on (for example a handler slower than a poll slice), and each one is recorded in the SOW that adds it;
+   - shorten production waits through the per-instance test timings (C `*_for_tests` under `NIPC_INTERNAL_TESTING`, Rust crate-internal setters, Go unexported fields), never by changing production defaults;
    - run after every fix and at every SOW close;
    - target the affected surface: the touched languages, transports and platforms, plus their interop pairs. A wider run is needed only when the change crosses those boundaries (shared wire format, a cross-language contract, a build system change);
    - before triaging a timing failure, check whether the test processes were stalled during the run: sample `/proc/pressure/{cpu,memory,io}` and `/proc/vmstat` (`compact_stall`, `allocstall_*`) while it runs. Memory pressure measures allocator stall time, not free RAM. Rerun once the stalls are gone before treating the failure as a bug, and never attribute it to another workload without evidence.
-2. Performance tests (`tests/run-posix-bench.sh`, `tests/run-windows-bench.sh`) take hours, so they run only when a change can affect what they measure:
+2. Extended tests (fuzz, stress, randomized chaos, lookup scale) are not correctness tests. Default CTest, `cargo test` and `go test` runs exclude them (`NETIPC_EXTENDED_TESTS=OFF`, Go `netipc_extended` build tag, Rust `#[ignore]`). Run them with `tests/run-extended-fuzz.sh` and `tests/run-extended-stress.sh` only before vendoring, and only when the vendored changes touch what they exercise.
+3. Performance tests (`tests/run-posix-bench.sh`, `tests/run-windows-bench.sh`) take hours, so they run only when a change can affect what they measure:
    - they measure established-session steady state: per-request encode/decode, dispatch, transport send/receive, SHM signalling, batching, pipelining, snapshot refresh and cache lookup;
    - changes outside those paths do not need a benchmark run. Examples: connection setup and handshake, reconnect, error mapping, paths that run only after an idle timeout, shutdown, close-on-exec flags, tests, docs, build scripts;
    - every SOW gate records a performance assessment: which changed code, if any, runs per request on an established session, with file:line evidence. When that assessment is uncertain, ask the user before planning a benchmark run.
@@ -295,6 +298,8 @@ Output/reference skills:
 - POSIX interop examples: `bash tests/interop_codec.sh`, `bash tests/test_uds_interop.sh`, `bash tests/test_shm_interop.sh`, `bash tests/test_service_interop.sh`
 - `tests/interop_codec.sh` configures `build/`; do not run it in parallel with CTest or another build-directory validation command.
 - Netdata Linux targets (32-bit, ARM, musl): `bash tests/run-linux-target.sh <target> [c] [rust] [go] [interop]`; targets and required cross toolchains are listed in the script header. C test fixtures use fixed `/tmp` paths: never run two targets in parallel on one host.
+- Extended (non-correctness) suites, before vendoring only: `bash tests/run-extended-fuzz.sh`, `bash tests/run-extended-stress.sh`
+- Interop scripts share `tests/interop-lib.sh` (start a fixture server, block on its READY line, stop it with an identity check).
 - Robustness reproduction tests: C `test_robustness` / `test_win_robustness`, Rust `service::raw::tests::robustness` / `service::raw::windows_tests::robustness`, Go `TestRobust*` / `TestWinRobust*`. They always run; there is no skip gate.
 - Windows validation scripts are under `tests/run-*-windows*.sh` and `tests/test_*_win*.sh`; use the specific script matching the touched transport/API.
 - Benchmarks (only when Test Cadence calls for them): measure with `bash tests/run-posix-bench.sh <csv> [duration]` or `bash tests/run-windows-bench.sh <csv> [duration]`, then render the report and check floors with `bash tests/generate-benchmarks-posix.sh` or `bash tests/generate-benchmarks-windows.sh`

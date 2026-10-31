@@ -1,6 +1,7 @@
 /* Exercise the public SHM wait path on native and cross-compiled Linux ABIs. */
 #define _GNU_SOURCE
 #include "netipc/netipc_shm.h"
+#include "test_sync.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>

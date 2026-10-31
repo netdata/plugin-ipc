@@ -75,24 +75,8 @@ mod linux_only {
     }
 
     fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Retry attach -- server may not be fully ready yet
-        let mut ctx = None;
-        for _ in 0..500 {
-            let attempt = ShmContext::client_attach(run_dir, service, 1);
-            match attempt {
-                Ok(c) => {
-                    ctx = Some(c);
-                    break;
-                }
-                Err(netipc::transport::shm::ShmError::NotReady)
-                | Err(netipc::transport::shm::ShmError::Open(_))
-                | Err(netipc::transport::shm::ShmError::BadMagic) => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-        let mut ctx = ctx.ok_or("client: attach failed after retries")?;
+        // The server prints READY only after creating the region.
+        let mut ctx = ShmContext::client_attach(run_dir, service, 1)?;
 
         // Build payload with known pattern
         let payload: Vec<u8> = (0..256).map(|i| (i & 0xFF) as u8).collect();

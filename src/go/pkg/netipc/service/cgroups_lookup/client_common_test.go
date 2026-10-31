@@ -21,17 +21,18 @@ func cgroupsLookupTestConfig() ClientConfig {
 	}
 }
 
-func waitCgroupsLookupReady(t *testing.T, client *Client) {
+// waitCgroupsLookupReady waits until server listens, then connects once.
+func waitCgroupsLookupReady(t *testing.T, server *Server, client *Client) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		client.Refresh()
-		if client.Ready() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-server.Listening():
+	case <-time.After(10 * time.Second):
+		t.Fatal("server not listening after 10s")
 	}
-	t.Fatalf("cgroups lookup client did not become ready; status=%+v", client.Status())
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatalf("cgroups lookup client not ready after one refresh; status=%+v", client.Status())
+	}
 }
 
 func TestCgroupsLookupPublicWrapper(t *testing.T) {
@@ -80,7 +81,7 @@ func TestCgroupsLookupPublicWrapper(t *testing.T) {
 	client.SetCallTimeout(500)
 	client.Abort()
 	client.ClearAbort()
-	waitCgroupsLookupReady(t, client)
+	waitCgroupsLookupReady(t, server, client)
 	if client.Status().State != StateReady {
 		t.Fatalf("status after ready = %+v", client.Status())
 	}

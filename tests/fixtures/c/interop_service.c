@@ -428,16 +428,11 @@ static int run_cgroups_mixed_server(const char *run_dir, const char *service)
     return 0;
 }
 
+/* The server printed READY after binding, so one refresh connects. */
 static int wait_client_ready(nipc_client_ctx_t *client)
 {
-    for (int i = 0; i < 200; i++) {
-        nipc_client_refresh(client);
-        if (nipc_client_ready(client))
-            return 1;
-        usleep(10000);
-    }
-
-    return 0;
+    nipc_client_refresh(client);
+    return nipc_client_ready(client);
 }
 
 static int run_apps_client(const char *run_dir, const char *service)
@@ -727,12 +722,7 @@ static int run_client(const char *run_dir, const char *service)
 
     nipc_client_ctx_t client;
     nipc_client_init(&client, run_dir, service, &ccfg);
-    for (int i = 0; i < 200; i++) {
-        nipc_client_refresh(&client);
-        if (nipc_client_ready(&client))
-            break;
-        usleep(10000);
-    }
+    nipc_client_refresh(&client);
 
     if (!nipc_client_ready(&client)) {
         fprintf(stderr, "client: not ready\n");

@@ -1312,8 +1312,7 @@ func TestAcceptWithTimeout(t *testing.T) {
 		}
 	}()
 
-	// Short delay then connect
-	time.Sleep(50 * time.Millisecond)
+	// The listener is bound, so the connect queues until the accept runs.
 	cCfg := defaultClientConfig()
 	client, err := Connect(runDir, service, &cCfg)
 	if err != nil {

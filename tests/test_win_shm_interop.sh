@@ -15,6 +15,7 @@
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/run-low-priority.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/interop-lib.sh"
 netipc_low_priority_self "$@"
 
 RED='\033[0;31m'
@@ -55,41 +56,8 @@ else
     RUN_DIR="$RUN_DIR_HOST"
 fi
 
-# taskkill lives in System32, which a minimal PATH may lack.
-taskkill_bin() {
-    if command -v taskkill.exe >/dev/null 2>&1; then
-        command -v taskkill.exe
-    else
-        cygpath -u "${SYSTEMROOT:-C:\\Windows}\\System32\\taskkill.exe"
-    fi
-}
-
-# MSYS-runtime servers blocked in a Win32 wait never act on SIGTERM, so a
-# plain kill can leave them running and a following wait blocks forever.
-force_stop_server() {
-    local server_pid="$1"
-    local waited=0
-    local win_pid
-
-    kill "$server_pid" 2>/dev/null || true
-    while kill -0 "$server_pid" 2>/dev/null && [[ $waited -lt 20 ]]; do
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-    if kill -0 "$server_pid" 2>/dev/null; then
-        win_pid=$(ps -W 2>/dev/null | awk -v pid="$server_pid" '$1 == pid {print $4; exit}')
-        if [[ -n "$win_pid" ]]; then
-            "$(taskkill_bin)" //PID "$win_pid" //T //F >/dev/null 2>&1 || true
-        fi
-    fi
-    wait "$server_pid" 2>/dev/null || true
-}
-
 cleanup() {
-    local pid
-    for pid in $(jobs -p 2>/dev/null); do
-        force_stop_server "$pid"
-    done
+    interop_stop_server
     rm -rf "$RUN_DIR_HOST"
 }
 trap cleanup EXIT
@@ -128,56 +96,36 @@ run_test() {
 
     echo -n "  $name ... "
 
-    # Start server in background, wait for READY
-    local server_pid
     local server_log="${RUN_DIR_HOST}/${service}.server.log"
-    "$server_bin" server "$RUN_DIR" "$service" > "$server_log" 2>&1 &
-    server_pid=$!
-
-    # Wait for READY line
-    local waited=0
-    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
-        if ! kill -0 "$server_pid" 2>/dev/null; then
-            echo -e "${RED}FAIL${NC} (server exited early)"
-            cat "$server_log" >&2 || true
-            FAIL=$((FAIL + 1))
-            return
-        fi
-        if grep -q "^READY$" "$server_log" 2>/dev/null; then
-            break
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    if [[ $waited -ge $((TIMEOUT * 10)) ]]; then
-        echo -e "${RED}FAIL${NC} (server not ready after ${TIMEOUT}s)"
-        force_stop_server "$server_pid"
+    if ! interop_start_server "$TIMEOUT" "$server_log" \
+        "$server_bin" server "$RUN_DIR" "$service"; then
+        echo -e "${RED}FAIL${NC} (server not ready)"
+        cat "$server_log" >&2 2>/dev/null || true
+        interop_stop_server
         FAIL=$((FAIL + 1))
         return
     fi
 
-    # Run client
-    local client_out
-    if client_out=$("$client_bin" client "$RUN_DIR" "$service" 2>&1); then
-        if echo "$client_out" | grep -q "^PASS$"; then
-            echo -e "${GREEN}PASS${NC}"
-            PASS=$((PASS + 1))
-        else
-            echo -e "${RED}FAIL${NC} (client output: $client_out)"
-            FAIL=$((FAIL + 1))
-        fi
-    else
-        echo -e "${RED}FAIL${NC} (client exit code $?, output: $client_out)"
+    # The server printed READY after creating its endpoint, so the client
+    # connects once.
+    local client_out rc
+    set +e
+    client_out=$("$client_bin" client "$RUN_DIR" "$service" 2>&1)
+    rc=$?
+    set -e
+
+    if [[ $rc -ne 0 ]] || ! echo "$client_out" | grep -q "^PASS$"; then
+        echo -e "${RED}FAIL${NC} (client exit code $rc, output: $client_out)"
         FAIL=$((FAIL + 1))
         # The server exits after serving one client; after a client failure
         # it may still be waiting for one.
-        force_stop_server "$server_pid"
+        interop_stop_server
         return
     fi
 
-    # Wait for server to exit
-    wait "$server_pid" 2>/dev/null || true
+    echo -e "${GREEN}PASS${NC}"
+    PASS=$((PASS + 1))
+    interop_wait_server
 }
 
 main() {

@@ -39,6 +39,9 @@ type Client struct {
 	abortRequested                atomic.Bool
 	abortMu                       sync.Mutex
 	abortCh                       chan struct{}
+	// shmAttachTimeout bounds the SHM attach retry after negotiation;
+	// tests shorten it per instance.
+	shmAttachTimeout time.Duration
 }
 
 func newClient(runDir, serviceName string, config windows.ClientConfig, expectedMethodCode uint16) *Client {
@@ -50,6 +53,7 @@ func newClient(runDir, serviceName string, config windows.ClientConfig, expected
 		config:             config,
 		callTimeoutMs:      ClientCallTimeoutDefaultMs,
 		abortCh:            make(chan struct{}),
+		shmAttachTimeout:   clientShmAttachRetryTimeout,
 	}
 	client.SetLookupLogicalConfig(LookupLogicalConfig{})
 	return client
@@ -84,7 +88,7 @@ func (c *Client) tryConnect() ClientState {
 	// Win SHM upgrade if negotiated
 	if session.SelectedProfile == windows.WinShmProfileHybrid ||
 		session.SelectedProfile == windows.WinShmProfileBusywait {
-		deadline := time.Now().Add(clientShmAttachRetryTimeout)
+		deadline := time.Now().Add(c.shmAttachTimeout)
 		for {
 			shm, serr := windows.WinShmClientAttach(
 				c.runDir, c.serviceName,

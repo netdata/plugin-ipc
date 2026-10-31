@@ -43,7 +43,7 @@ static void server_handle_session(nipc_managed_server_t *server,
         if (shm) {
             size_t msg_len;
             nipc_win_shm_error_t serr = nipc_win_shm_receive(shm, recv_buf, recv_size,
-                                                               &msg_len, SERVER_POLL_TIMEOUT_MS);
+                                                               &msg_len, server->poll_ms);
             if (serr == NIPC_WIN_SHM_ERR_TIMEOUT) {
                 /* A crashed client never sets the close flag; its broken
                  * pipe is the only sign it left. */
@@ -69,7 +69,7 @@ static void server_handle_session(nipc_managed_server_t *server,
              * request. */
             bool readable = false;
             nipc_np_error_t werr = nipc_np_wait_readable(
-                session, SERVER_POLL_TIMEOUT_MS, &readable);
+                session, server->poll_ms, &readable);
             if (werr == NIPC_NP_ERR_DISCONNECTED)
                 break;
             if (werr != NIPC_NP_OK)
@@ -307,7 +307,7 @@ static bool server_prepare_accept_config(nipc_managed_server_t *server,
  * deadline. */
 static bool server_wait_hello(nipc_managed_server_t *server, HANDLE pipe)
 {
-    ULONGLONG deadline = GetTickCount64() + NIPC_SERVER_HANDSHAKE_TIMEOUT_MS;
+    ULONGLONG deadline = GetTickCount64() + server->handshake_ms;
     for (;;) {
         DWORD available = 0;
         if (!PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL))
@@ -328,8 +328,16 @@ static bool server_session_handshake(nipc_managed_server_t *server,
 {
     nipc_np_server_config_t cfg;
     prepared_win_shm_t prepared;
-    if (!server_prepare_accept_config(server, sctx->id, &cfg, &prepared) ||
-        !server_wait_hello(server, pipe)) {
+    if (!server_prepare_accept_config(server, sctx->id, &cfg, &prepared)) {
+        server_destroy_prepared_win_shm(&prepared);
+        DisconnectNamedPipe(pipe);
+        CloseHandle(pipe);
+        return false;
+    }
+    if (server->test_event_hook)
+        server->test_event_hook(server->test_event_user,
+                                NIPC_SERVER_TEST_EVENT_HANDSHAKE_STARTED);
+    if (!server_wait_hello(server, pipe)) {
         server_destroy_prepared_win_shm(&prepared);
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
@@ -338,7 +346,7 @@ static bool server_session_handshake(nipc_managed_server_t *server,
 
     /* HELLO is readable, so this does not block on the client. */
     nipc_np_session_t session;
-    if (nipc_np_accept_handshake(pipe, &cfg, sctx->id, SERVER_POLL_TIMEOUT_MS,
+    if (nipc_np_accept_handshake(pipe, &cfg, sctx->id, server->poll_ms,
                                  &session) != NIPC_NP_OK) {
         server_destroy_prepared_win_shm(&prepared);
         return false;
@@ -402,6 +410,10 @@ unsigned __stdcall nipc_service_win_session_handler_thread(void *arg)
 
     /* Mark inactive; the reap/destroy path owns removal from the array */
     InterlockedExchange(&sctx->active, 0);
+    /* sctx may be freed from here on; report through the server only. */
+    if (server->test_event_hook)
+        server->test_event_hook(server->test_event_user,
+                                NIPC_SERVER_TEST_EVENT_SESSION_EXITED);
     return 0;
 }
 

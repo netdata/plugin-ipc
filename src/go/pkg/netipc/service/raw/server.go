@@ -47,18 +47,61 @@ func (s *Server) initCommon(
 	s.responsePayloadGrowthCeiling = responsePayloadGrowthCeiling
 	s.learnedRequestPayloadBytes.Store(maxRequestPayloadBytes)
 	s.learnedResponsePayloadBytes.Store(maxResponsePayloadBytes)
+	s.timings = defaultServerTimings()
+	s.listening = make(chan struct{})
 }
 
-const (
-	// serverStopGrace is how long stop waits for workers to exit on their
-	// own before interrupting their blocking I/O.
-	serverStopGrace = 1000 * time.Millisecond
-	serverStopRetry = 50 * time.Millisecond
-	// serverSlotWait is how long a connection waits for a worker slot
-	// before it is refused. Two poll slices: a worker whose client left
-	// exits within one.
-	serverSlotWait = 2 * serverPollTimeoutMs * time.Millisecond
-)
+const serverStopRetry = 50 * time.Millisecond
+
+// serverTimings holds the server's internal waits. Production always uses
+// defaultServerTimings; tests shorten them per instance so they can prove
+// timeout behaviour without waiting out production values.
+type serverTimings struct {
+	// pollMs bounds every blocking wait, so it sets how fast stop is noticed.
+	pollMs uint32
+	// stopGrace is how long stop waits for workers to exit on their own
+	// before interrupting their blocking I/O.
+	stopGrace time.Duration
+	// handshakeMs bounds how long a connection may take to send HELLO.
+	handshakeMs uint32
+}
+
+func defaultServerTimings() serverTimings {
+	return serverTimings{
+		pollMs:      serverPollTimeoutMs,
+		stopGrace:   1000 * time.Millisecond,
+		handshakeMs: protocol.ServerHandshakeTimeoutMs,
+	}
+}
+
+// slotWait is how long a connection waits for a worker slot before it is
+// refused. Two poll slices: a worker whose client left exits within one.
+func (t serverTimings) slotWait() time.Duration {
+	return 2 * time.Duration(t.pollMs) * time.Millisecond
+}
+
+// Listening returns a channel closed once Run has bound the listener and
+// clients can connect. It stays open if Run fails or returns before binding.
+func (s *Server) Listening() <-chan struct{} {
+	return s.listening
+}
+
+// notifyTestHook signals a test hook channel; production servers leave the
+// hooks nil.
+func (s *Server) notifyTestHook(ch chan struct{}) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// markListening records that the listener is bound and accepting.
+func (s *Server) markListening() {
+	s.listeningOnce.Do(func() { close(s.listening) })
+}
 
 // stopChan is closed once a stop is requested; handshakes wait on it.
 func (s *Server) stopChan() <-chan struct{} {
@@ -86,7 +129,7 @@ func (s *Server) retryAcceptAfter(cleanup func()) bool {
 	return true
 }
 
-// acquireWorkerSlot waits up to serverSlotWait for a free worker, so a
+// acquireWorkerSlot waits up to timings.slotWait() for a free worker, so a
 // client that reconnects right after closing is not refused while its old
 // worker exits. The accept loop has nothing else to serve while full, so
 // waiting costs nothing.
@@ -97,7 +140,7 @@ func (s *Server) acquireWorkerSlot(sem chan struct{}, cleanup func(), closeSessi
 	default:
 	}
 
-	timer := time.NewTimer(serverSlotWait)
+	timer := time.NewTimer(s.timings.slotWait())
 	defer timer.Stop()
 	select {
 	case sem <- struct{}{}:
@@ -120,6 +163,7 @@ func (s *Server) startSessionWorker(sem chan struct{}, run func()) {
 				// Session handler panicked; keep the accept loop alive.
 			}
 			<-sem
+			s.notifyTestHook(s.sessionExited)
 			s.wg.Done()
 		}()
 		run()

@@ -4,6 +4,7 @@
  * Each test asserts the correct behavior. Every blocking step runs on a
  * helper thread waited with a deadline, so a regression fails instead of
  * hanging. Bounds are deliberately lenient so they do not dictate a fix.
+ * Tests wait on server events and peer signals, never on sleeps.
  *
  * Tests:
  *   K2  SHM session released after client crash
@@ -24,6 +25,7 @@
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_win_shm.h"
+#include "test_sync.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,8 +70,9 @@ static const char *svc_name(const char *prefix)
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    DWORD  delay_ms;
     size_t raw_len; /* if non-zero, reply with raw_len opaque bytes */
+    BOOL   block;   /* report entry on stdout, then block until killed */
+    int    handled; /* __atomic: raised once a raw reply is built */
 } handler_opts_t;
 
 static nipc_error_t robust_handler(void *user, const nipc_header_t *request_hdr,
@@ -77,17 +80,21 @@ static nipc_error_t robust_handler(void *user, const nipc_header_t *request_hdr,
                                    uint8_t *response_buf, size_t response_buf_size,
                                    size_t *response_len_out)
 {
-    const handler_opts_t *opts = (const handler_opts_t *)user;
+    handler_opts_t *opts = (handler_opts_t *)user;
     (void)request_hdr;
 
-    if (opts && opts->delay_ms)
-        Sleep(opts->delay_ms);
+    if (opts && opts->block) {
+        printf("HELPER_HANDLER_ENTERED\n");
+        fflush(stdout);
+        Sleep(INFINITE);
+    }
 
     if (opts && opts->raw_len) {
         if (opts->raw_len > response_buf_size)
             return NIPC_ERR_OVERFLOW;
         memset(response_buf, 0, opts->raw_len);
         *response_len_out = opts->raw_len;
+        test_flag_set(&opts->handled);
         return NIPC_OK;
     }
 
@@ -112,6 +119,7 @@ typedef struct {
     uint32_t max_payload;
     handler_opts_t opts;
     nipc_managed_server_t server;
+    test_server_events_t events;
     HANDLE thread;
 } robust_server_t;
 
@@ -148,8 +156,9 @@ static BOOL start_server(robust_server_t *rs)
         fprintf(stderr, "server init failed: %d\n", err);
         return FALSE;
     }
-    rs->thread = CreateThread(NULL, 0, robust_server_fn, rs, 0, NULL);
-    Sleep(100);
+    /* init creates the first pipe instance: clients may connect now. */
+    test_server_use_test_timings(&rs->server, &rs->events);
+    rs->thread = test_create_thread(NULL, 0, robust_server_fn, rs, 0, NULL);
     return rs->thread != NULL;
 }
 
@@ -177,52 +186,45 @@ static nipc_client_config_t client_config(BOOL shm, uint32_t timeout_ms)
     return ccfg;
 }
 
-static BOOL served_within(const char *service, BOOL shm, DWORD limit_ms)
+/* Connect and complete one snapshot call, in one attempt. */
+static BOOL served_once(const char *service, BOOL shm)
 {
-    ULONGLONG deadline = now_ms() + limit_ms;
     nipc_client_config_t ccfg = client_config(shm, 1000);
-    while (now_ms() < deadline) {
-        nipc_client_ctx_t client;
-        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        nipc_client_refresh(&client);
-        if (nipc_client_ready(&client)) {
-            nipc_cgroups_resp_view_t view;
-            nipc_error_t err = nipc_client_call_cgroups_snapshot_timeout(&client, &view, 1000);
-            BOOL ok = (err == NIPC_OK && view.item_count == 1);
-            nipc_client_close(&client);
-            if (ok)
-                return TRUE;
-        } else {
-            nipc_client_close(&client);
-        }
-        Sleep(50);
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    nipc_client_refresh(&client);
+    BOOL ok = FALSE;
+    if (nipc_client_ready(&client)) {
+        nipc_cgroups_resp_view_t view;
+        nipc_error_t err = nipc_client_call_cgroups_snapshot_timeout(&client, &view, 1000);
+        ok = (err == NIPC_OK && view.item_count == 1);
     }
-    return FALSE;
+    nipc_client_close(&client);
+    return ok;
 }
 
 typedef struct {
     const char *service;
-    DWORD limit_ms;
     BOOL result;
 } served_job_t;
 
 static DWORD WINAPI served_job_fn(LPVOID arg)
 {
     served_job_t *job = (served_job_t *)arg;
-    job->result = served_within(job->service, FALSE, job->limit_ms);
+    job->result = served_once(job->service, FALSE);
     return 0;
 }
 
+/* Open the pipe without sending HELLO. While every instance is busy the
+ * server is creating the next one; WaitNamedPipeW blocks until it exists. */
 static HANDLE open_pipe_silently(const char *service)
 {
     wchar_t name[NIPC_NP_MAX_PIPE_NAME];
     nipc_np_build_pipe_name(name, NIPC_NP_MAX_PIPE_NAME, TEST_RUN_DIR, service);
-    HANDLE h = INVALID_HANDLE_VALUE;
-    for (int i = 0; i < 100 && h == INVALID_HANDLE_VALUE; i++) {
+    HANDLE h = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PIPE_BUSY &&
+        WaitNamedPipeW(name, TEST_WAIT_LIMIT_MS))
         h = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
-        if (h == INVALID_HANDLE_VALUE)
-            Sleep(20);
-    }
     return h;
 }
 
@@ -235,10 +237,7 @@ static int helper_shm_client(const char *service)
     nipc_client_config_t ccfg = client_config(TRUE, 2000);
     nipc_client_ctx_t client;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    for (int i = 0; i < 200 && !nipc_client_ready(&client); i++) {
-        nipc_client_refresh(&client);
-        Sleep(10);
-    }
+    nipc_client_refresh(&client);
     nipc_cgroups_resp_view_t view;
     if (nipc_client_call_cgroups_snapshot_timeout(&client, &view, 2000) != NIPC_OK) {
         printf("HELPER_FAILED\n");
@@ -254,8 +253,9 @@ static int helper_shm_client(const char *service)
  * parent kills this process. */
 static int helper_shm_server(const char *service)
 {
-    robust_server_t rs = {.service = service, .workers = 2, .shm = TRUE,
-                          .opts = {.delay_ms = 60000}};
+    static robust_server_t rs;
+    rs = (robust_server_t){.service = service, .workers = 2, .shm = TRUE,
+                           .opts = {.block = TRUE}};
     if (!start_server(&rs)) {
         printf("HELPER_FAILED\n");
         return 1;
@@ -266,8 +266,51 @@ static int helper_shm_server(const char *service)
     return 0;
 }
 
-/* Spawn this binary in helper mode and wait for HELPER_READY. */
-static HANDLE spawn_helper(const char *mode, const char *service)
+typedef struct {
+    HANDLE rd;
+    const char *marker;
+    BOOL found;
+} line_job_t;
+
+static DWORD WINAPI line_job_fn(LPVOID arg)
+{
+    line_job_t *job = (line_job_t *)arg;
+    char buf[256];
+    DWORD used = 0;
+    while (used < sizeof(buf) - 1) {
+        DWORD n = 0;
+        /* One byte at a time, so a later marker stays in the pipe. */
+        if (!ReadFile(job->rd, buf + used, 1, &n, NULL) || n == 0)
+            return 0;
+        used += n;
+        buf[used] = '\0';
+        if (strstr(buf, job->marker)) {
+            job->found = TRUE;
+            return 0;
+        }
+        if (buf[used - 1] == '\n')
+            used = 0;
+    }
+    return 0;
+}
+
+/* Wait until the helper's stdout carries marker. A blocked reader thread
+ * ends once the caller kills the helper, which breaks the pipe. */
+static BOOL helper_wait_line(HANDLE rd, const char *marker)
+{
+    static line_job_t job;
+    job = (line_job_t){.rd = rd, .marker = marker};
+    HANDLE t = test_create_thread(NULL, 0, line_job_fn, &job, 0, NULL);
+    if (!t)
+        return FALSE;
+    BOOL done = WaitForSingleObject(t, TEST_WAIT_LIMIT_MS) == WAIT_OBJECT_0;
+    CloseHandle(t);
+    return done && job.found;
+}
+
+/* Spawn this binary in helper mode and wait for HELPER_READY. When out_rd
+ * is given it receives the helper's stdout for later markers. */
+static HANDLE spawn_helper(const char *mode, const char *service, HANDLE *out_rd)
 {
     SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
     HANDLE rd = NULL, wr = NULL;
@@ -294,32 +337,17 @@ static HANDLE spawn_helper(const char *mode, const char *service)
     }
     CloseHandle(pi.hThread);
 
-    char buf[256];
-    DWORD used = 0;
-    BOOL ready = FALSE;
-    ULONGLONG deadline = now_ms() + 10000;
-    while (!ready && now_ms() < deadline && used < sizeof(buf) - 1) {
-        DWORD avail = 0;
-        if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL))
-            break;
-        if (avail == 0) {
-            Sleep(20);
-            continue;
-        }
-        DWORD n = 0;
-        if (!ReadFile(rd, buf + used, sizeof(buf) - 1 - used, &n, NULL) || n == 0)
-            break;
-        used += n;
-        buf[used] = '\0';
-        ready = strstr(buf, "HELPER_READY") != NULL;
-    }
-    CloseHandle(rd);
-    if (!ready) {
+    if (!helper_wait_line(rd, "HELPER_READY")) {
         TerminateProcess(pi.hProcess, 1);
         WaitForSingleObject(pi.hProcess, 5000);
         CloseHandle(pi.hProcess);
+        CloseHandle(rd);
         return NULL;
     }
+    if (out_rd)
+        *out_rd = rd;
+    else
+        CloseHandle(rd);
     return pi.hProcess;
 }
 
@@ -345,7 +373,7 @@ static void test_shm_session_released_after_client_crash(void)
 
     BOOL spawned = TRUE;
     for (int i = 0; i < 2; i++) {
-        HANDLE p = spawn_helper("--helper-shm-client", rs.service);
+        HANDLE p = spawn_helper("--helper-shm-client", rs.service, NULL);
         if (!p) {
             spawned = FALSE;
             break;
@@ -353,8 +381,10 @@ static void test_shm_session_released_after_client_crash(void)
         kill_helper(p);
     }
     check("crash helpers held SHM sessions", spawned);
+    check("both workers freed their crashed clients' slots",
+          spawned && test_server_wait_session_exits(&rs.events, 2));
     check("new client served after 2 crashed SHM clients on 2 workers",
-          served_within(rs.service, TRUE, 8000));
+          served_once(rs.service, TRUE));
     stop_server_within(&rs, 5000);
 }
 
@@ -373,10 +403,11 @@ static void test_silent_client_does_not_block_other_clients(void)
 
     HANDLE silent = open_pipe_silently(rs.service);
     check("silent client opened the pipe", silent != INVALID_HANDLE_VALUE);
-    Sleep(100);
+    check("a worker waits for the silent client's HELLO",
+          test_server_wait_handshakes(&rs.events, 1));
 
-    served_job_t job = {.service = rs.service, .limit_ms = 5000};
-    HANDLE t = CreateThread(NULL, 0, served_job_fn, &job, 0, NULL);
+    served_job_t job = {.service = rs.service};
+    HANDLE t = test_create_thread(NULL, 0, served_job_fn, &job, 0, NULL);
     BOOL finished = WaitForSingleObject(t, 5000) == WAIT_OBJECT_0;
 
     if (silent != INVALID_HANDLE_VALUE)
@@ -398,7 +429,8 @@ static void test_silent_client_does_not_block_shutdown(void)
     }
 
     HANDLE silent = open_pipe_silently(rs.service);
-    Sleep(100);
+    check("a worker waits for the silent client's HELLO",
+          test_server_wait_handshakes(&rs.events, 1));
     BOOL stopped = stop_server_within(&rs, 3000);
 
     if (silent != INVALID_HANDLE_VALUE)
@@ -419,9 +451,15 @@ static void test_silent_client_released_at_handshake_deadline(void)
 
     HANDLE silent = open_pipe_silently(rs.service);
     check("silent client opened the pipe", silent != INVALID_HANDLE_VALUE);
-    BOOL served = served_within(rs.service, FALSE, NIPC_SERVER_HANDSHAKE_TIMEOUT_MS + 4000);
+    ULONGLONG start = now_ms();
+    BOOL released = test_server_wait_handshakes(&rs.events, 1) &&
+                    test_server_wait_session_exits(&rs.events, 1);
+    ULONGLONG elapsed = now_ms() - start;
+    check("the silent client's worker exits", released);
+    check("the worker waited for the handshake deadline",
+          elapsed >= TEST_SERVER_HANDSHAKE_MS);
     check("the only worker serves a new client once the silent one misses the deadline",
-          served);
+          served_once(rs.service, FALSE));
 
     if (silent != INVALID_HANDLE_VALUE)
         CloseHandle(silent);
@@ -461,7 +499,7 @@ static void test_client_bounded_when_server_never_sends_hello_ack(void)
     check("fake server pipe created", pipe != INVALID_HANDLE_VALUE);
 
     bounded_job_t job = {.service = svc};
-    HANDLE t = CreateThread(NULL, 0, bounded_client_fn, &job, 0, NULL);
+    HANDLE t = test_create_thread(NULL, 0, bounded_client_fn, &job, 0, NULL);
     BOOL finished = WaitForSingleObject(t, 6000) == WAIT_OBJECT_0;
 
     if (pipe != INVALID_HANDLE_VALUE)
@@ -505,8 +543,9 @@ static void test_shutdown_not_blocked_by_non_reading_client(void)
                              .item_count = 1, .message_id = 1};
         check("request sent", nipc_np_send(&session, &hdr, req, req_len) == NIPC_NP_OK);
     }
-    /* Never read the response; give the worker time to block in WriteFile. */
-    Sleep(500);
+    /* Never read the response. Once the handler built it, the worker can
+     * only be writing, which blocks. */
+    check("handler built the 4 MiB response", test_flag_wait(&rs.opts.handled));
 
     BOOL stopped = stop_server_within(&rs, 3000);
     if (connected)
@@ -538,7 +577,7 @@ static void test_stop_before_run_is_honored(void)
     }
 
     nipc_server_stop(&rs.server);
-    HANDLE t = CreateThread(NULL, 0, run_only_fn, &rs.server, 0, NULL);
+    HANDLE t = test_create_thread(NULL, 0, run_only_fn, &rs.server, 0, NULL);
     BOOL returned = WaitForSingleObject(t, 2000) == WAIT_OBJECT_0;
     if (!returned) {
         nipc_server_stop(&rs.server);
@@ -557,7 +596,7 @@ typedef struct {
     const char *service;
     nipc_error_t err;
     ULONGLONG elapsed_ms;
-    volatile LONG calling;
+    int calling; /* __atomic */
 } dead_server_job_t;
 
 static DWORD WINAPI dead_server_client_fn(LPVOID arg)
@@ -566,12 +605,9 @@ static DWORD WINAPI dead_server_client_fn(LPVOID arg)
     nipc_client_config_t ccfg = client_config(TRUE, 10000);
     nipc_client_ctx_t client;
     nipc_client_init(&client, TEST_RUN_DIR, job->service, &ccfg);
-    for (int i = 0; i < 200 && !nipc_client_ready(&client); i++) {
-        nipc_client_refresh(&client);
-        Sleep(10);
-    }
+    nipc_client_refresh(&client);
     nipc_cgroups_resp_view_t view;
-    InterlockedExchange(&job->calling, 1);
+    test_flag_set(&job->calling);
     ULONGLONG start = now_ms();
     job->err = nipc_client_call_cgroups_snapshot_timeout(&client, &view, 10000);
     job->elapsed_ms = now_ms() - start;
@@ -583,17 +619,19 @@ static void test_shm_client_notices_crashed_server(void)
 {
     printf("N5: SHM client notices a crashed server before its timeout\n");
     const char *svc = svc_name("wrob_dead_server");
-    HANDLE server = spawn_helper("--helper-shm-server", svc);
+    HANDLE helper_out = NULL;
+    HANDLE server = spawn_helper("--helper-shm-server", svc, &helper_out);
     check("server helper started", server != NULL);
     if (!server)
         return;
 
     dead_server_job_t job = {.service = svc};
-    HANDLE t = CreateThread(NULL, 0, dead_server_client_fn, &job, 0, NULL);
-    for (int i = 0; i < 500 && !InterlockedCompareExchange(&job.calling, 0, 0); i++)
-        Sleep(10);
-    Sleep(500); /* request is now parked in the stalled handler */
+    HANDLE t = test_create_thread(NULL, 0, dead_server_client_fn, &job, 0, NULL);
+    check("client connected", test_flag_wait(&job.calling));
+    check("request parked in the stalled handler",
+          helper_wait_line(helper_out, "HELPER_HANDLER_ENTERED"));
     kill_helper(server);
+    CloseHandle(helper_out);
 
     BOOL finished = WaitForSingleObject(t, 15000) == WAIT_OBJECT_0;
     if (!finished)
@@ -628,10 +666,7 @@ static void test_shm_attach_stops_when_server_closes_session(void)
     nipc_client_config_t ccfg = client_config(TRUE, 1000);
     nipc_client_ctx_t holder;
     nipc_client_init(&holder, TEST_RUN_DIR, rs.service, &ccfg);
-    for (int i = 0; i < 200 && !nipc_client_ready(&holder); i++) {
-        nipc_client_refresh(&holder);
-        Sleep(10);
-    }
+    nipc_client_refresh(&holder);
     check("first client holds the only worker", nipc_client_ready(&holder));
 
     nipc_client_ctx_t refused;
@@ -643,13 +678,9 @@ static void test_shm_attach_stops_when_server_closes_session(void)
     check("refused connect returns within 1s (attach retry budget is 5s)", elapsed < 1000);
 
     nipc_client_close(&holder);
-    BOOL ready = FALSE;
-    for (int i = 0; i < 300 && !ready; i++) {
-        nipc_client_refresh(&refused);
-        ready = nipc_client_ready(&refused);
-        if (!ready)
-            Sleep(10);
-    }
+    check("holder's session exited", test_server_wait_session_exits(&rs.events, 1));
+    nipc_client_refresh(&refused);
+    BOOL ready = nipc_client_ready(&refused);
     check("refused client connects once the worker is free", ready);
     check("refused client still uses WinSHM", ready && refused.shm != NULL);
     nipc_client_close(&refused);

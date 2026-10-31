@@ -32,6 +32,11 @@ type Server struct {
 	stopInit                     sync.Once
 	stopClose                    sync.Once
 	stopCh                       chan struct{}
+	timings                      serverTimings
+	listening                    chan struct{} // closed once the listener accepts
+	listeningOnce                sync.Once
+	sessionExited                chan struct{} // test hook, nil in production: signalled after a worker frees its slot
+	handshakeStarted             chan struct{} // test hook, nil in production: signalled before a worker waits for HELLO
 	sessionFdsMu                 sync.Mutex
 	sessionFds                   map[int]struct{}
 }
@@ -120,13 +125,14 @@ func (s *Server) Run() error {
 	if s.stopRequested.Load() {
 		s.running.Store(false)
 	}
+	s.markListening()
 
 	/* Semaphore channel limits concurrent sessions */
 	sem := make(chan struct{}, s.workerCount)
 
 	for s.running.Load() {
 		// Poll the listener fd before blocking on accept
-		ready := pollFd(listener.Fd(), serverPollTimeoutMs)
+		ready := pollFd(listener.Fd(), int(s.timings.pollMs))
 		if ready < 0 {
 			break
 		}
@@ -171,9 +177,10 @@ func (s *Server) serveConnection(pending *posix.PendingConn) {
 		pending.Close()
 		return
 	}
+	s.notifyTestHook(s.handshakeStarted)
 
 	session, err := pending.Handshake(
-		sessionID, acceptCfg, protocol.ServerHandshakeTimeoutMs, s.stopChan())
+		sessionID, acceptCfg, s.timings.handshakeMs, s.stopChan())
 	if err != nil {
 		if precreatedShm != nil {
 			precreatedShm.ShmDestroy()
@@ -228,7 +235,7 @@ func (s *Server) stopSessionWorkers() {
 	select {
 	case <-done:
 		return
-	case <-time.After(serverStopGrace):
+	case <-time.After(s.timings.stopGrace):
 	}
 
 	ticker := time.NewTicker(serverStopRetry)
@@ -254,7 +261,7 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 		maxResponsePayloadBytes: session.MaxResponsePayloadBytes,
 		receive: func(recvBuf []byte) (protocol.Header, []byte, serverReceiveAction) {
 			if shm != nil {
-				mlen, err := shm.ShmReceive(recvBuf, serverPollTimeoutMs)
+				mlen, err := shm.ShmReceive(recvBuf, s.timings.pollMs)
 				if err != nil {
 					if err == posix.ErrShmTimeout {
 						// A client that left (cleanly or by crashing)
@@ -276,7 +283,7 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 				return hdr, recvBuf[protocol.HeaderSize:mlen], serverReceiveOK
 			}
 
-			ready := pollFd(session.Fd(), serverPollTimeoutMs)
+			ready := pollFd(session.Fd(), int(s.timings.pollMs))
 			if ready < 0 {
 				return protocol.Header{}, nil, serverReceiveStop
 			}

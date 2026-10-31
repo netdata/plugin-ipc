@@ -81,19 +81,8 @@ static int run_client(const char *run_dir, const char *service)
 {
     nipc_shm_ctx_t shm;
 
-    /* Retry attach -- server may not be fully ready yet. */
-    nipc_shm_error_t err = NIPC_SHM_ERR_NOT_READY;
-    for (int i = 0; i < 500; i++) {
-        err = nipc_shm_client_attach(run_dir, service, 1, &shm);
-        if (err == NIPC_SHM_OK)
-            break;
-        if (err == NIPC_SHM_ERR_NOT_READY ||
-            err == NIPC_SHM_ERR_OPEN ||
-            err == NIPC_SHM_ERR_BAD_MAGIC)
-            usleep(10000);
-        else
-            break;
-    }
+    /* The server prints READY only after creating the region. */
+    nipc_shm_error_t err = nipc_shm_client_attach(run_dir, service, 1, &shm);
     if (err != NIPC_SHM_OK) {
         fprintf(stderr, "client: attach failed: %d\n", err);
         return 1;

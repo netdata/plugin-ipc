@@ -1,7 +1,9 @@
-use super::common::{wait_for_worker_slot, SERVER_STOP_GRACE_MS};
+use super::common::wait_for_worker_slot;
+#[cfg(test)]
+use super::server::TestHooks;
 use super::server::{ManagedServer, ServerConfig};
 use super::server_session_windows::handle_session_win_threaded;
-use crate::protocol::{NipcError, HEADER_SIZE, SERVER_HANDSHAKE_TIMEOUT_MS};
+use crate::protocol::{NipcError, HEADER_SIZE};
 use crate::transport::win_shm::{
     WinShmContext, PROFILE_BUSYWAIT as WIN_SHM_PROFILE_BUSYWAIT,
     PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID,
@@ -37,6 +39,7 @@ impl ManagedServer {
         if self.stop_requested.load(Ordering::Acquire) {
             self.running.store(false, Ordering::Release);
         }
+        self.listening.set();
 
         let mut session_threads: Vec<JoinHandle<()>> = Vec::new();
 
@@ -63,7 +66,7 @@ impl ManagedServer {
             // Refuse before HELLO_ACK so the client's connect fails instead of
             // a later call.
             let worker_count = self.worker_count;
-            if !wait_for_worker_slot(&self.running, || {
+            if !wait_for_worker_slot(&self.running, self.timings.slot_wait(), || {
                 session_threads.retain(|t| !t.is_finished());
                 session_threads.len() < worker_count
             }) {
@@ -78,16 +81,24 @@ impl ManagedServer {
                 service_name: self.service_name.clone(),
                 base_config: self.server_config.clone(),
                 session_id,
+                handshake_ms: self.timings.handshake_ms,
             };
             let expected_method_code = self.expected_method_code;
             let handler = self.handler.clone();
             let running = self.running.clone();
+            let poll_ms = self.timings.poll_ms;
+            #[cfg(test)]
+            let hooks = self.test_hooks.clone();
             let stop_requested = self.stop_requested.clone();
             let learned_request_payload_bytes = self.learned_request_payload_bytes.clone();
             let learned_response_payload_bytes = self.learned_response_payload_bytes.clone();
             let request_payload_growth_ceiling = self.request_payload_growth_ceiling;
             let response_payload_growth_ceiling = self.response_payload_growth_ceiling;
             let t = std::thread::spawn(move || {
+                #[cfg(test)]
+                let _exit = SessionExitNotice(hooks.session_exited.clone());
+                #[cfg(test)]
+                TestHooks::notify(&hooks.handshake_started);
                 let Some((session, shm)) = accept.handshake(
                     pending,
                     &stop_requested,
@@ -102,6 +113,7 @@ impl ManagedServer {
                     expected_method_code,
                     handler,
                     running,
+                    poll_ms,
                     learned_request_payload_bytes,
                     learned_response_payload_bytes,
                     request_payload_growth_ceiling,
@@ -115,7 +127,7 @@ impl ManagedServer {
         self.stop_requested.store(true, Ordering::Release);
         self.running.store(false, Ordering::Release);
         drop(listener);
-        stop_workers(session_threads);
+        stop_workers(session_threads, self.timings.stop_grace);
 
         Ok(())
     }
@@ -125,8 +137,8 @@ impl ManagedServer {
 /// pipe I/O of the ones still blocked until they exit, and join them all. A
 /// single cancel can land before a thread enters its next blocking call, so
 /// it repeats.
-fn stop_workers(workers: Vec<JoinHandle<()>>) {
-    let deadline = Instant::now() + Duration::from_millis(SERVER_STOP_GRACE_MS);
+fn stop_workers(workers: Vec<JoinHandle<()>>, grace: Duration) {
+    let deadline = Instant::now() + grace;
     while Instant::now() < deadline && workers.iter().any(|t| !t.is_finished()) {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -152,6 +164,19 @@ struct AcceptContext {
     service_name: String,
     base_config: ServerConfig,
     session_id: u64,
+    handshake_ms: u32,
+}
+
+/// Reports a session worker's exit, after its pipe closed, however the
+/// worker returns.
+#[cfg(test)]
+struct SessionExitNotice(Option<std::sync::mpsc::Sender<()>>);
+
+#[cfg(test)]
+impl Drop for SessionExitNotice {
+    fn drop(&mut self) {
+        TestHooks::notify(&self.0);
+    }
 }
 
 impl AcceptContext {
@@ -173,7 +198,7 @@ impl AcceptContext {
         let session = match pending.handshake(
             self.session_id,
             &cfg,
-            SERVER_HANDSHAKE_TIMEOUT_MS,
+            self.handshake_ms,
             Some(stop_requested),
         ) {
             Ok(session) => session,

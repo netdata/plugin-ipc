@@ -104,6 +104,8 @@ mod ffi {
 
         pub fn SwitchToThread() -> BOOL;
 
+        pub fn WaitNamedPipeW(lpNamedPipeName: LPCWSTR, nTimeOut: DWORD) -> BOOL;
+
         pub fn SetNamedPipeHandleState(
             hNamedPipe: HANDLE,
             lpMode: *const DWORD,
@@ -123,6 +125,10 @@ const DEFAULT_PIPE_BUF_SIZE: u32 = 65536;
 const HELLO_PAYLOAD_SIZE: usize = 44;
 const HELLO_ACK_PAYLOAD_SIZE: usize = 48;
 const MAX_PIPE_NAME_CHARS: usize = 256;
+
+/// How long a connect waits for a free pipe instance when every instance is
+/// busy (ERROR_PIPE_BUSY).
+pub const CONNECT_BUSY_WAIT_MS: u32 = 1000;
 
 // FNV-1a 64-bit constants
 const FNV1A_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -727,22 +733,7 @@ impl NpSession {
         config: &ClientConfig,
     ) -> Result<Self, NpError> {
         let pipe_name = build_pipe_name(run_dir, service_name)?;
-
-        let handle = unsafe {
-            ffi::CreateFileW(
-                pipe_name.as_ptr(),
-                ffi::GENERIC_READ | ffi::GENERIC_WRITE,
-                0,
-                ptr::null(),
-                ffi::OPEN_EXISTING,
-                0,
-                0,
-            )
-        };
-
-        if handle == ffi::INVALID_HANDLE_VALUE {
-            return Err(NpError::Connect(last_error()));
-        }
+        let handle = open_client_pipe(&pipe_name)?;
 
         // Set read mode to message mode
         let mode: u32 = ffi::PIPE_READMODE_MESSAGE;
@@ -1217,6 +1208,53 @@ impl Drop for NpListener {
     fn drop(&mut self) {
         self.close();
     }
+}
+
+#[cfg(windows)]
+fn create_client_pipe(pipe_name: &[u16]) -> ffi::HANDLE {
+    unsafe {
+        ffi::CreateFileW(
+            pipe_name.as_ptr(),
+            ffi::GENERIC_READ | ffi::GENERIC_WRITE,
+            0,
+            ptr::null(),
+            ffi::OPEN_EXISTING,
+            0,
+            0,
+        )
+    }
+}
+
+/// Runs whenever a connect finds every pipe instance busy, before it waits.
+#[cfg(all(windows, test))]
+pub(crate) static CONNECT_BUSY_HOOK: std::sync::Mutex<Option<Box<dyn Fn() + Send>>> =
+    std::sync::Mutex::new(None);
+
+/// A server has no free pipe instance between accepting one client and
+/// creating the next instance, and connects in that window fail with
+/// ERROR_PIPE_BUSY. Wait, bounded, for an instance, then try once more.
+#[cfg(windows)]
+fn open_client_pipe(pipe_name: &[u16]) -> Result<ffi::HANDLE, NpError> {
+    let mut handle = create_client_pipe(pipe_name);
+    if handle == ffi::INVALID_HANDLE_VALUE {
+        let mut err = last_error();
+        if err == ffi::ERROR_PIPE_BUSY {
+            #[cfg(test)]
+            if let Some(hook) = CONNECT_BUSY_HOOK.lock().unwrap().as_ref() {
+                hook();
+            }
+            if unsafe { ffi::WaitNamedPipeW(pipe_name.as_ptr(), CONNECT_BUSY_WAIT_MS) } != 0 {
+                handle = create_client_pipe(pipe_name);
+            }
+            if handle == ffi::INVALID_HANDLE_VALUE {
+                err = last_error();
+            }
+        }
+        if handle == ffi::INVALID_HANDLE_VALUE {
+            return Err(NpError::Connect(err));
+        }
+    }
+    Ok(handle)
 }
 
 /// Wakes a listener blocked in `ConnectNamedPipe` by connecting to it.
@@ -2357,6 +2395,56 @@ mod tests {
 
         session.close();
         server.join().expect("server join");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_connect_waits_for_busy_pipe() {
+        ensure_run_dir();
+        let svc = unique_service("rs_busy");
+        let mut listener =
+            NpListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("bind");
+
+        // The first client takes the only instance; the server has not
+        // accepted it, so no next instance exists yet.
+        let pipe_name = build_pipe_name(TEST_RUN_DIR, &svc).expect("pipe name");
+        let holder = create_client_pipe(&pipe_name);
+        assert_ne!(
+            holder,
+            ffi::INVALID_HANDLE_VALUE,
+            "first client holds the only instance"
+        );
+
+        let (busy_tx, busy_rx) = std::sync::mpsc::channel::<()>();
+        *CONNECT_BUSY_HOOK.lock().unwrap() = Some(Box::new(move || {
+            let _ = busy_tx.send(());
+        }));
+
+        // Accept the holder once the second client found the pipe busy, then
+        // serve the second client's handshake.
+        let server = thread::spawn(move || {
+            busy_rx.recv().ok()?;
+            let first = listener.accept_pending().ok()?;
+            let second = listener.accept_pending().ok()?;
+            let session = second
+                .handshake(2, &default_server_config(), 10_000, None)
+                .ok()?;
+            drop(first);
+            Some(session)
+        });
+
+        let result = NpSession::connect(TEST_RUN_DIR, &svc, &default_client_config());
+        // Dropping the hook releases the server thread if connect never waited.
+        *CONNECT_BUSY_HOOK.lock().unwrap() = None;
+        if result.is_err() {
+            close_handle(holder);
+        }
+        let mut session = result.expect("busy pipe connect waits and succeeds");
+        let accepted = server.join().expect("server join");
+        assert!(accepted.is_some(), "server accepted the waiting client");
+
+        session.close();
+        close_handle(holder);
     }
 
     #[cfg(windows)]

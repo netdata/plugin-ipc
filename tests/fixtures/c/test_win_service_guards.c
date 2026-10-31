@@ -13,6 +13,7 @@
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_win_shm.h"
+#include "test_sync.h"
 #include "test_win_raw_client_helpers.h"
 
 #include <stdio.h>
@@ -535,6 +536,7 @@ typedef struct {
     HANDLE ready_event;
     volatile LONG init_ok;
     nipc_managed_server_t server;
+    test_server_events_t events;
 } server_thread_ctx_t;
 
 static DWORD WINAPI managed_server_thread(LPVOID arg)
@@ -562,6 +564,7 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
 
     InterlockedExchange(&ctx->init_ok, 1);
     SetEvent(ctx->ready_event);
+    test_server_use_test_timings(&ctx->server, &ctx->events);
     nipc_server_run(&ctx->server);
     return 0;
 }
@@ -581,7 +584,7 @@ static HANDLE start_server_named(server_thread_ctx_t *ctx,
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     InterlockedExchange(&ctx->init_ok, 0);
 
-    HANDLE thread = CreateThread(NULL, 0, managed_server_thread, ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, managed_server_thread, ctx, 0, NULL);
     check("guard server thread created", thread != NULL);
     if (!thread)
         return NULL;
@@ -619,7 +622,7 @@ static HANDLE start_raw_server_named(server_thread_ctx_t *ctx,
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     InterlockedExchange(&ctx->init_ok, 0);
 
-    HANDLE thread = CreateThread(NULL, 0, managed_server_thread, ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, managed_server_thread, ctx, 0, NULL);
     check("guard raw server thread created", thread != NULL);
     if (!thread)
         return NULL;
@@ -650,52 +653,29 @@ static void stop_server_drain(server_thread_ctx_t *ctx, HANDLE thread)
           nipc_server_drain(&ctx->server, 10000));
 }
 
-static bool refresh_until_ready(nipc_client_ctx_t *client, int max_tries, DWORD sleep_ms)
+/* One refresh, then report whether the client is ready. */
+static bool refresh_ready(nipc_client_ctx_t *client)
 {
-    for (int i = 0; i < max_tries; i++) {
-        nipc_client_refresh(client);
-        if (nipc_client_ready(client))
-            return true;
-        Sleep(sleep_ms);
-    }
-
-    return false;
+    nipc_client_refresh(client);
+    return nipc_client_ready(client);
 }
 
-static bool refresh_until_state(nipc_client_ctx_t *client,
-                                nipc_client_state_t target_state,
-                                int max_tries,
-                                DWORD sleep_ms)
+/* One refresh, then report whether the client reached target_state. */
+static bool refresh_to_state(nipc_client_ctx_t *client,
+                             nipc_client_state_t target_state)
 {
-    for (int i = 0; i < max_tries; i++) {
-        nipc_client_refresh(client);
-        if (client->state == target_state)
-            return true;
-        Sleep(sleep_ms);
-    }
-
+    nipc_client_refresh(client);
     return client->state == target_state;
 }
 
-static bool wait_for_server_sessions(nipc_managed_server_t *server,
-                                     int target_count,
-                                     int max_tries,
-                                     DWORD sleep_ms)
+/* Callers wait for a handler or handshake first, so the sessions they
+ * count are already registered. */
+static bool server_has_sessions(nipc_managed_server_t *server, int target_count)
 {
-    for (int i = 0; i < max_tries; i++) {
-        int count;
-
-        EnterCriticalSection(&server->sessions_lock);
-        count = server->session_count;
-        LeaveCriticalSection(&server->sessions_lock);
-
-        if (count >= target_count)
-            return true;
-
-        Sleep(sleep_ms);
-    }
-
-    return false;
+    EnterCriticalSection(&server->sessions_lock);
+    int count = server->session_count;
+    LeaveCriticalSection(&server->sessions_lock);
+    return count >= target_count;
 }
 
 typedef struct {
@@ -712,7 +692,7 @@ static DWORD WINAPI blocking_client_thread(LPVOID arg)
     nipc_client_config_t ccfg = default_typed_client_config();
 
     nipc_client_init(&client, TEST_RUN_DIR, ctx->service, &ccfg);
-    if (refresh_until_ready(&client, 100, 10))
+    if (refresh_ready(&client))
         ctx->err = test_win_client_call_increment_raw(&client, 41, &ctx->value_out);
     else
         ctx->err = NIPC_ERR_NOT_READY;
@@ -897,7 +877,7 @@ static HANDLE start_fake_hybrid_server(fake_hybrid_server_ctx_t *ctx,
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     InterlockedExchange(&ctx->listen_ok, 0);
 
-    HANDLE thread = CreateThread(NULL, 0, fake_hybrid_server_thread, ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, fake_hybrid_server_thread, ctx, 0, NULL);
     check("fake hybrid server thread created", thread != NULL);
     if (!thread)
         return NULL;
@@ -948,7 +928,7 @@ static void test_client_batch_and_string_guards(void)
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         client.transport_config.max_request_payload_bytes = 8;
         check("guard batch-overflow client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         if (nipc_client_ready(&client)) {
             nipc_error_t err = test_win_client_call_increment_batch_raw(
@@ -991,7 +971,7 @@ static void test_client_batch_and_string_guards(void)
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         client.transport_config.max_request_payload_bytes = 16;
         check("guard string-overflow client ready",
-              refresh_until_ready(&client, 100, 10));
+              refresh_ready(&client));
 
         if (nipc_client_ready(&client)) {
             nipc_error_t err = test_win_client_call_string_reverse_raw(
@@ -1030,7 +1010,7 @@ static void test_hybrid_attach_failure_falls_back_to_baseline(void)
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
 
     check("hybrid attach failure eventually reaches READY",
-          refresh_until_ready(&client, 50, 10));
+          refresh_ready(&client));
     check("hybrid attach failure leaves client ready on baseline",
           nipc_client_ready(&client));
     check("hybrid attach failure maps to READY baseline",
@@ -1092,7 +1072,7 @@ static void test_hybrid_client_rejects_malformed_responses(void)
         nipc_client_ctx_t client;
         nipc_client_config_t ccfg = default_typed_hybrid_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-        check(cases[i].label, refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+        check(cases[i].label, refresh_ready(&client) && client.shm != NULL);
 
         if (nipc_client_ready(&client) && client.shm != NULL) {
             uint64_t value_out = 0;
@@ -1143,7 +1123,7 @@ static void test_hybrid_typed_snapshot_response_guards(void)
         nipc_client_config_t ccfg = default_typed_hybrid_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check(cases[i].label,
-              refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+              refresh_ready(&client) && client.shm != NULL);
 
         if (nipc_client_ready(&client) && client.shm != NULL) {
             nipc_cgroups_resp_view_t view;
@@ -1185,7 +1165,7 @@ static void test_hybrid_client_send_buffer_guard(void)
     nipc_client_config_t ccfg = default_typed_hybrid_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("hybrid send-guard client ready",
-          refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+          refresh_ready(&client) && client.shm != NULL);
 
     if (nipc_client_ready(&client) && client.shm != NULL) {
         uint64_t value_out = 0;
@@ -1222,7 +1202,7 @@ static void test_hybrid_client_send_capacity_guard(void)
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     client.transport_config.max_request_payload_bytes = 16;
     check("hybrid send-capacity client ready",
-          refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+          refresh_ready(&client) && client.shm != NULL);
 
     if (nipc_client_ready(&client) && client.shm != NULL) {
         nipc_string_reverse_view_t view;
@@ -1265,7 +1245,7 @@ static void test_hybrid_batch_send_capacity_guard(void)
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     client.transport_config.max_request_payload_bytes = 16;
     check("hybrid batch send-capacity client ready",
-          refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+          refresh_ready(&client) && client.shm != NULL);
 
     if (nipc_client_ready(&client) && client.shm != NULL) {
         uint64_t req[4] = { 41, 99, 123, 777 };
@@ -1304,7 +1284,7 @@ static void test_hybrid_batch_receive_failure(void)
     nipc_client_config_t ccfg = default_typed_hybrid_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("hybrid batch-recv client ready",
-          refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+          refresh_ready(&client) && client.shm != NULL);
 
     if (nipc_client_ready(&client) && client.shm != NULL) {
         uint64_t req = 41;
@@ -1339,7 +1319,7 @@ static void test_hybrid_string_raw_call_failure(void)
     nipc_client_config_t ccfg = default_typed_hybrid_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("hybrid string-fail client ready",
-          refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+          refresh_ready(&client) && client.shm != NULL);
 
     if (nipc_client_ready(&client) && client.shm != NULL) {
         nipc_string_reverse_view_t view;
@@ -1391,20 +1371,21 @@ static void test_hybrid_server_rejects_malformed_requests(void)
         nipc_client_config_t ccfg = default_typed_hybrid_client_config();
         nipc_client_init(&bad_client, TEST_RUN_DIR, service, &ccfg);
         check(cases[i].label,
-              refresh_until_ready(&bad_client, 200, 10) && bad_client.shm != NULL);
+              refresh_ready(&bad_client) && bad_client.shm != NULL);
 
         if (nipc_client_ready(&bad_client) && bad_client.shm != NULL) {
             check("send malformed hybrid request",
                   nipc_win_shm_send(bad_client.shm, cases[i].msg, cases[i].msg_len)
                   == NIPC_WIN_SHM_OK);
-            Sleep(100);
         }
         nipc_client_close(&bad_client);
+        check("malformed hybrid session exited",
+              test_server_wait_session_exits(&sctx.events, 1));
 
         nipc_client_ctx_t good_client;
         nipc_client_init(&good_client, TEST_RUN_DIR, service, &ccfg);
         check("replacement hybrid client ready",
-              refresh_until_ready(&good_client, 200, 10) && good_client.shm != NULL);
+              refresh_ready(&good_client) && good_client.shm != NULL);
         if (nipc_client_ready(&good_client) && good_client.shm != NULL) {
             uint64_t value_out = 0;
             nipc_error_t err = test_win_client_call_increment_raw(&good_client, 9, &value_out);
@@ -1435,7 +1416,7 @@ static void test_snapshot_default_max_items(void)
     nipc_client_config_t ccfg = default_typed_hybrid_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("snapshot default client ready",
-          refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+          refresh_ready(&client) && client.shm != NULL);
 
     if (nipc_client_ready(&client)) {
         nipc_cgroups_resp_view_t view;
@@ -1468,7 +1449,7 @@ static void test_typed_request_overflow_reconnect_guards(void)
         nipc_client_config_t ccfg = default_typed_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("typed baseline request-overflow client ready",
-              refresh_until_ready(&client, 200, 10) && client.shm == NULL);
+              refresh_ready(&client) && client.shm == NULL);
 
         if (nipc_client_ready(&client)) {
             nipc_cgroups_resp_view_t view = {0};
@@ -1505,7 +1486,7 @@ static void test_typed_request_overflow_reconnect_guards(void)
         nipc_client_config_t ccfg = default_typed_hybrid_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("typed hybrid request-overflow client ready",
-              refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+              refresh_ready(&client) && client.shm != NULL);
 
         if (nipc_client_ready(&client) && client.shm != NULL) {
             nipc_cgroups_resp_view_t view = {0};
@@ -1544,7 +1525,7 @@ static void test_typed_request_overflow_reconnect_guards(void)
         nipc_client_config_t ccfg = default_typed_hybrid_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("typed hybrid no-growth overflow client ready",
-              refresh_until_ready(&client, 200, 10) && client.shm != NULL);
+              refresh_ready(&client) && client.shm != NULL);
 
         if (nipc_client_ready(&client) && client.shm != NULL) {
             nipc_cgroups_resp_view_t view = {0};
@@ -1855,7 +1836,7 @@ static void test_drain_timeout_on_blocked_handler(void)
     };
     strncpy(client_ctx.service, service, sizeof(client_ctx.service) - 1);
 
-    HANDLE client_thread = CreateThread(NULL, 0, blocking_client_thread, &client_ctx, 0, NULL);
+    HANDLE client_thread = test_create_thread(NULL, 0, blocking_client_thread, &client_ctx, 0, NULL);
     check("blocking client thread created", client_thread != NULL);
     check("blocking handler entered",
           client_thread != NULL && WaitForSingleObject(g_block_entered, 10000) == WAIT_OBJECT_0);
@@ -1865,10 +1846,9 @@ static void test_drain_timeout_on_blocked_handler(void)
         .done_event = CreateEvent(NULL, TRUE, FALSE, NULL),
         .drained = TRUE,
     };
-    HANDLE drain_thread = CreateThread(NULL, 0, drain_thread_proc, &drain_ctx, 0, NULL);
+    HANDLE drain_thread = test_create_thread(NULL, 0, drain_thread_proc, &drain_ctx, 0, NULL);
     check("drain thread created", drain_thread != NULL);
 
-    Sleep(50);
     SetEvent(g_block_release);
 
     check("drain thread finished",

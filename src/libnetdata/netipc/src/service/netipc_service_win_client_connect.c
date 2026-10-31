@@ -123,7 +123,7 @@ nipc_client_state_t nipc_service_win_client_try_connect(nipc_client_ctx_t *ctx)
              * handshake, but filesystem/object visibility may lag briefly. */
             nipc_win_shm_error_t serr = NIPC_WIN_SHM_ERR_OPEN_MAPPING;
             bool server_gone = false;
-            ULONGLONG deadline_ms = GetTickCount64() + CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS;
+            ULONGLONG deadline_ms = GetTickCount64() + ctx->shm_attach_timeout_ms;
             for (;;) {
                 serr = nipc_win_shm_client_attach(
                     ctx->run_dir, ctx->service_name,

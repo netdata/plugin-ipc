@@ -1,4 +1,7 @@
-use super::common::{ensure_client_scratch, next_power_of_2_u32, LookupLogicalConfig};
+use super::common::{
+    ensure_client_scratch, next_power_of_2_u32, LookupLogicalConfig,
+    CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS,
+};
 use crate::protocol::{self, NipcError, MAX_PAYLOAD_CAP};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -85,6 +88,8 @@ pub struct RawClient {
     pub(super) max_logical_lookup_subcalls: u32,
     pub(super) max_logical_lookup_response_bytes: u32,
     pub(super) abort_requested: Arc<AtomicBool>,
+    /// How long to retry attaching a negotiated SHM region; tests shorten it.
+    pub(super) shm_attach_timeout: std::time::Duration,
 }
 
 /// Cloneable handle that can abort a blocking client call from another thread.
@@ -133,6 +138,15 @@ impl RawCallKind {
     }
 }
 
+#[cfg(test)]
+impl RawClient {
+    /// Shorten the client's internal waits for tests.
+    pub(crate) fn use_test_timings(&mut self) -> &mut Self {
+        self.shm_attach_timeout = std::time::Duration::from_millis(300);
+        self
+    }
+}
+
 impl RawClient {
     pub(super) fn new_bound(
         run_dir: &str,
@@ -164,6 +178,9 @@ impl RawClient {
             max_logical_lookup_subcalls: lookup_config.max_subcalls,
             max_logical_lookup_response_bytes: lookup_config.max_response_bytes,
             abort_requested: Arc::new(AtomicBool::new(false)),
+            shm_attach_timeout: std::time::Duration::from_millis(
+                CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS,
+            ),
         }
     }
 

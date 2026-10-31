@@ -5,7 +5,6 @@ package raw
 import (
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
@@ -35,14 +34,7 @@ func startTestServerUnixWithConfig(
 	cleanupAll(service)
 
 	s := NewServer(testRunDir, service, cfg, expectedMethodCode, handler)
-	doneCh := make(chan struct{})
-
-	go func() {
-		defer close(doneCh)
-		_ = s.Run()
-	}()
-
-	waitUnixServerReady(service)
+	doneCh := runServerForTest(s)
 	return &testServer{server: s, doneCh: doneCh}
 }
 
@@ -178,7 +170,9 @@ func TestUnixShmAttachFailureFallsBackToBaseline(t *testing.T) {
 		}
 	}()
 
-	client := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
+	// The listener negotiates SHM but never creates a region, so the attach
+	// window runs out; the test window keeps that in milliseconds.
+	client := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig()).useTestTimings()
 
 	if changed := client.Refresh(); !changed {
 		t.Fatal("refresh should transition to READY via baseline fallback after SHM attach failure")
@@ -397,7 +391,21 @@ func TestUnixShmMalformedBatchRequestRecovers(t *testing.T) {
 		t.Fatalf("ShmSend malformed batch request failed: %v", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	// The server answers the malformed batch with an error status and keeps
+	// the session.
+	respBuf := make([]byte, protocol.HeaderSize+4096)
+	n, err := client.shm.ShmReceive(respBuf, 5000)
+	if err != nil {
+		t.Fatalf("ShmReceive reply to malformed batch failed: %v", err)
+	}
+	respHdr, err := protocol.DecodeHeader(respBuf[:n])
+	if err != nil {
+		t.Fatalf("decode reply to malformed batch: %v", err)
+	}
+	if respHdr.MessageID != 1 || respHdr.TransportStatus == protocol.StatusOK {
+		t.Fatalf("reply to malformed batch = id %d status %d, want id 1 with an error status",
+			respHdr.MessageID, respHdr.TransportStatus)
+	}
 
 	got, err := client.CallIncrement(21)
 	if err != nil {
@@ -432,7 +440,8 @@ func TestUnixShmShortRequestKeepsServerHealthy(t *testing.T) {
 		t.Fatalf("ShmSend short request failed: %v", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	// The server ends the session on the malformed message.
+	waitSessionExits(ts.server, 1)
 
 	verify := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
 	defer verify.Close()
@@ -469,7 +478,8 @@ func TestUnixShmBadHeaderKeepsServerHealthy(t *testing.T) {
 		t.Fatalf("ShmSend bad header request failed: %v", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	// The server ends the session on the malformed message.
+	waitSessionExits(ts.server, 1)
 
 	verify := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
 	defer verify.Close()

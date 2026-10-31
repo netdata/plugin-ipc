@@ -171,10 +171,9 @@ run_c() {
         return
     fi
     section "C tests"
-    # Correctness only: fuzz, stress, scale and benchmark-tooling suites run
-    # before Netdata vendoring, when needed (AGENTS.md Test Cadence).
-    ctest --test-dir "$b" --output-on-failure --timeout 300 \
-        -E '^(test_windows_bench_stability_policy|fuzz_.*|test_stress.*|test_lookup_scale.*)$' || fail "C tests"
+    # Correctness only: fuzz, stress and scale suites are not registered by
+    # default and run from tests/run-extended-*.sh (AGENTS.md Test Cadence).
+    ctest --test-dir "$b" --output-on-failure --timeout 300 || fail "C tests"
 }
 
 run_rust() {
@@ -187,7 +186,7 @@ run_rust() {
         return
     fi
     section "Rust tests"
-    cargo test --manifest-path "$manifest" --target "$RUST_TARGET" --lib -- --skip test_stress || fail "Rust tests"
+    cargo test --manifest-path "$manifest" --target "$RUST_TARGET" --lib || fail "Rust tests"
 }
 
 run_go() {
@@ -200,7 +199,7 @@ run_go() {
     section "Go tests"
     (
         cd "$ROOT_DIR/src/go" &&
-        CGO_ENABLED=0 GOARCH=$GOARCH_VAL GOARM=$GOARM_VAL go test -skip '^TestStress' ./...
+        CGO_ENABLED=0 GOARCH=$GOARCH_VAL GOARM=$GOARM_VAL go test ./...
     ) || fail "Go tests"
 }
 

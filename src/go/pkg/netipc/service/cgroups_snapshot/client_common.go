@@ -110,3 +110,9 @@ func (s *Server) Run() error {
 func (s *Server) Stop() {
 	s.inner.Stop()
 }
+
+// Listening returns a channel closed once Run has bound the listener and
+// clients can connect.
+func (s *Server) Listening() <-chan struct{} {
+	return s.inner.Listening()
+}

@@ -11,17 +11,8 @@
 #include <stdint.h>
 #include <windows.h>
 
-#define SERVER_POLL_TIMEOUT_MS 100
-/* How long destroy waits for session threads to finish their current
- * message before cancelling their pipe I/O. */
-#define SERVER_STOP_GRACE_MS 1000u
-/* How long a connection waits for a worker slot before it is refused. Two
- * poll slices: a worker whose client left exits within one. */
-#define SERVER_SLOT_WAIT_MS (2u * SERVER_POLL_TIMEOUT_MS)
 #define CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS 5u
-#define CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS 5000u
 #define CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS 5u
-#define CLIENT_CALL_RECONNECT_DRAIN_MS (SERVER_POLL_TIMEOUT_MS + 50u)
 #define CLIENT_CALL_RECONNECT_RETRIES 20u
 
 enum {

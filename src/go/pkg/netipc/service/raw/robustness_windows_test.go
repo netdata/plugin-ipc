@@ -57,13 +57,7 @@ type winRobustServer struct {
 
 func startWinRobustServer(service string, cfg windows.ServerConfig, method uint16, handler DispatchHandler, workers int) *winRobustServer {
 	s := NewServerWithWorkers(winTestRunDir, service, cfg, method, handler, workers)
-	doneCh := make(chan struct{})
-	go func() {
-		defer close(doneCh)
-		_ = s.Run()
-	}()
-	time.Sleep(200 * time.Millisecond)
-	return &winRobustServer{server: s, doneCh: doneCh}
+	return &winRobustServer{server: s, doneCh: runServerForTest(s)}
 }
 
 // stopWithin stops the server and reports whether Run returned in time.
@@ -81,27 +75,34 @@ func (rs *winRobustServer) stopWithin(limit time.Duration) bool {
 	}
 }
 
-func winServedWithin(service string, cfg windows.ClientConfig, limit time.Duration) error {
-	deadline := time.Now().Add(limit)
-	last := fmt.Errorf("never connected")
-	for time.Now().Before(deadline) {
-		c := NewIncrementClient(winTestRunDir, service, cfg)
-		c.Refresh()
-		if c.Ready() {
-			v, err := c.CallIncrementWithTimeout(1, 1000)
-			c.Close()
-			if err == nil && v == 2 {
-				return nil
-			}
-			last = fmt.Errorf("call: v=%d err=%v", v, err)
-		} else {
-			last = fmt.Errorf("state %v", c.Status().State)
-			c.Close()
-		}
-		time.Sleep(50 * time.Millisecond)
+// winServedOnce connects once and completes one increment call. Callers
+// make sure a worker is free first, so any failure is a real one.
+func winServedOnce(service string, cfg windows.ClientConfig) error {
+	c := NewIncrementClient(winTestRunDir, service, cfg)
+	defer c.Close()
+	c.Refresh()
+	if !c.Ready() {
+		return fmt.Errorf("state %v", c.Status().State)
 	}
-	return last
+	v, err := c.CallIncrementWithTimeout(1, 1000)
+	if err != nil || v != 2 {
+		return fmt.Errorf("call: v=%d err=%v", v, err)
+	}
+	return nil
 }
+
+// winBlockingIncrementDispatch parks every request; the helper process
+// holding it is killed by the test.
+func winBlockingIncrementDispatch(entered func()) DispatchHandler {
+	return IncrementDispatch(func(v uint64) (uint64, bool) {
+		entered()
+		select {}
+	})
+}
+
+// winHelperEntered reports, per helper server process, that its handler
+// holds a request.
+var winHelperEntered = map[*exec.Cmd]chan struct{}{}
 
 func winOpenPipeSilently(t *testing.T, service string) syscall.Handle {
 	t.Helper()
@@ -109,15 +110,12 @@ func winOpenPipeSilently(t *testing.T, service string) syscall.Handle {
 	if err != nil {
 		t.Fatalf("pipe name: %v", err)
 	}
-	for i := 0; i < 100; i++ {
-		h, err := syscall.CreateFile(&name[0], syscall.GENERIC_READ|syscall.GENERIC_WRITE, 0, nil, syscall.OPEN_EXISTING, 0, 0)
-		if err == nil {
-			return h
-		}
-		time.Sleep(20 * time.Millisecond)
+	// The server is listening, so one open must succeed.
+	h, err := syscall.CreateFile(&name[0], syscall.GENERIC_READ|syscall.GENERIC_WRITE, 0, nil, syscall.OPEN_EXISTING, 0, 0)
+	if err != nil {
+		t.Fatalf("could not open pipe for %s: %v", service, err)
 	}
-	t.Fatalf("could not open pipe for %s", service)
-	return syscall.InvalidHandle
+	return h
 }
 
 func winSpawnHelper(t *testing.T, mode, service string) *exec.Cmd {
@@ -132,16 +130,20 @@ func winSpawnHelper(t *testing.T, mode, service string) *exec.Cmd {
 		t.Fatalf("start helper: %v", err)
 	}
 	ready := make(chan bool, 1)
+	entered := make(chan struct{}, 1)
 	go func() {
 		sc := bufio.NewScanner(stdout)
 		for sc.Scan() {
 			if strings.Contains(sc.Text(), "HELPER_READY") {
 				ready <- true
-				return
+			}
+			if strings.Contains(sc.Text(), "HELPER_HANDLER_ENTERED") {
+				entered <- struct{}{}
 			}
 		}
-		ready <- false
+		close(ready)
 	}()
+	winHelperEntered[cmd] = entered
 	select {
 	case ok := <-ready:
 		if !ok {
@@ -164,22 +166,21 @@ func TestWinRobustnessHelperProcess(t *testing.T) {
 	mode, service, _ := strings.Cut(spec, ":")
 	switch mode {
 	case "shm_client":
+		// The server listens before the helper starts: one connect.
 		c := NewIncrementClient(winTestRunDir, service, testWinShmClientConfig())
-		for i := 0; i < 200 && !c.Ready(); i++ {
-			c.Refresh()
-			time.Sleep(10 * time.Millisecond)
-		}
+		c.Refresh()
 		if v, err := c.CallIncrementWithTimeout(1, 2000); err != nil || v != 2 {
 			fmt.Printf("HELPER_FAILED v=%d err=%v\n", v, err)
 			os.Exit(1)
 		}
 	case "shm_server":
-		startWinRobustServer(service, testWinShmServerConfig(), protocol.MethodIncrement, winSlowIncrementDispatch(60*time.Second), 2)
+		startWinRobustServer(service, testWinShmServerConfig(), protocol.MethodIncrement,
+			winBlockingIncrementDispatch(func() { fmt.Println("HELPER_HANDLER_ENTERED") }), 2)
 	default:
 		t.Fatalf("unknown helper mode %q", mode)
 	}
 	fmt.Println("HELPER_READY")
-	time.Sleep(600 * time.Second)
+	select {} // until the test kills this process
 }
 
 // K2: SHM server must release a session once its client crashes.
@@ -192,7 +193,9 @@ func TestWinRobustShmSessionReleasedAfterClientCrash(t *testing.T) {
 		_ = cmd.Process.Kill() // TerminateProcess
 		_ = cmd.Wait()
 	}
-	served := winServedWithin(svc, testWinShmClientConfig(), 8*time.Second)
+	// Both workers must notice their crashed clients and free the slots.
+	waitSessionExits(rs.server, 2)
+	served := winServedOnce(svc, testWinShmClientConfig())
 	rs.stopWithin(5 * time.Second)
 	if served != nil {
 		t.Errorf("after 2 crashed SHM clients on 2 workers, a new client must be served: %v", served)
@@ -205,10 +208,10 @@ func TestWinRobustSilentClientDoesNotBlockOtherClients(t *testing.T) {
 	rs := startWinRobustServer(svc, testWinServerConfig(), protocol.MethodIncrement, winSlowIncrementDispatch(0), 4)
 
 	silent := winOpenPipeSilently(t, svc)
-	time.Sleep(100 * time.Millisecond)
+	waitHandshakesStarted(rs.server, 1)
 	var served error = fmt.Errorf("did not finish")
 	finished := winWithin(5*time.Second, func() {
-		served = winServedWithin(svc, testWinClientConfig(), 5*time.Second)
+		served = winServedOnce(svc, testWinClientConfig())
 	})
 
 	syscall.CloseHandle(silent)
@@ -223,7 +226,7 @@ func TestWinRobustSilentClientDoesNotBlockShutdown(t *testing.T) {
 	rs := startWinRobustServer(svc, testWinServerConfig(), protocol.MethodIncrement, winSlowIncrementDispatch(0), 4)
 
 	silent := winOpenPipeSilently(t, svc)
-	time.Sleep(100 * time.Millisecond)
+	waitHandshakesStarted(rs.server, 1)
 	stopped := rs.stopWithin(3 * time.Second)
 
 	syscall.CloseHandle(silent)
@@ -241,9 +244,14 @@ func TestWinRobustSilentClientReleasedAtHandshakeDeadline(t *testing.T) {
 	silent := winOpenPipeSilently(t, svc)
 	defer syscall.CloseHandle(silent)
 	start := time.Now()
-	limit := time.Duration(protocol.ServerHandshakeTimeoutMs)*time.Millisecond + 4*time.Second
-	served := winServedWithin(svc, testWinClientConfig(), limit)
+	waitHandshakesStarted(rs.server, 1)
+	waitSessionExits(rs.server, 1)
 	elapsed := time.Since(start)
+	served := winServedOnce(svc, testWinClientConfig())
+	deadline := time.Duration(rs.server.timings.handshakeMs) * time.Millisecond
+	if elapsed < deadline {
+		t.Errorf("silent client released after %v, before the %v handshake deadline", elapsed, deadline)
+	}
 
 	rs.stopWithin(5 * time.Second)
 	if served != nil {
@@ -309,7 +317,15 @@ func TestWinRobustShutdownNotBlockedByNonReadingClient(t *testing.T) {
 	scfg := testWinServerConfig()
 	scfg.MaxRequestPayloadBytes = big
 	scfg.MaxResponsePayloadBytes = big
-	rs := startWinRobustServer(svc, scfg, protocol.MethodStringReverse, winStringReverseDispatchHandler(), 2)
+	// After the handler returns, the worker can only be writing the 4 MiB
+	// response, which blocks because the client never reads.
+	handled := make(chan struct{}, 1)
+	reverse := winStringReverseDispatchHandler()
+	rs := startWinRobustServer(svc, scfg, protocol.MethodStringReverse, func(req, resp []byte) (int, error) {
+		n, err := reverse(req, resp)
+		handled <- struct{}{}
+		return n, err
+	}, 2)
 
 	ccfg := testWinClientConfig()
 	ccfg.MaxRequestPayloadBytes = big
@@ -325,8 +341,7 @@ func TestWinRobustShutdownNotBlockedByNonReadingClient(t *testing.T) {
 	if err := session.Send(&hdr, payload[:n]); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	// Never read the response; give the worker time to block in WriteFile.
-	time.Sleep(500 * time.Millisecond)
+	waitClosed(handled, "string reverse handler")
 
 	stopped := rs.stopWithin(3 * time.Second)
 	session.Close()
@@ -376,7 +391,7 @@ func TestWinRobustShmClientNoticesCrashedServer(t *testing.T) {
 		_, err := c.CallIncrementWithTimeout(1, 10000)
 		result <- outcome{err, time.Since(start)}
 	}()
-	time.Sleep(500 * time.Millisecond) // request parked in the stalled handler
+	waitClosed(winHelperEntered[cmd], "helper server handler") // request parked in the stalled handler
 	_ = cmd.Process.Kill()
 	_ = cmd.Wait()
 
@@ -398,10 +413,7 @@ func TestWinRobustShmAttachStopsWhenServerClosesSession(t *testing.T) {
 	rs := startWinRobustServer(svc, testWinShmServerConfig(), protocol.MethodIncrement, winSlowIncrementDispatch(0), 1)
 
 	holder := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
-	for i := 0; i < 200 && !holder.Ready(); i++ {
-		holder.Refresh()
-		time.Sleep(10 * time.Millisecond)
-	}
+	holder.Refresh()
 	holderReady := holder.Ready()
 
 	refused := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
@@ -411,12 +423,8 @@ func TestWinRobustShmAttachStopsWhenServerClosesSession(t *testing.T) {
 	elapsed := time.Since(start)
 
 	holder.Close()
-	for i := 0; i < 300 && !refused.Ready(); i++ {
-		refused.Refresh()
-		if !refused.Ready() {
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	waitSessionExits(rs.server, 1)
+	refused.Refresh()
 	ready, usesShm := refused.Ready(), refused.shm != nil
 	refused.Close()
 	rs.stopWithin(5 * time.Second)

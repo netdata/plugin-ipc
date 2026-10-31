@@ -10,6 +10,7 @@
 #include "netipc/netipc_shm.h"
 #include "netipc/netipc_uds.h"
 #include "netipc/netipc_protocol.h"
+#include "test_sync.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -97,11 +98,11 @@ static void *shm_echo_server_thread(void *arg)
         TEST_RUN_DIR, ctx->service, 1, 4096, 4096, &shm);
     if (err != NIPC_SHM_OK) {
         fprintf(stderr, "shm server create failed: %d\n", err);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     /* Receive a request. */
     uint8_t msg[65536];
@@ -110,7 +111,7 @@ static void *shm_echo_server_thread(void *arg)
     if (err != NIPC_SHM_OK) {
         fprintf(stderr, "shm server receive failed: %d\n", err);
         nipc_shm_destroy(&shm);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
@@ -142,7 +143,7 @@ static void *shm_echo_server_thread(void *arg)
     }
 
     nipc_shm_destroy(&shm);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -160,11 +161,7 @@ static void test_direct_roundtrip(void)
     pthread_create(&tid, NULL, shm_echo_server_thread, &sctx);
 
     /* Wait for server to be ready. */
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 2000) {
-        usleep(500);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server created SHM region", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Client attaches. */
@@ -232,6 +229,7 @@ typedef struct {
     int ready;
     int done;
     int shm_created;
+    int region_attempted; /* __atomic */
     int echo_ok;
 } hybrid_server_ctx_t;
 
@@ -259,17 +257,17 @@ static void *hybrid_server_thread(void *arg)
                                              &scfg, &listener);
     if (uerr != NIPC_UDS_OK) {
         fprintf(stderr, "hybrid server listen failed: %d\n", uerr);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     nipc_uds_session_t session;
     uerr = nipc_uds_accept(&listener, 1, &session);
     if (uerr != NIPC_UDS_OK) {
         nipc_uds_close_listener(&listener);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
@@ -282,10 +280,12 @@ static void *hybrid_server_thread(void *arg)
             TEST_RUN_DIR, ctx->service, session.session_id,
             4096, 4096, &shm);
         if (serr == NIPC_SHM_OK) {
-            ctx->shm_created = 1;
+            test_flag_set(&ctx->shm_created);
             use_shm = 1;
         }
     }
+    /* Released either way, so the client never waits for a missing region. */
+    test_flag_set(&ctx->region_attempted);
 
     if (use_shm) {
         /* Echo via SHM. */
@@ -317,7 +317,7 @@ static void *hybrid_server_thread(void *arg)
 
     nipc_uds_close_session(&session);
     nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -334,11 +334,7 @@ static void test_negotiated_shm(void)
     pthread_t tid;
     pthread_create(&tid, NULL, hybrid_server_thread, &sctx);
 
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 2000) {
-        usleep(500);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Client connects via UDS with SHM_HYBRID support. */
@@ -361,25 +357,12 @@ static void test_negotiated_shm(void)
         check("selected profile is SHM_HYBRID",
               session.selected_profile == NIPC_PROFILE_SHM_HYBRID);
 
-        /* Attach to SHM (with retry -- server creates region after
-         * the UDS handshake, so the file may not exist yet or the
-         * header may not be written yet). */
+        /* The server creates the region after the UDS handshake. */
+        check("server tried to create the SHM region",
+              test_flag_wait(&sctx.region_attempted));
         nipc_shm_ctx_t client_shm;
-        nipc_shm_error_t serr = NIPC_SHM_ERR_NOT_READY;
-        for (int i = 0; i < 500; i++) {
-            serr = nipc_shm_client_attach(TEST_RUN_DIR, svc,
-                                         session.session_id, &client_shm);
-            if (serr == NIPC_SHM_OK)
-                break;
-            /* Retryable: file doesn't exist, header not ready, or
-             * header not yet published (magic is still zero). */
-            if (serr == NIPC_SHM_ERR_NOT_READY ||
-                serr == NIPC_SHM_ERR_OPEN ||
-                serr == NIPC_SHM_ERR_BAD_MAGIC)
-                usleep(10000);
-            else
-                break; /* unexpected error */
-        }
+        nipc_shm_error_t serr = nipc_shm_client_attach(TEST_RUN_DIR, svc,
+                                                       session.session_id, &client_shm);
         check("client SHM attach", serr == NIPC_SHM_OK);
 
         if (serr == NIPC_SHM_OK) {
@@ -451,10 +434,10 @@ static void *baseline_only_server_thread(void *arg)
     nipc_uds_error_t uerr = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
                                              &scfg, &listener);
     if (uerr != NIPC_UDS_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     nipc_uds_session_t session;
     uerr = nipc_uds_accept(&listener, 1, &session);
@@ -465,7 +448,7 @@ static void *baseline_only_server_thread(void *arg)
     }
 
     nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -482,11 +465,7 @@ static void test_profile_fallback(void)
     pthread_t tid;
     pthread_create(&tid, NULL, baseline_only_server_thread, &sctx);
 
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 2000) {
-        usleep(500);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Client supports both, but server only supports baseline. */
@@ -602,10 +581,10 @@ static void *large_msg_server_thread(void *arg)
     nipc_shm_error_t err = nipc_shm_server_create(
         TEST_RUN_DIR, ctx->service, 1, 65536, 65536, &shm);
     if (err != NIPC_SHM_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     uint8_t *msg = malloc(65536);
     size_t msg_len;
@@ -632,7 +611,7 @@ static void *large_msg_server_thread(void *arg)
     free(msg);
 
     nipc_shm_destroy(&shm);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -649,11 +628,7 @@ static void test_large_message(void)
     pthread_t tid;
     pthread_create(&tid, NULL, large_msg_server_thread, &sctx);
 
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 2000) {
-        usleep(500);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_shm_ctx_t client;
@@ -804,10 +779,10 @@ static void *multi_rt_server_thread(void *arg)
     nipc_shm_error_t err = nipc_shm_server_create(
         TEST_RUN_DIR, ctx->service, 1, 4096, 4096, &shm);
     if (err != NIPC_SHM_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     int all_ok = 1;
     uint8_t recv_msg[65536];
@@ -841,7 +816,7 @@ static void *multi_rt_server_thread(void *arg)
 
     ctx->echo_ok = all_ok;
     nipc_shm_destroy(&shm);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -858,11 +833,7 @@ static void test_multiple_roundtrips(void)
     pthread_t tid;
     pthread_create(&tid, NULL, multi_rt_server_thread, &sctx);
 
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 2000) {
-        usleep(500);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_shm_ctx_t client;
@@ -1344,10 +1315,10 @@ static void *small_recv_server_thread(void *arg)
     nipc_shm_error_t err = nipc_shm_server_create(
         TEST_RUN_DIR, ctx->service, 1, 4096, 4096, &shm);
     if (err != NIPC_SHM_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     /* Receive into a small buffer to trigger MSG_TOO_LARGE */
     uint8_t msg[32]; /* very small */
@@ -1357,7 +1328,7 @@ static void *small_recv_server_thread(void *arg)
     ctx->echo_ok = (err == NIPC_SHM_ERR_MSG_TOO_LARGE) ? 1 : 0;
 
     nipc_shm_destroy(&shm);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -1374,12 +1345,7 @@ static void test_shm_receive_msg_too_large(void)
     pthread_t tid;
     pthread_create(&tid, NULL, small_recv_server_thread, &sctx);
 
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) &&
-           !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 2000) {
-        usleep(500);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_shm_ctx_t client;

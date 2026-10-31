@@ -123,11 +123,12 @@ static bool server_stop_requested(nipc_managed_server_t *server) {
 }
 
 /* Takes sessions_lock and keeps it on return. When all workers are busy,
- * waits up to SERVER_SLOT_WAIT_MS for one to finish, so a client that
+ * waits up to two poll slices for one to finish (a worker whose client left
+ * exits within one), so a client that
  * reconnects right after closing is not refused while its old worker exits.
  * The loop has nothing else to serve while full, so waiting costs nothing. */
 static bool server_wait_for_slot_locked(nipc_managed_server_t *server) {
-  ULONGLONG deadline = GetTickCount64() + SERVER_SLOT_WAIT_MS;
+  ULONGLONG deadline = GetTickCount64() + 2u * (ULONGLONG)server->poll_ms;
   EnterCriticalSection(&server->sessions_lock);
   for (;;) {
     nipc_service_win_server_reap_sessions_locked(server);
@@ -277,7 +278,7 @@ void nipc_server_destroy(nipc_managed_server_t *server) {
   server_stop_accepting(server);
 
   if (server->sessions) {
-    (void)nipc_service_win_server_wait_sessions(server, SERVER_STOP_GRACE_MS);
+    (void)nipc_service_win_server_wait_sessions(server, server->stop_grace_ms);
     server_join_sessions(server);
   }
 

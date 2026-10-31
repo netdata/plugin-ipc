@@ -7,6 +7,7 @@
 
 #include "netipc/netipc_uds.h"
 #include "netipc/netipc_protocol.h"
+#include "test_sync.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -253,11 +254,11 @@ static void *echo_server_thread(void *arg)
                                             &ctx->config, &listener);
     if (err != NIPC_UDS_OK) {
         fprintf(stderr, "server listen failed: %d\n", err);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     for (int c = 0; c < ctx->accept_count; c++) {
         nipc_uds_session_t session;
@@ -292,7 +293,7 @@ static void *echo_server_thread(void *arg)
     }
 
     nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -308,7 +309,7 @@ static void *malformed_ack_server_thread(void *arg)
 
     lfd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
     if (lfd < 0) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
@@ -320,11 +321,11 @@ static void *malformed_ack_server_thread(void *arg)
         listen(lfd, 4) != 0) {
         close(lfd);
         unlink(path);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     cfd = accept(lfd, NULL, NULL);
     if (cfd >= 0) {
@@ -496,7 +497,7 @@ static void *malformed_ack_server_thread(void *arg)
 
     close(lfd);
     unlink(path);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -510,10 +511,10 @@ static void *accept_result_server_thread(void *arg)
                                            &ctx->config, &listener);
     if (err != NIPC_UDS_OK) {
         ctx->accept_err = err;
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     nipc_uds_session_t session;
     ctx->accept_err = nipc_uds_accept(&listener, 1, &session);
@@ -521,7 +522,7 @@ static void *accept_result_server_thread(void *arg)
         nipc_uds_close_session(&session);
 
     nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -532,10 +533,10 @@ static void *raw_response_server_thread(void *arg)
     nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
                                            &ctx->config, &listener);
     if (err != NIPC_UDS_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     nipc_uds_session_t session;
     err = nipc_uds_accept(&listener, 1, &session);
@@ -643,7 +644,7 @@ static void *raw_response_server_thread(void *arg)
     }
 
     nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -656,11 +657,7 @@ static pthread_t start_echo_server(server_ctx_t *ctx)
     pthread_create(&tid, NULL, echo_server_thread, ctx);
 
     /* Wait for the server to be ready */
-    int retries = 0;
-    while (!__atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE) && retries < 1000) {
-        usleep(1000);
-        retries++;
-    }
+    (void)test_flag_wait_any(&ctx->ready, &ctx->done);
     return tid;
 }
 
@@ -884,16 +881,16 @@ static void *chunked_server_thread(void *arg)
     nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
                                             &ctx->config, &listener);
     if (err != NIPC_UDS_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     nipc_uds_session_t session;
     err = nipc_uds_accept(&listener, 0, &session);
     if (err != NIPC_UDS_OK) {
         nipc_uds_close_listener(&listener);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
@@ -914,7 +911,7 @@ static void *chunked_server_thread(void *arg)
 
     nipc_uds_close_session(&session);
     nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -942,11 +939,7 @@ static void test_chunking(void)
     __atomic_store_n(&sctx.done, 0, __ATOMIC_RELAXED);
     pthread_create(&tid, NULL, chunked_server_thread, &sctx);
 
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 1000) {
-        usleep(1000);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("chunked server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_uds_client_config_t ccfg = default_client_config();
@@ -1218,10 +1211,10 @@ static void *disconnect_server_thread(void *arg)
     nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
                                             &ctx->config, &listener);
     if (err != NIPC_UDS_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     nipc_uds_session_t session;
     err = nipc_uds_accept(&listener, 0, &session);
@@ -1236,7 +1229,7 @@ static void *disconnect_server_thread(void *arg)
     }
 
     nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -1258,11 +1251,7 @@ static void test_disconnect_inflight(void)
     __atomic_store_n(&sctx.done, 0, __ATOMIC_RELAXED);
     pthread_create(&tid, NULL, disconnect_server_thread, &sctx);
 
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 1000) {
-        usleep(1000);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_uds_client_config_t ccfg = default_client_config();
@@ -1888,16 +1877,16 @@ static void *chunked_echo_server_thread(void *arg)
     nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
                                             &ctx->config, &listener);
     if (err != NIPC_UDS_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     nipc_uds_session_t session;
     err = nipc_uds_accept(&listener, 0, &session);
     if (err != NIPC_UDS_OK) {
         nipc_uds_close_listener(&listener);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
@@ -1923,7 +1912,7 @@ static void *chunked_echo_server_thread(void *arg)
 
     nipc_uds_close_session(&session);
     nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -1954,12 +1943,7 @@ static void test_pipeline_chunked(void)
     __atomic_store_n(&sctx.done, 0, __ATOMIC_RELAXED);
     pthread_create(&tid, NULL, chunked_echo_server_thread, &sctx);
 
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) &&
-           !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 1000) {
-        usleep(1000);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("chunked pipeline server ready",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -2035,10 +2019,10 @@ static void *wrong_kind_server(void *arg)
     nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
                                              &scfg, &listener);
     if (err != NIPC_UDS_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     nipc_uds_session_t session;
     err = nipc_uds_accept(&listener, 1, &session);
@@ -2047,7 +2031,7 @@ static void *wrong_kind_server(void *arg)
         nipc_uds_close_session(&session);
 
     nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -2067,10 +2051,7 @@ static void test_handshake_wrong_kind(void)
     pthread_t tid;
     pthread_create(&tid, NULL, wrong_kind_server, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Connect raw socket and send a RESPONSE instead of HELLO */
@@ -2128,10 +2109,7 @@ static void test_inflight_duplicate(void)
     pthread_t tid;
     pthread_create(&tid, NULL, echo_server_thread, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Connect client */
@@ -2175,10 +2153,10 @@ static void *oversized_server(void *arg)
     nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
                                            &ctx->config, &listener);
     if (err != NIPC_UDS_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     nipc_uds_session_t session;
     err = nipc_uds_accept(&listener, 1, &session);
@@ -2205,7 +2183,7 @@ static void *oversized_server(void *arg)
         nipc_uds_close_session(&session);
     }
     nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -2229,10 +2207,7 @@ static void test_directional_limit_negotiation(void)
     pthread_t tid;
     pthread_create(&tid, NULL, oversized_server, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Client requests large request capacity but advertises small response capacity. */
@@ -2306,10 +2281,7 @@ static void test_receive_payload_exceeds_limit(void)
     pthread_t tid;
     pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("raw-response server ready",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -2359,10 +2331,10 @@ static void *wrong_msgid_server(void *arg)
     nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
                                              &scfg, &listener);
     if (err != NIPC_UDS_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     nipc_uds_session_t session;
     err = nipc_uds_accept(&listener, 1, &session);
@@ -2387,7 +2359,7 @@ static void *wrong_msgid_server(void *arg)
         nipc_uds_close_session(&session);
     }
     nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -2407,10 +2379,7 @@ static void test_receive_unknown_message_id(void)
     pthread_t tid;
     pthread_create(&tid, NULL, wrong_msgid_server, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_uds_client_config_t ccfg = default_client_config();
@@ -2508,10 +2477,7 @@ static void test_batch_corrupt_dir(void)
     pthread_t tid;
     pthread_create(&tid, NULL, echo_server_thread, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_uds_client_config_t ccfg = default_client_config();
@@ -2612,10 +2578,7 @@ static void test_connect_malformed_hello_ack(void)
         pthread_t tid;
         pthread_create(&tid, NULL, malformed_ack_server_thread, &sctx);
 
-        for (int j = 0; j < 2000
-             && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-             && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); j++)
-            usleep(500);
+        (void)test_flag_wait_any(&sctx.ready, &sctx.done);
         check("malformed-ack server ready",
               __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -2652,10 +2615,7 @@ static void test_accept_malformed_hello_payload(void)
     pthread_t tid;
     pthread_create(&tid, NULL, accept_result_server_thread, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("accept-result server ready",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -2712,10 +2672,7 @@ static void test_accept_incompatible_hello_version(void)
     pthread_t tid;
     pthread_create(&tid, NULL, accept_result_server_thread, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("accept-result server ready",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -2785,10 +2742,7 @@ static void test_accept_incompatible_hello_layout(void)
     pthread_t tid;
     pthread_create(&tid, NULL, accept_result_server_thread, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("accept-result server ready",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -2862,10 +2816,7 @@ static void test_receive_short_packet_protocol(void)
     pthread_t tid;
     pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("raw-response server ready",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -2919,10 +2870,7 @@ static void test_receive_trailing_packet_protocol(void)
     pthread_t tid;
     pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("raw-response trailing server ready",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -2976,10 +2924,7 @@ static void test_receive_batch_dir_too_short(void)
     pthread_t tid;
     pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("raw-response server ready",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -3037,10 +2982,7 @@ static void test_receive_short_continuation_packet(void)
     pthread_t tid;
     pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("raw-response server ready",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -3099,10 +3041,7 @@ static void test_receive_item_count_exceeds_limit(void)
     pthread_t tid;
     pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("raw-response server ready",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -3160,10 +3099,7 @@ static void test_receive_bad_continuation_header(void)
     pthread_t tid;
     pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("raw-response server ready",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -3224,10 +3160,7 @@ static void test_receive_missing_continuation(void)
     pthread_t tid;
     pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("raw-response server ready",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 

@@ -18,11 +18,12 @@
 #include <time.h>
 #include <unistd.h>
 
-int nipc_service_posix_poll_with_shutdown(int fd, bool *running)
+int nipc_service_posix_poll_with_shutdown(int fd, bool *running,
+                                          uint32_t poll_ms)
 {
     while (__atomic_load_n(running, __ATOMIC_RELAXED)) {
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
-        int ret = poll(&pfd, 1, SERVER_POLL_TIMEOUT_MS);
+        int ret = poll(&pfd, 1, (int)poll_ms);
 
         if (ret < 0) {
             if (errno == EINTR)
@@ -120,7 +121,7 @@ static void server_handle_session(nipc_managed_server_t *server,
         if (shm) {
             size_t msg_len;
             nipc_shm_error_t serr = nipc_shm_receive(shm, recv_buf, recv_size,
-                                                       &msg_len, SERVER_POLL_TIMEOUT_MS);
+                                                       &msg_len, server->poll_ms);
             if (serr == NIPC_SHM_ERR_TIMEOUT) {
                 if (nipc_service_posix_peer_disconnected(session->fd))
                     break;
@@ -139,7 +140,8 @@ static void server_handle_session(nipc_managed_server_t *server,
             payload_len = msg_len - NIPC_HEADER_LEN;
         } else {
             /* Poll the session fd before blocking on receive */
-            int pr = nipc_service_posix_poll_with_shutdown(session->fd, &server->running);
+            int pr = nipc_service_posix_poll_with_shutdown(session->fd, &server->running,
+                                                           server->poll_ms);
             if (pr <= 0)
                 break; /* shutdown or error */
 
@@ -337,9 +339,9 @@ static bool server_wait_hello(nipc_managed_server_t *server, int fd)
 {
     uint32_t waited = 0;
     while (__atomic_load_n(&server->running, __ATOMIC_RELAXED) &&
-           waited < NIPC_SERVER_HANDSHAKE_TIMEOUT_MS) {
+           waited < server->handshake_ms) {
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
-        int ret = poll(&pfd, 1, SERVER_POLL_TIMEOUT_MS);
+        int ret = poll(&pfd, 1, (int)server->poll_ms);
         if (ret < 0) {
             if (errno == EINTR)
                 continue;
@@ -347,7 +349,7 @@ static bool server_wait_hello(nipc_managed_server_t *server, int fd)
         }
         if (ret > 0)
             return true;
-        waited += SERVER_POLL_TIMEOUT_MS;
+        waited += server->poll_ms;
     }
     return false;
 }
@@ -364,6 +366,9 @@ static bool server_session_handshake(nipc_managed_server_t *server,
         return false;
     }
 
+    if (server->test_event_hook)
+        server->test_event_hook(server->test_event_user,
+                                NIPC_SERVER_TEST_EVENT_HANDSHAKE_STARTED);
     if (!server_wait_hello(server, fd)) {
         server_destroy_precreated_shm(&shm);
         close(fd);
@@ -372,7 +377,7 @@ static bool server_session_handshake(nipc_managed_server_t *server,
 
     /* HELLO is readable, so this does not block on the client. */
     nipc_uds_session_t session;
-    if (nipc_uds_accept_handshake(fd, &cfg, sctx->id, SERVER_POLL_TIMEOUT_MS,
+    if (nipc_uds_accept_handshake(fd, &cfg, sctx->id, server->poll_ms,
                                   &session) != NIPC_UDS_OK) {
         server_destroy_precreated_shm(&shm);
         return false;
@@ -445,6 +450,10 @@ void *nipc_service_posix_session_handler_thread(void *arg)
      * can join this thread and free sctx.  Do NOT remove from the
      * tracking array here — the reap/destroy path owns that. */
     __atomic_store_n(&sctx->active, false, __ATOMIC_RELEASE);
+    /* sctx may be freed from here on; report through the server only. */
+    if (server->test_event_hook)
+        server->test_event_hook(server->test_event_user,
+                                NIPC_SERVER_TEST_EVENT_SESSION_EXITED);
     return NULL;
 }
 

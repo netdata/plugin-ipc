@@ -25,29 +25,33 @@ fn within<T: Send + 'static>(
     (rx.recv_timeout(limit).ok(), handle)
 }
 
-/// Connect and complete one increment call, retrying until `limit` elapses.
-fn served_within(service: &str, config: ClientConfig, limit: Duration) -> Result<(), String> {
-    let deadline = Instant::now() + limit;
-    let mut last = String::from("never connected");
-    while Instant::now() < deadline {
-        let mut client = increment_client(service, config.clone());
-        client.refresh();
-        if client.ready() {
-            match client.call_increment_with_timeout(1, 1000) {
-                Ok(2) => {
-                    client.close();
-                    return Ok(());
-                }
-                Ok(v) => last = format!("unexpected value {v}"),
-                Err(e) => last = format!("call error {e:?}"),
-            }
-        } else {
-            last = format!("state {:?}", client.state);
+/// Connect and complete one increment call. The server listens before tests
+/// connect and a slot is free by then, so one attempt must succeed.
+fn served_once(service: &str, config: ClientConfig) -> Result<(), String> {
+    let mut client = increment_client(service, config);
+    client.refresh();
+    let result = if client.ready() {
+        match client.call_increment_with_timeout(1, 1000) {
+            Ok(2) => Ok(()),
+            Ok(v) => Err(format!("unexpected value {v}")),
+            Err(e) => Err(format!("call error {e:?}")),
         }
-        client.close();
-        thread::sleep(Duration::from_millis(50));
-    }
-    Err(last)
+    } else {
+        Err(format!("state {:?}", client.state))
+    };
+    client.close();
+    result
+}
+
+/// Increment handler that reports entry, then blocks until its process is
+/// killed.
+fn blocking_increment_dispatch(entered: impl Fn() + Send + Sync + 'static) -> DispatchHandler {
+    increment_dispatch(Arc::new(move |_v| {
+        entered();
+        loop {
+            thread::park();
+        }
+    }))
 }
 
 fn shm_files(service: &str) -> Vec<String> {
@@ -60,17 +64,6 @@ fn shm_files(service: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn wait_no_shm_files(service: &str, limit: Duration) -> Vec<String> {
-    let deadline = Instant::now() + limit;
-    loop {
-        let files = shm_files(service);
-        if files.is_empty() || Instant::now() >= deadline {
-            return files;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
 }
 
 /// Connect a raw SOCK_SEQPACKET socket to the service without sending HELLO.
@@ -95,38 +88,45 @@ fn silent_connect(service: &str) -> RawFd {
     fd
 }
 
-/// Start a managed server on its own thread. Returns the running flag used to
-/// stop it (on POSIX, `stop()` only clears this flag) and the thread handle.
+/// Start a managed server on its own thread with test timings. Dropping or
+/// stopping the result stops the server.
 fn start_server(
     service: &str,
     config: ServerConfig,
     method: u16,
     handler: DispatchHandler,
     workers: usize,
-) -> (Arc<AtomicBool>, thread::JoinHandle<()>) {
+) -> server::RunningTestServer {
     ensure_run_dir();
     cleanup_all(service);
-    let mut server = ManagedServer::with_workers(
+    ManagedServer::with_workers(
         TEST_RUN_DIR,
         service,
         config,
         method,
         Some(handler),
         workers,
-    );
-    let running = server.running_flag();
-    let handle = thread::spawn(move || {
-        let _ = server.run();
-    });
-    wait_for_listener_bind(service);
-    (running, handle)
+    )
+    .spawn_for_test()
 }
 
-fn stop(running: &AtomicBool) {
-    running.store(false, Ordering::Release);
+/// Stop `server`; returns whether `run()` returned within `limit`.
+fn stop_within(mut server: server::RunningTestServer, limit: Duration) -> bool {
+    let (stopped, waiter) = within(limit, move || server.stop());
+    let finished = stopped.is_some();
+    if finished {
+        let _ = waiter.join();
+    }
+    finished
 }
 
-fn spawn_helper(mode: &str, service: &str) -> Child {
+/// A helper process and the signal it sends when its server handler starts.
+struct Helper {
+    child: Child,
+    handler_entered: mpsc::Receiver<()>,
+}
+
+fn spawn_helper(mode: &str, service: &str) -> Helper {
     let mut child = Command::new(std::env::current_exe().expect("current_exe"))
         .args([HELPER_TEST, "--exact", "--nocapture", "--test-threads=1"])
         .env(HELPER_ENV, format!("{mode}:{service}"))
@@ -135,14 +135,27 @@ fn spawn_helper(mode: &str, service: &str) -> Child {
         .spawn()
         .expect("spawn helper");
     let stdout = child.stdout.take().expect("helper stdout");
-    let (ready, _h) = within(Duration::from_secs(10), move || {
-        BufReader::new(stdout)
-            .lines()
-            .map_while(Result::ok)
-            .any(|l| l.contains("HELPER_READY"))
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (entered_tx, handler_entered) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if line.contains("HELPER_READY") {
+                let _ = ready_tx.send(());
+            }
+            if line.contains("HELPER_HANDLER_ENTERED") {
+                let _ = entered_tx.send(());
+            }
+        }
     });
-    assert_eq!(ready, Some(true), "helper {mode} did not become ready");
-    child
+    if ready_rx.recv_timeout(server::TEST_WAIT_LIMIT).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("helper {mode} did not become ready");
+    }
+    Helper {
+        child,
+        handler_entered,
+    }
 }
 
 /// Child-process entry point. Inert unless spawned by `spawn_helper`.
@@ -158,13 +171,13 @@ fn robustness_helper_process() {
             connect_ready(&mut client);
             assert_eq!(client.call_increment_with_timeout(1, 2000), Ok(2));
             println!("HELPER_READY");
-            thread::sleep(Duration::from_secs(600));
+            // Until the test kills this process.
+            loop {
+                thread::park();
+            }
         }
         "shm_server" | "uds_server" => {
-            let handler = increment_dispatch(Arc::new(|v| {
-                thread::sleep(Duration::from_secs(60));
-                Some(v + 1)
-            }));
+            let handler = blocking_increment_dispatch(|| println!("HELPER_HANDLER_ENTERED"));
             let config = if mode == "shm_server" {
                 shm_server_config()
             } else {
@@ -172,7 +185,9 @@ fn robustness_helper_process() {
             };
             let _server = start_server(service, config, METHOD_INCREMENT, handler, 2);
             println!("HELPER_READY");
-            thread::sleep(Duration::from_secs(600));
+            loop {
+                thread::park();
+            }
         }
         other => panic!("unknown helper mode {other}"),
     }
@@ -185,7 +200,7 @@ fn robustness_helper_process() {
 #[test]
 fn test_robust_shm_sessions_released_after_clean_close() {
     let svc = unique_service("rs_rob_shm_clean");
-    let (server, handle) = start_server(
+    let server = start_server(
         &svc,
         shm_server_config(),
         METHOD_INCREMENT,
@@ -193,16 +208,18 @@ fn test_robust_shm_sessions_released_after_clean_close() {
         2,
     );
 
+    // Each worker must exit and remove its region once its client closes;
+    // a leaked session fails wait_session_exits loudly.
     let mut failures = Vec::new();
     for i in 0..5 {
-        if let Err(e) = served_within(&svc, shm_client_config(), Duration::from_secs(3)) {
+        if let Err(e) = served_once(&svc, shm_client_config()) {
             failures.push(format!("client {i}: {e}"));
         }
+        server.events.wait_session_exits(1);
     }
-    let leftover = wait_no_shm_files(&svc, Duration::from_secs(2));
+    let leftover = shm_files(&svc);
 
-    stop(&server);
-    let _ = handle.join();
+    stop_within(server, Duration::from_secs(5));
     cleanup_all(&svc);
     assert!(
         failures.is_empty(),
@@ -214,7 +231,7 @@ fn test_robust_shm_sessions_released_after_clean_close() {
 #[test]
 fn test_robust_shm_sessions_released_after_client_crash() {
     let svc = unique_service("rs_rob_shm_crash");
-    let (server, handle) = start_server(
+    let server = start_server(
         &svc,
         shm_server_config(),
         METHOD_INCREMENT,
@@ -223,15 +240,17 @@ fn test_robust_shm_sessions_released_after_client_crash() {
     );
 
     for _ in 0..2 {
-        let mut child = spawn_helper("shm_client", &svc);
-        let _ = child.kill(); // SIGKILL
-        let _ = child.wait();
+        let mut helper = spawn_helper("shm_client", &svc);
+        let _ = helper.child.kill(); // SIGKILL
+        let _ = helper.child.wait();
     }
-    let served = served_within(&svc, shm_client_config(), Duration::from_secs(3));
-    let leftover = wait_no_shm_files(&svc, Duration::from_secs(2));
+    // Both workers must notice their crashed clients and free the slots.
+    server.events.wait_session_exits(2);
+    let served = served_once(&svc, shm_client_config());
+    server.events.wait_session_exits(1);
+    let leftover = shm_files(&svc);
 
-    stop(&server);
-    let _ = handle.join();
+    stop_within(server, Duration::from_secs(5));
     cleanup_all(&svc);
     assert!(
         served.is_ok(),
@@ -248,7 +267,7 @@ fn test_robust_shm_sessions_released_after_client_crash() {
 #[test]
 fn test_robust_silent_client_does_not_block_other_clients() {
     let svc = unique_service("rs_rob_silent");
-    let (server, handle) = start_server(
+    let server = start_server(
         &svc,
         server_config(),
         METHOD_INCREMENT,
@@ -257,16 +276,15 @@ fn test_robust_silent_client_does_not_block_other_clients() {
     );
 
     let silent = silent_connect(&svc);
-    thread::sleep(Duration::from_millis(100));
+    server.events.wait_handshakes_started(1);
     let svc2 = svc.clone();
     let (served, worker) = within(Duration::from_secs(5), move || {
-        served_within(&svc2, client_config(), Duration::from_secs(5))
+        served_once(&svc2, client_config())
     });
 
     unsafe { libc::close(silent) };
     let _ = worker.join();
-    stop(&server);
-    let _ = handle.join();
+    stop_within(server, Duration::from_secs(5));
     cleanup_all(&svc);
     assert!(
         matches!(served, Some(Ok(()))),
@@ -278,7 +296,7 @@ fn test_robust_silent_client_does_not_block_other_clients() {
 #[test]
 fn test_robust_silent_client_released_at_handshake_deadline() {
     let svc = unique_service("rs_rob_silent_deadline");
-    let (server, handle) = start_server(
+    let server = start_server(
         &svc,
         server_config(),
         METHOD_INCREMENT,
@@ -287,16 +305,22 @@ fn test_robust_silent_client_released_at_handshake_deadline() {
     );
 
     let silent = silent_connect(&svc);
-    let limit =
-        Duration::from_millis(u64::from(crate::protocol::SERVER_HANDSHAKE_TIMEOUT_MS) + 4000);
-    let served = served_within(&svc, client_config(), limit);
+    let start = Instant::now();
+    server.events.wait_handshakes_started(1);
+    server.events.wait_session_exits(1);
+    let elapsed = start.elapsed();
+    let served = served_once(&svc, client_config());
 
     let mut ch = 0u8;
     let n = unsafe { libc::recv(silent, (&mut ch as *mut u8).cast(), 1, libc::MSG_DONTWAIT) };
     unsafe { libc::close(silent) };
-    stop(&server);
-    let _ = handle.join();
+    stop_within(server, Duration::from_secs(5));
     cleanup_all(&svc);
+    let deadline = server::TEST_SERVER_TIMINGS.handshake_ms;
+    assert!(
+        elapsed >= Duration::from_millis(u64::from(deadline)),
+        "silent client released after {elapsed:?}, before the {deadline} ms handshake deadline"
+    );
     assert!(
         served.is_ok(),
         "the only worker must be freed once the silent client misses the handshake deadline: {served:?}"
@@ -310,7 +334,7 @@ fn test_robust_silent_client_released_at_handshake_deadline() {
 #[test]
 fn test_robust_silent_client_does_not_block_shutdown() {
     let svc = unique_service("rs_rob_silent_stop");
-    let (server, handle) = start_server(
+    let server = start_server(
         &svc,
         server_config(),
         METHOD_INCREMENT,
@@ -319,15 +343,13 @@ fn test_robust_silent_client_does_not_block_shutdown() {
     );
 
     let silent = silent_connect(&svc);
-    thread::sleep(Duration::from_millis(100));
-    stop(&server);
-    let (joined, waiter) = within(Duration::from_secs(3), move || handle.join().is_ok());
+    server.events.wait_handshakes_started(1);
+    let joined = stop_within(server, Duration::from_secs(3));
 
     unsafe { libc::close(silent) };
-    let _ = waiter.join();
     cleanup_all(&svc);
     assert!(
-        joined.is_some(),
+        joined,
         "server run() must return within 3s of stop() while a silent client is connected"
     );
 }
@@ -371,10 +393,11 @@ fn test_robust_client_bounded_when_server_never_sends_hello_ack() {
     ensure_run_dir();
     cleanup_all(&svc);
     let listener = raw_listener_fd_for_service(&svc);
+    let (release_tx, release_rx) = mpsc::channel::<()>();
     let acceptor = thread::spawn(move || {
         let fd = unsafe { libc::accept(listener, std::ptr::null_mut(), std::ptr::null_mut()) };
-        // Hold the session open without replying until the listener goes away.
-        thread::sleep(Duration::from_secs(8));
+        // Hold the session open without replying until the test releases it.
+        let _ = release_rx.recv();
         if fd >= 0 {
             unsafe { libc::close(fd) };
         }
@@ -391,6 +414,7 @@ fn test_robust_client_bounded_when_server_never_sends_hello_ack() {
         r
     });
 
+    drop(release_tx);
     let _ = acceptor.join();
     let _ = worker.join();
     cleanup_all(&svc);
@@ -412,7 +436,7 @@ fn test_robust_uds_call_honors_timeout_longer_than_100ms() {
         thread::sleep(Duration::from_millis(300));
         Some(v + 1)
     }));
-    let (server, handle) = start_server(&svc, server_config(), METHOD_INCREMENT, handler, 2);
+    let server = start_server(&svc, server_config(), METHOD_INCREMENT, handler, 2);
 
     let mut client = increment_client(&svc, client_config());
     connect_ready(&mut client);
@@ -421,8 +445,7 @@ fn test_robust_uds_call_honors_timeout_longer_than_100ms() {
     let elapsed = start.elapsed();
     client.close();
 
-    stop(&server);
-    let _ = handle.join();
+    stop_within(server, Duration::from_secs(5));
     cleanup_all(&svc);
     assert_eq!(
         result,
@@ -446,13 +469,17 @@ fn test_robust_shutdown_not_blocked_by_non_reading_client() {
     // Explicit packet size isolates this test from the default-size issue
     // covered by test_robust_default_packet_size_carries_large_message.
     scfg.packet_size = 65536;
-    let (server, handle) = start_server(
-        &svc,
-        scfg,
-        METHOD_STRING_REVERSE,
-        string_reverse_dispatch_handler(),
-        2,
-    );
+    // After the handler returns, the worker can only be sending the 4 MiB
+    // response, which blocks because the client never reads.
+    let (handled_tx, handled_rx) = mpsc::channel();
+    let handled_tx = std::sync::Mutex::new(handled_tx);
+    let reverse = string_reverse_handler();
+    let handler = string_reverse_dispatch(Arc::new(move |s: &str| {
+        let out = reverse(s);
+        let _ = handled_tx.lock().unwrap().send(());
+        out
+    }));
+    let server = start_server(&svc, scfg, METHOD_STRING_REVERSE, handler, 2);
 
     let mut ccfg = client_config();
     ccfg.max_request_payload_bytes = BIG;
@@ -471,17 +498,17 @@ fn test_robust_shutdown_not_blocked_by_non_reading_client() {
         ..Header::default()
     };
     session.send(&mut hdr, &payload[..n]).expect("send request");
-    // Never read the response; give the worker time to block in send.
-    thread::sleep(Duration::from_millis(500));
+    // Never read the response.
+    handled_rx
+        .recv_timeout(server::TEST_WAIT_LIMIT)
+        .expect("string reverse handler ran");
 
-    stop(&server);
-    let (joined, waiter) = within(Duration::from_secs(3), move || handle.join().is_ok());
+    let joined = stop_within(server, Duration::from_secs(3));
 
     drop(session);
-    let _ = waiter.join();
     cleanup_all(&svc);
     assert!(
-        joined.is_some(),
+        joined,
         "server run() must return within 3s of stop() while a worker is blocked sending"
     );
 }
@@ -510,7 +537,7 @@ fn test_robust_stop_before_run_is_honored() {
     });
 
     if returned.is_none() {
-        stop(&flag);
+        flag.store(false, Ordering::Release);
     }
     let _ = worker.join();
     cleanup_all(&svc);
@@ -552,7 +579,7 @@ fn large_round_trip(packet_size: u32) -> Result<(), NipcError> {
     scfg.max_request_payload_bytes = BIG;
     scfg.max_response_payload_bytes = BIG;
     scfg.packet_size = packet_size;
-    let (server, handle) = start_server(
+    let server = start_server(
         &svc,
         scfg,
         METHOD_STRING_REVERSE,
@@ -572,8 +599,7 @@ fn large_round_trip(packet_size: u32) -> Result<(), NipcError> {
         .map(|v| v.as_str().len());
     client.close();
 
-    stop(&server);
-    let _ = handle.join();
+    stop_within(server, Duration::from_secs(5));
     cleanup_all(&svc);
     match result {
         Ok(n) if n == text.len() => Ok(()),
@@ -605,7 +631,7 @@ fn client_notices_crashed_server(shm: bool) {
     });
     ensure_run_dir();
     cleanup_all(&svc);
-    let mut child = spawn_helper(if shm { "shm_server" } else { "uds_server" }, &svc);
+    let mut helper = spawn_helper(if shm { "shm_server" } else { "uds_server" }, &svc);
 
     let svc2 = svc.clone();
     let (call_tx, call_rx) = mpsc::channel();
@@ -627,9 +653,13 @@ fn client_notices_crashed_server(shm: bool) {
     call_rx
         .recv_timeout(Duration::from_secs(10))
         .expect("client connected");
-    thread::sleep(Duration::from_millis(500)); // request parked in the stalled handler
-    let _ = child.kill();
-    let _ = child.wait();
+    // Request parked in the stalled handler.
+    helper
+        .handler_entered
+        .recv_timeout(server::TEST_WAIT_LIMIT)
+        .expect("helper server handler entered");
+    let _ = helper.child.kill();
+    let _ = helper.child.wait();
 
     let (result, elapsed) = caller.join().expect("caller");
     cleanup_all(&svc);
@@ -652,30 +682,24 @@ fn client_notices_crashed_server(shm: bool) {
 fn test_robust_shm_attach_stops_when_server_closes_session() {
     let svc = unique_service("rs_rob_attach_refused");
     let handler = increment_dispatch(Arc::new(|v| Some(v + 1)));
-    let (running, handle) = start_server(&svc, shm_server_config(), METHOD_INCREMENT, handler, 1);
+    let server = start_server(&svc, shm_server_config(), METHOD_INCREMENT, handler, 1);
 
     let mut holder = increment_client(&svc, shm_client_config());
     connect_ready(&mut holder);
 
-    let mut refused = increment_client(&svc, shm_client_config());
+    // Production attach budget: a short test budget would hide the bug.
+    let mut refused = RawClient::new_increment(TEST_RUN_DIR, &svc, shm_client_config());
     let start = Instant::now();
     refused.refresh();
     let elapsed = start.elapsed();
 
     holder.close();
-    let mut ready = false;
-    for _ in 0..300 {
-        refused.refresh();
-        if refused.ready() {
-            ready = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+    server.events.wait_session_exits(1);
+    refused.refresh();
+    let ready = refused.ready();
     let uses_shm = refused.shm.is_some();
     refused.close();
-    stop(&running);
-    let _ = handle.join();
+    stop_within(server, Duration::from_secs(5));
     cleanup_all(&svc);
 
     assert!(

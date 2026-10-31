@@ -65,12 +65,7 @@ func startRobustServer(service string, cfg posix.ServerConfig, method uint16, ha
 	ensureRunDir()
 	cleanupAll(service)
 	s := NewServerWithWorkers(testRunDir, service, cfg, method, handler, workers)
-	doneCh := make(chan struct{})
-	go func() {
-		defer close(doneCh)
-		_ = s.Run()
-	}()
-	waitUnixSocketReady(service)
+	doneCh := runServerForTest(s)
 	return &robustServer{server: s, doneCh: doneCh}
 }
 
@@ -85,27 +80,20 @@ func (rs *robustServer) stopWithin(limit time.Duration) bool {
 	}
 }
 
-// servedWithin connects and completes one increment call, retrying until limit.
-func servedWithin(service string, cfg posix.ClientConfig, limit time.Duration) error {
-	deadline := time.Now().Add(limit)
-	last := fmt.Errorf("never connected")
-	for time.Now().Before(deadline) {
-		c := NewIncrementClient(testRunDir, service, cfg)
-		c.Refresh()
-		if c.Ready() {
-			v, err := c.CallIncrementWithTimeout(1, 1000)
-			c.Close()
-			if err == nil && v == 2 {
-				return nil
-			}
-			last = fmt.Errorf("call: v=%d err=%v", v, err)
-		} else {
-			last = fmt.Errorf("state %v", c.Status().State)
-			c.Close()
-		}
-		time.Sleep(50 * time.Millisecond)
+// servedOnce connects once and completes one increment call. Callers make
+// sure a worker is free first, so any failure is a real one.
+func servedOnce(service string, cfg posix.ClientConfig) error {
+	c := NewIncrementClient(testRunDir, service, cfg)
+	defer c.Close()
+	c.Refresh()
+	if !c.Ready() {
+		return fmt.Errorf("state %v", c.Status().State)
 	}
-	return last
+	v, err := c.CallIncrementWithTimeout(1, 1000)
+	if err != nil || v != 2 {
+		return fmt.Errorf("call: v=%d err=%v", v, err)
+	}
+	return nil
 }
 
 func shmFiles(service string) []string {
@@ -113,15 +101,13 @@ func shmFiles(service string) []string {
 	return matches
 }
 
-func waitNoShmFiles(service string, limit time.Duration) []string {
-	deadline := time.Now().Add(limit)
-	for {
-		files := shmFiles(service)
-		if len(files) == 0 || time.Now().After(deadline) {
-			return files
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+// blockingIncrementDispatch parks every request; the helper process holding
+// it is killed by the test.
+func blockingIncrementDispatch(entered func()) DispatchHandler {
+	return IncrementDispatch(func(v uint64) (uint64, bool) {
+		entered()
+		select {}
+	})
 }
 
 // silentConnect opens a SOCK_SEQPACKET connection without sending HELLO.
@@ -157,7 +143,11 @@ func rawListener(t *testing.T, service string) int {
 	return fd
 }
 
-// spawnHelper re-executes the test binary as a client process.
+// helperEntered reports, per helper server process, that its handler holds a
+// request.
+var helperEntered = map[*exec.Cmd]chan struct{}{}
+
+// spawnHelper re-executes the test binary as a client or server process.
 func spawnHelper(t *testing.T, mode, service string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestRobustnessHelperProcess$", "-test.v")
@@ -170,16 +160,20 @@ func spawnHelper(t *testing.T, mode, service string) *exec.Cmd {
 		t.Fatalf("start helper: %v", err)
 	}
 	ready := make(chan bool, 1)
+	entered := make(chan struct{}, 1)
 	go func() {
 		sc := bufio.NewScanner(stdout)
 		for sc.Scan() {
 			if strings.Contains(sc.Text(), "HELPER_READY") {
 				ready <- true
-				return
+			}
+			if strings.Contains(sc.Text(), "HELPER_HANDLER_ENTERED") {
+				entered <- struct{}{}
 			}
 		}
-		ready <- false
+		close(ready)
 	}()
+	helperEntered[cmd] = entered
 	select {
 	case ok := <-ready:
 		if !ok {
@@ -202,25 +196,24 @@ func TestRobustnessHelperProcess(t *testing.T) {
 	mode, service, _ := strings.Cut(spec, ":")
 	switch mode {
 	case "shm_client":
+		// The server listens before the helper starts: one connect.
 		c := NewIncrementClient(testRunDir, service, testUnixShmClientConfig())
-		for i := 0; i < 200 && !c.Ready(); i++ {
-			c.Refresh()
-			time.Sleep(10 * time.Millisecond)
-		}
+		c.Refresh()
 		if v, err := c.CallIncrementWithTimeout(1, 2000); err != nil || v != 2 {
 			fmt.Printf("HELPER_FAILED v=%d err=%v\n", v, err)
 			os.Exit(1)
 		}
 		fmt.Println("HELPER_READY")
-		time.Sleep(600 * time.Second)
+		select {} // until the test kills this process
 	case "shm_server", "uds_server":
 		cfg := testServerConfig()
 		if mode == "shm_server" {
 			cfg = testUnixShmServerConfig()
 		}
-		startRobustServer(service, cfg, protocol.MethodIncrement, robustIncrementDispatch(60*time.Second), 2)
+		startRobustServer(service, cfg, protocol.MethodIncrement,
+			blockingIncrementDispatch(func() { fmt.Println("HELPER_HANDLER_ENTERED") }), 2)
 		fmt.Println("HELPER_READY")
-		time.Sleep(600 * time.Second)
+		select {} // until the test kills this process
 	default:
 		t.Fatalf("unknown helper mode %q", mode)
 	}
@@ -233,13 +226,16 @@ func TestRobustShmSessionsReleasedAfterCleanClose(t *testing.T) {
 	rs := startRobustServer(svc, testUnixShmServerConfig(), protocol.MethodIncrement, robustIncrementDispatch(0), 2)
 	defer cleanupAll(svc)
 
+	// Each worker must exit and remove its region once its client closes;
+	// a leaked session fails waitSessionExits loudly.
 	var failures []string
 	for i := 0; i < 5; i++ {
-		if err := servedWithin(svc, testUnixShmClientConfig(), 3*time.Second); err != nil {
+		if err := servedOnce(svc, testUnixShmClientConfig()); err != nil {
 			failures = append(failures, fmt.Sprintf("client %d: %v", i, err))
 		}
+		waitSessionExits(rs.server, 1)
 	}
-	leftover := waitNoShmFiles(svc, 2*time.Second)
+	leftover := shmFiles(svc)
 	rs.stopWithin(5 * time.Second)
 
 	if len(failures) > 0 {
@@ -260,8 +256,11 @@ func TestRobustShmSessionsReleasedAfterClientCrash(t *testing.T) {
 		_ = cmd.Process.Kill() // SIGKILL
 		_ = cmd.Wait()
 	}
-	served := servedWithin(svc, testUnixShmClientConfig(), 3*time.Second)
-	leftover := waitNoShmFiles(svc, 2*time.Second)
+	// Both workers must notice their crashed clients and free the slots.
+	waitSessionExits(rs.server, 2)
+	served := servedOnce(svc, testUnixShmClientConfig())
+	waitSessionExits(rs.server, 1)
+	leftover := shmFiles(svc)
 	rs.stopWithin(5 * time.Second)
 
 	if served != nil {
@@ -281,10 +280,10 @@ func TestRobustSilentClientDoesNotBlockOtherClients(t *testing.T) {
 	defer cleanupAll(svc)
 
 	silent := silentConnect(t, svc)
-	time.Sleep(100 * time.Millisecond)
+	waitHandshakesStarted(rs.server, 1)
 	var served error = fmt.Errorf("did not finish")
 	finished := within(5*time.Second, func() {
-		served = servedWithin(svc, testClientConfig(), 5*time.Second)
+		served = servedOnce(svc, testClientConfig())
 	})
 
 	syscall.Close(silent)
@@ -300,7 +299,7 @@ func TestRobustSilentClientDoesNotBlockShutdown(t *testing.T) {
 	defer cleanupAll(svc)
 
 	silent := silentConnect(t, svc)
-	time.Sleep(100 * time.Millisecond)
+	waitHandshakesStarted(rs.server, 1)
 	stopped := rs.stopWithin(3 * time.Second)
 
 	syscall.Close(silent)
@@ -319,9 +318,14 @@ func TestRobustSilentClientReleasedAtHandshakeDeadline(t *testing.T) {
 	silent := silentConnect(t, svc)
 	defer syscall.Close(silent)
 	start := time.Now()
-	limit := time.Duration(protocol.ServerHandshakeTimeoutMs)*time.Millisecond + 4*time.Second
-	served := servedWithin(svc, testClientConfig(), limit)
+	waitHandshakesStarted(rs.server, 1)
+	waitSessionExits(rs.server, 1)
 	elapsed := time.Since(start)
+	served := servedOnce(svc, testClientConfig())
+	deadline := time.Duration(rs.server.timings.handshakeMs) * time.Millisecond
+	if elapsed < deadline {
+		t.Errorf("silent client released after %v, before the %v handshake deadline", elapsed, deadline)
+	}
 
 	var buf [1]byte
 	n, _, rerr := syscall.Recvfrom(silent, buf[:], syscall.MSG_DONTWAIT)
@@ -420,7 +424,15 @@ func TestRobustShutdownNotBlockedByNonReadingClient(t *testing.T) {
 	scfg.MaxRequestPayloadBytes = big
 	scfg.MaxResponsePayloadBytes = big
 	scfg.PacketSize = 65536 // isolate from the default packet size issue (N11)
-	rs := startRobustServer(svc, scfg, protocol.MethodStringReverse, pingPongStringReverseDispatch(), 2)
+	// After the handler returns, the worker can only be sending the 4 MiB
+	// response, which blocks because the client never reads.
+	handled := make(chan struct{}, 1)
+	reverse := pingPongStringReverseDispatch()
+	rs := startRobustServer(svc, scfg, protocol.MethodStringReverse, func(req, resp []byte) (int, error) {
+		n, err := reverse(req, resp)
+		handled <- struct{}{}
+		return n, err
+	}, 2)
 	defer cleanupAll(svc)
 
 	ccfg := testClientConfig()
@@ -438,8 +450,7 @@ func TestRobustShutdownNotBlockedByNonReadingClient(t *testing.T) {
 	if err := session.Send(&hdr, payload[:n]); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	// Never read the response; give the worker time to block in send.
-	time.Sleep(500 * time.Millisecond)
+	waitClosed(handled, "string reverse handler")
 
 	stopped := rs.stopWithin(3 * time.Second)
 	session.Close()
@@ -469,7 +480,6 @@ func TestRobustStopBeforeRunIsHonored(t *testing.T) {
 	case <-doneCh:
 	case <-time.After(2 * time.Second):
 		t.Error("Run after Stop must return promptly instead of serving forever")
-		waitUnixSocketReady(svc)
 		s.Stop()
 		<-doneCh
 	}
@@ -545,9 +555,11 @@ func clientNoticesCrashedServer(t *testing.T, shm bool) {
 
 	c := NewIncrementClient(testRunDir, svc, ccfg)
 	defer c.Close()
-	for i := 0; i < 200 && !c.Ready(); i++ {
-		c.Refresh()
-		time.Sleep(10 * time.Millisecond)
+	c.Refresh()
+	if !c.Ready() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("client not ready against the helper server: %+v", c.Status())
 	}
 
 	type outcome struct {
@@ -560,7 +572,7 @@ func clientNoticesCrashedServer(t *testing.T, shm bool) {
 		_, err := c.CallIncrementWithTimeout(1, 10000)
 		result <- outcome{err, time.Since(start)}
 	}()
-	time.Sleep(500 * time.Millisecond) // request parked in the stalled handler
+	waitClosed(helperEntered[cmd], "helper server handler") // request parked in the stalled handler
 	_ = cmd.Process.Kill()
 	_ = cmd.Wait()
 
@@ -583,10 +595,7 @@ func TestRobustShmAttachStopsWhenServerClosesSession(t *testing.T) {
 	defer cleanupAll(svc)
 
 	holder := NewIncrementClient(testRunDir, svc, testUnixShmClientConfig())
-	for i := 0; i < 200 && !holder.Ready(); i++ {
-		holder.Refresh()
-		time.Sleep(10 * time.Millisecond)
-	}
+	holder.Refresh()
 	if !holder.Ready() {
 		holder.Close()
 		rs.stopWithin(5 * time.Second)
@@ -600,12 +609,8 @@ func TestRobustShmAttachStopsWhenServerClosesSession(t *testing.T) {
 	elapsed := time.Since(start)
 
 	holder.Close()
-	for i := 0; i < 300 && !refused.Ready(); i++ {
-		refused.Refresh()
-		if !refused.Ready() {
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	waitSessionExits(rs.server, 1)
+	refused.Refresh()
 	ready, usesShm := refused.Ready(), refused.shm != nil
 	refused.Close()
 	rs.stopWithin(5 * time.Second)

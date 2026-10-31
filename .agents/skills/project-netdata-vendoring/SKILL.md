@@ -198,6 +198,19 @@ Load this skill for any task involving:
    A regression that is neither fixed nor explicitly accepted by the user
    blocks vendoring.
 
+   Extended suites (fuzz, stress, randomized chaos, lookup scale) are not
+   part of correctness runs. Run them once on the candidate commit when the
+   vendored changes touch what they exercise (codecs and decoders for fuzz;
+   concurrency, session lifecycle or transports for stress), and record the
+   result or the reason none was needed:
+
+   ```bash
+   bash tests/run-extended-fuzz.sh
+   bash tests/run-extended-stress.sh
+   ```
+
+   A failure blocks vendoring until it is fixed.
+
 8. Record the CI/scanner preflight in the active SOW before vendoring.
 
    Include:
@@ -261,5 +274,6 @@ Netdata vendoring preflight:
 - Downstream gap: <summary of Netdata vendored changes since baseline>
 - Migration plan: <preserve/backport/overwrite/decision summary>
 - Performance: <assessment; benchmark run or why none was needed; regressions fixed/accepted/none>
+- Extended suites: <fuzz/stress run and result, or why none was needed>
 - Decision: proceed | blocked | proceed with user-accepted risk
 ```

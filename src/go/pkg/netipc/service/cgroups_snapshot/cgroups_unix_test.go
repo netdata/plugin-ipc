@@ -84,6 +84,7 @@ func testUnixHandler() Handler {
 type unixTestServer struct {
 	server *Server
 	done   chan struct{}
+	t      *testing.T
 }
 
 func startUnixTestServer(t *testing.T, service string) *unixTestServer {
@@ -98,28 +99,32 @@ func startUnixTestServer(t *testing.T, service string) *unixTestServer {
 		_ = s.Run()
 	}()
 
-	time.Sleep(50 * time.Millisecond)
-	return &unixTestServer{server: s, done: done}
+	select {
+	case <-s.Listening():
+	case <-done:
+		t.Fatal("server Run returned before listening")
+	case <-time.After(10 * time.Second):
+		t.Fatal("server not listening after 10s")
+	}
+	return &unixTestServer{server: s, done: done, t: t}
 }
 
 func (ts *unixTestServer) stop() {
 	ts.server.Stop()
 	select {
 	case <-ts.done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
+		ts.t.Error("server Run did not return within 10s of Stop")
 	}
 }
 
+// connectReadyUnix connects once: the server is already listening.
 func connectReadyUnix(t *testing.T, client *Client) {
 	t.Helper()
-	for range 200 {
-		client.Refresh()
-		if client.Ready() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	client.Refresh()
+	if !client.Ready() {
+		t.Fatalf("client not READY after one refresh: %+v", client.Status())
 	}
-	t.Fatal("client did not reach READY state")
 }
 
 func TestSnapshotRoundTripUnix(t *testing.T) {
@@ -167,16 +172,8 @@ func TestCacheRoundTripUnix(t *testing.T) {
 	cache.Abort()
 	cache.ClearAbort()
 
-	var updated bool
-	for range 200 {
-		if cache.Refresh() {
-			updated = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !updated {
-		t.Fatal("Refresh never succeeded")
+	if !cache.Refresh() {
+		t.Fatal("first Refresh against a listening server must succeed")
 	}
 	if !cache.Ready() {
 		t.Fatal("cache not ready after refresh")

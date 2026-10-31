@@ -8,6 +8,7 @@
  */
 
 #include "netipc/netipc_service.h"
+#include "test_sync.h"
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_uds.h"
 
@@ -330,6 +331,15 @@ static nipc_error_t failing_handler(void *user,
     return NIPC_ERR_HANDLER_FAILED;
 }
 
+/* Slow handlers hold the request until the test, having seen the client
+ * give up, releases them. */
+static int g_slow_handler_release;
+
+static void slow_handler_arm(void)
+{
+    __atomic_store_n(&g_slow_handler_release, 0, __ATOMIC_RELEASE);
+}
+
 static nipc_error_t slow_cgroups_handler(void *user,
                                          const nipc_header_t *request_hdr,
                                          const uint8_t *request_payload,
@@ -338,7 +348,7 @@ static nipc_error_t slow_cgroups_handler(void *user,
                                          size_t response_buf_size,
                                          size_t *response_len_out)
 {
-    usleep(150000);
+    (void)test_flag_wait(&g_slow_handler_release);
     return test_cgroups_handler(user, request_hdr, request_payload, request_len,
                                 response_buf, response_buf_size,
                                 response_len_out);
@@ -355,9 +365,8 @@ static nipc_error_t blocking_cgroups_handler(void *user,
                                              size_t response_buf_size,
                                              size_t *response_len_out)
 {
-    __atomic_store_n(&g_blocking_handler_entered, 1, __ATOMIC_RELEASE);
-    while (!__atomic_load_n(&g_blocking_handler_release, __ATOMIC_ACQUIRE))
-        usleep(1000);
+    test_flag_set(&g_blocking_handler_entered);
+    (void)test_flag_wait(&g_blocking_handler_release);
 
     return test_cgroups_handler(user, request_hdr, request_payload, request_len,
                                 response_buf, response_buf_size,
@@ -386,6 +395,7 @@ static void *snapshot_call_thread_fn(void *arg)
 typedef struct {
     const char *service;
     nipc_managed_server_t server;
+    test_server_events_t events;
     nipc_server_handler_fn handler;
     int ready;  /* use __atomic builtins for cross-thread access */
     int done;   /* use __atomic builtins for cross-thread access */
@@ -403,17 +413,18 @@ static void *server_thread_fn(void *arg)
 
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed: %d\n", err);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_server_use_test_timings(&ctx->server, &ctx->events);
+    test_flag_set(&ctx->ready);
 
     /* Blocking acceptor loop */
     nipc_server_run(&ctx->server);
 
     nipc_server_destroy(&ctx->server);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -430,10 +441,7 @@ static void start_server(server_thread_ctx_t *sctx, const char *service,
     pthread_create(tid, NULL, server_thread_fn, sctx);
 
     /* Wait for server to be ready */
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx->ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx->done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx->ready, &sctx->done);
 }
 
 /* Stop a managed server and join its thread. */
@@ -447,6 +455,7 @@ typedef struct {
     const char *service;
     uint16_t method_code;
     nipc_managed_server_t server;
+    test_server_events_t events;
     nipc_server_handler_fn handler;
     int ready;
     int done;
@@ -463,14 +472,15 @@ static void *raw_method_server_thread_fn(void *arg)
                                         ctx->method_code, ctx->handler, NULL);
     if (err != NIPC_OK) {
         fprintf(stderr, "raw method server init failed: %d\n", err);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_server_use_test_timings(&ctx->server, &ctx->events);
+    test_flag_set(&ctx->ready);
     nipc_server_run(&ctx->server);
     nipc_server_destroy(&ctx->server);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -486,10 +496,7 @@ static void start_raw_method_server(raw_method_server_thread_ctx_t *sctx,
     sctx->handler = handler;
     pthread_create(tid, NULL, raw_method_server_thread_fn, sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx->ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx->done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx->ready, &sctx->done);
 }
 
 static void stop_raw_method_server(raw_method_server_thread_ctx_t *sctx,
@@ -526,6 +533,7 @@ typedef struct {
     const char *service;
     lookup_server_kind_t kind;
     nipc_managed_server_t server;
+    test_server_events_t events;
     nipc_server_config_t config;
     int has_config;
     int worker_count;
@@ -554,14 +562,15 @@ static void *lookup_server_thread_fn(void *arg)
 
     if (err != NIPC_OK) {
         fprintf(stderr, "lookup server init failed: %d\n", err);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_server_use_test_timings(&ctx->server, &ctx->events);
+    test_flag_set(&ctx->ready);
     nipc_server_run(&ctx->server);
     nipc_server_destroy(&ctx->server);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -586,10 +595,7 @@ static void start_lookup_server(lookup_server_thread_ctx_t *sctx,
     __atomic_store_n(&sctx->ready, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&sctx->done, 0, __ATOMIC_RELAXED);
     pthread_create(tid, NULL, lookup_server_thread_fn, sctx);
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx->ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx->done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx->ready, &sctx->done);
 }
 
 static void stop_lookup_server(lookup_server_thread_ctx_t *sctx, pthread_t tid)
@@ -698,7 +704,7 @@ static void *raw_lookup_partial_disconnect_thread(void *arg)
         NIPC_UDS_OK)
         goto out;
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     if (accept_with_timeout(&listener, 1, 30000, &session) != NIPC_UDS_OK)
         goto out;
@@ -742,7 +748,7 @@ out:
         nipc_uds_close_session(&session);
     if (listener.fd != -1)
         nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -756,10 +762,7 @@ static void start_raw_lookup_partial_disconnect(
     ctx->service = service;
     ctx->kind = kind;
     pthread_create(tid, NULL, raw_lookup_partial_disconnect_thread, ctx);
-    for (int i = 0; i < 2000 &&
-                    !__atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE) &&
-                    !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&ctx->ready, &ctx->done);
 }
 
 static nipc_server_config_t default_shm_service_server_config(void)
@@ -820,13 +823,13 @@ static void *raw_hello_ack_version_server_thread(void *arg)
     if (listen(fd, 4) != 0)
         goto out;
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     cfd = accept(fd, NULL, NULL);
     if (cfd < 0)
         goto out;
 
-    __atomic_store_n(&ctx->accepted, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->accepted);
 
     {
         uint8_t hello_buf[128];
@@ -879,7 +882,7 @@ out:
         close(cfd);
     if (fd >= 0)
         close(fd);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -891,10 +894,7 @@ static void start_raw_hello_ack_version_server(raw_hello_ack_server_ctx_t *ctx,
     ctx->service = service;
     pthread_create(tid, NULL, raw_hello_ack_version_server_thread, ctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&ctx->ready, &ctx->done);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1035,6 +1035,7 @@ static void test_client_call_timeout_on_wedged_peer(void)
 
     server_thread_ctx_t sctx;
     pthread_t tid;
+    slow_handler_arm();
     start_server(&sctx, svc, slow_cgroups_handler, &tid);
     check("timeout test server started",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
@@ -1042,10 +1043,7 @@ static void test_client_call_timeout_on_wedged_peer(void)
     nipc_client_ctx_t client;
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
-    for (int i = 0; i < 2000 && !nipc_client_ready(&client); i++) {
-        nipc_client_refresh(&client);
-        usleep(500);
-    }
+    nipc_client_refresh(&client);
     check("timeout test client is READY", nipc_client_ready(&client));
 
     nipc_cgroups_resp_view_t view;
@@ -1056,6 +1054,7 @@ static void test_client_call_timeout_on_wedged_peer(void)
     uint64_t elapsed = monotonic_msec() - start;
     check("wedged peer returns timeout", err == NIPC_ERR_TIMEOUT);
     check("timeout returns promptly", elapsed < 1000u);
+    test_flag_set(&g_slow_handler_release);
 
     nipc_client_close(&client);
     stop_server(&sctx, tid);
@@ -1080,10 +1079,7 @@ static void test_client_abort_unblocks_call(void)
     nipc_client_ctx_t client;
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
-    for (int i = 0; i < 2000 && !nipc_client_ready(&client); i++) {
-        nipc_client_refresh(&client);
-        usleep(500);
-    }
+    nipc_client_refresh(&client);
     check("abort test client is READY", nipc_client_ready(&client));
 
     snapshot_call_thread_ctx_t call_ctx;
@@ -1095,10 +1091,7 @@ static void test_client_abort_unblocks_call(void)
           pthread_create(&call_tid, NULL, snapshot_call_thread_fn,
                          &call_ctx) == 0);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&g_blocking_handler_entered, __ATOMIC_ACQUIRE);
-         i++)
-        usleep(500);
+    (void)test_flag_wait_any(&g_blocking_handler_entered, NULL);
     check("blocking handler received request",
           __atomic_load_n(&g_blocking_handler_entered,
                           __ATOMIC_ACQUIRE) == 1);
@@ -1110,7 +1103,7 @@ static void test_client_abort_unblocks_call(void)
     check("aborted call returns aborted", call_ctx.err == NIPC_ERR_ABORTED);
     check("abort returns promptly", elapsed < 1000u);
 
-    __atomic_store_n(&g_blocking_handler_release, 1, __ATOMIC_RELEASE);
+    test_flag_set(&g_blocking_handler_release);
     nipc_client_close(&client);
     stop_server(&sctx, tid);
     cleanup_all(svc);
@@ -1200,6 +1193,7 @@ typedef struct {
     int slow_second_call;
     int signal_second_call;
     int second_call_entered;
+    int release_second_call;
 } lookup_scale_state_t;
 
 static void lookup_scale_note_items(lookup_scale_state_t *state,
@@ -1219,9 +1213,9 @@ static void lookup_scale_after_call(lookup_scale_state_t *state, uint32_t call)
         return;
 
     if (state->signal_second_call)
-        __atomic_store_n(&state->second_call_entered, 1, __ATOMIC_RELEASE);
+        test_flag_set(&state->second_call_entered);
     if (state->slow_second_call)
-        usleep(250000);
+        (void)test_flag_wait(&state->release_second_call);
 }
 
 typedef struct {
@@ -1256,14 +1250,7 @@ static void *lookup_call_thread_fn(void *arg)
 
 static int lookup_scale_wait_for_second_call(lookup_scale_state_t *state)
 {
-    for (int i = 0; i < 5000; i++) {
-        if (__atomic_load_n(&state->second_call_entered,
-                            __ATOMIC_ACQUIRE) != 0)
-            return 1;
-        usleep(500);
-    }
-
-    return 0;
+    return test_flag_wait(&state->second_call_entered) ? 1 : 0;
 }
 
 static bool cgroups_lookup_scale_handler(void *user,
@@ -1852,7 +1839,7 @@ static bool cgroups_lookup_slow_handler(
         const nipc_cgroups_lookup_req_view_t *request,
         nipc_cgroups_lookup_builder_t *builder)
 {
-    usleep(150000);
+    (void)test_flag_wait(&g_slow_handler_release);
     return cgroups_lookup_test_handler(user, request, builder);
 }
 
@@ -1861,7 +1848,7 @@ static bool apps_lookup_slow_handler(
         const nipc_apps_lookup_req_view_t *request,
         nipc_apps_lookup_builder_t *builder)
 {
-    usleep(150000);
+    (void)test_flag_wait(&g_slow_handler_release);
     return apps_lookup_test_handler(user, request, builder);
 }
 
@@ -3362,18 +3349,20 @@ static void test_shm_lookup_session_closes_after_client_disconnect(void)
     check("first SHM lookup client ready",
           nipc_client_ready(&first) && first.shm != NULL);
 
-    usleep(150000);
     if (nipc_client_ready(&first) && first.session.fd >= 0) {
         char control_byte = 0;
         check("first SHM lookup control fd accepts readable byte",
               send(first.session.fd, &control_byte, sizeof(control_byte), 0) ==
               (ssize_t)sizeof(control_byte));
-        usleep(150000);
+        nipc_str_view_t path = { .ptr = "/known", .len = 6 };
+        nipc_cgroups_lookup_resp_view_t view;
+        check("SHM lookup session survives a stray control byte",
+              nipc_client_call_cgroups_lookup(&first, &path, 1, &view) == NIPC_OK);
     }
 
     nipc_client_close(&first);
-
-    usleep(300000);
+    check("first SHM lookup session exits after disconnect",
+          test_server_wait_session_exits(&sctx.events, 1));
 
     nipc_client_ctx_t second;
     nipc_client_init(&second, TEST_RUN_DIR, svc, &ccfg);
@@ -3395,6 +3384,32 @@ static void test_shm_lookup_session_closes_after_client_disconnect(void)
     nipc_client_close(&second);
     stop_lookup_server(&sctx, tid);
     cleanup_all(svc);
+}
+
+/* Internal liveness probe; exercised directly so each outcome is covered
+ * without racing the session's poll cadence. */
+bool nipc_service_posix_peer_disconnected(int fd);
+
+static void test_peer_disconnected_probe(void)
+{
+    printf("Test 3i2: Peer liveness probe distinguishes data from hangup\n");
+
+    int sv[2];
+    check("probe socketpair created",
+          socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) == 0);
+    check("invalid fd counts as disconnected",
+          nipc_service_posix_peer_disconnected(-1));
+    check("idle peer is alive", !nipc_service_posix_peer_disconnected(sv[0]));
+
+    char byte = 0;
+    check("probe byte sent", send(sv[1], &byte, 1, 0) == 1);
+    check("pending data keeps peer alive",
+          !nipc_service_posix_peer_disconnected(sv[0]));
+
+    close(sv[1]);
+    check("closed peer is disconnected",
+          nipc_service_posix_peer_disconnected(sv[0]));
+    close(sv[0]);
 }
 
 static void test_lookup_init_guards(void)
@@ -4418,6 +4433,7 @@ static void test_lookup_timeout_cap_and_raw_guards(void)
 
         lookup_server_thread_ctx_t sctx;
         memset(&sctx, 0, sizeof(sctx));
+        slow_handler_arm();
         sctx.cgroups_handler.handle = cgroups_lookup_slow_handler;
         pthread_t tid;
         start_lookup_server(&sctx, svc, LOOKUP_SERVER_CGROUPS, &tid);
@@ -4435,6 +4451,7 @@ static void test_lookup_timeout_cap_and_raw_guards(void)
         nipc_error_t err =
             nipc_client_call_cgroups_lookup_timeout(&client, &path, 1, &view, 20);
         check("cgroups lookup timeout rejected", err == NIPC_ERR_TIMEOUT);
+        test_flag_set(&g_slow_handler_release);
 
         nipc_client_close(&client);
         stop_lookup_server(&sctx, tid);
@@ -4447,6 +4464,7 @@ static void test_lookup_timeout_cap_and_raw_guards(void)
 
         lookup_server_thread_ctx_t sctx;
         memset(&sctx, 0, sizeof(sctx));
+        slow_handler_arm();
         sctx.apps_handler.handle = apps_lookup_slow_handler;
         pthread_t tid;
         start_lookup_server(&sctx, svc, LOOKUP_SERVER_APPS, &tid);
@@ -4464,6 +4482,7 @@ static void test_lookup_timeout_cap_and_raw_guards(void)
         nipc_error_t err =
             nipc_client_call_apps_lookup_timeout(&client, &pid, 1, &view, 20);
         check("apps lookup timeout rejected", err == NIPC_ERR_TIMEOUT);
+        test_flag_set(&g_slow_handler_release);
 
         nipc_client_close(&client);
         stop_lookup_server(&sctx, tid);
@@ -4954,6 +4973,7 @@ static void test_lookup_timeout_during_followup_subcall(void)
             nipc_client_call_cgroups_lookup_timeout(&client, paths, 3, &view,
                                                     200);
         check("cgroups follow-up timeout rejected", err == NIPC_ERR_TIMEOUT);
+        test_flag_set(&state.release_second_call);
         check("cgroups follow-up timeout reached second subcall",
               __atomic_load_n(&state.calls, __ATOMIC_ACQUIRE) >= 2);
 
@@ -4993,6 +5013,7 @@ static void test_lookup_timeout_during_followup_subcall(void)
         nipc_error_t err =
             nipc_client_call_apps_lookup_timeout(&client, pids, 3, &view, 200);
         check("apps follow-up timeout rejected", err == NIPC_ERR_TIMEOUT);
+        test_flag_set(&state.release_second_call);
         check("apps follow-up timeout reached second subcall",
               __atomic_load_n(&state.calls, __ATOMIC_ACQUIRE) >= 2);
 
@@ -5056,6 +5077,7 @@ static void test_lookup_abort_during_followup_subcall(void)
                   lookup_scale_wait_for_second_call(&state));
             nipc_client_abort(&client);
             pthread_join(call_tid, NULL);
+            test_flag_set(&state.release_second_call);
             check("cgroups follow-up abort rejected",
                   call_ctx.err == NIPC_ERR_ABORTED);
             check("cgroups follow-up abort used follow-up call",
@@ -5113,6 +5135,7 @@ static void test_lookup_abort_during_followup_subcall(void)
                   lookup_scale_wait_for_second_call(&state));
             nipc_client_abort(&client);
             pthread_join(call_tid, NULL);
+            test_flag_set(&state.release_second_call);
             check("apps follow-up abort rejected",
                   call_ctx.err == NIPC_ERR_ABORTED);
             check("apps follow-up abort used follow-up call",
@@ -5298,7 +5321,6 @@ static void test_retry_on_failure(void)
     /* Kill server */
     stop_server(&sctx, tid);
     cleanup_all(svc);
-    usleep(50000); /* let cleanup settle */
 
     /* Restart server */
     server_thread_ctx_t sctx2;
@@ -5358,11 +5380,11 @@ static void test_multiple_clients(void)
     if (err1 == NIPC_OK)
         check("client 1 got 3 items", view1.item_count == 3);
 
-    /* Close client 1 so the server can accept client 2
-     * (single-threaded acceptor). Give the server a short window to
-     * observe the disconnect before opening the next session. */
+    /* Close client 1 and wait for its worker to exit before opening the
+     * next session. */
     nipc_client_close(&client1);
-    usleep(50000);
+    check("client 1 session exited",
+          test_server_wait_session_exits(&sctx.events, 1));
 
     nipc_client_init(&client2, TEST_RUN_DIR, svc, &ccfg);
     nipc_client_refresh(&client2);
@@ -5485,6 +5507,8 @@ static void test_status_reporting(void)
 typedef struct {
     const char *service;
     int done;  /* __atomic */
+    int connected;  /* __atomic: calls finished, session still open */
+    int release;  /* __atomic: drain finished, close the session */
     int call_ok;  /* __atomic */
 } drain_client_ctx_t;
 
@@ -5496,27 +5520,23 @@ static void *drain_client_fn(void *arg)
     nipc_client_ctx_t client;
     nipc_client_init(&client, TEST_RUN_DIR, ctx->service, &ccfg);
 
-    /* Connect with retry */
-    for (int r = 0; r < 200; r++) {
-        nipc_client_refresh(&client);
-        if (nipc_client_ready(&client))
-            break;
-        usleep(5000);
-    }
-
+    nipc_client_refresh(&client);
     if (nipc_client_ready(&client)) {
-        /* Make a slow series of calls to be "in-flight" during drain */
         for (int i = 0; i < 5; i++) {
             nipc_cgroups_resp_view_t view;
             nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
             if (err == NIPC_OK)
                 __atomic_fetch_add(&ctx->call_ok, 1, __ATOMIC_RELAXED);
-            usleep(10000); /* 10ms between calls */
         }
     }
 
+    /* Keep the session open across the drain: calling during it would
+     * race the session shutdown. */
+    test_flag_set(&ctx->connected);
+    (void)test_flag_wait(&ctx->release);
+
     nipc_client_close(&client);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -5537,8 +5557,8 @@ static void test_graceful_drain(void)
 
     /* Start server in background thread */
     pthread_t server_tid;
+    test_server_use_test_timings(&server, NULL);
     pthread_create(&server_tid, NULL, (void *(*)(void *))nipc_server_run, &server);
-    usleep(50000); /* let it start */
 
     /* Start 3 client threads that will be making calls */
     drain_client_ctx_t cctxs[3];
@@ -5546,20 +5566,23 @@ static void test_graceful_drain(void)
     for (int i = 0; i < 3; i++) {
         cctxs[i].service = svc;
         __atomic_store_n(&cctxs[i].done, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&cctxs[i].connected, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&cctxs[i].release, 0, __ATOMIC_RELAXED);
         __atomic_store_n(&cctxs[i].call_ok, 0, __ATOMIC_RELAXED);
         pthread_create(&ctids[i], NULL, drain_client_fn, &cctxs[i]);
     }
 
-    /* Let clients establish connections and start making calls */
-    usleep(50000);
+    for (int i = 0; i < 3; i++)
+        check("drain client connected", test_flag_wait(&cctxs[i].connected));
 
     /* Drain with 5-second timeout */
     bool drained = nipc_server_drain(&server, 5000);
     check("drain completed", drained);
 
-    /* Wait for client threads to finish */
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 3; i++) {
+        test_flag_set(&cctxs[i].release);
         pthread_join(ctids[i], NULL);
+    }
 
     /* Join server thread */
     pthread_join(server_tid, NULL);
@@ -5569,7 +5592,7 @@ static void test_graceful_drain(void)
     for (int i = 0; i < 3; i++)
         total_ok += __atomic_load_n(&cctxs[i].call_ok, __ATOMIC_RELAXED);
     printf("    total successful calls during drain: %d\n", total_ok);
-    check("clients got successful calls before drain", total_ok > 0);
+    check("clients got successful calls before drain", total_ok == 15);
 
     cleanup_all(svc);
 }
@@ -5594,9 +5617,9 @@ static void test_non_request_terminates_session(void)
     check("server init", err == NIPC_OK);
 
     pthread_t server_tid;
+    test_server_use_test_timings(&server, NULL);
     pthread_create(&server_tid, NULL,
                    (void *(*)(void *))nipc_server_run, &server);
-    usleep(50000);
 
     /* Connect via raw UDS session */
     nipc_uds_client_config_t ccfg = default_transport_client_config();
@@ -5618,9 +5641,6 @@ static void test_non_request_terminates_session(void)
 
     uerr = nipc_uds_send(&session, &hdr, NULL, 0);
     check("send non-request", uerr == NIPC_UDS_OK);
-
-    /* Wait for server to process and terminate the session */
-    usleep(200000);
 
     /* Try to send a valid request - should fail because server closed */
     nipc_header_t hdr2 = {0};
@@ -5679,6 +5699,7 @@ static void test_non_request_terminates_session(void)
 typedef struct {
     const char *service;
     nipc_managed_server_t server;
+    test_server_events_t events;
     int ready;
     int done;
 } shm_server_ctx_t;
@@ -5688,6 +5709,7 @@ typedef struct {
     uint32_t max_request_payload_bytes;
     uint32_t max_response_payload_bytes;
     nipc_managed_server_t server;
+    test_server_events_t events;
     int ready;
     int done;
 } shm_limit_server_ctx_t;
@@ -5713,14 +5735,15 @@ static void *shm_server_thread_fn(void *arg)
 
     if (err != NIPC_OK) {
         fprintf(stderr, "SHM server init failed: %d\n", err);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_server_use_test_timings(&ctx->server, &ctx->events);
+    test_flag_set(&ctx->ready);
     nipc_server_run(&ctx->server);
     nipc_server_destroy(&ctx->server);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -5744,14 +5767,15 @@ static void *shm_limit_server_thread_fn(void *arg)
 
     if (err != NIPC_OK) {
         fprintf(stderr, "limited SHM server init failed: %d\n", err);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_server_use_test_timings(&ctx->server, &ctx->events);
+    test_flag_set(&ctx->ready);
     nipc_server_run(&ctx->server);
     nipc_server_destroy(&ctx->server);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -5808,11 +5832,11 @@ static void *fake_shm_response_server_thread_fn(void *arg)
     shm.fd = -1;
 
     if (nipc_uds_listen(TEST_RUN_DIR, ctx->service, &scfg, &listener) != NIPC_UDS_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     if (nipc_uds_accept(&listener, 1, &session) != NIPC_UDS_OK)
         goto out;
@@ -5945,7 +5969,7 @@ out:
     nipc_shm_destroy(&shm);
     nipc_uds_close_session(&session);
     nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -5976,11 +6000,11 @@ static void *fake_shm_attach_fallback_server_thread_fn(void *arg)
     ctx->second_receive_err = NIPC_UDS_ERR_BAD_PARAM;
 
     if (nipc_uds_listen(TEST_RUN_DIR, ctx->service, &scfg, &listener) != NIPC_UDS_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     if (accept_with_timeout(&listener, 1, 30000, &first) != NIPC_UDS_OK)
         goto out;
@@ -6017,7 +6041,7 @@ out:
         nipc_uds_close_session(&second);
     if (listener.fd != -1)
         nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -6035,10 +6059,7 @@ static void test_shm_l2_service(void)
     pthread_t tid;
     pthread_create(&tid, NULL, shm_server_thread_fn, &sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("SHM server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Connect client with SHM profile */
@@ -6114,13 +6135,7 @@ static void test_shm_client_rejects_malformed_responses(void)
         sctx.mode = cases[i].mode;
         pthread_create(&tid, NULL, fake_shm_response_server_thread_fn, &sctx);
 
-        for (int spin = 0;
-             spin < 2000 &&
-             !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) &&
-             !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE);
-             spin++) {
-            usleep(500);
-        }
+        (void)test_flag_wait_any(&sctx.ready, &sctx.done);
 
         snprintf(msg, sizeof(msg), "%s: fake SHM server started", cases[i].label);
         check(msg, __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
@@ -6190,13 +6205,7 @@ static void test_shm_server_rejects_malformed_requests(void)
         sctx.service = cases[i].service;
         pthread_create(&tid, NULL, shm_server_thread_fn, &sctx);
 
-        for (int spin = 0;
-             spin < 2000 &&
-             !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) &&
-             !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE);
-             spin++) {
-            usleep(500);
-        }
+        (void)test_flag_wait_any(&sctx.ready, &sctx.done);
 
         snprintf(msg, sizeof(msg), "%s: SHM server started", cases[i].label);
         check(msg, __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
@@ -6214,10 +6223,11 @@ static void test_shm_server_rejects_malformed_requests(void)
                                     cases[i].copy_len > 0 ? cases[i].msg : NULL,
                                     cases[i].copy_len,
                                     cases[i].published_len);
-            usleep(100000);
         }
 
         nipc_client_close(&bad_client);
+        snprintf(msg, sizeof(msg), "%s: attacker session exited", cases[i].label);
+        check(msg, test_server_wait_session_exits(&sctx.events, 1));
 
         nipc_client_init(&good_client, TEST_RUN_DIR, cases[i].service, &ccfg);
         nipc_client_refresh(&good_client);
@@ -6268,13 +6278,7 @@ static void test_shm_request_resize_retry(void)
     sctx.max_response_payload_bytes = RESPONSE_BUF_SIZE;
     pthread_create(&tid, NULL, shm_limit_server_thread_fn, &sctx);
 
-    for (int spin = 0;
-         spin < 2000 &&
-         !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) &&
-         !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE);
-         spin++) {
-        usleep(500);
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
 
     check("request resize: server started",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
@@ -6331,13 +6335,7 @@ static void test_shm_response_resize_retry(void)
     sctx.max_response_payload_bytes = 32;
     pthread_create(&tid, NULL, shm_limit_server_thread_fn, &sctx);
 
-    for (int spin = 0;
-         spin < 2000 &&
-         !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) &&
-         !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE);
-         spin++) {
-        usleep(500);
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
 
     check("response resize: server started",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
@@ -6404,7 +6402,6 @@ static void test_cache_refresh_failure_preserves(void)
     /* Stop server */
     stop_server(&sctx, tid);
     cleanup_all(svc);
-    usleep(50000);
 
     /* Refresh fails, but old cache must be preserved */
     updated = nipc_cgroups_cache_refresh(&cache);
@@ -6477,7 +6474,6 @@ static void test_malformed_response_handling(void)
     /* Stop good server, start garbage server */
     stop_server(&sctx_good, tid_good);
     cleanup_all(svc);
-    usleep(50000);
 
     server_thread_ctx_t sctx_bad;
     pthread_t tid_bad;
@@ -6625,7 +6621,6 @@ static void test_client_broken_refresh(void)
     /* Kill server */
     stop_server(&sctx, tid);
     cleanup_all(svc);
-    usleep(50000);
 
     /* Make a call - should fail and put client in BROKEN state */
     nipc_cgroups_resp_view_t view;
@@ -6755,9 +6750,9 @@ static void test_server_closes_after_terminal_error_response(void)
         check("terminal close status bad-envelope",
               resp_hdr.transport_status == NIPC_STATUS_BAD_ENVELOPE);
         check("terminal close response empty", payload_len == 0);
+        check("terminal close session exited",
+              test_server_wait_session_exits(&sctx.events, 1));
     }
-
-    usleep(300000);
 
     nipc_client_ctx_t good_client;
     nipc_client_config_t good_cfg = default_client_config();
@@ -6853,8 +6848,8 @@ static void test_drain_timeout(void)
     check("server init ok", err == NIPC_OK);
 
     pthread_t server_tid;
+    test_server_use_test_timings(&server, NULL);
     pthread_create(&server_tid, NULL, (void *(*)(void *))nipc_server_run, &server);
-    usleep(50000);
 
     /* Start clients that make calls */
     drain_client_ctx_t cctxs[2];
@@ -6862,18 +6857,23 @@ static void test_drain_timeout(void)
     for (int i = 0; i < 2; i++) {
         cctxs[i].service = svc;
         __atomic_store_n(&cctxs[i].done, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&cctxs[i].connected, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&cctxs[i].release, 0, __ATOMIC_RELAXED);
         __atomic_store_n(&cctxs[i].call_ok, 0, __ATOMIC_RELAXED);
         pthread_create(&ctids[i], NULL, drain_client_fn, &cctxs[i]);
     }
-    usleep(100000);
+    for (int i = 0; i < 2; i++)
+        check("drain client connected", test_flag_wait(&cctxs[i].connected));
 
     /* Drain with short timeout */
     bool drained = nipc_server_drain(&server, 3000);
     /* With fast service callbacks and 3s timeout, drain should succeed */
     check("drain completed", drained);
 
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < 2; i++) {
+        test_flag_set(&cctxs[i].release);
         pthread_join(ctids[i], NULL);
+    }
     pthread_join(server_tid, NULL);
     cleanup_all(svc);
 }
@@ -6928,8 +6928,9 @@ static void test_cache_empty_snapshot(void)
         1, NIPC_METHOD_CGROUPS_SNAPSHOT, empty_cgroups_handler, NULL);
     check("server init", serr == NIPC_OK);
 
+    test_server_use_test_timings(&sctx.server, NULL);
+
     pthread_create(&tid, NULL, (void *(*)(void *))nipc_server_run, &sctx.server);
-    usleep(50000);
 
     /* Create cache and refresh */
     nipc_cgroups_cache_t cache;
@@ -7154,10 +7155,7 @@ static void test_shm_negotiation_falls_back_to_baseline_on_obstructed_region(voi
 
     pthread_t tid;
     pthread_create(&tid, NULL, shm_server_thread_fn, &sctx);
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("obstructed SHM server started",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -7201,10 +7199,7 @@ static void test_shm_allocation_failure_falls_back_to_working_baseline(void)
 
     pthread_t tid;
     pthread_create(&tid, NULL, shm_server_thread_fn, &sctx);
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("allocation-fallback SHM server started",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -7254,10 +7249,7 @@ static void test_client_shm_attach_failure_falls_back_to_baseline(void)
 
     pthread_t tid;
     pthread_create(&tid, NULL, fake_shm_attach_fallback_server_thread_fn, &sctx);
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("attach-fallback server started",
           __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
@@ -7271,6 +7263,8 @@ static void test_client_shm_attach_failure_falls_back_to_baseline(void)
 
     nipc_client_ctx_t client;
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+    nipc_client_set_shm_attach_timeout_for_tests(&client,
+                                                 TEST_CLIENT_SHM_ATTACH_TIMEOUT_MS);
     bool changed = nipc_client_refresh(&client);
     check("refresh reports READY transition after attach failure fallback", changed);
     check("client is ready after attach failure fallback", nipc_client_ready(&client));
@@ -7333,6 +7327,7 @@ int main(void)
     test_cgroups_lookup_call_shm(); printf("\n");
     test_apps_lookup_call_shm();   printf("\n");
     test_shm_lookup_session_closes_after_client_disconnect(); printf("\n");
+    test_peer_disconnected_probe(); printf("\n");
     test_lookup_init_guards();     printf("\n");
     test_lookup_client_invalid_requests(); printf("\n");
     test_lookup_rejects_bad_server_responses(); printf("\n");

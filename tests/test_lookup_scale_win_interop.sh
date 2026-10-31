@@ -9,6 +9,7 @@
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/run-low-priority.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/interop-lib.sh"
 netipc_low_priority_self "$@"
 
 RED='\033[0;31m'
@@ -21,8 +22,6 @@ FAIL=0
 SKIP=0
 TIMEOUT=60
 LOOKUP_ITEMS="${NIPC_LOOKUP_SCALE_ITEMS:-8192}"
-CLIENT_FAIL_REASON=""
-SERVER_PIDS=()
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -44,62 +43,10 @@ else
 fi
 
 cleanup() {
-    for pid in "${SERVER_PIDS[@]}"; do
-        stop_server "$pid" >/dev/null 2>&1 || true
-    done
+    interop_stop_server
     rm -rf "$RUN_DIR_HOST"
 }
 trap cleanup EXIT
-
-# taskkill lives in System32, which a minimal PATH may lack.
-taskkill_bin() {
-    if command -v taskkill.exe >/dev/null 2>&1; then
-        command -v taskkill.exe
-    else
-        cygpath -u "${SYSTEMROOT:-C:\\Windows}\\System32\\taskkill.exe"
-    fi
-}
-
-stop_server() {
-    local server_pid="$1"
-    local waited=0
-    local win_pid
-
-    if ! kill -0 "$server_pid" 2>/dev/null; then
-        wait "$server_pid" 2>/dev/null || true
-        return 0
-    fi
-
-    # MSYS-runtime servers blocked in a Win32 wait never act on SIGTERM;
-    # give a short grace, then force-stop the Windows process.
-    kill "$server_pid" 2>/dev/null || true
-
-    while [[ $waited -lt 20 ]]; do
-        if ! kill -0 "$server_pid" 2>/dev/null; then
-            wait "$server_pid" 2>/dev/null || true
-            return 0
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    win_pid=$(ps -W 2>/dev/null | awk -v pid="$server_pid" '$1 == pid {print $4; exit}')
-    if [[ -n "$win_pid" ]]; then
-        "$(taskkill_bin)" //PID "$win_pid" //T //F >/dev/null 2>&1 || true
-    fi
-
-    waited=0
-    while [[ $waited -lt 50 ]]; do
-        if ! kill -0 "$server_pid" 2>/dev/null; then
-            wait "$server_pid" 2>/dev/null || true
-            return 0
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    return 1
-}
 
 check_binaries() {
     local missing=0
@@ -120,66 +67,6 @@ check_binaries() {
     fi
 }
 
-wait_for_ready() {
-    local server_pid="$1"
-    local server_log="$2"
-    local waited=0
-
-    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
-        if ! kill -0 "$server_pid" 2>/dev/null; then
-            return 1
-        fi
-        if grep -q "^READY$" "$server_log" 2>/dev/null; then
-            return 0
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    return 2
-}
-
-run_client_with_ready_retry() {
-    local client_bin="$1"
-    local client_mode="$2"
-    local service="$3"
-    local max_attempts=$((TIMEOUT * 10))
-    local attempt
-    local client_out
-    local rc
-
-    CLIENT_FAIL_REASON=""
-
-    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-        set +e
-        client_out=$(env NIPC_PROFILE="${NIPC_PROFILE:-}" \
-            NIPC_LOOKUP_SCALE_ITEMS="$LOOKUP_ITEMS" \
-            "$client_bin" "$client_mode" "$RUN_DIR" "$service" 2>&1)
-        rc=$?
-        set -e
-
-        if [[ $rc -eq 0 ]] && echo "$client_out" | grep -q "^PASS$"; then
-            return 0
-        fi
-
-        if echo "$client_out" | grep -q "not ready" &&
-           [[ $attempt -lt $max_attempts ]]; then
-            sleep 0.1
-            continue
-        fi
-
-        if [[ $rc -eq 0 ]]; then
-            CLIENT_FAIL_REASON="client output: $client_out"
-        else
-            CLIENT_FAIL_REASON="client exit code $rc, output: $client_out"
-        fi
-        return 1
-    done
-
-    CLIENT_FAIL_REASON="client did not become ready after ${TIMEOUT}s"
-    return 1
-}
-
 run_lookup_test() {
     local method="$1"
     local name="$2"
@@ -198,43 +85,30 @@ run_lookup_test() {
     echo -n "  $name ... "
 
     local server_log="${RUN_DIR_HOST}/${service}.server.log"
-    env NIPC_PROFILE="${NIPC_PROFILE:-}" \
+    if ! interop_start_server "$TIMEOUT" "$server_log" \
+        env NIPC_PROFILE="${NIPC_PROFILE:-}" \
         NIPC_LOOKUP_SCALE_ITEMS="$LOOKUP_ITEMS" \
-        "$server_bin" "$server_mode" "$RUN_DIR" "$service" >"$server_log" 2>&1 &
-    local server_pid=$!
-    SERVER_PIDS+=("$server_pid")
-
-    local ready_rc=0
-    set +e
-    wait_for_ready "$server_pid" "$server_log"
-    ready_rc=$?
-    set -e
-    if [[ $ready_rc -ne 0 ]]; then
-        echo -e "${RED}FAIL${NC} (server readiness rc=${ready_rc})"
+        "$server_bin" "$server_mode" "$RUN_DIR" "$service"; then
+        echo -e "${RED}FAIL${NC} (server not ready)"
         cat "$server_log" >&2 2>/dev/null || true
+        interop_stop_server
         FAIL=$((FAIL + 1))
         return
     fi
 
-    local test_ok=1
-    local fail_reason=""
+    # The server printed READY after binding, so the client connects once.
+    local client_out rc
+    set +e
+    client_out=$(env NIPC_PROFILE="${NIPC_PROFILE:-}" \
+        NIPC_LOOKUP_SCALE_ITEMS="$LOOKUP_ITEMS" \
+        "$client_bin" "$client_mode" "$RUN_DIR" "$service" 2>&1)
+    rc=$?
+    set -e
 
-    if ! run_client_with_ready_retry "$client_bin" "$client_mode" "$service"; then
-        test_ok=0
-        fail_reason="$CLIENT_FAIL_REASON"
-    fi
+    interop_stop_server
 
-    if ! stop_server "$server_pid"; then
-        test_ok=0
-        if [[ -n "$fail_reason" ]]; then
-            fail_reason="${fail_reason}; server did not exit cleanly"
-        else
-            fail_reason="server did not exit cleanly"
-        fi
-    fi
-
-    if [[ $test_ok -eq 0 ]]; then
-        echo -e "${RED}FAIL${NC} (${fail_reason})"
+    if [[ $rc -ne 0 ]] || ! echo "$client_out" | grep -q "^PASS$"; then
+        echo -e "${RED}FAIL${NC} (client exit code $rc, output: $client_out)"
         FAIL=$((FAIL + 1))
         return
     fi

@@ -927,6 +927,38 @@ nipc_np_error_t nipc_np_accept(nipc_np_listener_t *listener,
 /*  Public API: connect                                                */
 /* ------------------------------------------------------------------ */
 
+static void (*g_connect_busy_hook)(void *user);
+static void *g_connect_busy_user;
+
+void nipc_np_set_connect_busy_hook_for_tests(void (*hook)(void *user),
+                                             void *user) {
+  g_connect_busy_hook = hook;
+  g_connect_busy_user = user;
+}
+
+static HANDLE create_client_pipe(const wchar_t *pipe_name) {
+  return CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, /* no sharing */
+                     NULL,             /* default security */
+                     OPEN_EXISTING, 0, /* default attributes */
+                     NULL              /* no template */
+  );
+}
+
+/* A server has no free pipe instance between accepting one client and
+ * creating the next instance, and connects in that window fail with
+ * ERROR_PIPE_BUSY. Wait, bounded, for an instance, then try once more. */
+static HANDLE open_client_pipe(const wchar_t *pipe_name) {
+  HANDLE h = create_client_pipe(pipe_name);
+  if (h != INVALID_HANDLE_VALUE || GetLastError() != ERROR_PIPE_BUSY)
+    return h;
+
+  if (g_connect_busy_hook)
+    g_connect_busy_hook(g_connect_busy_user);
+  if (!WaitNamedPipeW(pipe_name, NIPC_NP_CONNECT_BUSY_WAIT_MS))
+    return INVALID_HANDLE_VALUE;
+  return create_client_pipe(pipe_name);
+}
+
 nipc_np_error_t nipc_np_connect(const char *run_dir, const char *service_name,
                                 const nipc_np_client_config_t *config,
                                 nipc_np_session_t *out) {
@@ -943,13 +975,7 @@ nipc_np_error_t nipc_np_connect(const char *run_dir, const char *service_name,
     return NIPC_NP_ERR_BAD_PARAM;
 
   /* Connect to the server pipe */
-  HANDLE h =
-      CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, /* no sharing */
-                  NULL,             /* default security */
-                  OPEN_EXISTING, 0, /* default attributes */
-                  NULL              /* no template */
-      );
-
+  HANDLE h = open_client_pipe(pipe_name);
   if (h == INVALID_HANDLE_VALUE)
     return NIPC_NP_ERR_CONNECT;
 

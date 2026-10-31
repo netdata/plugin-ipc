@@ -522,6 +522,24 @@ The managed server internally:
 6. Per-session isolation: each session has its own internal reusable
    buffers and builders, with no cross-session coordination
 
+### Readiness
+
+Clients can connect once the listener exists:
+
+- C: `nipc_server_init()` creates the listener before it returns (POSIX
+  binds and listens on the socket; Windows creates the first pipe
+  instance). A client may connect as soon as init returns, even before
+  `nipc_server_run()` starts; the connection is accepted when the run
+  loop starts.
+- Rust and Go create the listener inside `run()` / `Run()`. Callers that
+  start a server and then start clients wait for the listening signal:
+  Rust `listening_signal()` returns a `ListeningSignal` whose
+  `wait(timeout)` reports whether the server listens; Go `Listening()`
+  returns a channel that closes once the server listens. Both exist on
+  the raw server and every typed server. The signal never fires when
+  `run()` / `Run()` fails before listening, so wait together with the
+  run result.
+
 ### Handler contract
 
 The public managed-server contract is typed.
@@ -600,6 +618,16 @@ up resources:
   requests before this step.
 
 ## Testing requirements
+
+Correctness tests are deterministic: they synchronize on events (server
+listening, handshake started, session exited, flags raised by handlers),
+never on sleeps or retry loops, and a test passes or fails in one run.
+Production timings (poll slice, stop grace, handshake deadline, client SHM
+attach window) are per-instance fields that tests shorten through
+test-only entrypoints (C `*_for_tests` functions under
+`NIPC_INTERNAL_TESTING`, Rust crate-internal setters, Go unexported
+fields). Fuzz, stress and randomized tests are not correctness tests; they
+run from `tests/run-extended-fuzz.sh` and `tests/run-extended-stress.sh`.
 
 Level 2 must have:
 

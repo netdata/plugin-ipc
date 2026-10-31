@@ -149,22 +149,44 @@ func (s *Session) Close() {
 	s.failAllInflight()
 }
 
+// ConnectBusyWaitMs bounds how long Connect waits for a free pipe instance
+// when every instance is busy (ERROR_PIPE_BUSY).
+const ConnectBusyWaitMs = 1000
+
+// connectBusyHook, when set by tests, runs whenever a connect finds every
+// pipe instance busy, before it waits.
+var connectBusyHook func()
+
+func createClientPipe(name *uint16) (syscall.Handle, error) {
+	return syscall.CreateFile(name, _GENERIC_READ|_GENERIC_WRITE, 0, nil, _OPEN_EXISTING, 0, 0)
+}
+
+// openClientPipe opens the client end of a pipe. A server has no free pipe
+// instance between accepting one client and creating the next instance, and
+// connects in that window fail with ERROR_PIPE_BUSY. Wait, bounded, for an
+// instance, then try once more.
+func openClientPipe(name *uint16) (syscall.Handle, error) {
+	handle, err := createClientPipe(name)
+	if errno, ok := err.(syscall.Errno); ok && errno == _ERROR_PIPE_BUSY {
+		if connectBusyHook != nil {
+			connectBusyHook()
+		}
+		if waitNamedPipe(name, ConnectBusyWaitMs) {
+			handle, err = createClientPipe(name)
+		}
+	}
+	return handle, err
+}
+
 // Connect establishes a session to a server pipe derived from runDir + serviceName.
+// When every pipe instance is busy it waits up to ConnectBusyWaitMs for one.
 func Connect(runDir, serviceName string, config *ClientConfig) (*Session, error) {
 	pipeName, err := BuildPipeName(runDir, serviceName)
 	if err != nil {
 		return nil, err
 	}
 
-	handle, err := syscall.CreateFile(
-		&pipeName[0],
-		_GENERIC_READ|_GENERIC_WRITE,
-		0,
-		nil,
-		_OPEN_EXISTING,
-		0,
-		0,
-	)
+	handle, err := openClientPipe(&pipeName[0])
 	if err != nil {
 		return nil, wrapErr(ErrConnect, err.Error())
 	}

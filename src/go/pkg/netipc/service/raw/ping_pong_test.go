@@ -4,7 +4,6 @@ package raw
 
 import (
 	"testing"
-	"time"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 )
@@ -163,18 +162,11 @@ func TestIncrementBatch(t *testing.T) {
 		protocol.MethodIncrement,
 		pingPongIncrementDispatch(),
 	)
-	doneCh := make(chan struct{})
-	go func() {
-		defer close(doneCh)
-		s.Run()
-	}()
+	doneCh := runServerForTest(s)
 	defer func() {
 		s.Stop()
 		<-doneCh
 	}()
-
-	// Wait for server
-	time.Sleep(100 * time.Millisecond)
 
 	// Client config with batch support
 	cCfg := testClientConfig()

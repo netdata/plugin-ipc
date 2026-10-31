@@ -2,11 +2,9 @@ use super::*;
 #[cfg(target_os = "linux")]
 use crate::protocol::PROFILE_SHM_FUTEX;
 use crate::protocol::{CgroupsBuilder, NipcError, PROFILE_BASELINE};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const TEST_RUN_DIR: &str = "/tmp/nipc_cgroups_rust_test";
 const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;
@@ -33,53 +31,6 @@ fn unique_service(prefix: &str) -> String {
 
 fn cleanup_all(service: &str) {
     let _ = std::fs::remove_file(format!("{TEST_RUN_DIR}/{service}.sock"));
-}
-
-fn socket_path(service: &str) -> PathBuf {
-    PathBuf::from(format!("{TEST_RUN_DIR}/{service}.sock"))
-}
-
-fn wait_for_listener_bind(service: &str) {
-    let sock = socket_path(service);
-    for _ in 0..2000 {
-        if sock.exists() {
-            break;
-        }
-        thread::sleep(Duration::from_micros(500));
-    }
-
-    // The socket file appears at bind(), before listen(); a connect in that
-    // window is refused. Wait for the listening state without connecting, so
-    // tests that count sessions or inject first-session faults stay exact.
-    for _ in 0..2000 {
-        if socket_is_listening(&sock) {
-            return;
-        }
-        thread::sleep(Duration::from_micros(500));
-    }
-    panic!("listener did not start listening for service {service}");
-}
-
-#[cfg(target_os = "linux")]
-fn socket_is_listening(sock: &std::path::Path) -> bool {
-    // /proc/net/unix flag 0x10000 is __SO_ACCEPTCON, set by listen().
-    let Some(path) = sock.to_str() else {
-        return false;
-    };
-    let Ok(table) = std::fs::read_to_string("/proc/net/unix") else {
-        return false;
-    };
-    table.lines().skip(1).any(|line| {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        fields.len() >= 8
-            && fields[7] == path
-            && u32::from_str_radix(fields[3], 16).is_ok_and(|flags| flags & 0x10000 != 0)
-    })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn socket_is_listening(sock: &std::path::Path) -> bool {
-    sock.exists()
 }
 
 fn server_config() -> ServerConfig {
@@ -169,58 +120,23 @@ fn snapshot_handler() -> Handler {
     }
 }
 
+/// The server listens before tests connect, so one refresh must succeed.
 fn connect_ready(client: &mut CgroupsClient) {
-    for _ in 0..200 {
-        client.refresh();
-        if client.ready() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-
-    panic!("client did not reach READY state");
+    client.refresh();
+    assert!(client.ready(), "client did not reach READY state");
 }
 
 struct TestServer {
-    stop_flag: Arc<std::sync::atomic::AtomicBool>,
-    thread: Option<thread::JoinHandle<()>>,
+    _inner: raw::RunningTestServer,
 }
 
 impl TestServer {
     fn start(service: &str, config: ServerConfig) -> Self {
         ensure_run_dir();
         cleanup_all(service);
-
-        let ready_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let ready_clone = ready_flag.clone();
-        let mut server = ManagedServer::new(TEST_RUN_DIR, service, config, snapshot_handler());
-        let stop_flag = server.running_flag();
-        let thread = thread::spawn(move || {
-            ready_clone.store(true, std::sync::atomic::Ordering::Release);
-            let _ = server.run();
-        });
-
-        for _ in 0..2000 {
-            if ready_flag.load(std::sync::atomic::Ordering::Acquire) {
-                break;
-            }
-            thread::sleep(Duration::from_micros(500));
-        }
-        wait_for_listener_bind(service);
-
+        let server = ManagedServer::new(TEST_RUN_DIR, service, config, snapshot_handler());
         Self {
-            stop_flag,
-            thread: Some(thread),
-        }
-    }
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        self.stop_flag
-            .store(false, std::sync::atomic::Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            _inner: server.inner.spawn_for_test(),
         }
     }
 }
@@ -264,15 +180,7 @@ fn test_cache_round_trip_unix() {
     let _server = TestServer::start(&service, server_config());
 
     let cache = CgroupsCache::new(TEST_RUN_DIR, &service, client_config());
-    let mut updated = false;
-    for _ in 0..200 {
-        if cache.refresh() {
-            updated = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(updated);
+    assert!(cache.refresh());
     assert!(cache.ready());
 
     let item = {

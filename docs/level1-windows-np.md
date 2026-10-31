@@ -51,6 +51,13 @@ This is the Windows baseline profile.
 2. **Client**: connects to the pipe with `CreateFileW`. The connection
    is established when the server's `ConnectNamedPipe` completes.
 
+   Between accepting one client and creating the next instance a server
+   has no free instance, and `CreateFileW` fails with `ERROR_PIPE_BUSY`.
+   The client then waits once with `WaitNamedPipeW`, for at most 1000 ms
+   (C `NIPC_NP_CONNECT_BUSY_WAIT_MS`, Rust `CONNECT_BUSY_WAIT_MS`, Go
+   `ConnectBusyWaitMs`), and tries `CreateFileW` once more. Any other
+   failure, or a second failure, fails the connect.
+
    On the server, accept is split: `nipc_np_accept_pending()` (C),
    `NpListener::accept_pending()` (Rust) and `Listener.AcceptPending()`
    (Go) return the connected pipe instance without reading;

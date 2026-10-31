@@ -8,6 +8,8 @@ import (
 )
 
 const clientShmAttachRetryInterval = 5 * time.Millisecond
+
+// clientShmAttachRetryTimeout is the default Client.shmAttachTimeout.
 const clientShmAttachRetryTimeout = 5 * time.Second
 
 func nextPowerOf2U32(n uint32) uint32 {

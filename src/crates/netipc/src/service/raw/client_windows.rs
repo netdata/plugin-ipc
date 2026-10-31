@@ -1,5 +1,5 @@
 use super::client::{ClientState, RawClient};
-use super::common::{CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS, CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS};
+use super::common::CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS;
 use crate::transport::win_shm::{
     WinShmContext, PROFILE_BUSYWAIT as WIN_SHM_PROFILE_BUSYWAIT,
     PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID,
@@ -17,8 +17,7 @@ impl RawClient {
                     || selected_profile == WIN_SHM_PROFILE_BUSYWAIT
                 {
                     let mut shm_ok = false;
-                    let deadline = std::time::Instant::now()
-                        + std::time::Duration::from_millis(CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS);
+                    let deadline = std::time::Instant::now() + self.shm_attach_timeout;
                     loop {
                         match WinShmContext::client_attach(
                             &self.run_dir,

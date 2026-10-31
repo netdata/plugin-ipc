@@ -38,7 +38,9 @@ pub use client::{ClientAbortHandle, ClientState, ClientStatus, RawClient};
 pub use common::LookupLogicalConfig;
 pub use dispatch::{DispatchError, DispatchHandler};
 pub use increment::{increment_dispatch, IncrementHandler};
-pub use server::ManagedServer;
+#[cfg(test)]
+pub(crate) use server::RunningTestServer;
+pub use server::{ListeningSignal, ManagedServer};
 pub use string_reverse::{string_reverse_dispatch, StringReverseHandler};
 
 #[cfg(all(test, unix))]

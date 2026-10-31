@@ -127,7 +127,6 @@ const nipc_service_common_client_ops_t *nipc_service_posix_client_ops(void)
         .try_connect = nipc_service_posix_client_try_connect,
         .reconnect_for_call = nipc_service_posix_client_reconnect_for_call,
         .sleep_ms = client_sleep_ms,
-        .reconnect_drain_ms = CLIENT_CALL_RECONNECT_DRAIN_MS,
         .reconnect_retry_interval_ms = CLIENT_CALL_RECONNECT_RETRY_INTERVAL_MS,
     };
     return &ops;
