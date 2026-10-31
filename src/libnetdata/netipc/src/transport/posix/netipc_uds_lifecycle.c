@@ -15,7 +15,6 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,8 +31,6 @@
 
 /* Longest single connect wait, so an abort ends a connect promptly. */
 #define UDS_CONNECT_SLICE_MS 100u
-
-static pthread_mutex_t bind_umask_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Sockets must not leak into children a consumer forks and execs: an
  * inherited session socket keeps the peer from ever seeing EOF, which is
@@ -63,32 +60,15 @@ static int accept_cloexec(int listen_fd)
 #endif
 }
 
+/* Bind as owner-only (0600, narrowed by the umask). Linux and FreeBSD give
+ * the socket file the mode of the unbound socket, so fchmod() before bind()
+ * sets it without a post-bind window and without touching the
+ * process-global umask, which other threads of the embedding process use. */
 static int bind_owner_only_socket(int fd, const struct sockaddr_un *addr)
 {
-    int rc = pthread_mutex_lock(&bind_umask_lock);
-    if (rc != 0) {
-        errno = rc;
+    if (fchmod(fd, S_IRUSR | S_IWUSR) < 0)
         return -1;
-    }
-
-    /* Bind path sockets as 0600 without a post-bind permission window. */
-    // Flawfinder: ignore
-    mode_t old_mask = umask(S_IXUSR | S_IRWXG | S_IRWXO); // nosemgrep // NOSONAR
-    int bind_rc = bind(fd, (const struct sockaddr *)addr, sizeof(*addr));
-    int saved_errno = errno;
-    // Flawfinder: ignore
-    umask(old_mask); // nosemgrep // NOSONAR
-
-    rc = pthread_mutex_unlock(&bind_umask_lock);
-    if (bind_rc < 0) {
-        errno = saved_errno;
-        return -1;
-    }
-    if (rc != 0) {
-        errno = rc;
-        return -1;
-    }
-    return 0;
+    return bind(fd, (const struct sockaddr *)addr, sizeof(*addr));
 }
 
 static int copy_cstr_checked(char *dst, size_t dst_size, const char *src)

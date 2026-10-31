@@ -725,7 +725,17 @@ impl UdsListener {
             return Err(UdsError::Socket(errno()));
         }
 
-        // Bind
+        // Owner-only (0600, narrowed by the umask). Linux and FreeBSD give
+        // the socket file the mode of the unbound socket, so this needs no
+        // post-bind window and no change to the process-global umask.
+        if unsafe { libc::fchmod(fd, libc::S_IRUSR | libc::S_IWUSR) } < 0 {
+            let e = errno();
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(UdsError::Socket(e));
+        }
+
         if let Err(e) = bind_unix(fd, &path) {
             unsafe {
                 libc::close(fd);

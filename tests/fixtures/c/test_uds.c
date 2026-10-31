@@ -800,6 +800,40 @@ static void test_eintr_retried(void)
     uds_eintr_wrap_set(0, 0, 0);
     cleanup_socket(svc);
 }
+
+/* The umask is process-global: a file another thread creates while the
+ * listener binds must keep the process umask, and the socket must still be
+ * owner-only. */
+static void test_listen_keeps_process_umask(void)
+{
+    printf("Test: Listen leaves the process umask alone\n");
+    const char *svc = "test_listen_umask";
+    cleanup_socket(svc);
+
+    char probe[256];
+    snprintf(probe, sizeof(probe), "%s/%s.probe", TEST_RUN_DIR, svc);
+    unlink(probe);
+
+    mode_t old_mask = umask(022);
+    uds_bind_probe_arm(probe);
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_uds_listener_t listener;
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &listener);
+    umask(old_mask);
+    check("listen succeeds", err == NIPC_UDS_OK);
+    check("file created during bind keeps the process umask (0644)",
+          uds_bind_probe_mode() == 0644);
+
+    if (err == NIPC_UDS_OK) {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, svc);
+        struct stat st;
+        check("socket mode is owner-only",
+              stat(path, &st) == 0 && (st.st_mode & 0777) == 0600);
+        nipc_uds_close_listener(&listener);
+    }
+    cleanup_socket(svc);
+}
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -3436,6 +3470,7 @@ int main(void)
     test_ping_pong();              printf("\n");
 #ifdef NIPC_TEST_EINTR_WRAP
     test_eintr_retried();          printf("\n");
+    test_listen_keeps_process_umask(); printf("\n");
 #endif
     test_multi_client();           printf("\n");
     test_pipelining();             printf("\n");

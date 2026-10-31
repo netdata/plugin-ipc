@@ -32,6 +32,7 @@ Inferences:
 Unknowns:
 
 - The transport design choice (user decision).
+- Whether macOS honors `fchmod` on an unbound unix socket, which the POSIX listener uses to create owner-only sockets (SOW-0032, `docs/level1-posix-uds.md` "Socket permissions"). If it does not, the listener fails closed with a socket error and macOS needs its own owner-only mechanism.
 
 ### Acceptance Criteria
 

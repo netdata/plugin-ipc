@@ -30,6 +30,24 @@ Example: `/run/netdata/cgroups-snapshot.sock`
 - `service_name` is the service identity string
 - The path must not exceed the platform's `sun_path` limit
 
+## Socket permissions
+
+The listener socket file is owner-only: mode `0600`, narrowed further by the
+process umask. C, Rust and Go set it the same way: `fchmod(fd, 0600)` on the
+unbound socket, then `bind()`. Linux and FreeBSD create the socket file with
+the unbound socket's mode, so the file never exists with a wider mode, no
+path-based `chmod` runs, and the process-global umask is never changed (other
+threads of the embedding process may be creating files at the same time).
+
+Consequences:
+
+- clients must run as the server's user (or as a user the kernel lets
+  bypass file permissions, such as root);
+- `run_dir` must not be writable by untrusted users: whoever can write it
+  can remove or replace the endpoint;
+- a platform whose kernel rejects `fchmod` on an unbound socket fails
+  `listen` with a socket error instead of creating a wider socket.
+
 ## Profile bit
 
 UDS SEQPACKET is profile bit 0 (`0x01`), named `UDS_SEQPACKET`.

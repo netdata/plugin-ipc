@@ -1124,3 +1124,20 @@ func TestListenExcludesStartingServer(t *testing.T) {
 	}
 	again.Close()
 }
+
+func TestListenSocketOwnerOnly(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	l, err := Listen(runDir, service, defaultServerConfig())
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	st, statErr := os.Stat(filepath.Join(runDir, service+".sock"))
+	l.Close()
+	if statErr != nil {
+		t.Fatalf("stat socket: %v", statErr)
+	}
+	if mode := st.Mode().Perm(); mode != 0o600 {
+		t.Errorf("listener socket mode = %o, want 600", mode)
+	}
+}

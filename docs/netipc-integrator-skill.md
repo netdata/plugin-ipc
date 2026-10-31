@@ -376,6 +376,8 @@ Netdata-specific integration rules:
   `{run_dir}/{service}.lock` for its whole life; the file stays after the
   server exits and must not be deleted while a server may be starting, so
   two servers that start at the same time cannot both claim the endpoint
+- on POSIX the listener socket is owner-only (`0600`), so the provider and
+  its consumers must run as the same user (Netdata's plugins do)
 - if provider and consumer do not agree on auth token or run dir, the client
   will stay in `AUTH_FAILED` or `NOT_FOUND`
 

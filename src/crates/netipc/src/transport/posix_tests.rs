@@ -574,6 +574,22 @@ fn test_listen_excludes_starting_server() {
 }
 
 #[test]
+fn test_listen_socket_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    ensure_run_dir();
+    let svc = unique_service("rs_owner_only");
+    cleanup_socket(&svc);
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("listen");
+    let mode = std::fs::metadata(format!("{TEST_RUN_DIR}/{svc}.sock"))
+        .expect("stat socket")
+        .permissions()
+        .mode();
+    drop(listener);
+    cleanup_socket(&svc);
+    assert_eq!(mode & 0o777, 0o600, "listener socket must be owner-only");
+}
+
+#[test]
 fn test_stale_recovery_in_group_writable_run_dir() {
     use std::os::unix::fs::PermissionsExt;
     // Crash recovery must work regardless of run-dir permissions

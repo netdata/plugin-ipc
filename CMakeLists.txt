@@ -308,7 +308,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME)
         target_compile_definitions(test_uds PRIVATE NIPC_TEST_EINTR_WRAP=1)
         target_link_options(test_uds PRIVATE
             "LINKER:--wrap=send" "LINKER:--wrap=sendmsg" "LINKER:--wrap=__sendmsg64"
-            "LINKER:--wrap=recv")
+            "LINKER:--wrap=recv" "LINKER:--wrap=bind")
     endif()
     add_test(NAME test_uds COMMAND test_uds)
     set_tests_properties(test_uds PROPERTIES TIMEOUT 30)

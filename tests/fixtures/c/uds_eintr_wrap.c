@@ -4,8 +4,11 @@
 #include "uds_eintr_wrap.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
+#include <unistd.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 
 static unsigned g_send_eintr;
@@ -64,6 +67,40 @@ ssize_t __wrap_recv(int fd, void *buf, size_t len, int flags)
     if (take(&g_recv_eintr))
         return -1;
     return __real_recv(fd, buf, len, flags);
+}
+
+static const char *g_bind_probe_path;
+static int g_bind_probe_mode = -1;
+
+void uds_bind_probe_arm(const char *path)
+{
+    g_bind_probe_mode = -1;
+    __atomic_store_n(&g_bind_probe_path, path, __ATOMIC_RELEASE);
+}
+
+int uds_bind_probe_mode(void)
+{
+    return g_bind_probe_mode;
+}
+
+int __real_bind(int fd, const struct sockaddr *addr, socklen_t len);
+
+int __wrap_bind(int fd, const struct sockaddr *addr, socklen_t len)
+{
+    const char *path = __atomic_exchange_n(&g_bind_probe_path, NULL,
+                                           __ATOMIC_ACQ_REL);
+    if (path) {
+        int saved_errno = errno;
+        int pfd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+        struct stat st;
+        if (pfd >= 0 && fstat(pfd, &st) == 0)
+            g_bind_probe_mode = (int)(st.st_mode & 0777);
+        if (pfd >= 0)
+            close(pfd);
+        unlink(path);
+        errno = saved_errno;
+    }
+    return __real_bind(fd, addr, len);
 }
 
 #if defined(__GLIBC__) && defined(__USE_TIME_BITS64)
