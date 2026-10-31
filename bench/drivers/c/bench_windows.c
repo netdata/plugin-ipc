@@ -69,6 +69,63 @@
 #endif
 #endif
 
+#ifdef __MSYS__
+#include <pthread.h>
+
+/* The MSYS runtime does not support threads started with CreateThread:
+ * under load such a thread may never run and the process dies silently.
+ * Start threads with pthread_create; each duplicates its own handle for the
+ * creator, so callers keep waiting on and closing a real thread handle. */
+typedef struct {
+    LPTHREAD_START_ROUTINE fn;
+    void *arg;
+    HANDLE started;
+    HANDLE thread;
+} bench_thread_start_t;
+
+static void *bench_thread_trampoline(void *p)
+{
+    bench_thread_start_t *start = p;
+    LPTHREAD_START_ROUTINE fn = start->fn;
+    void *arg = start->arg;
+    HANDLE thread = NULL;
+    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+                         &thread, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        thread = NULL;
+    start->thread = thread;
+    /* start lives on the creator's stack: no access after this. */
+    SetEvent(start->started);
+    if (thread)
+        fn(arg);
+    return NULL;
+}
+
+static HANDLE bench_create_thread(LPTHREAD_START_ROUTINE fn, void *arg)
+{
+    bench_thread_start_t start = {
+        .fn = fn,
+        .arg = arg,
+        .started = CreateEventW(NULL, TRUE, FALSE, NULL),
+    };
+    if (!start.started)
+        return NULL;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, bench_thread_trampoline, &start) != 0) {
+        CloseHandle(start.started);
+        return NULL;
+    }
+    pthread_detach(thread);
+    WaitForSingleObject(start.started, INFINITE);
+    CloseHandle(start.started);
+    return start.thread;
+}
+#else
+static HANDLE bench_create_thread(LPTHREAD_START_ROUTINE fn, void *arg)
+{
+    return CreateThread(NULL, 0, fn, arg, 0, NULL);
+}
+#endif
+
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
@@ -535,7 +592,7 @@ static HANDLE start_timer_thread(int duration_sec, bench_timer_ctx_t *ctx)
     if (!ctx->cancel_event)
         return NULL;
 
-    HANDLE timer = CreateThread(NULL, 0, timer_thread, ctx, 0, NULL);
+    HANDLE timer = bench_create_thread(timer_thread, ctx);
     if (!timer) {
         CloseHandle(ctx->cancel_event);
         ctx->cancel_event = NULL;
@@ -666,7 +723,7 @@ static int run_server(const char *run_dir, const char *service,
     bench_server_thread_ctx_t thread_ctx = {
         .server = &server,
     };
-    HANDLE server_thread = CreateThread(NULL, 0, bench_server_thread, &thread_ctx, 0, NULL);
+    HANDLE server_thread = bench_create_thread(bench_server_thread, &thread_ctx);
     if (!server_thread) {
         fprintf(stderr, "server thread create failed: %lu\n", (unsigned long)GetLastError());
         g_server = NULL;
@@ -752,7 +809,7 @@ static int run_server_batch(const char *run_dir, const char *service,
     bench_server_thread_ctx_t thread_ctx = {
         .server = &server,
     };
-    HANDLE server_thread = CreateThread(NULL, 0, bench_server_thread, &thread_ctx, 0, NULL);
+    HANDLE server_thread = bench_create_thread(bench_server_thread, &thread_ctx);
     if (!server_thread) {
         fprintf(stderr, "batch server thread create failed: %lu\n",
                 (unsigned long)GetLastError());

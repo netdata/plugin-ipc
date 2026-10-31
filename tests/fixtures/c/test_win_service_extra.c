@@ -7,17 +7,27 @@
 
 #if defined(_WIN32) || defined(__MSYS__)
 
+#ifdef __MSYS__
+/* pthread_getattr_np */
+#define _GNU_SOURCE
+#endif
+
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_win_shm.h"
 #include "test_sync.h"
 #include "netipc_service_common.h"
+#include "netipc_service_win_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+
+#ifdef __MSYS__
+#include <pthread.h>
+#endif
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -4188,6 +4198,50 @@ static void test_cache_fault_injection(void)
     }
 }
 
+typedef struct {
+    DWORD thread_id;
+    int runtime_thread;
+} library_thread_probe_t;
+
+static unsigned __stdcall library_thread_probe(void *arg)
+{
+    library_thread_probe_t *probe = (library_thread_probe_t *)arg;
+    probe->thread_id = GetCurrentThreadId();
+#ifdef __MSYS__
+    /* The runtime knows only threads it started; for others it reports
+     * ESRCH. */
+    pthread_attr_t attr;
+    probe->runtime_thread = pthread_getattr_np(pthread_self(), &attr) == 0;
+    if (probe->runtime_thread)
+        pthread_attr_destroy(&attr);
+#else
+    probe->runtime_thread = 1;
+#endif
+    return 0;
+}
+
+/* Library threads must be threads the C runtime supports, and their handle
+ * must be a real thread handle: signaled when the thread returns and naming
+ * the thread that ran. */
+static void test_library_thread_creation(void)
+{
+    library_thread_probe_t probe = {0};
+    unsigned thread_id = 0;
+    HANDLE thread = (HANDLE)nipc_service_win_beginthreadex(
+        NULL, 0, library_thread_probe, &probe, 0, &thread_id);
+    check("library thread created", thread != NULL);
+    if (!thread)
+        return;
+    check("library thread handle signaled when the thread returns",
+          WaitForSingleObject(thread, TEST_WAIT_LIMIT_MS) == WAIT_OBJECT_0);
+    check("library thread is a runtime thread", probe.runtime_thread);
+    check("library thread id matches the thread that ran",
+          thread_id != 0 && thread_id == probe.thread_id);
+    check("library thread handle names the thread that ran",
+          GetThreadId(thread) == probe.thread_id);
+    CloseHandle(thread);
+}
+
 static void test_common_helper_edges(void)
 {
     printf("--- Common service helper edge paths ---\n");
@@ -4822,6 +4876,7 @@ int main(void)
     CreateDirectoryA(TEST_RUN_DIR, NULL);
     g_test_filter = getenv("NIPC_TEST_FILTER");
 
+    RUN_TEST(test_library_thread_creation);
     RUN_TEST(test_common_helper_edges);
     RUN_TEST(test_lookup_remaining_timeout_helpers);
     RUN_TEST(test_client_init_defaults_and_truncation);
