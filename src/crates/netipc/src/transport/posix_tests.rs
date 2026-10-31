@@ -1,5 +1,8 @@
 use super::*;
-use crate::protocol;
+use crate::protocol::{
+    self, ChunkHeader, FLAG_BATCH, KIND_REQUEST, KIND_RESPONSE, MAGIC_CHUNK, MAGIC_MSG, VERSION,
+};
+use crate::transport::framing::{HELLO_ACK_PAYLOAD_SIZE, HELLO_PAYLOAD_SIZE};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
@@ -2848,25 +2851,6 @@ fn test_path_too_long() {
     let long_name = "a".repeat(200);
     let result = build_socket_path("/tmp", &long_name);
     assert!(matches!(result, Err(UdsError::PathTooLong)));
-}
-
-// -----------------------------------------------------------------------
-//  Helpers: highest_bit, apply_default
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_highest_bit() {
-    assert_eq!(highest_bit(0), 0);
-    assert_eq!(highest_bit(1), 1);
-    assert_eq!(highest_bit(0b0101), 4);
-    assert_eq!(highest_bit(0b1000), 8);
-    assert_eq!(highest_bit(0xFF), 128);
-}
-
-#[test]
-fn test_apply_default() {
-    assert_eq!(apply_default(0, 42), 42);
-    assert_eq!(apply_default(10, 42), 10);
 }
 
 #[test]

@@ -3,6 +3,9 @@
 //! Each transport provides connection lifecycle, handshake, and
 //! send/receive with transparent chunking.
 
+#[cfg(any(unix, windows))]
+pub(crate) mod framing;
+
 #[cfg(unix)]
 pub mod posix;
 

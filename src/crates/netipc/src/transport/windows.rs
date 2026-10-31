@@ -4,9 +4,9 @@
 //! and send/receive with transparent chunking over Win32 Named Pipes
 //! in message mode. Wire-compatible with the C and Go implementations.
 
+use super::framing::{self, Framing, FramingError, ServerOffer, apply_default};
 use crate::protocol::{
-    self, ChunkHeader, FLAG_BATCH, HEADER_SIZE, Header, Hello, HelloAck, KIND_REQUEST,
-    KIND_RESPONSE, MAGIC_CHUNK, MAGIC_MSG, MAX_PAYLOAD_DEFAULT, PROFILE_BASELINE, VERSION, align8,
+    HEADER_SIZE, Header, Hello, HelloAck, MAX_PAYLOAD_DEFAULT, PROFILE_BASELINE,
 };
 #[cfg(windows)]
 use crate::transport::win_security::{OwnerOnlyAttributes, owner_trusted};
@@ -126,8 +126,6 @@ mod ffi {
 const DEFAULT_BATCH_ITEMS: u32 = 1;
 const DEFAULT_PACKET_SIZE: u32 = 65536;
 const DEFAULT_PIPE_BUF_SIZE: u32 = 65536;
-const HELLO_PAYLOAD_SIZE: usize = 44;
-const HELLO_ACK_PAYLOAD_SIZE: usize = 48;
 const MAX_PIPE_NAME_CHARS: usize = 256;
 
 /// How long a connect waits for a free pipe instance when every instance is
@@ -220,30 +218,40 @@ impl std::fmt::Display for NpError {
     }
 }
 
-fn header_version_incompatible(buf: &[u8], expected_code: u16) -> bool {
-    if buf.len() < HEADER_SIZE {
-        return false;
+impl FramingError for NpError {
+    fn protocol(msg: String) -> Self {
+        NpError::Protocol(msg)
     }
-
-    let magic = u32::from_ne_bytes(buf[0..4].try_into().unwrap());
-    let version = u16::from_ne_bytes(buf[4..6].try_into().unwrap());
-    let header_len = u16::from_ne_bytes(buf[6..8].try_into().unwrap());
-    let kind = u16::from_ne_bytes(buf[8..10].try_into().unwrap());
-    let code = u16::from_ne_bytes(buf[12..14].try_into().unwrap());
-
-    magic == MAGIC_MSG
-        && version != VERSION
-        && header_len == protocol::HEADER_LEN
-        && kind == protocol::KIND_CONTROL
-        && code == expected_code
-}
-
-fn hello_layout_incompatible(buf: &[u8]) -> bool {
-    buf.len() >= 2 && u16::from_ne_bytes(buf[0..2].try_into().unwrap()) != 1
-}
-
-fn hello_ack_layout_incompatible(buf: &[u8]) -> bool {
-    buf.len() >= 2 && u16::from_ne_bytes(buf[0..2].try_into().unwrap()) != 1
+    fn chunk(msg: String) -> Self {
+        NpError::Chunk(msg)
+    }
+    fn incompatible(msg: String) -> Self {
+        NpError::Incompatible(msg)
+    }
+    fn handshake(msg: String) -> Self {
+        NpError::Handshake(msg)
+    }
+    fn bad_param(msg: String) -> Self {
+        NpError::BadParam(msg)
+    }
+    fn limit_exceeded() -> Self {
+        NpError::LimitExceeded
+    }
+    fn auth_failed() -> Self {
+        NpError::AuthFailed
+    }
+    fn no_profile() -> Self {
+        NpError::NoProfile
+    }
+    fn duplicate_msg_id(id: u64) -> Self {
+        NpError::DuplicateMsgId(id)
+    }
+    fn unknown_msg_id(id: u64) -> Self {
+        NpError::UnknownMsgId(id)
+    }
+    fn fails_session(&self) -> bool {
+        matches!(self, NpError::Send(_) | NpError::Disconnected)
+    }
 }
 
 impl std::error::Error for NpError {}
@@ -391,38 +399,12 @@ pub fn build_pipe_name(run_dir: &str, service_name: &str) -> Result<Vec<u16>, Np
 //  Internal helpers
 // ---------------------------------------------------------------------------
 
-fn apply_default(val: u32, def: u32) -> u32 {
-    if val == 0 { def } else { val }
-}
-
-fn min_u32(a: u32, b: u32) -> u32 {
-    a.min(b)
-}
-
-fn max_u32(a: u32, b: u32) -> u32 {
-    a.max(b)
-}
-
 #[cfg(windows)]
 fn pipe_buffer_size(packet_size: u32) -> u32 {
     // The protocol packet size controls logical framing and chunk size. The
     // underlying pipe quota must stay large enough for full-duplex pipelining
     // even when tests force a tiny protocol packet size.
-    max_u32(
-        apply_default(packet_size, DEFAULT_PIPE_BUF_SIZE),
-        DEFAULT_PIPE_BUF_SIZE,
-    )
-}
-
-fn highest_bit(mask: u32) -> u32 {
-    if mask == 0 {
-        return 0;
-    }
-    let mut bit: u32 = 1 << 31;
-    while bit & mask == 0 {
-        bit >>= 1;
-    }
-    bit
+    apply_default(packet_size, DEFAULT_PIPE_BUF_SIZE).max(DEFAULT_PIPE_BUF_SIZE)
 }
 
 // ---------------------------------------------------------------------------
@@ -702,9 +684,23 @@ pub struct NpSession {
 
 #[cfg(windows)]
 impl NpSession {
-    fn fail_all_inflight(&mut self) {
-        if self.role == Role::Client {
-            self.inflight_ids.clear();
+    /// The framing of the messages this side sends (`sending`) or receives.
+    /// Clients send requests and receive responses; servers the opposite.
+    fn framing(&self, sending: bool) -> Framing {
+        let client = self.role == Role::Client;
+        let (max_payload, max_items) = if client == sending {
+            (self.max_request_payload_bytes, self.max_request_batch_items)
+        } else {
+            (
+                self.max_response_payload_bytes,
+                self.max_response_batch_items,
+            )
+        };
+        Framing {
+            client,
+            max_payload,
+            max_items,
+            packet_size: self.packet_size,
         }
     }
 
@@ -785,122 +781,12 @@ impl NpSession {
             return Err(NpError::BadParam("session closed".into()));
         }
 
-        // Validate payload against negotiated directional limits before transmitting.
-        let (max_payload, max_items) = if self.role == Role::Client {
-            (self.max_request_payload_bytes, self.max_request_batch_items)
-        } else {
-            (
-                self.max_response_payload_bytes,
-                self.max_response_batch_items,
-            )
-        };
-        if payload.len() > max_payload as usize
-            || payload.len() > (u32::MAX as usize).saturating_sub(HEADER_SIZE)
-        {
-            return Err(NpError::LimitExceeded);
-        }
-        if hdr.item_count > max_items {
-            return Err(NpError::LimitExceeded);
-        }
-
-        // Client-side: track in-flight message_ids for requests
-        if self.role == Role::Client && hdr.kind == KIND_REQUEST {
-            if !self.inflight_ids.insert(hdr.message_id) {
-                return Err(NpError::DuplicateMsgId(hdr.message_id));
-            }
-        }
-
-        // Fill envelope fields
-        hdr.magic = MAGIC_MSG;
-        hdr.version = VERSION;
-        hdr.header_len = protocol::HEADER_LEN;
-        hdr.payload_len = payload.len() as u32;
-
-        let tracked = self.role == Role::Client && hdr.kind == KIND_REQUEST;
-        let msg_id = hdr.message_id;
-
-        let result = self.send_inner(hdr, payload);
-
-        if let Err(err) = &result {
-            if tracked {
-                match err {
-                    NpError::Send(_) | NpError::Disconnected => self.fail_all_inflight(),
-                    _ => {
-                        self.inflight_ids.remove(&msg_id);
-                    }
-                }
-            }
-        }
-
-        result
-    }
-
-    fn send_inner(&mut self, hdr: &mut Header, payload: &[u8]) -> Result<(), NpError> {
-        let total_msg = HEADER_SIZE + payload.len();
-
-        // Single packet?
-        if total_msg <= self.packet_size as usize {
-            let mut hdr_buf = [0u8; HEADER_SIZE];
-            hdr.encode(&mut hdr_buf);
-            return raw_send_msg(self.handle, &mut self.send_buf, &hdr_buf, payload);
-        }
-
-        // Chunked send
-        let chunk_payload_budget = self.packet_size as usize - HEADER_SIZE;
-        if chunk_payload_budget == 0 {
-            return Err(NpError::BadParam("packet_size too small".into()));
-        }
-
-        let first_chunk_payload = payload.len().min(chunk_payload_budget);
-        let remaining_after_first = payload.len() - first_chunk_payload;
-
-        let continuation_chunks = if remaining_after_first > 0 {
-            1 + ((remaining_after_first - 1) / chunk_payload_budget)
-        } else {
-            0
-        };
-        let chunk_count = 1 + continuation_chunks as u32;
-
-        // First chunk
-        let mut hdr_buf = [0u8; HEADER_SIZE];
-        hdr.encode(&mut hdr_buf);
-        raw_send_msg(
-            self.handle,
-            &mut self.send_buf,
-            &hdr_buf,
-            &payload[..first_chunk_payload],
-        )?;
-
-        // Continuation chunks
-        let mut offset = first_chunk_payload;
-        for ci in 1..chunk_count {
-            let remaining = payload.len() - offset;
-            let this_chunk = remaining.min(chunk_payload_budget);
-
-            let chk = ChunkHeader {
-                magic: MAGIC_CHUNK,
-                version: VERSION,
-                flags: 0,
-                message_id: hdr.message_id,
-                total_message_len: total_msg as u32,
-                chunk_index: ci,
-                chunk_count,
-                chunk_payload_len: this_chunk as u32,
-            };
-
-            let mut chk_buf = [0u8; HEADER_SIZE];
-            chk.encode(&mut chk_buf);
-            raw_send_msg(
-                self.handle,
-                &mut self.send_buf,
-                &chk_buf,
-                &payload[offset..offset + this_chunk],
-            )?;
-
-            offset += this_chunk;
-        }
-
-        Ok(())
+        let framing = self.framing(true);
+        let handle = self.handle;
+        let send_buf = &mut self.send_buf;
+        framing::send_message(framing, &mut self.inflight_ids, hdr, payload, |h, p| {
+            raw_send_msg(handle, send_buf, h, p)
+        })
     }
 
     /// Receive one logical message. buf is a scratch buffer for the first read.
@@ -923,166 +809,16 @@ impl NpSession {
         let controlled = timeout_ms != 0 || abort.is_some();
         let mut wait = ReceiveWait::new(timeout_ms, abort);
 
-        let n = match raw_recv_control(self.handle, buf, controlled, &mut wait) {
-            Ok(n) => n,
-            Err(err) => {
-                self.fail_all_inflight();
-                return Err(err);
-            }
-        };
-
-        if n < HEADER_SIZE {
-            return Err(NpError::Protocol("packet too short for header".into()));
-        }
-
-        let hdr = Header::decode(&buf[..n])
-            .map_err(|e| NpError::Protocol(format!("header decode: {e}")))?;
-
-        // Validate payload_len against negotiated limit
-        let max_payload = if self.role == Role::Server {
-            self.max_request_payload_bytes
-        } else {
-            self.max_response_payload_bytes
-        };
-        if hdr.payload_len > max_payload {
-            return Err(NpError::LimitExceeded);
-        }
-
-        // Validate item_count
-        let max_batch = if self.role == Role::Server {
-            self.max_request_batch_items
-        } else {
-            self.max_response_batch_items
-        };
-        if hdr.item_count > max_batch {
-            return Err(NpError::LimitExceeded);
-        }
-
-        // Client-side: validate response message_id
-        if self.role == Role::Client && hdr.kind == KIND_RESPONSE {
-            if !self.inflight_ids.remove(&hdr.message_id) {
-                return Err(NpError::UnknownMsgId(hdr.message_id));
-            }
-        }
-
-        let total_msg = HEADER_SIZE + hdr.payload_len as usize;
-
-        if n > total_msg {
-            return Err(NpError::Protocol(
-                "packet exceeds declared payload_len".into(),
-            ));
-        }
-
-        // Non-chunked
-        if n == total_msg {
-            let payload = &buf[HEADER_SIZE..HEADER_SIZE + hdr.payload_len as usize];
-
-            // Validate batch directory
-            if hdr.flags & FLAG_BATCH != 0 && hdr.item_count > 1 {
-                let dir_bytes = hdr.item_count as usize * 8;
-                let dir_aligned = align8(dir_bytes);
-                if payload.len() < dir_aligned {
-                    return Err(NpError::Protocol("batch directory exceeds payload".into()));
-                }
-                let packed_area_len = (payload.len() - dir_aligned) as u32;
-                protocol::batch_dir_validate(
-                    &payload[..dir_bytes],
-                    hdr.item_count,
-                    packed_area_len,
-                )
-                .map_err(|e| NpError::Protocol(format!("batch directory: {e:?}")))?;
-            }
-
-            return Ok((hdr, payload));
-        }
-
-        // Chunked
-        let first_payload_bytes = n - HEADER_SIZE;
-        let needed = hdr.payload_len as usize;
-        if self.recv_buf.len() < needed {
-            self.recv_buf.resize(needed, 0);
-        }
-
-        self.recv_buf[..first_payload_bytes]
-            .copy_from_slice(&buf[HEADER_SIZE..HEADER_SIZE + first_payload_bytes]);
-
-        let mut assembled = first_payload_bytes;
-        let chunk_payload_budget = self.packet_size as usize - HEADER_SIZE;
-
-        let remaining_after_first = hdr.payload_len as usize - first_payload_bytes;
-        let expected_continuations = if remaining_after_first > 0 && chunk_payload_budget > 0 {
-            1 + ((remaining_after_first - 1) / chunk_payload_budget)
-        } else {
-            0
-        };
-        let expected_chunk_count = 1 + expected_continuations as u32;
-
-        if self.pkt_buf.len() < self.packet_size as usize {
-            self.pkt_buf.resize(self.packet_size as usize, 0);
-        }
-
-        let mut ci: u32 = 1;
-        while assembled < hdr.payload_len as usize {
-            let cn = match raw_recv_control(self.handle, &mut self.pkt_buf, controlled, &mut wait) {
-                Ok(n) => n,
-                Err(err) => {
-                    self.fail_all_inflight();
-                    return Err(err);
-                }
-            };
-
-            if cn < HEADER_SIZE {
-                return Err(NpError::Chunk("continuation too short".into()));
-            }
-
-            let chk = ChunkHeader::decode(&self.pkt_buf[..cn])
-                .map_err(|e| NpError::Chunk(format!("chunk header: {e}")))?;
-
-            if chk.message_id != hdr.message_id {
-                return Err(NpError::Chunk("message_id mismatch".into()));
-            }
-            if chk.chunk_index != ci {
-                return Err(NpError::Chunk(format!(
-                    "chunk_index mismatch: expected {ci}, got {}",
-                    chk.chunk_index
-                )));
-            }
-            if chk.chunk_count != expected_chunk_count {
-                return Err(NpError::Chunk("chunk_count mismatch".into()));
-            }
-            if chk.total_message_len != total_msg as u32 {
-                return Err(NpError::Chunk("total_message_len mismatch".into()));
-            }
-
-            let chunk_data = cn - HEADER_SIZE;
-            if chunk_data != chk.chunk_payload_len as usize {
-                return Err(NpError::Chunk("chunk_payload_len mismatch".into()));
-            }
-            if assembled + chunk_data > hdr.payload_len as usize {
-                return Err(NpError::Chunk("chunk exceeds payload_len".into()));
-            }
-
-            self.recv_buf[assembled..assembled + chunk_data]
-                .copy_from_slice(&self.pkt_buf[HEADER_SIZE..HEADER_SIZE + chunk_data]);
-            assembled += chunk_data;
-            ci += 1;
-        }
-
-        let payload = &self.recv_buf[..hdr.payload_len as usize];
-
-        // Validate batch directory
-        if hdr.flags & FLAG_BATCH != 0 && hdr.item_count > 1 {
-            let dir_bytes = hdr.item_count as usize * 8;
-            let dir_aligned = align8(dir_bytes);
-            if payload.len() < dir_aligned {
-                return Err(NpError::Protocol("batch directory exceeds payload".into()));
-            }
-            let packed_area_len = (payload.len() - dir_aligned) as u32;
-            protocol::batch_dir_validate(&payload[..dir_bytes], hdr.item_count, packed_area_len)
-                .map_err(|e| NpError::Protocol(format!("batch directory: {e:?}")))?;
-        }
-
-        Ok((hdr, payload))
+        let framing = self.framing(false);
+        let handle = self.handle;
+        framing::receive_message(
+            framing,
+            &mut self.inflight_ids,
+            buf,
+            &mut self.recv_buf,
+            &mut self.pkt_buf,
+            |b| raw_recv_control(handle, b, controlled, &mut wait),
+        )
     }
 
     /// Close the session.
@@ -1096,7 +832,9 @@ impl NpSession {
             close_handle(self.handle);
             self.handle = ffi::INVALID_HANDLE_VALUE;
         }
-        self.fail_all_inflight();
+        if self.role == Role::Client {
+            self.inflight_ids.clear();
+        }
         self.recv_buf.clear();
     }
 }
@@ -1461,11 +1199,7 @@ fn client_handshake(
 ) -> Result<NpSession, NpError> {
     let pkt_size = apply_default(config.packet_size, DEFAULT_PACKET_SIZE);
 
-    let supported = if config.supported_profiles != 0 {
-        config.supported_profiles
-    } else {
-        PROFILE_BASELINE
-    };
+    let supported = apply_default(config.supported_profiles, PROFILE_BASELINE);
 
     let hello = Hello {
         layout_version: 1,
@@ -1489,27 +1223,7 @@ fn client_handshake(
         packet_size: pkt_size,
     };
 
-    let mut hello_buf = [0u8; HELLO_PAYLOAD_SIZE];
-    hello.encode(&mut hello_buf);
-
-    let hdr = Header {
-        magic: MAGIC_MSG,
-        version: VERSION,
-        header_len: protocol::HEADER_LEN,
-        kind: protocol::KIND_CONTROL,
-        flags: 0,
-        code: protocol::CODE_HELLO,
-        transport_status: protocol::STATUS_OK,
-        payload_len: HELLO_PAYLOAD_SIZE as u32,
-        item_count: 1,
-        message_id: 0,
-    };
-
-    let mut pkt = [0u8; HEADER_SIZE + HELLO_PAYLOAD_SIZE];
-    hdr.encode(&mut pkt[..HEADER_SIZE]);
-    pkt[HEADER_SIZE..].copy_from_slice(&hello_buf);
-
-    raw_write(handle, &pkt)?;
+    raw_write(handle, &framing::hello_packet(&hello))?;
 
     // Receive HELLO_ACK; a server that never answers must not hold the
     // client past its deadline. A server that rejects the client writes its
@@ -1528,58 +1242,7 @@ fn client_handshake(
     let mut ack_buf = [0u8; 128];
     let n = raw_recv(handle, &mut ack_buf)?;
 
-    let ack_hdr = match Header::decode(&ack_buf[..n]) {
-        Ok(hdr) => hdr,
-        Err(crate::protocol::NipcError::BadVersion) => {
-            return Err(NpError::Incompatible("ack header version mismatch".into()));
-        }
-        Err(e) => return Err(NpError::Protocol(format!("ack header: {e}"))),
-    };
-
-    if ack_hdr.kind != protocol::KIND_CONTROL || ack_hdr.code != protocol::CODE_HELLO_ACK {
-        return Err(NpError::Protocol("expected HELLO_ACK".into()));
-    }
-
-    if ack_hdr.transport_status == protocol::STATUS_AUTH_FAILED {
-        return Err(NpError::AuthFailed);
-    }
-    if ack_hdr.transport_status == protocol::STATUS_UNSUPPORTED {
-        return Err(NpError::NoProfile);
-    }
-    if ack_hdr.transport_status == protocol::STATUS_INCOMPATIBLE {
-        return Err(NpError::Incompatible(
-            "ack transport_status incompatible".into(),
-        ));
-    }
-    if ack_hdr.transport_status == protocol::STATUS_LIMIT_EXCEEDED {
-        return Err(NpError::LimitExceeded);
-    }
-    if ack_hdr.transport_status != protocol::STATUS_OK {
-        return Err(NpError::Handshake(format!(
-            "transport_status={}",
-            ack_hdr.transport_status
-        )));
-    }
-
-    if n < HEADER_SIZE + HELLO_ACK_PAYLOAD_SIZE {
-        return Err(NpError::Protocol("ack payload truncated".into()));
-    }
-
-    let ack = match HelloAck::decode(&ack_buf[HEADER_SIZE..n]) {
-        Ok(ack) => ack,
-        Err(crate::protocol::NipcError::BadLayout)
-            if hello_ack_layout_incompatible(&ack_buf[HEADER_SIZE..n]) =>
-        {
-            return Err(NpError::Incompatible(
-                "ack payload layout version mismatch".into(),
-            ));
-        }
-        Err(e) => return Err(NpError::Protocol(format!("ack payload: {e}"))),
-    };
-
-    if !super::selected_profile_offered(ack.selected_profile, supported) {
-        return Err(NpError::Protocol("selected profile was not offered".into()));
-    }
+    let ack: HelloAck = framing::parse_hello_ack(&ack_buf[..n], supported)?;
 
     // Reject packet sizes too small for a header
     if ack.agreed_packet_size <= HEADER_SIZE as u32 {
@@ -1614,187 +1277,39 @@ fn server_handshake(
     handle: ffi::HANDLE,
     config: &ServerConfig,
     session_id: u64,
-    mut prepare: Option<&mut dyn FnMut(u32, u32, u32) -> bool>,
+    prepare: Option<&mut dyn FnMut(u32, u32, u32) -> bool>,
 ) -> Result<NpSession, NpError> {
-    let server_pkt_size = apply_default(config.packet_size, DEFAULT_PACKET_SIZE);
-    let s_req_pay = apply_default(config.max_request_payload_bytes, MAX_PAYLOAD_DEFAULT);
-    let s_resp_pay = apply_default(config.max_response_payload_bytes, MAX_PAYLOAD_DEFAULT);
-    let mut s_profiles = if config.supported_profiles != 0 {
-        config.supported_profiles
-    } else {
-        PROFILE_BASELINE
-    };
-    let s_preferred = config.preferred_profiles;
-
-    let send_rejection = |status: u16| {
-        let ack = HelloAck {
-            layout_version: 1,
-            ..HelloAck::default()
-        };
-        let mut ack_buf = [0u8; HELLO_ACK_PAYLOAD_SIZE];
-        ack.encode(&mut ack_buf);
-
-        let ack_hdr = Header {
-            magic: MAGIC_MSG,
-            version: VERSION,
-            header_len: protocol::HEADER_LEN,
-            kind: protocol::KIND_CONTROL,
-            flags: 0,
-            code: protocol::CODE_HELLO_ACK,
-            transport_status: status,
-            payload_len: HELLO_ACK_PAYLOAD_SIZE as u32,
-            item_count: 1,
-            message_id: 0,
-        };
-
-        let mut pkt = [0u8; HEADER_SIZE + HELLO_ACK_PAYLOAD_SIZE];
-        ack_hdr.encode(&mut pkt[..HEADER_SIZE]);
-        pkt[HEADER_SIZE..].copy_from_slice(&ack_buf);
-        let _ = raw_write(handle, &pkt);
+    let offer = ServerOffer {
+        packet_size: apply_default(config.packet_size, DEFAULT_PACKET_SIZE),
+        supported_profiles: apply_default(config.supported_profiles, PROFILE_BASELINE),
+        preferred_profiles: config.preferred_profiles,
+        max_request_payload_bytes: apply_default(
+            config.max_request_payload_bytes,
+            MAX_PAYLOAD_DEFAULT,
+        ),
+        max_response_payload_bytes: apply_default(
+            config.max_response_payload_bytes,
+            MAX_PAYLOAD_DEFAULT,
+        ),
+        auth_token: config.auth_token,
     };
 
     // Receive HELLO
     let mut buf = [0u8; 128];
     let n = raw_recv(handle, &mut buf)?;
-
-    let hdr = match Header::decode(&buf[..n]) {
-        Ok(hdr) => hdr,
-        Err(crate::protocol::NipcError::BadVersion)
-            if header_version_incompatible(&buf[..n], protocol::CODE_HELLO) =>
-        {
-            send_rejection(protocol::STATUS_INCOMPATIBLE);
-            return Err(NpError::Incompatible(
-                "hello header version mismatch".into(),
-            ));
-        }
-        Err(e) => return Err(NpError::Protocol(format!("hello header: {e}"))),
-    };
-
-    if hdr.kind != protocol::KIND_CONTROL || hdr.code != protocol::CODE_HELLO {
-        return Err(NpError::Protocol("expected HELLO".into()));
-    }
-
-    let hello = match Hello::decode(&buf[HEADER_SIZE..n]) {
-        Ok(hello) => hello,
-        Err(crate::protocol::NipcError::BadLayout)
-            if hello_layout_incompatible(&buf[HEADER_SIZE..n]) =>
-        {
-            send_rejection(protocol::STATUS_INCOMPATIBLE);
-            return Err(NpError::Incompatible(
-                "hello payload layout version mismatch".into(),
-            ));
-        }
-        Err(e) => return Err(NpError::Protocol(format!("hello payload: {e}"))),
-    };
-
-    let mut intersection = hello.supported_profiles & s_profiles;
-
-    if intersection == 0 {
-        send_rejection(protocol::STATUS_UNSUPPORTED);
-        return Err(NpError::NoProfile);
-    }
-
-    if hello.auth_token != config.auth_token {
-        send_rejection(protocol::STATUS_AUTH_FAILED);
-        return Err(NpError::AuthFailed);
-    }
-
-    // Select profile
-    let preferred_intersection = intersection & hello.preferred_profiles & s_preferred;
-    let mut selected = if preferred_intersection != 0 {
-        highest_bit(preferred_intersection)
-    } else {
-        highest_bit(intersection)
-    };
-
-    if hello.max_request_payload_bytes > s_req_pay {
-        send_rejection(protocol::STATUS_LIMIT_EXCEEDED);
-        return Err(NpError::LimitExceeded);
-    }
-
-    // Negotiate limits:
-    // - request payload and batch size are client-proposed and echoed
-    // - response payload is server-authoritative
-    // - response batch size is symmetric with request batch size
-    let agreed_req_pay = hello.max_request_payload_bytes;
-    let agreed_req_bat = hello.max_request_batch_items;
-    let agreed_resp_pay = s_resp_pay;
-    let agreed_resp_bat = agreed_req_bat;
-    let agreed_pkt = min_u32(hello.packet_size, server_pkt_size);
-
-    // Reject packet sizes too small for a usable message packet
-    if agreed_pkt <= HEADER_SIZE as u32 {
-        send_rejection(protocol::STATUS_INCOMPATIBLE);
-        return Err(NpError::Incompatible(
-            "packet size too small for negotiated session".into(),
-        ));
-    }
-
-    // Set up the selected profile before the ACK promises it. A profile the
-    // caller cannot prepare is dropped, as if the server never offered it.
-    if let Some(prepare) = prepare.as_mut() {
-        while !prepare(selected, agreed_req_pay, agreed_resp_pay) {
-            s_profiles &= !selected;
-            intersection &= !selected;
-            if intersection == 0 {
-                send_rejection(protocol::STATUS_UNSUPPORTED);
-                return Err(NpError::NoProfile);
-            }
-            let preferred = intersection & hello.preferred_profiles & s_preferred;
-            selected = if preferred != 0 {
-                highest_bit(preferred)
-            } else {
-                highest_bit(intersection)
-            };
-        }
-    }
-
-    // Send HELLO_ACK
-    let ack = HelloAck {
-        layout_version: 1,
-        flags: 0,
-        server_supported_profiles: s_profiles,
-        intersection_profiles: intersection,
-        selected_profile: selected,
-        agreed_max_request_payload_bytes: agreed_req_pay,
-        agreed_max_request_batch_items: agreed_req_bat,
-        agreed_max_response_payload_bytes: agreed_resp_pay,
-        agreed_max_response_batch_items: agreed_resp_bat,
-        agreed_packet_size: agreed_pkt,
-        session_id,
-    };
-
-    let mut ack_buf = [0u8; HELLO_ACK_PAYLOAD_SIZE];
-    ack.encode(&mut ack_buf);
-
-    let ack_hdr = Header {
-        magic: MAGIC_MSG,
-        version: VERSION,
-        header_len: protocol::HEADER_LEN,
-        kind: protocol::KIND_CONTROL,
-        flags: 0,
-        code: protocol::CODE_HELLO_ACK,
-        transport_status: protocol::STATUS_OK,
-        payload_len: HELLO_ACK_PAYLOAD_SIZE as u32,
-        item_count: 1,
-        message_id: 0,
-    };
-
-    let mut pkt = [0u8; HEADER_SIZE + HELLO_ACK_PAYLOAD_SIZE];
-    ack_hdr.encode(&mut pkt[..HEADER_SIZE]);
-    pkt[HEADER_SIZE..].copy_from_slice(&ack_buf);
-
-    raw_write(handle, &pkt)?;
+    let ack = framing::server_negotiate(&buf[..n], &offer, session_id, prepare, |pkt| {
+        raw_write(handle, pkt)
+    })?;
 
     Ok(NpSession {
         handle,
         role: Role::Server,
-        max_request_payload_bytes: agreed_req_pay,
-        max_request_batch_items: agreed_req_bat,
-        max_response_payload_bytes: agreed_resp_pay,
-        max_response_batch_items: agreed_resp_bat,
-        packet_size: agreed_pkt,
-        selected_profile: selected,
+        max_request_payload_bytes: ack.agreed_max_request_payload_bytes,
+        max_request_batch_items: ack.agreed_max_request_batch_items,
+        max_response_payload_bytes: ack.agreed_max_response_payload_bytes,
+        max_response_batch_items: ack.agreed_max_response_batch_items,
+        packet_size: ack.agreed_packet_size,
+        selected_profile: ack.selected_profile,
         session_id,
         recv_buf: Vec::new(),
         pkt_buf: Vec::new(),
@@ -1810,6 +1325,11 @@ fn server_handshake(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol;
+    #[cfg(windows)]
+    use crate::protocol::{KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG, VERSION};
+    #[cfg(windows)]
+    use crate::transport::framing::HELLO_ACK_PAYLOAD_SIZE;
     #[cfg(windows)]
     use std::sync::atomic::{AtomicU64, Ordering};
     #[cfg(windows)]
@@ -1988,54 +1508,6 @@ mod tests {
 
         let e: &dyn std::error::Error = &NpError::Disconnected;
         let _ = format!("{e}");
-    }
-
-    #[test]
-    fn test_incompatible_classifiers() {
-        let hdr = Header {
-            magic: MAGIC_MSG,
-            version: VERSION + 1,
-            header_len: protocol::HEADER_LEN,
-            kind: protocol::KIND_CONTROL,
-            flags: 0,
-            code: protocol::CODE_HELLO,
-            transport_status: protocol::STATUS_OK,
-            payload_len: HELLO_PAYLOAD_SIZE as u32,
-            item_count: 1,
-            message_id: 0,
-        };
-        let mut hdr_buf = [0u8; HEADER_SIZE];
-        hdr.encode(&mut hdr_buf);
-        assert!(header_version_incompatible(&hdr_buf, protocol::CODE_HELLO));
-        assert!(!header_version_incompatible(
-            &hdr_buf,
-            protocol::CODE_HELLO_ACK
-        ));
-
-        let hello = Hello {
-            layout_version: 2,
-            ..Hello::default()
-        };
-        let mut hello_buf = [0u8; HELLO_PAYLOAD_SIZE];
-        hello.encode(&mut hello_buf);
-        assert!(hello_layout_incompatible(&hello_buf));
-
-        let ack = HelloAck {
-            layout_version: 2,
-            ..HelloAck::default()
-        };
-        let mut ack_buf = [0u8; HELLO_ACK_PAYLOAD_SIZE];
-        ack.encode(&mut ack_buf);
-        assert!(hello_ack_layout_incompatible(&ack_buf));
-    }
-
-    #[test]
-    fn test_highest_bit() {
-        assert_eq!(highest_bit(0), 0);
-        assert_eq!(highest_bit(1), 1);
-        assert_eq!(highest_bit(0b0101), 4);
-        assert_eq!(highest_bit(0b1000), 8);
-        assert_eq!(highest_bit(0xFF), 128);
     }
 
     #[test]
