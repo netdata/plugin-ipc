@@ -4,7 +4,7 @@
 
 Status: open
 
-Sub-state: SOW-0043 and SOW-0044 are done; runs after SOW-0045, SOW-0058 and the pre-vendoring benchmark run (user ordering 2026-10-31).
+Sub-state: runs after all code SOWs (0045, 0058, 0057, 0049, 0059, 0056), together with the full benchmark run (user ordering 2026-10-31).
 
 ## Requirements
 
@@ -110,6 +110,7 @@ Open decisions:
 ## Implications And Decisions
 
 Ordering (2026-10-31, user): the full POSIX and Windows benchmark run happens after SOW-0045 and SOW-0058 land, and before this vendoring. SOW-0057 waits until after this vendoring.
+- Ordering (2026-10-31, user, supersedes earlier ordering): finish all code changes first — SOW-0045, SOW-0058, SOW-0057, SOW-0049, SOW-0059, and SOW-0056 when the FreeBSD 15.1 VM arrives — then run the full benchmarks and the SOW-0050 vendoring together; benchmark regressions are fixed and re-vendored.
 
 ## Plan
 

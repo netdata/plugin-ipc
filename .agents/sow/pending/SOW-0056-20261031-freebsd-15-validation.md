@@ -95,6 +95,7 @@ Open decisions:
 ## Implications And Decisions
 
 User decision (2026-10-31, user): the user will provide a FreeBSD 15.1 VM; validate there when it is available.
+- Ordering (2026-10-31, user, supersedes earlier ordering): finish all code changes first — SOW-0045, SOW-0058, SOW-0057, SOW-0049, SOW-0059, and SOW-0056 when the FreeBSD 15.1 VM arrives — then run the full benchmarks and the SOW-0050 vendoring together; benchmark regressions are fixed and re-vendored.
 
 ## Plan
 

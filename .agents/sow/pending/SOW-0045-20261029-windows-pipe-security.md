@@ -127,6 +127,7 @@ User decisions (2026-10-31, user):
 3. Clients open with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` and, before sending HELLO, verify the pipe owner is the client's own account, SYSTEM or Administrators; otherwise the connect fails.
 4. The same DACL applies to Windows SHM mappings and events.
 5. Validation may create, on the Windows test host, a temporary non-admin local user and a scheduled task running a test server as SYSTEM; both are removed afterwards.
+- Ordering (2026-10-31, user, supersedes earlier ordering): finish all code changes first — SOW-0045, SOW-0058, SOW-0057, SOW-0049, SOW-0059, and SOW-0056 when the FreeBSD 15.1 VM arrives — then run the full benchmarks and the SOW-0050 vendoring together; benchmark regressions are fixed and re-vendored.
 
 ## Plan
 
