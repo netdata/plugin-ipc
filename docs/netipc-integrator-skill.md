@@ -687,6 +687,20 @@ L2 typed calls are also bounded:
 - abort is sticky until the caller clears it or closes the client/cache helper
 - a call blocked waiting for its response notices an abort within 100 ms on
   every transport
+- a peer that is gone (closed, crashed, or killed) is reported as a distinct
+  disconnected error (C `NIPC_ERR_DISCONNECTED`, Rust
+  `NipcError::Disconnected`, Go `protocol.ErrDisconnected`) after the one
+  reconnect retry also fails; earlier releases reported it as `TRUNCATED` /
+  "buffer too short"
+- SHM calls notice a crashed server within about 100 ms instead of waiting for
+  the call timeout, and SHM servers free the worker of a crashed client within
+  about 100 ms; both rely on the session socket/pipe, so do not close or
+  duplicate it outside NetIPC
+- NetIPC sockets, pipes and SHM descriptors are close-on-exec, so consumers
+  that fork and exec children do not need to close them in the child
+- the transport-level `nipc_shm_owner_alive` / `ShmContext::owner_alive` /
+  `OwnerAlive` helper was removed: it could not detect a replaced region and
+  was wrong across PID namespaces
 
 Implication:
 

@@ -452,4 +452,64 @@ fn test_robust_win_shm_client_notices_crashed_server() {
         result.is_err() && elapsed < Duration::from_millis(3500),
         "call must fail within 3s of the server crash (timeout is 10s): {result:?} after {elapsed:?}"
     );
+    assert_eq!(
+        result,
+        Err(NipcError::Disconnected),
+        "call must report the server as disconnected"
+    );
+}
+
+// A server at worker capacity completes the handshake, then closes the
+// session and destroys the prepared WinSHM objects. The client must not spend
+// its attach retry budget (5 s) on objects that will never appear, and must
+// keep WinSHM enabled for its next connect.
+#[test]
+fn test_robust_win_shm_attach_stops_when_server_closes_session() {
+    let svc = unique_service("rs_wrob_attach_refused");
+    let server = start_server(
+        &svc,
+        shm_server_config(),
+        shm_client_config(),
+        METHOD_INCREMENT,
+        increment_dispatch_handler(),
+        1,
+    );
+
+    let mut holder = RawClient::new_increment(TEST_RUN_DIR, &svc, shm_client_config());
+    for _ in 0..200 {
+        holder.refresh();
+        if holder.ready() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let holder_ready = holder.ready();
+
+    let mut refused = RawClient::new_increment(TEST_RUN_DIR, &svc, shm_client_config());
+    let start = Instant::now();
+    refused.refresh();
+    let elapsed = start.elapsed();
+
+    holder.close();
+    let mut ready = false;
+    for _ in 0..300 {
+        refused.refresh();
+        if refused.ready() {
+            ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let uses_shm = refused.shm.is_some();
+    refused.close();
+    let (_, waiter) = server.stop_within(Duration::from_secs(5));
+    let _ = waiter.join();
+
+    assert!(holder_ready, "first client must hold the only worker");
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "refused connect must return within 1s (attach retry budget is 5s): {elapsed:?}"
+    );
+    assert!(ready, "refused client must connect once the worker is free");
+    assert!(uses_shm, "refused client must still use WinSHM");
 }

@@ -241,7 +241,12 @@ once. Duplicate requests are acceptable by contract.
 There are two important cases:
 
 - For ordinary transport / peer failures, Level 2 reconnects and retries
-  once.
+  once. When the peer is gone (end of stream, `EPIPE`, `ECONNRESET`, broken
+  pipe, or an SHM session whose session socket/pipe the peer closed) and
+  the retry also fails, the reported error is a distinct disconnected
+  error (C `NIPC_ERR_DISCONNECTED`, Rust `NipcError::Disconnected`, Go
+  `protocol.ErrDisconnected`). Protocol violations keep their own errors
+  even if the peer closes right after sending them.
 - Timeout and caller-requested abort are terminal for the current call:
   Level 2 reports the explicit error, disconnects or marks the current
   session broken, and does not reconnect/retry that same request.

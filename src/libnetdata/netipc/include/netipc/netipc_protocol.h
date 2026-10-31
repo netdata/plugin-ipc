@@ -101,6 +101,7 @@ typedef enum {
   NIPC_ERR_NOT_READY,      /* client not connected / service unavailable */
   NIPC_ERR_TIMEOUT,        /* synchronous call deadline expired */
   NIPC_ERR_ABORTED,        /* synchronous call aborted by caller */
+  NIPC_ERR_DISCONNECTED,   /* peer closed the session or its process exited */
 } nipc_error_t;
 
 /* ------------------------------------------------------------------ */

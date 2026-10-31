@@ -21,6 +21,20 @@
 /*  Internal: send/receive via the active transport                    */
 /* ------------------------------------------------------------------ */
 
+/* A broken pipe is a disconnect; a plain send/recv failure is one when the
+ * session probe says the server is gone. Protocol errors keep their own
+ * meaning. */
+static nipc_error_t pipe_failure(nipc_client_ctx_t *ctx, nipc_np_error_t werr,
+                                 nipc_error_t otherwise)
+{
+    if (werr == NIPC_NP_ERR_DISCONNECTED)
+        return NIPC_ERR_DISCONNECTED;
+    if ((werr == NIPC_NP_ERR_SEND || werr == NIPC_NP_ERR_RECV) &&
+        nipc_service_win_peer_disconnected(&ctx->session))
+        return NIPC_ERR_DISCONNECTED;
+    return otherwise;
+}
+
 static nipc_error_t transport_send(nipc_client_ctx_t *ctx,
                                     nipc_header_t *hdr,
                                     const void *payload,
@@ -54,7 +68,8 @@ static nipc_error_t transport_send(nipc_client_ctx_t *ctx,
             ctx, (uint32_t)payload_len);
         return NIPC_ERR_OVERFLOW;
     }
-    return (uerr == NIPC_NP_OK) ? NIPC_OK : NIPC_ERR_NOT_READY;
+    return (uerr == NIPC_NP_OK) ? NIPC_OK
+                                : pipe_failure(ctx, uerr, NIPC_ERR_NOT_READY);
 }
 
 static nipc_error_t transport_receive(nipc_client_ctx_t *ctx,
@@ -89,8 +104,14 @@ static nipc_error_t transport_receive(nipc_client_ctx_t *ctx,
                 ctx->shm, buf, buf_size, &msg_len, wait_ms);
             if (serr == NIPC_WIN_SHM_OK)
                 break;
-            if (serr == NIPC_WIN_SHM_ERR_TIMEOUT)
+            if (serr == NIPC_WIN_SHM_ERR_TIMEOUT) {
+                /* Only an idle slice pays for the probe. */
+                if (nipc_service_win_peer_disconnected(&ctx->session))
+                    return NIPC_ERR_DISCONNECTED;
                 continue;
+            }
+            if (serr == NIPC_WIN_SHM_ERR_DISCONNECTED)
+                return NIPC_ERR_DISCONNECTED;
             return NIPC_ERR_TRUNCATED;
         }
 
@@ -115,7 +136,7 @@ static nipc_error_t transport_receive(nipc_client_ctx_t *ctx,
     case NIPC_NP_ERR_LIMIT_EXCEEDED:
         return NIPC_ERR_OVERFLOW;
     default:
-        return NIPC_ERR_TRUNCATED;
+        return pipe_failure(ctx, uerr, NIPC_ERR_TRUNCATED);
     }
 }
 

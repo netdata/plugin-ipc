@@ -46,7 +46,14 @@ pub(super) fn handle_session_win_threaded(
                         let payload = &recv_buf[HEADER_SIZE..mlen];
                         (hdr, payload)
                     }
-                    Err(crate::transport::win_shm::WinShmError::Timeout) => continue,
+                    Err(crate::transport::win_shm::WinShmError::Timeout) => {
+                        // A crashed client never sets the close flag; its
+                        // broken pipe is the only sign it left.
+                        if peer_disconnected(&session) {
+                            break;
+                        }
+                        continue;
+                    }
                     Err(_) => break,
                 }
             } else {
@@ -245,4 +252,14 @@ pub(super) fn handle_session_win_threaded(
         shm_ctx.destroy();
     }
     session.close();
+}
+
+/// Zero-wait probe of a session pipe. WinSHM sessions keep the pipe open for
+/// their whole life and the kernel breaks it when the peer exits, so a broken
+/// pipe is the dead-peer signal for both directions.
+pub(super) fn peer_disconnected(session: &crate::transport::windows::NpSession) -> bool {
+    matches!(
+        session.wait_readable(0),
+        Err(crate::transport::windows::NpError::Disconnected)
+    )
 }

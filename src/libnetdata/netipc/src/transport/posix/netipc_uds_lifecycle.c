@@ -5,6 +5,11 @@
 #define _FILE_OFFSET_BITS 64
 #endif
 
+/* accept4() is a GNU/BSD extension on glibc and musl. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "netipc_uds_internal.h"
 
 #include <dirent.h>
@@ -21,6 +26,34 @@
 #include <sys/un.h>
 
 static pthread_mutex_t bind_umask_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Sockets must not leak into children a consumer forks and execs: an
+ * inherited session socket keeps the peer from ever seeing EOF, which is
+ * the dead-peer signal. Platforms without SOCK_CLOEXEC set the flag right
+ * after creation. */
+static int seqpacket_socket_cloexec(void)
+{
+#ifdef SOCK_CLOEXEC
+    return socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+#else
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    if (fd >= 0)
+        (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+    return fd;
+#endif
+}
+
+static int accept_cloexec(int listen_fd)
+{
+#if defined(SOCK_CLOEXEC) && (defined(__linux__) || defined(__FreeBSD__))
+    return accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
+#else
+    int fd = accept(listen_fd, NULL, NULL);
+    if (fd >= 0)
+        (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+    return fd;
+#endif
+}
 
 static int bind_owner_only_socket(int fd, const struct sockaddr_un *addr)
 {
@@ -149,7 +182,7 @@ int nipc_uds_check_and_recover_stale(const char *run_dir,
                                      const char *socket_name,
                                      const char *path)
 {
-    int probe = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    int probe = seqpacket_socket_cloexec();
     if (probe < 0) {
         /* Cannot probe liveness (fd exhaustion) — keep the endpoint and
          * report it in use rather than risk deleting a live socket. */
@@ -206,7 +239,7 @@ nipc_uds_error_t nipc_uds_listen(const char *run_dir,
     if (stale == 1)
         return NIPC_UDS_ERR_ADDR_IN_USE;
 
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    int fd = seqpacket_socket_cloexec();
     if (fd < 0)
         return NIPC_UDS_ERR_SOCKET;
 
@@ -248,7 +281,7 @@ nipc_uds_error_t nipc_uds_accept(nipc_uds_listener_t *listener,
     memset(out, 0, sizeof(*out));
     out->fd = -1;
 
-    int client_fd = accept(listener->fd, NULL, NULL);
+    int client_fd = accept_cloexec(listener->fd);
     if (client_fd < 0)
         return NIPC_UDS_ERR_ACCEPT;
 
@@ -279,7 +312,7 @@ nipc_uds_error_t nipc_uds_connect(const char *run_dir,
     if (path_rc < 0)
         return NIPC_UDS_ERR_PATH_TOO_LONG;
 
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    int fd = seqpacket_socket_cloexec();
     if (fd < 0)
         return NIPC_UDS_ERR_SOCKET;
 

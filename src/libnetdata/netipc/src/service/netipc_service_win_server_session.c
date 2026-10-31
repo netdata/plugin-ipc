@@ -44,8 +44,13 @@ static void server_handle_session(nipc_managed_server_t *server,
             size_t msg_len;
             nipc_win_shm_error_t serr = nipc_win_shm_receive(shm, recv_buf, recv_size,
                                                                &msg_len, SERVER_POLL_TIMEOUT_MS);
-            if (serr == NIPC_WIN_SHM_ERR_TIMEOUT)
+            if (serr == NIPC_WIN_SHM_ERR_TIMEOUT) {
+                /* A crashed client never sets the close flag; its broken
+                 * pipe is the only sign it left. */
+                if (nipc_service_win_peer_disconnected(session))
+                    break;
                 continue;
+            }
             if (serr != NIPC_WIN_SHM_OK)
                 break;
             if (msg_len < NIPC_HEADER_LEN)

@@ -41,6 +41,12 @@ impl RawClient {
                                     if std::time::Instant::now() >= deadline {
                                         break;
                                     }
+                                    // A server that refused or died closes the
+                                    // session socket; its SHM region will never
+                                    // appear. Not an SHM problem: keep SHM enabled.
+                                    if super::server_session_unix::peer_disconnected(session.fd()) {
+                                        return ClientState::Disconnected;
+                                    }
                                     std::thread::sleep(std::time::Duration::from_millis(
                                         CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS,
                                     ));

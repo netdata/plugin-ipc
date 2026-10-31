@@ -18,6 +18,19 @@
 /*  Internal: send/receive via the active transport                    */
 /* ------------------------------------------------------------------ */
 
+/* The UDS transport reports EOF, EPIPE and ECONNRESET as plain send/recv
+ * failures; the session probe tells a gone server apart. Protocol errors
+ * keep their own meaning. */
+static nipc_error_t socket_failure(const nipc_client_ctx_t *ctx,
+                                   nipc_uds_error_t uerr,
+                                   nipc_error_t otherwise)
+{
+    if ((uerr == NIPC_UDS_ERR_SEND || uerr == NIPC_UDS_ERR_RECV) &&
+        nipc_service_posix_peer_disconnected(ctx->session.fd))
+        return NIPC_ERR_DISCONNECTED;
+    return otherwise;
+}
+
 /*
  * Send a complete message (header + payload) using whichever transport
  * is active: SHM if negotiated, UDS otherwise.
@@ -55,7 +68,8 @@ static nipc_error_t transport_send(nipc_client_ctx_t *ctx,
             ctx, (uint32_t)payload_len);
         return NIPC_ERR_OVERFLOW;
     }
-    return (uerr == NIPC_UDS_OK) ? NIPC_OK : NIPC_ERR_NOT_READY;
+    return (uerr == NIPC_UDS_OK) ? NIPC_OK
+                                 : socket_failure(ctx, uerr, NIPC_ERR_NOT_READY);
 }
 
 /*
@@ -97,8 +111,12 @@ static nipc_error_t transport_receive(nipc_client_ctx_t *ctx,
                                                      &msg_len, wait_ms);
             if (serr == NIPC_SHM_OK)
                 break;
-            if (serr == NIPC_SHM_ERR_TIMEOUT)
+            if (serr == NIPC_SHM_ERR_TIMEOUT) {
+                /* Only an idle slice pays for the probe. */
+                if (nipc_service_posix_peer_disconnected(ctx->session.fd))
+                    return NIPC_ERR_DISCONNECTED;
                 continue;
+            }
             return NIPC_ERR_TRUNCATED;
         }
 
@@ -124,7 +142,7 @@ static nipc_error_t transport_receive(nipc_client_ctx_t *ctx,
     case NIPC_UDS_ERR_LIMIT_EXCEEDED:
         return NIPC_ERR_OVERFLOW;
     default:
-        return NIPC_ERR_TRUNCATED;
+        return socket_failure(ctx, uerr, NIPC_ERR_TRUNCATED);
     }
 }
 

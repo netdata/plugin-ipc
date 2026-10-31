@@ -267,7 +267,7 @@ impl RawClient {
                 self.client_note_request_capacity(req_len as u32);
                 Err(NipcError::Overflow)
             }
-            Err(_) => Err(NipcError::Truncated),
+            Err(e) => Err(session_failure(e, self.session.as_ref())),
         }
     }
 
@@ -283,7 +283,9 @@ impl RawClient {
         #[cfg(target_os = "linux")]
         {
             if let Some(ref mut shm) = self.shm {
-                let mlen = receive_posix_shm_with_control(shm, scratch, timeout_ms, &abort)?;
+                let session_fd = self.session.as_ref().map_or(-1, |s| s.fd());
+                let mlen =
+                    receive_posix_shm_with_control(shm, scratch, timeout_ms, &abort, session_fd)?;
 
                 if mlen < HEADER_SIZE {
                     return Err(NipcError::Truncated);
@@ -303,7 +305,13 @@ impl RawClient {
         #[cfg(windows)]
         {
             if let Some(ref mut shm) = self.shm {
-                let mlen = receive_win_shm_with_control(shm, scratch, timeout_ms, &abort)?;
+                let mlen = receive_win_shm_with_control(
+                    shm,
+                    scratch,
+                    timeout_ms,
+                    &abort,
+                    self.session.as_ref(),
+                )?;
 
                 if mlen < HEADER_SIZE {
                     return Err(NipcError::Truncated);
@@ -325,9 +333,10 @@ impl RawClient {
         #[cfg(unix)]
         {
             let scratch_payload_ptr = unsafe { scratch.as_ptr().add(HEADER_SIZE) };
+            let session_fd = session.fd();
             let (hdr, payload) = session
                 .receive_with_control(scratch, timeout_ms, Some(&abort))
-                .map_err(map_uds_receive_error)?;
+                .map_err(|e| map_uds_receive_error(e, session_fd))?;
             let source = if payload.as_ptr() == scratch_payload_ptr {
                 ClientResponseSource::TransportBuf
             } else {
@@ -345,9 +354,11 @@ impl RawClient {
         #[cfg(windows)]
         {
             let scratch_payload_ptr = unsafe { scratch.as_ptr().add(HEADER_SIZE) };
-            let (hdr, payload) = session
-                .receive_with_control(scratch, timeout_ms, Some(&abort))
-                .map_err(map_np_receive_error)?;
+            let received = session.receive_with_control(scratch, timeout_ms, Some(&abort));
+            let (hdr, payload) = match received {
+                Ok(v) => v,
+                Err(e) => return Err(map_np_receive_error(e, session)),
+            };
             let source = if payload.as_ptr() == scratch_payload_ptr {
                 ClientResponseSource::TransportBuf
             } else {
@@ -443,7 +454,9 @@ fn receive_posix_shm_with_control(
     scratch: &mut [u8],
     timeout_ms: u32,
     abort: &AtomicBool,
+    session_fd: i32,
 ) -> Result<usize, NipcError> {
+    use super::server_session_unix::peer_disconnected;
     use crate::transport::shm::ShmError;
 
     let deadline = receive_deadline(timeout_ms);
@@ -451,7 +464,13 @@ fn receive_posix_shm_with_control(
         let wait_ms = receive_wait_slice_ms(deadline, abort)?;
         match shm.receive(scratch, wait_ms) {
             Ok(mlen) => return Ok(mlen),
-            Err(ShmError::Timeout) => continue,
+            Err(ShmError::Timeout) => {
+                // Only an idle slice pays for the probe.
+                if session_fd >= 0 && peer_disconnected(session_fd) {
+                    return Err(NipcError::Disconnected);
+                }
+                continue;
+            }
             Err(ShmError::MsgTooLarge) => return Err(NipcError::Overflow),
             Err(_) => return Err(NipcError::Truncated),
         }
@@ -464,8 +483,11 @@ fn receive_win_shm_with_control(
     scratch: &mut [u8],
     timeout_ms: u32,
     abort: &AtomicBool,
+    session: Option<&crate::transport::windows::NpSession>,
 ) -> Result<usize, NipcError> {
     use crate::transport::win_shm::WinShmError;
+
+    let peer_gone = || session.is_some_and(super::server_session_windows::peer_disconnected);
 
     if abort.load(Ordering::Acquire) {
         return Err(NipcError::Aborted);
@@ -474,6 +496,7 @@ fn receive_win_shm_with_control(
         Ok(Some(mlen)) => return Ok(mlen),
         Ok(None) => {}
         Err(WinShmError::MsgTooLarge) => return Err(NipcError::Overflow),
+        Err(WinShmError::Disconnected) => return Err(NipcError::Disconnected),
         Err(_) => return Err(NipcError::Truncated),
     }
 
@@ -482,30 +505,76 @@ fn receive_win_shm_with_control(
         let wait_ms = receive_wait_slice_ms(deadline, abort)?;
         match shm.receive(scratch, wait_ms) {
             Ok(mlen) => return Ok(mlen),
-            Err(WinShmError::Timeout) => continue,
+            Err(WinShmError::Timeout) => {
+                // Only an idle slice pays for the probe.
+                if peer_gone() {
+                    return Err(NipcError::Disconnected);
+                }
+                continue;
+            }
             Err(WinShmError::MsgTooLarge) => return Err(NipcError::Overflow),
+            Err(WinShmError::Disconnected) => return Err(NipcError::Disconnected),
             Err(_) => return Err(NipcError::Truncated),
         }
     }
 }
 
 #[cfg(unix)]
-fn map_uds_receive_error(err: crate::transport::posix::UdsError) -> NipcError {
+fn map_uds_receive_error(err: crate::transport::posix::UdsError, session_fd: i32) -> NipcError {
     match err {
         crate::transport::posix::UdsError::Timeout => NipcError::Timeout,
         crate::transport::posix::UdsError::Aborted => NipcError::Aborted,
         crate::transport::posix::UdsError::LimitExceeded => NipcError::Overflow,
+        crate::transport::posix::UdsError::Recv(_) | crate::transport::posix::UdsError::Send(_)
+            if super::server_session_unix::peer_disconnected(session_fd) =>
+        {
+            NipcError::Disconnected
+        }
+        _ => NipcError::Truncated,
+    }
+}
+
+/// The UDS transport reports EOF, EPIPE and ECONNRESET as plain send/recv
+/// failures; the session probe tells a gone server apart. Protocol errors keep
+/// their own meaning.
+#[cfg(unix)]
+fn session_failure(
+    err: crate::transport::posix::UdsError,
+    session: Option<&crate::transport::posix::UdsSession>,
+) -> NipcError {
+    session.map_or(NipcError::Truncated, |s| map_uds_receive_error(err, s.fd()))
+}
+
+/// A broken pipe is a disconnect; a plain send/recv failure is one when the
+/// session probe says the server is gone. Protocol errors keep their own
+/// meaning.
+#[cfg(windows)]
+fn session_failure(
+    err: crate::transport::windows::NpError,
+    session: Option<&crate::transport::windows::NpSession>,
+) -> NipcError {
+    match (err, session) {
+        (crate::transport::windows::NpError::Disconnected, _) => NipcError::Disconnected,
+        (crate::transport::windows::NpError::Recv(_), Some(s))
+        | (crate::transport::windows::NpError::Send(_), Some(s))
+            if super::server_session_windows::peer_disconnected(s) =>
+        {
+            NipcError::Disconnected
+        }
         _ => NipcError::Truncated,
     }
 }
 
 #[cfg(windows)]
-fn map_np_receive_error(err: crate::transport::windows::NpError) -> NipcError {
+fn map_np_receive_error(
+    err: crate::transport::windows::NpError,
+    session: &crate::transport::windows::NpSession,
+) -> NipcError {
     match err {
         crate::transport::windows::NpError::Timeout => NipcError::Timeout,
         crate::transport::windows::NpError::Aborted => NipcError::Aborted,
         crate::transport::windows::NpError::LimitExceeded => NipcError::Overflow,
-        _ => NipcError::Truncated,
+        other => session_failure(other, Some(session)),
     }
 }
 
@@ -554,7 +623,7 @@ mod tests {
         let mut scratch = [0u8; 128];
 
         server.send(b"response").expect("server send");
-        let len = receive_win_shm_with_control(&mut client, &mut scratch, 100, &abort)
+        let len = receive_win_shm_with_control(&mut client, &mut scratch, 100, &abort, None)
             .expect("receive ready response");
         assert_eq!(len, 8);
         assert_eq!(&scratch[..len], b"response");
@@ -565,7 +634,7 @@ mod tests {
         let (mut server, mut client) = win_shm_pair("rs_raw_win_shm_abort");
         let abort = AtomicBool::new(true);
         assert_eq!(
-            receive_win_shm_with_control(&mut client, &mut scratch, 100, &abort),
+            receive_win_shm_with_control(&mut client, &mut scratch, 100, &abort, None),
             Err(NipcError::Aborted)
         );
         client.close();
@@ -574,7 +643,7 @@ mod tests {
         let (mut server, mut client) = win_shm_pair("rs_raw_win_shm_timeout");
         let abort = AtomicBool::new(false);
         assert_eq!(
-            receive_win_shm_with_control(&mut client, &mut scratch, 1, &abort),
+            receive_win_shm_with_control(&mut client, &mut scratch, 1, &abort, None),
             Err(NipcError::Timeout)
         );
         client.close();
@@ -584,8 +653,8 @@ mod tests {
         let abort = AtomicBool::new(false);
         server.destroy();
         assert_eq!(
-            receive_win_shm_with_control(&mut client, &mut scratch, 100, &abort),
-            Err(NipcError::Truncated)
+            receive_win_shm_with_control(&mut client, &mut scratch, 100, &abort, None),
+            Err(NipcError::Disconnected)
         );
         client.close();
     }

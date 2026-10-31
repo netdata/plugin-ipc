@@ -13,6 +13,7 @@
  *   N2  shutdown not blocked by a client that stopped reading
  *   N3  stop before run is honored
  *   N5  SHM client notices a crashed server before its timeout
+ *   N5  SHM attach stops when the server closes the session
  *
  * The binary re-executes itself with --helper-shm-client / --helper-shm-server
  * to simulate a peer process that is killed with TerminateProcess.
@@ -580,9 +581,59 @@ static void test_shm_client_notices_crashed_server(void)
     printf("    call returned err=%d after %llums\n", job.err, job.elapsed_ms);
     check("call fails within 3s of the server crash (timeout is 10s)",
           finished && job.err != NIPC_OK && job.elapsed_ms < 3500);
+    check("call reports the server as disconnected",
+          finished && job.err == NIPC_ERR_DISCONNECTED);
 }
 
 /* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/*  N5: SHM attach stops when the server closes the session            */
+/* ------------------------------------------------------------------ */
+
+/* A server at worker capacity completes the handshake, then closes the
+ * session and destroys the prepared WinSHM objects. The client must not
+ * spend its attach retry budget (5 s) on objects that will never appear,
+ * and must keep WinSHM enabled for its next connect. */
+static void test_shm_attach_stops_when_server_closes_session(void)
+{
+    printf("N5: SHM attach stops when the server closes the session\n");
+    robust_server_t rs = {.service = svc_name("wrob_attach_refused"), .workers = 1, .shm = TRUE};
+    if (!start_server(&rs)) {
+        check("server started", 0);
+        return;
+    }
+
+    nipc_client_config_t ccfg = client_config(TRUE, 1000);
+    nipc_client_ctx_t holder;
+    nipc_client_init(&holder, TEST_RUN_DIR, rs.service, &ccfg);
+    for (int i = 0; i < 200 && !nipc_client_ready(&holder); i++) {
+        nipc_client_refresh(&holder);
+        Sleep(10);
+    }
+    check("first client holds the only worker", nipc_client_ready(&holder));
+
+    nipc_client_ctx_t refused;
+    nipc_client_init(&refused, TEST_RUN_DIR, rs.service, &ccfg);
+    ULONGLONG start = now_ms();
+    nipc_client_refresh(&refused);
+    ULONGLONG elapsed = now_ms() - start;
+    printf("    refused refresh took %llums\n", (unsigned long long)elapsed);
+    check("refused connect returns within 1s (attach retry budget is 5s)", elapsed < 1000);
+
+    nipc_client_close(&holder);
+    BOOL ready = FALSE;
+    for (int i = 0; i < 300 && !ready; i++) {
+        nipc_client_refresh(&refused);
+        ready = nipc_client_ready(&refused);
+        if (!ready)
+            Sleep(10);
+    }
+    check("refused client connects once the worker is free", ready);
+    check("refused client still uses WinSHM", ready && refused.shm != NULL);
+    nipc_client_close(&refused);
+    check("server stops", stop_server_within(&rs, 5000));
+}
 
 int main(int argc, char **argv)
 {
@@ -602,6 +653,7 @@ int main(int argc, char **argv)
     test_shutdown_not_blocked_by_non_reading_client();
     test_stop_before_run_is_honored();
     test_shm_client_notices_crashed_server();
+    test_shm_attach_stops_when_server_closes_session();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     fflush(stdout);

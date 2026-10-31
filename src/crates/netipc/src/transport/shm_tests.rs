@@ -670,119 +670,6 @@ fn test_shm_role_and_fd() {
 }
 
 // -----------------------------------------------------------------------
-//  ShmContext::owner_alive() (lines 174-191)
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_owner_alive() {
-    ensure_run_dir();
-    let svc = "rs_shm_alive";
-    let sid: u64 = 51;
-    cleanup_shm(svc, sid);
-
-    let server =
-        ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
-
-    // Owner is the current process, so should be alive
-    assert!(server.owner_alive());
-
-    // Client should also report alive (same process owns it)
-    let client = ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
-    assert!(client.owner_alive());
-
-    let mut c = client;
-    let mut s = server;
-    c.close();
-    s.destroy();
-    cleanup_shm(svc, sid);
-}
-
-#[test]
-fn test_owner_alive_dead_pid() {
-    ensure_run_dir();
-    let svc = "rs_shm_dead";
-    let sid: u64 = 52;
-    cleanup_shm(svc, sid);
-
-    let mut server =
-        ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
-
-    // Forge a dead PID
-    let hdr = server.base as *mut RegionHeader;
-    unsafe { (*hdr).owner_pid = DEAD_PID };
-
-    assert!(!server.owner_alive());
-
-    server.destroy();
-    cleanup_shm(svc, sid);
-}
-
-#[test]
-fn test_owner_alive_null_base() {
-    ensure_run_dir();
-    let svc = "rs_shm_null";
-    let sid: u64 = 53;
-    cleanup_shm(svc, sid);
-
-    let mut server =
-        ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
-
-    // Null base -> not alive
-    let saved_base = server.base;
-    server.base = std::ptr::null_mut();
-    assert!(!server.owner_alive());
-
-    // Restore for cleanup
-    server.base = saved_base;
-    server.destroy();
-    cleanup_shm(svc, sid);
-}
-
-#[test]
-fn test_owner_alive_generation_mismatch() {
-    ensure_run_dir();
-    let svc = "rs_shm_gen";
-    let sid: u64 = 54;
-    cleanup_shm(svc, sid);
-
-    let mut server =
-        ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
-
-    // Forge a different generation in the header
-    let hdr = server.base as *mut RegionHeader;
-    unsafe { (*hdr).owner_generation = server.owner_generation + 1 };
-
-    // Generation mismatch -> not alive
-    assert!(!server.owner_alive());
-
-    server.destroy();
-    cleanup_shm(svc, sid);
-}
-
-#[test]
-fn test_owner_alive_legacy_generation_skips_generation_check() {
-    ensure_run_dir();
-    let svc = "rs_shm_gen_legacy";
-    let sid: u64 = 55;
-    cleanup_shm(svc, sid);
-
-    let mut server =
-        ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
-
-    let hdr = server.base as *mut RegionHeader;
-    unsafe { (*hdr).owner_generation = server.owner_generation.wrapping_add(123) };
-    server.owner_generation = 0;
-
-    assert!(
-        server.owner_alive(),
-        "cached generation 0 should skip owner-generation mismatch checks"
-    );
-
-    server.destroy();
-    cleanup_shm(svc, sid);
-}
-
-// -----------------------------------------------------------------------
 //  ShmContext::send() error paths (lines 436-437, 458)
 // -----------------------------------------------------------------------
 
@@ -1583,4 +1470,26 @@ fn test_cleanup_stale_unlinks_directory_symlink_when_mmap_fails() {
     assert!(target.is_dir(), "target directory should remain");
 
     std::fs::remove_dir_all(&target).expect("remove target dir");
+}
+
+// SHM fds must not leak into children a consumer forks and execs.
+#[test]
+fn test_shm_fds_are_cloexec() {
+    ensure_run_dir();
+    let svc = "rs_shm_cloexec";
+    let sid: u64 = 4242;
+    cleanup_shm(svc, sid);
+
+    let cloexec = |fd: i32| unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC != 0;
+    let mut server =
+        ShmContext::server_create(TEST_RUN_DIR, svc, sid, 4096, 4096).expect("server create");
+    let mut client = ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
+    let server_ok = cloexec(server.fd());
+    let client_ok = cloexec(client.fd());
+    client.close();
+    server.destroy();
+    cleanup_shm(svc, sid);
+
+    assert!(server_ok, "server SHM fd must be close-on-exec");
+    assert!(client_ok, "client SHM fd must be close-on-exec");
 }

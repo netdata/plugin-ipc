@@ -11,6 +11,13 @@ must follow this contract to interoperate on the same socket.
 `AF_UNIX` / `SOCK_SEQPACKET` — message-oriented, reliable, ordered,
 connection-based Unix domain sockets with preserved message boundaries.
 
+Every socket and pipe the transport creates (listener, accepted and
+connected sessions, the client abort pipe, SHM region descriptors) is
+close-on-exec (`SOCK_CLOEXEC`, `accept4(..., SOCK_CLOEXEC)`, `O_CLOEXEC`,
+`F_DUPFD_CLOEXEC`; platforms without them set `FD_CLOEXEC` right after
+creation). A session descriptor inherited by a child that a consumer forks
+and execs would keep a dead peer's socket open and hide the disconnect.
+
 ## Socket path derivation
 
 ```

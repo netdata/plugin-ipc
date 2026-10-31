@@ -36,6 +36,16 @@ enum {
 
 const nipc_service_common_client_ops_t *nipc_service_win_client_ops(void);
 void nipc_service_win_client_disconnect(nipc_client_ctx_t *ctx);
+
+/* Zero-wait probe of a session pipe. WinSHM sessions keep the pipe open for
+ * their whole life and the kernel breaks it when the peer exits, so a broken
+ * pipe is the dead-peer signal for both directions. */
+static inline bool nipc_service_win_peer_disconnected(nipc_np_session_t *session)
+{
+    bool readable = false;
+    return nipc_np_wait_readable(session, 0, &readable) ==
+           NIPC_NP_ERR_DISCONNECTED;
+}
 nipc_client_state_t nipc_service_win_client_try_connect(nipc_client_ctx_t *ctx);
 bool nipc_service_win_client_reconnect_for_call(nipc_client_ctx_t *ctx);
 void *nipc_service_win_malloc(size_t size, int fault_site);

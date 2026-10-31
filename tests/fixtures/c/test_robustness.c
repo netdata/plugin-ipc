@@ -16,11 +16,14 @@
  *   N2  shutdown not blocked by a client that stopped reading
  *   N3  stop before run is honored
  *   N5  SHM client notices a crashed server before its timeout
+ *   N5  baseline client reports a crashed server as disconnected
+ *   N5  SHM attach stops when the server closes the session
+ *   CLOEXEC  every NetIPC socket and pipe is close-on-exec
  *   N11 default packet size carries a message larger than SO_SNDBUF
  *       (plus an explicit-packet-size control)
  *
- * The binary re-executes itself with --helper-shm-client / --helper-shm-server
- * to simulate a peer process that is killed with SIGKILL mid-session.
+ * The binary re-executes itself with --helper-shm-client / --helper-shm-server /
+ * --helper-uds-server to simulate a peer process that is killed with SIGKILL mid-session.
  */
 
 #define _GNU_SOURCE
@@ -31,6 +34,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -342,12 +346,12 @@ static int helper_shm_client(const char *service)
         pause();
 }
 
-/* SHM server whose handler stalls, so a client call is in flight when the
+/* Server whose handler stalls, so a client call is in flight when the
  * parent kills this process. */
-static int helper_shm_server(const char *service)
+static int helper_stalled_server(const char *service, bool shm)
 {
     static robust_server_t rs;
-    rs = (robust_server_t){.service = service, .workers = 2, .shm = true,
+    rs = (robust_server_t){.service = service, .workers = 2, .shm = shm,
                            .opts = {.delay_ms = 60000}};
     if (!start_server(&rs)) {
         printf("HELPER_FAILED\n");
@@ -702,6 +706,7 @@ static void test_stop_before_run_is_honored(void)
 
 typedef struct {
     const char *service;
+    bool shm;
     nipc_error_t err;
     uint64_t elapsed_ms;
     int calling; /* __atomic */
@@ -710,7 +715,7 @@ typedef struct {
 static void *dead_server_client_fn(void *arg)
 {
     dead_server_job_t *job = (dead_server_job_t *)arg;
-    nipc_client_config_t ccfg = client_config(true);
+    nipc_client_config_t ccfg = client_config(job->shm);
     ccfg.call_timeout_ms = 10000;
     nipc_client_ctx_t client;
     nipc_client_init(&client, TEST_RUN_DIR, job->service, &ccfg);
@@ -727,17 +732,16 @@ static void *dead_server_client_fn(void *arg)
     return NULL;
 }
 
-static void test_shm_client_notices_crashed_server(void)
+static void client_notices_crashed_server(bool shm)
 {
-    printf("N5: SHM client notices a crashed server before its timeout\n");
-    const char *svc = "rob_dead_server";
+    const char *svc = shm ? "rob_dead_server" : "rob_dead_uds_server";
     cleanup_all(svc);
-    pid_t server = spawn_helper("--helper-shm-server", svc);
+    pid_t server = spawn_helper(shm ? "--helper-shm-server" : "--helper-uds-server", svc);
     check("server helper started", server > 0);
     if (server <= 0)
         return;
 
-    dead_server_job_t job = {.service = svc};
+    dead_server_job_t job = {.service = svc, .shm = shm};
     pthread_t tid;
     pthread_create(&tid, NULL, dead_server_client_fn, &job);
     for (int i = 0; i < 500 && !__atomic_load_n(&job.calling, __ATOMIC_ACQUIRE); i++)
@@ -753,7 +757,126 @@ static void test_shm_client_notices_crashed_server(void)
            (unsigned long long)job.elapsed_ms);
     check("call fails within 3s of the server crash (timeout is 10s)",
           finished && job.err != NIPC_OK && job.elapsed_ms < 3500);
+    check("call reports the server as disconnected",
+          finished && job.err == NIPC_ERR_DISCONNECTED);
     cleanup_all(svc);
+}
+
+static void test_shm_client_notices_crashed_server(void)
+{
+    printf("N5: SHM client notices a crashed server before its timeout\n");
+    client_notices_crashed_server(true);
+}
+
+static void test_uds_client_reports_crashed_server_as_disconnected(void)
+{
+    printf("N5: baseline client reports a crashed server as disconnected\n");
+    client_notices_crashed_server(false);
+}
+
+/* A server at worker capacity completes the handshake, then closes the
+ * session and removes the prepared SHM region. The client must not spend
+ * its attach retry budget (5 s) on a region that will never appear, and
+ * must keep SHM enabled for its next connect. */
+static void test_shm_attach_stops_when_server_closes_session(void)
+{
+    printf("N5: SHM attach stops when the server closes the session\n");
+    robust_server_t rs = {.service = "rob_attach_refused", .workers = 1, .shm = true};
+    if (!start_server(&rs)) {
+        check("server started", 0);
+        return;
+    }
+
+    nipc_client_config_t ccfg = client_config(true);
+    nipc_client_ctx_t holder;
+    nipc_client_init(&holder, TEST_RUN_DIR, rs.service, &ccfg);
+    for (int i = 0; i < 200 && !nipc_client_ready(&holder); i++) {
+        nipc_client_refresh(&holder);
+        sleep_ms(10);
+    }
+    check("first client holds the only worker", nipc_client_ready(&holder));
+
+    nipc_client_ctx_t refused;
+    nipc_client_init(&refused, TEST_RUN_DIR, rs.service, &ccfg);
+    uint64_t start = now_ms();
+    nipc_client_refresh(&refused);
+    uint64_t elapsed = now_ms() - start;
+    printf("    refused refresh took %llums\n", (unsigned long long)elapsed);
+    check("refused connect returns within 1s (attach retry budget is 5s)", elapsed < 1000);
+
+    nipc_client_close(&holder);
+    bool ready = false;
+    for (int i = 0; i < 300 && !ready; i++) {
+        nipc_client_refresh(&refused);
+        ready = nipc_client_ready(&refused);
+        if (!ready)
+            sleep_ms(10);
+    }
+    check("refused client connects once the worker is free", ready);
+    check("refused client still uses SHM", ready && refused.shm != NULL);
+    nipc_client_close(&refused);
+    check("server stops", stop_server_within(&rs, 5000));
+}
+
+/* Sockets and pipes must not leak into children a consumer forks and
+ * execs: an inherited session socket keeps the peer from seeing EOF. */
+static bool all_ipc_fds_cloexec(int *checked)
+{
+    DIR *d = opendir("/proc/self/fd");
+    if (!d)
+        return false;
+    bool ok = true;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        int fd = atoi(e->d_name);
+        if (fd <= 2 || fd == dirfd(d))
+            continue;
+        char link[64], target[128];
+        snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+        ssize_t n = readlink(link, target, sizeof(target) - 1);
+        if (n <= 0)
+            continue;
+        target[n] = '\0';
+        if (strncmp(target, "socket:", 7) != 0 && strncmp(target, "pipe:", 5) != 0)
+            continue;
+        (*checked)++;
+        int flags = fcntl(fd, F_GETFD);
+        if (flags < 0 || !(flags & FD_CLOEXEC)) {
+            printf("    fd %d (%s) is not close-on-exec\n", fd, target);
+            ok = false;
+        }
+    }
+    closedir(d);
+    return ok;
+}
+
+static void test_ipc_fds_are_cloexec(void)
+{
+    printf("CLOEXEC: every NetIPC socket and pipe is close-on-exec\n");
+    robust_server_t rs = {.service = "rob_cloexec", .workers = 2, .shm = true};
+    if (!start_server(&rs)) {
+        check("server started", 0);
+        return;
+    }
+    nipc_client_config_t ccfg = client_config(true);
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, rs.service, &ccfg);
+    for (int i = 0; i < 200 && !nipc_client_ready(&client); i++) {
+        nipc_client_refresh(&client);
+        sleep_ms(10);
+    }
+    check("client connected", nipc_client_ready(&client));
+    sleep_ms(100); /* let the server finish creating its session */
+
+    /* Listener, accepted session, client session and client abort pipe. */
+    int checked = 0;
+    bool ok = all_ipc_fds_cloexec(&checked);
+    printf("    checked %d socket/pipe fds\n", checked);
+    check("listener, both session ends and the abort pipe are checked", checked >= 5);
+    check("all of them are close-on-exec", ok);
+
+    nipc_client_close(&client);
+    check("server stops", stop_server_within(&rs, 5000));
 }
 
 /* ------------------------------------------------------------------ */
@@ -862,7 +985,9 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "--helper-shm-client") == 0)
         return helper_shm_client(argv[2]);
     if (argc == 3 && strcmp(argv[1], "--helper-shm-server") == 0)
-        return helper_shm_server(argv[2]);
+        return helper_stalled_server(argv[2], true);
+    if (argc == 3 && strcmp(argv[1], "--helper-uds-server") == 0)
+        return helper_stalled_server(argv[2], false);
 
     signal(SIGPIPE, SIG_IGN);
     mkdir(TEST_RUN_DIR, 0700);
@@ -878,6 +1003,9 @@ int main(int argc, char **argv)
     test_shutdown_not_blocked_by_non_reading_client();
     test_stop_before_run_is_honored();
     test_shm_client_notices_crashed_server();
+    test_uds_client_reports_crashed_server_as_disconnected();
+    test_shm_attach_stops_when_server_closes_session();
+    test_ipc_fds_are_cloexec();
     test_default_packet_size_carries_large_message();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

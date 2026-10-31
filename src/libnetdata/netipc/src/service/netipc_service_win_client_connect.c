@@ -122,6 +122,7 @@ nipc_client_state_t nipc_service_win_client_try_connect(nipc_client_ctx_t *ctx)
             /* Retry attach: the server prepares SHM before accepting the
              * handshake, but filesystem/object visibility may lag briefly. */
             nipc_win_shm_error_t serr = NIPC_WIN_SHM_ERR_OPEN_MAPPING;
+            bool server_gone = false;
             ULONGLONG deadline_ms = GetTickCount64() + CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS;
             for (;;) {
                 serr = nipc_win_shm_client_attach(
@@ -138,11 +139,23 @@ nipc_client_state_t nipc_service_win_client_try_connect(nipc_client_ctx_t *ctx)
                     break;
                 if (GetTickCount64() >= deadline_ms)
                     break;
+                /* A server that refused or died breaks the session pipe;
+                 * waiting for its SHM objects would only burn the timeout. */
+                if (nipc_service_win_peer_disconnected(&session)) {
+                    server_gone = true;
+                    break;
+                }
                 Sleep(CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS);
             }
 
             if (serr == NIPC_WIN_SHM_OK) {
                 ctx->shm = shm;
+            } else if (server_gone) {
+                /* Not a WinSHM problem: keep WinSHM enabled for the next connect. */
+                free(shm);
+                nipc_np_close_session(&ctx->session);
+                ctx->session_valid = false;
+                return NIPC_CLIENT_DISCONNECTED;
             } else {
                 /* WinSHM attach failed after negotiation. Close that
                  * session, blacklist WinSHM for this client context, and

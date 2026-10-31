@@ -107,9 +107,8 @@ type ShmContext struct {
 	localReqSeq  uint64
 	localRespSeq uint64
 
-	SpinTries       uint32
-	ownerGeneration uint32 // cached for PID reuse detection
-	path            string
+	SpinTries uint32
+	path      string
 }
 
 // Role returns the context role.
@@ -118,24 +117,14 @@ func (c *ShmContext) Role() ShmRole { return c.role }
 // Fd returns the file descriptor.
 func (c *ShmContext) Fd() int { return c.fd }
 
-// OwnerAlive checks if the region's owner process is still alive.
-func (c *ShmContext) OwnerAlive() bool {
-	if len(c.data) < int(shmHeaderLen) {
-		return false
+// dupCloexec duplicates fd with close-on-exec set, so a consumer's exec'd
+// children do not inherit the SHM region (syscall.Dup does not set it).
+func dupCloexec(fd int) (int, error) {
+	r, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_DUPFD_CLOEXEC, 0)
+	if errno != 0 {
+		return -1, errno
 	}
-	pid := int32(binary.NativeEndian.Uint32(c.data[shmHeaderOwnerPidOff : shmHeaderOwnerPidOff+4]))
-	if !pidAlive(int(pid)) {
-		return false
-	}
-	// Verify generation matches to detect PID reuse.
-	// Skip check if cached generation is 0 (legacy region).
-	if c.ownerGeneration != 0 {
-		curGen := binary.NativeEndian.Uint32(c.data[shmHeaderOwnerGenOff : shmHeaderOwnerGenOff+4])
-		if curGen != c.ownerGeneration {
-			return false
-		}
-	}
-	return true
+	return int(r), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +221,7 @@ func shmServerCreate(runDir, serviceName string, sessionID uint64, reqCapacity, 
 	// not use os.File.Close(). We already have the fd from f.Fd().
 	// Trick: prevent Go's finalizer from closing fd.
 	// The safe way: dup the fd, then close the file.
-	newFd, err := syscall.Dup(fd)
+	newFd, err := dupCloexec(fd)
 	if err != nil {
 		_ = syscall.Munmap(data)
 		_ = f.Close()
@@ -252,7 +241,6 @@ func shmServerCreate(runDir, serviceName string, sessionID uint64, reqCapacity, 
 		localReqSeq:      0,
 		localRespSeq:     0,
 		SpinTries:        shmDefaultSpin,
-		ownerGeneration:  generation,
 		path:             path,
 	}, nil
 }
@@ -381,10 +369,8 @@ func ShmClientAttach(runDir, serviceName string, sessionID uint64) (*ShmContext,
 		_ = f.Close()
 		return nil, fmt.Errorf("%w: load resp_seq: %v", ErrShmBadParam, err)
 	}
-	ownerGen := binary.NativeEndian.Uint32(data[shmHeaderOwnerGenOff : shmHeaderOwnerGenOff+4])
-
 	// Dup fd and close file
-	newFd, err := syscall.Dup(fd)
+	newFd, err := dupCloexec(fd)
 	if err != nil {
 		_ = syscall.Munmap(data)
 		_ = f.Close()
@@ -403,7 +389,6 @@ func ShmClientAttach(runDir, serviceName string, sessionID uint64) (*ShmContext,
 		localReqSeq:      curReqSeq,
 		localRespSeq:     curRespSeq,
 		SpinTries:        shmDefaultSpin,
-		ownerGeneration:  ownerGen,
 		path:             path,
 	}, nil
 }

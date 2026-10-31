@@ -7,6 +7,9 @@ import (
 	"unsafe"
 )
 
+// RdHup reports a peer that closed its end (Linux-only POLLRDHUP).
+const RdHup int16 = 0x2000
+
 // Poll waits up to timeoutMs (negative waits indefinitely) for pfd.Events.
 // It returns the poll result count and the raw errno.
 //

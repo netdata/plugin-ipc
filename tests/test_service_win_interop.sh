@@ -63,6 +63,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# taskkill lives in System32, which a minimal PATH may lack.
+taskkill_bin() {
+    if command -v taskkill.exe >/dev/null 2>&1; then
+        command -v taskkill.exe
+    else
+        cygpath -u "${SYSTEMROOT:-C:\\Windows}\\System32\\taskkill.exe"
+    fi
+}
+
 stop_server() {
     local server_pid="$1"
     local waited=0
@@ -73,9 +82,11 @@ stop_server() {
         return 0
     fi
 
+    # MSYS-runtime servers blocked in a Win32 wait never act on SIGTERM;
+    # give a short grace, then force-stop the Windows process.
     kill "$server_pid" 2>/dev/null || true
 
-    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
+    while [[ $waited -lt 20 ]]; do
         if ! kill -0 "$server_pid" 2>/dev/null; then
             wait "$server_pid" 2>/dev/null || true
             return 0
@@ -85,10 +96,8 @@ stop_server() {
     done
 
     win_pid=$(ps -W 2>/dev/null | awk -v pid="$server_pid" '$1 == pid {print $4; exit}')
-    if [[ -n "$win_pid" ]] && command -v taskkill.exe >/dev/null 2>&1; then
-        taskkill.exe //PID "$win_pid" //T //F >/dev/null 2>&1 || true
-    elif [[ -n "$win_pid" ]] && command -v taskkill >/dev/null 2>&1; then
-        taskkill //PID "$win_pid" //T //F >/dev/null 2>&1 || true
+    if [[ -n "$win_pid" ]]; then
+        "$(taskkill_bin)" //PID "$win_pid" //T //F >/dev/null 2>&1 || true
     fi
 
     waited=0
@@ -101,7 +110,6 @@ stop_server() {
         waited=$((waited + 1))
     done
 
-    wait "$server_pid" 2>/dev/null || true
     return 1
 }
 

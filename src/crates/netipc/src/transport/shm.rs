@@ -155,7 +155,6 @@ pub struct ShmContext {
     local_resp_seq: u64,
 
     spin_tries: u32,
-    owner_generation: u32,
     path: PathBuf,
 }
 
@@ -172,39 +171,6 @@ impl ShmContext {
     /// Returns the raw file descriptor.
     pub fn fd(&self) -> i32 {
         self.fd
-    }
-
-    /// Check if the region's owner process is still alive.
-    pub fn owner_alive(&self) -> bool {
-        if self.base.is_null() || self.region_size < HEADER_LEN as usize {
-            return false;
-        }
-        // Read the PID and generation fields by computing their byte offsets
-        // directly from self.base, avoiding any pointer dereference through
-        // a reference type. This is safer than casting to *const RegionHeader
-        // and dereferencing because we never materialize a borrow of the
-        // header struct — we just read raw bytes at known offsets.
-        //
-        // SAFETY: self.base is a non-null mmap'd region of at least HEADER_LEN
-        // bytes (checked above). The field offsets below are within HEADER_LEN.
-        // owner_pid is at offset 8, owner_generation at offset 12
-        let pid: i32 = unsafe {
-            let p = self.base.add(8) as *const i32;
-            ptr::read_volatile(p)
-        };
-        if !pid_alive(pid) {
-            return false;
-        }
-        if self.owner_generation != 0 {
-            let cur_gen: u32 = unsafe {
-                let p = self.base.add(12) as *const u32;
-                ptr::read_volatile(p)
-            };
-            if cur_gen != self.owner_generation {
-                return false;
-            }
-        }
-        true
     }
 
     /// Create a SHM region (server side).
@@ -242,7 +208,7 @@ impl ShmContext {
         let mut fd = unsafe {
             libc::open(
                 c_path.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
                 0o600,
             )
         };
@@ -257,7 +223,7 @@ impl ShmContext {
             fd = unsafe {
                 libc::open(
                     c_path.as_ptr(),
-                    libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                    libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
                     0o600,
                 )
             };
@@ -331,7 +297,6 @@ impl ShmContext {
             local_req_seq: 0,
             local_resp_seq: 0,
             spin_tries: DEFAULT_SPIN_TRIES,
-            owner_generation: generation,
             path,
         })
     }
@@ -345,7 +310,7 @@ impl ShmContext {
         let path = build_shm_path(run_dir, service_name, session_id)?;
         let c_path = path_to_cstring(&path)?;
 
-        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR) };
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
         if fd < 0 {
             return Err(ShmError::Open(errno()));
         }
@@ -459,7 +424,6 @@ impl ShmContext {
         // Read current sequence numbers
         let cur_req_seq = atomic_load_u64(base, OFF_REQ_SEQ);
         let cur_resp_seq = atomic_load_u64(base, OFF_RESP_SEQ);
-        let generation = unsafe { (*hdr).owner_generation };
 
         Ok(ShmContext {
             role: ShmRole::Client,
@@ -473,7 +437,6 @@ impl ShmContext {
             local_req_seq: cur_req_seq,
             local_resp_seq: cur_resp_seq,
             spin_tries: DEFAULT_SPIN_TRIES,
-            owner_generation: generation,
             path,
         })
     }
@@ -749,7 +712,7 @@ pub fn cleanup_stale(run_dir: &str, service_name: &str) {
         };
 
         // Open read-only to inspect the header
-        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY) };
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
         if fd < 0 {
             // Entries that cannot be opened are junk (vanished, unreadable,
             // dangling symlink) — remove them. Keep the entry only when fd
@@ -1112,7 +1075,7 @@ fn check_shm_stale(path: &Path) -> StaleResult {
         return StaleResult::Invalid;
     }
 
-    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY) };
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
     if fd < 0 {
         let e = errno();
         if e == libc::ENOENT {

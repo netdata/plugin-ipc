@@ -51,7 +51,14 @@ pub(super) fn handle_session_threaded(
                             let payload = &recv_buf[HEADER_SIZE..mlen];
                             (hdr, payload)
                         }
-                        Err(crate::transport::shm::ShmError::Timeout) => continue,
+                        Err(crate::transport::shm::ShmError::Timeout) => {
+                            // A client that left (cleanly or by crashing)
+                            // never sends again; its socket is the only sign.
+                            if peer_disconnected(session.fd()) {
+                                break;
+                            }
+                            continue;
+                        }
                         Err(_) => break,
                     }
                 } else {
@@ -282,6 +289,68 @@ pub(super) fn handle_session_threaded(
         }
     }
     drop(session);
+}
+
+/// Zero-wait probe of a session socket. SHM sessions keep the socket open for
+/// their whole life and the kernel closes it when the peer exits, so
+/// HUP/ERR/EOF here is the dead-peer signal for both directions.
+pub(super) fn peer_disconnected(fd: i32) -> bool {
+    if fd < 0 {
+        return true;
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let rdhup = libc::POLLRDHUP;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let rdhup = 0;
+
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN | libc::POLLHUP | libc::POLLERR | rdhup,
+        revents: 0,
+    };
+    let ret = loop {
+        let ret = unsafe { libc::poll(&mut pfd, 1, 0) };
+        if ret < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        break ret;
+    };
+
+    if ret < 0 {
+        return true;
+    }
+    if ret == 0 {
+        return false;
+    }
+    if pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL | rdhup) != 0 {
+        return true;
+    }
+    if pfd.revents & libc::POLLIN != 0 {
+        let mut ch = 0u8;
+        let n = loop {
+            let n = unsafe {
+                libc::recv(
+                    fd,
+                    (&mut ch as *mut u8).cast(),
+                    1,
+                    libc::MSG_PEEK | libc::MSG_DONTWAIT,
+                )
+            };
+            if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break n;
+        };
+        if n == 0 {
+            return true;
+        }
+        if n < 0 {
+            let errno = std::io::Error::last_os_error().raw_os_error();
+            return errno != Some(libc::EAGAIN) && errno != Some(libc::EWOULDBLOCK);
+        }
+    }
+    false
 }
 
 /// Poll a file descriptor for readability with a timeout in milliseconds.

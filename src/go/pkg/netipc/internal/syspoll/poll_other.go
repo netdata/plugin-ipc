@@ -7,6 +7,9 @@ import (
 	"unsafe"
 )
 
+// RdHup is Linux-only; elsewhere a closed peer shows as Hup or EOF.
+const RdHup int16 = 0
+
 // Poll waits up to timeoutMs (negative waits indefinitely) for pfd.Events.
 // It returns the poll result count and the raw errno.
 func Poll(pfd *PollFd, timeoutMs int) (int, syscall.Errno) {

@@ -95,6 +95,7 @@ var (
 	ErrHandlerFailed = errors.New("dispatch handler failed")
 	ErrTimeout       = errors.New("synchronous call deadline expired")
 	ErrAborted       = errors.New("synchronous call aborted")
+	ErrDisconnected  = errors.New("peer disconnected")
 )
 
 // ---------------------------------------------------------------------------

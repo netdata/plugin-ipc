@@ -273,7 +273,31 @@ place.
 
 If the file does not exist or is undersized (server has not yet
 finished creating it), the client treats this as a retryable
-protocol-not-ready condition.
+protocol-not-ready condition. Between retries the client probes the
+session socket (see "Peer liveness"); if the server already closed it
+(refused at worker capacity, or died), the client stops retrying, reports
+the connect as failed, and keeps SHM enabled for its next connect.
+
+### Peer liveness
+
+The UDS session socket stays open for the whole SHM session. SHM waits
+cannot see a peer that exits, but the kernel closes that process's socket
+end, so the socket is the dead-peer signal for both sides:
+
+- The probe is a zero-wait `poll()` for `POLLHUP`, `POLLERR`, `POLLNVAL`
+  (and `POLLRDHUP` where available); readable data is checked with a
+  non-blocking `MSG_PEEK` receive, where 0 bytes means end of stream. No
+  data flows on the socket during an SHM session.
+- It runs only after a wait slice expires with no message, never while
+  messages flow: the server after each idle receive poll (100 ms), the
+  client after each idle slice of its response wait (100 ms).
+- A server that sees the peer gone ends the session (freeing the worker
+  and the region). A client fails the in-flight call with a disconnected
+  error.
+- Process liveness (`kill(pid, 0)`) is not used: it is wrong across PID
+  namespaces and after PID reuse.
+- Session sockets are close-on-exec, so a child that a consumer forks and
+  execs cannot keep a dead peer's socket open.
 
 ### Server destroys a per-session region
 

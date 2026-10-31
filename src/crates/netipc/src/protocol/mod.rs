@@ -110,6 +110,8 @@ pub enum NipcError {
     Timeout,
     /// Synchronous call was aborted by the caller.
     Aborted,
+    /// The peer closed the session or its process exited.
+    Disconnected,
 }
 
 impl core::fmt::Display for NipcError {
@@ -129,6 +131,7 @@ impl core::fmt::Display for NipcError {
             NipcError::HandlerFailed => write!(f, "dispatch handler failed"),
             NipcError::Timeout => write!(f, "synchronous call timed out"),
             NipcError::Aborted => write!(f, "synchronous call aborted"),
+            NipcError::Disconnected => write!(f, "peer disconnected"),
         }
     }
 }

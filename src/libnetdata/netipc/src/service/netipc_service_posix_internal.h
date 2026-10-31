@@ -40,6 +40,11 @@ enum {
 };
 
 void nipc_service_posix_sleep_us(unsigned int usec);
+
+/* Zero-wait probe of a session socket. SHM sessions keep the socket open
+ * for their whole life and the kernel closes it when the peer exits, so
+ * HUP/ERR/EOF here is the dead-peer signal for both directions. */
+bool nipc_service_posix_peer_disconnected(int fd);
 const nipc_service_common_client_ops_t *nipc_service_posix_client_ops(void);
 void nipc_service_posix_client_disconnect(nipc_client_ctx_t *ctx);
 nipc_client_state_t nipc_service_posix_client_try_connect(nipc_client_ctx_t *ctx);

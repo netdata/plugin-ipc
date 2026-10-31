@@ -40,7 +40,7 @@ int nipc_service_posix_poll_with_shutdown(int fd, bool *running)
     return 0;
 }
 
-static bool session_peer_disconnected(int fd)
+bool nipc_service_posix_peer_disconnected(int fd)
 {
     if (fd < 0)
         return true;
@@ -120,7 +120,7 @@ static void server_handle_session(nipc_managed_server_t *server,
             nipc_shm_error_t serr = nipc_shm_receive(shm, recv_buf, recv_size,
                                                        &msg_len, SERVER_POLL_TIMEOUT_MS);
             if (serr == NIPC_SHM_ERR_TIMEOUT) {
-                if (session_peer_disconnected(session->fd))
+                if (nipc_service_posix_peer_disconnected(session->fd))
                     break;
                 continue; /* check running flag */
             }

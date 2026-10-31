@@ -160,12 +160,17 @@ fn robustness_helper_process() {
             println!("HELPER_READY");
             thread::sleep(Duration::from_secs(600));
         }
-        "shm_server" => {
+        "shm_server" | "uds_server" => {
             let handler = increment_dispatch(Arc::new(|v| {
                 thread::sleep(Duration::from_secs(60));
                 Some(v + 1)
             }));
-            let _server = start_server(service, shm_server_config(), METHOD_INCREMENT, handler, 2);
+            let config = if mode == "shm_server" {
+                shm_server_config()
+            } else {
+                server_config()
+            };
+            let _server = start_server(service, config, METHOD_INCREMENT, handler, 2);
             println!("HELPER_READY");
             thread::sleep(Duration::from_secs(600));
         }
@@ -551,15 +556,33 @@ fn large_round_trip(packet_size: u32) -> Result<(), NipcError> {
 
 #[test]
 fn test_robust_shm_client_notices_crashed_server() {
-    let svc = unique_service("rs_rob_dead_server");
+    client_notices_crashed_server(true);
+}
+
+#[test]
+fn test_robust_uds_client_reports_crashed_server_as_disconnected() {
+    client_notices_crashed_server(false);
+}
+
+fn client_notices_crashed_server(shm: bool) {
+    let svc = unique_service(if shm {
+        "rs_rob_dead_server"
+    } else {
+        "rs_rob_dead_uds_server"
+    });
     ensure_run_dir();
     cleanup_all(&svc);
-    let mut child = spawn_helper("shm_server", &svc);
+    let mut child = spawn_helper(if shm { "shm_server" } else { "uds_server" }, &svc);
 
     let svc2 = svc.clone();
     let (call_tx, call_rx) = mpsc::channel();
     let caller = thread::spawn(move || {
-        let mut client = increment_client(&svc2, shm_client_config());
+        let config = if shm {
+            shm_client_config()
+        } else {
+            client_config()
+        };
+        let mut client = increment_client(&svc2, config);
         connect_ready(&mut client);
         let _ = call_tx.send(());
         let start = Instant::now();
@@ -581,4 +604,51 @@ fn test_robust_shm_client_notices_crashed_server() {
         result.is_err() && elapsed < Duration::from_millis(3500),
         "call must fail within 3s of the server crash (timeout is 10s): {result:?} after {elapsed:?}"
     );
+    assert_eq!(
+        result,
+        Err(NipcError::Disconnected),
+        "call must report the server as disconnected"
+    );
+}
+
+// A server at worker capacity completes the handshake, then closes the
+// session and removes the prepared SHM region. The client must not spend its
+// attach retry budget (5 s) on a region that will never appear, and must keep
+// SHM enabled for its next connect.
+#[test]
+fn test_robust_shm_attach_stops_when_server_closes_session() {
+    let svc = unique_service("rs_rob_attach_refused");
+    let handler = increment_dispatch(Arc::new(|v| Some(v + 1)));
+    let (running, handle) = start_server(&svc, shm_server_config(), METHOD_INCREMENT, handler, 1);
+
+    let mut holder = increment_client(&svc, shm_client_config());
+    connect_ready(&mut holder);
+
+    let mut refused = increment_client(&svc, shm_client_config());
+    let start = Instant::now();
+    refused.refresh();
+    let elapsed = start.elapsed();
+
+    holder.close();
+    let mut ready = false;
+    for _ in 0..300 {
+        refused.refresh();
+        if refused.ready() {
+            ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let uses_shm = refused.shm.is_some();
+    refused.close();
+    stop(&running);
+    let _ = handle.join();
+    cleanup_all(&svc);
+
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "refused connect must return within 1s (attach retry budget is 5s): {elapsed:?}"
+    );
+    assert!(ready, "refused client must connect once the worker is free");
+    assert!(uses_shm, "refused client must still use SHM");
 }

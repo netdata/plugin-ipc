@@ -99,6 +99,13 @@ func (c *Client) tryConnect() ClientState {
 			if !time.Now().Before(deadline) {
 				break
 			}
+			// A server that refused or died breaks the session pipe; its
+			// SHM objects will never appear. Not a WinSHM problem: keep it
+			// enabled for the next connect.
+			if pipePeerDisconnected(session) {
+				session.Close()
+				return StateDisconnected
+			}
 			time.Sleep(clientShmAttachRetryInterval)
 		}
 		if c.shm == nil {
@@ -156,9 +163,31 @@ func (c *Client) transportSend(hdr *protocol.Header, payload []byte) error {
 			c.noteRequestCapacity(uint32(len(payload)))
 			return protocol.ErrOverflow
 		}
-		return protocol.ErrTruncated
+		return c.pipeFailure(err)
 	}
 	return nil
+}
+
+// pipeFailure maps a pipe send/recv failure. A broken pipe is a disconnect;
+// a plain send/recv failure is one when the session probe says the server is
+// gone; protocol errors keep their own meaning.
+func (c *Client) pipeFailure(err error) error {
+	if errors.Is(err, windows.ErrDisconnected) {
+		return protocol.ErrDisconnected
+	}
+	if (errors.Is(err, windows.ErrSend) || errors.Is(err, windows.ErrRecv)) &&
+		c.session != nil && pipePeerDisconnected(c.session) {
+		return protocol.ErrDisconnected
+	}
+	return protocol.ErrTruncated
+}
+
+// pipePeerDisconnected is a zero-wait probe of a session pipe. WinSHM sessions
+// keep the pipe open for their whole life and the kernel breaks it when the
+// peer exits, so a broken pipe is the dead-peer signal for both directions.
+func pipePeerDisconnected(session *windows.Session) bool {
+	_, err := session.WaitReadable(0)
+	return errors.Is(err, windows.ErrDisconnected)
 }
 
 func (c *Client) transportReceive() (protocol.Header, []byte, error) {
@@ -193,7 +222,14 @@ func (c *Client) transportReceiveWithControl(timeoutMs uint32, abortCh <-chan st
 			mlen, err := c.shm.WinShmReceive(scratch, waitMs)
 			if err != nil {
 				if errors.Is(err, windows.ErrWinShmTimeout) {
+					// Only an idle slice pays for the probe.
+					if c.session != nil && pipePeerDisconnected(c.session) {
+						return protocol.Header{}, nil, protocol.ErrDisconnected
+					}
 					continue
+				}
+				if errors.Is(err, windows.ErrWinShmDisconnected) {
+					return protocol.Header{}, nil, protocol.ErrDisconnected
 				}
 				return protocol.Header{}, nil, protocol.ErrTruncated
 			}
@@ -221,7 +257,7 @@ func (c *Client) transportReceiveWithControl(timeoutMs uint32, abortCh <-chan st
 		if errors.Is(err, windows.ErrAborted) {
 			return protocol.Header{}, nil, protocol.ErrAborted
 		}
-		return protocol.Header{}, nil, protocol.ErrTruncated
+		return protocol.Header{}, nil, c.pipeFailure(err)
 	}
 	return hdr, payload, nil
 }

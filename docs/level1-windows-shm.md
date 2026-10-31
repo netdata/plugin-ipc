@@ -210,6 +210,22 @@ must periodically yield so an infinite wait does not monopolize a core.
 - On peer close detection, the detecting side must report the session
   as disconnected (graceful close, equivalent to `io.EOF`).
 
+### Detecting a crashed peer
+
+A crashed process never sets its close flag. The named-pipe session stays
+open for the whole SHM session and the kernel breaks it when the peer
+process exits, so the pipe is the crash signal for both sides:
+
+- The probe is a zero-wait `PeekNamedPipe`; a disconnect error (see
+  `level1-windows-np.md`, "Disconnect detection") means the peer is gone.
+  No data flows on the pipe during an SHM session.
+- It runs only after a wait slice expires with no message: the server
+  after each idle receive poll (100 ms), the client after each idle slice
+  of its response wait (100 ms).
+- A server that sees the peer gone ends the session (freeing the worker
+  and the region). A client fails the in-flight call with a disconnected
+  error.
+
 ## Memory ordering
 
 - Sequence number and length stores use interlocked (atomic) operations
@@ -274,6 +290,11 @@ objects in place.
 5. Read offsets, capacities, and spin_tries from the header.
 6. If SHM_HYBRID: open `req_event` and `resp_event` kernel events.
 7. The client is now ready to publish requests and consume responses.
+
+If the objects cannot be opened yet, the client retries. Between retries
+it probes the session pipe; if the server already broke it (refused at
+worker capacity, or died), the client stops retrying, reports the connect
+as failed, and keeps SHM enabled for its next connect.
 
 ### Server destroys a per-session region
 

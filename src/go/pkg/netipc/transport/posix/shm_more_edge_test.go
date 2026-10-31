@@ -174,36 +174,6 @@ func writeRawShmRegionFile(t *testing.T, runDir, service string, sessionID uint6
 	return path
 }
 
-func TestShmOwnerAliveFalsePaths(t *testing.T) {
-	if (&ShmContext{data: alignedShmData(8)}).OwnerAlive() {
-		t.Fatal("short header should not be treated as alive")
-	}
-
-	runDir := t.TempDir()
-	svc := "go_shm_owner_false"
-	ctx, err := ShmServerCreate(runDir, svc, 1, 1024, 1024)
-	if err != nil {
-		t.Fatalf("server create: %v", err)
-	}
-	defer ctx.ShmDestroy()
-
-	binary.NativeEndian.PutUint32(ctx.data[shmHeaderOwnerPidOff:shmHeaderOwnerPidOff+4], 0)
-	if ctx.OwnerAlive() {
-		t.Fatal("owner pid 0 should not be treated as alive")
-	}
-
-	binary.NativeEndian.PutUint32(ctx.data[shmHeaderOwnerPidOff:shmHeaderOwnerPidOff+4], uint32(int32(os.Getpid())))
-	binary.NativeEndian.PutUint32(ctx.data[shmHeaderOwnerGenOff:shmHeaderOwnerGenOff+4], ctx.ownerGeneration+1)
-	if ctx.OwnerAlive() {
-		t.Fatal("generation mismatch should not be treated as alive")
-	}
-
-	ctx.ownerGeneration = 0
-	if !ctx.OwnerAlive() {
-		t.Fatal("legacy zero cached generation should skip generation check")
-	}
-}
-
 func TestShmServerCreateRejectsLiveRegion(t *testing.T) {
 	runDir := t.TempDir()
 	svc := "go_shm_live_region"

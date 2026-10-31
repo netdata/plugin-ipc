@@ -36,6 +36,12 @@ impl RawClient {
                                 if std::time::Instant::now() >= deadline {
                                     break;
                                 }
+                                // A server that refused or died breaks the
+                                // session pipe; its SHM objects will never
+                                // appear. Not a WinSHM problem: keep it enabled.
+                                if super::server_session_windows::peer_disconnected(&session) {
+                                    return ClientState::Disconnected;
+                                }
                                 std::thread::sleep(std::time::Duration::from_millis(
                                     CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS,
                                 ));

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1884,4 +1885,52 @@ func TestUnknownMessageID(t *testing.T) {
 	if !errors.Is(err, ErrUnknownMsgID) {
 		t.Errorf("error = %v, want ErrUnknownMsgID", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+//  Test: close-on-exec
+// ---------------------------------------------------------------------------
+
+// Sockets must not leak into children a consumer forks and execs: an
+// inherited session socket keeps the peer from ever seeing EOF, which is the
+// dead-peer signal.
+func TestListenerAndSessionSocketsAreCloexec(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	defer os.Remove(filepath.Join(runDir, service+".sock"))
+
+	listener := startListener(t, runDir, service, defaultServerConfig())
+	defer listener.Close()
+	acceptCh := acceptAsync(listener)
+
+	cCfg := defaultClientConfig()
+	client, err := Connect(runDir, service, &cCfg)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer client.Close()
+	res := <-acceptCh
+	if res.err != nil {
+		t.Fatalf("Accept failed: %v", res.err)
+	}
+	defer res.session.Close()
+
+	for name, fd := range map[string]int{
+		"listener": listener.Fd(),
+		"accepted": res.session.Fd(),
+		"client":   client.Fd(),
+	} {
+		flags, err := fcntlGetFd(fd)
+		if err != nil || flags&syscall.FD_CLOEXEC == 0 {
+			t.Errorf("%s socket fd %d must be close-on-exec (flags=%#x err=%v)", name, fd, flags, err)
+		}
+	}
+}
+
+func fcntlGetFd(fd int) (uintptr, error) {
+	flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_GETFD, 0)
+	if errno != 0 {
+		return 0, errno
+	}
+	return flags, nil
 }

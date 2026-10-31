@@ -31,7 +31,7 @@ func Listen(runDir, serviceName string, config ServerConfig) (*Listener, error) 
 		return nil, ErrAddrInUse
 	}
 
-	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+	fd, err := seqpacketSocket()
 	if err != nil {
 		return nil, wrapErr(ErrSocket, err.Error())
 	}
@@ -95,7 +95,7 @@ func (l *Listener) AcceptWithConfig(sessionID uint64, config ServerConfig) (*Ses
 		return nil, wrapErr(ErrAccept, "listener closed")
 	}
 
-	nfd, _, err := syscall.Accept(fd)
+	nfd, err := acceptCloexec(fd)
 	if err != nil {
 		return nil, wrapErr(ErrAccept, err.Error())
 	}

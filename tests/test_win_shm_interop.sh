@@ -55,13 +55,41 @@ else
     RUN_DIR="$RUN_DIR_HOST"
 fi
 
-cleanup() {
-    local pids
-    pids=$(jobs -p 2>/dev/null) || true
-    if [[ -n "$pids" ]]; then
-        kill $pids 2>/dev/null || true
-        wait $pids 2>/dev/null || true
+# taskkill lives in System32, which a minimal PATH may lack.
+taskkill_bin() {
+    if command -v taskkill.exe >/dev/null 2>&1; then
+        command -v taskkill.exe
+    else
+        cygpath -u "${SYSTEMROOT:-C:\\Windows}\\System32\\taskkill.exe"
     fi
+}
+
+# MSYS-runtime servers blocked in a Win32 wait never act on SIGTERM, so a
+# plain kill can leave them running and a following wait blocks forever.
+force_stop_server() {
+    local server_pid="$1"
+    local waited=0
+    local win_pid
+
+    kill "$server_pid" 2>/dev/null || true
+    while kill -0 "$server_pid" 2>/dev/null && [[ $waited -lt 20 ]]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$server_pid" 2>/dev/null; then
+        win_pid=$(ps -W 2>/dev/null | awk -v pid="$server_pid" '$1 == pid {print $4; exit}')
+        if [[ -n "$win_pid" ]]; then
+            "$(taskkill_bin)" //PID "$win_pid" //T //F >/dev/null 2>&1 || true
+        fi
+    fi
+    wait "$server_pid" 2>/dev/null || true
+}
+
+cleanup() {
+    local pid
+    for pid in $(jobs -p 2>/dev/null); do
+        force_stop_server "$pid"
+    done
     rm -rf "$RUN_DIR_HOST"
 }
 trap cleanup EXIT
@@ -124,8 +152,7 @@ run_test() {
 
     if [[ $waited -ge $((TIMEOUT * 10)) ]]; then
         echo -e "${RED}FAIL${NC} (server not ready after ${TIMEOUT}s)"
-        kill "$server_pid" 2>/dev/null || true
-        wait "$server_pid" 2>/dev/null || true
+        force_stop_server "$server_pid"
         FAIL=$((FAIL + 1))
         return
     fi
@@ -143,6 +170,10 @@ run_test() {
     else
         echo -e "${RED}FAIL${NC} (client exit code $?, output: $client_out)"
         FAIL=$((FAIL + 1))
+        # The server exits after serving one client; after a client failure
+        # it may still be waiting for one.
+        force_stop_server "$server_pid"
+        return
     fi
 
     # Wait for server to exit

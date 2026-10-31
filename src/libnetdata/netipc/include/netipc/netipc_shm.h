@@ -118,7 +118,6 @@ typedef struct {
     uint64_t local_resp_seq;     /* last known resp_seq */
 
     uint32_t spin_tries;         /* spin count before futex wait */
-    uint32_t owner_generation;   /* cached for PID reuse detection */
 
     char     path[256];          /* stored for unlink on destroy */
 
@@ -202,13 +201,6 @@ nipc_shm_error_t nipc_shm_receive(nipc_shm_ctx_t *ctx,
                                     size_t buf_size,
                                     size_t *msg_len_out,
                                     uint32_t timeout_ms);
-
-/* ------------------------------------------------------------------ */
-/*  Utility                                                            */
-/* ------------------------------------------------------------------ */
-
-/* Check if the region's owner process is still alive. */
-bool nipc_shm_owner_alive(const nipc_shm_ctx_t *ctx);
 
 /*
  * Scan for and unlink stale per-session SHM files left by a crashed

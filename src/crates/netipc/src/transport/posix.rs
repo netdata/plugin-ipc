@@ -265,7 +265,7 @@ impl UdsSession {
     ) -> Result<Self, UdsError> {
         let path = build_socket_path(run_dir, service_name)?;
 
-        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+        let fd = seqpacket_socket_cloexec();
         if fd < 0 {
             return Err(UdsError::Socket(errno()));
         }
@@ -645,7 +645,7 @@ impl UdsListener {
             StaleResult::Stale | StaleResult::NotExist => { /* proceed */ }
         }
 
-        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+        let fd = seqpacket_socket_cloexec();
         if fd < 0 {
             return Err(UdsError::Socket(errno()));
         }
@@ -710,8 +710,7 @@ impl UdsListener {
         session_id: u64,
         config: ServerConfig,
     ) -> Result<UdsSession, UdsError> {
-        let client_fd =
-            unsafe { libc::accept(self.fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let client_fd = accept_cloexec(self.fd);
         if client_fd < 0 {
             return Err(UdsError::Accept(errno()));
         }
@@ -745,6 +744,45 @@ impl Drop for UdsListener {
 // ---------------------------------------------------------------------------
 //  Internal helpers
 // ---------------------------------------------------------------------------
+
+// Sockets must not leak into children a consumer forks and execs: an
+// inherited session socket keeps the peer from ever seeing EOF, which is
+// the dead-peer signal. Platforms without SOCK_CLOEXEC set the flag right
+// after creation.
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
+fn seqpacket_socket_cloexec() -> i32 {
+    unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
+fn seqpacket_socket_cloexec() -> i32 {
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+    if fd >= 0 {
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    fd
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
+fn accept_cloexec(listen_fd: i32) -> i32 {
+    unsafe {
+        libc::accept4(
+            listen_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            libc::SOCK_CLOEXEC,
+        )
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
+fn accept_cloexec(listen_fd: i32) -> i32 {
+    let fd = unsafe { libc::accept(listen_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+    if fd >= 0 {
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    fd
+}
 
 fn errno() -> i32 {
     io::Error::last_os_error().raw_os_error().unwrap_or(0)
@@ -1069,7 +1107,7 @@ fn check_and_recover_stale(path: &str) -> StaleResult {
     }
 
     // Try connecting to see if a live server is there
-    let probe = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+    let probe = seqpacket_socket_cloexec();
     if probe < 0 {
         // Cannot probe liveness (fd exhaustion) — keep the endpoint; the
         // subsequent bind() fails instead of risking a live socket.

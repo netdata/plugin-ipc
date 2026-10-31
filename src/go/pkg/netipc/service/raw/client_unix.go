@@ -101,6 +101,13 @@ func (c *Client) tryConnect() ClientState {
 			if !time.Now().Before(deadline) {
 				break
 			}
+			// A server that refused or died closes the session socket; its
+			// SHM region will never appear. Not an SHM problem: keep SHM
+			// enabled for the next connect.
+			if peerDisconnected(session.Fd()) {
+				session.Close()
+				return StateDisconnected
+			}
 			time.Sleep(clientShmAttachRetryInterval)
 		}
 		if c.shm == nil {
@@ -168,9 +175,20 @@ func (c *Client) transportSend(hdr *protocol.Header, payload []byte) error {
 			c.noteRequestCapacity(payloadLen)
 			return protocol.ErrOverflow
 		}
-		return protocol.ErrTruncated
+		return c.socketFailure(err)
 	}
 	return nil
+}
+
+// socketFailure maps a socket send/recv failure. The transport reports EOF,
+// EPIPE and ECONNRESET as plain send/recv failures, so the session probe tells
+// a gone server apart; protocol errors keep their own meaning.
+func (c *Client) socketFailure(err error) error {
+	if (errors.Is(err, posix.ErrSend) || errors.Is(err, posix.ErrRecv)) &&
+		c.session != nil && peerDisconnected(c.session.Fd()) {
+		return protocol.ErrDisconnected
+	}
+	return protocol.ErrTruncated
 }
 
 func (c *Client) transportReceive() (protocol.Header, []byte, error) {
@@ -205,6 +223,10 @@ func (c *Client) transportReceiveWithControl(timeoutMs uint32, abortCh <-chan st
 			mlen, err := c.shm.ShmReceive(scratch, waitMs)
 			if err != nil {
 				if errors.Is(err, posix.ErrShmTimeout) {
+					// Only an idle slice pays for the probe.
+					if c.session != nil && peerDisconnected(c.session.Fd()) {
+						return protocol.Header{}, nil, protocol.ErrDisconnected
+					}
 					continue
 				}
 				return protocol.Header{}, nil, protocol.ErrTruncated
@@ -234,7 +256,7 @@ func (c *Client) transportReceiveWithControl(timeoutMs uint32, abortCh <-chan st
 		if errors.Is(err, posix.ErrAborted) {
 			return protocol.Header{}, nil, protocol.ErrAborted
 		}
-		return protocol.Header{}, nil, protocol.ErrTruncated
+		return protocol.Header{}, nil, c.socketFailure(err)
 	}
 	return hdr, payload, nil
 }

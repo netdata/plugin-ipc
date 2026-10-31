@@ -92,7 +92,7 @@ func Connect(runDir, serviceName string, config *ClientConfig) (*Session, error)
 		return nil, err
 	}
 
-	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+	fd, err := seqpacketSocket()
 	if err != nil {
 		return nil, wrapErr(ErrSocket, err.Error())
 	}

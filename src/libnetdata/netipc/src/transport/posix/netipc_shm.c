@@ -438,7 +438,6 @@ nipc_shm_error_t nipc_shm_server_create(const char *run_dir,
     out->local_req_seq     = 0;
     out->local_resp_seq    = 0;
     out->spin_tries        = NIPC_SHM_DEFAULT_SPIN;
-    out->owner_generation  = hdr->owner_generation;
     if (copy_cstr_checked(out->path, sizeof(out->path), path) != 0) {
         munmap(map, region_size);
         close(fd);
@@ -633,7 +632,6 @@ nipc_shm_error_t nipc_shm_client_attach(const char *run_dir,
     out->local_req_seq     = cur_req_seq;
     out->local_resp_seq    = cur_resp_seq;
     out->spin_tries        = NIPC_SHM_DEFAULT_SPIN;
-    out->owner_generation  = hdr->owner_generation;
     if (copy_cstr_checked(out->path, sizeof(out->path), path) != 0) {
         munmap(map, file_size);
         close(fd);
@@ -880,30 +878,6 @@ nipc_shm_error_t nipc_shm_receive(nipc_shm_ctx_t *ctx,
         ctx->local_resp_seq = expected_seq;
 
     return NIPC_SHM_OK;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Utility                                                            */
-/* ------------------------------------------------------------------ */
-
-bool nipc_shm_owner_alive(const nipc_shm_ctx_t *ctx)
-{
-    if (!ctx || !ctx->base)
-        return false;
-
-    const nipc_shm_region_header_t *hdr =
-        (const nipc_shm_region_header_t *)ctx->base;
-
-    if (!pid_alive((pid_t)hdr->owner_pid))
-        return false;
-
-    /* PID is alive; verify generation matches to detect PID reuse.
-     * If owner_generation is 0, skip the check (legacy region). */
-    if (ctx->owner_generation != 0 &&
-        hdr->owner_generation != ctx->owner_generation)
-        return false;
-
-    return true;
 }
 
 /* ------------------------------------------------------------------ */

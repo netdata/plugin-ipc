@@ -3001,3 +3001,33 @@ fn test_raw_send_closed_peer_returns_send_error() {
         libc::close(fd0);
     }
 }
+
+// Sockets must not leak into children a consumer forks and execs: an
+// inherited session socket keeps the peer from ever seeing EOF, which is the
+// dead-peer signal.
+#[test]
+fn test_listener_and_session_sockets_are_cloexec() {
+    ensure_run_dir();
+    let svc = unique_service("rs_cloexec");
+    cleanup_socket(&svc);
+
+    let cloexec = |fd: RawFd| unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC != 0;
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("listen");
+    let listener_fd = listener.fd();
+    let server_thread = thread::spawn(move || {
+        let session = listener.accept().expect("accept");
+        (cloexec(listener.fd()), cloexec(session.fd()))
+    });
+
+    let session =
+        UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
+    let (listener_ok, accepted_ok) = server_thread.join().expect("server thread");
+    assert!(listener_fd >= 0);
+    assert!(listener_ok, "listener socket must be close-on-exec");
+    assert!(accepted_ok, "accepted session socket must be close-on-exec");
+    assert!(
+        cloexec(session.fd()),
+        "client session socket must be close-on-exec"
+    );
+    cleanup_socket(&svc);
+}

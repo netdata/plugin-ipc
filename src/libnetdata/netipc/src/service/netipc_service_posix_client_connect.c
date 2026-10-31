@@ -119,6 +119,7 @@ nipc_client_state_t nipc_service_posix_client_try_connect(nipc_client_ctx_t *ctx
             /* Retry attach: server creates the SHM region after
              * the UDS handshake, so it may not exist yet. */
             nipc_shm_error_t serr = NIPC_SHM_ERR_NOT_READY;
+            bool server_gone = false;
             uint64_t deadline_ms = nipc_service_platform_monotonic_ms() + CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS;
             for (;;) {
                 serr = nipc_shm_client_attach(
@@ -132,11 +133,23 @@ nipc_client_state_t nipc_service_posix_client_try_connect(nipc_client_ctx_t *ctx
                     break;
                 if (nipc_service_platform_monotonic_ms() >= deadline_ms)
                     break;
+                /* A server that refused or died closes the session socket;
+                 * waiting for its SHM region would only burn the timeout. */
+                if (nipc_service_posix_peer_disconnected(session.fd)) {
+                    server_gone = true;
+                    break;
+                }
                 nipc_service_posix_sleep_us(CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS * 1000u);
             }
 
             if (serr == NIPC_SHM_OK) {
                 ctx->shm = shm;
+            } else if (server_gone) {
+                /* Not an SHM problem: keep SHM enabled for the next connect. */
+                free(shm);
+                nipc_uds_close_session(&ctx->session);
+                ctx->session_valid = false;
+                return NIPC_CLIENT_DISCONNECTED;
             } else {
                 /* SHM attach failed after negotiation. Close that session,
                  * blacklist SHM for this client context, and retry

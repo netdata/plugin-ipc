@@ -207,6 +207,11 @@ func (s *Server) handleSession(session *posix.Session, shm *posix.ShmContext) {
 				mlen, err := shm.ShmReceive(recvBuf, serverPollTimeoutMs)
 				if err != nil {
 					if err == posix.ErrShmTimeout {
+						// A client that left (cleanly or by crashing)
+						// never sends again; its socket is the only sign.
+						if peerDisconnected(session.Fd()) {
+							return protocol.Header{}, nil, serverReceiveStop
+						}
 						return protocol.Header{}, nil, serverReceiveContinue
 					}
 					return protocol.Header{}, nil, serverReceiveStop

@@ -537,11 +537,8 @@ static void test_disconnect_detection(void)
         err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
         check("client attach", err == NIPC_SHM_OK);
 
-        if (err == NIPC_SHM_OK) {
-            /* Owner (this process) is alive. */
-            check("owner alive from client", nipc_shm_owner_alive(&client));
+        if (err == NIPC_SHM_OK)
             nipc_shm_close(&client);
-        }
 
         nipc_shm_destroy(&server);
     }
@@ -1270,129 +1267,6 @@ static void test_null_params(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Coverage: pid_alive with pid=0                                      */
-/* ------------------------------------------------------------------ */
-
-static void test_pid_zero(void)
-{
-    printf("Test: owner_alive with dead PID via pid=0 in header\n");
-    const char *svc = "shm_pid0";
-    cleanup_shm(svc);
-
-    nipc_shm_ctx_t server;
-    nipc_shm_error_t err = nipc_shm_server_create(
-        TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
-    check("server create", err == NIPC_SHM_OK);
-
-    if (err == NIPC_SHM_OK) {
-        nipc_shm_ctx_t client;
-        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
-        check("client attach", err == NIPC_SHM_OK);
-
-        if (err == NIPC_SHM_OK) {
-            /* Corrupt owner_pid to 0 */
-            nipc_shm_region_header_t *hdr =
-                (nipc_shm_region_header_t *)client.base;
-            int32_t saved_pid = hdr->owner_pid;
-            hdr->owner_pid = 0;
-
-            check("owner_alive with pid=0 returns false",
-                  !nipc_shm_owner_alive(&client));
-
-            /* Restore */
-            hdr->owner_pid = saved_pid;
-            nipc_shm_close(&client);
-        }
-        nipc_shm_destroy(&server);
-    }
-    cleanup_shm(svc);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Coverage: owner_alive with dead PID, generation mismatch            */
-/* ------------------------------------------------------------------ */
-
-static void test_owner_dead_pid(void)
-{
-    printf("Test: owner_alive with dead PID\n");
-    const char *svc = "shm_deadpid";
-    cleanup_shm(svc);
-
-    nipc_shm_ctx_t server;
-    nipc_shm_error_t err = nipc_shm_server_create(
-        TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
-    check("server create", err == NIPC_SHM_OK);
-
-    if (err == NIPC_SHM_OK) {
-        nipc_shm_ctx_t client;
-        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
-        check("client attach", err == NIPC_SHM_OK);
-
-        if (err == NIPC_SHM_OK) {
-            /* Set owner_pid to a definitely-dead PID */
-            nipc_shm_region_header_t *hdr =
-                (nipc_shm_region_header_t *)client.base;
-            hdr->owner_pid = DEAD_PID;
-
-            check("owner_alive with dead pid returns false",
-                  !nipc_shm_owner_alive(&client));
-
-            /* Restore for cleanup */
-            hdr->owner_pid = (int32_t)getpid();
-            nipc_shm_close(&client);
-        }
-        nipc_shm_destroy(&server);
-    }
-    cleanup_shm(svc);
-}
-
-static void test_owner_generation_mismatch(void)
-{
-    printf("Test: owner_alive with generation mismatch\n");
-    const char *svc = "shm_gen_mm";
-    cleanup_shm(svc);
-
-    nipc_shm_ctx_t server;
-    nipc_shm_error_t err = nipc_shm_server_create(
-        TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
-    check("server create", err == NIPC_SHM_OK);
-
-    if (err == NIPC_SHM_OK) {
-        nipc_shm_ctx_t client;
-        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
-        check("client attach", err == NIPC_SHM_OK);
-
-        if (err == NIPC_SHM_OK) {
-            /* Corrupt generation in header to mismatch client's cached value */
-            nipc_shm_region_header_t *hdr =
-                (nipc_shm_region_header_t *)client.base;
-            uint32_t saved_gen = hdr->owner_generation;
-            hdr->owner_generation = saved_gen + 1; /* mismatch */
-
-            check("owner_alive with gen mismatch returns false",
-                  !nipc_shm_owner_alive(&client));
-
-            /* Restore */
-            hdr->owner_generation = saved_gen;
-            nipc_shm_close(&client);
-        }
-        nipc_shm_destroy(&server);
-    }
-    cleanup_shm(svc);
-}
-
-static void test_owner_alive_null(void)
-{
-    printf("Test: owner_alive with NULL and null base\n");
-
-    check("owner_alive(NULL) returns false", !nipc_shm_owner_alive(NULL));
-
-    nipc_shm_ctx_t ctx;
-    memset(&ctx, 0, sizeof(ctx));
-    check("owner_alive with null base returns false", !nipc_shm_owner_alive(&ctx));
-}
-
-/* ------------------------------------------------------------------ */
 /*  Coverage: cleanup_stale with NULL params, invalid service, no dir   */
 /* ------------------------------------------------------------------ */
 
@@ -1898,10 +1772,6 @@ int main(void)
 
     /* Coverage gap tests */
     test_null_params();                printf("\n");
-    test_pid_zero();                   printf("\n");
-    test_owner_dead_pid();             printf("\n");
-    test_owner_generation_mismatch();  printf("\n");
-    test_owner_alive_null();           printf("\n");
     test_cleanup_stale_params();       printf("\n");
     test_cleanup_stale_with_files();   printf("\n");
     test_cleanup_stale_ignores_nonmatching_files(); printf("\n");

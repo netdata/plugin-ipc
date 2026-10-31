@@ -10,6 +10,7 @@ package raw
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -364,5 +365,54 @@ func TestWinRobustShmClientNoticesCrashedServer(t *testing.T) {
 	r := <-result
 	if r.err == nil || r.elapsed > 3500*time.Millisecond {
 		t.Errorf("call must fail within 3s of the server crash (timeout is 10s): err=%v after %v", r.err, r.elapsed)
+	}
+	if !errors.Is(r.err, protocol.ErrDisconnected) {
+		t.Errorf("call must report the server as disconnected: err=%v", r.err)
+	}
+}
+
+// A server at worker capacity completes the handshake, then closes the
+// session and destroys the prepared WinSHM objects. The client must not spend
+// its attach retry budget (5 s) on objects that will never appear, and must
+// keep WinSHM enabled for its next connect.
+func TestWinRobustShmAttachStopsWhenServerClosesSession(t *testing.T) {
+	svc := uniqueWinService("go_wrob_attach_refused")
+	rs := startWinRobustServer(svc, testWinShmServerConfig(), protocol.MethodIncrement, winSlowIncrementDispatch(0), 1)
+
+	holder := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
+	for i := 0; i < 200 && !holder.Ready(); i++ {
+		holder.Refresh()
+		time.Sleep(10 * time.Millisecond)
+	}
+	holderReady := holder.Ready()
+
+	refused := NewIncrementClient(winTestRunDir, svc, testWinShmClientConfig())
+	defer refused.Close()
+	start := time.Now()
+	refused.Refresh()
+	elapsed := time.Since(start)
+
+	holder.Close()
+	for i := 0; i < 300 && !refused.Ready(); i++ {
+		refused.Refresh()
+		if !refused.Ready() {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	ready, usesShm := refused.Ready(), refused.shm != nil
+	refused.Close()
+	rs.stopWithin(5 * time.Second)
+
+	if !holderReady {
+		t.Error("first client must hold the only worker")
+	}
+	if elapsed >= time.Second {
+		t.Errorf("refused connect must return within 1s (attach retry budget is 5s): %v", elapsed)
+	}
+	if !ready {
+		t.Error("refused client must connect once the worker is free")
+	}
+	if !usesShm {
+		t.Error("refused client must still use WinSHM")
 	}
 }

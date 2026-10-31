@@ -248,6 +248,11 @@ func (s *Server) handleSession(session *windows.Session, shm *windows.WinShmCont
 				mlen, err := shm.WinShmReceive(recvBuf, serverPollTimeoutMs)
 				if err != nil {
 					if err == windows.ErrWinShmTimeout {
+						// A crashed client never sets the close flag; its
+						// broken pipe is the only sign it left.
+						if pipePeerDisconnected(session) {
+							return protocol.Header{}, nil, serverReceiveStop
+						}
 						return protocol.Header{}, nil, serverReceiveContinue
 					}
 					return protocol.Header{}, nil, serverReceiveStop
