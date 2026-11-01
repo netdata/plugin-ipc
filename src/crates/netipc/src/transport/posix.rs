@@ -1,8 +1,10 @@
-//! L1 POSIX UDS SEQPACKET transport.
+//! L1 POSIX UDS transport.
 //!
 //! Connection lifecycle, handshake with profile/limit negotiation,
-//! and send/receive with transparent chunking over AF_UNIX SEQPACKET sockets.
-//! Wire-compatible with the C implementation in netipc_uds.c.
+//! and send/receive with transparent chunking over AF_UNIX SEQPACKET sockets
+//! (a stream socket carrying the same packets on macOS, see
+//! `posix_stream.rs`). Wire-compatible with the C implementation in
+//! netipc_uds.c.
 
 use super::framing::{self, Framing, FramingError, ServerOffer, apply_default};
 use crate::protocol::{
@@ -22,14 +24,28 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_BACKLOG: i32 = 16;
 const DEFAULT_BATCH_ITEMS: u32 = 1;
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 const DEFAULT_PACKET_SIZE_FALLBACK: u32 = 65536;
 const PACKET_SIZE_MAX: u32 = 262_144;
 /// Bytes the kernel keeps from SO_SNDBUF for a SEQPACKET datagram: Linux
 /// accepts SO_SNDBUF - 32, FreeBSD the full SO_SNDBUF.
 #[cfg(target_os = "freebsd")]
 const SNDBUF_OVERHEAD: u32 = 0;
-#[cfg(not(target_os = "freebsd"))]
+#[cfg(not(any(target_os = "freebsd", target_os = "macos")))]
 const SNDBUF_OVERHEAD: u32 = 32;
+
+/// macOS has no AF_UNIX SOCK_SEQPACKET; its baseline is a stream socket
+/// carrying the same packets (docs/level1-posix-uds.md).
+#[cfg(target_os = "macos")]
+pub(crate) const SOCK_TYPE: libc::c_int = libc::SOCK_STREAM;
+#[cfg(not(target_os = "macos"))]
+pub(crate) const SOCK_TYPE: libc::c_int = libc::SOCK_SEQPACKET;
+
+const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
+
+#[path = "posix_stream.rs"]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod stream;
 
 /// Profiles this platform can provide. POSIX SHM needs Linux futexes, so
 /// other POSIX systems offer and accept the baseline profile only.
@@ -313,7 +329,7 @@ impl UdsSession {
         let wait = ReceiveWait::new(timeout_ms, abort);
         let path = build_socket_path(run_dir, service_name)?;
 
-        let fd = seqpacket_socket_cloexec();
+        let fd = uds_socket_cloexec();
         if fd < 0 {
             return Err(UdsError::Socket(errno()));
         }
@@ -341,7 +357,7 @@ impl UdsSession {
         let framing = self.framing(true);
         let fd = self.fd;
         framing::send_message(framing, &mut self.inflight_ids, hdr, payload, |h, p| {
-            raw_send_iov(fd, h, p)
+            send_packet(fd, h, p)
         })
     }
 
@@ -368,10 +384,51 @@ impl UdsSession {
         }
 
         let controlled = timeout_ms != 0 || abort.is_some();
+        #[cfg_attr(target_os = "macos", allow(unused_mut))]
         let mut wait = ReceiveWait::new(timeout_ms, abort);
 
         let framing = self.framing(false);
         let fd = self.fd;
+
+        #[cfg(target_os = "macos")]
+        {
+            // A timeout or abort before the first byte leaves the stream on a
+            // packet boundary. A failure after it does not: the rest of the
+            // message is still queued, so the receive side is shut down and
+            // every later receive fails. Sends stay valid; they always write
+            // whole messages.
+            let wait = controlled.then_some(&wait);
+            if let Some(wait) = wait {
+                wait_fd_readable(fd, wait)?;
+            }
+            let mut first = true;
+            let result = framing::receive_message(
+                framing,
+                &mut self.inflight_ids,
+                buf,
+                &mut self.recv_buf,
+                &mut self.pkt_buf,
+                |b| {
+                    let r = stream::recv_session_packet(
+                        fd,
+                        b,
+                        first,
+                        framing.packet_size,
+                        framing.max_payload,
+                        framing.max_items,
+                        wait,
+                    );
+                    first = false;
+                    r
+                },
+            );
+            if result.is_err() {
+                unsafe { libc::shutdown(fd, libc::SHUT_RD) };
+            }
+            result
+        }
+
+        #[cfg(not(target_os = "macos"))]
         framing::receive_message(
             framing,
             &mut self.inflight_ids,
@@ -467,23 +524,12 @@ impl UdsListener {
             StaleResult::Stale | StaleResult::NotExist => { /* proceed */ }
         }
 
-        let fd = seqpacket_socket_cloexec();
+        let fd = uds_socket_cloexec();
         if fd < 0 {
             return Err(UdsError::Socket(errno()));
         }
 
-        // Owner-only (0600, narrowed by the umask). Linux and FreeBSD give
-        // the socket file the mode of the unbound socket, so this needs no
-        // post-bind window and no change to the process-global umask.
-        if unsafe { libc::fchmod(fd, libc::S_IRUSR | libc::S_IWUSR) } < 0 {
-            let e = errno();
-            unsafe {
-                libc::close(fd);
-            }
-            return Err(UdsError::Socket(e));
-        }
-
-        if let Err(e) = bind_unix(fd, &path) {
+        if let Err(e) = bind_owner_only(fd, run_dir, service_name, &path) {
             unsafe {
                 libc::close(fd);
             }
@@ -624,8 +670,10 @@ impl PendingConnection {
         abort: Option<&AtomicBool>,
         prepare: Option<&mut dyn FnMut(u32, u32, u32) -> bool>,
     ) -> Result<UdsSession, UdsError> {
-        wait_fd_readable(self.fd, &ReceiveWait::new(timeout_ms, abort))?;
-        let session = server_handshake(self.fd, config, session_id, prepare)?;
+        // One deadline covers the wait for HELLO and, on a stream, its bytes.
+        let wait = ReceiveWait::new(timeout_ms, abort);
+        wait_fd_readable(self.fd, &wait)?;
+        let session = server_handshake(self.fd, config, session_id, prepare, &wait)?;
         // The session owns the descriptor now.
         std::mem::forget(self);
         Ok(session)
@@ -658,20 +706,39 @@ impl Drop for UdsListener {
 //  Internal helpers
 // ---------------------------------------------------------------------------
 
+// SO_NOSIGPIPE is macOS's documented way to keep a write to a closed peer
+// from raising SIGPIPE in the embedding process; sends also pass
+// MSG_NOSIGNAL.
+#[cfg(target_os = "macos")]
+fn set_nosigpipe(fd: i32) {
+    let on: libc::c_int = 1;
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_NOSIGPIPE,
+            &on as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+}
+
 // Sockets must not leak into children a consumer forks and execs: an
 // inherited session socket keeps the peer from ever seeing EOF, which is
 // the dead-peer signal. Platforms without SOCK_CLOEXEC set the flag right
 // after creation.
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
-fn seqpacket_socket_cloexec() -> i32 {
-    unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) }
+fn uds_socket_cloexec() -> i32 {
+    unsafe { libc::socket(libc::AF_UNIX, SOCK_TYPE | libc::SOCK_CLOEXEC, 0) }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
-fn seqpacket_socket_cloexec() -> i32 {
-    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+fn uds_socket_cloexec() -> i32 {
+    let fd = unsafe { libc::socket(libc::AF_UNIX, SOCK_TYPE, 0) };
     if fd >= 0 {
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        #[cfg(target_os = "macos")]
+        set_nosigpipe(fd);
     }
     fd
 }
@@ -693,8 +760,88 @@ fn accept_cloexec(listen_fd: i32) -> i32 {
     let fd = unsafe { libc::accept(listen_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
     if fd >= 0 {
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        #[cfg(target_os = "macos")]
+        set_nosigpipe(fd);
     }
     fd
+}
+
+/// Bind as owner-only (0600, narrowed by the umask). Linux and FreeBSD give
+/// the socket file the mode of the unbound socket, so fchmod() before bind()
+/// sets it without a post-bind window and without touching the
+/// process-global umask, which other threads of the embedding process use.
+#[cfg(not(target_os = "macos"))]
+fn bind_owner_only(
+    fd: RawFd,
+    _run_dir: &str,
+    _service_name: &str,
+    path: &str,
+) -> Result<(), UdsError> {
+    if unsafe { libc::fchmod(fd, libc::S_IRUSR | libc::S_IWUSR) } < 0 {
+        return Err(UdsError::Socket(errno()));
+    }
+    bind_unix(fd, path)
+}
+
+/// macOS rejects fchmod() on an unbound socket and creates the socket file
+/// 0777 & ~umask. The socket is bound inside a private 0700 directory
+/// `{service_name}.d`, narrowed to owner-only there, then renamed into
+/// place, so it is never reachable with a wider mode and the process-global
+/// umask is untouched. The caller holds the endpoint lock, so a leftover
+/// directory belongs to a crashed server and is removed first.
+#[cfg(target_os = "macos")]
+fn bind_owner_only(
+    fd: RawFd,
+    run_dir: &str,
+    service_name: &str,
+    path: &str,
+) -> Result<(), UdsError> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let io_err = |e: io::Error| UdsError::Socket(e.raw_os_error().unwrap_or(libc::EIO));
+    let dir = format!("{run_dir}/{service_name}.d");
+    let tmp = format!("{dir}/s");
+
+    // Anything but a real directory is unlinked without following it.
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.is_dir() => {
+            match std::fs::remove_file(&tmp) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(io_err(e)),
+            }
+            std::fs::remove_dir(&dir).map_err(io_err)?;
+        }
+        Ok(_) => std::fs::remove_file(&dir).map_err(io_err)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_err(e)),
+    }
+
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .map_err(io_err)?;
+    let result = (|| {
+        // set_permissions ignores the umask, so a umask without owner write
+        // cannot make the directory unusable; the socket file still gets it.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(io_err)?;
+        bind_unix(fd, &tmp)?;
+        let renamed = (|| {
+            let mode = std::fs::metadata(&tmp)
+                .map_err(io_err)?
+                .permissions()
+                .mode();
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode & 0o600))
+                .map_err(io_err)?;
+            std::fs::rename(&tmp, path).map_err(io_err)
+        })();
+        if renamed.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        renamed
+    })();
+    let _ = std::fs::remove_dir(&dir);
+    result
 }
 
 fn errno() -> i32 {
@@ -747,6 +894,18 @@ fn build_socket_path(run_dir: &str, service_name: &str) -> Result<String, UdsErr
 /// Linux rejects a datagram larger than SO_SNDBUF minus 32 bytes of
 /// accounting overhead with EMSGSIZE; very large buffers also hit ENOBUFS
 /// near 1 MiB, hence the fixed cap.
+#[cfg(target_os = "macos")]
+fn packet_size_limit(_fd: RawFd, configured: u32) -> u32 {
+    // A stream has no per-message size cap; the fixed cap keeps the first
+    // packet's buffer bounded and the chunking code shared.
+    if configured != 0 && configured < PACKET_SIZE_MAX {
+        configured
+    } else {
+        PACKET_SIZE_MAX
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 fn packet_size_limit(fd: RawFd, configured: u32) -> u32 {
     let mut val: libc::c_int = 0;
     let mut len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
@@ -779,7 +938,24 @@ fn packet_size_limit(fd: RawFd, configured: u32) -> u32 {
 //  Low-level I/O
 // ---------------------------------------------------------------------------
 
+/// Send one packet: one SEQPACKET message, or all its bytes on a stream.
+fn send_packet(fd: RawFd, hdr: &[u8], payload: &[u8]) -> Result<(), UdsError> {
+    #[cfg(target_os = "macos")]
+    return stream::send_all(fd, hdr, payload);
+    #[cfg(not(target_os = "macos"))]
+    raw_send_iov(fd, hdr, payload)
+}
+
+/// Send one contiguous handshake packet.
+fn send_control(fd: RawFd, pkt: &[u8]) -> Result<(), UdsError> {
+    #[cfg(target_os = "macos")]
+    return stream::send_all(fd, pkt, &[]);
+    #[cfg(not(target_os = "macos"))]
+    raw_send(fd, pkt)
+}
+
 /// Send header + payload as one SEQPACKET message using sendmsg.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn raw_send_iov(fd: RawFd, hdr: &[u8], payload: &[u8]) -> Result<(), UdsError> {
     let total = hdr.len() + payload.len();
 
@@ -805,7 +981,7 @@ fn raw_send_iov(fd: RawFd, hdr: &[u8], payload: &[u8]) -> Result<(), UdsError> {
     let n = retry_eintr(
         #[cfg(test)]
         &eintr_inject::SENDMSG,
-        || unsafe { libc::sendmsg(fd, &msg, libc::MSG_NOSIGNAL) },
+        || unsafe { libc::sendmsg(fd, &msg, SEND_FLAGS) },
     );
     match n {
         Ok(n) if n as usize == total => Ok(()),
@@ -868,6 +1044,7 @@ pub(crate) mod eintr_inject {
 }
 
 /// Send a contiguous buffer as one SEQPACKET message.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn raw_send(fd: RawFd, data: &[u8]) -> Result<(), UdsError> {
     let n = retry_eintr(
         #[cfg(test)]
@@ -877,7 +1054,7 @@ fn raw_send(fd: RawFd, data: &[u8]) -> Result<(), UdsError> {
                 fd,
                 data.as_ptr() as *const libc::c_void,
                 data.len(),
-                libc::MSG_NOSIGNAL,
+                SEND_FLAGS,
             )
         },
     );
@@ -978,6 +1155,7 @@ fn wait_fd_readable(fd: RawFd, wait: &ReceiveWait<'_>) -> Result<(), UdsError> {
     }
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn raw_recv_with_wait(
     fd: RawFd,
     buf: &mut [u8],
@@ -987,6 +1165,7 @@ fn raw_recv_with_wait(
     raw_recv(fd, buf)
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn raw_recv_control(
     fd: RawFd,
     buf: &mut [u8],
@@ -1012,6 +1191,9 @@ fn bind_unix(fd: RawFd, path: &str) -> Result<(), UdsError> {
     addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
 
     let path_bytes = c_path.as_bytes_with_nul();
+    if path_bytes.len() > addr.sun_path.len() {
+        return Err(UdsError::PathTooLong);
+    }
     let sun_path_ptr = addr.sun_path.as_mut_ptr() as *mut u8;
     unsafe {
         std::ptr::copy_nonoverlapping(path_bytes.as_ptr(), sun_path_ptr, path_bytes.len());
@@ -1072,7 +1254,7 @@ fn check_and_recover_stale(path: &str) -> StaleResult {
     }
 
     // Try connecting to see if a live server is there
-    let probe = seqpacket_socket_cloexec();
+    let probe = uds_socket_cloexec();
     if probe < 0 {
         // Cannot probe liveness (fd exhaustion) — keep the endpoint; the
         // subsequent bind() fails instead of risking a live socket.
@@ -1202,13 +1384,18 @@ fn connect_and_handshake(
     };
 
     // Send HELLO
-    raw_send(fd, &framing::hello_packet(&hello))?;
+    send_control(fd, &framing::hello_packet(&hello))?;
 
     // Receive HELLO_ACK; a server that never answers must not hold the
     // client past its deadline.
-    wait_fd_readable(fd, wait)?;
     let mut buf = [0u8; 128];
-    let n = raw_recv(fd, &mut buf)?;
+    #[cfg(target_os = "macos")]
+    let n = stream::recv_packet(fd, &mut buf, 0, Some(wait))?;
+    #[cfg(not(target_os = "macos"))]
+    let n = {
+        wait_fd_readable(fd, wait)?;
+        raw_recv(fd, &mut buf)?
+    };
     let ack: HelloAck = framing::parse_hello_ack(&buf[..n], supported)?;
 
     // Sanity: reject a packet_size too small for chunking arithmetic
@@ -1248,6 +1435,7 @@ fn server_handshake(
     config: &ServerConfig,
     session_id: u64,
     prepare: Option<&mut dyn FnMut(u32, u32, u32) -> bool>,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] wait: &ReceiveWait<'_>,
 ) -> Result<UdsSession, UdsError> {
     let offer = ServerOffer {
         packet_size: packet_size_limit(fd, config.packet_size),
@@ -1265,11 +1453,15 @@ fn server_handshake(
         auth_token: config.auth_token,
     };
 
-    // Receive HELLO
+    // Receive HELLO. The caller waited for it; a datagram arrives whole,
+    // a stream packet within the same deadline.
     let mut buf = [0u8; 128];
+    #[cfg(target_os = "macos")]
+    let n = stream::recv_packet(fd, &mut buf, 0, Some(wait))?;
+    #[cfg(not(target_os = "macos"))]
     let n = raw_recv(fd, &mut buf)?;
     let ack = framing::server_negotiate(&buf[..n], &offer, session_id, prepare, |pkt| {
-        raw_send(fd, pkt)
+        send_control(fd, pkt)
     })?;
 
     Ok(UdsSession {

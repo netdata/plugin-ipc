@@ -1,9 +1,10 @@
 //go:build unix
 
-// Package posix implements the L1 POSIX UDS SEQPACKET transport.
+// Package posix implements the L1 POSIX UDS transport.
 //
 // Connection lifecycle, handshake with profile/limit negotiation,
-// and send/receive with transparent chunking over AF_UNIX SEQPACKET sockets.
+// and send/receive with transparent chunking over AF_UNIX SEQPACKET sockets
+// (a stream socket carrying the same packets on macOS, see uds_stream.go).
 // Wire-compatible with the C and Rust implementations.
 //
 // Pure Go — no cgo. Works with CGO_ENABLED=0.
@@ -104,17 +105,9 @@ func buildSocketPath(runDir, serviceName string) (string, error) {
 }
 
 // packetSizeLimit returns the packet size this side may propose: configured
-// (0 = no preference) capped by what the kernel accepts as one datagram.
-// Linux rejects a datagram larger than SO_SNDBUF minus 32 bytes of
-// accounting overhead with EMSGSIZE; very large buffers also hit ENOBUFS
-// near 1 MiB, hence the fixed cap.
+// (0 = no preference) capped by what the kernel accepts as one packet.
 func packetSizeLimit(fd int, configured uint32) uint32 {
-	limit := defaultPacketSizeFallback
-	val, err := syscall.GetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF)
-	if err == nil && val > sndbufOverhead {
-		limit = uint32(val - sndbufOverhead) // #nosec G115 -- val is a positive int from the kernel.
-	}
-	limit = min(limit, packetSizeMax)
+	limit := min(kernelPacketLimit(fd), packetSizeMax)
 	if configured != 0 && configured < limit {
 		return configured
 	}
@@ -151,6 +144,15 @@ func minU32(a, b uint32) uint32 {
 //  Low-level I/O
 // ---------------------------------------------------------------------------
 
+// sendPacket sends one packet: one SEQPACKET message, or all its bytes on a
+// stream.
+func sendPacket(fd int, hdr []byte, payload []byte) error {
+	if streamTransport {
+		return streamSendAll(fd, hdr, payload)
+	}
+	return rawSendIov(fd, hdr, payload)
+}
+
 // rawSendIov sends header + payload as one SEQPACKET message using sendmsg.
 func rawSendIov(fd int, hdr []byte, payload []byte) error {
 	var iov [2]syscall.Iovec
@@ -167,7 +169,7 @@ func rawSendIov(fd int, hdr []byte, payload []byte) error {
 		msg.Iovlen = 2
 	}
 
-	n, errno := rawSendmsg(fd, &msg, syscall.MSG_NOSIGNAL)
+	n, errno := rawSendmsg(fd, &msg, sendFlags)
 	if errno != 0 {
 		return wrapErr(ErrSend, errno.Error())
 	}

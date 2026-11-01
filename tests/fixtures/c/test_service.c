@@ -9,6 +9,7 @@
 
 #include "netipc/netipc_service.h"
 #include "test_sync.h"
+#include "uds_test_socket.h"
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_uds.h"
 
@@ -816,7 +817,7 @@ static void *raw_hello_ack_version_server_thread(void *arg)
     build_socket_path(path, sizeof(path), ctx->service);
     unlink(path);
 
-    fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    fd = socket(AF_UNIX, TEST_UDS_SOCK_TYPE, 0);
     if (fd < 0)
         goto out;
 
@@ -3404,7 +3405,7 @@ static void test_peer_disconnected_probe(void)
 
     int sv[2];
     check("probe socketpair created",
-          socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) == 0);
+          socketpair(AF_UNIX, TEST_UDS_SOCK_TYPE, 0, sv) == 0);
     check("invalid fd counts as disconnected",
           nipc_service_posix_peer_disconnected(-1));
     check("idle peer is alive", !nipc_service_posix_peer_disconnected(sv[0]));

@@ -56,6 +56,15 @@ func rawSendPacket(fd int, pkt []byte) error {
 	return nil
 }
 
+// endStreamWrites: on a stream a short or over-long packet is only visible
+// once the peer stops sending, so end the peer's writes there; the receiver
+// then sees EOF where a SEQPACKET receiver sees the packet end.
+func endStreamWrites(fd int) {
+	if streamTransport {
+		_ = syscall.Shutdown(fd, syscall.SHUT_WR)
+	}
+}
+
 func encodePacket(hdr protocol.Header, payload []byte) []byte {
 	hdr.Magic = protocol.MagicMsg
 	hdr.Version = protocol.Version
@@ -174,7 +183,7 @@ func rawSeqpacketListener(t *testing.T, runDir, service string) (int, string) {
 	}
 	_ = os.Remove(path)
 
-	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+	fd, err := syscall.Socket(syscall.AF_UNIX, sockType, 0)
 	if err != nil {
 		t.Fatalf("socket failed: %v", err)
 	}
@@ -195,7 +204,7 @@ func rawSeqpacketListener(t *testing.T, runDir, service string) (int, string) {
 func rawSeqpacketConnect(t *testing.T, path string) int {
 	t.Helper()
 
-	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+	fd, err := syscall.Socket(syscall.AF_UNIX, sockType, 0)
 	if err != nil {
 		t.Fatalf("socket failed: %v", err)
 	}
@@ -223,7 +232,7 @@ func TestUdsAcceptOnClosedListener(t *testing.T) {
 }
 
 func TestUdsListenFailsWhenRunDirMissing(t *testing.T) {
-	runDir := filepath.Join(t.TempDir(), "missing")
+	runDir := filepath.Join(shortTempDir(t), "missing")
 	_, err := Listen(runDir, uniqueService(t), defaultServerConfig())
 	if !errors.Is(err, ErrSocket) {
 		t.Fatalf("Listen(missing runDir) = %v, want ErrSocket", err)
@@ -286,7 +295,7 @@ func TestReceiveAndStaleDirectGuards(t *testing.T) {
 		t.Fatalf("recv high fd error = %v, want ErrBadParam", err)
 	}
 
-	closedFD, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+	closedFD, err := syscall.Socket(syscall.AF_UNIX, sockType, 0)
 	if err != nil {
 		t.Fatalf("socket for closed-fd receive guard: %v", err)
 	}
@@ -429,6 +438,7 @@ func TestUdsReceiveRejectsMalformedFirstPacket(t *testing.T) {
 			if err := rawSendPacket(server.fd, tc.pkt); err != nil {
 				t.Fatalf("rawSendPacket failed: %v", err)
 			}
+			endStreamWrites(server.fd)
 
 			buf := make([]byte, 4096)
 			_, _, err := client.Receive(buf)
@@ -511,13 +521,17 @@ func TestUdsReceiveRejectsMalformedChunkedBatchPayload(t *testing.T) {
 				copy(payload[16:], []byte("payload!!"))
 				return payload
 			}(),
-			first: 8,
+			first: 12,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			client, server := udsSessionPair(t, defaultServerConfig(), defaultClientConfig())
+			// The first packet is full, as a sender would make it: a stream
+			// receiver reads min(payload_len, packet_size - 32) bytes after
+			// its header.
+			client.PacketSize = uint32(protocol.HeaderSize + tc.first)
 
 			client.inflightIDs[42] = struct{}{}
 			firstPkt := encodePartialPacket(protocol.Header{
@@ -664,6 +678,8 @@ func TestUdsReceiveRejectsMalformedChunks(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			client, server := udsSessionPair(t, defaultServerConfig(), defaultClientConfig())
+			// A full first packet carries the 4 bytes of "head".
+			client.PacketSize = protocol.HeaderSize + 4
 
 			client.inflightIDs[42] = struct{}{}
 			firstPkt := encodePartialPacket(protocol.Header{
@@ -678,6 +694,7 @@ func TestUdsReceiveRejectsMalformedChunks(t *testing.T) {
 			if err := rawSendPacket(server.fd, tc.second); err != nil {
 				t.Fatalf("rawSendPacket(second) failed: %v", err)
 			}
+			endStreamWrites(server.fd)
 
 			buf := make([]byte, 4096)
 			_, _, err := client.Receive(buf)
@@ -734,7 +751,7 @@ func TestUdsClientHandshakeRejectsMalformedAck(t *testing.T) {
 				return ack[:protocol.HeaderSize+8]
 			},
 			want:     ErrProtocol,
-			wantText: "ack payload truncated",
+			wantText: truncatedText("ack payload truncated"),
 		},
 		{
 			name: "agreed packet size above proposal",
@@ -905,7 +922,7 @@ func TestUdsServerHandshakeRejectsMalformedHello(t *testing.T) {
 				return hello[:protocol.HeaderSize+8]
 			},
 			want:     ErrProtocol,
-			wantText: "hello payload",
+			wantText: truncatedText("hello payload"),
 		},
 		{
 			name: "bad hello payload layout",
@@ -942,6 +959,7 @@ func TestUdsServerHandshakeRejectsMalformedHello(t *testing.T) {
 			if err := rawSendPacket(cfd, tc.packetFn()); err != nil {
 				t.Fatalf("rawSendPacket failed: %v", err)
 			}
+			endStreamWrites(cfd)
 
 			err := <-handshakeDone
 			if err == nil {
@@ -997,57 +1015,18 @@ func defaultServerConfigPtr() *ServerConfig {
 	return &cfg
 }
 
+// truncatedText is the error text for a packet shorter than its header
+// declares: a SEQPACKET receiver sees the short packet and reports what it
+// lacks, a stream receiver hits EOF inside the packet.
+func truncatedText(seqpacket string) string {
+	if streamTransport {
+		return "truncated packet"
+	}
+	return seqpacket
+}
+
 func containsErrText(err error, want string) bool {
 	return err != nil && want != "" && strings.Contains(err.Error(), want)
-}
-
-func TestPacketSizeLimitFallbackAndClamp(t *testing.T) {
-	if got := packetSizeLimit(-1, 0); got != defaultPacketSizeFallback {
-		t.Fatalf("packetSizeLimit(-1, 0) = %d, want fallback %d", got, defaultPacketSizeFallback)
-	}
-	if got := packetSizeLimit(-1, 1000); got != 1000 {
-		t.Fatalf("packetSizeLimit(-1, 1000) = %d, want 1000", got)
-	}
-	if got := packetSizeLimit(-1, defaultPacketSizeFallback+1); got != defaultPacketSizeFallback {
-		t.Fatalf("packetSizeLimit(-1, fallback+1) = %d, want %d", got, defaultPacketSizeFallback)
-	}
-}
-
-func TestPacketSizeLimitMatchesKernelDatagramLimit(t *testing.T) {
-	// 0 keeps the system default SO_SNDBUF.
-	for _, sndbuf := range []int{0, 4096, 65536} {
-		fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
-		if err != nil {
-			t.Fatalf("socketpair: %v", err)
-		}
-		if sndbuf != 0 {
-			if err := syscall.SetsockoptInt(fds[0], syscall.SOL_SOCKET, syscall.SO_SNDBUF, sndbuf); err != nil {
-				t.Fatalf("setsockopt(SO_SNDBUF): %v", err)
-			}
-		}
-		limit := packetSizeLimit(fds[0], 0)
-		if limit <= protocol.HeaderSize || limit > packetSizeMax {
-			t.Fatalf("sndbuf %d: limit %d out of range", sndbuf, limit)
-		}
-		if got := packetSizeLimit(fds[0], ^uint32(0)); got != limit {
-			t.Fatalf("sndbuf %d: configured max clamps to %d, want %d", sndbuf, got, limit)
-		}
-		if err := rawSendPacket(fds[0], make([]byte, limit)); err != nil {
-			t.Fatalf("sndbuf %d: send %d bytes: %v", sndbuf, limit, err)
-		}
-		buf := make([]byte, limit)
-		if n, err := rawRecv(fds[1], buf); err != nil || n != int(limit) {
-			t.Fatalf("sndbuf %d: recv = %d, %v", sndbuf, n, err)
-		}
-		if limit < packetSizeMax {
-			// Guards the SO_SNDBUF - 32 rule: one more byte must not fit.
-			if err := rawSendPacket(fds[0], make([]byte, limit+1)); err == nil {
-				t.Fatalf("sndbuf %d: %d + 1 bytes unexpectedly sent", sndbuf, limit)
-			}
-		}
-		syscall.Close(fds[0])
-		syscall.Close(fds[1])
-	}
 }
 
 // A server between bind() and listen() refuses connects just like a dead
@@ -1104,7 +1083,7 @@ func TestListenExcludesStartingServer(t *testing.T) {
 	}
 
 	// A connect to the endpoint must reach the first server.
-	cfd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+	cfd, err := syscall.Socket(syscall.AF_UNIX, sockType, 0)
 	if err != nil {
 		t.Fatalf("socket: %v", err)
 	}

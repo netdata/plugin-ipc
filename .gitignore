@@ -3,6 +3,7 @@ build-*/
 **/target/
 *.o
 coverage/
+.tmp/
 *.profraw
 *.profdata
 

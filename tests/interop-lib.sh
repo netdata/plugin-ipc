@@ -11,29 +11,51 @@
 # Start CMD in the background and return once it printed READY. The server's
 # output goes to LOG. Sets INTEROP_SERVER_PID. Returns 1 when the server
 # exited, or printed nothing for TIMEOUT_S seconds, before READY.
+#
+# Runs on bash 3.2 (macOS): no {fd} redirections, and no $! for a process
+# substitution. The wrapper shell prints its PID, then execs CMD, so the PID
+# is the server's.
 interop_start_server() {
     local timeout_s="$1"
     local log="$2"
     shift 2
-    local fd line
+    local line
 
     : > "$log"
     INTEROP_SERVER_EXE="$(interop_command_binary "$@")"
-    exec {fd}< <(exec "$@" 2>&1)
-    INTEROP_SERVER_PID=$!
+    INTEROP_SERVER_PID=""
     INTEROP_DRAIN_PID=""
-    while IFS= read -r -t "$timeout_s" -u "$fd" line; do
+    exec 9< <(exec sh -c 'echo "$$"; exec "$@"' sh "$@" 2>&1)
+    if ! IFS= read -r -t "$timeout_s" -u 9 INTEROP_SERVER_PID; then
+        exec 9<&-
+        return 1
+    fi
+    local ready=1
+    while IFS= read -r -t "$timeout_s" -u 9 line; do
         printf '%s\n' "$line" >> "$log"
         if [[ "$line" == "READY" ]]; then
-            # Keep draining so later server output never blocks on the pipe.
-            cat <&"$fd" >> "$log" &
-            INTEROP_DRAIN_PID=$!
-            exec {fd}<&-
-            return 0
+            ready=0
+            break
         fi
     done
-    exec {fd}<&-
-    return 1
+    # Keep draining so later server output never blocks on the pipe. The
+    # drain ends when the server exits, so waiting for it waits for the
+    # server too, also for one that never got ready and was killed.
+    cat <&9 >> "$log" &
+    INTEROP_DRAIN_PID=$!
+    exec 9<&-
+    return "$ready"
+}
+
+# interop_mktemp_run_dir PREFIX
+#
+# Create and print a private run directory. macOS's $TMPDIR is long enough
+# to push a socket path past the 104-byte sun_path limit, so there the
+# directory goes under /tmp.
+interop_mktemp_run_dir() {
+    local root="${TMPDIR:-/tmp}"
+    [[ "$(uname -s)" == Darwin ]] && root=/tmp
+    mktemp -d "${root%/}/$1.XXXXXX"
 }
 
 # interop_command_binary CMD [ARGS...]
@@ -109,23 +131,20 @@ interop_taskkill_bin() {
 
 # interop_stop_server
 #
-# Kill the server started by interop_start_server and reap it and its
+# Kill the server started by interop_start_server and wait for it and its
 # output drain.
 interop_stop_server() {
     if [[ -n "${INTEROP_SERVER_PID:-}" ]]; then
         interop_kill "$INTEROP_SERVER_PID" "${INTEROP_SERVER_EXE:-}"
-        wait "$INTEROP_SERVER_PID" 2>/dev/null || true
     fi
     interop_wait_server
 }
 
 # interop_wait_server
 #
-# Wait for a server that exits on its own, then for its output drain.
+# Wait for a server that exits on its own: its output drain ends when it
+# does. The server is not a child of this shell, so wait cannot reap it.
 interop_wait_server() {
-    if [[ -n "${INTEROP_SERVER_PID:-}" ]]; then
-        wait "$INTEROP_SERVER_PID" 2>/dev/null || true
-    fi
     if [[ -n "${INTEROP_DRAIN_PID:-}" ]]; then
         wait "$INTEROP_DRAIN_PID" 2>/dev/null || true
     fi

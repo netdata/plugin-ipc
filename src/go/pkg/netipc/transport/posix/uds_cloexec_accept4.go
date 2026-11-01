@@ -8,8 +8,8 @@ import "syscall"
 // inherited session socket keeps the peer from ever seeing EOF, which is the
 // dead-peer signal.
 
-func seqpacketSocket() (int, error) {
-	return syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET|syscall.SOCK_CLOEXEC, 0)
+func udsSocket() (int, error) {
+	return syscall.Socket(syscall.AF_UNIX, sockType|syscall.SOCK_CLOEXEC, 0)
 }
 
 func acceptCloexec(fd int) (int, error) {

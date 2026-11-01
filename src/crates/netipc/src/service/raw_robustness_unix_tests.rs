@@ -71,7 +71,7 @@ fn shm_files(service: &str) -> Vec<String> {
 fn silent_connect(service: &str) -> RawFd {
     let path = socket_path(service);
     let bytes = path.as_os_str().as_bytes();
-    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+    let fd = unsafe { libc::socket(libc::AF_UNIX, crate::transport::posix::SOCK_TYPE, 0) };
     assert!(fd >= 0, "socket: {}", std::io::Error::last_os_error());
     let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     addr.sun_family = libc::AF_UNIX as libc::sa_family_t;

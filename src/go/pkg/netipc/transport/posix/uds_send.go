@@ -27,12 +27,12 @@ func (s *Session) Send(hdr *protocol.Header, payload []byte) error {
 		SendFirstPacket: func(packetHdr *protocol.Header, packetPayload []byte, _ int) error {
 			var hdrBuf [protocol.HeaderSize]byte
 			packetHdr.Encode(hdrBuf[:])
-			return rawSendIov(s.fd, hdrBuf[:], packetPayload)
+			return sendPacket(s.fd, hdrBuf[:], packetPayload)
 		},
 		SendChunk: func(chk protocol.ChunkHeader, chunkPayload []byte) error {
 			var chkBuf [protocol.HeaderSize]byte
 			chk.Encode(chkBuf[:])
-			return rawSendIov(s.fd, chkBuf[:], chunkPayload)
+			return sendPacket(s.fd, chkBuf[:], chunkPayload)
 		},
 		ErrLimitExceeded:  func(msg string) error { return wrapErr(ErrLimitExceeded, msg) },
 		ErrDuplicateMsgID: func(msg string) error { return wrapErr(ErrDuplicateMsgID, msg) },

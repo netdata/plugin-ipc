@@ -36,6 +36,7 @@
 #include "netipc/netipc_uds.h"
 #include "netipc/netipc_shm.h"
 #include "test_sync.h"
+#include "uds_test_socket.h"
 
 #include <dirent.h>
 #include <limits.h>
@@ -99,9 +100,50 @@ static void cleanup_all(const char *service)
     nipc_shm_cleanup_stale(TEST_RUN_DIR, service);
 }
 
-/* Join with a deadline. Returns true if the thread finished in time. */
+/* Join with a deadline, portably (macOS has no pthread_timedjoin_np): a
+ * helper thread joins the target and signals. Returns true if the thread
+ * finished in time; otherwise the join stays pending and join_rest()
+ * completes it. */
+typedef struct {
+    pthread_t target;
+    pthread_t helper;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    bool done;
+} timed_join_t;
+
+#define MAX_PENDING_JOINS 8
+static timed_join_t *g_pending_joins[MAX_PENDING_JOINS];
+
+static void *timed_join_helper(void *arg)
+{
+    timed_join_t *j = arg;
+    pthread_join(j->target, NULL);
+    pthread_mutex_lock(&j->lock);
+    j->done = true;
+    pthread_cond_signal(&j->cond);
+    pthread_mutex_unlock(&j->lock);
+    return NULL;
+}
+
+static void timed_join_free(timed_join_t *j)
+{
+    pthread_join(j->helper, NULL);
+    pthread_cond_destroy(&j->cond);
+    pthread_mutex_destroy(&j->lock);
+    free(j);
+}
+
 static bool join_within(pthread_t tid, unsigned limit_ms)
 {
+    timed_join_t *j = calloc(1, sizeof(*j));
+    if (!j)
+        abort();
+    j->target = tid;
+    pthread_mutex_init(&j->lock, NULL);
+    pthread_cond_init(&j->cond, NULL);
+    pthread_create(&j->helper, NULL, timed_join_helper, j);
+
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_sec += limit_ms / 1000u;
@@ -110,7 +152,40 @@ static bool join_within(pthread_t tid, unsigned limit_ms)
         ts.tv_sec++;
         ts.tv_nsec -= 1000000000L;
     }
-    return pthread_timedjoin_np(tid, NULL, &ts) == 0;
+
+    pthread_mutex_lock(&j->lock);
+    while (!j->done) {
+        if (pthread_cond_timedwait(&j->cond, &j->lock, &ts) != 0)
+            break;
+    }
+    bool done = j->done;
+    pthread_mutex_unlock(&j->lock);
+
+    if (done) {
+        timed_join_free(j);
+        return true;
+    }
+    for (int i = 0; i < MAX_PENDING_JOINS; i++) {
+        if (!g_pending_joins[i]) {
+            g_pending_joins[i] = j;
+            return false;
+        }
+    }
+    abort();
+}
+
+/* Finish the join of a thread whose join_within() timed out. */
+static void join_rest(pthread_t tid)
+{
+    for (int i = 0; i < MAX_PENDING_JOINS; i++) {
+        timed_join_t *j = g_pending_joins[i];
+        if (j && pthread_equal(j->target, tid)) {
+            g_pending_joins[i] = NULL;
+            timed_join_free(j);
+            return;
+        }
+    }
+    abort();
 }
 
 #if defined(__linux__)
@@ -298,7 +373,7 @@ static int raw_socket_connect(const char *service)
 {
     char path[256];
     snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, service);
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    int fd = socket(AF_UNIX, TEST_UDS_SOCK_TYPE, 0);
     if (fd < 0)
         return -1;
     struct sockaddr_un addr;
@@ -317,7 +392,7 @@ static int raw_listener(const char *service)
     char path[256];
     snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, service);
     unlink(path);
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    int fd = socket(AF_UNIX, TEST_UDS_SOCK_TYPE, 0);
     if (fd < 0)
         return -1;
     struct sockaddr_un addr;
@@ -523,7 +598,7 @@ static void test_silent_client_does_not_block_other_clients(void)
     if (silent >= 0)
         close(silent);
     if (!finished)
-        pthread_join(tid, NULL);
+        join_rest(tid);
     check("legitimate client served within 5s while a silent client is connected",
           finished && job.result);
     stop_server_within(&rs, 5000);
@@ -547,7 +622,7 @@ static void test_silent_client_does_not_block_shutdown(void)
     if (silent >= 0)
         close(silent);
     if (!stopped)
-        pthread_join(rs.tid, NULL);
+        join_rest(rs.tid);
     check("server stop + destroy finish within 3s while a silent client is connected",
           stopped);
     cleanup_all(rs.service);
@@ -620,7 +695,7 @@ static void test_client_bounded_when_server_never_accepts(void)
     if (listener >= 0)
         close(listener);
     if (!finished)
-        pthread_join(tid, NULL);
+        join_rest(tid);
     check("refresh + call with 1s timeout return within 6s", finished);
     cleanup_all(svc);
 }
@@ -661,7 +736,7 @@ static void test_client_bounded_when_server_never_sends_hello_ack(void)
     test_flag_set(&hold.release);
     pthread_join(holder, NULL);
     if (!finished)
-        pthread_join(tid, NULL);
+        join_rest(tid);
     check("refresh + call with 1s timeout return within 6s", finished);
     cleanup_all(svc);
 }
@@ -712,7 +787,7 @@ static void test_call_reconnect_bounded_by_call_deadline(void)
     test_flag_set(&hold.release);
     pthread_join(holder, NULL);
     if (!finished)
-        pthread_join(tid, NULL);
+        join_rest(tid);
     printf("    call took %llums\n", (unsigned long long)job.elapsed_ms);
     check("call with 1s timeout returns within 6s", finished);
     check("call reports the timeout", job.err == NIPC_ERR_TIMEOUT);
@@ -755,7 +830,7 @@ static void test_abort_ends_refresh_waiting_for_hello_ack(void)
     test_flag_set(&hold.release);
     pthread_join(holder, NULL);
     if (!finished)
-        pthread_join(tid, NULL);
+        join_rest(tid);
     check("refresh returns within 2s of the abort", finished);
     check("client is not ready", !nipc_client_ready(&client));
     nipc_client_close(&client);
@@ -833,7 +908,7 @@ static void test_shutdown_not_blocked_by_non_reading_client(void)
     if (connected)
         nipc_uds_close_session(&session);
     if (!stopped)
-        pthread_join(rs.tid, NULL);
+        join_rest(rs.tid);
     check("server stop + destroy finish within 3s while a worker is blocked sending", stopped);
     cleanup_all(rs.service);
 }
@@ -866,7 +941,7 @@ static void test_stop_before_run_is_honored(void)
     bool returned = join_within(tid, 2000);
     if (!returned) {
         nipc_server_stop(&rs.server);
-        pthread_join(tid, NULL);
+        join_rest(tid);
     }
     nipc_server_destroy(&rs.server);
     check("run after stop returns promptly", returned);
@@ -925,7 +1000,7 @@ static void client_notices_crashed_server(bool shm)
 
     bool finished = join_within(tid, 15000);
     if (!finished)
-        pthread_join(tid, NULL);
+        join_rest(tid);
     printf("    call returned err=%d after %llums\n", job.err,
            (unsigned long long)job.elapsed_ms);
     check("call fails within 3s of the server crash (timeout is 10s)",

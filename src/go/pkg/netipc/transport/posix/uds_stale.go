@@ -24,7 +24,7 @@ const staleDialTimeout = 1 * time.Second
 // endpoint lock, not repeated dials, keeps a starting server's endpoint
 // safe (see acquireEndpointLock).
 func dialStaleCandidate(path string) error {
-	conn, err := net.DialTimeout("unixpacket", path, staleDialTimeout)
+	conn, err := net.DialTimeout(staleDialNetwork, path, staleDialTimeout)
 	if err == nil {
 		_ = conn.Close()
 	}

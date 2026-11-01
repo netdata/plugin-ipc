@@ -64,7 +64,9 @@ fn server_config() -> ServerConfig {
         max_response_payload_bytes: RESPONSE_BUF_SIZE as u32,
         max_response_batch_items: 1,
         auth_token: AUTH_TOKEN,
-        backlog: 4,
+        // Above every test's connect burst: macOS and FreeBSD refuse a
+        // connect to a full backlog at once, where Linux waits.
+        backlog: 64,
         ..ServerConfig::default()
     }
 }
@@ -562,7 +564,7 @@ fn raw_listener_fd_for_service(service: &str) -> RawFd {
         "socket path too long"
     );
 
-    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+    let fd = unsafe { libc::socket(libc::AF_UNIX, crate::transport::posix::SOCK_TYPE, 0) };
     assert!(
         fd >= 0,
         "socket failed: {}",

@@ -78,7 +78,7 @@ func startRawPosixHelloAckServer(t *testing.T, service string, packet []byte) *u
 	path := filepath.Join(testRunDir, service+".sock")
 	_ = os.Remove(path)
 
-	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+	fd, err := syscall.Socket(syscall.AF_UNIX, testSockType, 0)
 	if err != nil {
 		t.Fatalf("socket failed: %v", err)
 	}

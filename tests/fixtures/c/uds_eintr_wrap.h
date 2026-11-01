@@ -6,7 +6,12 @@
 void uds_eintr_wrap_set(unsigned send_count, unsigned sendmsg_count,
                         unsigned recv_count);
 
-/* Injections not consumed yet. */
+/* Make the next recv_count recv() calls read at most one byte and the next
+ * sendmsg_count sendmsg() calls write at most one byte, as a stream socket
+ * may. */
+void uds_short_io_set(unsigned recv_count, unsigned sendmsg_count);
+
+/* Injections not consumed yet (EINTR and short I/O). */
 unsigned uds_eintr_wrap_pending(void);
 
 /* Inside the next bind(), create the unrelated file `path` with mode 0666,

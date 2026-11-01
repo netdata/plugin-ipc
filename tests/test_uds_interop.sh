@@ -49,7 +49,7 @@ if [[ -x "$INTEROP_UDS_GO" ]]; then
     HAS_GO=1
 fi
 
-RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nipc_interop.XXXXXX")"
+RUN_DIR="$(interop_mktemp_run_dir nipc_interop)"
 
 cleanup() {
     # Kill any background processes we started

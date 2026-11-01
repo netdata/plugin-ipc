@@ -100,7 +100,7 @@ func ConnectTimeout(runDir, serviceName string, config *ClientConfig, timeoutMs 
 		return nil, err
 	}
 
-	fd, err := seqpacketSocket()
+	fd, err := udsSocket()
 	if err != nil {
 		return nil, wrapErr(ErrSocket, err.Error())
 	}

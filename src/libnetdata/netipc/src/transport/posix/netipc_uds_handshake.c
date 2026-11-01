@@ -162,13 +162,22 @@ nipc_uds_error_t nipc_uds_client_handshake(int fd,
     return err;
 
   /* A server that accepted but never answers must not hold the client. */
-  err = nipc_uds_wait_readable(fd, timeout_ms, abort_fd);
+  nipc_uds_wait_t wait = nipc_uds_wait_init(timeout_ms, abort_fd);
+#if NIPC_UDS_STREAM
+  size_t len = 0;
+  err = nipc_uds_stream_recv_packet(fd, buf, sizeof(buf), 0, &wait, &len);
+  if (err != NIPC_UDS_OK)
+    return err;
+  ssize_t n = (ssize_t)len;
+#else
+  err = nipc_uds_wait_for_readable(fd, &wait);
   if (err != NIPC_UDS_OK)
     return err;
 
   ssize_t n = nipc_uds_raw_recv(fd, buf, sizeof(buf));
   if (n <= 0)
     return NIPC_UDS_ERR_RECV;
+#endif
 
   nipc_header_t ack_hdr;
   nipc_error_t perr = nipc_header_decode(buf, (size_t)n, &ack_hdr);
@@ -214,6 +223,7 @@ nipc_uds_error_t nipc_uds_server_handshake(int fd,
                                            uint64_t session_id,
                                            nipc_uds_profile_prepare_fn prepare,
                                            void *prepare_user,
+                                           const nipc_uds_wait_t *wait,
                                            nipc_uds_session_t *session) {
   uint8_t buf[128];
   uint32_t server_pkt_size = nipc_uds_packet_size(fd, cfg->packet_size);
@@ -227,9 +237,20 @@ nipc_uds_error_t nipc_uds_server_handshake(int fd,
       NIPC_UDS_PLATFORM_PROFILES;
   uint32_t s_preferred = cfg->preferred_profiles & NIPC_UDS_PLATFORM_PROFILES;
 
+#if NIPC_UDS_STREAM
+  size_t len = 0;
+  nipc_uds_error_t rerr =
+      nipc_uds_stream_recv_packet(fd, buf, sizeof(buf), 0, wait, &len);
+  if (rerr != NIPC_UDS_OK)
+    return rerr;
+  ssize_t n = (ssize_t)len;
+#else
+  /* The caller waited for HELLO; a datagram arrives whole. */
+  (void)wait;
   ssize_t n = nipc_uds_raw_recv(fd, buf, sizeof(buf));
   if (n <= 0)
     return NIPC_UDS_ERR_RECV;
+#endif
 
   nipc_header_t hdr;
   nipc_error_t perr = nipc_header_decode(buf, (size_t)n, &hdr);

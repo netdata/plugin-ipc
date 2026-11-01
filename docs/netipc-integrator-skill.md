@@ -1292,6 +1292,15 @@ Before you define a new service or integrate one into a plugin, answer these:
   same caller configuration works on Linux and FreeBSD
 - FreeBSD's default `SO_SNDBUF` is 8192 bytes, so larger messages are chunked
   more often there than on Linux
+- macOS has no `SOCK_SEQPACKET`: its baseline is a `SOCK_STREAM` socket that
+  carries the same packets, with the same API, handshake and profile bit, and
+  no SHM. The packet size is 256 KiB regardless of `SO_SNDBUF`. A receive that
+  fails after reading part of a message (timeout, abort, oversized or
+  malformed message) ends further receives on that session; sends still work,
+  and the L2 client reconnects as for any broken session. A full listen backlog
+  refuses a connect at once (also on FreeBSD), so size `backlog` for bursts of
+  clients. The listener binds through a private `{service}.d` directory in the
+  run directory; a leftover one from a crashed server is removed on start.
 
 ### Windows
 

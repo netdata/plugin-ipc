@@ -2,6 +2,8 @@ package cgroups_lookup
 
 import (
 	"fmt"
+	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -36,7 +38,7 @@ func waitCgroupsLookupReady(t *testing.T, server *Server, client *Client) {
 }
 
 func TestCgroupsLookupPublicWrapper(t *testing.T) {
-	runDir := t.TempDir()
+	runDir := shortTempDir(t)
 	service := fmt.Sprintf("go_cgroups_wrapper_%d", time.Now().UnixNano())
 	handler := Handler{Handle: func(req *protocol.CgroupsLookupRequestView, builder *protocol.CgroupsLookupBuilder) bool {
 		for i := uint32(0); i < req.ItemCount; i++ {
@@ -106,4 +108,20 @@ func TestCgroupsLookupPublicWrapper(t *testing.T) {
 	if err != nil || item.Path.String() != "/b" {
 		t.Fatalf("cgroups timeout item = %+v err=%v", item, err)
 	}
+}
+
+// shortTempDir is a per-test run directory. t.TempDir() follows $TMPDIR,
+// which on macOS is long enough to push a socket path past the 104-byte
+// sun_path limit.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return t.TempDir()
+	}
+	dir, err := os.MkdirTemp("/tmp", "nipc_go_")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }

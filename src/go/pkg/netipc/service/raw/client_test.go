@@ -33,7 +33,9 @@ func testServerConfig() posix.ServerConfig {
 		MaxResponsePayloadBytes: responseBufSize,
 		MaxResponseBatchItems:   1,
 		AuthToken:               authToken,
-		Backlog:                 4,
+		// Above every test's connect burst: macOS and FreeBSD refuse a
+		// connect to a full backlog at once, where Linux waits.
+		Backlog: 64,
 	}
 }
 

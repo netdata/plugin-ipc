@@ -3,6 +3,7 @@
 package posix
 
 import (
+	"errors"
 	"fmt"
 	"syscall"
 	"time"
@@ -82,6 +83,9 @@ func connectAndHandshake(fd int, path string, config *ClientConfig, wait receive
 			PacketSize:              pktSize,
 		},
 		Send: func(pkt []byte) error {
+			if streamTransport {
+				return streamSendAll(fd, pkt, nil)
+			}
 			n, err := syscall.SendmsgN(fd, pkt, nil, nil, 0)
 			if err != nil {
 				return err
@@ -92,6 +96,15 @@ func connectAndHandshake(fd int, path string, config *ClientConfig, wait receive
 			return nil
 		},
 		Recv: func(dst []byte) (int, error) {
+			if streamTransport {
+				// A packet cut short is a protocol error, not a receive
+				// failure, as on SEQPACKET.
+				n, err := streamRecvPacket(fd, dst, 0, &wait)
+				if errors.Is(err, ErrTimeout) || errors.Is(err, ErrAborted) || errors.Is(err, ErrProtocol) {
+					waitErr = err
+				}
+				return n, err
+			}
 			if err := pollReadableForReceive(fd, wait); err != nil {
 				waitErr = err
 				return 0, err
@@ -154,6 +167,8 @@ func serverHandshake(fd int, config *ServerConfig, sessionID uint64) (*Session, 
 func serverHandshakeWait(fd int, config *ServerConfig, sessionID uint64, wait receiveWait, prepare ProfilePrepare) (*Session, error) {
 	serverPktSize := packetSizeLimit(fd, config.PacketSize)
 
+	// A stream HELLO cut short is a protocol error, as on SEQPACKET.
+	var streamErr error
 	sRespPay := applyDefault(config.MaxResponsePayloadBytes, protocol.MaxPayloadDefault)
 	sReqPay := applyDefault(config.MaxRequestPayloadBytes, protocol.MaxPayloadDefault)
 	ack, err := framing.ServerHandshake(framing.ServerHandshakeConfig{
@@ -166,9 +181,15 @@ func serverHandshakeWait(fd int, config *ServerConfig, sessionID uint64, wait re
 			AuthToken:               config.AuthToken,
 			PlatformProfiles:        platformProfiles,
 		},
-		SessionID:       sessionID,
-		Prepare:         prepare,
-		Recv:            func(dst []byte) (int, error) { return rawRecvWithTimeout(fd, dst, wait) },
+		SessionID: sessionID,
+		Prepare:   prepare,
+		Recv: func(dst []byte) (int, error) {
+			n, err := serverHandshakeRecv(fd, dst, &wait)
+			if streamTransport && errors.Is(err, ErrProtocol) {
+				streamErr = err
+			}
+			return n, err
+		},
 		SendAck:         func(status uint16, ack protocol.HelloAck) error { return sendHelloAck(fd, status, ack) },
 		StatusError:     helloAckStatusError,
 		ErrRecv:         func(msg string) error { return wrapErr(ErrRecv, msg) },
@@ -176,6 +197,9 @@ func serverHandshakeWait(fd int, config *ServerConfig, sessionID uint64, wait re
 		ErrProtocol:     func(msg string) error { return wrapErr(ErrProtocol, msg) },
 		ErrIncompatible: func(msg string) error { return wrapErr(ErrIncompatible, msg) },
 	})
+	if streamErr != nil {
+		return nil, streamErr
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -194,8 +218,18 @@ func serverHandshakeWait(fd int, config *ServerConfig, sessionID uint64, wait re
 	}, nil
 }
 
+func serverHandshakeRecv(fd int, dst []byte, wait *receiveWait) (int, error) {
+	if streamTransport {
+		return streamRecvPacket(fd, dst, 0, wait)
+	}
+	return rawRecvWithTimeout(fd, dst, *wait)
+}
+
 func sendHelloAck(fd int, status uint16, ack protocol.HelloAck) error {
 	pkt := framing.BuildHelloAckPacket(status, ack)
+	if streamTransport {
+		return streamSendAll(fd, pkt[:], nil)
+	}
 
 	sn, err := syscall.SendmsgN(fd, pkt[:], nil, nil, 0)
 	if err != nil {

@@ -47,6 +47,18 @@ fn default_client_config() -> ClientConfig {
     }
 }
 
+/// On a stream a short or over-long packet is only visible once the peer
+/// stops sending: end the peer's writes there so the receiver sees EOF where
+/// a SEQPACKET receiver sees the packet end.
+fn end_stream_writes(fd: RawFd) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        libc::shutdown(fd, libc::SHUT_WR)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let _ = fd;
+}
+
 /// Unique service name to avoid parallel test collisions.
 static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 fn unique_service(prefix: &str) -> String {
@@ -56,7 +68,7 @@ fn unique_service(prefix: &str) -> String {
 
 fn socketpair_seqpacket() -> (RawFd, RawFd) {
     let mut fds = [-1; 2];
-    let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, fds.as_mut_ptr()) };
+    let rc = unsafe { libc::socketpair(libc::AF_UNIX, SOCK_TYPE, 0, fds.as_mut_ptr()) };
     assert_eq!(rc, 0, "socketpair failed: {}", errno());
     (fds[0], fds[1])
 }
@@ -80,7 +92,7 @@ fn test_session(fd: RawFd, role: Role, packet_size: u32) -> UdsSession {
 
 fn raw_listener_fd(service: &str) -> RawFd {
     let path = build_socket_path(TEST_RUN_DIR, service).expect("socket path");
-    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+    let fd = unsafe { libc::socket(libc::AF_UNIX, SOCK_TYPE, 0) };
     assert!(fd >= 0, "socket failed: {}", errno());
     bind_unix(fd, &path).expect("bind raw listener");
     let rc = unsafe { libc::listen(fd, DEFAULT_BACKLOG) };
@@ -109,11 +121,16 @@ fn test_eintr_retried() {
         session.send(&mut resp, &payload).expect("send");
     });
 
-    // HELLO goes through send, the request through sendmsg; HELLO_ACK and
-    // the response through recv. Injection is per thread: only this
-    // client's calls fail.
-    eintr_inject::SEND.with(|c| c.set(1));
-    eintr_inject::SENDMSG.with(|c| c.set(1));
+    // HELLO goes through send (sendmsg on a macOS stream), the request
+    // through sendmsg; HELLO_ACK and the response through recv. Injection is
+    // per thread: only this client's calls fail.
+    #[cfg(not(target_os = "macos"))]
+    {
+        eintr_inject::SEND.with(|c| c.set(1));
+        eintr_inject::SENDMSG.with(|c| c.set(1));
+    }
+    #[cfg(target_os = "macos")]
+    eintr_inject::SENDMSG.with(|c| c.set(2));
     eintr_inject::RECV.with(|c| c.set(2));
 
     let mut session = UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config())
@@ -478,7 +495,7 @@ fn test_request_payload_over_cap() {
 /// server leaves behind.
 fn create_stale_socket_file(path: &str) {
     unsafe {
-        let sock = libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0);
+        let sock = libc::socket(libc::AF_UNIX, SOCK_TYPE, 0);
         assert!(sock >= 0);
 
         let c_path = CString::new(path).unwrap();
@@ -556,7 +573,7 @@ fn test_listen_excludes_starting_server() {
     let first = first.join().unwrap().expect("first listen ok");
 
     // A connect to the endpoint must reach the first server.
-    let cfd = seqpacket_socket_cloexec();
+    let cfd = uds_socket_cloexec();
     assert!(cfd >= 0);
     connect_unix(cfd, &path).expect("connect to endpoint");
     let mut pfd = libc::pollfd {
@@ -1571,6 +1588,7 @@ fn test_receive_packet_too_short_for_header() {
     let mut session = test_session(fd0, Role::Server, 4096);
 
     raw_send(fd1, &[0x01]).expect("send short packet");
+    end_stream_writes(fd1);
 
     let mut buf = [0u8; 64];
     let err = session.receive(&mut buf).expect_err("packet too short");
@@ -1602,13 +1620,24 @@ fn test_receive_packet_longer_than_declared_payload() {
     pkt[HEADER_SIZE..].copy_from_slice(&payload);
 
     raw_send(fd1, &pkt).expect("send packet with trailing bytes");
+    end_stream_writes(fd1);
 
     let mut buf = [0u8; 128];
+    // A stream has no packet end to check: the message completes and the
+    // trailing byte is rejected as the next packet, a truncated header.
+    #[cfg(target_os = "macos")]
+    {
+        let (_, payload) = session.receive(&mut buf).expect("message delivered");
+        assert_eq!(payload, &[0xBE]);
+    }
     let err = session
         .receive(&mut buf)
         .expect_err("trailing bytes should be rejected");
+    #[cfg(not(target_os = "macos"))]
     assert!(matches!(err, UdsError::Protocol(ref msg)
         if msg.contains("exceeds declared payload_len")));
+    #[cfg(target_os = "macos")]
+    assert!(matches!(err, UdsError::Protocol(_)));
 
     unsafe { libc::close(fd1) };
 }
@@ -1830,7 +1859,8 @@ fn test_receive_chunked_batch_directory_too_short() {
 #[test]
 fn test_receive_chunked_batch_directory_invalid() {
     let (fd0, fd1) = socketpair_seqpacket();
-    let mut session = test_session(fd0, Role::Server, (HEADER_SIZE + 8) as u32);
+    // The first chunk below carries 16 payload bytes, a full packet.
+    let mut session = test_session(fd0, Role::Server, (HEADER_SIZE + 16) as u32);
 
     let mut full_payload = [0u8; 24];
     full_payload[0..4].copy_from_slice(&0u32.to_ne_bytes());
@@ -1967,6 +1997,7 @@ fn test_receive_chunk_payload_len_mismatch() {
     chk.encode(&mut second_pkt[..HEADER_SIZE]);
     second_pkt[HEADER_SIZE..].copy_from_slice(&second_payload);
     raw_send(fd1, &second_pkt).expect("send bad chunk length");
+    end_stream_writes(fd1);
 
     let mut buf = [0u8; 64];
     let err = session
@@ -2000,6 +2031,7 @@ fn test_receive_continuation_too_short() {
     first_pkt[HEADER_SIZE..].copy_from_slice(&first_payload);
     raw_send(fd1, &first_pkt).expect("send first chunk");
     raw_send(fd1, &[0x01]).expect("send truncated continuation");
+    end_stream_writes(fd1);
 
     let mut buf = [0u8; 64];
     let err = session
@@ -2624,7 +2656,7 @@ fn test_accept_rejects_bad_hello_kind() {
     let svc_clone = svc.clone();
     let client = thread::spawn(move || {
         let path = build_socket_path(TEST_RUN_DIR, &svc_clone).expect("socket path");
-        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+        let fd = unsafe { libc::socket(libc::AF_UNIX, SOCK_TYPE, 0) };
         assert!(fd >= 0, "socket failed: {}", errno());
         connect_unix(fd, &path).expect("connect");
 
@@ -2683,7 +2715,7 @@ fn test_accept_rejects_bad_hello_version_as_incompatible() {
     let svc_clone = svc.clone();
     let client = thread::spawn(move || {
         let path = build_socket_path(TEST_RUN_DIR, &svc_clone).expect("socket path");
-        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+        let fd = unsafe { libc::socket(libc::AF_UNIX, SOCK_TYPE, 0) };
         assert!(fd >= 0, "socket failed: {}", errno());
         connect_unix(fd, &path).expect("connect");
 
@@ -2742,7 +2774,7 @@ fn test_accept_rejects_bad_hello_layout_as_incompatible() {
     let svc_clone = svc.clone();
     let client = thread::spawn(move || {
         let path = build_socket_path(TEST_RUN_DIR, &svc_clone).expect("socket path");
-        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0) };
+        let fd = unsafe { libc::socket(libc::AF_UNIX, SOCK_TYPE, 0) };
         assert!(fd >= 0, "socket failed: {}", errno());
         connect_unix(fd, &path).expect("connect");
 
@@ -2853,6 +2885,7 @@ fn test_path_too_long() {
     assert!(matches!(result, Err(UdsError::PathTooLong)));
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn test_packet_size_limit_invalid_fd_uses_fallback() {
     assert_eq!(packet_size_limit(-1, 0), DEFAULT_PACKET_SIZE_FALLBACK);
@@ -2863,6 +2896,7 @@ fn test_packet_size_limit_invalid_fd_uses_fallback() {
     );
 }
 
+#[cfg(not(target_os = "macos"))]
 fn set_sndbuf(fd: RawFd, bytes: libc::c_int) {
     let rc = unsafe {
         libc::setsockopt(
@@ -2876,6 +2910,38 @@ fn set_sndbuf(fd: RawFd, bytes: libc::c_int) {
     assert_eq!(rc, 0, "setsockopt(SO_SNDBUF) failed: {}", errno());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn test_packet_size_limit_is_fixed_on_a_stream() {
+    assert_eq!(packet_size_limit(-1, 0), PACKET_SIZE_MAX);
+    assert_eq!(packet_size_limit(-1, 1000), 1000);
+    assert_eq!(packet_size_limit(-1, u32::MAX), PACKET_SIZE_MAX);
+
+    // A full packet crosses even though it is far above SO_SNDBUF.
+    let (fd0, fd1) = socketpair_seqpacket();
+    let mut pkt = vec![0xA5u8; PACKET_SIZE_MAX as usize];
+    let hdr = Header {
+        magic: MAGIC_MSG,
+        version: VERSION,
+        header_len: protocol::HEADER_LEN,
+        kind: KIND_REQUEST,
+        item_count: 1,
+        payload_len: PACKET_SIZE_MAX - HEADER_SIZE as u32,
+        ..Header::default()
+    };
+    hdr.encode(&mut pkt[..HEADER_SIZE]);
+    let reader = thread::spawn(move || {
+        let mut buf = vec![0u8; PACKET_SIZE_MAX as usize];
+        let n = stream::recv_packet(fd1, &mut buf, PACKET_SIZE_MAX, None).expect("recv");
+        unsafe { libc::close(fd1) };
+        (n, buf[n - 1])
+    });
+    send_packet(fd0, &pkt[..HEADER_SIZE], &pkt[HEADER_SIZE..]).expect("send");
+    assert_eq!(reader.join().unwrap(), (PACKET_SIZE_MAX as usize, 0xA5));
+    unsafe { libc::close(fd0) };
+}
+
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn test_packet_size_limit_matches_kernel_datagram_limit() {
     // None keeps the system default SO_SNDBUF.
@@ -3011,5 +3077,123 @@ fn test_listener_and_session_sockets_are_cloexec() {
         cloexec(session.fd()),
         "client session socket must be close-on-exec"
     );
+    cleanup_socket(&svc);
+}
+
+// -----------------------------------------------------------------------
+//  macOS stream baseline
+// -----------------------------------------------------------------------
+
+/// A receive that consumed part of a message cannot leave the session
+/// usable: the rest is still queued and would be read as a header.
+#[cfg(target_os = "macos")]
+#[test]
+fn test_stream_partial_receive_ends_reads() {
+    let (fd0, fd1) = socketpair_seqpacket();
+    let mut session = test_session(fd0, Role::Server, 1024);
+    let mut buf = [0u8; 2048];
+
+    assert_eq!(
+        session.receive_with_control(&mut buf, 1, None).err(),
+        Some(UdsError::Timeout),
+        "timeout before the first byte"
+    );
+
+    let hdr = Header {
+        magic: MAGIC_MSG,
+        version: VERSION,
+        header_len: protocol::HEADER_LEN,
+        kind: KIND_REQUEST,
+        code: 1,
+        item_count: 1,
+        message_id: 9,
+        payload_len: 5,
+        ..Header::default()
+    };
+    let mut pkt = [0u8; HEADER_SIZE + 5];
+    hdr.encode(&mut pkt[..HEADER_SIZE]);
+    pkt[HEADER_SIZE..].copy_from_slice(b"hello");
+    send_packet(fd1, &pkt, &[]).unwrap();
+    let (_, payload) = session
+        .receive(&mut buf)
+        .expect("intact after a clean timeout");
+    assert_eq!(payload, b"hello");
+
+    send_packet(fd1, &pkt[..10], &[]).unwrap();
+    assert_eq!(
+        session.receive_with_control(&mut buf, 1, None).err(),
+        Some(UdsError::Timeout),
+        "timeout inside a message"
+    );
+    send_packet(fd1, &pkt[10..], &[]).unwrap();
+    assert_eq!(
+        session.receive(&mut buf).err(),
+        Some(UdsError::Recv(0)),
+        "later receives fail"
+    );
+
+    // Sends always write whole messages, so they stay valid.
+    let mut resp = Header {
+        kind: protocol::KIND_RESPONSE,
+        code: 1,
+        item_count: 1,
+        message_id: 9,
+        ..Header::default()
+    };
+    session.send(&mut resp, b"ok").expect("sends still work");
+    let n = stream::recv_packet(fd1, &mut buf, 1024, None).expect("peer gets the response");
+    assert_eq!(n, HEADER_SIZE + 2);
+    unsafe { libc::close(fd1) };
+}
+
+/// macOS binds in `{service}.d/` and renames the socket into place.
+#[cfg(target_os = "macos")]
+#[test]
+fn test_listen_bind_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    ensure_run_dir();
+    let svc = unique_service("rs_bind_dir");
+    cleanup_socket(&svc);
+    let dir = format!("{TEST_RUN_DIR}/{svc}.d");
+    let path = build_socket_path(TEST_RUN_DIR, &svc).unwrap();
+    let listen = || UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config());
+    let gone = |p: &str| std::fs::symlink_metadata(p).is_err();
+
+    let listener = listen().expect("listen");
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "socket is owner-only");
+    assert!(gone(&dir), "bind directory removed");
+    drop(listener);
+
+    // A crashed server's leftover directory is reclaimed.
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(format!("{dir}/s"), b"").unwrap();
+    drop(listen().expect("listen over a leftover directory"));
+    assert!(gone(&dir));
+
+    // A non-directory at the name is junk, as at the socket name.
+    std::fs::write(&dir, b"").unwrap();
+    drop(listen().expect("listen over a leftover file"));
+    assert!(gone(&dir));
+
+    // Foreign content is never deleted: listen fails instead.
+    std::fs::create_dir(&dir).unwrap();
+    let other = format!("{dir}/other");
+    std::fs::write(&other, b"").unwrap();
+    assert!(matches!(listen(), Err(UdsError::Socket(_))));
+    assert!(std::fs::metadata(&other).is_ok(), "foreign content kept");
+    std::fs::remove_file(&other).unwrap();
+
+    // A directory where the socket goes is foreign content too.
+    let sub = format!("{dir}/s");
+    std::fs::create_dir(&sub).unwrap();
+    assert!(matches!(listen(), Err(UdsError::Socket(_))));
+    assert!(
+        std::fs::metadata(&sub).unwrap().is_dir(),
+        "foreign subdirectory kept"
+    );
+    std::fs::remove_dir(&sub).unwrap();
+    std::fs::remove_dir(&dir).unwrap();
     cleanup_socket(&svc);
 }

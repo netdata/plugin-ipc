@@ -41,6 +41,19 @@ func testRunDir(t *testing.T) string {
 	return dir
 }
 
+// shortTempDir is a per-test directory for socket paths. t.TempDir() follows
+// $TMPDIR, which on macOS is long enough to push a socket path past the
+// 104-byte sun_path limit.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "nipc_go_")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func defaultServerConfig() ServerConfig {
 	return ServerConfig{
 		SupportedProfiles:       protocol.ProfileBaseline,
@@ -656,7 +669,7 @@ func TestStaleRecovery(t *testing.T) {
 func TestStaleRecoveryInGroupWritableRunDir(t *testing.T) {
 	// Crash recovery must work regardless of run-dir permissions
 	// (netdata's systemd unit ships RuntimeDirectoryMode=0775).
-	runDir := t.TempDir()
+	runDir := shortTempDir(t)
 	if err := os.Chmod(runDir, 0o775); err != nil {
 		t.Fatalf("chmod run dir: %v", err)
 	}

@@ -11,6 +11,9 @@ must follow this contract to interoperate on the same socket.
 `AF_UNIX` / `SOCK_SEQPACKET` — message-oriented, reliable, ordered,
 connection-based Unix domain sockets with preserved message boundaries.
 
+macOS has no `AF_UNIX` `SOCK_SEQPACKET`. There the baseline runs over
+`SOCK_STREAM` with the same bytes on the wire; see "macOS stream baseline".
+
 Every socket and pipe the transport creates (listener, accepted and
 connected sessions, the client abort pipe, SHM region descriptors) is
 close-on-exec (`SOCK_CLOEXEC`, `accept4(..., SOCK_CLOEXEC)`, `O_CLOEXEC`,
@@ -47,6 +50,23 @@ Consequences:
   can remove or replace the endpoint;
 - a platform whose kernel rejects `fchmod` on an unbound socket fails
   `listen` with a socket error instead of creating a wider socket.
+
+macOS rejects `fchmod` on an unbound socket and creates the socket file
+with mode `0777 & ~umask`, so it binds in a private directory instead:
+
+1. Under the endpoint lock, a leftover `{run_dir}/{service_name}.d` from a
+   crashed server is removed: a directory holding only `s` is emptied and
+   removed, any other non-directory at that name is unlinked. A directory
+   with other content is never deleted; `listen` fails with a socket error.
+2. `mkdir {service_name}.d` (mode 0700, set again with `chmod` so a umask
+   without owner bits cannot make it unusable), `bind()` to
+   `{service_name}.d/s`, then `chmod` the socket file to its created mode
+   `& 0600`, which keeps the umask narrowing.
+3. `rename()` it to `{service_name}.sock` and remove the directory.
+
+No other user can reach the socket while its mode is wider, and the
+process-global umask is never changed. The temporary path must also fit
+`sun_path`.
 
 ## Profile bit
 
@@ -211,11 +231,59 @@ client must close that session and reconnect baseline-only. If a later reconnect
 larger capacities, it establishes a new session with a new `session_id`
 and therefore a different SHM file path.
 
+## macOS stream baseline
+
+macOS has no `AF_UNIX` `SOCK_SEQPACKET`, so its baseline uses `SOCK_STREAM`.
+The handshake, profile bit and packets are unchanged; only how a receiver
+finds packet boundaries differs. C, Rust and Go implement it the same way.
+
+- **Packets.** A packet is the 32-byte header plus the bytes it declares,
+  so no framing bytes are added. After an outer header (`NIPC`) the body is
+  `min(payload_len, packet_size - 32)` bytes, after a continuation header
+  (`NCHK`) it is `chunk_payload_len` bytes. A handshake packet is read
+  with a packet size of 0, which caps the body at the receive buffer.
+  Bytes that do not fit the buffer are not read, as a SEQPACKET receive
+  into a short buffer drops them; the length checks then fail.
+- **First header first.** A session's first packet header is checked
+  before its body is read. A header that is not an outer header, or that
+  declares more payload or items than the negotiated limits, is passed to
+  the framing alone, so `LIMIT_EXCEEDED` or a protocol error is reported
+  without waiting for bytes the peer may never send.
+- **End of stream.** EOF before a packet's first byte is a disconnect. EOF
+  inside a packet is a protocol error, inside a continuation a chunk error.
+  Bytes left after a message's last packet are read as the next packet.
+- **Packet size.** A stream has no datagram limit: the proposal is the
+  configured packet size, or 262144 when it is 0 or larger. `SO_SNDBUF` is
+  not consulted. Messages larger than the agreed size are chunked as on
+  SEQPACKET.
+- **Writes.** A packet may take several `sendmsg()` calls; the sender
+  resumes after a partial write. Header and body go out without copying.
+  `SO_NOSIGPIPE` is set on every session socket, so a write to a closed
+  peer fails with `EPIPE` instead of raising `SIGPIPE`, also in Go, whose
+  darwin `syscall` package has no `MSG_NOSIGNAL`.
+- **Partial receive.** A receive timeout or abort before the first byte of
+  a message leaves the session usable. Any receive failure after it
+  (timeout, abort, malformed or over-limit packet) leaves unread bytes of
+  the message queued, so the receiving side is shut down
+  (`shutdown(SHUT_RD)`) and every later receive fails. Sends stay valid, so
+  a server can still answer a rejected request with `LIMIT_EXCEEDED`.
+- **Socket buffers.** macOS's default `AF_UNIX` stream buffers are 8 KiB
+  per direction, far below Linux's. A pipelining caller that sends many
+  requests before reading responses blocks sooner: once the responses it is
+  not reading fill its receive buffer, the server stops reading requests
+  too. Read responses while sending, or keep the bytes in flight small.
+- **Connect.** A full listen backlog refuses a connect at once
+  (`ECONNREFUSED`), as on FreeBSD; Linux waits for room.
+- **Not available:** SHM profiles. macOS servers and clients offer the
+  baseline only.
+
 ## Interrupted system calls
 
 `send()`, `sendmsg()` and `recv()` calls that fail with `EINTR` are
 retried inside the transport. A SEQPACKET call moves a whole message or
-nothing, so a retry can neither duplicate nor split a message. Signals
+nothing, so a retry can neither duplicate nor split a message. On the
+macOS stream an interrupted call moved no bytes, and partial transfers are
+resumed, so the same holds there. Signals
 delivered to the process therefore never surface as send/receive
 failures.
 

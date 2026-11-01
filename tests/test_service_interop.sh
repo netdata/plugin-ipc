@@ -52,7 +52,7 @@ if [[ -x "$INTEROP_SVC_GO" ]]; then
     HAS_GO=1
 fi
 
-RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nipc_svc_interop.XXXXXX")"
+RUN_DIR="$(interop_mktemp_run_dir nipc_svc_interop)"
 
 cleanup() {
     local pids

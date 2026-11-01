@@ -14,6 +14,8 @@
 static unsigned g_send_eintr;
 static unsigned g_sendmsg_eintr;
 static unsigned g_recv_eintr;
+static unsigned g_short_recv;
+static unsigned g_short_sendmsg;
 
 void uds_eintr_wrap_set(unsigned send_count, unsigned sendmsg_count,
                         unsigned recv_count)
@@ -23,11 +25,31 @@ void uds_eintr_wrap_set(unsigned send_count, unsigned sendmsg_count,
     __atomic_store_n(&g_recv_eintr, recv_count, __ATOMIC_RELEASE);
 }
 
+void uds_short_io_set(unsigned recv_count, unsigned sendmsg_count)
+{
+    __atomic_store_n(&g_short_recv, recv_count, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_short_sendmsg, sendmsg_count, __ATOMIC_RELEASE);
+}
+
 unsigned uds_eintr_wrap_pending(void)
 {
     return __atomic_load_n(&g_send_eintr, __ATOMIC_ACQUIRE) +
            __atomic_load_n(&g_sendmsg_eintr, __ATOMIC_ACQUIRE) +
-           __atomic_load_n(&g_recv_eintr, __ATOMIC_ACQUIRE);
+           __atomic_load_n(&g_recv_eintr, __ATOMIC_ACQUIRE) +
+           __atomic_load_n(&g_short_recv, __ATOMIC_ACQUIRE) +
+           __atomic_load_n(&g_short_sendmsg, __ATOMIC_ACQUIRE);
+}
+
+/* Consume one pending injection for a call site, if any. */
+static bool take_one(unsigned *count)
+{
+    unsigned left = __atomic_load_n(count, __ATOMIC_ACQUIRE);
+    while (left > 0) {
+        if (__atomic_compare_exchange_n(count, &left, left - 1, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return true;
+    }
+    return false;
 }
 
 /* Consume one pending EINTR for a call site, if any. */
@@ -55,10 +77,31 @@ ssize_t __wrap_send(int fd, const void *buf, size_t len, int flags)
     return __real_send(fd, buf, len, flags);
 }
 
+/* The first byte of msg's data as a one-byte message, if it has any. */
+static bool first_byte_only(const struct msghdr *msg, struct msghdr *one,
+                            struct iovec *iov)
+{
+    for (size_t i = 0; i < (size_t)msg->msg_iovlen; i++) {
+        if (msg->msg_iov[i].iov_len == 0)
+            continue;
+        *one = *msg;
+        iov->iov_base = msg->msg_iov[i].iov_base;
+        iov->iov_len = 1;
+        one->msg_iov = iov;
+        one->msg_iovlen = 1;
+        return true;
+    }
+    return false;
+}
+
 ssize_t __wrap_sendmsg(int fd, const struct msghdr *msg, int flags)
 {
     if (take(&g_sendmsg_eintr))
         return -1;
+    struct msghdr one;
+    struct iovec iov;
+    if (first_byte_only(msg, &one, &iov) && take_one(&g_short_sendmsg))
+        return __real_sendmsg(fd, &one, flags);
     return __real_sendmsg(fd, msg, flags);
 }
 
@@ -66,6 +109,8 @@ ssize_t __wrap_recv(int fd, void *buf, size_t len, int flags)
 {
     if (take(&g_recv_eintr))
         return -1;
+    if (len > 1 && take_one(&g_short_recv))
+        len = 1;
     return __real_recv(fd, buf, len, flags);
 }
 
@@ -112,6 +157,10 @@ ssize_t __wrap___sendmsg64(int fd, const struct msghdr *msg, int flags)
 {
     if (take(&g_sendmsg_eintr))
         return -1;
+    struct msghdr one;
+    struct iovec iov;
+    if (first_byte_only(msg, &one, &iov) && take_one(&g_short_sendmsg))
+        return __real___sendmsg64(fd, &one, flags);
     return __real___sendmsg64(fd, msg, flags);
 }
 #endif

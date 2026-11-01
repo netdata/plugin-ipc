@@ -11,7 +11,7 @@ import (
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 )
 
-// Listener is a listening UDS SEQPACKET endpoint.
+// Listener is a listening UDS endpoint.
 type Listener struct {
 	mu            sync.Mutex
 	fd            int
@@ -50,26 +50,16 @@ func Listen(runDir, serviceName string, config ServerConfig) (*Listener, error) 
 		return nil, ErrAddrInUse
 	}
 
-	fd, err := seqpacketSocket()
+	fd, err := udsSocket()
 	if err != nil {
 		_ = lock.Close()
 		return nil, wrapErr(ErrSocket, err.Error())
 	}
 
-	// Owner-only (0600, narrowed by the umask). Linux and FreeBSD give the
-	// socket file the mode of the unbound socket, so this needs no post-bind
-	// window and no change to the process-global umask.
-	if err := syscall.Fchmod(fd, 0o600); err != nil {
+	if err := bindOwnerOnly(fd, runDir, serviceName, path); err != nil {
 		_ = syscall.Close(fd)
 		_ = lock.Close()
-		return nil, wrapErr(ErrSocket, "fchmod: "+err.Error())
-	}
-
-	sa := &syscall.SockaddrUnix{Name: path}
-	if err := syscall.Bind(fd, sa); err != nil {
-		_ = syscall.Close(fd)
-		_ = lock.Close()
-		return nil, wrapErr(ErrSocket, "bind: "+err.Error())
+		return nil, err
 	}
 
 	if hook := listenHook.Load(); hook != nil {

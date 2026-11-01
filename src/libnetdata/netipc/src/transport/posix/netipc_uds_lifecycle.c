@@ -32,20 +32,35 @@
 /* Longest single connect wait, so an abort ends a connect promptly. */
 #define UDS_CONNECT_SLICE_MS 100u
 
+/* SO_NOSIGPIPE is macOS's documented way to keep a write to a closed peer
+ * from raising SIGPIPE in the embedding process; sends also pass
+ * MSG_NOSIGNAL where the SDK defines it. */
+static void uds_set_nosigpipe(int fd)
+{
+#if defined(__APPLE__)
+    int on = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+#else
+    (void)fd;
+#endif
+}
+
 /* Sockets must not leak into children a consumer forks and execs: an
  * inherited session socket keeps the peer from ever seeing EOF, which is
  * the dead-peer signal. Platforms without SOCK_CLOEXEC set the flag right
  * after creation. */
-static int seqpacket_socket_cloexec(void)
+static int uds_socket_cloexec(void)
 {
 #ifdef SOCK_CLOEXEC
-    return socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    int fd = socket(AF_UNIX, NIPC_UDS_SOCK_TYPE | SOCK_CLOEXEC, 0);
 #else
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    int fd = socket(AF_UNIX, NIPC_UDS_SOCK_TYPE, 0);
     if (fd >= 0)
         (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
-    return fd;
 #endif
+    if (fd >= 0)
+        uds_set_nosigpipe(fd);
+    return fd;
 }
 
 static int accept_cloexec(int listen_fd)
@@ -54,22 +69,97 @@ static int accept_cloexec(int listen_fd)
     return accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
 #else
     int fd = accept(listen_fd, NULL, NULL);
-    if (fd >= 0)
+    if (fd >= 0) {
         (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+        uds_set_nosigpipe(fd);
+    }
     return fd;
 #endif
 }
 
+static int fill_sockaddr_path(struct sockaddr_un *addr, const char *path);
+
+#if defined(__APPLE__)
+/* Remove a bind directory a crashed server left behind. The caller holds
+ * the endpoint lock, so no live server uses it. Anything but a real
+ * directory is unlinked without following it. */
+static int remove_bind_dir(const char *dir, const char *tmp)
+{
+    struct stat st;
+    if (lstat(dir, &st) < 0)
+        return errno == ENOENT ? 0 : -1;
+    if (!S_ISDIR(st.st_mode))
+        return unlink(dir);
+    if (unlink(tmp) < 0 && errno != ENOENT)
+        return -1;
+    return rmdir(dir);
+}
+
+/* macOS rejects fchmod() on an unbound socket and creates the socket file
+ * 0777 & ~umask. The socket is bound inside a private 0700 directory,
+ * narrowed to owner-only there, then renamed into place, so it is never
+ * reachable with a wider mode and the process-global umask is untouched.
+ * Returns 0, -1 on a socket error, -2 if the bind path is too long. */
+static int bind_owner_only_socket(int fd, const char *run_dir,
+                                  const char *service_name, const char *path)
+{
+    char dir[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    char tmp[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    int n = snprintf(dir, sizeof(dir), "%s/%s.d", run_dir, service_name);
+    if (n < 0 || (size_t)n >= sizeof(dir))
+        return -2;
+    n = snprintf(tmp, sizeof(tmp), "%s/s", dir);
+    if (n < 0 || (size_t)n >= sizeof(tmp))
+        return -2;
+
+    struct sockaddr_un addr;
+    if (fill_sockaddr_path(&addr, tmp) != 0)
+        return -2;
+
+    if (remove_bind_dir(dir, tmp) < 0)
+        return -1;
+    if (mkdir(dir, S_IRWXU) < 0)
+        return -1;
+
+    struct stat st;
+    /* chmod() ignores the umask, so a umask without owner write cannot make
+     * the directory unusable; the socket file below still gets it. */
+    if (chmod(dir, S_IRWXU) < 0 ||
+        bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) < 0)
+        goto fail_dir;
+    /* The bound file carries 0777 & ~umask; keep the umask narrowing. */
+    if (stat(tmp, &st) < 0 ||
+        chmod(tmp, (st.st_mode & 0777) & (S_IRUSR | S_IWUSR)) < 0 ||
+        rename(tmp, path) < 0)
+        goto fail_file;
+    (void)rmdir(dir);
+    return 0;
+
+fail_file:
+    (void)unlink(tmp);
+fail_dir:
+    (void)rmdir(dir);
+    return -1;
+}
+#else
 /* Bind as owner-only (0600, narrowed by the umask). Linux and FreeBSD give
  * the socket file the mode of the unbound socket, so fchmod() before bind()
  * sets it without a post-bind window and without touching the
- * process-global umask, which other threads of the embedding process use. */
-static int bind_owner_only_socket(int fd, const struct sockaddr_un *addr)
+ * process-global umask, which other threads of the embedding process use.
+ * Returns 0 or -1. */
+static int bind_owner_only_socket(int fd, const char *run_dir,
+                                  const char *service_name, const char *path)
 {
+    (void)run_dir;
+    (void)service_name;
+    struct sockaddr_un addr;
+    if (fill_sockaddr_path(&addr, path) != 0)
+        return -2;
     if (fchmod(fd, S_IRUSR | S_IWUSR) < 0)
         return -1;
-    return bind(fd, (const struct sockaddr *)addr, sizeof(*addr));
+    return bind(fd, (const struct sockaddr *)&addr, sizeof(addr));
 }
+#endif
 
 static int copy_cstr_checked(char *dst, size_t dst_size, const char *src)
 {
@@ -170,7 +260,7 @@ int nipc_uds_check_and_recover_stale(const char *run_dir,
                                      const char *socket_name,
                                      const char *path)
 {
-    int probe = seqpacket_socket_cloexec();
+    int probe = uds_socket_cloexec();
     if (probe < 0) {
         /* Cannot probe liveness (fd exhaustion) — keep the endpoint and
          * report it in use rather than risk deleting a live socket. */
@@ -282,23 +372,17 @@ nipc_uds_error_t nipc_uds_listen(const char *run_dir,
         return NIPC_UDS_ERR_ADDR_IN_USE;
     }
 
-    int fd = seqpacket_socket_cloexec();
+    int fd = uds_socket_cloexec();
     if (fd < 0) {
         close(lock_fd);
         return NIPC_UDS_ERR_SOCKET;
     }
 
-    struct sockaddr_un addr;
-    if (fill_sockaddr_path(&addr, path) != 0) {
+    int bind_rc = bind_owner_only_socket(fd, run_dir, service_name, path);
+    if (bind_rc < 0) {
         close(fd);
         close(lock_fd);
-        return NIPC_UDS_ERR_PATH_TOO_LONG;
-    }
-
-    if (bind_owner_only_socket(fd, &addr) < 0) {
-        close(fd);
-        close(lock_fd);
-        return NIPC_UDS_ERR_SOCKET;
+        return bind_rc == -2 ? NIPC_UDS_ERR_PATH_TOO_LONG : NIPC_UDS_ERR_SOCKET;
     }
 
     if (g_listen_hook)
@@ -362,10 +446,12 @@ nipc_uds_error_t nipc_uds_accept_handshake_prepared(
     memset(out, 0, sizeof(*out));
     out->fd = -1;
 
-    nipc_uds_error_t err = nipc_uds_wait_readable(fd, timeout_ms, -1);
+    /* One deadline covers the wait for HELLO and, on a stream, its bytes. */
+    nipc_uds_wait_t wait = nipc_uds_wait_init(timeout_ms, -1);
+    nipc_uds_error_t err = nipc_uds_wait_for_readable(fd, &wait);
     if (err == NIPC_UDS_OK)
         err = nipc_uds_server_handshake(fd, config, session_id, prepare, user,
-                                        out);
+                                        &wait, out);
     if (err != NIPC_UDS_OK) {
         close(fd);
         out->fd = -1;
@@ -486,7 +572,7 @@ nipc_uds_error_t nipc_uds_connect_timeout(const char *run_dir,
     if (path_rc < 0)
         return NIPC_UDS_ERR_PATH_TOO_LONG;
 
-    int fd = seqpacket_socket_cloexec();
+    int fd = uds_socket_cloexec();
     if (fd < 0)
         return NIPC_UDS_ERR_SOCKET;
 

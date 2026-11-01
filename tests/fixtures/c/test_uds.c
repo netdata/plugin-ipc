@@ -8,6 +8,8 @@
 #include "netipc/netipc_uds.h"
 #include "netipc/netipc_protocol.h"
 #include "test_sync.h"
+#include "uds_test_socket.h"
+#include "netipc_uds_internal.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -311,7 +313,7 @@ static void *malformed_ack_server_thread(void *arg)
     build_socket_path(path, sizeof(path), ctx->service);
     unlink(path);
 
-    lfd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    lfd = socket(AF_UNIX, TEST_UDS_SOCK_TYPE, 0);
     if (lfd < 0) {
         test_flag_set(&ctx->done);
         return NULL;
@@ -1269,7 +1271,7 @@ static void test_stale_recovery(void)
     char path[256];
     snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, svc);
 
-    int sock = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    int sock = socket(AF_UNIX, TEST_UDS_SOCK_TYPE, 0);
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
@@ -1643,7 +1645,7 @@ static void test_send_recv_validation(void)
               == NIPC_UDS_ERR_BAD_PARAM);
 
     int sv[2] = {-1, -1};
-    check("socketpair for zero chunk budget", socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) == 0);
+    check("socketpair for zero chunk budget", socketpair(AF_UNIX, TEST_UDS_SOCK_TYPE, 0, sv) == 0);
     if (sv[0] >= 0 && sv[1] >= 0) {
         nipc_uds_session_t tiny_packet_session;
         memset(&tiny_packet_session, 0, sizeof(tiny_packet_session));
@@ -1677,7 +1679,7 @@ static void test_send_recv_validation(void)
     }
 
     int sv_big[2] = {-1, -1};
-    check("socketpair for oversized framed length", socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv_big) == 0);
+    check("socketpair for oversized framed length", socketpair(AF_UNIX, TEST_UDS_SOCK_TYPE, 0, sv_big) == 0);
     if (sv_big[0] >= 0 && sv_big[1] >= 0) {
         nipc_uds_session_t large_session;
         memset(&large_session, 0, sizeof(large_session));
@@ -2212,7 +2214,7 @@ static void test_handshake_wrong_kind(void)
     /* Connect raw socket and send a RESPONSE instead of HELLO */
     char path[256];
     snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, svc);
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    int fd = socket(AF_UNIX, TEST_UDS_SOCK_TYPE, 0);
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
@@ -2653,7 +2655,7 @@ static void test_listen_excludes_starting_server(void)
         struct sockaddr_un addr = {.sun_family = AF_UNIX};
         snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/%s.sock",
                  TEST_RUN_DIR, svc);
-        int cfd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+        int cfd = socket(AF_UNIX, TEST_UDS_SOCK_TYPE, 0);
         check("connect to endpoint",
               cfd >= 0 && connect(cfd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
         struct pollfd pfd = {.fd = held.listener.fd, .events = POLLIN};
@@ -2861,7 +2863,7 @@ static void test_accept_malformed_hello_payload(void)
 
     char path[256];
     build_socket_path(path, sizeof(path), svc);
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    int fd = socket(AF_UNIX, TEST_UDS_SOCK_TYPE, 0);
     check("raw client socket created", fd >= 0);
 
     if (fd >= 0) {
@@ -2918,7 +2920,7 @@ static void test_accept_incompatible_hello_version(void)
 
     char path[256];
     build_socket_path(path, sizeof(path), svc);
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    int fd = socket(AF_UNIX, TEST_UDS_SOCK_TYPE, 0);
     check("raw client socket created", fd >= 0);
 
     if (fd >= 0) {
@@ -2988,7 +2990,7 @@ static void test_accept_incompatible_hello_layout(void)
 
     char path[256];
     build_socket_path(path, sizeof(path), svc);
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    int fd = socket(AF_UNIX, TEST_UDS_SOCK_TYPE, 0);
     check("raw client socket created", fd >= 0);
 
     if (fd >= 0) {
@@ -3137,6 +3139,16 @@ static void test_receive_trailing_packet_protocol(void)
             size_t resp_payload_len;
             nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
                                                      &resp_hdr, &resp_payload, &resp_payload_len);
+#if TEST_UDS_STREAM
+            /* A stream has no packet end to check: the message completes
+             * and the trailing byte is rejected as the next packet, a
+             * truncated header once the server closes. */
+            check("trailing response message delivered",
+                  rerr == NIPC_UDS_OK && resp_payload_len == 1 &&
+                      ((const uint8_t *)resp_payload)[0] == 0xBE);
+            rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                    &resp_hdr, &resp_payload, &resp_payload_len);
+#endif
             check("trailing response packet rejected", rerr == NIPC_UDS_ERR_PROTOCOL);
         }
 
@@ -3444,6 +3456,313 @@ static void test_receive_missing_continuation(void)
 /*  Coverage: close_session(NULL)                                       */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/*  Stream-socket packet I/O (the macOS baseline; tested everywhere)   */
+/* ------------------------------------------------------------------ */
+
+static size_t encode_test_packet(uint8_t *dst, uint32_t magic,
+                                 uint32_t declared, const void *body,
+                                 size_t body_len)
+{
+    memset(dst, 0, NIPC_HEADER_LEN);
+    if (magic == NIPC_MAGIC_MSG) {
+        nipc_header_t hdr = {
+            .magic = NIPC_MAGIC_MSG, .version = NIPC_VERSION,
+            .header_len = NIPC_HEADER_LEN, .kind = NIPC_KIND_REQUEST,
+            .code = 1, .item_count = 1, .message_id = 9,
+            .payload_len = declared,
+        };
+        nipc_header_encode(&hdr, dst, NIPC_HEADER_LEN);
+    } else if (magic == NIPC_MAGIC_CHUNK) {
+        nipc_chunk_header_t chk = {
+            .magic = NIPC_MAGIC_CHUNK, .version = NIPC_VERSION,
+            .message_id = 9, .chunk_index = 1, .chunk_count = 2,
+            .chunk_payload_len = declared,
+        };
+        nipc_chunk_header_encode(&chk, dst, NIPC_HEADER_LEN);
+    } else {
+        memcpy(dst, &magic, sizeof(magic));
+    }
+    if (body_len)
+        memcpy(dst + NIPC_HEADER_LEN, body, body_len);
+    return NIPC_HEADER_LEN + body_len;
+}
+
+static void test_stream_body_len(void)
+{
+    printf("Test: Stream packet length comes from its header\n");
+    uint8_t pkt[NIPC_HEADER_LEN];
+
+    encode_test_packet(pkt, NIPC_MAGIC_MSG, 100, NULL, 0);
+    check("outer header: whole payload when it fits the packet",
+          nipc_uds_stream_body_len(pkt, 1024, 1024) == 100);
+    check("outer header: first chunk fills the packet",
+          nipc_uds_stream_body_len(pkt, 1024, 48) == 16);
+    check("outer header in a handshake: capped by the buffer",
+          nipc_uds_stream_body_len(pkt, 80, 0) == 48);
+    check("outer header: bytes past the buffer are not read",
+          nipc_uds_stream_body_len(pkt, 64, 1024) == 32);
+
+    encode_test_packet(pkt, NIPC_MAGIC_CHUNK, 7, NULL, 0);
+    check("continuation header: chunk_payload_len",
+          nipc_uds_stream_body_len(pkt, 1024, 48) == 7);
+
+    encode_test_packet(pkt, 0x12345678u, 0, NULL, 0);
+    check("unknown magic: header only",
+          nipc_uds_stream_body_len(pkt, 1024, 1024) == 0);
+}
+
+static void test_stream_packet_io(void)
+{
+    printf("Test: Stream packet send and receive\n");
+    int sv[2];
+    check("stream socketpair", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+
+    uint8_t out[NIPC_HEADER_LEN + 16];
+    uint8_t in[NIPC_HEADER_LEN + 16];
+    size_t len = 0;
+
+    /* Two packets back to back come out one at a time. */
+    size_t n1 = encode_test_packet(out, NIPC_MAGIC_MSG, 5, "hello", 5);
+    check("send outer packet",
+          nipc_uds_stream_send_iov(sv[0], out, NIPC_HEADER_LEN,
+                                   out + NIPC_HEADER_LEN, 5) == NIPC_UDS_OK);
+    uint8_t chunk[NIPC_HEADER_LEN + 3];
+    size_t n2 = encode_test_packet(chunk, NIPC_MAGIC_CHUNK, 3, "abc", 3);
+    check("send continuation packet",
+          nipc_uds_stream_send_iov(sv[0], chunk, n2, NULL, 0) == NIPC_UDS_OK);
+
+    check("receive outer packet",
+          nipc_uds_stream_recv_packet(sv[1], in, sizeof(in), 64, NULL, &len) ==
+              NIPC_UDS_OK && len == n1 && memcmp(in, out, n1) == 0);
+    check("receive continuation packet",
+          nipc_uds_stream_recv_packet(sv[1], in, sizeof(in), 64, NULL, &len) ==
+              NIPC_UDS_OK && len == n2 && memcmp(in, chunk, n2) == 0);
+
+    /* A deadline with nothing queued is a timeout, not a failure. */
+    nipc_uds_wait_t wait = nipc_uds_wait_init(1, -1);
+    check("idle stream times out",
+          nipc_uds_stream_recv_packet(sv[1], in, sizeof(in), 64, &wait, &len) ==
+              NIPC_UDS_ERR_TIMEOUT);
+
+    /* EOF inside a packet is a truncated packet. */
+    n1 = encode_test_packet(out, NIPC_MAGIC_MSG, 5, "he", 2);
+    check("send truncated packet",
+          nipc_uds_stream_send_iov(sv[0], out, n1, NULL, 0) == NIPC_UDS_OK);
+    shutdown(sv[0], SHUT_WR);
+    check("EOF inside the body is a protocol error",
+          nipc_uds_stream_recv_packet(sv[1], in, sizeof(in), 64, NULL, &len) ==
+              NIPC_UDS_ERR_PROTOCOL);
+    close(sv[0]);
+    close(sv[1]);
+
+    check("stream socketpair", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    check("send partial header",
+          nipc_uds_stream_send_iov(sv[0], out, 10, NULL, 0) == NIPC_UDS_OK);
+    shutdown(sv[0], SHUT_WR);
+    check("EOF inside the header is a protocol error",
+          nipc_uds_stream_recv_packet(sv[1], in, sizeof(in), 64, NULL, &len) ==
+              NIPC_UDS_ERR_PROTOCOL);
+    close(sv[0]);
+    close(sv[1]);
+
+    check("stream socketpair", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    close(sv[0]);
+    check("EOF between packets is a disconnect",
+          nipc_uds_stream_recv_packet(sv[1], in, sizeof(in), 64, NULL, &len) ==
+              NIPC_UDS_ERR_RECV);
+    close(sv[1]);
+}
+
+#ifdef NIPC_TEST_EINTR_WRAP
+/* A stream moves any part of the data per call and a signal may interrupt
+ * any call: one-byte transfers and EINTR must still yield whole packets. */
+static void test_stream_short_io(void)
+{
+    printf("Test: Stream packets survive one-byte transfers and EINTR\n");
+    int sv[2];
+    check("stream socketpair", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+
+    uint8_t out[NIPC_HEADER_LEN + 5];
+    uint8_t in[NIPC_HEADER_LEN + 5];
+    size_t n = encode_test_packet(out, NIPC_MAGIC_MSG, 5, "hello", 5);
+
+    /* 36 one-byte writes leave one byte for the last call; reads of more
+     * than one byte are cut to one, 31 in the header and 4 in the body. */
+    uds_short_io_set(0, n - 1);
+    uds_eintr_wrap_set(0, 2, 0);
+    check("send in one-byte writes",
+          nipc_uds_stream_send_iov(sv[0], out, NIPC_HEADER_LEN,
+                                   out + NIPC_HEADER_LEN, 5) == NIPC_UDS_OK);
+
+    uds_short_io_set(n - 2, 0);
+    uds_eintr_wrap_set(0, 0, 2);
+    size_t len = 0;
+    check("receive in one-byte reads",
+          nipc_uds_stream_recv_packet(sv[1], in, sizeof(in), 64, NULL, &len) ==
+              NIPC_UDS_OK && len == n && memcmp(in, out, n) == 0);
+    check("every injection was hit", uds_eintr_wrap_pending() == 0);
+    uds_short_io_set(0, 0);
+    uds_eintr_wrap_set(0, 0, 0);
+    close(sv[0]);
+    close(sv[1]);
+}
+#endif
+
+#if TEST_UDS_STREAM
+static void stream_server_session(nipc_uds_session_t *s, int fd)
+{
+    memset(s, 0, sizeof(*s));
+    s->fd = fd;
+    s->role = NIPC_UDS_ROLE_SERVER;
+    s->packet_size = 1024;
+    s->max_request_payload_bytes = 1024;
+    s->max_request_batch_items = 1;
+    s->max_response_payload_bytes = 1024;
+    s->max_response_batch_items = 1;
+}
+
+/* A receive that consumed part of a message cannot leave the session usable:
+ * the rest is still queued and would be read as a header. */
+static void test_stream_partial_receive_ends_reads(void)
+{
+    printf("Test: Stream receive after a partial message fails\n");
+    int sv[2];
+    check("stream socketpair", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    nipc_uds_session_t session;
+    stream_server_session(&session, sv[1]);
+
+    uint8_t buf[2048];
+    nipc_header_t hdr;
+    const void *payload;
+    size_t payload_len;
+    check("timeout before the first byte",
+          nipc_uds_receive_timeout(&session, buf, sizeof(buf), &hdr, &payload,
+                                   &payload_len, 1, -1) == NIPC_UDS_ERR_TIMEOUT);
+
+    uint8_t pkt[NIPC_HEADER_LEN + 5];
+    size_t n = encode_test_packet(pkt, NIPC_MAGIC_MSG, 5, "hello", 5);
+    check("send a whole request",
+          nipc_uds_stream_send_iov(sv[0], pkt, n, NULL, 0) == NIPC_UDS_OK);
+    check("the session still receives after a clean timeout",
+          nipc_uds_receive(&session, buf, sizeof(buf), &hdr, &payload,
+                           &payload_len) == NIPC_UDS_OK && payload_len == 5);
+
+    check("send part of a request",
+          nipc_uds_stream_send_iov(sv[0], pkt, 10, NULL, 0) == NIPC_UDS_OK);
+    check("timeout inside a message",
+          nipc_uds_receive_timeout(&session, buf, sizeof(buf), &hdr, &payload,
+                                   &payload_len, 1, -1) == NIPC_UDS_ERR_TIMEOUT);
+    check("send the rest of the request",
+          nipc_uds_stream_send_iov(sv[0], pkt + 10, n - 10, NULL, 0) == NIPC_UDS_OK);
+    check("later receives fail",
+          nipc_uds_receive(&session, buf, sizeof(buf), &hdr, &payload,
+                           &payload_len) == NIPC_UDS_ERR_RECV);
+
+    /* Sends always write whole messages, so they stay valid. */
+    nipc_header_t resp = {.kind = NIPC_KIND_RESPONSE, .code = 1,
+                          .item_count = 1, .message_id = 9};
+    check("sends still work",
+          nipc_uds_send(&session, &resp, "ok", 2) == NIPC_UDS_OK);
+    size_t len = 0;
+    check("the peer gets the whole response",
+          nipc_uds_stream_recv_packet(sv[0], buf, sizeof(buf), 1024, NULL, &len) ==
+              NIPC_UDS_OK && len == NIPC_HEADER_LEN + 2);
+
+    close(sv[0]);
+    nipc_uds_close_session(&session);
+}
+#endif
+
+#if defined(__APPLE__)
+static void bind_dir_path(char *dst, size_t len, const char *svc)
+{
+    snprintf(dst, len, "%s/%s.d", TEST_RUN_DIR, svc);
+}
+
+static bool listen_and_close(const char *svc, nipc_uds_error_t *err_out,
+                             mode_t *mode_out)
+{
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_uds_listener_t listener;
+    *err_out = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &listener);
+    if (*err_out != NIPC_UDS_OK)
+        return false;
+    char path[256];
+    build_socket_path(path, sizeof(path), svc);
+    struct stat st;
+    *mode_out = stat(path, &st) == 0 ? (st.st_mode & 0777) : 0;
+    nipc_uds_close_listener(&listener);
+    return true;
+}
+
+/* macOS binds in {service}.d/ and renames the socket into place. */
+static void test_listen_bind_dir(void)
+{
+    printf("Test: macOS listen binds through a private directory\n");
+    const char *svc = "test_bind_dir";
+    char dir[256], inner[300];
+    bind_dir_path(dir, sizeof(dir), svc);
+    snprintf(inner, sizeof(inner), "%s/s", dir);
+    cleanup_socket(svc);
+
+    nipc_uds_error_t err;
+    mode_t mode = 0;
+    struct stat st;
+    check("listen", listen_and_close(svc, &err, &mode));
+    check("socket is owner-only", mode == 0600);
+    check("bind directory removed", lstat(dir, &st) < 0 && errno == ENOENT);
+
+    /* A crashed server's leftover directory is reclaimed. */
+    check("leftover dir", mkdir(dir, 0700) == 0);
+    int fd = open(inner, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+    check("leftover socket file", fd >= 0);
+    if (fd >= 0)
+        close(fd);
+    check("listen over a leftover directory", listen_and_close(svc, &err, &mode));
+    check("leftover directory removed", lstat(dir, &st) < 0 && errno == ENOENT);
+
+    /* A non-directory at the name is junk, as at the socket name. */
+    fd = open(dir, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+    check("leftover file", fd >= 0);
+    if (fd >= 0)
+        close(fd);
+    check("listen over a leftover file", listen_and_close(svc, &err, &mode));
+    check("leftover file removed", lstat(dir, &st) < 0 && errno == ENOENT);
+
+    /* Foreign content is never deleted: listen fails instead. */
+    char other[300];
+    snprintf(other, sizeof(other), "%s/other", dir);
+    check("foreign dir", mkdir(dir, 0700) == 0);
+    fd = open(other, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+    check("foreign file", fd >= 0);
+    if (fd >= 0)
+        close(fd);
+    check("listen refuses a directory with foreign content",
+          !listen_and_close(svc, &err, &mode) && err == NIPC_UDS_ERR_SOCKET);
+    check("foreign content kept", stat(other, &st) == 0);
+    unlink(other);
+
+    /* A directory where the socket goes is foreign content too. */
+    char sub[300];
+    snprintf(sub, sizeof(sub), "%s/s", dir);
+    check("foreign subdirectory", mkdir(sub, 0700) == 0);
+    check("listen refuses a directory at the socket name",
+          !listen_and_close(svc, &err, &mode) && err == NIPC_UDS_ERR_SOCKET);
+    check("foreign subdirectory kept", stat(sub, &st) == 0 && S_ISDIR(st.st_mode));
+    rmdir(sub);
+    rmdir(dir);
+
+    /* The umask still narrows the mode, as with fchmod() on Linux. */
+    mode_t old_mask = umask(0277);
+    bool ok = listen_and_close(svc, &err, &mode);
+    umask(old_mask);
+    check("listen under umask 0277", ok);
+    check("socket mode narrowed by the umask", mode == 0400);
+    cleanup_socket(svc);
+}
+#endif
+
 static void test_close_session_null(void)
 {
     printf("Test: close_session(NULL)\n");
@@ -3471,6 +3790,15 @@ int main(void)
 #ifdef NIPC_TEST_EINTR_WRAP
     test_eintr_retried();          printf("\n");
     test_listen_keeps_process_umask(); printf("\n");
+    test_stream_short_io();        printf("\n");
+#endif
+    test_stream_body_len();        printf("\n");
+    test_stream_packet_io();       printf("\n");
+#if TEST_UDS_STREAM
+    test_stream_partial_receive_ends_reads(); printf("\n");
+#endif
+#if defined(__APPLE__)
+    test_listen_bind_dir();        printf("\n");
 #endif
     test_multi_client();           printf("\n");
     test_pipelining();             printf("\n");

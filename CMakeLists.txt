@@ -36,10 +36,9 @@ if(WIN32 OR CYGWIN OR CMAKE_SYSTEM_NAME STREQUAL "MSYS")
     set(NETIPC_WINDOWS_RUNTIME ON)
 endif()
 
-# POSIX service stack: every non-Windows system except macOS, which builds only
-# the protocol and UDS transport so far.
+# POSIX service stack: every non-Windows system.
 set(NETIPC_POSIX_RUNTIME OFF)
-if(NOT NETIPC_WINDOWS_RUNTIME AND NOT APPLE)
+if(NOT NETIPC_WINDOWS_RUNTIME)
     set(NETIPC_POSIX_RUNTIME ON)
 endif()
 
@@ -303,6 +302,9 @@ if(NOT NETIPC_WINDOWS_RUNTIME)
     add_executable(test_uds tests/fixtures/c/test_uds.c)
     target_link_libraries(test_uds PRIVATE netipc_uds netipc_protocol Threads::Threads)
     target_compile_definitions(test_uds PRIVATE NIPC_INTERNAL_TESTING=1)
+    # The stream packet helpers are internal to the transport.
+    target_include_directories(test_uds PRIVATE
+        src/libnetdata/netipc/src/transport/posix)
     if(NOT APPLE)
         # Deterministic EINTR injection; ld64 has no --wrap.
         target_sources(test_uds PRIVATE tests/fixtures/c/uds_eintr_wrap.c)

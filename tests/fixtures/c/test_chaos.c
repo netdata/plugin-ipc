@@ -25,6 +25,7 @@
 #include "netipc/netipc_uds.h"
 #include "netipc/netipc_shm.h"
 #include "test_sync.h"
+#include "uds_test_socket.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -260,7 +261,7 @@ static int raw_connect(const char *service)
     char path[256];
     snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, service);
 
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    int fd = socket(AF_UNIX, TEST_UDS_SOCK_TYPE, 0);
     if (fd < 0) return -1;
 
     struct sockaddr_un addr;

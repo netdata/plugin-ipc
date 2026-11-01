@@ -113,12 +113,70 @@ func (s *Session) ReceiveTimeout(buf []byte, timeoutMs uint32, abortCh <-chan st
 		return protocol.Header{}, nil, wrapErr(ErrBadParam, "session closed")
 	}
 
+	controlled := timeoutMs != 0 || abortCh != nil
+	if streamTransport {
+		return s.receiveStream(buf, controlled, newReceiveWait(timeoutMs, abortCh))
+	}
+
 	recv := func(dst []byte) (int, error) { return rawRecv(s.fd, dst) }
-	if timeoutMs != 0 || abortCh != nil {
+	if controlled {
 		wait := newReceiveWait(timeoutMs, abortCh)
 		recv = func(dst []byte) (int, error) { return rawRecvWithTimeout(s.fd, dst, wait) }
 	}
+	return s.receiveFraming(buf, recv, false)
+}
 
+// receiveStream receives on a stream socket. A timeout or abort before the
+// first byte leaves the stream on a packet boundary. A failure after it does
+// not: the rest of the message is still queued, so the receive side is shut
+// down and every later receive fails. Sends stay valid; they always write
+// whole messages.
+func (s *Session) receiveStream(buf []byte, controlled bool, wait receiveWait) (protocol.Header, []byte, error) {
+	var waitp *receiveWait
+	if controlled {
+		if err := pollReadableForReceive(s.fd, wait); err != nil {
+			return protocol.Header{}, nil, err
+		}
+		waitp = &wait
+	}
+	maxPayload, maxItems := s.MaxResponsePayloadBytes, s.MaxResponseBatchItems
+	if s.role == RoleServer {
+		maxPayload, maxItems = s.MaxRequestPayloadBytes, s.MaxRequestBatchItems
+	}
+	first := true
+	recv := func(dst []byte) (int, error) {
+		n, err := streamRecvSessionPacket(s.fd, dst, first, s.PacketSize, maxPayload, maxItems, waitp)
+		first = false
+		return n, err
+	}
+	hdr, payload, err := s.receiveFraming(buf, recv, true)
+	if err != nil {
+		_ = syscall.Shutdown(s.fd, syscall.SHUT_RD)
+	}
+	return hdr, payload, err
+}
+
+func propagateWaitError(err error) bool {
+	return errors.Is(err, ErrTimeout) || errors.Is(err, ErrAborted)
+}
+
+func propagateStreamError(err error) bool {
+	return propagateWaitError(err) || errors.Is(err, ErrChunk)
+}
+
+// propagateRecvError picks a top-level function, so a receive allocates no
+// closure for it.
+func propagateRecvError(stream bool) func(error) bool {
+	if stream {
+		return propagateStreamError
+	}
+	return propagateWaitError
+}
+
+// receiveFraming runs the shared message framing over recv. A stream's
+// continuation errors keep their class (a truncated chunk is ErrChunk), as
+// a SEQPACKET continuation's framing errors do.
+func (s *Session) receiveFraming(buf []byte, recv func([]byte) (int, error), stream bool) (protocol.Header, []byte, error) {
 	return framing.SessionReceive(framing.SessionReceiveConfig{
 		RoleServer:              s.role == RoleServer,
 		PacketSize:              s.PacketSize,
@@ -132,14 +190,12 @@ func (s *Session) ReceiveTimeout(buf []byte, timeoutMs uint32, abortCh <-chan st
 		Recv:                    recv,
 		EnsurePacketScratch:     ensureScratchBuf,
 		IsRecvDisconnect:        func(err error) bool { return errors.Is(err, ErrRecv) },
-		PropagateRecvError: func(err error) bool {
-			return errors.Is(err, ErrTimeout) || errors.Is(err, ErrAborted)
-		},
-		FailAllInflight:  s.failAllInflight,
-		ErrLimitExceeded: func(msg string) error { return wrapErr(ErrLimitExceeded, msg) },
-		ErrProtocol:      func(msg string) error { return wrapErr(ErrProtocol, msg) },
-		ErrChunk:         func(msg string) error { return wrapErr(ErrChunk, msg) },
-		ErrUnknownMsgID:  func(msg string) error { return wrapErr(ErrUnknownMsgID, msg) },
-		ErrRecv:          func(msg string) error { return wrapErr(ErrRecv, msg) },
+		PropagateRecvError:      propagateRecvError(stream),
+		FailAllInflight:         s.failAllInflight,
+		ErrLimitExceeded:        func(msg string) error { return wrapErr(ErrLimitExceeded, msg) },
+		ErrProtocol:             func(msg string) error { return wrapErr(ErrProtocol, msg) },
+		ErrChunk:                func(msg string) error { return wrapErr(ErrChunk, msg) },
+		ErrUnknownMsgID:         func(msg string) error { return wrapErr(ErrUnknownMsgID, msg) },
+		ErrRecv:                 func(msg string) error { return wrapErr(ErrRecv, msg) },
 	}, buf)
 }

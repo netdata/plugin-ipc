@@ -104,10 +104,10 @@ func blockingIncrementDispatch(entered func()) DispatchHandler {
 	})
 }
 
-// silentConnect opens a SOCK_SEQPACKET connection without sending HELLO.
+// silentConnect opens a transport-type connection without sending HELLO.
 func silentConnect(t *testing.T, service string) int {
 	t.Helper()
-	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+	fd, err := syscall.Socket(syscall.AF_UNIX, testSockType, 0)
 	if err != nil {
 		t.Fatalf("socket: %v", err)
 	}
@@ -124,7 +124,7 @@ func rawListener(t *testing.T, service string) int {
 	t.Helper()
 	ensureRunDir()
 	cleanupAll(service)
-	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+	fd, err := syscall.Socket(syscall.AF_UNIX, testSockType, 0)
 	if err != nil {
 		t.Fatalf("socket: %v", err)
 	}

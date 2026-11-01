@@ -535,7 +535,7 @@ static void test_typed_server_init_propagates_raw_init_error(void)
 
 static void test_internal_session_table_growth(void)
 {
-    printf("--- Internal session table growth under forced small capacity ---\n");
+    printf("--- Internal session table at its smallest valid capacity ---\n");
 
     const char *svc = "hard_growth";
     nipc_managed_server_t server;
@@ -549,21 +549,25 @@ static void test_internal_session_table_growth(void)
 
     cleanup_all(svc);
 
-    err = nipc_server_init_typed(&server, TEST_RUN_DIR, svc, &scfg, 4,
+    const int workers = 4;
+    err = nipc_server_init_typed(&server, TEST_RUN_DIR, svc, &scfg, workers,
                                  &g_service_handler);
     check("growth: server init", err == NIPC_OK);
     if (err != NIPC_OK)
         return;
 
-    nipc_session_ctx_t **shrunk = realloc(server.sessions, sizeof(*shrunk));
-    check("growth: shrink session table to 1 slot", shrunk != NULL);
+    /* The table never grows: the worker limit keeps session_count below
+     * worker_count, so worker_count slots is the smallest valid table. */
+    nipc_session_ctx_t **shrunk =
+        realloc(server.sessions, (size_t)workers * sizeof(*shrunk));
+    check("growth: shrink session table to worker_count slots", shrunk != NULL);
     if (!shrunk) {
         nipc_server_destroy(&server);
         cleanup_all(svc);
         return;
     }
     server.sessions = shrunk;
-    server.session_capacity = 1;
+    server.session_capacity = workers;
 
     test_server_use_test_timings(&server, NULL);
     pthread_create(&server_tid, NULL, (void *(*)(void *))nipc_server_run, &server);
@@ -583,11 +587,7 @@ static void test_internal_session_table_growth(void)
     observed_count = server.session_count;
     pthread_mutex_unlock(&server.sessions_lock);
 
-    /* The reaper may reclaim slots between accepts, so the table may
-     * not need to grow beyond the initial allocation.  The important
-     * invariant is that all 3 clients were served, not that the
-     * internal capacity reached a specific number. */
-    check("growth: session table expanded or reused", observed_capacity >= 1);
+    check("growth: session table kept its capacity", observed_capacity == workers);
     check("growth: server tracked three sessions", observed_count >= 3);
 
     for (int i = 0; i < 3; i++)

@@ -43,10 +43,11 @@ if [[ -x "$INTEROP_SVC_GO" ]]; then
     HAS_GO=1
 fi
 
-RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nipc_lookup_scale_interop.XXXXXX")"
+RUN_DIR="$(interop_mktemp_run_dir nipc_lookup_scale_interop)"
 
 cleanup() {
-    for pid in "${SERVER_PIDS[@]}"; do
+    # bash 3.2 treats an empty array as unset under set -u.
+    for pid in ${SERVER_PIDS[@]+"${SERVER_PIDS[@]}"}; do
         if kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
