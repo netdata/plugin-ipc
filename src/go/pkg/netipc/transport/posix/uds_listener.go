@@ -46,19 +46,19 @@ func Listen(runDir, serviceName string, config ServerConfig) (*Listener, error) 
 	// older library version).
 	stale := checkAndRecoverStale(path)
 	if stale == staleLiveServer {
-		_ = lock.Close()
+		releaseEndpointLock(lock)
 		return nil, ErrAddrInUse
 	}
 
 	fd, err := udsSocket()
 	if err != nil {
-		_ = lock.Close()
+		releaseEndpointLock(lock)
 		return nil, wrapErr(ErrSocket, err.Error())
 	}
 
 	if err := bindOwnerOnly(fd, runDir, serviceName, path); err != nil {
 		_ = syscall.Close(fd)
-		_ = lock.Close()
+		releaseEndpointLock(lock)
 		return nil, err
 	}
 
@@ -74,7 +74,7 @@ func Listen(runDir, serviceName string, config ServerConfig) (*Listener, error) 
 	if err := syscall.Listen(fd, backlog); err != nil {
 		_ = syscall.Close(fd)
 		_ = os.Remove(path)
-		_ = lock.Close()
+		releaseEndpointLock(lock)
 		return nil, wrapErr(ErrSocket, "listen: "+err.Error())
 	}
 
@@ -219,6 +219,6 @@ func (l *Listener) Close() {
 	}
 	// Release the endpoint only after its socket file is gone.
 	if lock != nil {
-		_ = lock.Close()
+		releaseEndpointLock(lock)
 	}
 }

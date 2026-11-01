@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -1100,6 +1101,39 @@ func TestListenExcludesStartingServer(t *testing.T) {
 	again, err := Listen(runDir, service, defaultServerConfig())
 	if err != nil {
 		t.Fatalf("endpoint not free after close: %v", err)
+	}
+	again.Close()
+}
+
+// A child that shares the lock's open file description (as a child forked
+// by another thread does until it execs) must not keep the endpoint once
+// the listener closes.
+func TestListenCloseReleasesLockHeldByChild(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	l, err := Listen(runDir, service, defaultServerConfig())
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	child := exec.Command("/bin/sh", "-c", "read x")
+	child.ExtraFiles = []*os.File{l.lock}
+	gate, err := child.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	if err := child.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	defer func() {
+		_ = gate.Close()
+		_ = child.Wait()
+	}()
+
+	l.Close()
+	again, err := Listen(runDir, service, defaultServerConfig())
+	if err != nil {
+		t.Fatalf("endpoint not free while the child holds the lock fd: %v", err)
 	}
 	again.Close()
 }

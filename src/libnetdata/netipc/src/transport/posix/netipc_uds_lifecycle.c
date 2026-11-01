@@ -333,6 +333,14 @@ static int acquire_endpoint_lock(const char *run_dir, const char *service_name,
     return 0;
 }
 
+/* Unlock before closing: a child forked by another thread shares the open
+ * file description until it execs, and its copy would keep the lock held. */
+static void release_endpoint_lock(int fd)
+{
+    flock(fd, LOCK_UN);
+    close(fd);
+}
+
 nipc_uds_error_t nipc_uds_listen(const char *run_dir,
                                   const char *service_name,
                                   const nipc_uds_server_config_t *config,
@@ -368,20 +376,20 @@ nipc_uds_error_t nipc_uds_listen(const char *run_dir,
      * older library version). */
     int stale = nipc_uds_check_and_recover_stale(run_dir, socket_name, path);
     if (stale == 1) {
-        close(lock_fd);
+        release_endpoint_lock(lock_fd);
         return NIPC_UDS_ERR_ADDR_IN_USE;
     }
 
     int fd = uds_socket_cloexec();
     if (fd < 0) {
-        close(lock_fd);
+        release_endpoint_lock(lock_fd);
         return NIPC_UDS_ERR_SOCKET;
     }
 
     int bind_rc = bind_owner_only_socket(fd, run_dir, service_name, path);
     if (bind_rc < 0) {
         close(fd);
-        close(lock_fd);
+        release_endpoint_lock(lock_fd);
         return bind_rc == -2 ? NIPC_UDS_ERR_PATH_TOO_LONG : NIPC_UDS_ERR_SOCKET;
     }
 
@@ -392,7 +400,7 @@ nipc_uds_error_t nipc_uds_listen(const char *run_dir,
     if (listen(fd, backlog) < 0) {
         close(fd);
         unlink(path);
-        close(lock_fd);
+        release_endpoint_lock(lock_fd);
         return NIPC_UDS_ERR_SOCKET;
     }
 
@@ -401,7 +409,7 @@ nipc_uds_error_t nipc_uds_listen(const char *run_dir,
     if (copy_cstr_checked(out->path, sizeof(out->path), path) != 0) {
         close(fd);
         unlink(path);
-        close(lock_fd);
+        release_endpoint_lock(lock_fd);
         memset(out, 0, sizeof(*out));
         out->fd = -1;
         return NIPC_UDS_ERR_PATH_TOO_LONG;
@@ -649,7 +657,7 @@ void nipc_uds_close_listener(nipc_uds_listener_t *listener)
 
     /* Release the endpoint only after its socket file is gone. */
     if (listener->has_lock) {
-        close(listener->lock_fd);
+        release_endpoint_lock(listener->lock_fd);
         listener->has_lock = false;
         listener->lock_fd = -1;
     }

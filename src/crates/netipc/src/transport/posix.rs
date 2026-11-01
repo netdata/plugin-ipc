@@ -464,7 +464,7 @@ pub struct UdsListener {
     /// `{service_name}.lock`, flock'ed for the listener's lifetime. Fields
     /// drop after `Drop::drop` removed the socket file, so the endpoint is
     /// released only once its socket file is gone.
-    _lock: std::fs::File,
+    _lock: EndpointLock,
 }
 
 /// Test-only hook run inside `UdsListener::bind` between bind() and
@@ -481,7 +481,7 @@ pub(crate) static LISTEN_HOOK: std::sync::Mutex<Option<ListenHook>> = std::sync:
 /// lock can: its holder owns the endpoint, and the kernel drops it when that
 /// process dies. The file stays on disk; removing it would let a starter
 /// that already opened it lock an orphaned inode.
-fn acquire_endpoint_lock(run_dir: &str, service_name: &str) -> Result<std::fs::File, UdsError> {
+fn acquire_endpoint_lock(run_dir: &str, service_name: &str) -> Result<EndpointLock, UdsError> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
 
@@ -497,13 +497,25 @@ fn acquire_endpoint_lock(run_dir: &str, service_name: &str) -> Result<std::fs::F
         .map_err(|e| UdsError::Socket(e.raw_os_error().unwrap_or(0)))?;
     loop {
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(file);
+            return Ok(EndpointLock(file));
         }
         match errno() {
             libc::EINTR => continue,
             libc::EWOULDBLOCK => return Err(UdsError::AddrInUse),
             e => return Err(UdsError::Socket(e)),
         }
+    }
+}
+
+/// The held endpoint lock. Dropping it unlocks before closing: a child
+/// forked by another thread shares the open file description until it
+/// execs, and its copy would keep the lock held.
+struct EndpointLock(std::fs::File);
+
+impl Drop for EndpointLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
     }
 }
 

@@ -593,6 +593,46 @@ fn test_listen_excludes_starting_server() {
     cleanup_socket(&svc);
 }
 
+// A child forked by another thread shares the lock's open file description
+// until it execs. Closing the listener must still free the endpoint.
+#[test]
+fn test_listen_close_releases_lock_held_by_child() {
+    ensure_run_dir();
+    let svc = unique_service("rs_listen_child_lock");
+    cleanup_socket(&svc);
+    let first = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("listen");
+
+    let mut gate = [0 as libc::c_int; 2];
+    assert_eq!(unsafe { libc::pipe(gate.as_mut_ptr()) }, 0, "pipe");
+    let child = unsafe { libc::fork() };
+    if child == 0 {
+        // Keep every inherited fd until the parent closes the pipe. Only
+        // async-signal-safe calls after fork.
+        unsafe {
+            libc::close(gate[1]);
+            let mut c = 0u8;
+            while libc::read(gate[0], (&raw mut c).cast(), 1) < 0 && errno() == libc::EINTR {}
+            libc::_exit(0);
+        }
+    }
+    assert!(child > 0, "fork");
+    unsafe { libc::close(gate[0]) };
+
+    drop(first);
+    let again = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config());
+    unsafe {
+        libc::close(gate[1]);
+        libc::waitpid(child, std::ptr::null_mut(), 0);
+    }
+    assert!(
+        again.is_ok(),
+        "endpoint free while the child holds the lock fd: {:?}",
+        again.as_ref().map(|_| ())
+    );
+    drop(again);
+    cleanup_socket(&svc);
+}
+
 #[test]
 fn test_listen_socket_owner_only() {
     use std::os::unix::fs::PermissionsExt;

@@ -60,6 +60,14 @@ func acquireEndpointLock(runDir, serviceName string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), lockPath), nil
 }
 
+// releaseEndpointLock unlocks before closing: a child forked by another
+// thread shares the open file description until it execs, and its copy
+// would keep the lock held.
+func releaseEndpointLock(lock *os.File) {
+	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	_ = lock.Close()
+}
+
 func checkAndRecoverStale(path string) staleResult {
 	_, err := os.Stat(path)
 	if err != nil {

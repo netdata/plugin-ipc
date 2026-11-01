@@ -300,7 +300,11 @@ failures.
   unlink a live endpoint.
 - The listener holds the lock for its whole life and releases it after
   it unlinks the socket at close. The kernel releases it when the
-  process dies. The lock file itself is never deleted: deleting it would
+  process dies.
+- Every release, at close and on a failed listen, unlocks (`LOCK_UN`)
+  before it closes the fd. A child forked by another thread shares the
+  lock's open file description until it execs, so a plain close would
+  leave the lock held by the child's copy. The lock file itself is never deleted: deleting it would
   let a server that already opened the old file and a server that
   creates a new one both hold "the" lock.
 - All three implementations use the same lock file, so C, Rust and Go

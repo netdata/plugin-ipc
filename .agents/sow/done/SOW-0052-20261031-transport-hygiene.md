@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: completed 2026-10-31; the SHM-timing item moved to SOW-0055 (decision 4).
+Sub-state: regression of 2026-11-01 fixed and validated (see Regression - 2026-11-01). Originally completed 2026-10-31; the SHM-timing item moved to SOW-0055 (decision 4).
 
 ## Requirements
 
@@ -275,4 +275,66 @@ Artifact maintenance gate:
 
 ## Regression Log
 
-None yet.
+- 2026-11-01: endpoint lock held after close by a forked child; fixed the same day. See Regression - 2026-11-01.
+
+## Regression - 2026-11-01
+
+What broke:
+
+- The Outcome claims "two POSIX servers that start at once for one service can no longer both claim the endpoint", and the endpoint is free again once its listener closes. Rust `transport::posix::tests::test_listen_excludes_starting_server` fails intermittently on Linux with "endpoint free after close: AddrInUse" (`src/crates/netipc/src/transport/posix_tests.rs:591`): a listen right after the previous listener closed finds the lock still held.
+
+Evidence:
+
+- Seen in SOW-0049 validation: once under Rust 1.91 (6 reruns passed), once under stable (2026-11-01, 392 passed, 1 failed).
+- Root-cause model: flock locks belong to the open file description. A child forked by another thread (here `std::process::Command` in a concurrent robustness test, `src/crates/netipc/src/service/raw_robustness_unix_tests.rs:131`) shares that description between fork and exec. `O_CLOEXEC` closes its copy only at exec, so closing the listener's lock fd in that window leaves the lock held until the child execs.
+- Probe (2026-11-01, Linux): lock a file, fork a child that keeps the fd, then close it in the parent: a new `flock(LOCK_EX|LOCK_NB)` fails (held). With `flock(LOCK_UN)` before the close, it succeeds (free).
+- All three languages close the lock without unlocking: C `nipc_uds_close_listener` (`src/libnetdata/netipc/src/transport/posix/netipc_uds_lifecycle.c:651-655`) and the listen error paths (`:371-404`); Rust drops the `File` (`src/crates/netipc/src/transport/posix.rs:467`); Go `lock.Close()` (`src/go/pkg/netipc/transport/posix/uds_listener.go:49-77`, `:208-211`).
+- Production reach: any multi-threaded server process that spawns children while it closes and reopens a listener. The window is fork-to-exec, so the effect is a transient `AddrInUse` on the next listen.
+
+Why the previous validation missed it:
+
+- The race needs a concurrent fork inside a microsecond window; SOW-0052's runs did not hit it, and no test forces it.
+
+Repair plan (user decision 2026-11-01: option A, "4a"):
+
+- Release the endpoint lock with an explicit `flock(LOCK_UN)` before closing its fd, on every release path, in C, Rust and Go. An unlock releases the lock on the open file description, so a forked child's copy of the fd no longer keeps it.
+- Rejected: serializing process spawns in tests (hides the production race) and retrying listen on `AddrInUse` (sleeps and retries in production; delays real conflicts).
+- Tests, deterministic in each language: a child process that holds an inherited copy of the lock fd while the listener closes; a new listen must succeed at once.
+- Spec: `docs/level1-posix-uds.md` "Endpoint lock" states the explicit unlock.
+- Performance assessment: listener close and listen error paths only; nothing on the established-session path, so no benchmark run.
+
+Implementation:
+
+- C: `release_endpoint_lock()` (`flock(LOCK_UN)` then `close`) in `src/libnetdata/netipc/src/transport/posix/netipc_uds_lifecycle.c`, used by `nipc_uds_close_listener` and all four listen error paths.
+- Rust: `EndpointLock` wraps the lock `File` and unlocks in `Drop` (`src/crates/netipc/src/transport/posix.rs`), so the listener drop and every early return in `UdsListener::bind` release it the same way.
+- Go: `releaseEndpointLock()` (`src/go/pkg/netipc/transport/posix/uds_stale.go`), used by `Listener.Close` and all four listen error paths (`uds_listener.go`).
+- Spec: `docs/level1-posix-uds.md` "Endpoint lock" states the unlock-before-close rule.
+
+Validation:
+
+- Reproduction tests, one per language, each a child process holding a copy of the lock's open file description while the listener closes:
+  - C `test_listen_close_releases_lock_held_by_child` (`tests/fixtures/c/test_uds.c`, fork without exec, child blocks on a pipe);
+  - Rust `test_listen_close_releases_lock_held_by_child` (`transport/posix_tests.rs`, same with `libc::fork`, async-signal-safe calls only in the child);
+  - Go `TestListenCloseReleasesLockHeldByChild` (`transport/posix/uds_more_edge_test.go`, the lock fd handed to `/bin/sh -c 'read x'` through `ExtraFiles`; Go cannot fork without exec).
+  - Each fails without the unlock ("endpoint free while the child holds the lock fd": C FAIL, Rust `Err(AddrInUse)`, Go "address already in use by live server") and passes with it. No sleeps: the child is released by closing its pipe.
+- Linux x86_64: CTest 32/32 (1 skipped, root-only, unaffected), `test_uds` 230/230, every POSIX interop script, `cargo test` stable and 1.91.0 (394 passed each), `cargo fmt --check` with both toolchains, CI clippy gate for Linux and `x86_64-pc-windows-gnu`, `go vet` and `go test ./...`. The full Rust lib suite passed 20 runs in a row; before the fix, `test_listen_excludes_starting_server` failed about once in seven.
+- macOS test host: CTest 24/24, `cargo test` 325 passed, `go test ./...` ok, the five macOS interop scripts pass.
+- FreeBSD 14.3: CTest 24/24, `cargo test` 324 passed, `go test ./...` ok, the same five interop scripts pass.
+- Netdata Linux targets (`tests/run-linux-target.sh <target>`, C, Rust, Go and interop): all 9 pass (x86_64-musl, i386-gnu, i386-musl, armv7-gnu, armv7-gnu-time64, armv7-musl, armv6-musl, aarch64-gnu, aarch64-musl), each started after memory PSI full avg10 stayed under 5% for a minute (peak during the runs: 0.63).
+- Windows: not run. The changed code is POSIX-only (`netipc_uds_lifecycle.c`, `transport/posix.rs`, Go `transport/posix`, none built on Windows); the Windows clippy gate compiles the crate for that target.
+- Performance assessment: listener close and failed-listen paths only; nothing on the established-session path changes, so no benchmark run.
+- Same-failure search: `flock` is used only for the endpoint lock (`grep -rn flock` over `src/`); no other lock fd in C, Rust or Go is closed without an unlock.
+- Sensitive data gate: code paths, test names and command output only; hosts named by role.
+
+Artifact updates:
+
+- AGENTS.md: no change; no workflow or command changed.
+- Runtime project skills: no change; vendoring preflight is unaffected.
+- Specs: `docs/level1-posix-uds.md` "Endpoint lock"; `.agents/sow/specs/` holds no lock rule.
+- End-user/operator docs: no change; README and the integrator skill do not describe lock release.
+- End-user/operator skills: `docs/netipc-integrator-skill.md` unaffected (no lock detail).
+- SOW lifecycle: regression fixed; SOW back to `completed` in `done/`.
+
+Lessons:
+
+- flock locks follow the open file description, and `O_CLOEXEC` closes only at exec. A lock that must end at close needs an explicit unlock in any process that may fork from another thread.

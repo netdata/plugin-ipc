@@ -2674,6 +2674,48 @@ static void test_listen_excludes_starting_server(void)
     cleanup_socket(svc);
 }
 
+/* A child forked by another thread shares the lock's open file description
+ * until it execs. Closing the listener must still free the endpoint. */
+static void test_listen_close_releases_lock_held_by_child(void)
+{
+    printf("Test: close frees the endpoint while a forked child holds the lock fd\n");
+    const char *svc = "test_listen_child_lock";
+    cleanup_socket(svc);
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_uds_listener_t first;
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &first);
+    check("first listen ok", err == NIPC_UDS_OK);
+    if (err != NIPC_UDS_OK)
+        return;
+
+    int gate[2];
+    check("pipe", pipe(gate) == 0);
+    pid_t child = fork();
+    if (child == 0) {
+        /* Keep every inherited fd until the parent closes the pipe. */
+        char c;
+        close(gate[1]);
+        while (read(gate[0], &c, 1) < 0 && errno == EINTR)
+            ;
+        _exit(0);
+    }
+    check("child forked", child > 0);
+    close(gate[0]);
+
+    nipc_uds_close_listener(&first);
+    nipc_uds_listener_t second;
+    err = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &second);
+    check("endpoint free while the child holds the lock fd", err == NIPC_UDS_OK);
+    if (err == NIPC_UDS_OK)
+        nipc_uds_close_listener(&second);
+
+    close(gate[1]);
+    if (child > 0)
+        waitpid(child, NULL, 0);
+    cleanup_socket(svc);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Coverage: listen on invalid path (bind failure)                     */
 /* ------------------------------------------------------------------ */
@@ -3831,6 +3873,7 @@ int main(void)
     test_receive_unknown_message_id(); printf("\n");
     test_stale_live_server();      printf("\n");
     test_listen_excludes_starting_server(); printf("\n");
+    test_listen_close_releases_lock_held_by_child(); printf("\n");
     test_listen_bind_failure();    printf("\n");
     test_batch_corrupt_dir();      printf("\n");
     test_connect_malformed_hello_ack(); printf("\n");
