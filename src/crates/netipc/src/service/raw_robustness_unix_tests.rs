@@ -54,7 +54,7 @@ fn blocking_increment_dispatch(entered: impl Fn() + Send + Sync + 'static) -> Di
     }))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn shm_files(service: &str) -> Vec<String> {
     let prefix = format!("{service}-");
     std::fs::read_dir(TEST_RUN_DIR)
@@ -167,7 +167,7 @@ fn robustness_helper_process() {
     };
     let (mode, service) = spec.split_once(':').expect("helper spec");
     match mode {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         "shm_client" => {
             let mut client = increment_client(service, shm_client_config());
             connect_ready(&mut client);
@@ -181,7 +181,7 @@ fn robustness_helper_process() {
         "shm_server" | "uds_server" => {
             let handler = blocking_increment_dispatch(|| println!("HELPER_HANDLER_ENTERED"));
             let config = match mode {
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 "shm_server" => shm_server_config(),
                 _ => server_config(),
             };
@@ -200,7 +200,7 @@ fn robustness_helper_process() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn test_robust_shm_sessions_released_after_clean_close() {
     let svc = unique_service("rs_rob_shm_clean");
     let server = start_server(
@@ -232,7 +232,7 @@ fn test_robust_shm_sessions_released_after_clean_close() {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn test_robust_shm_sessions_released_after_client_crash() {
     let svc = unique_service("rs_rob_shm_crash");
     let server = start_server(
@@ -708,7 +708,7 @@ fn large_round_trip(packet_size: u32) -> Result<(), NipcError> {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn test_robust_shm_client_notices_crashed_server() {
     client_notices_crashed_server(true);
 }
@@ -732,7 +732,7 @@ fn client_notices_crashed_server(shm: bool) {
     let (call_tx, call_rx) = mpsc::channel();
     let caller = thread::spawn(move || {
         let config = match shm {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             true => shm_client_config(),
             _ => client_config(),
         };
@@ -774,7 +774,7 @@ fn client_notices_crashed_server(shm: bool) {
 // attach retry budget (5 s) on a region that will never appear, and must keep
 // SHM enabled for its next connect.
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn test_robust_shm_attach_stops_when_server_closes_session() {
     let svc = unique_service("rs_rob_attach_refused");
     let handler = increment_dispatch(Arc::new(|v| Some(v + 1)));

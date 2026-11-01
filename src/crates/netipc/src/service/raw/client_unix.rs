@@ -1,10 +1,10 @@
 use super::client::{ClientState, RawClient};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use super::common::CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::protocol::{PROFILE_SHM_FUTEX, PROFILE_SHM_HYBRID};
 use crate::transport::posix::UdsSession;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::transport::shm::ShmContext;
 
 impl RawClient {
@@ -25,12 +25,12 @@ impl RawClient {
             Some(&abort),
         ) {
             Ok(session) => {
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 let selected_profile = session.selected_profile;
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 let session_id = session.session_id;
 
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 {
                     if selected_profile == PROFILE_SHM_HYBRID
                         || selected_profile == PROFILE_SHM_FUTEX

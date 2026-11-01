@@ -47,11 +47,12 @@ const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod stream;
 
-/// Profiles this platform can provide. POSIX SHM needs Linux futexes, so
-/// other POSIX systems offer and accept the baseline profile only.
-#[cfg(target_os = "linux")]
+/// Profiles this platform can provide. POSIX SHM needs a futex-style wait
+/// (Linux futex, FreeBSD `_umtx_op`), so other POSIX systems offer and
+/// accept the baseline profile only.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 const PLATFORM_PROFILES: u32 = u32::MAX;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 const PLATFORM_PROFILES: u32 = PROFILE_BASELINE;
 
 // ---------------------------------------------------------------------------
@@ -1285,7 +1286,11 @@ fn check_and_recover_stale(path: &str) -> StaleResult {
             match std::fs::remove_file(path) {
                 Ok(()) => StaleResult::Stale,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => StaleResult::NotExist,
-                Err(err) if err.raw_os_error() == Some(libc::EISDIR) => {
+                // Unlinking a directory fails with EISDIR on Linux and
+                // EPERM on FreeBSD and macOS.
+                Err(err)
+                    if matches!(err.raw_os_error(), Some(libc::EISDIR) | Some(libc::EPERM)) =>
+                {
                     match std::fs::remove_dir(path) {
                         Ok(()) => StaleResult::Stale,
                         Err(_) => StaleResult::LiveServer,

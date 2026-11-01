@@ -188,7 +188,7 @@ static void join_rest(pthread_t tid)
     abort();
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 static int count_shm_files(const char *service)
 {
     DIR *d = opendir(TEST_RUN_DIR);
@@ -410,7 +410,7 @@ static int raw_listener(const char *service)
 /*  Crash helper (child process)                                       */
 /* ------------------------------------------------------------------ */
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 static int helper_shm_client(const char *service)
 {
     nipc_client_config_t ccfg = client_config(true);
@@ -512,7 +512,7 @@ static pid_t spawn_helper(const char *mode, const char *service, int *out_fd)
 /*  K1: SHM sessions released after the client leaves                  */
 /* ------------------------------------------------------------------ */
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 static void test_shm_sessions_released_after_clean_close(void)
 {
     printf("K1: SHM sessions released after clean close\n");
@@ -539,7 +539,7 @@ static void test_shm_sessions_released_after_clean_close(void)
 }
 #endif
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 static void test_shm_sessions_released_after_client_crash(void)
 {
     printf("K1: SHM sessions released after client crash\n");
@@ -1010,7 +1010,7 @@ static void client_notices_crashed_server(bool shm)
     cleanup_all(svc);
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 static void test_shm_client_notices_crashed_server(void)
 {
     printf("N5: SHM client notices a crashed server before its timeout\n");
@@ -1024,7 +1024,7 @@ static void test_uds_client_reports_crashed_server_as_disconnected(void)
     client_notices_crashed_server(false);
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 /* A server at worker capacity completes the handshake, then closes the
  * session and removes the prepared SHM region. The client must not spend
  * its attach retry budget (5 s) on a region that will never appear, and
@@ -1220,7 +1220,7 @@ static void test_default_packet_size_carries_large_message(void)
 
 int main(int argc, char **argv)
 {
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     if (argc == 3 && strcmp(argv[1], "--helper-shm-client") == 0)
         return helper_shm_client(argv[2]);
 #endif
@@ -1237,7 +1237,7 @@ int main(int argc, char **argv)
     mkdir(TEST_RUN_DIR, 0700);
     setvbuf(stdout, NULL, _IOLBF, 0);
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     test_shm_sessions_released_after_clean_close();
     test_shm_sessions_released_after_client_crash();
 #endif
@@ -1251,11 +1251,11 @@ int main(int argc, char **argv)
     test_call_honors_timeout_longer_than_100ms();
     test_shutdown_not_blocked_by_non_reading_client();
     test_stop_before_run_is_honored();
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     test_shm_client_notices_crashed_server();
 #endif
     test_uds_client_reports_crashed_server_as_disconnected();
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     test_shm_attach_stops_when_server_closes_session();
 #endif
     test_ipc_fds_are_cloexec();

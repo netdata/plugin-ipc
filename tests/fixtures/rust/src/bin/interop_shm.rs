@@ -7,13 +7,13 @@
 //!   interop_shm client <run_dir> <service_name>
 //!     Attaches to SHM, sends 1 message, verifies echo, exits 0 on success.
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 fn main() {
-    eprintln!("interop_shm is only supported on Linux");
+    eprintln!("interop_shm is only supported on Linux and FreeBSD");
     std::process::exit(1);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod linux_only {
 
     use netipc::protocol::{self, Header};
@@ -170,7 +170,7 @@ mod linux_only {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn main() {
     linux_only::main();
 }

@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || (freebsd && (amd64 || 386))
 
 // Simple server/client for cross-language SHM interop tests.
 //

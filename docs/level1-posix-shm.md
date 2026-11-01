@@ -3,14 +3,29 @@
 ## Purpose
 
 This document defines the shared memory region layout, synchronization
-protocol, and lifecycle rules for the POSIX SHM transport on Linux.
+protocol, and lifecycle rules for the POSIX SHM transport on Linux and
+FreeBSD.
 All implementations (C, Rust, Go) must use this exact layout and
 synchronization protocol to interoperate on the same shared region.
 
-This transport is Linux-only. FreeBSD and macOS fall back to UDS
-baseline. Outside Linux the C and Go SHM APIs remain available and return
-an "unsupported" error (`NIPC_SHM_ERR_UNSUPPORTED`, `ErrShmUnsupported`);
-the Rust crate compiles the POSIX SHM module only on Linux.
+This transport runs on Linux and FreeBSD. C and Rust support it on every
+FreeBSD architecture; Go supports it on FreeBSD amd64 and 386 only. macOS,
+and Go on other FreeBSD architectures, fall back to UDS baseline. Where SHM
+is not supported the C and Go SHM APIs remain available and return an
+"unsupported" error (`NIPC_SHM_ERR_UNSUPPORTED`, `ErrShmUnsupported`); the
+Rust crate compiles the POSIX SHM module only on Linux and FreeBSD.
+
+The platforms differ only in the system calls behind three operations; the
+region layout and the protocol are the same:
+
+| Operation | Linux | FreeBSD |
+|---|---|---|
+| Wait on a signal word | `futex(FUTEX_WAIT)` | `_umtx_op(UMTX_OP_WAIT_UINT)` |
+| Wake waiters | `futex(FUTEX_WAKE)` | `_umtx_op(UMTX_OP_WAKE)` |
+| Reserve the region file | `fallocate(fd, 0, 0, size)` | `posix_fallocate(fd, 0, size)` |
+
+On FreeBSD the shared (not `_PRIVATE`) umtx operations are required: they
+key on the mapped object, so a wake reaches waiters in other processes.
 
 ## Region file path
 
@@ -26,7 +41,8 @@ Each session gets its own SHM region. Multiple concurrent clients each
 have independent regions with independent request/response areas,
 sequence numbers, and futex signal words.
 
-Created by the server via `open` + native Linux `fallocate` on a filesystem path.
+Created by the server via `open` + a reserving allocation (Linux `fallocate`,
+FreeBSD `posix_fallocate`) on a filesystem path.
 The complete range is allocated before it is mapped, so capacity exhaustion is
 reported as a normal creation error instead of a later `SIGBUS` during mapped access.
 The client opens the same path after the handshake negotiates an SHM
@@ -177,7 +193,14 @@ kernel-assisted blocking:
 3. The publisher always calls `futex(FUTEX_WAKE)` after advancing the
    sequence, regardless of whether the consumer is spinning or waiting.
 
-Futex timeout arguments must use the selected Linux syscall's ABI, not assume
+On FreeBSD the wait is `_umtx_op(UMTX_OP_WAIT_UINT)` with a relative
+`struct _umtx_time` on `CLOCK_MONOTONIC` (its size passed in the `uaddr`
+argument), and the wake is `_umtx_op(UMTX_OP_WAKE)`. A wait whose expected
+value is already stale returns success at once, where a Linux futex returns
+`EAGAIN`. Both are spurious-wakeup-safe because the consumer re-checks the
+sequence number after every return.
+
+Linux futex timeout arguments must use the selected syscall's ABI, not assume
 that libc's `struct timespec` has the same layout. In particular, 32-bit libc
 may use 64-bit seconds while the legacy syscall expects two 32-bit fields.
 All receive budgets are unsigned 32-bit milliseconds: their relative seconds
@@ -219,7 +242,9 @@ the handshake.
 2. Create the file via `open(O_RDWR | O_CREAT | O_EXCL, 0600)`.
    `O_EXCL` ensures no collision with an existing region.
 3. Allocate the required size (header + request area + response area) with
-   native Linux `fallocate(fd, 0, 0, size)`. Retry `EINTR`; any other failure
+   native Linux `fallocate(fd, 0, 0, size)` or FreeBSD
+   `posix_fallocate(fd, 0, size)` (which returns its error number instead of
+   setting `errno`). Retry `EINTR`; any other failure
    aborts SHM preparation, closes and unlinks the new region, and reports the
    allocation-stage transport error. Do not fall back to sparse `ftruncate`
    or an allocation mechanism without the same reservation guarantee.
@@ -237,6 +262,13 @@ allocation-stage error (`NIPC_SHM_ERR_ALLOCATE`, `ShmError::Allocate`, or
 in their error values. Managed services remove SHM from that session's negotiation and
 continue over baseline when baseline is configured. An explicitly SHM-only service has
 no fallback transport and may reject or retry the session.
+
+FreeBSD ZFS does not support `posix_fallocate` and rejects it with `EINVAL`, so
+a server whose run directory is on ZFS (for example Netdata's default
+`/var/run/netdata` on a ZFS-root install) never prepares SHM and serves every
+session over baseline. tmpfs and UFS reserve the space and report exhaustion as
+`ENOSPC`. To get SHM on such a system, point the run directory at tmpfs or UFS
+(Netdata: `NETDATA_RUN_DIR`).
 
 Linux runtime sandboxes must allow the `fallocate` system call or arrange for it to
 return an ordinary error such as `EPERM`, `ENOSYS`, or `EOPNOTSUPP`. NetIPC can convert

@@ -1,5 +1,5 @@
 use super::*;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::protocol::PROFILE_SHM_FUTEX;
 use crate::protocol::{CgroupsBuilder, NipcError, PROFILE_BASELINE};
 use std::sync::Arc;
@@ -55,7 +55,7 @@ fn client_config() -> ClientConfig {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn shm_server_config() -> ServerConfig {
     ServerConfig {
         supported_profiles: PROFILE_BASELINE | PROFILE_SHM_FUTEX,
@@ -67,7 +67,7 @@ fn shm_server_config() -> ServerConfig {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn shm_client_config() -> ClientConfig {
     ClientConfig {
         supported_profiles: PROFILE_BASELINE | PROFILE_SHM_FUTEX,
@@ -160,7 +160,7 @@ fn test_snapshot_round_trip_unix() {
     assert_eq!(item0.path.as_bytes(), b"/sys/fs/cgroup/docker/abc123");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_snapshot_round_trip_shm_unix() {
     let service = unique_service("snapshot_shm");

@@ -1,11 +1,12 @@
-//go:build unix && !linux
+//go:build unix && !linux && !(freebsd && (amd64 || 386))
 
 package posix
 
 import "github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 
 // platformProfiles limits the handshake to the baseline profile: POSIX SHM
-// needs Linux futexes.
+// needs a futex-style wait (Linux futex, FreeBSD _umtx_op), and Go on
+// FreeBSD provides it only on amd64 and 386.
 const platformProfiles = protocol.ProfileBaseline
 
 // ShmContext is a handle to a shared memory region. Without SHM support no

@@ -29,6 +29,8 @@
 #include <unistd.h>
 #if defined(__linux__)
 #include <linux/futex.h>
+#elif defined(__FreeBSD__)
+#include <sys/umtx.h>
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -185,7 +187,7 @@ static void cleanup_all(const char *service)
     cleanup_shm(service);
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 static void publish_raw_shm_message(nipc_shm_ctx_t *ctx,
                                     const void *msg,
                                     size_t copy_len,
@@ -215,7 +217,11 @@ static void publish_raw_shm_message(nipc_shm_ctx_t *ctx,
     __atomic_store_n(len_ptr, published_len, __ATOMIC_RELEASE);
     __atomic_add_fetch(seq_ptr, 1, __ATOMIC_RELEASE);
     __atomic_add_fetch(signal_ptr, 1, __ATOMIC_RELEASE);
+#if defined(__linux__)
     syscall(SYS_futex, signal_ptr, FUTEX_WAKE, 1, NULL, NULL, 0);
+#else
+    _umtx_op(signal_ptr, UMTX_OP_WAKE, 1, NULL, NULL);
+#endif
 
     if (ctx->role == NIPC_SHM_ROLE_CLIENT)
         ctx->local_req_seq++;
@@ -770,7 +776,7 @@ static void start_raw_lookup_partial_disconnect(
     (void)test_flag_wait_any(&ctx->ready, &ctx->done);
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 static nipc_server_config_t default_shm_service_server_config(void)
 {
     return (nipc_server_config_t){
@@ -3208,7 +3214,7 @@ static void test_apps_lookup_rejects_mixed_generation_retry(void)
     cleanup_all(svc);
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 static void test_cgroups_lookup_call_shm(void)
 {
     printf("Test 3g: Typed cgroups lookup call over SHM/futex\n");
@@ -5701,7 +5707,7 @@ static void test_non_request_terminates_session(void)
     cleanup_all(svc);
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 /* ------------------------------------------------------------------ */
 /*  SHM-mode snapshot service coverage                                 */
 /* ------------------------------------------------------------------ */
@@ -6262,7 +6268,7 @@ static void test_send_failure_with_live_peer_is_transport(void)
     cleanup_all(service);
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 /* ------------------------------------------------------------------ */
 /*  Coverage: SHM server rejects malformed raw requests                */
 /* ------------------------------------------------------------------ */
@@ -7240,7 +7246,7 @@ static void test_client_init_defaults_and_truncation(void)
     nipc_client_close(&client);
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 /* ------------------------------------------------------------------ */
 /*  Coverage: negotiated SHM obstruction rejects the session            */
 /* ------------------------------------------------------------------ */
@@ -7429,7 +7435,7 @@ int main(void)
     test_lookup_logical_limits(); printf("\n");
     test_cgroups_lookup_rejects_mixed_generation_retry(); printf("\n");
     test_apps_lookup_rejects_mixed_generation_retry(); printf("\n");
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     test_cgroups_lookup_call_shm(); printf("\n");
     test_apps_lookup_call_shm();   printf("\n");
     test_shm_lookup_session_closes_after_client_disconnect(); printf("\n");
@@ -7453,12 +7459,12 @@ int main(void)
     test_status_reporting();       printf("\n");
     test_graceful_drain();         printf("\n");
     test_non_request_terminates_session(); printf("\n");
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     test_shm_l2_service();         printf("\n");
     test_shm_client_rejects_malformed_responses(); printf("\n");
 #endif
     test_send_failure_with_live_peer_is_transport(); printf("\n");
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     test_shm_server_rejects_malformed_requests(); printf("\n");
     test_shm_request_resize_retry(); printf("\n");
     test_shm_response_resize_retry(); printf("\n");
@@ -7482,7 +7488,7 @@ int main(void)
     test_server_init_long_strings();    printf("\n");
     test_server_init_worker_floor_and_long_run_dir(); printf("\n");
     test_client_init_defaults_and_truncation(); printf("\n");
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     test_shm_negotiation_falls_back_to_baseline_on_obstructed_region(); printf("\n");
     test_shm_allocation_failure_falls_back_to_working_baseline(); printf("\n");
     test_client_shm_attach_failure_falls_back_to_baseline(); printf("\n");

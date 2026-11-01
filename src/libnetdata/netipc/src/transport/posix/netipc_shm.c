@@ -10,19 +10,21 @@
 #endif
 
 /*
- * netipc_shm.c - L1 POSIX SHM transport (Linux only).
+ * netipc_shm.c - L1 POSIX SHM transport (Linux and FreeBSD).
  *
- * Shared memory data plane with spin+futex synchronization.
+ * Shared memory data plane with spin+futex synchronization (FreeBSD:
+ * _umtx_op wait/wake on the same signal words).
  * Uses the same wire envelope as UDS -- higher levels are unaware
  * of the underlying transport.
  */
 
 #include "netipc/netipc_shm.h"
 
-#if !defined(__linux__)
+#if !defined(__linux__) && !defined(__FreeBSD__)
 
-/* POSIX SHM needs Linux futexes. The handshake never selects an SHM profile
- * on other systems, so these entry points only report that. */
+/* POSIX SHM needs a futex-style wait/wake (Linux futex, FreeBSD _umtx_op).
+ * The handshake never selects an SHM profile on other systems, so these
+ * entry points only report that. */
 
 nipc_shm_error_t nipc_shm_server_create(const char *run_dir,
                                         const char *service_name,
@@ -88,7 +90,7 @@ void nipc_shm_test_fault_set(nipc_shm_test_fault_site_t site,
 void nipc_shm_test_fault_clear(void) {}
 #endif
 
-#else /* __linux__ */
+#else /* __linux__ || __FreeBSD__ */
 
 #include <dirent.h>
 #include <errno.h>
@@ -105,7 +107,11 @@ void nipc_shm_test_fault_clear(void) {}
 #include <sys/syscall.h>
 #include <sys/types.h>
 
+#if defined(__linux__)
 #include <linux/futex.h>
+#else
+#include <sys/umtx.h>
+#endif
 
 /* ------------------------------------------------------------------ */
 /*  Internal helpers                                                   */
@@ -193,12 +199,14 @@ static bool stale_check_unavailable(int err)
     return err == EMFILE || err == ENFILE;
 }
 
-/* Remove a junk entry at an endpoint name; directories are junk too. */
+/* Remove a junk entry at an endpoint name; directories are junk too.
+ * Unlinking a directory fails with EISDIR on Linux and EPERM on FreeBSD. */
 static int unlink_stale_name(int dir_fd, const char *name)
 {
     if (unlinkat(dir_fd, name, 0) == 0 || errno == ENOENT)
         return 0;
-    if (errno == EISDIR && unlinkat(dir_fd, name, AT_REMOVEDIR) == 0)
+    if ((errno == EISDIR || errno == EPERM) &&
+        unlinkat(dir_fd, name, AT_REMOVEDIR) == 0)
         return 0;
     return -1;
 }
@@ -215,6 +223,7 @@ static int open_run_dir_fd(const char *run_dir)
     return fd;
 }
 
+#if defined(__linux__)
 /* Use the kernel ABI, not libc's timespec (which can use time64 on a
  * legacy 32-bit syscall ABI). All receive budgets are uint32_t milliseconds,
  * so their relative seconds fit even the legacy signed 32-bit field.
@@ -242,6 +251,46 @@ static int futex_wait(uint32_t *addr, uint32_t expected,
     return (int)syscall(NIPC_SYS_FUTEX, addr, FUTEX_WAIT, expected,
                        timeout ? kernel_timeout : NULL, NULL, 0);
 }
+
+/* Reserve the whole region; 0 on success, -1 with errno on failure. */
+static int shm_allocate(int fd, off_t size)
+{
+    return fallocate(fd, 0, 0, size);
+}
+#else
+/* The shared (not _PRIVATE) operations key on the mapped object, so they
+ * cross processes. A wait whose expected value is already stale returns 0,
+ * where a Linux futex returns EAGAIN; callers re-check either way. */
+static int futex_wake(uint32_t *addr, int count)
+{
+    return _umtx_op(addr, UMTX_OP_WAKE, count, NULL, NULL);
+}
+
+static int futex_wait(uint32_t *addr, uint32_t expected,
+                      const struct timespec *timeout)
+{
+    struct _umtx_time t;
+    if (!timeout)
+        return _umtx_op(addr, UMTX_OP_WAIT_UINT, expected, NULL, NULL);
+    memset(&t, 0, sizeof(t));
+    t._timeout = *timeout;
+    t._clockid = CLOCK_MONOTONIC;
+    return _umtx_op(addr, UMTX_OP_WAIT_UINT, expected,
+                    (void *)(uintptr_t)sizeof(t), &t);
+}
+
+/* Reserve the whole region; 0 on success, -1 with errno on failure.
+ * posix_fallocate returns the error instead of setting errno. ZFS rejects
+ * it with EINVAL: SHM preparation fails and the session uses baseline. */
+static int shm_allocate(int fd, off_t size)
+{
+    int rc = posix_fallocate(fd, 0, size);
+    if (rc == 0)
+        return 0;
+    errno = rc;
+    return -1;
+}
+#endif
 
 /* CPU pause hint for spin loops. */
 static inline void cpu_relax(void)
@@ -452,7 +501,7 @@ nipc_shm_error_t nipc_shm_server_create(const char *run_dir,
 
     int allocate_rc;
     do {
-        allocate_rc = fallocate(fd, 0, 0, (off_t)region_size);
+        allocate_rc = shm_allocate(fd, (off_t)region_size);
     } while (allocate_rc < 0 && errno == EINTR);
 
     if (allocate_rc < 0) {
@@ -1003,4 +1052,4 @@ void nipc_shm_cleanup_stale(const char *run_dir, const char *service_name)
     closedir(dir);
 }
 
-#endif /* __linux__ */
+#endif /* __linux__ || __FreeBSD__ */

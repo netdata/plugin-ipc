@@ -29,9 +29,9 @@ impl ServerTimings {
         std::time::Duration::from_millis(2 * self.poll_ms as u64)
     }
 }
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
 pub(super) const CLIENT_SHM_ATTACH_RETRY_INTERVAL_MS: u64 = 5;
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
 pub(super) const CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS: u64 = 5_000;
 pub(super) const CACHE_RESPONSE_BUF_SIZE: usize = 65536;
 pub const LOOKUP_LOGICAL_ITEMS_DEFAULT: u32 = 65_536;

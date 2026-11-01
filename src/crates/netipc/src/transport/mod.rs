@@ -9,7 +9,7 @@ pub(crate) mod framing;
 #[cfg(unix)]
 pub mod posix;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub mod shm;
 
 #[cfg(windows)]

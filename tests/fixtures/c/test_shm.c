@@ -993,6 +993,19 @@ static void test_server_create_allocation_failures(void)
     check("unsupported allocation removes incomplete region",
           access(path, F_OK) != 0);
 
+    /* FreeBSD ZFS rejects posix_fallocate with EINVAL. */
+    nipc_shm_test_fault_set(NIPC_SHM_TEST_FAULT_ALLOCATE, EINVAL);
+    err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 4096, 4096, &ctx);
+    allocation_errno = errno;
+    nipc_shm_test_fault_clear();
+
+    check("EINVAL allocation has no sparse fallback",
+          err == NIPC_SHM_ERR_ALLOCATE);
+    check("EINVAL allocation preserves errno", allocation_errno == EINVAL);
+    check("EINVAL allocation removes incomplete region",
+          access(path, F_OK) != 0);
+
     nipc_shm_test_fault_set(NIPC_SHM_TEST_FAULT_ALLOCATE, EINTR);
     err = nipc_shm_server_create(TEST_RUN_DIR, svc, 1, 4096, 4096, &ctx);
     nipc_shm_test_fault_clear();

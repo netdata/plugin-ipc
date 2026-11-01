@@ -1,15 +1,15 @@
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
 use super::client::CLIENT_ABORT_POLL_MS;
 use super::client::{ClientResponseRef, ClientResponseSource, ClientState, RawCallKind, RawClient};
 use super::common::{CACHE_RESPONSE_BUF_SIZE, ensure_client_scratch};
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
 use crate::protocol::{self, MAGIC_MSG, VERSION};
 use crate::protocol::{
     HEADER_SIZE, Header, KIND_REQUEST, KIND_RESPONSE, NipcError, STATUS_LIMIT_EXCEEDED, STATUS_OK,
 };
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
 use std::time::{Duration, Instant};
 
 impl RawClient {
@@ -186,10 +186,10 @@ impl RawClient {
         hdr: &mut Header,
         req_len: usize,
     ) -> Result<(), NipcError> {
-        #[cfg(any(target_os = "linux", windows))]
+        #[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
         let max_request_payload_bytes = self.session_max_request_payload_bytes();
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
             if self.shm.is_some() {
                 if req_len > max_request_payload_bytes as usize {
@@ -286,7 +286,7 @@ impl RawClient {
         let abort = self.abort_requested.clone();
         let scratch = ensure_client_scratch(&mut self.transport_buf, needed);
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
             if let Some(ref mut shm) = self.shm {
                 let session_fd = self.session.as_ref().map_or(-1, |s| s.fd());
@@ -428,12 +428,12 @@ impl RawClient {
     }
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
 fn receive_deadline(timeout_ms: u32) -> Option<Instant> {
     (timeout_ms != 0).then(|| Instant::now() + Duration::from_millis(timeout_ms as u64))
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
 fn receive_wait_slice_ms(deadline: Option<Instant>, abort: &AtomicBool) -> Result<u32, NipcError> {
     if abort.load(Ordering::Acquire) {
         return Err(NipcError::Aborted);
@@ -456,7 +456,7 @@ fn receive_wait_slice_ms(deadline: Option<Instant>, abort: &AtomicBool) -> Resul
     Ok(wait_ms.unwrap().min(u32::MAX as u128) as u32)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn receive_posix_shm_with_control(
     shm: &mut crate::transport::shm::ShmContext,
     scratch: &mut [u8],
@@ -575,7 +575,7 @@ fn session_failure(
 
 /// A failed SHM send is a disconnect when the session probe says the server
 /// is gone, and a transport failure otherwise.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn shm_send_failure(session: Option<&crate::transport::posix::UdsSession>) -> NipcError {
     match session {
         Some(s) if super::server_session_unix::peer_disconnected(s.fd()) => NipcError::Disconnected,

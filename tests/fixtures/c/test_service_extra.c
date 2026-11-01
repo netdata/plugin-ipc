@@ -231,7 +231,7 @@ static void clear_test_faults(void)
     nipc_posix_service_test_fault_clear();
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 static int shm_regions_created(server_thread_ctx_t *ctx)
 {
     test_sync_lock();
@@ -245,7 +245,7 @@ static int shm_regions_created(server_thread_ctx_t *ctx)
  * selects SHM, and falls back to baseline in the same handshake when the
  * region cannot be created. The region exists before HELLO_ACK, so a
  * client that is READY has already been counted. */
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
 static void test_shm_region_only_for_shm_sessions(void)
 {
     printf("--- SHM region created only for SHM sessions ---\n");
@@ -484,7 +484,7 @@ static void test_client_fault_injection_disconnects_and_recovers(void)
         stop_server_drain(&sctx, tid);
     }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     {
         char service[64];
         unique_service(service, sizeof(service), "svc_client_send_fault");
@@ -512,7 +512,7 @@ static void test_client_fault_injection_disconnects_and_recovers(void)
     }
 #endif
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     {
         char service[64];
         unique_service(service, sizeof(service), "svc_client_shm_ctx_fault");
@@ -638,7 +638,7 @@ int main(void)
     test_common_service_helpers();
     test_lookup_remaining_timeout_helpers();
     test_client_fault_injection_disconnects_and_recovers();
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     test_shm_region_only_for_shm_sessions();
 #endif
     test_server_init_fault_injection();

@@ -24,7 +24,7 @@ mod posix_only {
         dispatch_cgroups_lookup, encode_apps_lookup_request, encode_cgroups_lookup_request,
         increment_decode, increment_encode,
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     use netipc::protocol::{MAGIC_MSG, VERSION};
     use netipc::service::cgroups::{CgroupsClient, ClientConfig as TypedClientConfig};
     use netipc::service::raw::{
@@ -33,7 +33,7 @@ mod posix_only {
     };
     use netipc::transport::posix::{ClientConfig, ServerConfig, UdsSession};
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     use netipc::transport::shm::ShmContext;
 
     use std::sync::{OnceLock, atomic::Ordering};
@@ -428,12 +428,12 @@ mod posix_only {
 
         let mut req_buf = vec![0u8; BENCH_BATCH_BUF_SIZE];
         let mut recv_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let mut msg_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
         let mut expected = vec![0u64; BENCH_MAX_BATCH_ITEMS as usize];
 
         // SHM upgrade if negotiated
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let mut shm: Option<ShmContext> = {
             let sp = session.selected_profile;
             if sp == PROFILE_SHM_HYBRID || sp == protocol::PROFILE_SHM_FUTEX {
@@ -460,7 +460,7 @@ mod posix_only {
             }
         };
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if (session.selected_profile == PROFILE_SHM_HYBRID
             || session.selected_profile == protocol::PROFILE_SHM_FUTEX)
             && shm.is_none()
@@ -516,7 +516,7 @@ mod posix_only {
             let t0 = Instant::now();
 
             // Send + receive via SHM or UDS
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             let io_result = if let Some(ref mut shm_ctx) = shm {
                 // SHM path: assemble header + payload into one message
                 let msg_len = HEADER_SIZE + req_len;
@@ -567,7 +567,7 @@ mod posix_only {
                 }
             };
 
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             let io_result = match session.send(&mut hdr, &req_buf[..req_len]) {
                 Ok(_) => session.receive(&mut recv_buf).map_err(|_| ()),
                 Err(_) => Err(()),
@@ -643,7 +643,7 @@ mod posix_only {
             scenario, server_lang, throughput, p50, p95, p99, cpu_pct, cpu_pct
         );
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if let Some(mut shm_ctx) = shm {
             shm_ctx.close();
         }
@@ -989,7 +989,7 @@ mod posix_only {
         let deadline = Duration::from_secs(duration_sec as u64);
 
         // SHM upgrade if negotiated
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let mut shm: Option<ShmContext> = {
             let sp = session.selected_profile;
             if sp == PROFILE_SHM_HYBRID || sp == protocol::PROFILE_SHM_FUTEX {
@@ -1010,7 +1010,7 @@ mod posix_only {
             }
         };
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if (session.selected_profile == PROFILE_SHM_HYBRID
             || session.selected_profile == protocol::PROFILE_SHM_FUTEX)
             && shm.is_none()
@@ -1020,9 +1020,9 @@ mod posix_only {
             return 1;
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let mut msg_buf = vec![0u8; HEADER_SIZE + 8];
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let mut resp_shm_buf = vec![0u8; HEADER_SIZE + 64];
         let mut recv_buf = vec![0u8; 256];
 
@@ -1043,7 +1043,7 @@ mod posix_only {
 
             let t0 = Instant::now();
 
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             let send_ok = if let Some(ref mut shm_ctx) = shm {
                 // SHM path
                 let msg_len = HEADER_SIZE + 8;
@@ -1112,7 +1112,7 @@ mod posix_only {
                 }
             };
 
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             let send_ok = {
                 if session.send(&mut hdr, &req_payload).is_err() {
                     errors += 1;
@@ -1165,7 +1165,7 @@ mod posix_only {
         );
 
         // Cleanup
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
             if let Some(mut shm_ctx) = shm {
                 shm_ctx.close();

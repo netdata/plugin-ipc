@@ -1,7 +1,9 @@
-//go:build linux
+//go:build linux || (freebsd && (amd64 || 386))
 
-// SHM transport for Linux — shared memory data plane with spin+futex
-// synchronization. Wire-compatible with the C and Rust implementations.
+// SHM transport for Linux and FreeBSD — shared memory data plane with
+// spin+futex synchronization (FreeBSD: _umtx_op, shm_umtx_freebsd.go).
+// Wire-compatible with the C and Rust implementations. FreeBSD is limited
+// to amd64 and 386, whose raw syscall layouts are tested.
 //
 // Pure Go — no cgo. Works with CGO_ENABLED=0.
 
@@ -47,15 +49,11 @@ const (
 	shmHeaderReqSignalOff  = 56
 	shmHeaderRespSignalOff = 60
 
-	// futex operations
-	futexWait = 0
-	futexWake = 1
-
 	shmMaxPath = 256
 )
 
-// platformProfiles leaves the handshake profiles unrestricted: Linux provides
-// every POSIX profile.
+// platformProfiles leaves the handshake profiles unrestricted: this system
+// provides every POSIX profile.
 const platformProfiles = 0
 
 // ---------------------------------------------------------------------------
@@ -114,7 +112,7 @@ func shmPreallocate(fd int, size int64, fallocate shmFallocateFunc) error {
 
 // ShmServerCreate creates a SHM region at {runDir}/{serviceName}-{sessionID}.ipcshm.
 func ShmServerCreate(runDir, serviceName string, sessionID uint64, reqCapacity, respCapacity uint32) (*ShmContext, error) {
-	return shmServerCreate(runDir, serviceName, sessionID, reqCapacity, respCapacity, syscall.Fallocate)
+	return shmServerCreate(runDir, serviceName, sessionID, reqCapacity, respCapacity, shmAllocate)
 }
 
 func shmServerCreate(runDir, serviceName string, sessionID uint64, reqCapacity, respCapacity uint32, fallocate shmFallocateFunc) (*ShmContext, error) {
@@ -503,7 +501,7 @@ func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 		var deadlineNs uint64
 		if timeoutMs > 0 {
 			var nowTs syscall.Timespec
-			syscall.Syscall(syscall.SYS_CLOCK_GETTIME, 1 /* CLOCK_MONOTONIC */, uintptr(unsafe.Pointer(&nowTs)), 0) // #nosec G103 -- syscall requires passing a Timespec pointer.
+			monotonicNow(&nowTs)
 			deadlineNs = uint64(nowTs.Sec)*1_000_000_000 + uint64(nowTs.Nsec) +
 				uint64(timeoutMs)*1_000_000
 		}
@@ -526,7 +524,7 @@ func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 			var ts *syscall.Timespec
 			if deadlineNs > 0 {
 				var nowTs syscall.Timespec
-				syscall.Syscall(syscall.SYS_CLOCK_GETTIME, 1 /* CLOCK_MONOTONIC */, uintptr(unsafe.Pointer(&nowTs)), 0) // #nosec G103 -- syscall requires passing a Timespec pointer.
+				monotonicNow(&nowTs)
 				nowVal := uint64(nowTs.Sec)*1_000_000_000 + uint64(nowTs.Nsec)
 				if nowVal >= deadlineNs {
 					return 0, ErrShmTimeout
@@ -667,42 +665,10 @@ func atomicAddU32(data []byte, off int, val uint32) error {
 	return nil
 }
 
-func futexWakeCall(data []byte, off int, count int) int {
-	if off < 0 || off+4 > len(data) {
-		return -1
-	}
-	addr := unsafe.Pointer(&data[off]) // #nosec G103 -- futex needs the address of the mmap signal word.
-	r1, _, _ := syscall.Syscall6(
-		syscall.SYS_FUTEX,
-		uintptr(addr),
-		uintptr(futexWake),
-		uintptr(count),
-		0, 0, 0,
-	)
-	return int(r1)
-}
-
-func futexWaitCall(data []byte, off int, expected uint32, ts *syscall.Timespec) int {
-	if off < 0 || off+4 > len(data) {
-		return -1
-	}
-	addr := unsafe.Pointer(&data[off]) // #nosec G103 -- futex needs the address of the mmap signal word.
-	var tsPtr uintptr
-	if ts != nil {
-		tsPtr = uintptr(unsafe.Pointer(ts)) // #nosec G103 -- futex syscall requires an optional Timespec pointer.
-	}
-	r1, _, errno := syscall.Syscall6(
-		syscall.SYS_FUTEX,
-		uintptr(addr),
-		uintptr(futexWait),
-		uintptr(expected),
-		tsPtr,
-		0, 0,
-	)
-	if errno != 0 {
-		return -int(errno)
-	}
-	return int(r1)
+// monotonicNow reads CLOCK_MONOTONIC without allocating; the clock id
+// differs per OS (shmClockMonotonic).
+func monotonicNow(ts *syscall.Timespec) {
+	syscall.Syscall(syscall.SYS_CLOCK_GETTIME, shmClockMonotonic, uintptr(unsafe.Pointer(ts)), 0) // #nosec G103 -- syscall requires passing a Timespec pointer.
 }
 
 // ---------------------------------------------------------------------------

@@ -40,9 +40,10 @@
 #define NIPC_UDS_SEND_FLAGS 0
 #endif
 
-/* Profiles this platform can provide. POSIX SHM needs Linux futexes, so other
- * POSIX systems offer and accept the baseline profile only. */
-#if defined(__linux__)
+/* Profiles this platform can provide. POSIX SHM needs a futex-style wait
+ * (Linux futex, FreeBSD _umtx_op), so other POSIX systems offer and accept
+ * the baseline profile only. */
+#if defined(__linux__) || defined(__FreeBSD__)
 #define NIPC_UDS_PLATFORM_PROFILES 0xFFFFFFFFu
 #else
 #define NIPC_UDS_PLATFORM_PROFILES NIPC_PROFILE_BASELINE

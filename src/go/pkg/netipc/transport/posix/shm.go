@@ -1,7 +1,8 @@
 //go:build unix
 
-// SHM transport types shared by every POSIX system. The data plane itself
-// needs Linux futexes (shm_linux.go); other systems get stubs (shm_other.go).
+// SHM transport types shared by every POSIX system. The data plane needs a
+// futex-style wait (shm_posix.go: Linux, and FreeBSD amd64 and 386); other
+// systems get stubs (shm_other.go).
 
 package posix
 

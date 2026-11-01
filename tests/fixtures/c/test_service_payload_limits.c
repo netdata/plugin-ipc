@@ -41,7 +41,7 @@ static void test_typed_request_overflow_reconnect_guards(void)
         stop_server_drain(&sctx, tid);
     }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     {
         char service[64];
         unique_service(service, sizeof(service), "svc_typed_hybrid_req_overflow");
@@ -81,7 +81,7 @@ static void test_typed_request_overflow_reconnect_guards(void)
     }
 #endif
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     {
         char service[64];
         unique_service(service, sizeof(service), "svc_typed_hybrid_no_growth");
@@ -160,7 +160,7 @@ static void test_typed_response_overflow_reconnect_guards(void)
         stop_server_drain(&sctx, tid);
     }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     {
         char service[64];
         unique_service(service, sizeof(service), "svc_typed_hybrid_resp_overflow");

@@ -1187,7 +1187,7 @@ static void test_platform_profile_mask(void)
     printf("Test 6b: Platform profile mask\n");
     const char *svc = "test_platprofile";
     cleanup_socket(svc);
-#if defined(__linux__)
+#if defined(__linux__) || defined(__FreeBSD__)
     const uint32_t want = NIPC_PROFILE_SHM_HYBRID;
 #else
     const uint32_t want = NIPC_PROFILE_BASELINE;
@@ -1327,6 +1327,35 @@ static void test_stale_recovery_reclaims_regular_file(void)
     if (err == NIPC_UDS_OK)
         nipc_uds_close_listener(&listener);
 
+    cleanup_socket(svc);
+}
+
+/* Unlinking a directory fails with EISDIR on Linux and EPERM on FreeBSD and
+ * macOS; every platform must reclaim an empty one. */
+static void test_stale_recovery_reclaims_empty_directory(void)
+{
+    printf("Test: Stale socket recovery reclaims an empty directory\n");
+    const char *svc = "test_stale_dir";
+    cleanup_socket(svc);
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, svc);
+    rmdir(path);
+    check("directory created at socket path", mkdir(path, 0700) == 0);
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_uds_listener_t listener;
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &listener);
+    check("listen reclaims a directory path", err == NIPC_UDS_OK);
+
+    struct stat st;
+    check("socket replaces the directory",
+          stat(path, &st) == 0 && S_ISSOCK(st.st_mode));
+
+    if (err == NIPC_UDS_OK)
+        nipc_uds_close_listener(&listener);
+
+    rmdir(path);
     cleanup_socket(svc);
 }
 
@@ -3851,6 +3880,7 @@ int main(void)
     test_request_payload_over_cap(); printf("\n");
     test_stale_recovery();         printf("\n");
     test_stale_recovery_reclaims_regular_file(); printf("\n");
+    test_stale_recovery_reclaims_empty_directory(); printf("\n");
     test_listen_socket_owner_only(); printf("\n");
     test_disconnect_inflight();    printf("\n");
     test_batch();                  printf("\n");

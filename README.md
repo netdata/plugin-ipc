@@ -103,7 +103,7 @@ See:
 | Platform | Baseline transport | Negotiated fast path | Languages |
 |---|---|---|---|
 | Linux | Unix domain `SOCK_SEQPACKET` | POSIX shared memory | C, Rust, Go |
-| FreeBSD | Unix domain `SOCK_SEQPACKET` | none | C, Rust, Go |
+| FreeBSD | Unix domain `SOCK_SEQPACKET` | POSIX shared memory (Go: amd64 and 386 only; run directory on tmpfs or UFS, not ZFS) | C, Rust, Go |
 | macOS | Unix domain `SOCK_STREAM`, same packets | none | C, Rust, Go |
 | Windows | Named Pipes | Windows shared memory | C, Rust, Go |
 

@@ -43,7 +43,7 @@ pub(crate) use server::RunningTestServer;
 pub use server::{ListeningSignal, ManagedServer};
 pub use string_reverse::{StringReverseHandler, string_reverse_dispatch};
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
 use crate::protocol::STATUS_BAD_ENVELOPE;
 #[cfg(all(test, unix))]
 use crate::protocol::{
@@ -54,7 +54,7 @@ use crate::protocol::{
 };
 #[cfg(all(test, unix))]
 use crate::transport::posix::{ClientConfig, ServerConfig, UdsListener, UdsSession};
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
 use crate::transport::shm::ShmContext;
 #[cfg(all(test, windows))]
 use crate::transport::windows::{ClientConfig, NpListener, NpSession, ServerConfig};

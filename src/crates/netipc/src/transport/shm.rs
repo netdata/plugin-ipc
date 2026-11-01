@@ -1,6 +1,7 @@
-//! L1 POSIX SHM transport (Linux only).
+//! L1 POSIX SHM transport (Linux and FreeBSD).
 //!
-//! Shared memory data plane with spin+futex synchronization.
+//! Shared memory data plane with spin+futex synchronization (FreeBSD:
+//! `_umtx_op` wait/wake on the same signal words).
 //! The SHM region carries the same outer protocol envelope as the UDS
 //! transport. Higher levels see no difference.
 //!
@@ -30,7 +31,9 @@ const OFF_REQ_SIGNAL: usize = 56;
 const OFF_RESP_SIGNAL: usize = 60;
 
 // futex operations
+#[cfg(target_os = "linux")]
 const FUTEX_WAIT: i32 = 0;
+#[cfg(target_os = "linux")]
 const FUTEX_WAKE: i32 = 1;
 
 // ---------------------------------------------------------------------------
@@ -214,7 +217,7 @@ impl ShmContext {
         };
 
         // If O_EXCL failed (file exists), do stale recovery and retry.
-        if fd < 0 && unsafe { *libc::__errno_location() } == libc::EEXIST {
+        if fd < 0 && errno() == libc::EEXIST {
             let stale = check_shm_stale(&path);
             if stale == StaleResult::LiveServer {
                 return Err(ShmError::AddrInUse);
@@ -230,7 +233,7 @@ impl ShmContext {
             // If retry still fails with EEXIST, the stale check couldn't
             // unlink (e.g., EACCES) — treat as address-in-use rather than
             // leaking EEXIST up the stack.
-            if fd < 0 && unsafe { *libc::__errno_location() } == libc::EEXIST {
+            if fd < 0 && errno() == libc::EEXIST {
                 return Err(ShmError::AddrInUse);
             }
         }
@@ -820,40 +823,52 @@ fn path_to_cstring(path: &Path) -> Result<std::ffi::CString, ShmError> {
 }
 
 fn errno() -> i32 {
-    unsafe { *libc::__errno_location() }
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
 /// Reserve all backing storage before exposing the region through mmap.
 ///
-/// Linux may interrupt fallocate before it changes the file, so retry EINTR.
-/// Every other error is returned to the caller; SHM has no unsafe sparse-file
-/// fallback.
+/// The allocation may be interrupted before it changes the file, so retry
+/// EINTR. Every other error is returned to the caller; SHM has no unsafe
+/// sparse-file fallback.
 fn allocate_region(fd: i32, region_size: usize) -> Result<(), i32> {
     loop {
         #[cfg(test)]
         record_fallocate_call();
 
         #[cfg(test)]
-        let result = match take_fallocate_fault() {
-            Some(error) => {
-                unsafe { *libc::__errno_location() = error };
-                -1
-            }
-            None => unsafe { libc::fallocate(fd, 0, 0, region_size as libc::off_t) },
+        let error = match take_fallocate_fault() {
+            Some(error) => error,
+            None => reserve_region(fd, region_size),
         };
 
         #[cfg(not(test))]
-        let result = unsafe { libc::fallocate(fd, 0, 0, region_size as libc::off_t) };
+        let error = reserve_region(fd, region_size);
 
-        if result == 0 {
-            return Ok(());
-        }
-
-        let error = errno();
-        if error != libc::EINTR {
-            return Err(error);
+        match error {
+            0 => return Ok(()),
+            libc::EINTR => continue,
+            e => return Err(e),
         }
     }
+}
+
+/// Reserve the whole file: 0 or the error number.
+#[cfg(target_os = "linux")]
+fn reserve_region(fd: i32, region_size: usize) -> i32 {
+    if unsafe { libc::fallocate(fd, 0, 0, region_size as libc::off_t) } == 0 {
+        0
+    } else {
+        errno()
+    }
+}
+
+/// Reserve the whole file: 0 or the error number. posix_fallocate returns
+/// the error itself; ZFS rejects it with EINVAL, so SHM preparation fails
+/// and the session uses baseline.
+#[cfg(target_os = "freebsd")]
+fn reserve_region(fd: i32, region_size: usize) -> i32 {
+    unsafe { libc::posix_fallocate(fd, 0, region_size as libc::off_t) }
 }
 
 unsafe fn map_region(fd: i32, region_size: usize) -> *mut libc::c_void {
@@ -980,6 +995,7 @@ fn atomic_add_u32(base: *mut u8, offset: usize, val: u32) {
     unsafe { (*ptr).fetch_add(val, std::sync::atomic::Ordering::Release) };
 }
 
+#[cfg(target_os = "linux")]
 fn futex_wake(addr: *mut u32, count: i32) -> i32 {
     unsafe {
         libc::syscall(
@@ -994,6 +1010,7 @@ fn futex_wake(addr: *mut u32, count: i32) -> i32 {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn futex_wait(addr: *mut u32, expected: u32, timeout: Option<&libc::timespec>) -> i32 {
     // SYS_futex consumes kernel words, not libc's timespec. In particular,
     // 32-bit musl uses time64 even when SYS_futex is the legacy syscall.
@@ -1028,6 +1045,47 @@ fn futex_wait(addr: *mut u32, expected: u32, timeout: Option<&libc::timespec>) -
     }
 }
 
+// The shared (not _PRIVATE) umtx operations key on the mapped object, so they
+// cross processes. A wait whose expected value is already stale returns 0,
+// where a Linux futex returns EAGAIN; callers re-check either way.
+#[cfg(target_os = "freebsd")]
+fn futex_wake(addr: *mut u32, count: i32) -> i32 {
+    unsafe {
+        libc::_umtx_op(
+            addr.cast(),
+            libc::UMTX_OP_WAKE,
+            count as libc::c_ulong,
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    }
+}
+
+#[cfg(target_os = "freebsd")]
+fn futex_wait(addr: *mut u32, expected: u32, timeout: Option<&libc::timespec>) -> i32 {
+    let mut t = timeout.map(|ts| libc::_umtx_time {
+        _timeout: *ts,
+        _flags: 0,
+        _clockid: libc::CLOCK_MONOTONIC as u32,
+    });
+    let (size, tp) = match t.as_mut() {
+        Some(t) => (
+            std::mem::size_of::<libc::_umtx_time>() as *mut libc::c_void,
+            (t as *mut libc::_umtx_time).cast(),
+        ),
+        None => (ptr::null_mut(), ptr::null_mut()),
+    };
+    unsafe {
+        libc::_umtx_op(
+            addr.cast(),
+            libc::UMTX_OP_WAIT_UINT,
+            expected as libc::c_ulong,
+            size,
+            tp,
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  Stale region recovery
 // ---------------------------------------------------------------------------
@@ -1052,8 +1110,10 @@ fn unlink_stale_path(c_path: &CString) -> bool {
     if unsafe { libc::unlink(c_path.as_ptr()) } == 0 || errno() == libc::ENOENT {
         return true;
     }
-    // A directory squatting on the region path is junk too.
-    errno() == libc::EISDIR && unsafe { libc::rmdir(c_path.as_ptr()) } == 0
+    // A directory squatting on the region path is junk too. Unlinking one
+    // fails with EISDIR on Linux and EPERM on FreeBSD.
+    let e = errno();
+    (e == libc::EISDIR || e == libc::EPERM) && unsafe { libc::rmdir(c_path.as_ptr()) } == 0
 }
 
 #[allow(dead_code)]

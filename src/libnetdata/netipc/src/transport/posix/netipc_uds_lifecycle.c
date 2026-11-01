@@ -245,11 +245,13 @@ static int unlink_stale_socket_path(const char *run_dir,
 
     /* Whatever sits at the endpoint name is not a live server (the connect
      * probe already failed): a dead server's socket or a foreign file.
-     * Reclaim the name; directories are junk too. */
+     * Reclaim the name; directories are junk too. Unlinking a directory
+     * fails with EISDIR on Linux and EPERM on FreeBSD and macOS. */
     int ret = -1;
     if (unlinkat(dir_fd, socket_name, 0) == 0 || errno == ENOENT)
         ret = 0;
-    else if (errno == EISDIR && unlinkat(dir_fd, socket_name, AT_REMOVEDIR) == 0)
+    else if ((errno == EISDIR || errno == EPERM) &&
+             unlinkat(dir_fd, socket_name, AT_REMOVEDIR) == 0)
         ret = 0;
 
     closedir(dir);

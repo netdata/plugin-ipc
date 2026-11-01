@@ -2,7 +2,8 @@
 #define _GNU_SOURCE
 #endif
 
-/* Test-only linker wrapper for deterministic Linux fallocate failures. */
+/* Test-only linker wrapper for deterministic SHM allocation failures:
+ * Linux fallocate, FreeBSD posix_fallocate. */
 
 #include "netipc/netipc_shm.h"
 
@@ -39,6 +40,18 @@ static bool take_allocate_fault(void)
     return false;
 }
 
+#if defined(__FreeBSD__)
+int __real_posix_fallocate(int fd, off_t offset, off_t length);
+
+/* posix_fallocate returns the error instead of setting errno. */
+int __wrap_posix_fallocate(int fd, off_t offset, off_t length)
+{
+    if (take_allocate_fault())
+        return errno;
+
+    return __real_posix_fallocate(fd, offset, length);
+}
+#else
 int __real_fallocate(int fd, int mode, off_t offset, off_t length);
 
 int __wrap_fallocate(int fd, int mode, off_t offset, off_t length)
@@ -62,3 +75,4 @@ int __wrap_fallocate64(int fd, int mode, off64_t offset, off64_t length)
     return __real_fallocate64(fd, mode, offset, length);
 }
 #endif
+#endif /* __FreeBSD__ */

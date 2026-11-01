@@ -1,4 +1,4 @@
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use super::common::ensure_client_scratch;
 use super::dispatch::{
     DispatchError, DispatchHandler, dispatch_single_internal, method_supported_internal,
@@ -8,11 +8,11 @@ use crate::protocol::{
     self, BatchBuilder, FLAG_BATCH, HEADER_SIZE, Header, KIND_REQUEST, KIND_RESPONSE,
     STATUS_BAD_ENVELOPE, STATUS_INTERNAL_ERROR, STATUS_LIMIT_EXCEEDED, STATUS_OK, batch_item_get,
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::protocol::{MAGIC_MSG, VERSION};
 use crate::transport::posix::UdsSession;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::transport::shm::ShmContext;
 
 use std::sync::Arc;
@@ -21,8 +21,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 /// POSIX: Handle one client session in its own thread.
 pub(super) fn handle_session_threaded(
     session: &mut UdsSession,
-    #[cfg(target_os = "linux")] mut shm: Option<ShmContext>,
-    #[cfg(not(target_os = "linux"))] _shm: Option<()>,
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))] mut shm: Option<ShmContext>,
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))] _shm: Option<()>,
     expected_method_code: u16,
     handler: Option<DispatchHandler>,
     running: Arc<AtomicBool>,
@@ -35,12 +35,12 @@ pub(super) fn handle_session_threaded(
     let mut recv_buf = vec![0u8; HEADER_SIZE + session.max_request_payload_bytes as usize];
     let mut resp_buf = vec![0u8; session.max_response_payload_bytes as usize];
     let mut item_resp_buf = vec![0u8; session.max_response_payload_bytes as usize];
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let mut msg_buf = vec![0u8; HEADER_SIZE + session.max_response_payload_bytes as usize];
 
     while running.load(Ordering::Acquire) {
         let (hdr, payload) = {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             {
                 if let Some(ref mut shm_ctx) = shm {
                     match shm_ctx.receive(&mut recv_buf, poll_ms) {
@@ -81,7 +81,7 @@ pub(super) fn handle_session_threaded(
                 }
             }
 
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             {
                 let ready = poll_fd(session.fd(), poll_ms as i32);
                 if ready < 0 {
@@ -120,7 +120,7 @@ pub(super) fn handle_session_threaded(
                 ..Header::default()
             };
 
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             {
                 if let Some(ref mut shm_ctx) = shm {
                     let msg = ensure_client_scratch(&mut msg_buf, HEADER_SIZE);
@@ -249,7 +249,7 @@ pub(super) fn handle_session_threaded(
             }
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
             if let Some(ref mut shm_ctx) = shm {
                 let msg_len = HEADER_SIZE + response_len;
@@ -286,7 +286,7 @@ pub(super) fn handle_session_threaded(
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
         if let Some(mut shm_ctx) = shm {
             shm_ctx.destroy();

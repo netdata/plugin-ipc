@@ -42,11 +42,25 @@ if(NOT NETIPC_WINDOWS_RUNTIME)
     set(NETIPC_POSIX_RUNTIME ON)
 endif()
 
-# POSIX SHM data plane: Linux only, it needs futexes. Other POSIX systems build
-# the SHM API as stubs and negotiate the baseline profile.
+# POSIX SHM data plane: Linux and FreeBSD, it needs a futex-style wait (Linux
+# futex, FreeBSD _umtx_op). Other POSIX systems build the SHM API as stubs and
+# negotiate the baseline profile.
 set(NETIPC_POSIX_SHM OFF)
-if(NETIPC_POSIX_RUNTIME AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(NETIPC_POSIX_RUNTIME AND CMAKE_SYSTEM_NAME MATCHES "^(Linux|FreeBSD)$")
     set(NETIPC_POSIX_SHM ON)
+endif()
+# Go builds its SHM data plane on Linux and on FreeBSD amd64 and 386 only,
+# where its raw syscall layouts are tested.
+set(NETIPC_GO_POSIX_SHM OFF)
+if(NETIPC_POSIX_SHM AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
+        CMAKE_SYSTEM_PROCESSOR MATCHES "^(amd64|AMD64|x86_64|i386|i686)$"))
+    set(NETIPC_GO_POSIX_SHM ON)
+endif()
+# Test-only linker wrap of the SHM allocation call, for injected failures.
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    set(NETIPC_SHM_ALLOCATE_WRAP "LINKER:--wrap=posix_fallocate")
+else()
+    set(NETIPC_SHM_ALLOCATE_WRAP "LINKER:--wrap=fallocate" "LINKER:--wrap=fallocate64")
 endif()
 
 
@@ -321,7 +335,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME)
     target_link_libraries(interop_uds_c PRIVATE netipc_uds netipc_protocol)
 endif()
 
-# --- L1 SHM transport tests (Linux only) -----------------------------------
+# --- L1 SHM transport tests (Linux and FreeBSD) ----------------------------
 
 if(NETIPC_POSIX_SHM)
     add_library(netipc_shm_fallocate_test_wrap OBJECT
@@ -339,7 +353,7 @@ if(NETIPC_POSIX_SHM)
         $<TARGET_OBJECTS:netipc_shm_fallocate_test_wrap>
     )
     target_compile_definitions(test_shm PRIVATE NIPC_INTERNAL_TESTING=1)
-    target_link_options(test_shm PRIVATE "LINKER:--wrap=fallocate" "LINKER:--wrap=fallocate64")
+    target_link_options(test_shm PRIVATE ${NETIPC_SHM_ALLOCATE_WRAP})
     target_link_libraries(test_shm PRIVATE netipc_shm netipc_uds netipc_protocol Threads::Threads)
     add_test(NAME test_shm COMMAND test_shm)
     set_tests_properties(test_shm PROPERTIES TIMEOUT 30)
@@ -366,7 +380,7 @@ if(NETIPC_POSIX_RUNTIME)
         target_sources(test_service PRIVATE
             $<TARGET_OBJECTS:netipc_shm_fallocate_test_wrap>
         )
-        target_link_options(test_service PRIVATE "LINKER:--wrap=fallocate" "LINKER:--wrap=fallocate64")
+        target_link_options(test_service PRIVATE ${NETIPC_SHM_ALLOCATE_WRAP})
     endif()
     add_test(NAME test_service COMMAND test_service)
     set_tests_properties(test_service PROPERTIES TIMEOUT 60)
@@ -493,7 +507,7 @@ if(CARGO_EXECUTABLE)
         COMMENT "Building Rust UDS interop binary"
     )
 
-    # Rust SHM transport tests (Linux only)
+    # Rust SHM transport tests (Linux and FreeBSD)
     if(NETIPC_POSIX_SHM)
         add_test(NAME test_shm_rust
             COMMAND ${CARGO_EXECUTABLE} test transport::shm::
@@ -565,8 +579,8 @@ if(GO_EXECUTABLE AND NOT NETIPC_WINDOWS_RUNTIME)
         COMMENT "Building Go UDS interop binary"
     )
 
-    # Go SHM transport tests (Linux only)
-    if(NETIPC_POSIX_SHM)
+    # Go SHM transport tests (Linux, FreeBSD amd64 and 386)
+    if(NETIPC_GO_POSIX_SHM)
         add_test(NAME test_shm_go
             COMMAND ${CMAKE_COMMAND} -E env CGO_ENABLED=0
                 ${GO_EXECUTABLE} test -count=1 -timeout=60s
@@ -625,7 +639,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
     )
 endif()
 
-# --- Cross-language SHM interop tests (Linux only) -------------------------
+# --- Cross-language SHM interop tests (Linux and FreeBSD) ------------------
 
 if(NETIPC_POSIX_SHM AND CARGO_EXECUTABLE)
     set(INTEROP_SHM_RS "${NETIPC_RUST_CRATE_DIR}/target/debug/interop_shm")
@@ -763,7 +777,7 @@ if(CARGO_EXECUTABLE AND NETIPC_POSIX_RUNTIME AND NETIPC_EXTENDED_TESTS)
     )
 endif()
 
-# --- Cross-language L2 service SHM interop tests (Linux only) ---------------
+# --- Cross-language L2 service SHM interop tests (Linux and FreeBSD) --------
 
 if(NETIPC_POSIX_SHM AND CARGO_EXECUTABLE)
     add_test(NAME test_service_shm_interop
@@ -1163,7 +1177,7 @@ if(NETIPC_WINDOWS_RUNTIME AND CARGO_EXECUTABLE)
 endif()
 
 # --- Benchmarks (Phase 13) ------------------------------------------------
-# POSIX benchmarks cover the SHM profiles, so they build on Linux only.
+# POSIX benchmarks cover the SHM profiles, so they build where SHM does.
 
 if(NETIPC_POSIX_SHM)
     # C benchmark binary

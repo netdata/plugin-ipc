@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -688,6 +687,30 @@ func TestStaleRecoveryInGroupWritableRunDir(t *testing.T) {
 	listener.Close()
 }
 
+// An empty directory at the socket path is reclaimed on every platform, as
+// in C and Rust.
+func TestStaleRecoveryReclaimsEmptyDirectory(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	sockPath := filepath.Join(runDir, service+".sock")
+	defer os.Remove(sockPath)
+
+	if err := os.Mkdir(sockPath, 0o700); err != nil {
+		t.Fatalf("cannot create directory at socket path: %v", err)
+	}
+
+	listener, err := Listen(runDir, service, defaultServerConfig())
+	if err != nil {
+		t.Fatalf("Listen must reclaim an empty directory: %v", err)
+	}
+	defer listener.Close()
+
+	info, err := os.Lstat(sockPath)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("socket must replace the directory: info=%v err=%v", info, err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 //  Test: Disconnect detection
 // ---------------------------------------------------------------------------
@@ -898,7 +921,7 @@ func TestProfileSelection(t *testing.T) {
 	// Preferred intersection = SHMFutex (0x04), highest bit = 0x04. Without
 	// POSIX SHM the platform limit leaves baseline on both sides.
 	want := uint32(protocol.ProfileSHMFutex)
-	if runtime.GOOS != "linux" {
+	if platformProfiles == protocol.ProfileBaseline {
 		want = protocol.ProfileBaseline
 	}
 	if client.SelectedProfile != want || server.SelectedProfile != want {

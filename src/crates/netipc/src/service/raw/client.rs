@@ -1,4 +1,4 @@
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
 use super::common::CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS;
 use super::common::{LookupLogicalConfig, ensure_client_scratch, next_power_of_2_u32};
 use crate::protocol::{self, MAX_PAYLOAD_CAP, NipcError};
@@ -12,7 +12,7 @@ pub(super) use crate::transport::posix::ClientConfig;
 #[cfg(unix)]
 use crate::transport::posix::UdsSession;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::transport::shm::ShmContext;
 
 #[cfg(windows)]
@@ -27,7 +27,7 @@ use crate::transport::win_shm::WinShmContext;
 /// Default timeout for synchronous client calls.
 pub const CLIENT_CALL_TIMEOUT_DEFAULT_MS: u32 = 30_000;
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
 pub(super) const CLIENT_ABORT_POLL_MS: u32 = 100;
 
 /// Client connection state machine.
@@ -66,7 +66,7 @@ pub struct RawClient {
 
     #[cfg(unix)]
     pub(super) session: Option<UdsSession>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub(super) shm: Option<ShmContext>,
 
     #[cfg(windows)]
@@ -75,7 +75,7 @@ pub struct RawClient {
     pub(super) shm: Option<WinShmContext>,
 
     pub(super) request_buf: Vec<u8>,
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
     pub(super) send_buf: Vec<u8>,
     pub(super) transport_buf: Vec<u8>,
 
@@ -90,7 +90,7 @@ pub struct RawClient {
     pub(super) max_logical_lookup_response_bytes: u32,
     pub(super) abort_requested: Arc<AtomicBool>,
     /// How long to retry attaching a negotiated SHM region; tests shorten it.
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
     pub(super) shm_attach_timeout: std::time::Duration,
     /// Deadline of the call or refresh in progress.
     pub(super) op_deadline: Instant,
@@ -146,7 +146,7 @@ impl RawCallKind {
 impl RawClient {
     /// Shorten the client's internal waits for tests.
     pub(crate) fn use_test_timings(&mut self) -> &mut Self {
-        #[cfg(any(target_os = "linux", windows))]
+        #[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
         {
             self.shm_attach_timeout = std::time::Duration::from_millis(300);
         }
@@ -169,12 +169,12 @@ impl RawClient {
             expected_method_code,
             transport_config: config,
             session: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             shm: None,
             #[cfg(windows)]
             shm: None,
             request_buf: Vec::new(),
-            #[cfg(any(target_os = "linux", windows))]
+            #[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
             send_buf: Vec::new(),
             transport_buf: Vec::new(),
             connect_count: 0,
@@ -186,7 +186,7 @@ impl RawClient {
             max_logical_lookup_subcalls: lookup_config.max_subcalls,
             max_logical_lookup_response_bytes: lookup_config.max_response_bytes,
             abort_requested: Arc::new(AtomicBool::new(false)),
-            #[cfg(any(target_os = "linux", windows))]
+            #[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
             shm_attach_timeout: std::time::Duration::from_millis(
                 CLIENT_SHM_ATTACH_RETRY_TIMEOUT_MS,
             ),
@@ -469,7 +469,7 @@ impl RawClient {
 
     /// Tear down the current connection.
     pub(super) fn disconnect(&mut self) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
             if let Some(mut shm) = self.shm.take() {
                 shm.close();

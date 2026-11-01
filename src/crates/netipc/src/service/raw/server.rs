@@ -50,10 +50,16 @@ pub(super) struct TestHooks {
     pub(super) handshake_started: Option<std::sync::mpsc::Sender<()>>,
     /// A session's SHM region was created. SHM exists only on Linux and
     /// Windows.
-    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "freebsd", windows)),
+        allow(dead_code)
+    )]
     pub(super) shm_created: Option<std::sync::mpsc::Sender<()>>,
     /// Makes SHM region creation fail, to exercise the baseline fallback.
-    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "freebsd", windows)),
+        allow(dead_code)
+    )]
     pub(super) fail_shm_create: std::sync::Arc<AtomicBool>,
 }
 
@@ -253,13 +259,19 @@ impl TestEvents {
 
     /// Number of SHM regions created since the last call. A region exists
     /// before HELLO_ACK, so a READY client's region is already counted.
-    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "freebsd", windows)),
+        allow(dead_code)
+    )]
     pub(crate) fn take_shm_created(&self) -> usize {
         self.shm_created.try_iter().count()
     }
 
     /// Make the server's SHM region creation fail (or succeed again).
-    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "freebsd", windows)),
+        allow(dead_code)
+    )]
     pub(crate) fn set_fail_shm_create(&self, fail: bool) {
         self.fail_shm_create.store(fail, Ordering::Release);
     }

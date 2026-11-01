@@ -321,7 +321,11 @@ failures.
   with ENOENT, nothing is there. Any other connect failure
   (ECONNREFUSED, EACCES, a foreign file squatting on the socket path,
   etc.) means the endpoint is not a live server — it is silently
-  unlinked and recreated.
+  unlinked and recreated. An empty directory at the path is removed
+  too; a non-empty one is kept and the server fails with
+  address-in-use. Unlinking a directory fails with `EISDIR` on Linux
+  and `EPERM` on FreeBSD and macOS, so both errors lead to the
+  directory removal.
 - The only exception is fd exhaustion (EMFILE/ENFILE) while creating
   the probe socket: liveness cannot be evaluated, so the endpoint is
   kept and the server fails with address-in-use rather than risk

@@ -684,6 +684,29 @@ fn test_foreign_file_at_socket_path_is_reclaimed() {
     cleanup_socket(&svc);
 }
 
+// Unlinking a directory fails with EISDIR on Linux and EPERM on FreeBSD and
+// macOS; every platform must reclaim an empty one.
+#[test]
+fn test_empty_directory_at_socket_path_is_reclaimed() {
+    ensure_run_dir();
+    let svc = unique_service("rs_stale_dir");
+    cleanup_socket(&svc);
+
+    let path = format!("{TEST_RUN_DIR}/{svc}.sock");
+    let _ = std::fs::remove_dir(&path);
+    std::fs::create_dir(&path).expect("create directory at socket path");
+
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config())
+        .expect("listen should reclaim an empty directory at the socket path");
+    let meta = std::fs::symlink_metadata(&path).expect("socket path");
+    assert!(
+        std::os::unix::fs::FileTypeExt::is_socket(&meta.file_type()),
+        "the socket must replace the directory"
+    );
+    drop(listener);
+    cleanup_socket(&svc);
+}
+
 // -----------------------------------------------------------------------
 //  Test 8: Disconnect detection
 // -----------------------------------------------------------------------
@@ -2208,7 +2231,7 @@ fn test_profile_preference_selects_shm_futex() {
     let svc = unique_service("rs_pref_prof");
     cleanup_socket(&svc);
     // Without POSIX SHM the platform limit leaves baseline on both sides.
-    let want = if cfg!(target_os = "linux") {
+    let want = if cfg!(any(target_os = "linux", target_os = "freebsd")) {
         protocol::PROFILE_SHM_FUTEX
     } else {
         PROFILE_BASELINE

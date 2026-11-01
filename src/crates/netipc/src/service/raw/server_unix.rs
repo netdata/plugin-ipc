@@ -4,10 +4,10 @@ use super::server::TestHooks;
 use super::server::{ManagedServer, ServerConfig};
 use super::server_session_unix::{handle_session_threaded, poll_fd};
 use crate::protocol::NipcError;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::protocol::{HEADER_SIZE, PROFILE_SHM_FUTEX, PROFILE_SHM_HYBRID};
 use crate::transport::posix::{PendingConnection, UdsListener, UdsSession};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::transport::shm::ShmContext;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -40,7 +40,7 @@ impl ManagedServer {
             return Ok(());
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         crate::transport::shm::cleanup_stale(&self.run_dir, &self.service_name);
 
         let listener = UdsListener::bind(
@@ -96,14 +96,14 @@ impl ManagedServer {
             let session_id = self.next_session_id;
             self.next_session_id += 1;
             let accept = AcceptContext {
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 run_dir: self.run_dir.clone(),
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 service_name: self.service_name.clone(),
                 base_config: self.server_config.clone(),
                 session_id,
                 handshake_ms: self.timings.handshake_ms,
-                #[cfg(all(test, target_os = "linux"))]
+                #[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
                 hooks: self.test_hooks.clone(),
             };
             let socket = Arc::new(WorkerSocket::default());
@@ -189,14 +189,14 @@ fn stop_workers(workers: Vec<Worker>, grace: Duration) {
 
 /// What a worker needs to run the server side of one handshake.
 struct AcceptContext {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     run_dir: String,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     service_name: String,
     base_config: ServerConfig,
     session_id: u64,
     handshake_ms: u32,
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
     hooks: TestHooks,
 }
 
@@ -212,9 +212,9 @@ impl Drop for SessionExitNotice {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 type WorkerShm = Option<ShmContext>;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 type WorkerShm = Option<()>;
 
 impl AcceptContext {
@@ -232,7 +232,7 @@ impl AcceptContext {
         cfg.max_request_payload_bytes = learned_request_payload_bytes.load(Ordering::Acquire);
         cfg.max_response_payload_bytes = learned_response_payload_bytes.load(Ordering::Acquire);
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
             let mut shm: WorkerShm = None;
             let result = {
@@ -276,7 +276,7 @@ impl AcceptContext {
                 }
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         {
             let session = pending
                 .handshake(
@@ -291,7 +291,7 @@ impl AcceptContext {
     }
 
     /// Create the session's SHM region for the agreed payload limits.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn create_shm(&self, request_payload: u32, response_payload: u32) -> Option<ShmContext> {
         #[cfg(test)]
         if self.hooks.fail_shm_create.load(Ordering::Acquire) {

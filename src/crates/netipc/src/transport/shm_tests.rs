@@ -626,19 +626,22 @@ fn test_server_create_does_not_fallback_when_fallocate_is_unsupported() {
     ensure_run_dir();
     let svc = "rs_shm_alloc_unsupported";
     let sid = 0xa110_c003;
-    cleanup_shm(svc, sid);
 
-    let _fault = FallocateFaultGuard::install(&[libc::EOPNOTSUPP]);
-    let err = match ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024) {
-        Ok(_) => panic!("unsupported fallocate must disable SHM creation"),
-        Err(err) => err,
-    };
+    // EINVAL is how FreeBSD ZFS rejects posix_fallocate.
+    for errno in [libc::EOPNOTSUPP, libc::EINVAL] {
+        cleanup_shm(svc, sid);
+        let _fault = FallocateFaultGuard::install(&[errno]);
+        let err = match ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024) {
+            Ok(_) => panic!("unsupported allocation ({errno}) must disable SHM creation"),
+            Err(err) => err,
+        };
 
-    assert_eq!(err, ShmError::Allocate(libc::EOPNOTSUPP));
-    assert_eq!(syscall_test_counts(), (1, 0), "mmap must not be reached");
+        assert_eq!(err, ShmError::Allocate(errno));
+        assert_eq!(syscall_test_counts(), (1, 0), "mmap must not be reached");
 
-    let path = build_shm_path(TEST_RUN_DIR, svc, sid).expect("SHM path");
-    assert!(!path.exists(), "failed allocation must unlink its file");
+        let path = build_shm_path(TEST_RUN_DIR, svc, sid).expect("SHM path");
+        assert!(!path.exists(), "failed allocation must unlink its file");
+    }
 }
 
 // -----------------------------------------------------------------------

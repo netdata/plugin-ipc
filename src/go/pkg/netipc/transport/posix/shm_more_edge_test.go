@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || (freebsd && (amd64 || 386))
 
 package posix
 
@@ -87,33 +87,36 @@ func TestShmServerCreatePreallocation(t *testing.T) {
 		}
 	})
 
-	t.Run("unsupported allocation has no sparse fallback", func(t *testing.T) {
-		runDir := t.TempDir()
-		const (
-			svc       = "go_shm_allocate_unsupported"
-			sessionID = uint64(43)
-		)
+	// EINVAL is how FreeBSD ZFS rejects posix_fallocate.
+	for _, cause := range []syscall.Errno{syscall.EOPNOTSUPP, syscall.EINVAL} {
+		t.Run("unsupported allocation has no sparse fallback/"+cause.Error(), func(t *testing.T) {
+			runDir := t.TempDir()
+			const (
+				svc       = "go_shm_allocate_unsupported"
+				sessionID = uint64(43)
+			)
 
-		ctx, err := shmServerCreate(runDir, svc, sessionID, 1024, 1024,
-			func(_ int, _ uint32, _, _ int64) error {
-				return syscall.EOPNOTSUPP
-			})
-		if ctx != nil {
-			ctx.ShmDestroy()
-			t.Fatal("unsupported allocation returned a context")
-		}
-		if !errors.Is(err, ErrShmAllocate) || !errors.Is(err, syscall.EOPNOTSUPP) {
-			t.Fatalf("create error = %v, want allocation error wrapping EOPNOTSUPP", err)
-		}
+			ctx, err := shmServerCreate(runDir, svc, sessionID, 1024, 1024,
+				func(_ int, _ uint32, _, _ int64) error {
+					return cause
+				})
+			if ctx != nil {
+				ctx.ShmDestroy()
+				t.Fatal("unsupported allocation returned a context")
+			}
+			if !errors.Is(err, ErrShmAllocate) || !errors.Is(err, cause) {
+				t.Fatalf("create error = %v, want allocation error wrapping %v", err, cause)
+			}
 
-		path, pathErr := buildShmPath(runDir, svc, sessionID)
-		if pathErr != nil {
-			t.Fatalf("build path: %v", pathErr)
-		}
-		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatalf("unsupported allocation file should be removed, stat err = %v", statErr)
-		}
-	})
+			path, pathErr := buildShmPath(runDir, svc, sessionID)
+			if pathErr != nil {
+				t.Fatalf("build path: %v", pathErr)
+			}
+			if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("unsupported allocation file should be removed, stat err = %v", statErr)
+			}
+		})
+	}
 
 	t.Run("EINTR retries", func(t *testing.T) {
 		runDir := t.TempDir()
@@ -124,7 +127,7 @@ func TestShmServerCreatePreallocation(t *testing.T) {
 				if calls == 1 {
 					return syscall.EINTR
 				}
-				return syscall.Fallocate(fd, mode, off, len)
+				return shmAllocate(fd, mode, off, len)
 			})
 		if err != nil {
 			t.Fatalf("create after EINTR: %v", err)

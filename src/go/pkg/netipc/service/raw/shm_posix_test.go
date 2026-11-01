@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || (freebsd && (amd64 || 386))
 
 // SHM service tests: the POSIX SHM data plane exists on Linux only.
 

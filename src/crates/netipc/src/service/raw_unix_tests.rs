@@ -1,5 +1,5 @@
 use super::*;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::protocol::PROFILE_SHM_FUTEX;
 use crate::protocol::{
     APPS_CGROUP_HOST_ROOT, APPS_CGROUP_KNOWN, APPS_LOOKUP_RESP_HDR_SIZE, AppsLookupBuilder,
@@ -39,7 +39,7 @@ fn ensure_run_dir() {
 
 fn cleanup_all(service: &str) {
     let _ = std::fs::remove_file(format!("{TEST_RUN_DIR}/{service}.sock"));
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     crate::transport::shm::cleanup_stale(TEST_RUN_DIR, service);
 }
 
@@ -83,7 +83,7 @@ fn client_config() -> ClientConfig {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn shm_server_config() -> ServerConfig {
     ServerConfig {
         supported_profiles: PROFILE_BASELINE | PROFILE_SHM_FUTEX,
@@ -98,7 +98,7 @@ fn shm_server_config() -> ServerConfig {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn shm_client_config() -> ClientConfig {
     ClientConfig {
         supported_profiles: PROFILE_BASELINE | PROFILE_SHM_FUTEX,
@@ -273,7 +273,7 @@ fn fill_test_cgroups_snapshot(builder: &mut CgroupsBuilder<'_>) -> bool {
     true
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     match payload.downcast::<String>() {
         Ok(msg) => *msg,
@@ -476,7 +476,7 @@ impl TestServer {
         Self::start_with(service, server_config(), expected_method_code, handler, 8)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn start_shm(
         service: &str,
         expected_method_code: u16,
@@ -784,12 +784,12 @@ fn start_raw_overflow_no_growth_server(service: &str, cfg: ServerConfig) -> RawS
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 struct RawShmSessionServer {
     thread: Option<thread::JoinHandle<Result<(), String>>>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn start_raw_shm_session_server<F>(
     service: &str,
     cfg: ServerConfig,
@@ -837,7 +837,7 @@ where
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 impl RawShmSessionServer {
     fn wait(&mut self) {
         if let Some(thread) = self.thread.take() {
@@ -850,7 +850,7 @@ impl RawShmSessionServer {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn encode_raw_message(hdr: &Header, payload: &[u8]) -> Vec<u8> {
     let mut msg = vec![0u8; HEADER_SIZE + payload.len()];
     hdr.encode(&mut msg[..HEADER_SIZE]);
@@ -3070,7 +3070,7 @@ fn test_lookup_rejects_malformed_typed_responses_unix() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_cgroups_call_shm() {
     let svc = "rs_svc_cgroups_shm";
@@ -3098,7 +3098,7 @@ fn test_cgroups_call_shm() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_client_call_string_reverse_shm_success() {
     let svc = "rs_svc_strrev_shm";
@@ -3125,7 +3125,7 @@ fn test_client_call_string_reverse_shm_success() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_increment_batch_shm() {
     let svc = "rs_pp_batch_shm";
@@ -3150,7 +3150,7 @@ fn test_increment_batch_shm() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_refresh_shm_attach_failure_falls_back_to_baseline() {
     let svc = "rs_svc_shm_attach_fail";
@@ -3209,7 +3209,7 @@ fn test_refresh_shm_attach_failure_falls_back_to_baseline() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_server_falls_back_to_baseline_when_linux_shm_prepare_fails() {
     let svc = "rs_svc_shm_upgrade_fail";
@@ -3247,7 +3247,7 @@ fn test_server_falls_back_to_baseline_when_linux_shm_prepare_fails() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_call_increment_shm_short_response_truncated() {
     let svc = "rs_svc_shm_short_resp";
@@ -3303,7 +3303,7 @@ fn test_call_increment_shm_short_response_truncated() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_raw_shm_session_server_wait_panics_on_baseline_profile() {
     let svc = "rs_svc_shm_helper_bad_profile";
@@ -3327,7 +3327,7 @@ fn test_raw_shm_session_server_wait_panics_on_baseline_profile() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_raw_shm_session_server_wait_panics_on_short_request() {
     let svc = "rs_svc_shm_helper_short_req";
@@ -3362,7 +3362,7 @@ fn test_raw_shm_session_server_wait_panics_on_short_request() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_call_increment_shm_server_thread_rejects_baseline_profile() {
     let svc = "rs_svc_shm_short_resp_bad_profile";
@@ -3396,7 +3396,7 @@ fn test_call_increment_shm_server_thread_rejects_baseline_profile() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_call_increment_shm_server_thread_rejects_short_request() {
     let svc = "rs_svc_shm_short_resp_short_req";
@@ -3452,7 +3452,7 @@ fn test_call_increment_shm_server_thread_rejects_short_request() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_call_increment_shm_rejects_bad_message_id() {
     let svc = "rs_svc_shm_inc_bad_mid";
@@ -3497,7 +3497,7 @@ fn test_call_increment_shm_rejects_bad_message_id() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_call_string_reverse_shm_rejects_bad_message_id() {
     let svc = "rs_svc_shm_str_bad_mid";
@@ -3542,7 +3542,7 @@ fn test_call_string_reverse_shm_rejects_bad_message_id() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_call_increment_batch_shm_rejects_bad_message_id() {
     let svc = "rs_svc_shm_batch_bad_mid";
@@ -4116,7 +4116,7 @@ fn test_managed_server_recovers_after_uds_peer_closes_before_response() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_managed_server_recovers_after_short_shm_request() {
     let svc = "rs_svc_short_shm_req";
@@ -4147,7 +4147,7 @@ fn test_managed_server_recovers_after_short_shm_request() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_managed_server_recovers_after_bad_shm_header() {
     let svc = "rs_svc_bad_shm_hdr";
@@ -5454,11 +5454,11 @@ fn test_client_incompatible() {
 
     // Client requires SHM_FUTEX only (no baseline)
     let mut bad_cfg = client_config();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
         bad_cfg.supported_profiles = crate::protocol::PROFILE_SHM_FUTEX;
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     {
         // On non-Linux, use a profile bit that won't match
         bad_cfg.supported_profiles = 0x80000000;
@@ -6311,7 +6311,7 @@ fn test_batch_dispatch_builder_overflow_respects_configured_ceiling() {
     cleanup_all(svc);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_shm_batch_request_item_decode_failure_returns_bad_envelope() {
     let svc = "rs_svc_shm_batch_bad_item";
@@ -6447,7 +6447,7 @@ fn test_transport_without_session_unix() {
 /// The server creates a session's SHM region only when the handshake selects
 /// SHM, and falls back to baseline in the same handshake when the region
 /// cannot be created.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_shm_region_only_for_shm_sessions_unix() {
     let svc = unique_service("rs_unix_shm_after_negotiation");

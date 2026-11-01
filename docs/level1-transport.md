@@ -492,6 +492,7 @@ They may require chunking for large messages.
 | Transport | Platform | Synchronization |
 |-----------|----------|-----------------|
 | SHM | Linux | Futex-based |
+| SHM | FreeBSD | `_umtx_op`-based (Go: amd64 and 386 only) |
 | SHM | Windows | WaitOnAddress / named events |
 
 SHM transports are negotiated upgrades from the corresponding baseline
@@ -516,13 +517,15 @@ prohibition. Callers that need pipelining over SHM should pipeline at the
 batch level (one batch message in flight containing multiple items) or fall
 back to the baseline transport.
 
-FreeBSD and macOS do not have SHM backends. They always use the baseline UDS
-transport: on those platforms the POSIX handshake masks both the client's
-offered profiles and the server's supported and preferred profiles to the
-baseline bit, whatever the caller configured, so a misconfigured peer can
-never negotiate an SHM profile there. The SHM API still exists in C and Go and
-reports "unsupported"; the Rust crate does not compile the POSIX SHM module
-outside Linux.
+macOS, and Go on FreeBSD architectures other than amd64 and 386, do not have
+SHM backends. They always use the baseline UDS transport: there the POSIX
+handshake masks both the client's offered profiles and the server's supported
+and preferred profiles to the baseline bit, whatever the caller configured, so
+a misconfigured peer can never negotiate an SHM profile. The SHM API still
+exists in C and Go and reports "unsupported"; the Rust crate compiles the POSIX
+SHM module only on Linux and FreeBSD. On FreeBSD a server whose run directory
+is on ZFS cannot reserve region files and serves baseline (see
+`level1-posix-shm.md`).
 
 ### Transport selection
 
