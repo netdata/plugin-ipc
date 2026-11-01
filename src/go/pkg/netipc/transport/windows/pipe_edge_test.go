@@ -1150,3 +1150,25 @@ func TestSessionSendRejectsTooSmallPacketSize(t *testing.T) {
 		t.Fatalf("server expected ErrIncompatible, got %v", sr.err)
 	}
 }
+
+// A server whose client never sends HELLO reports the wait's own error,
+// as C and Rust do, not a generic receive failure.
+func TestServerHandshakeWaitKeepsTimeoutAndAbort(t *testing.T) {
+	aborted := make(chan struct{})
+	close(aborted)
+	cases := []struct {
+		name string
+		wait receiveWait
+		want error
+	}{
+		{"deadline", newReceiveWait(20, nil), ErrTimeout},
+		{"abort", newReceiveWait(0, aborted), ErrAborted},
+	}
+	for _, tc := range cases {
+		_, serverHandle := rawPipePair(t)
+		cfg := defaultServerConfig()
+		if _, err := serverHandshakeWait(serverHandle, &cfg, 1, tc.wait, nil); !errors.Is(err, tc.want) {
+			t.Errorf("%s: %v, want %v", tc.name, err, tc.want)
+		}
+	}
+}

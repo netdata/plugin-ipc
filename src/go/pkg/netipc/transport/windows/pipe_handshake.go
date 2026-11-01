@@ -123,6 +123,8 @@ func serverHandshakeWait(handle syscall.Handle, config *ServerConfig, sessionID 
 	sRespPay := applyDefault(config.MaxResponsePayloadBytes, protocol.MaxPayloadDefault)
 	sReqPay := applyDefault(config.MaxRequestPayloadBytes, protocol.MaxPayloadDefault)
 
+	// The wait's own timeout or abort is returned as is, as in C and Rust.
+	var waitErr error
 	ack, err := framing.ServerHandshake(framing.ServerHandshakeConfig{
 		ServerHelloConfig: framing.ServerHelloConfig{
 			PacketSize:              serverPktSize,
@@ -132,9 +134,15 @@ func serverHandshakeWait(handle syscall.Handle, config *ServerConfig, sessionID 
 			PreferredProfiles:       config.PreferredProfiles,
 			AuthToken:               config.AuthToken,
 		},
-		SessionID:       sessionID,
-		Prepare:         prepare,
-		Recv:            func(dst []byte) (int, error) { return pending.rawRecvWithTimeout(dst, wait) },
+		SessionID: sessionID,
+		Prepare:   prepare,
+		Recv: func(dst []byte) (int, error) {
+			n, err := pending.rawRecvWithTimeout(dst, wait)
+			if errors.Is(err, ErrTimeout) || errors.Is(err, ErrAborted) {
+				waitErr = err
+			}
+			return n, err
+		},
 		SendAck:         func(status uint16, ack protocol.HelloAck) error { return sendHelloAck(handle, status, ack) },
 		StatusError:     helloAckStatusError,
 		ErrRecv:         func(msg string) error { return wrapErr(ErrRecv, msg) },
@@ -142,6 +150,9 @@ func serverHandshakeWait(handle syscall.Handle, config *ServerConfig, sessionID 
 		ErrProtocol:     func(msg string) error { return wrapErr(ErrProtocol, msg) },
 		ErrIncompatible: func(msg string) error { return wrapErr(ErrIncompatible, msg) },
 	})
+	if waitErr != nil {
+		return nil, waitErr
+	}
 	if err != nil {
 		return nil, err
 	}

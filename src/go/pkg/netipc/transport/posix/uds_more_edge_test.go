@@ -1154,3 +1154,30 @@ func TestListenSocketOwnerOnly(t *testing.T) {
 		t.Errorf("listener socket mode = %o, want 600", mode)
 	}
 }
+
+// A server whose client never sends HELLO reports the wait's own error,
+// as C and Rust do, not a generic receive failure.
+func TestServerHandshakeWaitKeepsTimeoutAndAbort(t *testing.T) {
+	aborted := make(chan struct{})
+	close(aborted)
+	cases := []struct {
+		name string
+		wait receiveWait
+		want error
+	}{
+		{"deadline", newReceiveWait(20, nil), ErrTimeout},
+		{"abort", newReceiveWait(0, aborted), ErrAborted},
+	}
+	for _, tc := range cases {
+		fds, err := syscall.Socketpair(syscall.AF_UNIX, sockType, 0)
+		if err != nil {
+			t.Fatalf("socketpair: %v", err)
+		}
+		_, err = serverHandshakeWait(fds[0], defaultServerConfigPtr(), 1, tc.wait, nil)
+		syscall.Close(fds[0])
+		syscall.Close(fds[1])
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%s: %v, want %v", tc.name, err, tc.want)
+		}
+	}
+}

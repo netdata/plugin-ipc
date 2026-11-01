@@ -167,8 +167,9 @@ func serverHandshake(fd int, config *ServerConfig, sessionID uint64) (*Session, 
 func serverHandshakeWait(fd int, config *ServerConfig, sessionID uint64, wait receiveWait, prepare ProfilePrepare) (*Session, error) {
 	serverPktSize := packetSizeLimit(fd, config.PacketSize)
 
-	// A stream HELLO cut short is a protocol error, as on SEQPACKET.
-	var streamErr error
+	// The wait's own timeout or abort is returned as is, as in C and Rust;
+	// a stream HELLO cut short is a protocol error, as on SEQPACKET.
+	var waitErr error
 	sRespPay := applyDefault(config.MaxResponsePayloadBytes, protocol.MaxPayloadDefault)
 	sReqPay := applyDefault(config.MaxRequestPayloadBytes, protocol.MaxPayloadDefault)
 	ack, err := framing.ServerHandshake(framing.ServerHandshakeConfig{
@@ -185,8 +186,9 @@ func serverHandshakeWait(fd int, config *ServerConfig, sessionID uint64, wait re
 		Prepare:   prepare,
 		Recv: func(dst []byte) (int, error) {
 			n, err := serverHandshakeRecv(fd, dst, &wait)
-			if streamTransport && errors.Is(err, ErrProtocol) {
-				streamErr = err
+			if errors.Is(err, ErrTimeout) || errors.Is(err, ErrAborted) ||
+				(streamTransport && errors.Is(err, ErrProtocol)) {
+				waitErr = err
 			}
 			return n, err
 		},
@@ -197,8 +199,8 @@ func serverHandshakeWait(fd int, config *ServerConfig, sessionID uint64, wait re
 		ErrProtocol:     func(msg string) error { return wrapErr(ErrProtocol, msg) },
 		ErrIncompatible: func(msg string) error { return wrapErr(ErrIncompatible, msg) },
 	})
-	if streamErr != nil {
-		return nil, streamErr
+	if waitErr != nil {
+		return nil, waitErr
 	}
 	if err != nil {
 		return nil, err

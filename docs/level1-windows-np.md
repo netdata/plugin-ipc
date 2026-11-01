@@ -106,8 +106,9 @@ Both pass the client check when the client runs as the same account.
    (Go) return the connected pipe instance without reading;
    `nipc_np_accept_handshake()`, `PendingPipe::handshake()` and
    `PendingConn.Handshake()` then wait for HELLO with a timeout (0 = none)
-   and, in Rust and Go, an abort signal. A failed handshake closes the
-   instance without `DisconnectNamedPipe`, which would discard a rejection
+   and, in Rust and Go, an abort signal. Expiry returns a timeout error,
+   an abort an aborted error, in all three languages. A failed handshake
+   closes the instance without `DisconnectNamedPipe`, which would discard a rejection
    reply the client has not read yet. `nipc_np_accept_handshake_prepared()`,
    `PendingPipe::handshake_prepared()` and `PendingConn.HandshakePrepared()`
    also take a prepare callback with the selected profile and the final
