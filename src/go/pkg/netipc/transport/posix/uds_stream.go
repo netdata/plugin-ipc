@@ -107,18 +107,32 @@ func streamRecvPacket(fd int, buf []byte, packetSize uint32, wait *receiveWait) 
 	return end, nil
 }
 
-// streamRecvSessionPacket reads one packet of a session's message. The first
+// streamReadExactPending is streamReadExact that takes the session's
+// pending bytes first; a nil pending reads only the socket.
+func streamReadExactPending(fd int, pending *pendingQueue, dst []byte, wait *receiveWait, midPacket bool) error {
+	got := 0
+	if pending != nil {
+		got = pending.take(dst)
+	}
+	if got == len(dst) {
+		return nil
+	}
+	return streamReadExact(fd, dst[got:], wait, midPacket || got > 0)
+}
+
+// streamRecvSessionPacket reads one packet of a session's message, from its
+// pending bytes first (nil reads only the socket). The first
 // packet's header is checked before its body is read: one that is not an
 // outer header, or declares more than this direction's limits, comes back
 // alone so the framing rejects it without waiting for bytes a stream peer
 // may never send. A truncated continuation is a chunk error, as on
 // SEQPACKET.
-func streamRecvSessionPacket(fd int, buf []byte, first bool, packetSize, maxPayload, maxItems uint32, wait *receiveWait) (int, error) {
+func streamRecvSessionPacket(fd int, pending *pendingQueue, buf []byte, first bool, packetSize, maxPayload, maxItems uint32, wait *receiveWait) (int, error) {
 	if len(buf) < protocol.HeaderSize {
 		return 0, wrapErr(ErrProtocol, "packet too short for header")
 	}
 	n, err := func() (int, error) {
-		if err := streamReadExact(fd, buf[:protocol.HeaderSize], wait, false); err != nil {
+		if err := streamReadExactPending(fd, pending, buf[:protocol.HeaderSize], wait, false); err != nil {
 			return 0, err
 		}
 		hdr := buf[:protocol.HeaderSize]
@@ -129,7 +143,7 @@ func streamRecvSessionPacket(fd int, buf []byte, first bool, packetSize, maxPayl
 			}
 		}
 		end := protocol.HeaderSize + streamBodyLen(hdr, len(buf), packetSize)
-		if err := streamReadExact(fd, buf[protocol.HeaderSize:end], wait, true); err != nil {
+		if err := streamReadExactPending(fd, pending, buf[protocol.HeaderSize:end], wait, true); err != nil {
 			return 0, err
 		}
 		return end, nil

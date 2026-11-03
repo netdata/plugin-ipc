@@ -268,6 +268,9 @@ pub struct UdsSession {
 
     // In-flight message_id set (client-side only)
     inflight_ids: HashSet<u64>,
+
+    // Inbound packets read while a pipelined send waited for buffer space
+    pending: Pending,
 }
 
 impl UdsSession {
@@ -291,9 +294,17 @@ impl UdsSession {
         }
     }
 
-    /// Get the raw fd for poll/epoll integration.
+    /// Get the raw fd for poll/epoll integration. A pipelined send can read
+    /// responses into the session's pending queue, where the fd no longer
+    /// shows them: check [`Self::has_pending`] before waiting on the fd.
     pub fn fd(&self) -> RawFd {
         self.fd
+    }
+
+    /// True when the next receive can return data read earlier by a
+    /// pipelined send, without the fd becoming readable.
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
     }
 
     /// Get the session role.
@@ -357,9 +368,36 @@ impl UdsSession {
 
         let framing = self.framing(true);
         let fd = self.fd;
-        framing::send_message(framing, &mut self.inflight_ids, hdr, payload, |h, p| {
-            send_packet(fd, h, p)
-        })
+
+        // One request in flight (every typed call) keeps the plain blocking
+        // send; only a pipelining client can deadlock with a server blocked
+        // sending to it.
+        let inflight = self.inflight_ids.len()
+            + usize::from(framing.client && hdr.kind == crate::protocol::KIND_REQUEST);
+        if !(framing.client && inflight > 1) {
+            return framing::send_message(framing, &mut self.inflight_ids, hdr, payload, |h, p| {
+                send_packet(fd, h, p)
+            });
+        }
+
+        let bound = pending_bound(self.max_response_payload_bytes, self.packet_size, inflight);
+        let read_len = self.packet_size as usize;
+        let pending = &mut self.pending;
+        let mut failed = false;
+        let result =
+            framing::send_message(framing, &mut self.inflight_ids, hdr, payload, |h, p| {
+                let r = send_with_progress(fd, h, p, pending, read_len, bound);
+                if matches!(r, Err(UdsError::Protocol(_))) {
+                    failed = true;
+                }
+                r
+            });
+        if failed {
+            // Inbound bytes were dropped: the session cannot continue.
+            unsafe { libc::shutdown(fd, libc::SHUT_RDWR) };
+            self.inflight_ids.clear();
+        }
+        result
     }
 
     /// Receive one logical message. Blocks until a complete message arrives.
@@ -399,9 +437,12 @@ impl UdsSession {
             // every later receive fails. Sends stay valid; they always write
             // whole messages.
             let wait = controlled.then_some(&wait);
-            if let Some(wait) = wait {
+            if let Some(wait) = wait
+                && self.pending.is_empty()
+            {
                 wait_fd_readable(fd, wait)?;
             }
+            let pending = &mut self.pending;
             let mut first = true;
             let result = framing::receive_message(
                 framing,
@@ -412,6 +453,7 @@ impl UdsSession {
                 |b| {
                     let r = stream::recv_session_packet(
                         fd,
+                        pending,
                         b,
                         first,
                         framing.packet_size,
@@ -425,6 +467,8 @@ impl UdsSession {
             );
             if result.is_err() {
                 unsafe { libc::shutdown(fd, libc::SHUT_RD) };
+                // Queued bytes are part of the abandoned stream too.
+                self.pending = Pending::default();
             }
             result
         }
@@ -436,7 +480,13 @@ impl UdsSession {
             buf,
             &mut self.recv_buf,
             &mut self.pkt_buf,
-            |b| raw_recv_control(fd, b, controlled, &mut wait),
+            |b| {
+                if self.pending.is_empty() {
+                    raw_recv_control(fd, b, controlled, &mut wait)
+                } else {
+                    Ok(self.pending.pop_packet(b))
+                }
+            },
         )
     }
 }
@@ -967,6 +1017,244 @@ fn send_control(fd: RawFd, pkt: &[u8]) -> Result<(), UdsError> {
     raw_send(fd, pkt)
 }
 
+/// Inbound bytes a pipelined client send read while it waited for buffer
+/// space; receive consumes them before reading the socket. SEQPACKET stores
+/// each datagram as a 4-byte length record followed by its bytes; the
+/// stream stores raw bytes.
+#[derive(Default)]
+pub(crate) struct Pending {
+    buf: Vec<u8>,
+    head: usize,
+}
+
+#[cfg(target_os = "macos")]
+const PENDING_RECORD_LEN: usize = 0;
+#[cfg(not(target_os = "macos"))]
+const PENDING_RECORD_LEN: usize = 4;
+
+impl Pending {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.head == self.buf.len()
+    }
+
+    fn consumed(&mut self) {
+        if self.head == self.buf.len() {
+            self.buf.clear();
+            self.head = 0;
+        }
+    }
+
+    /// Reads without blocking until the socket has nothing more to read, EOF
+    /// or an error (both set `eof`). Queued bytes beyond `bound` are a
+    /// protocol failure. A datagram larger than `read_len` is stored
+    /// truncated, and the receive path rejects it.
+    fn drain(
+        &mut self,
+        fd: RawFd,
+        read_len: usize,
+        bound: usize,
+        eof: &mut bool,
+    ) -> Result<(), UdsError> {
+        if self.head > 0 {
+            self.buf.drain(..self.head);
+            self.head = 0;
+        }
+        loop {
+            let start = self.buf.len();
+            self.buf.resize(start + PENDING_RECORD_LEN + read_len, 0);
+            let dst = &mut self.buf[start + PENDING_RECORD_LEN..];
+            let n = unsafe {
+                libc::recv(
+                    fd,
+                    dst.as_mut_ptr() as *mut libc::c_void,
+                    dst.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if n <= 0 {
+                self.buf.truncate(start);
+                match errno() {
+                    _ if n == 0 => *eof = true,
+                    libc::EINTR => continue,
+                    e if e == libc::EAGAIN || e == libc::EWOULDBLOCK => {}
+                    // A socket error: the retried send reports it.
+                    _ => *eof = true,
+                }
+                return Ok(());
+            }
+            let n = n as usize;
+            #[cfg(not(target_os = "macos"))]
+            self.buf[start..start + PENDING_RECORD_LEN].copy_from_slice(&(n as u32).to_ne_bytes());
+            self.buf.truncate(start + PENDING_RECORD_LEN + n);
+            if self.buf.len() > bound {
+                return Err(UdsError::Protocol(
+                    "inbound bytes exceed the in-flight responses".into(),
+                ));
+            }
+        }
+    }
+
+    /// SEQPACKET: pops one queued datagram into `dst`, truncating it to
+    /// `dst.len()` as recv() does. Returns the bytes copied.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    fn pop_packet(&mut self, dst: &mut [u8]) -> usize {
+        let h = self.head;
+        let rec = u32::from_ne_bytes(self.buf[h..h + 4].try_into().unwrap()) as usize;
+        let n = rec.min(dst.len());
+        dst[..n].copy_from_slice(&self.buf[h + 4..h + 4 + n]);
+        self.head = h + 4 + rec;
+        self.consumed();
+        n
+    }
+
+    /// Stream: copies up to `dst.len()` queued bytes. Returns the count.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn take(&mut self, dst: &mut [u8]) -> usize {
+        let n = dst.len().min(self.buf.len() - self.head);
+        dst[..n].copy_from_slice(&self.buf[self.head..self.head + n]);
+        self.head += n;
+        self.consumed();
+        n
+    }
+}
+
+/// Wire bytes `inflight` responses can occupy: the pending queue bound.
+fn pending_bound(max_response_payload: u32, packet_size: u32, inflight: usize) -> usize {
+    let payload = max_response_payload as usize;
+    let budget = (packet_size as usize).saturating_sub(HEADER_SIZE).max(1);
+    let packets = if payload == 0 {
+        1
+    } else {
+        1 + (payload - 1) / budget
+    };
+    packets
+        .saturating_mul(HEADER_SIZE + PENDING_RECORD_LEN)
+        .saturating_add(payload)
+        .saturating_mul(inflight)
+}
+
+/// `send_with_progress_loop`; macOS ignores MSG_DONTWAIT on a stream send
+/// that lacks buffer space and blocks, so the descriptor is made
+/// non-blocking for the send instead.
+fn send_with_progress(
+    fd: RawFd,
+    hdr: &[u8],
+    payload: &[u8],
+    pending: &mut Pending,
+    read_len: usize,
+    bound: usize,
+) -> Result<(), UdsError> {
+    #[cfg(target_os = "macos")]
+    {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(UdsError::Send(errno()));
+        }
+        let result = send_with_progress_loop(fd, hdr, payload, pending, read_len, bound);
+        // A descriptor left non-blocking would break later blocking calls;
+        // a Send error also fails every in-flight request.
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags) } < 0 {
+            let e = errno();
+            unsafe { libc::shutdown(fd, libc::SHUT_RDWR) };
+            return Err(UdsError::Send(e));
+        }
+        result
+    }
+    #[cfg(not(target_os = "macos"))]
+    send_with_progress_loop(fd, hdr, payload, pending, read_len, bound)
+}
+
+/// Sends one packet without blocking; while the socket is full, reads what
+/// the peer sent into `pending`, so both peers keep making progress. No
+/// timeout: it waits as long as a blocking send would.
+fn send_with_progress_loop(
+    fd: RawFd,
+    hdr: &[u8],
+    payload: &[u8],
+    pending: &mut Pending,
+    read_len: usize,
+    bound: usize,
+) -> Result<(), UdsError> {
+    // A SEQPACKET send moves the whole packet or nothing, so only the
+    // stream advances these.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut parts = [hdr, payload];
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut first = 0;
+    let mut eof = false;
+    loop {
+        let mut iov = [libc::iovec {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 0,
+        }; 2];
+        let mut iovcnt = 0;
+        for part in &parts[first..] {
+            if !part.is_empty() {
+                iov[iovcnt] = libc::iovec {
+                    iov_base: part.as_ptr() as *mut libc::c_void,
+                    iov_len: part.len(),
+                };
+                iovcnt += 1;
+            }
+        }
+        // Zero-initialize: musl's 64-bit msghdr has private padding fields.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = iov.as_mut_ptr();
+        msg.msg_iovlen = iovcnt as _;
+
+        let n = unsafe { libc::sendmsg(fd, &msg, SEND_FLAGS | libc::MSG_DONTWAIT) };
+        if n >= 0 {
+            #[cfg(target_os = "macos")]
+            {
+                if n == 0 {
+                    return Err(UdsError::Send(0));
+                }
+                let mut left = n as usize;
+                while first < parts.len() && left >= parts[first].len() {
+                    left -= parts[first].len();
+                    first += 1;
+                }
+                if first == parts.len() {
+                    return Ok(());
+                }
+                parts[first] = &parts[first][left..];
+                continue;
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                return if n as usize == hdr.len() + payload.len() {
+                    Ok(())
+                } else {
+                    Err(UdsError::Send(errno()))
+                };
+            }
+        }
+        match errno() {
+            libc::EINTR => continue,
+            e if e == libc::EAGAIN || e == libc::EWOULDBLOCK => {}
+            e => return Err(UdsError::Send(e)),
+        }
+
+        // After EOF only writability matters; the retried send reports a
+        // closed peer.
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLOUT | if eof { 0 } else { libc::POLLIN },
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut pfd, 1, -1) } < 0 {
+            let e = errno();
+            if e == libc::EINTR {
+                continue;
+            }
+            return Err(UdsError::Send(e));
+        }
+        if !eof && pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+            pending.drain(fd, read_len, bound, &mut eof)?;
+        }
+    }
+}
+
 /// Send header + payload as one SEQPACKET message using sendmsg.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 fn raw_send_iov(fd: RawFd, hdr: &[u8], payload: &[u8]) -> Result<(), UdsError> {
@@ -1440,6 +1728,7 @@ fn connect_and_handshake(
         recv_buf: Vec::new(),
         pkt_buf: Vec::new(),
         inflight_ids: HashSet::new(),
+        pending: Pending::default(),
     })
 }
 
@@ -1494,6 +1783,7 @@ fn server_handshake(
         recv_buf: Vec::new(),
         pkt_buf: Vec::new(),
         inflight_ids: HashSet::new(),
+        pending: Pending::default(),
     })
 }
 

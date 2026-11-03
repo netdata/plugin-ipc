@@ -118,10 +118,20 @@ func (s *Session) ReceiveTimeout(buf []byte, timeoutMs uint32, abortCh <-chan st
 		return s.receiveStream(buf, controlled, newReceiveWait(timeoutMs, abortCh))
 	}
 
-	recv := func(dst []byte) (int, error) { return rawRecv(s.fd, dst) }
+	recv := func(dst []byte) (int, error) {
+		if s.pending.queued() {
+			return s.pending.popPacket(dst), nil
+		}
+		return rawRecv(s.fd, dst)
+	}
 	if controlled {
 		wait := newReceiveWait(timeoutMs, abortCh)
-		recv = func(dst []byte) (int, error) { return rawRecvWithTimeout(s.fd, dst, wait) }
+		recv = func(dst []byte) (int, error) {
+			if s.pending.queued() {
+				return s.pending.popPacket(dst), nil
+			}
+			return rawRecvWithTimeout(s.fd, dst, wait)
+		}
 	}
 	return s.receiveFraming(buf, recv, false)
 }
@@ -134,8 +144,10 @@ func (s *Session) ReceiveTimeout(buf []byte, timeoutMs uint32, abortCh <-chan st
 func (s *Session) receiveStream(buf []byte, controlled bool, wait receiveWait) (protocol.Header, []byte, error) {
 	var waitp *receiveWait
 	if controlled {
-		if err := pollReadableForReceive(s.fd, wait); err != nil {
-			return protocol.Header{}, nil, err
+		if !s.pending.queued() {
+			if err := pollReadableForReceive(s.fd, wait); err != nil {
+				return protocol.Header{}, nil, err
+			}
 		}
 		waitp = &wait
 	}
@@ -145,13 +157,15 @@ func (s *Session) receiveStream(buf []byte, controlled bool, wait receiveWait) (
 	}
 	first := true
 	recv := func(dst []byte) (int, error) {
-		n, err := streamRecvSessionPacket(s.fd, dst, first, s.PacketSize, maxPayload, maxItems, waitp)
+		n, err := streamRecvSessionPacket(s.fd, &s.pending, dst, first, s.PacketSize, maxPayload, maxItems, waitp)
 		first = false
 		return n, err
 	}
 	hdr, payload, err := s.receiveFraming(buf, recv, true)
 	if err != nil {
 		_ = syscall.Shutdown(s.fd, syscall.SHUT_RD)
+		// Queued bytes are part of the abandoned stream too.
+		s.pending = pendingQueue{}
 	}
 	return hdr, payload, err
 }

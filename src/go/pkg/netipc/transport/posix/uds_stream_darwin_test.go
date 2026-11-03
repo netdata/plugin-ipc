@@ -154,3 +154,39 @@ func TestListenBindDir(t *testing.T) {
 		t.Fatalf("foreign subdirectory removed: %v", err)
 	}
 }
+
+// macOS stream: a receive that fails mid-stream shuts the read side, and
+// every later receive must fail. Bytes left in the pending queue are part of
+// that abandoned stream: here a forged response for an in-flight id follows
+// an over-limit header, and must not be delivered.
+func TestStreamFailedReceiveDropsPending(t *testing.T) {
+	client, wg := smallBufferStart(t, smallBufCloseAfterOne, 65536)
+	if err := sendPipelinedRequest(client, 0); err != nil {
+		t.Fatalf("request 1: %v", err)
+	}
+
+	over := protocol.Header{
+		Magic:      protocol.MagicMsg,
+		Version:    protocol.Version,
+		HeaderLen:  protocol.HeaderSize,
+		Kind:       protocol.KindResponse,
+		ItemCount:  1,
+		MessageID:  1,
+		PayloadLen: 65537,
+	}
+	buf := make([]byte, 2*protocol.HeaderSize)
+	over.Encode(buf[:protocol.HeaderSize])
+	over.PayloadLen = 0
+	over.Encode(buf[protocol.HeaderSize:])
+	client.pending = pendingQueue{buf: buf}
+
+	rbuf := make([]byte, pipeBufPkt)
+	if _, _, err := client.Receive(rbuf); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("expected ErrLimitExceeded, got %v", err)
+	}
+	if _, _, err := client.Receive(rbuf); err == nil {
+		t.Fatal("later receive delivered a queued message")
+	}
+	client.Close()
+	wg.Wait()
+}

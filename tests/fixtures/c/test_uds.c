@@ -22,6 +22,7 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -2193,6 +2194,330 @@ static void test_pipeline_chunked(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: Pipelining beyond the socket buffers                         */
+/* ------------------------------------------------------------------ */
+
+/* Small buffers make the deadlock reachable on every platform (FreeBSD and
+ * macOS default to 8 KiB, Linux to about 208 KiB). The client's send timeout
+ * only bounds a failing run: a deadlocked send fails instead of hanging. A
+ * passing run never waits on it, and the server has none, so a slow server
+ * cannot fail a passing run. */
+static void shrink_socket_buffers(int fd, bool bound_sends)
+{
+    int size = 4096;
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
+    if (bound_sends) {
+        struct timeval tv = {.tv_sec = 10, .tv_usec = 0};
+        (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
+}
+
+#define PIPE_BUF_COUNT 16
+#define PIPE_BUF_SIZE  16000
+#define PIPE_BUF_PKT   1024
+/* Flood mode: small responses keep the client's queue bound small. */
+#define PIPE_BUF_FLOOD_RESP 4096
+
+typedef enum {
+    SMALL_BUF_ECHO = 1,        /* receive one request, send its response */
+    SMALL_BUF_CLOSE_AFTER_ONE, /* receive one request, then close */
+    SMALL_BUF_FLOOD,           /* receive one request, then send responses
+                                  without reading until the send fails */
+} small_buf_mode_t;
+
+typedef struct {
+    server_ctx_t     base;
+    small_buf_mode_t mode;
+} small_buf_ctx_t;
+
+static void *small_buffer_server_thread(void *arg)
+{
+    small_buf_ctx_t *sb = (small_buf_ctx_t *)arg;
+    server_ctx_t *ctx = &sb->base;
+
+    nipc_uds_listener_t listener;
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
+                                            &ctx->config, &listener);
+    if (err != NIPC_UDS_OK) {
+        test_flag_set(&ctx->done);
+        return NULL;
+    }
+    test_flag_set(&ctx->ready);
+
+    nipc_uds_session_t session;
+    err = nipc_uds_accept(&listener, 0, &session);
+    if (err != NIPC_UDS_OK) {
+        nipc_uds_close_listener(&listener);
+        test_flag_set(&ctx->done);
+        return NULL;
+    }
+    shrink_socket_buffers(session.fd, false);
+
+    int count = sb->mode == SMALL_BUF_ECHO ? ctx->echo_count : 1;
+    for (int m = 0; m < count; m++) {
+        uint8_t buf[PIPE_BUF_PKT];
+        nipc_header_t hdr;
+        const void *payload;
+        size_t payload_len;
+
+        err = nipc_uds_receive(&session, buf, sizeof(buf),
+                                &hdr, &payload, &payload_len);
+        if (err != NIPC_UDS_OK)
+            break;
+
+        if (sb->mode == SMALL_BUF_ECHO) {
+            nipc_header_t resp = hdr;
+            resp.kind = NIPC_KIND_RESPONSE;
+            resp.transport_status = NIPC_STATUS_OK;
+            err = nipc_uds_send(&session, &resp, payload, payload_len);
+            if (err != NIPC_UDS_OK)
+                break;
+        }
+    }
+
+    if (sb->mode == SMALL_BUF_FLOOD) {
+        static uint8_t resp_payload[PIPE_BUF_FLOOD_RESP];
+        for (;;) {
+            nipc_header_t resp = {
+                .kind = NIPC_KIND_RESPONSE, .code = 1,
+                .item_count = 1, .message_id = 1,
+                .transport_status = NIPC_STATUS_OK,
+            };
+            if (nipc_uds_send(&session, &resp, resp_payload,
+                              sizeof(resp_payload)) != NIPC_UDS_OK)
+                break;
+        }
+    }
+
+    nipc_uds_close_session(&session);
+    nipc_uds_close_listener(&listener);
+    test_flag_set(&ctx->done);
+    return NULL;
+}
+
+/* Starts the server in the given mode and connects a client; both ends get
+ * small socket buffers. Returns 0 on success. */
+static int small_buffer_start(const char *svc, small_buf_mode_t mode,
+                              uint32_t max_response, small_buf_ctx_t *sb,
+                              pthread_t *tid, nipc_uds_session_t *session)
+{
+    cleanup_socket(svc);
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    scfg.packet_size = PIPE_BUF_PKT;
+    scfg.max_request_payload_bytes  = 65536;
+    scfg.max_response_payload_bytes = max_response;
+
+    memset(sb, 0, sizeof(*sb));
+    sb->base.service = svc;
+    sb->base.config = scfg;
+    sb->base.accept_count = 1;
+    sb->base.echo_count = PIPE_BUF_COUNT;
+    sb->mode = mode;
+
+    pthread_create(tid, NULL, small_buffer_server_thread, sb);
+    (void)test_flag_wait_any(&sb->base.ready, &sb->base.done);
+    check("small-buffer server ready",
+          __atomic_load_n(&sb->base.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    ccfg.packet_size = PIPE_BUF_PKT;
+    ccfg.max_request_payload_bytes  = 65536;
+    ccfg.max_response_payload_bytes = max_response;
+
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, session);
+    check("connect", err == NIPC_UDS_OK);
+    if (err != NIPC_UDS_OK)
+        return -1;
+    shrink_socket_buffers(session->fd, true);
+    return 0;
+}
+
+static nipc_uds_error_t send_pipelined_request(nipc_uds_session_t *session,
+                                               uint8_t *payload, int i)
+{
+    for (size_t j = 0; j < PIPE_BUF_SIZE; j++)
+        payload[j] = (uint8_t)((i * 7 + j) & 0xFF);
+    nipc_header_t hdr = {
+        .kind = NIPC_KIND_REQUEST, .code = 1,
+        .item_count = 1, .message_id = (uint64_t)(i + 1),
+    };
+    return nipc_uds_send(session, &hdr, payload, PIPE_BUF_SIZE);
+}
+
+/* A client that sends every request before reading any response must not
+ * deadlock with the server when the bytes in flight exceed the buffers. */
+static void test_pipeline_exceeds_socket_buffers(void)
+{
+    printf("Test: Pipelining beyond the socket buffers completes\n");
+    const char *svc = "test_pipebuf";
+    small_buf_ctx_t sb;
+    pthread_t tid;
+    nipc_uds_session_t session;
+
+    if (small_buffer_start(svc, SMALL_BUF_ECHO, 65536, &sb, &tid,
+                           &session) == 0) {
+        check("no pending data before sending",
+              !nipc_uds_session_has_pending(&session));
+        uint8_t *payload = malloc(PIPE_BUF_SIZE);
+        int sent_ok = 1;
+        for (int i = 0; i < PIPE_BUF_COUNT && sent_ok; i++) {
+            if (send_pipelined_request(&session, payload, i) != NIPC_UDS_OK)
+                sent_ok = 0;
+        }
+        free(payload);
+        check("all pipelined requests sent", sent_ok);
+        /* The buffers hold a fraction of the responses, so finishing the
+         * sends required reading responses into the queue. */
+        check("responses queued during the sends",
+              nipc_uds_session_has_pending(&session));
+
+        int all_ok = sent_ok;
+        for (int i = 0; i < PIPE_BUF_COUNT && all_ok; i++) {
+            uint8_t rbuf[PIPE_BUF_PKT];
+            nipc_header_t rhdr;
+            const void *rp;
+            size_t rlen;
+            if (nipc_uds_receive(&session, rbuf, sizeof(rbuf),
+                                  &rhdr, &rp, &rlen) != NIPC_UDS_OK) {
+                all_ok = 0;
+                break;
+            }
+            if (rhdr.message_id != (uint64_t)(i + 1) || rlen != PIPE_BUF_SIZE) {
+                all_ok = 0;
+                break;
+            }
+            const uint8_t *rpp = (const uint8_t *)rp;
+            for (size_t j = 0; j < PIPE_BUF_SIZE; j++) {
+                if (rpp[j] != (uint8_t)((i * 7 + j) & 0xFF)) {
+                    all_ok = 0;
+                    break;
+                }
+            }
+        }
+        check("all pipelined responses correct", all_ok);
+        check("pending queue drained", session.pending_tail == 0);
+        check("no pending data after receiving",
+              !nipc_uds_session_has_pending(&session));
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+#if defined(__APPLE__)
+/* macOS stream: a receive that fails mid-stream shuts the read side, and
+ * every later receive must fail. Bytes left in the pending queue are part
+ * of that abandoned stream: here a forged response for an in-flight id
+ * follows an over-limit header, and must not be delivered. */
+static void test_stream_failed_receive_drops_pending(void)
+{
+    printf("Test: Failed stream receive drops pending bytes\n");
+    const char *svc = "test_pipestale";
+    small_buf_ctx_t sb;
+    pthread_t tid;
+    nipc_uds_session_t session;
+
+    if (small_buffer_start(svc, SMALL_BUF_CLOSE_AFTER_ONE, 65536, &sb, &tid,
+                           &session) == 0) {
+        uint8_t *payload = malloc(PIPE_BUF_SIZE);
+        check("request 1 sent",
+              send_pipelined_request(&session, payload, 0) == NIPC_UDS_OK);
+        free(payload);
+
+        nipc_header_t over = {
+            .magic = NIPC_MAGIC_MSG, .version = NIPC_VERSION,
+            .header_len = NIPC_HEADER_LEN, .kind = NIPC_KIND_RESPONSE,
+            .item_count = 1, .message_id = 1, .payload_len = 65537,
+        };
+        nipc_header_t forged = over;
+        forged.payload_len = 0;
+        session.pending_buf = malloc(2 * NIPC_HEADER_LEN);
+        nipc_header_encode(&over, session.pending_buf, NIPC_HEADER_LEN);
+        nipc_header_encode(&forged, session.pending_buf + NIPC_HEADER_LEN,
+                           NIPC_HEADER_LEN);
+        session.pending_cap = 2 * NIPC_HEADER_LEN;
+        session.pending_head = 0;
+        session.pending_tail = 2 * NIPC_HEADER_LEN;
+
+        uint8_t rbuf[PIPE_BUF_PKT];
+        nipc_header_t rhdr;
+        const void *rp;
+        size_t rlen;
+        check("over-limit response rejected",
+              nipc_uds_receive(&session, rbuf, sizeof(rbuf), &rhdr, &rp,
+                               &rlen) == NIPC_UDS_ERR_LIMIT_EXCEEDED);
+        check("later receive fails",
+              nipc_uds_receive(&session, rbuf, sizeof(rbuf), &rhdr, &rp,
+                               &rlen) != NIPC_UDS_OK);
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+#endif
+
+/* The server closes while the pipelining client waits for buffer space:
+ * the send fails instead of waiting forever. */
+static void test_pipeline_peer_close_during_send(void)
+{
+    printf("Test: Peer close during a pipelined send fails the send\n");
+    const char *svc = "test_pipeclose";
+    small_buf_ctx_t sb;
+    pthread_t tid;
+    nipc_uds_session_t session;
+
+    if (small_buffer_start(svc, SMALL_BUF_CLOSE_AFTER_ONE, 65536, &sb, &tid,
+                           &session) == 0) {
+        uint8_t *payload = malloc(PIPE_BUF_SIZE);
+        nipc_uds_error_t err = NIPC_UDS_OK;
+        for (int i = 0; i < PIPE_BUF_COUNT && err == NIPC_UDS_OK; i++)
+            err = send_pipelined_request(&session, payload, i);
+        free(payload);
+        check("pipelined send fails with SEND", err == NIPC_UDS_ERR_SEND);
+        check("in-flight set cleared", session.inflight_count == 0);
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* A server that sends more than the in-flight responses can occupy fails
+ * the client session instead of growing its queue without limit. */
+static void test_pipeline_pending_bound(void)
+{
+    printf("Test: Inbound bytes beyond the in-flight responses fail the session\n");
+    const char *svc = "test_pipebound";
+    small_buf_ctx_t sb;
+    pthread_t tid;
+    nipc_uds_session_t session;
+
+    if (small_buffer_start(svc, SMALL_BUF_FLOOD, PIPE_BUF_FLOOD_RESP, &sb,
+                           &tid, &session) == 0) {
+        uint8_t *payload = malloc(PIPE_BUF_SIZE);
+        nipc_uds_error_t err = NIPC_UDS_OK;
+        for (int i = 0; i < PIPE_BUF_COUNT && err == NIPC_UDS_OK; i++)
+            err = send_pipelined_request(&session, payload, i);
+        free(payload);
+        check("pipelined send fails with PROTOCOL",
+              err == NIPC_UDS_ERR_PROTOCOL);
+        check("in-flight set cleared", session.inflight_count == 0);
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Coverage: handshake with wrong message kind from mock client        */
 /* ------------------------------------------------------------------ */
 
@@ -3894,6 +4219,12 @@ int main(void)
     test_pipeline_100();           printf("\n");
     test_pipeline_mixed_sizes();   printf("\n");
     test_pipeline_chunked();       printf("\n");
+    test_pipeline_exceeds_socket_buffers(); printf("\n");
+    test_pipeline_peer_close_during_send(); printf("\n");
+    test_pipeline_pending_bound(); printf("\n");
+#if defined(__APPLE__)
+    test_stream_failed_receive_drops_pending(); printf("\n");
+#endif
 
     /* Coverage gap tests */
     test_handshake_wrong_kind();   printf("\n");

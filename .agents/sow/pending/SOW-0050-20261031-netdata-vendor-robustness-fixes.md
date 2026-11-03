@@ -33,7 +33,7 @@ Facts:
 
 Inferences:
 
-- The SOW-0044 performance assessment found no established-session per-request change beyond one `Option` read in Rust, so its part of the vendored diff needs no benchmark run; SOW-0043's assessment decides the rest. SOW-0051 adds two monotonic clock reads per call (call start and remaining-time computation), so the vendored diff includes an established-session per-request change and the pre-vendoring benchmark run covers it.
+- The SOW-0044 performance assessment found no established-session per-request change beyond one `Option` read in Rust, so its part of the vendored diff needs no benchmark run; SOW-0043's assessment decides the rest. SOW-0051 adds two monotonic clock reads per call (call start and remaining-time computation), so the vendored diff includes an established-session per-request change and the pre-vendoring benchmark run covers it. SOW-0062 adds one branch per client packet send and one queue-empty check per packet receive on the POSIX baseline, and a non-blocking progress send for pipelining clients; the pre-vendoring POSIX run covers its rows (`uds-pipeline-d16`, `uds-pipeline-batch`, and the single-in-flight UDS rows).
 
 Unknowns:
 

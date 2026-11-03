@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -230,4 +231,110 @@ nipc_uds_error_t nipc_uds_stream_send_iov(int fd, const void *hdr,
         }
     }
     return NIPC_UDS_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Session pending queue                                              */
+/* ------------------------------------------------------------------ */
+
+/* Makes room for need more bytes after pending_tail. */
+static nipc_uds_error_t pending_reserve(nipc_uds_session_t *s, size_t need)
+{
+    if (s->pending_head > 0) {
+        size_t queued = s->pending_tail - s->pending_head;
+        memmove(s->pending_buf, s->pending_buf + s->pending_head, queued);
+        s->pending_head = 0;
+        s->pending_tail = queued;
+    }
+    if (s->pending_cap - s->pending_tail >= need)
+        return NIPC_UDS_OK;
+    if (need > SIZE_MAX - s->pending_tail)
+        return NIPC_UDS_ERR_ALLOC;
+
+    size_t cap = s->pending_cap ? s->pending_cap : 4096;
+    while (cap < s->pending_tail + need)
+        cap = cap > SIZE_MAX / 2 ? s->pending_tail + need : cap * 2;
+
+    uint8_t *p = realloc(s->pending_buf, cap);
+    if (!p)
+        return NIPC_UDS_ERR_ALLOC;
+    s->pending_buf = p;
+    s->pending_cap = cap;
+    return NIPC_UDS_OK;
+}
+
+nipc_uds_error_t nipc_uds_pending_drain(nipc_uds_session_t *s, size_t bound,
+                                        bool *eof)
+{
+    /* A datagram larger than packet_size is a protocol violation; it is
+     * stored truncated and the receive path rejects it. */
+    size_t read_len = s->packet_size;
+    for (;;) {
+        nipc_uds_error_t err = pending_reserve(
+            s, NIPC_UDS_PENDING_RECORD_LEN + read_len);
+        if (err != NIPC_UDS_OK)
+            return err;
+
+        uint8_t *dst = s->pending_buf + s->pending_tail +
+                       NIPC_UDS_PENDING_RECORD_LEN;
+        ssize_t n = recv(s->fd, dst, read_len, MSG_DONTWAIT);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            return NIPC_UDS_OK;
+        if (n <= 0) {
+            /* EOF or a socket error: the retried send reports it. */
+            *eof = true;
+            return NIPC_UDS_OK;
+        }
+
+#if !NIPC_UDS_STREAM
+        uint32_t rec = (uint32_t)n;
+        memcpy(s->pending_buf + s->pending_tail, &rec, sizeof(rec));
+#endif
+        s->pending_tail += NIPC_UDS_PENDING_RECORD_LEN + (size_t)n;
+        if (s->pending_tail - s->pending_head > bound)
+            return NIPC_UDS_ERR_PROTOCOL;
+    }
+}
+
+static void pending_consumed(nipc_uds_session_t *s)
+{
+    if (s->pending_head == s->pending_tail)
+        s->pending_head = s->pending_tail = 0;
+}
+
+size_t nipc_uds_pending_pop_packet(nipc_uds_session_t *s, void *buf,
+                                   size_t buf_len)
+{
+    uint32_t rec;
+    memcpy(&rec, s->pending_buf + s->pending_head, sizeof(rec));
+    s->pending_head += sizeof(rec);
+
+    size_t n = rec < buf_len ? rec : buf_len;
+    memcpy(buf, s->pending_buf + s->pending_head, n);
+    s->pending_head += rec;
+    pending_consumed(s);
+    return n;
+}
+
+size_t nipc_uds_pending_take(nipc_uds_session_t *s, void *dst, size_t len)
+{
+    size_t queued = s->pending_tail - s->pending_head;
+    size_t n = len < queued ? len : queued;
+    if (n > 0) {
+        memcpy(dst, s->pending_buf + s->pending_head, n);
+        s->pending_head += n;
+        pending_consumed(s);
+    }
+    return n;
+}
+
+void nipc_uds_pending_free(nipc_uds_session_t *s)
+{
+    free(s->pending_buf);
+    s->pending_buf = NULL;
+    s->pending_cap = 0;
+    s->pending_head = 0;
+    s->pending_tail = 0;
 }

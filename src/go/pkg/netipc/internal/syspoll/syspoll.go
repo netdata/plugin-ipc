@@ -8,6 +8,7 @@ package syspoll
 // and macOS.
 const (
 	In   int16 = 0x0001
+	Out  int16 = 0x0004
 	Err  int16 = 0x0008
 	Hup  int16 = 0x0010
 	Nval int16 = 0x0020

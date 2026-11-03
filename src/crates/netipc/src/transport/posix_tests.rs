@@ -87,6 +87,7 @@ fn test_session(fd: RawFd, role: Role, packet_size: u32) -> UdsSession {
         recv_buf: Vec::new(),
         pkt_buf: Vec::new(),
         inflight_ids: HashSet::new(),
+        pending: Pending::default(),
     }
 }
 
@@ -1165,6 +1166,258 @@ fn test_pipeline_chunked_multi() {
 
     drop(session);
     server_thread.join().expect("server join");
+    cleanup_socket(&svc);
+}
+
+// Pipelining beyond the socket buffers. Small buffers make the deadlock
+// reachable on every platform (FreeBSD and macOS default to 8 KiB, Linux to
+// about 208 KiB). The client's send timeout only bounds a failing run: a
+// passing run never waits on it, and the server has none, so a slow server
+// cannot fail a passing run.
+const PIPE_BUF_COUNT: usize = 16;
+const PIPE_BUF_SIZE: usize = 16000;
+const PIPE_BUF_PKT: u32 = 1024;
+// Flood mode: small responses keep the client's queue bound small.
+const PIPE_BUF_FLOOD_RESP: u32 = 4096;
+
+fn shrink_socket_buffers(fd: RawFd, bound_sends: bool) {
+    let size: libc::c_int = 4096;
+    let tv = libc::timeval {
+        tv_sec: 10,
+        tv_usec: 0,
+    };
+    unsafe {
+        for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                opt,
+                &size as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&size) as libc::socklen_t,
+            );
+        }
+        if !bound_sends {
+            return;
+        }
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDTIMEO,
+            &tv as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&tv) as libc::socklen_t,
+        );
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SmallBufMode {
+    /// Receive one request, send its response.
+    Echo,
+    /// Receive one request, then close.
+    CloseAfterOne,
+    /// Receive one request, then send responses without reading until the
+    /// send fails.
+    Flood,
+}
+
+/// Starts the server in `mode` and connects a client; both ends get small
+/// socket buffers.
+fn small_buffer_start(
+    prefix: &str,
+    mode: SmallBufMode,
+    max_response: u32,
+) -> (String, thread::JoinHandle<()>, UdsSession) {
+    ensure_run_dir();
+    let svc = unique_service(prefix);
+    cleanup_socket(&svc);
+
+    let scfg = ServerConfig {
+        packet_size: PIPE_BUF_PKT,
+        max_request_payload_bytes: 65536,
+        max_response_payload_bytes: max_response,
+        ..default_server_config()
+    };
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc, scfg).expect("listen");
+    let server = thread::spawn(move || {
+        let mut session = listener.accept().expect("accept");
+        shrink_socket_buffers(session.fd(), false);
+        let count = if mode == SmallBufMode::Echo {
+            PIPE_BUF_COUNT
+        } else {
+            1
+        };
+        for _ in 0..count {
+            let mut buf = [0u8; PIPE_BUF_PKT as usize];
+            let Ok((hdr, payload)) = session.receive(&mut buf) else {
+                return;
+            };
+            if mode == SmallBufMode::Echo {
+                let payload = payload.to_vec();
+                let mut resp = hdr;
+                resp.kind = protocol::KIND_RESPONSE;
+                if session.send(&mut resp, &payload).is_err() {
+                    return;
+                }
+            }
+        }
+        if mode == SmallBufMode::Flood {
+            let payload = vec![0u8; PIPE_BUF_FLOOD_RESP as usize];
+            loop {
+                let mut resp = Header {
+                    kind: protocol::KIND_RESPONSE,
+                    code: 1,
+                    item_count: 1,
+                    message_id: 1,
+                    ..Header::default()
+                };
+                if session.send(&mut resp, &payload).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    let ccfg = ClientConfig {
+        packet_size: PIPE_BUF_PKT,
+        max_request_payload_bytes: 65536,
+        max_response_payload_bytes: max_response,
+        ..default_client_config()
+    };
+    let session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
+    shrink_socket_buffers(session.fd(), true);
+    (svc, server, session)
+}
+
+fn pipelined_payload(i: usize) -> Vec<u8> {
+    (0..PIPE_BUF_SIZE)
+        .map(|j| ((i * 7 + j) & 0xFF) as u8)
+        .collect()
+}
+
+fn send_pipelined_request(session: &mut UdsSession, i: usize) -> Result<(), UdsError> {
+    let mut hdr = Header {
+        kind: protocol::KIND_REQUEST,
+        code: 1,
+        item_count: 1,
+        message_id: (i + 1) as u64,
+        ..Header::default()
+    };
+    session.send(&mut hdr, &pipelined_payload(i))
+}
+
+/// A client that sends every request before reading any response must not
+/// deadlock with the server when the bytes in flight exceed the buffers.
+#[test]
+fn test_pipeline_exceeds_socket_buffers() {
+    let (svc, server, mut session) = small_buffer_start("rs_pipebuf", SmallBufMode::Echo, 65536);
+
+    assert!(!session.has_pending(), "no pending data before sending");
+    for i in 0..PIPE_BUF_COUNT {
+        send_pipelined_request(&mut session, i).expect("pipelined send");
+    }
+    // The buffers hold a fraction of the responses, so finishing the sends
+    // required reading responses into the queue.
+    assert!(session.has_pending(), "responses queued during the sends");
+    for i in 0..PIPE_BUF_COUNT {
+        let mut rbuf = [0u8; PIPE_BUF_PKT as usize];
+        let (rhdr, rpayload) = session.receive(&mut rbuf).expect("recv");
+        assert_eq!(rhdr.message_id, (i + 1) as u64);
+        assert!(rpayload == pipelined_payload(i).as_slice(), "payload {i}");
+    }
+    assert!(session.pending.is_empty(), "pending queue drained");
+    assert!(!session.has_pending(), "no pending data after receiving");
+
+    drop(session);
+    server.join().expect("server join");
+    cleanup_socket(&svc);
+}
+
+/// macOS stream: a receive that fails mid-stream shuts the read side, and
+/// every later receive must fail. Bytes left in the pending queue are part
+/// of that abandoned stream: here a forged response for an in-flight id
+/// follows an over-limit header, and must not be delivered.
+#[cfg(target_os = "macos")]
+#[test]
+fn test_stream_failed_receive_drops_pending() {
+    let (svc, server, mut session) =
+        small_buffer_start("rs_pipestale", SmallBufMode::CloseAfterOne, 65536);
+    send_pipelined_request(&mut session, 0).expect("request 1");
+
+    let mut over = Header {
+        magic: protocol::MAGIC_MSG,
+        version: protocol::VERSION,
+        header_len: HEADER_SIZE as u16,
+        kind: protocol::KIND_RESPONSE,
+        item_count: 1,
+        message_id: 1,
+        payload_len: 65537,
+        ..Header::default()
+    };
+    let mut buf = vec![0u8; 2 * HEADER_SIZE];
+    over.encode(&mut buf[..HEADER_SIZE]);
+    over.payload_len = 0;
+    over.encode(&mut buf[HEADER_SIZE..]);
+    session.pending = Pending { buf, head: 0 };
+
+    let mut rbuf = [0u8; PIPE_BUF_PKT as usize];
+    assert!(matches!(
+        session.receive(&mut rbuf),
+        Err(UdsError::LimitExceeded)
+    ));
+    assert!(session.receive(&mut rbuf).is_err(), "later receive fails");
+
+    drop(session);
+    server.join().expect("server join");
+    cleanup_socket(&svc);
+}
+
+/// The server closes while the pipelining client waits for buffer space:
+/// the send fails instead of waiting forever.
+#[test]
+fn test_pipeline_peer_close_during_send() {
+    let (svc, server, mut session) =
+        small_buffer_start("rs_pipeclose", SmallBufMode::CloseAfterOne, 65536);
+
+    let mut result = Ok(());
+    for i in 0..PIPE_BUF_COUNT {
+        result = send_pipelined_request(&mut session, i);
+        if result.is_err() {
+            break;
+        }
+    }
+    assert!(
+        matches!(result, Err(UdsError::Send(_))),
+        "expected Send, got {result:?}"
+    );
+    assert!(session.inflight_ids.is_empty(), "in-flight set cleared");
+
+    drop(session);
+    server.join().expect("server join");
+    cleanup_socket(&svc);
+}
+
+/// A server that sends more than the in-flight responses can occupy fails
+/// the client session instead of growing its queue without limit.
+#[test]
+fn test_pipeline_pending_bound() {
+    let (svc, server, mut session) =
+        small_buffer_start("rs_pipebound", SmallBufMode::Flood, PIPE_BUF_FLOOD_RESP);
+
+    let mut result = Ok(());
+    for i in 0..PIPE_BUF_COUNT {
+        result = send_pipelined_request(&mut session, i);
+        if result.is_err() {
+            break;
+        }
+    }
+    assert!(
+        matches!(result, Err(UdsError::Protocol(_))),
+        "expected Protocol, got {result:?}"
+    );
+    assert!(session.inflight_ids.is_empty(), "in-flight set cleared");
+
+    drop(session);
+    server.join().expect("server join");
     cleanup_socket(&svc);
 }
 

@@ -192,6 +192,16 @@ Non-negotiable rule:
   - raw payload encode/decode
   - batch and chunk rules
   - single-owner or externally locked access to each raw session object
+  - pipelining limits: POSIX client sessions may send every request before
+    reading any response (a send that waits for buffer space reads the
+    responses that arrive; see `level1-posix-uds.md`, "Pipelined sends").
+    A caller that waits on the session fd before receiving must first check
+    `nipc_uds_session_has_pending` (Rust `UdsSession::has_pending`, Go
+    `Session.HasPending`): responses read during a send no longer show on
+    the fd.
+    Windows Named Pipe sessions may not yet: keep the request and response
+    bytes of unread messages within the 64 KiB pipe buffer and read responses
+    before a send that would exceed it (`level1-windows-np.md`, "Pipelining")
 
 Use L1 for:
 

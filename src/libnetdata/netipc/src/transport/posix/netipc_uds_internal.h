@@ -103,6 +103,33 @@ nipc_uds_error_t nipc_uds_stream_send_iov(int fd, const void *hdr,
                                           size_t hdr_len, const void *payload,
                                           size_t payload_len);
 
+/* Session pending queue: inbound bytes a pipelined client send read while
+ * it waited for buffer space. SEQPACKET stores each datagram as a 4-byte
+ * length record followed by its bytes; the stream stores raw bytes. */
+#if NIPC_UDS_STREAM
+#define NIPC_UDS_PENDING_RECORD_LEN 0u
+#else
+#define NIPC_UDS_PENDING_RECORD_LEN 4u
+#endif
+
+static inline bool nipc_uds_pending_queued(const nipc_uds_session_t *s)
+{
+    return nipc_uds_session_has_pending(s);
+}
+
+/* Reads without blocking until the socket has nothing more to read, EOF,
+ * or an error (both set *eof). Fails with PROTOCOL when the queued bytes
+ * would exceed bound, or ALLOC. */
+nipc_uds_error_t nipc_uds_pending_drain(nipc_uds_session_t *s, size_t bound,
+                                        bool *eof);
+/* SEQPACKET: pops one queued datagram into buf, truncating it to buf_len
+ * like recv() does; returns the bytes copied. */
+size_t nipc_uds_pending_pop_packet(nipc_uds_session_t *s, void *buf,
+                                   size_t buf_len);
+/* Stream: copies up to len queued bytes into dst; returns the bytes copied. */
+size_t nipc_uds_pending_take(nipc_uds_session_t *s, void *dst, size_t len);
+void nipc_uds_pending_free(nipc_uds_session_t *s);
+
 int nipc_uds_build_socket_name(char *dst, size_t dst_len,
                                const char *service_name);
 int nipc_uds_build_socket_path(char *dst, size_t dst_len,

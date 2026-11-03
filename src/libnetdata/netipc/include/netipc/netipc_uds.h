@@ -112,6 +112,13 @@ typedef struct {
     uint64_t *inflight_ids;
     uint32_t  inflight_count;
     uint32_t  inflight_capacity;
+
+    /* Inbound packets read while a pipelined client send waited for
+     * buffer space; receive consumes them before reading the socket. */
+    uint8_t *pending_buf;
+    size_t   pending_cap;
+    size_t   pending_head;   /* next unconsumed byte */
+    size_t   pending_tail;   /* end of the stored bytes */
 } nipc_uds_session_t;
 
 /* ------------------------------------------------------------------ */
@@ -237,7 +244,12 @@ void nipc_uds_close_listener(nipc_uds_listener_t *listener);
  * If the total message (32 + payload_len) exceeds packet_size, the
  * message is chunked transparently.
  *
- * Blocks until all chunks are sent or an error occurs.
+ * Blocks until all chunks are sent or an error occurs. A client with other
+ * requests in flight keeps reading their responses into the session while
+ * it waits for buffer space, so pipelining never deadlocks with a server
+ * that is blocked sending to it; a later nipc_uds_receive() returns them.
+ * Inbound bytes beyond what the in-flight responses can occupy fail the
+ * session with NIPC_UDS_ERR_PROTOCOL.
  */
 nipc_uds_error_t nipc_uds_send(nipc_uds_session_t *session,
                                 nipc_header_t *hdr,
@@ -282,9 +294,17 @@ nipc_uds_error_t nipc_uds_receive_timeout(nipc_uds_session_t *session,
 /*  Utility                                                            */
 /* ------------------------------------------------------------------ */
 
-/* Get the fd for poll/epoll integration. */
+/* Get the fd for poll/epoll integration. A pipelined send can read
+ * responses into the session's pending queue, where the fd no longer shows
+ * them: check nipc_uds_session_has_pending() before waiting on the fd. */
 static inline int nipc_uds_session_fd(const nipc_uds_session_t *s) {
     return s->fd;
+}
+
+/* True when the next receive can return data read earlier by a pipelined
+ * send, without the fd becoming readable. */
+static inline bool nipc_uds_session_has_pending(const nipc_uds_session_t *s) {
+    return s->pending_tail > s->pending_head;
 }
 
 static inline int nipc_uds_listener_fd(const nipc_uds_listener_t *l) {

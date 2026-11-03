@@ -4,7 +4,7 @@
 //! on every POSIX system so its tests run everywhere; only macOS sessions
 //! use it.
 
-use super::{ReceiveWait, UdsError, raw_recv, wait_fd_readable};
+use super::{Pending, ReceiveWait, UdsError, raw_recv, wait_fd_readable};
 use crate::protocol::{HEADER_SIZE, Header, MAGIC_CHUNK, MAGIC_MSG};
 use std::os::unix::io::RawFd;
 
@@ -84,13 +84,30 @@ pub(super) fn recv_packet(
     Ok(HEADER_SIZE + body)
 }
 
-/// Read one packet of a session's message. The first packet's header is
+/// `read_exact` that takes the session's pending bytes first.
+fn read_exact_pending(
+    fd: RawFd,
+    pending: &mut Pending,
+    dst: &mut [u8],
+    wait: Option<&ReceiveWait<'_>>,
+    mid_packet: bool,
+) -> Result<(), UdsError> {
+    let got = pending.take(dst);
+    if got == dst.len() {
+        return Ok(());
+    }
+    read_exact(fd, &mut dst[got..], wait, mid_packet || got > 0)
+}
+
+/// Read one packet of a session's message, from its pending bytes first. The first packet's header is
 /// checked before its body is read: one that is not an outer header, or
 /// declares more than this direction's limits, comes back alone so the
 /// framing rejects it without waiting for bytes a stream peer may never
 /// send. A truncated continuation is a chunk error, as on SEQPACKET.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn recv_session_packet(
     fd: RawFd,
+    pending: &mut Pending,
     buf: &mut [u8],
     first: bool,
     packet_size: u32,
@@ -102,7 +119,7 @@ pub(super) fn recv_session_packet(
         return Err(UdsError::Protocol("packet too short for header".into()));
     }
     let result = (|| {
-        read_exact(fd, &mut buf[..HEADER_SIZE], wait, false)?;
+        read_exact_pending(fd, pending, &mut buf[..HEADER_SIZE], wait, false)?;
         let hdr = &buf[..HEADER_SIZE];
         if first
             && Header::decode(hdr).map_or(true, |h| {
@@ -112,7 +129,13 @@ pub(super) fn recv_session_packet(
             return Ok(HEADER_SIZE);
         }
         let body = body_len(hdr, buf.len(), packet_size);
-        read_exact(fd, &mut buf[HEADER_SIZE..HEADER_SIZE + body], wait, true)?;
+        read_exact_pending(
+            fd,
+            pending,
+            &mut buf[HEADER_SIZE..HEADER_SIZE + body],
+            wait,
+            true,
+        )?;
         Ok(HEADER_SIZE + body)
     })();
     match result {
@@ -336,7 +359,17 @@ mod tests {
         // never waited for.
         send_all(a, &outer(200, &[]), &[]).unwrap();
         assert_eq!(
-            recv_session_packet(b, &mut buf, true, 256, 100, 1, None).unwrap(),
+            recv_session_packet(
+                b,
+                &mut Pending::default(),
+                &mut buf,
+                true,
+                256,
+                100,
+                1,
+                None
+            )
+            .unwrap(),
             HEADER_SIZE
         );
 
@@ -345,14 +378,34 @@ mod tests {
         bad_version[4..6].copy_from_slice(&(VERSION + 1).to_ne_bytes());
         send_all(a, &bad_version, &[]).unwrap();
         assert_eq!(
-            recv_session_packet(b, &mut buf, true, 256, 100, 1, None).unwrap(),
+            recv_session_packet(
+                b,
+                &mut Pending::default(),
+                &mut buf,
+                true,
+                256,
+                100,
+                1,
+                None
+            )
+            .unwrap(),
             HEADER_SIZE
         );
 
         // A continuation header where a message starts: header only.
         send_all(a, &continuation(3, b"abc"), &[]).unwrap();
         assert_eq!(
-            recv_session_packet(b, &mut buf, true, 256, 100, 1, None).unwrap(),
+            recv_session_packet(
+                b,
+                &mut Pending::default(),
+                &mut buf,
+                true,
+                256,
+                100,
+                1,
+                None
+            )
+            .unwrap(),
             HEADER_SIZE
         );
         // Its body is still queued; read it off as a raw packet body.
@@ -362,7 +415,16 @@ mod tests {
         send_all(a, &continuation(5, b"ab"), &[]).unwrap();
         unsafe { libc::shutdown(a, libc::SHUT_WR) };
         assert!(matches!(
-            recv_session_packet(b, &mut buf, false, 256, 100, 1, None),
+            recv_session_packet(
+                b,
+                &mut Pending::default(),
+                &mut buf,
+                false,
+                256,
+                100,
+                1,
+                None
+            ),
             Err(UdsError::Chunk(_))
         ));
         close(a);

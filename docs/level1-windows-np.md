@@ -168,6 +168,21 @@ sequentially.
 
 See the wire envelope spec for chunk header layout and validation.
 
+## Pipelining
+
+Pipes are synchronous (no `FILE_FLAG_OVERLAPPED`) in all three languages,
+with each direction's buffer set to the larger of the packet size and
+64 KiB. A send is a blocking `WriteFile` per packet that cannot stop to
+read, so the POSIX "Pipelined sends" progress (`level1-posix-uds.md`) is
+not implemented here yet.
+
+Until it is, a pipelining caller must keep the request and response bytes
+of its unread messages within the pipe buffer: read responses before a
+send that would exceed it. Otherwise, once the responses it is not reading
+fill the pipe, the server blocks sending, stops reading requests, and both
+sides block. A caller with one request in flight (every typed call) is not
+affected.
+
 ## Receive timeout and abort
 
 The baseline receive primitive remains a blocking Level 1 operation for

@@ -640,6 +640,8 @@ void nipc_uds_close_session(nipc_uds_session_t *session)
     session->inflight_ids = NULL;
     session->inflight_count = 0;
     session->inflight_capacity = 0;
+
+    nipc_uds_pending_free(session);
 }
 
 void nipc_uds_close_listener(nipc_uds_listener_t *listener)

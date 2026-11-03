@@ -269,14 +269,49 @@ finds packet boundaries differs. C, Rust and Go implement it the same way.
   (`shutdown(SHUT_RD)`) and every later receive fails. Sends stay valid, so
   a server can still answer a rejected request with `LIMIT_EXCEEDED`.
 - **Socket buffers.** macOS's default `AF_UNIX` stream buffers are 8 KiB
-  per direction, far below Linux's. A pipelining caller that sends many
-  requests before reading responses blocks sooner: once the responses it is
-  not reading fill its receive buffer, the server stops reading requests
-  too. Read responses while sending, or keep the bytes in flight small.
+  per direction, far below Linux's, so a pipelining client's sends wait for
+  buffer space sooner. "Pipelined sends" below keeps that from deadlocking.
 - **Connect.** A full listen backlog refuses a connect at once
   (`ECONNREFUSED`), as on FreeBSD; Linux waits for room.
 - **Not available:** SHM profiles. macOS servers and clients offer the
   baseline only.
+
+## Pipelined sends
+
+The pipelining guarantee in `level1-transport.md` ("Pipelining") works like
+this, the same in C, Rust and Go:
+
+- **Who.** A client session sending a packet while another request is in
+  flight (the in-flight set holds more than the request being sent). A
+  client with one request in flight (every typed call) and every server
+  session send with a plain blocking call. The deadlock needs both peers
+  blocked in send, and client progress alone breaks it.
+- **Send.** Each packet goes out with `MSG_DONTWAIT` (on macOS, which
+  ignores that flag on a stream send short of buffer space and blocks, the
+  descriptor is made `O_NONBLOCK` for that send and restored after it). On
+  `EAGAIN` the client polls for readable and writable. When readable, it reads what is there
+  without blocking into a per-session pending queue (SEQPACKET: whole
+  datagrams; macOS stream: raw bytes), then retries the send. A stream send
+  resumes after partial writes. There is no new timeout: the send waits as
+  long as a blocking send would.
+- **Receive.** Every receive takes packets from the pending queue before the
+  socket, so reassembly, limits and in-flight validation are unchanged.
+- **Bound.** The queue may hold at most what the in-flight responses can
+  occupy on the wire: in-flight count × (maximum response payload + one
+  32-byte header per packet). More fails the send with a protocol error; the
+  session is shut down and every in-flight request fails, since the dropped
+  bytes cannot be recovered.
+- **Peer close.** At EOF or a socket error the client stops reading and
+  waits only for writability; the retried send then fails with the existing
+  send error, so a closed peer never leaves the client waiting or spinning.
+- **Polling the fd.** Queued responses no longer show on the session fd.
+  A caller that waits on the fd (`nipc_uds_session_fd`, Rust
+  `UdsSession::fd`, Go `Session.Fd`) before receiving must first check
+  `nipc_uds_session_has_pending` (Rust `UdsSession::has_pending`, Go
+  `Session.HasPending`) and receive without waiting while it is true.
+  Callers that only call receive need nothing: receive reads the queue
+  first. Only a pipelining client fills the queue; server sessions never do.
+- **Session close** frees the queue.
 
 ## Interrupted system calls
 

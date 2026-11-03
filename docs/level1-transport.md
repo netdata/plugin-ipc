@@ -85,6 +85,20 @@ message_id.
 If a caller needs ordered results for dependent work, it should use batching
 (one message, ordered items). Pipelining is for independent work.
 
+A pipelining client may send all its requests before reading any response,
+whatever the bytes in flight. Once those bytes exceed what the socket buffers
+hold, the server blocks sending responses the client is not reading, and stops
+reading requests. A client send that blocks then must not wait for the server:
+while it waits for buffer space, it reads the responses that arrive and keeps
+them for later receives. Both peers keep making progress, so pipelining cannot
+deadlock on buffer size. The in-flight set bounds those kept bytes: more than
+the in-flight responses can occupy is a protocol violation that fails the
+session. A client with one request in flight sends exactly as before.
+
+POSIX baseline sessions (all three languages) implement this; see
+`level1-posix-uds.md`, "Pipelined sends". Windows Named Pipe sessions do not
+yet; see `level1-windows-np.md`, "Pipelining".
+
 ### 4. Batching
 
 Batching is a Level 1 framing feature, not a typed-method feature.
