@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/internal/monotime"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
 )
@@ -952,7 +953,7 @@ func TestLookupRequestCapacityReconnectPaths(t *testing.T) {
 	}
 
 	client.session.MaxRequestPayloadBytes = 64
-	if err := client.ensureLookupRequestCapacity(128, time.Now().Add(time.Second)); err != nil {
+	if err := client.ensureLookupRequestCapacity(128, monotime.After(time.Second)); err != nil {
 		t.Fatalf("capacity reconnect should succeed: %v", err)
 	}
 	if client.state != StateReady {
@@ -963,14 +964,14 @@ func TestLookupRequestCapacityReconnectPaths(t *testing.T) {
 	}
 
 	client.session.MaxRequestPayloadBytes = 256
-	if err := client.ensureLookupRequestCapacity(128, time.Now().Add(time.Second)); err != nil {
+	if err := client.ensureLookupRequestCapacity(128, monotime.After(time.Second)); err != nil {
 		t.Fatalf("already-large session capacity = %v", err)
 	}
 
 	ts.stop()
 	cleanupAll(svc)
 	client.session.MaxRequestPayloadBytes = 64
-	if err := client.ensureLookupRequestCapacity(128, time.Now().Add(time.Second)); !errors.Is(err, protocol.ErrOverflow) {
+	if err := client.ensureLookupRequestCapacity(128, monotime.After(time.Second)); !errors.Is(err, protocol.ErrOverflow) {
 		t.Fatalf("capacity reconnect to stopped service = %v, want ErrOverflow", err)
 	}
 	if client.state == StateReady {
@@ -980,7 +981,7 @@ func TestLookupRequestCapacityReconnectPaths(t *testing.T) {
 	missing := NewAppsLookupClient(testRunDir, uniqueUnixService("go_svc_lookup_request_capacity_missing"), ccfg)
 	defer missing.Close()
 	missing.state = StateReady
-	if err := missing.ensureLookupRequestCapacity(128, time.Now().Add(time.Second)); err != nil {
+	if err := missing.ensureLookupRequestCapacity(128, monotime.After(time.Second)); err != nil {
 		t.Fatalf("sessionless configured capacity should not reconnect: %v", err)
 	}
 }

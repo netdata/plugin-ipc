@@ -145,9 +145,11 @@ func disconnectNamedPipe(handle syscall.Handle) {
 	procDisconnectNamedPipe.Call(uintptr(handle))
 }
 
+// peekNamedPipeAvailable runs in the receive poll loop. SyscallN, unlike
+// LazyProc.Call, keeps its arguments and &available on the stack.
 func peekNamedPipeAvailable(handle syscall.Handle) (uint32, error) {
 	var available uint32
-	r, _, err := procPeekNamedPipe.Call(
+	r, _, err := syscall.SyscallN(procPeekNamedPipe.Addr(),
 		uintptr(handle),
 		0,
 		0,

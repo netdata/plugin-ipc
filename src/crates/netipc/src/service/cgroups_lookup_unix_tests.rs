@@ -22,13 +22,15 @@ fn unique_service(prefix: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!(
+    let service = format!(
         "{}_{}_{}_{}",
         prefix,
         std::process::id(),
         SERVICE_COUNTER.fetch_add(1, Ordering::Relaxed) + 1,
         stamp
-    )
+    );
+    crate::test_locks::track(TEST_RUN_DIR, &service);
+    service
 }
 
 fn socket_path(service: &str) -> PathBuf {

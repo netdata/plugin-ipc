@@ -3,6 +3,7 @@
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_protocol.h"
 #include "test_sync.h"
+#include "test_lock_cleanup.h"
 #include "netipc_service_common.h"
 
 #include <pthread.h>
@@ -35,6 +36,7 @@ static void unique_service(char *buf, size_t len, const char *prefix)
 {
     int n = __sync_add_and_fetch(&g_service_counter, 1);
     snprintf(buf, len, "%s_%d_%ld", prefix, n, (long)getpid());
+    test_locks_track(TEST_RUN_DIR, buf);
 }
 
 static int cache_has(nipc_cgroups_cache_t *cache, uint32_t hash, const char *name)

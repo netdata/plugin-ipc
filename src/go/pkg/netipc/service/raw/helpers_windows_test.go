@@ -411,8 +411,8 @@ func winIncrementDispatchHandler() DispatchHandler {
 }
 
 func winStringReverseDispatchHandler() DispatchHandler {
-	return StringReverseDispatch(func(s string) (string, bool) {
-		return winReverseString(s), true
+	return StringReverseDispatch(func(s []byte) (string, bool) {
+		return winReverseString(string(s)), true
 	})
 }
 

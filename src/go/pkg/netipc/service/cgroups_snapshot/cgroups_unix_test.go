@@ -21,7 +21,9 @@ const (
 var unixServiceCounter atomic.Uint64
 
 func uniqueUnixService(prefix string) string {
-	return fmt.Sprintf("%s_%d_%d_%d", prefix, os.Getpid(), unixServiceCounter.Add(1), time.Now().UnixNano())
+	service := fmt.Sprintf("%s_%d_%d_%d", prefix, os.Getpid(), unixServiceCounter.Add(1), time.Now().UnixNano())
+	trackTestLock(testRunDirUnix, service)
+	return service
 }
 
 func ensureUnixRunDir(t *testing.T) {

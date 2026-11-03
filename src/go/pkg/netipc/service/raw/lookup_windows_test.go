@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/internal/monotime"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	windows "github.com/netdata/plugin-ipc/go/pkg/netipc/transport/windows"
 )
@@ -719,7 +720,7 @@ func TestWinLookupRequestCapacityReconnectPaths(t *testing.T) {
 		}
 
 		client.session.MaxRequestPayloadBytes = 64
-		if err := client.ensureLookupRequestCapacity(128, time.Now().Add(time.Second)); err != nil {
+		if err := client.ensureLookupRequestCapacity(128, monotime.After(time.Second)); err != nil {
 			t.Fatalf("capacity reconnect should succeed: %v", err)
 		}
 		if client.state != StateReady {
@@ -730,14 +731,14 @@ func TestWinLookupRequestCapacityReconnectPaths(t *testing.T) {
 		}
 
 		client.session.MaxRequestPayloadBytes = 256
-		if err := client.ensureLookupRequestCapacity(128, time.Now().Add(time.Second)); err != nil {
+		if err := client.ensureLookupRequestCapacity(128, monotime.After(time.Second)); err != nil {
 			t.Fatalf("already-large session capacity = %v", err)
 		}
 
 		missing := NewAppsLookupClient(winTestRunDir, uniqueWinService("go_win_lookup_request_capacity_missing"), ccfg)
 		defer missing.Close()
 		missing.state = StateReady
-		if err := missing.ensureLookupRequestCapacity(128, time.Now().Add(time.Second)); err != nil {
+		if err := missing.ensureLookupRequestCapacity(128, monotime.After(time.Second)); err != nil {
 			t.Fatalf("sessionless configured capacity should not reconnect: %v", err)
 		}
 	})
@@ -759,7 +760,7 @@ func TestWinLookupRequestCapacityReconnectPaths(t *testing.T) {
 		client.session.MaxRequestPayloadBytes = 64
 		ts.stop()
 
-		if err := client.ensureLookupRequestCapacity(128, time.Now().Add(time.Second)); !errors.Is(err, protocol.ErrOverflow) {
+		if err := client.ensureLookupRequestCapacity(128, monotime.After(time.Second)); !errors.Is(err, protocol.ErrOverflow) {
 			t.Fatalf("missing endpoint capacity reconnect error = %v, want ErrOverflow", err)
 		}
 		if client.errorCount == 0 {

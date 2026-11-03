@@ -48,12 +48,14 @@ fn socket_path(service: &str) -> PathBuf {
 }
 
 fn unique_service(prefix: &str) -> String {
-    format!(
+    let service = format!(
         "{}_{}_{}",
         prefix,
         std::process::id(),
         RAW_SERVICE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
-    )
+    );
+    crate::test_locks::track(TEST_RUN_DIR, &service);
+    service
 }
 
 fn server_config() -> ServerConfig {

@@ -596,7 +596,9 @@ func (c *WinShmContext) WinShmSend(msg []byte) error {
 	// 4. If HYBRID and peer waiting, signal event
 	if c.profile == WinShmProfileHybrid {
 		if atomic.LoadInt32((*int32)(unsafe.Pointer(&data[peerWaitingOff]))) != 0 {
-			procSetEvent.Call(uintptr(peerEvent))
+			// SyscallN, unlike LazyProc.Call, keeps its arguments on the
+			// stack: this runs per message.
+			syscall.SyscallN(procSetEvent.Addr(), uintptr(peerEvent))
 		}
 	}
 
@@ -706,7 +708,7 @@ func (c *WinShmContext) WinShmReceive(buf []byte, timeoutMs uint32) (int, error)
 					waitMs = uintptr(deadlineMs - elapsed)
 				}
 
-				ret, _, _ := procWaitForSingleObj.Call(uintptr(waitEvent), waitMs)
+				ret, _, _ := syscall.SyscallN(procWaitForSingleObj.Addr(), uintptr(waitEvent), waitMs)
 				atomic.StoreInt32((*int32)(unsafe.Pointer(&data[selfWaitingOff])), 0)
 
 				mlen, ok, err = winShmCopyObserved(data, seqOff, lenOff, expectedSeq, areaOff, maxCopy, buf)

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"syscall"
 	"time"
+
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/internal/monotime"
 )
 
 // Role distinguishes client vs server sessions.
@@ -61,6 +63,13 @@ type Session struct {
 	pktBuf  []byte
 
 	inflightIDs map[uint64]struct{}
+
+	// Receive state of the call in progress, read by closures built once
+	// per session (initReceiveFns), so a receive allocates nothing.
+	recvWait      receiveWait
+	recvControl   bool
+	recvPacketFn  func([]byte) (int, error)
+	failInflights func()
 }
 
 func (s *Session) failAllInflight() {
@@ -92,7 +101,7 @@ func (s *Session) WaitReadable(timeoutMs uint32) (bool, error) {
 		return false, wrapErr(ErrBadParam, "session closed")
 	}
 
-	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	deadline := monotime.After(time.Duration(timeoutMs) * time.Millisecond)
 	yielded := false
 	for {
 		available, err := peekNamedPipeAvailable(s.handle)
@@ -106,7 +115,7 @@ func (s *Session) WaitReadable(timeoutMs uint32) (bool, error) {
 		if available > 0 {
 			return true, nil
 		}
-		if !time.Now().Before(deadline) {
+		if monotime.Now() >= deadline {
 			return false, nil
 		}
 		if !yielded {
@@ -124,7 +133,7 @@ func (s *Session) WaitReadable(timeoutMs uint32) (bool, error) {
 				if available > 0 {
 					return true, nil
 				}
-				if !time.Now().Before(deadline) {
+				if monotime.Now() >= deadline {
 					return false, nil
 				}
 			}
@@ -186,17 +195,18 @@ func openClientPipe(name *uint16, wait receiveWait) (syscall.Handle, error) {
 		connectBusyHook()
 	}
 
-	busyDeadline := time.Now().Add(ConnectBusyWaitMs * time.Millisecond)
-	if !wait.infinite && wait.deadline.Before(busyDeadline) {
+	busyDeadline := monotime.After(ConnectBusyWaitMs * time.Millisecond)
+	if !wait.infinite && wait.deadline < busyDeadline {
 		busyDeadline = wait.deadline
 	}
 	for {
 		if _, werr := wait.waitMs(); errors.Is(werr, ErrAborted) {
 			return syscall.InvalidHandle, werr
 		}
-		left := time.Until(busyDeadline)
+		now := monotime.Now()
+		left := time.Duration(busyDeadline - now)
 		if left <= 0 {
-			if !wait.infinite && !time.Now().Before(wait.deadline) {
+			if !wait.infinite && now >= wait.deadline {
 				return syscall.InvalidHandle, ErrTimeout
 			}
 			return syscall.InvalidHandle, wrapErr(ErrConnect, err.Error())

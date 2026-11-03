@@ -62,6 +62,15 @@ type Session struct {
 	pending pendingQueue
 	// Queue bound of the send in progress; 0 sends with a blocking call.
 	progressBound int
+
+	// Receive state of the call in progress, read by closures built once
+	// per session (receiveFns), so a receive allocates nothing.
+	recvWait      receiveWait
+	recvControl   bool
+	streamFirst   bool
+	recvPacketFn  func([]byte) (int, error)
+	recvStreamFn  func([]byte) (int, error)
+	failInflights func()
 }
 
 // pendingQueue holds inbound bytes a pipelined client send read while it

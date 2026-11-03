@@ -229,6 +229,9 @@ func (s *Server) handleServerSession(ops serverSessionOps) {
 
 	defer ops.close()
 
+	// One response header per session: its address goes to ops.send, so a
+	// per-request variable would be a heap allocation per request.
+	var respHdr protocol.Header
 	for s.running.Load() {
 		hdr, payload, action := ops.receive(recvBuf)
 		switch action {
@@ -242,7 +245,9 @@ func (s *Server) handleServerSession(ops serverSessionOps) {
 			return
 		}
 
-		respHdr, responseLen, closeAfterSend := s.handleServerRequest(
+		var responseLen int
+		var closeAfterSend bool
+		respHdr, responseLen, closeAfterSend = s.handleServerRequest(
 			hdr, payload, respBuf, itemRespBuf, ops.maxResponsePayloadBytes)
 		if err := ops.send(&respHdr, respBuf[:responseLen], &msgBuf); err != nil {
 			return

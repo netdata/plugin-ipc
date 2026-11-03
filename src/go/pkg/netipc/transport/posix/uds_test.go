@@ -28,7 +28,9 @@ var testServiceCounter atomic.Uint64
 func uniqueService(t *testing.T) string {
 	t.Helper()
 	n := testServiceCounter.Add(1)
-	return fmt.Sprintf("gotest_%d_%d", os.Getpid(), n)
+	service := fmt.Sprintf("gotest_%d_%d", os.Getpid(), n)
+	trackTestLock(filepath.Join(os.TempDir(), "nipc_go_test"), service)
+	return service
 }
 
 func testRunDir(t *testing.T) string {

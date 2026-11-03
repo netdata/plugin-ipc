@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/internal/monotime"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 )
 
@@ -45,21 +46,21 @@ func (c *Client) resolvedCallTimeout(timeoutMs uint32) uint32 {
 // beginOp starts a call or refresh: one deadline, timeoutMs resolved as for
 // calls, bounds every connect, handshake, attach and retry inside it.
 func (c *Client) beginOp(timeoutMs uint32) {
-	c.opDeadline = time.Now().Add(time.Duration(c.resolvedCallTimeout(timeoutMs)) * time.Millisecond)
+	c.opDeadline = monotime.After(time.Duration(c.resolvedCallTimeout(timeoutMs)) * time.Millisecond)
 }
 
 func (c *Client) endOp() {
-	c.opDeadline = time.Time{}
+	c.opDeadline = 0
 }
 
 // opRemainingMs returns the time left before the current deadline, 0 once it
 // passed. It rounds up, so a wait given this time never ends before the
 // deadline itself. Outside a call or refresh it is the resolved call timeout.
 func (c *Client) opRemainingMs() uint32 {
-	if c.opDeadline.IsZero() {
+	if c.opDeadline == 0 {
 		return c.resolvedCallTimeout(0)
 	}
-	left := time.Until(c.opDeadline)
+	left := time.Duration(c.opDeadline - monotime.Now())
 	if left <= 0 {
 		return 0
 	}
@@ -302,14 +303,14 @@ func (c *Client) doRawCall(methodCode uint16, reqPayload []byte) (protocol.Heade
 // the time left before the call deadline; timeoutMs applies outside one.
 func (c *Client) doRawCallWithTimeout(methodCode uint16, reqPayload []byte, timeoutMs uint32) (protocol.Header, []byte, error) {
 	waitMs := c.resolvedCallTimeout(timeoutMs)
-	if !c.opDeadline.IsZero() {
+	if c.opDeadline != 0 {
 		waitMs = c.opRemainingMs()
 		if waitMs == 0 {
 			return protocol.Header{}, nil, protocol.ErrTimeout
 		}
 	}
 
-	hdr := protocol.Header{
+	c.requestHdr = protocol.Header{
 		Kind:            protocol.KindRequest,
 		Code:            methodCode,
 		Flags:           0,
@@ -317,8 +318,9 @@ func (c *Client) doRawCallWithTimeout(methodCode uint16, reqPayload []byte, time
 		MessageID:       uint64(c.callCount) + 1,
 		TransportStatus: protocol.StatusOK,
 	}
+	hdr := &c.requestHdr
 
-	if err := c.transportSend(&hdr, reqPayload); err != nil {
+	if err := c.transportSend(hdr, reqPayload); err != nil {
 		return protocol.Header{}, nil, err
 	}
 

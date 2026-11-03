@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/internal/monotime"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 )
 
@@ -269,7 +270,7 @@ func TestReceiveWaitTimeoutAndAbort(t *testing.T) {
 		t.Fatalf("fresh waitMs should reset deadline: %v", err)
 	}
 
-	expired := receiveWait{deadline: time.Now().Add(-time.Millisecond)}
+	expired := receiveWait{deadline: monotime.After(-time.Millisecond)}
 	if _, err := expired.waitMs(); !errors.Is(err, ErrTimeout) {
 		t.Fatalf("waitMs expired = %v, want ErrTimeout", err)
 	}
@@ -279,7 +280,7 @@ func TestReceiveWaitTimeoutAndAbort(t *testing.T) {
 		t.Fatalf("waitMs infinite = %d/%v, want %d/nil", waitMs, err, receiveAbortPollMs)
 	}
 
-	short := receiveWait{deadline: time.Now().Add(1500 * time.Microsecond)}
+	short := receiveWait{deadline: monotime.After(1500 * time.Microsecond)}
 	if waitMs, err := short.waitMs(); err != nil || waitMs < 1 || waitMs > 2 {
 		t.Fatalf("waitMs short deadline = %d/%v, want 1..2/nil", waitMs, err)
 	}

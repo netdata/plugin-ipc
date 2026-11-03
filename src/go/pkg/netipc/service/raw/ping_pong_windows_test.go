@@ -64,8 +64,8 @@ func winPingPongIncrementDispatch() DispatchHandler {
 }
 
 func winPingPongStringReverseDispatch() DispatchHandler {
-	return StringReverseDispatch(func(s string) (string, bool) {
-		return winReverseString(s), true
+	return StringReverseDispatch(func(s []byte) (string, bool) {
+		return winReverseString(string(s)), true
 	})
 }
 
@@ -143,11 +143,12 @@ func TestWinStringReversePingPong(t *testing.T) {
 		responsesReceived++
 
 		expectedReversed := winReverseString(current)
-		if view.Str != expectedReversed {
+		if string(view.Str) != expectedReversed {
 			t.Fatalf("round %d: sent %q, expected reverse %q, got %q", i+1, current, expectedReversed, view.Str)
 		}
 
-		current = view.Str
+		// The view borrows the client buffer that the next call reuses.
+		current = string(view.Str)
 	}
 
 	if responsesReceived != 6 {

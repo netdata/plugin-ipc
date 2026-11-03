@@ -2,8 +2,10 @@ package raw
 
 import "github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 
-// StringReverseHandler serves a single STRING_REVERSE service kind.
-type StringReverseHandler func(string) (string, bool)
+// StringReverseHandler serves a single STRING_REVERSE service kind. The
+// request borrows the receive buffer and is valid only during the call;
+// copy it to keep it.
+type StringReverseHandler func([]byte) (string, bool)
 
 // CallStringReverse performs a blocking STRING_REVERSE call.
 // The returned view is valid until the next typed call on this client.
@@ -15,8 +17,6 @@ func (c *Client) CallStringReverseWithTimeout(requestStr string, timeoutMs uint3
 	if err := c.validateMethod(protocol.MethodStringReverse); err != nil {
 		return nil, err
 	}
-
-	var result *protocol.StringReverseView
 
 	err := c.callWithRetry(timeoutMs, func() error {
 		reqBuf := ensureClientScratch(&c.requestBuf, protocol.StringReverseHdrSize+len(requestStr)+1)
@@ -33,13 +33,14 @@ func (c *Client) CallStringReverseWithTimeout(requestStr string, timeoutMs uint3
 		if derr != nil {
 			return derr
 		}
-		result = &view
+		c.stringReverseView = view
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return result, nil
+	// The view lives in the client, so returning it does not allocate.
+	return &c.stringReverseView, nil
 }
 
 // StringReverseDispatch adapts a typed string-reverse handler to the raw dispatch shape.

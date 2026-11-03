@@ -29,7 +29,9 @@ var robustCounter int
 
 func robustService(prefix string) string {
 	robustCounter++
-	return fmt.Sprintf("%s_%d_%d", prefix, os.Getpid(), robustCounter)
+	service := fmt.Sprintf("%s_%d_%d", prefix, os.Getpid(), robustCounter)
+	trackTestLock(testRunDir, service)
+	return service
 }
 
 // within runs f in a goroutine and reports whether it finished in time.

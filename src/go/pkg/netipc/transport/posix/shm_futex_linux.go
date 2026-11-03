@@ -1,7 +1,6 @@
 //go:build linux
 
-// Linux SHM primitives: futex wait/wake, CLOCK_MONOTONIC and the reserving
-// allocation.
+// Linux SHM primitives: futex wait/wake and the reserving allocation.
 
 package posix
 
@@ -15,8 +14,6 @@ const (
 	futexWait = 0
 	futexWake = 1
 )
-
-const shmClockMonotonic = 1
 
 // shmAllocate reserves the whole region file.
 func shmAllocate(fd int, mode uint32, off, length int64) error {

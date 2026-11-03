@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/internal/monotime"
 )
 
 // ---------------------------------------------------------------------------
@@ -495,15 +497,12 @@ func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 	//
 	// Handles spurious wakeups (EAGAIN when signal word changed
 	// between read and syscall, or EINTR from signal delivery).
-	// Computes a wall-clock deadline so total wait never exceeds
+	// Computes a monotonic deadline so total wait never exceeds
 	// timeoutMs regardless of retries.
 	if !observed {
 		var deadlineNs uint64
 		if timeoutMs > 0 {
-			var nowTs syscall.Timespec
-			monotonicNow(&nowTs)
-			deadlineNs = uint64(nowTs.Sec)*1_000_000_000 + uint64(nowTs.Nsec) +
-				uint64(timeoutMs)*1_000_000
+			deadlineNs = monotonicNs() + uint64(timeoutMs)*1_000_000
 		}
 
 		for {
@@ -523,9 +522,7 @@ func (c *ShmContext) ShmReceive(buf []byte, timeoutMs uint32) (int, error) {
 			// Compute remaining timeout for this futex_wait call
 			var ts *syscall.Timespec
 			if deadlineNs > 0 {
-				var nowTs syscall.Timespec
-				monotonicNow(&nowTs)
-				nowVal := uint64(nowTs.Sec)*1_000_000_000 + uint64(nowTs.Nsec)
+				nowVal := monotonicNs()
 				if nowVal >= deadlineNs {
 					return 0, ErrShmTimeout
 				}
@@ -665,10 +662,10 @@ func atomicAddU32(data []byte, off int, val uint32) error {
 	return nil
 }
 
-// monotonicNow reads CLOCK_MONOTONIC without allocating; the clock id
-// differs per OS (shmClockMonotonic).
-func monotonicNow(ts *syscall.Timespec) {
-	syscall.Syscall(syscall.SYS_CLOCK_GETTIME, shmClockMonotonic, uintptr(unsafe.Pointer(ts)), 0) // #nosec G103 -- syscall requires passing a Timespec pointer.
+// monotonicNs returns monotonic nanoseconds since process start; the wait
+// only needs differences, for relative futex/umtx timeouts.
+func monotonicNs() uint64 {
+	return uint64(monotime.Now()) // #nosec G115 -- monotonic time since start is non-negative.
 }
 
 // ---------------------------------------------------------------------------

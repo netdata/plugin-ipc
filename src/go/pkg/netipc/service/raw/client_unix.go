@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/internal/monotime"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/posix"
 )
@@ -30,6 +31,13 @@ type Client struct {
 	requestBuf   []byte
 	sendBuf      []byte
 	transportBuf []byte
+	// Request header of the call in progress: its address goes to the
+	// transport, so a per-call variable would be a heap allocation per call.
+	requestHdr protocol.Header
+	// Views returned by the typed calls: valid until the next typed call, and
+	// kept here so that returning their address does not allocate.
+	snapshotView      protocol.CgroupsResponseView
+	stringReverseView protocol.StringReverseView
 
 	// Stats
 	connectCount   uint32
@@ -47,8 +55,9 @@ type Client struct {
 	// shmAttachTimeout bounds the SHM attach retry after negotiation;
 	// tests shorten it per instance.
 	shmAttachTimeout time.Duration
-	// opDeadline bounds the call or refresh in progress; zero outside one.
-	opDeadline time.Time
+	// opDeadline bounds the call or refresh in progress, in monotime
+	// nanoseconds; zero outside one.
+	opDeadline int64
 }
 
 func newClient(runDir, serviceName string, config posix.ClientConfig, expectedMethodCode uint16) *Client {
@@ -233,7 +242,8 @@ func (c *Client) transportReceiveWithControl(timeoutMs uint32, abortCh <-chan st
 	scratch := ensureClientScratch(&c.transportBuf, c.maxReceiveMessageBytes())
 
 	if c.shm != nil {
-		deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+		// One monotonic read per slice, as in C.
+		deadline := monotime.After(time.Duration(timeoutMs) * time.Millisecond)
 		for {
 			select {
 			case <-abortCh:
@@ -241,13 +251,9 @@ func (c *Client) transportReceiveWithControl(timeoutMs uint32, abortCh <-chan st
 			default:
 			}
 
-			if timeoutMs != 0 && !time.Now().Before(deadline) {
-				return protocol.Header{}, nil, protocol.ErrTimeout
-			}
-
 			waitMs := clientAbortPollMs
 			if timeoutMs != 0 {
-				remaining := time.Until(deadline)
+				remaining := time.Duration(deadline - monotime.Now())
 				if remaining <= 0 {
 					return protocol.Header{}, nil, protocol.ErrTimeout
 				}

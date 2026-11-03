@@ -190,7 +190,9 @@ func ensureScratchBuf(buf *[]byte, needed int) []byte {
 
 // rawRecv receives one SEQPACKET message. Returns bytes received.
 func rawRecv(fd int, buf []byte) (int, error) {
-	n, _, _, _, err := syscall.Recvmsg(fd, buf, nil, 0)
+	// read(2) behaves as recvmsg with no flags (one datagram on SEQPACKET)
+	// and skips the source address that syscall.Recvmsg allocates.
+	n, err := syscall.Read(fd, buf)
 	if err != nil {
 		return 0, wrapErr(ErrRecv, err.Error())
 	}

@@ -63,7 +63,9 @@ fn end_stream_writes(fd: RawFd) {
 static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 fn unique_service(prefix: &str) -> String {
     let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}_{n}_{}", std::process::id())
+    let service = format!("{prefix}_{n}_{}", std::process::id());
+    crate::test_locks::track(TEST_RUN_DIR, &service);
+    service
 }
 
 fn socketpair_seqpacket() -> (RawFd, RawFd) {
@@ -660,6 +662,7 @@ fn test_stale_recovery_in_group_writable_run_dir() {
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775)).expect("chmod 0775");
 
     let svc = unique_service("rs_stale_gw");
+    crate::test_locks::track(&dir, &svc);
     let path = format!("{dir}/{svc}.sock");
     let _ = std::fs::remove_file(&path);
     create_stale_socket_file(&path);

@@ -7,6 +7,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/netdata/plugin-ipc/go/pkg/netipc/internal/monotime"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/internal/syspoll"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/internal/framing"
@@ -16,7 +17,7 @@ const receiveAbortPollMs = 100
 
 type receiveWait struct {
 	infinite bool
-	deadline time.Time
+	deadline int64 // monotime nanoseconds
 	abortCh  <-chan struct{}
 }
 
@@ -26,7 +27,7 @@ func newReceiveWait(timeoutMs uint32, abortCh <-chan struct{}) receiveWait {
 		abortCh:  abortCh,
 	}
 	if !w.infinite {
-		w.deadline = time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+		w.deadline = monotime.After(time.Duration(timeoutMs) * time.Millisecond)
 	}
 	return w
 }
@@ -45,7 +46,7 @@ func (w receiveWait) waitMs() (int, error) {
 		return waitMs, nil
 	}
 
-	remaining := time.Until(w.deadline)
+	remaining := time.Duration(w.deadline - monotime.Now())
 	if remaining <= 0 {
 		return 0, ErrTimeout
 	}
@@ -113,27 +114,44 @@ func (s *Session) ReceiveTimeout(buf []byte, timeoutMs uint32, abortCh <-chan st
 		return protocol.Header{}, nil, wrapErr(ErrBadParam, "session closed")
 	}
 
-	controlled := timeoutMs != 0 || abortCh != nil
+	s.initReceiveFns()
+	s.recvControl = timeoutMs != 0 || abortCh != nil
+	s.recvWait = newReceiveWait(timeoutMs, abortCh)
 	if streamTransport {
-		return s.receiveStream(buf, controlled, newReceiveWait(timeoutMs, abortCh))
+		return s.receiveStream(buf)
 	}
+	return s.receiveFraming(buf, s.recvPacketFn, false)
+}
 
-	recv := func(dst []byte) (int, error) {
+// initReceiveFns builds the session's receive closures once. They read the
+// call's state from the session (recvControl, recvWait, streamFirst).
+func (s *Session) initReceiveFns() {
+	if s.recvPacketFn != nil {
+		return
+	}
+	s.recvPacketFn = func(dst []byte) (int, error) {
 		if s.pending.queued() {
 			return s.pending.popPacket(dst), nil
 		}
+		if s.recvControl {
+			return rawRecvWithTimeout(s.fd, dst, s.recvWait)
+		}
 		return rawRecv(s.fd, dst)
 	}
-	if controlled {
-		wait := newReceiveWait(timeoutMs, abortCh)
-		recv = func(dst []byte) (int, error) {
-			if s.pending.queued() {
-				return s.pending.popPacket(dst), nil
-			}
-			return rawRecvWithTimeout(s.fd, dst, wait)
+	s.recvStreamFn = func(dst []byte) (int, error) {
+		var waitp *receiveWait
+		if s.recvControl {
+			waitp = &s.recvWait
 		}
+		maxPayload, maxItems := s.MaxResponsePayloadBytes, s.MaxResponseBatchItems
+		if s.role == RoleServer {
+			maxPayload, maxItems = s.MaxRequestPayloadBytes, s.MaxRequestBatchItems
+		}
+		n, err := streamRecvSessionPacket(s.fd, &s.pending, dst, s.streamFirst, s.PacketSize, maxPayload, maxItems, waitp)
+		s.streamFirst = false
+		return n, err
 	}
-	return s.receiveFraming(buf, recv, false)
+	s.failInflights = s.failAllInflight
 }
 
 // receiveStream receives on a stream socket. A timeout or abort before the
@@ -141,27 +159,14 @@ func (s *Session) ReceiveTimeout(buf []byte, timeoutMs uint32, abortCh <-chan st
 // not: the rest of the message is still queued, so the receive side is shut
 // down and every later receive fails. Sends stay valid; they always write
 // whole messages.
-func (s *Session) receiveStream(buf []byte, controlled bool, wait receiveWait) (protocol.Header, []byte, error) {
-	var waitp *receiveWait
-	if controlled {
-		if !s.pending.queued() {
-			if err := pollReadableForReceive(s.fd, wait); err != nil {
-				return protocol.Header{}, nil, err
-			}
+func (s *Session) receiveStream(buf []byte) (protocol.Header, []byte, error) {
+	if s.recvControl && !s.pending.queued() {
+		if err := pollReadableForReceive(s.fd, s.recvWait); err != nil {
+			return protocol.Header{}, nil, err
 		}
-		waitp = &wait
 	}
-	maxPayload, maxItems := s.MaxResponsePayloadBytes, s.MaxResponseBatchItems
-	if s.role == RoleServer {
-		maxPayload, maxItems = s.MaxRequestPayloadBytes, s.MaxRequestBatchItems
-	}
-	first := true
-	recv := func(dst []byte) (int, error) {
-		n, err := streamRecvSessionPacket(s.fd, &s.pending, dst, first, s.PacketSize, maxPayload, maxItems, waitp)
-		first = false
-		return n, err
-	}
-	hdr, payload, err := s.receiveFraming(buf, recv, true)
+	s.streamFirst = true
+	hdr, payload, err := s.receiveFraming(buf, s.recvStreamFn, true)
 	if err != nil {
 		_ = syscall.Shutdown(s.fd, syscall.SHUT_RD)
 		// Queued bytes are part of the abandoned stream too.
@@ -205,7 +210,7 @@ func (s *Session) receiveFraming(buf []byte, recv func([]byte) (int, error), str
 		EnsurePacketScratch:     ensureScratchBuf,
 		IsRecvDisconnect:        func(err error) bool { return errors.Is(err, ErrRecv) },
 		PropagateRecvError:      propagateRecvError(stream),
-		FailAllInflight:         s.failAllInflight,
+		FailAllInflight:         s.failInflights,
 		ErrLimitExceeded:        func(msg string) error { return wrapErr(ErrLimitExceeded, msg) },
 		ErrProtocol:             func(msg string) error { return wrapErr(ErrProtocol, msg) },
 		ErrChunk:                func(msg string) error { return wrapErr(ErrChunk, msg) },

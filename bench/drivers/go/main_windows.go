@@ -838,6 +838,10 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 	wallStart := nowNS()
 	tickDeadline := tickMSWin() + uint64(durationSec)*1000
 
+	// Declared once: Send takes &hdr, so it escapes to the heap; inside the
+	// loop that would be one allocation per request.
+	var hdr protocol.Header
+
 	for tickMSWin() < tickDeadline {
 		rl.wait()
 
@@ -867,7 +871,7 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 		reqLen, _ := bb.Finish()
 
 		msgSeq++
-		hdr := protocol.Header{
+		hdr = protocol.Header{
 			Kind:            protocol.KindRequest,
 			Code:            protocol.MethodIncrement,
 			Flags:           protocol.FlagBatch,
@@ -1076,6 +1080,10 @@ func runPipelineClientWin(runDir, service string, durationSec int, targetRPS uin
 
 	runtime.GC()
 
+	// Declared once: Send takes &hdr, so it escapes to the heap; inside the
+	// loop that would be one allocation per request.
+	var hdr protocol.Header
+
 	for tickMSWin() < tickDeadline {
 		rl.wait()
 
@@ -1088,7 +1096,7 @@ func runPipelineClientWin(runDir, service string, durationSec int, targetRPS uin
 			binary.NativeEndian.PutUint64(reqPayload[:], val)
 
 			msgSeq++
-			hdr := protocol.Header{
+			hdr = protocol.Header{
 				Kind:            protocol.KindRequest,
 				Code:            protocol.MethodIncrement,
 				ItemCount:       1,
@@ -1365,6 +1373,10 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 	tickDeadline := tickMSWin() + uint64(durationSec)*1000
 	rng := newXorShift32Win()
 
+	// Declared once: Send takes &hdr, so it escapes to the heap; inside the
+	// loop that would be one allocation per request.
+	var hdr protocol.Header
+
 	for tickMSWin() < tickDeadline {
 		rl.wait()
 
@@ -1395,7 +1407,7 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 				reqLen, _ := bb.Finish()
 
 				msgSeq++
-				hdr := protocol.Header{
+				hdr = protocol.Header{
 					Kind:            protocol.KindRequest,
 					Code:            protocol.MethodIncrement,
 					Flags:           protocol.FlagBatch,
@@ -1629,12 +1641,16 @@ func runPingPongClientWin(runDir, service string, profiles uint32, durationSec i
 	wallStart := nowNS()
 	tickDeadline := tickMSWin() + uint64(durationSec)*1000
 
+	// Declared once: Send takes &hdr, so it escapes to the heap; inside the
+	// loop that would be one allocation per request.
+	var hdr protocol.Header
+
 	for tickMSWin() < tickDeadline {
 		rl.wait()
 
 		binary.NativeEndian.PutUint64(reqPayload[:], counter)
 
-		hdr := protocol.Header{
+		hdr = protocol.Header{
 			Kind:            protocol.KindRequest,
 			Code:            protocol.MethodIncrement,
 			Flags:           0,

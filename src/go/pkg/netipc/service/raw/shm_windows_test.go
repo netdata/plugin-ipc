@@ -89,7 +89,7 @@ func TestWinShmRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CallStringReverse failed: %v", err)
 		}
-		if reversed.Str != "olleh" {
+		if string(reversed.Str) != "olleh" {
 			t.Fatalf("string reverse result = %q, want %q", reversed.Str, "olleh")
 		}
 	})
