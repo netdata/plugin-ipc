@@ -214,33 +214,16 @@ func TestPipeAcceptUnblocksWhenListenerClosed(t *testing.T) {
 	}
 }
 
-func TestRawRecvMoreData(t *testing.T) {
+// A message larger than the receive buffer fails, as in C and Rust, instead
+// of returning its first part as a whole message.
+func TestRawRecvMoreDataFails(t *testing.T) {
 	clientHandle, serverHandle := rawPipePair(t)
 
-	msg := make([]byte, 96)
-	for i := range msg {
-		msg[i] = byte(i)
-	}
-	if err := rawWrite(clientHandle, msg); err != nil {
+	if err := rawWrite(clientHandle, make([]byte, 96)); err != nil {
 		t.Fatalf("rawWrite failed: %v", err)
 	}
-
-	small := make([]byte, 16)
-	n, err := rawRecv(serverHandle, small)
-	if err != nil {
-		t.Fatalf("rawRecv(small) failed: %v", err)
-	}
-	if n != len(small) {
-		t.Fatalf("rawRecv(small) len=%d, want %d", n, len(small))
-	}
-
-	rest := make([]byte, 96)
-	n, err = rawRecv(serverHandle, rest)
-	if err != nil {
-		t.Fatalf("rawRecv(rest) failed: %v", err)
-	}
-	if n != len(msg)-len(small) {
-		t.Fatalf("rawRecv(rest) len=%d, want %d", n, len(msg)-len(small))
+	if _, err := rawRecv(serverHandle, make([]byte, 16)); !errors.Is(err, ErrRecv) {
+		t.Fatalf("rawRecv into a short buffer = %v, want ErrRecv", err)
 	}
 }
 
@@ -392,7 +375,7 @@ func TestClientHandshakeRejectsMalformedAck(t *testing.T) {
 				t.Fatalf("setNamedPipeHandleState failed: %v", err)
 			}
 
-			session, err := clientHandshake(clientHandle, defaultClientConfigPtr(), newReceiveWait(0, nil))
+			session, err := clientHandshake(clientHandle, nil, defaultClientConfigPtr(), newReceiveWait(0, nil))
 			if err == nil {
 				session.Close()
 				t.Fatal("clientHandshake should fail")
@@ -419,7 +402,7 @@ func TestClientHandshakeTransportErrors(t *testing.T) {
 			t.Fatalf("CloseHandle(server) failed: %v", err)
 		}
 
-		_, err := clientHandshake(clientHandle, defaultClientConfigPtr(), newReceiveWait(0, nil))
+		_, err := clientHandshake(clientHandle, nil, defaultClientConfigPtr(), newReceiveWait(0, nil))
 		if err == nil {
 			t.Fatal("clientHandshake should fail")
 		}
@@ -444,7 +427,7 @@ func TestClientHandshakeTransportErrors(t *testing.T) {
 			serverDone <- err
 		}()
 
-		_, err := clientHandshake(clientHandle, defaultClientConfigPtr(), newReceiveWait(0, nil))
+		_, err := clientHandshake(clientHandle, nil, defaultClientConfigPtr(), newReceiveWait(0, nil))
 		if err == nil {
 			t.Fatal("clientHandshake should fail")
 		}

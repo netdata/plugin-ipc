@@ -52,6 +52,20 @@ mod ffi {
     pub const ERROR_ACCESS_DENIED: DWORD = 5;
     pub const ERROR_PIPE_BUSY: DWORD = 231;
     pub const ERROR_SEM_TIMEOUT: DWORD = 121;
+    pub const FILE_FLAG_OVERLAPPED: DWORD = 0x40000000;
+    pub const ERROR_IO_PENDING: DWORD = 997;
+    pub const WAIT_OBJECT_0: DWORD = 0;
+    pub const WAIT_TIMEOUT: DWORD = 258;
+
+    /// OVERLAPPED; the offset union is unused for pipes.
+    #[repr(C)]
+    pub struct OVERLAPPED {
+        pub internal: usize,
+        pub internal_high: usize,
+        pub offset: u32,
+        pub offset_high: u32,
+        pub h_event: HANDLE,
+    }
 
     unsafe extern "system" {
         pub fn CreateNamedPipeW(
@@ -116,6 +130,24 @@ mod ffi {
             lpMaxCollectionCount: *const DWORD,
             lpCollectDataTimeout: *const DWORD,
         ) -> BOOL;
+
+        pub fn CreateEventW(
+            lpEventAttributes: *const core::ffi::c_void,
+            bManualReset: BOOL,
+            bInitialState: BOOL,
+            lpName: LPCWSTR,
+        ) -> HANDLE;
+
+        pub fn GetOverlappedResult(
+            hFile: HANDLE,
+            lpOverlapped: *mut OVERLAPPED,
+            lpNumberOfBytesTransferred: LPDWORD,
+            bWait: BOOL,
+        ) -> BOOL;
+
+        pub fn CancelIoEx(hFile: HANDLE, lpOverlapped: *mut OVERLAPPED) -> BOOL;
+
+        pub fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD) -> DWORD;
     }
 }
 
@@ -448,23 +480,6 @@ fn raw_write(handle: ffi::HANDLE, data: &[u8]) -> Result<(), NpError> {
     Ok(())
 }
 
-/// Send header + payload as one pipe message.
-#[cfg(windows)]
-fn raw_send_msg(
-    handle: ffi::HANDLE,
-    scratch: &mut Vec<u8>,
-    hdr: &[u8],
-    payload: &[u8],
-) -> Result<(), NpError> {
-    let total = hdr.len() + payload.len();
-    if scratch.len() < total {
-        scratch.resize(total, 0);
-    }
-    scratch[..hdr.len()].copy_from_slice(hdr);
-    scratch[hdr.len()..total].copy_from_slice(payload);
-    raw_write(handle, &scratch[..total])
-}
-
 /// Read one pipe message. Returns number of bytes read.
 #[cfg(windows)]
 fn raw_recv(handle: ffi::HANDLE, buf: &mut [u8]) -> Result<usize, NpError> {
@@ -489,6 +504,417 @@ fn raw_recv(handle: ffi::HANDLE, buf: &mut [u8]) -> Result<usize, NpError> {
         return Err(NpError::Disconnected);
     }
     Ok(read as usize)
+}
+
+// Client pipe handles are overlapped (FILE_FLAG_OVERLAPPED), so a
+// pipelining send can read responses while its write waits for buffer
+// space. Every read and write on such a handle passes an OVERLAPPED and is
+// waited to completion before the call returns, so the OVERLAPPED lives on
+// that call's stack. Server handles stay synchronous.
+
+/// The events of a client handle's reads and writes.
+#[cfg(windows)]
+struct PipeIo {
+    read_event: ffi::HANDLE,
+    write_event: ffi::HANDLE,
+}
+
+#[cfg(windows)]
+impl PipeIo {
+    fn new() -> Result<Self, NpError> {
+        let read_event = create_manual_event()?;
+        let write_event = match create_manual_event() {
+            Ok(event) => event,
+            Err(e) => {
+                close_handle(read_event);
+                return Err(e);
+            }
+        };
+        Ok(Self {
+            read_event,
+            write_event,
+        })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PipeIo {
+    fn drop(&mut self) {
+        close_handle(self.read_event);
+        close_handle(self.write_event);
+    }
+}
+
+#[cfg(windows)]
+fn create_manual_event() -> Result<ffi::HANDLE, NpError> {
+    let event = unsafe { ffi::CreateEventW(ptr::null(), 1, 0, ptr::null()) };
+    if event == 0 {
+        return Err(NpError::Connect(last_error()));
+    }
+    Ok(event)
+}
+
+#[cfg(windows)]
+fn new_overlapped(event: ffi::HANDLE) -> ffi::OVERLAPPED {
+    ffi::OVERLAPPED {
+        internal: 0,
+        internal_high: 0,
+        offset: 0,
+        offset_high: 0,
+        h_event: event,
+    }
+}
+
+#[cfg(windows)]
+fn send_error(err: u32) -> NpError {
+    if is_disconnect_error(err) {
+        NpError::Disconnected
+    } else {
+        NpError::Send(err)
+    }
+}
+
+#[cfg(windows)]
+fn recv_error(err: u32) -> NpError {
+    if is_disconnect_error(err) {
+        NpError::Disconnected
+    } else {
+        NpError::Recv(err)
+    }
+}
+
+/// Read one message on an overlapped handle and wait for it. A message
+/// larger than `buf` (ERROR_MORE_DATA) fails, as on a synchronous handle.
+#[cfg(windows)]
+fn overlapped_read(
+    handle: ffi::HANDLE,
+    event: ffi::HANDLE,
+    buf: &mut [u8],
+) -> Result<usize, NpError> {
+    let mut ov = new_overlapped(event);
+    let mut read: u32 = 0;
+    let ok = unsafe {
+        ffi::ReadFile(
+            handle,
+            buf.as_mut_ptr() as ffi::LPVOID,
+            buf.len() as u32,
+            &mut read,
+            &mut ov as *mut ffi::OVERLAPPED as *mut core::ffi::c_void,
+        )
+    };
+    if ok == 0 {
+        let err = last_error();
+        if err != ffi::ERROR_IO_PENDING {
+            return Err(recv_error(err));
+        }
+    }
+    if unsafe { ffi::GetOverlappedResult(handle, &mut ov, &mut read, 1) } == 0 {
+        return Err(recv_error(last_error()));
+    }
+    if read == 0 {
+        return Err(NpError::Disconnected);
+    }
+    Ok(read as usize)
+}
+
+/// Post one message on an overlapped handle; `finish_overlapped_write`
+/// collects its completion, also when WriteFile completed at once.
+#[cfg(windows)]
+fn start_overlapped_write(
+    handle: ffi::HANDLE,
+    ov: &mut ffi::OVERLAPPED,
+    data: &[u8],
+) -> Result<(), NpError> {
+    let mut written: u32 = 0;
+    let ok = unsafe {
+        ffi::WriteFile(
+            handle,
+            data.as_ptr() as ffi::LPCVOID,
+            data.len() as u32,
+            &mut written,
+            ov as *mut ffi::OVERLAPPED as *mut core::ffi::c_void,
+        )
+    };
+    if ok == 0 {
+        let err = last_error();
+        if err != ffi::ERROR_IO_PENDING {
+            return Err(send_error(err));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn finish_overlapped_write(
+    handle: ffi::HANDLE,
+    ov: &mut ffi::OVERLAPPED,
+    data: &[u8],
+) -> Result<(), NpError> {
+    let mut written: u32 = 0;
+    if unsafe { ffi::GetOverlappedResult(handle, ov, &mut written, 1) } == 0 {
+        return Err(send_error(last_error()));
+    }
+    if written != data.len() as u32 {
+        return Err(NpError::Send(0));
+    }
+    Ok(())
+}
+
+/// Cancel a posted write and wait until the kernel no longer uses its
+/// OVERLAPPED and buffer.
+#[cfg(windows)]
+fn cancel_overlapped_write(handle: ffi::HANDLE, ov: &mut ffi::OVERLAPPED) {
+    let mut written: u32 = 0;
+    unsafe {
+        ffi::CancelIoEx(handle, ov);
+        ffi::GetOverlappedResult(handle, ov, &mut written, 1);
+    }
+}
+
+/// Length prefix of each queued message.
+#[cfg(windows)]
+const PENDING_RECORD_LEN: usize = 4;
+
+/// Messages a pipelining client send read while its write waited; receive
+/// returns them before reading the pipe. Records live in `buf[head..end]`;
+/// `buf` only grows, so a read lands in storage zeroed once, not per message.
+#[cfg(windows)]
+#[derive(Default)]
+struct PendingQueue {
+    buf: Vec<u8>,
+    head: usize,
+    end: usize,
+}
+
+#[cfg(windows)]
+impl PendingQueue {
+    fn queued(&self) -> bool {
+        self.head < self.end
+    }
+
+    fn clear(&mut self) {
+        self.head = 0;
+        self.end = 0;
+    }
+
+    fn compact(&mut self) {
+        if self.head > 0 {
+            self.buf.copy_within(self.head..self.end, 0);
+            self.end -= self.head;
+            self.head = 0;
+        }
+    }
+
+    #[cfg(test)]
+    fn push(&mut self, msg: &[u8]) {
+        self.buf.truncate(self.end);
+        self.buf
+            .extend_from_slice(&(msg.len() as u32).to_ne_bytes());
+        self.buf.extend_from_slice(msg);
+        self.end = self.buf.len();
+    }
+
+    /// Copy the oldest queued message into `dst`. A message larger than
+    /// `dst` fails, as a pipe read would with ERROR_MORE_DATA.
+    fn pop(&mut self, dst: &mut [u8]) -> Result<usize, NpError> {
+        let mut len_bytes = [0u8; PENDING_RECORD_LEN];
+        len_bytes.copy_from_slice(&self.buf[self.head..self.head + PENDING_RECORD_LEN]);
+        let rec = u32::from_ne_bytes(len_bytes) as usize;
+        let start = self.head + PENDING_RECORD_LEN;
+        let result = if rec > dst.len() {
+            Err(NpError::Recv(ERROR_MORE_DATA))
+        } else {
+            dst[..rec].copy_from_slice(&self.buf[start..start + rec]);
+            Ok(rec)
+        };
+        self.head = start + rec;
+        if self.head == self.end {
+            self.clear();
+        }
+        result
+    }
+
+    /// Read every message available now. Reports whether it read any. A
+    /// disconnected pipe sets `eof`: the posted write reports it. Queued bytes beyond `bound` fail with `NpError::Protocol`.
+    fn drain(
+        &mut self,
+        handle: ffi::HANDLE,
+        event: ffi::HANDLE,
+        read_len: usize,
+        bound: usize,
+        eof: &mut bool,
+    ) -> Result<bool, NpError> {
+        let mut drained = false;
+        loop {
+            match peek_available(handle) {
+                Ok(0) => return Ok(drained),
+                Ok(_) => {}
+                Err(NpError::Disconnected) => {
+                    *eof = true;
+                    return Ok(drained);
+                }
+                // Stopping the drain on a live pipe would bring the deadlock back.
+                Err(e) => return Err(NpError::Protocol(format!("pending peek: {e}"))),
+            }
+            self.compact();
+            let start = self.end;
+            let need = start + PENDING_RECORD_LEN + read_len;
+            if self.buf.len() < need {
+                self.buf.resize(need, 0);
+            }
+            match overlapped_read(
+                handle,
+                event,
+                &mut self.buf[start + PENDING_RECORD_LEN..need],
+            ) {
+                Ok(n) => {
+                    self.buf[start..start + PENDING_RECORD_LEN]
+                        .copy_from_slice(&(n as u32).to_ne_bytes());
+                    self.end = start + PENDING_RECORD_LEN + n;
+                }
+                Err(NpError::Disconnected) => {
+                    *eof = true;
+                    return Ok(drained);
+                }
+                Err(e) => {
+                    // A message larger than a packet, or a read failure.
+                    return Err(NpError::Protocol(format!("pending read: {e}")));
+                }
+            }
+            if self.end > bound {
+                return Err(NpError::Protocol(
+                    "inbound bytes exceed the in-flight responses".into(),
+                ));
+            }
+            drained = true;
+        }
+    }
+}
+
+/// How long a stalled pipelined send keeps yielding before it sleeps.
+#[cfg(windows)]
+const PROGRESS_YIELD: Duration = Duration::from_millis(1);
+
+/// ERROR_MORE_DATA: a message larger than the read buffer.
+#[cfg(windows)]
+const ERROR_MORE_DATA: u32 = 234;
+
+/// Wire bytes `inflight` responses can occupy: the pending queue bound.
+#[cfg(windows)]
+fn pending_bound(max_response_payload: u32, packet_size: u32, inflight: usize) -> usize {
+    let payload = max_response_payload as usize;
+    let budget = (packet_size as usize).saturating_sub(HEADER_SIZE).max(1);
+    let packets = if payload == 0 {
+        1
+    } else {
+        1 + (payload - 1) / budget
+    };
+    packets
+        .saturating_mul(HEADER_SIZE + PENDING_RECORD_LEN)
+        .saturating_add(payload)
+        .saturating_mul(inflight)
+}
+
+#[cfg(windows)]
+fn peek_available(handle: ffi::HANDLE) -> Result<u32, NpError> {
+    let mut available: u32 = 0;
+    let ok = unsafe {
+        ffi::PeekNamedPipe(
+            handle,
+            ptr::null_mut(),
+            0,
+            ptr::null_mut(),
+            &mut available,
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(recv_error(last_error()));
+    }
+    Ok(available)
+}
+
+/// Write one packet. On a client handle with `bound` set (more than one
+/// request in flight), it reads what the server sent into `pending` until
+/// the write completes, so both sides keep making progress. No timeout: it
+/// waits as long as a blocking write would.
+#[cfg(windows)]
+fn write_packet(
+    handle: ffi::HANDLE,
+    io: Option<&PipeIo>,
+    pending: &mut PendingQueue,
+    bound: usize,
+    read_len: usize,
+    data: &[u8],
+    broken: &mut bool,
+) -> Result<(), NpError> {
+    let Some(io) = io else {
+        return raw_write(handle, data);
+    };
+    let mut ov = new_overlapped(io.write_event);
+    start_overlapped_write(handle, &mut ov, data)?;
+    if bound == 0 {
+        return finish_overlapped_write(handle, &mut ov, data);
+    }
+    let mut eof = false;
+    let mut yield_until = Instant::now() + PROGRESS_YIELD;
+    loop {
+        match unsafe { ffi::WaitForSingleObject(io.write_event, 0) } {
+            ffi::WAIT_OBJECT_0 => return finish_overlapped_write(handle, &mut ov, data),
+            ffi::WAIT_TIMEOUT => {}
+            _ => {
+                let err = last_error();
+                cancel_overlapped_write(handle, &mut ov);
+                *broken = true;
+                return Err(NpError::Send(err));
+            }
+        }
+        if !eof {
+            match pending.drain(handle, io.read_event, read_len, bound, &mut eof) {
+                Ok(true) => {
+                    yield_until = Instant::now() + PROGRESS_YIELD;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    cancel_overlapped_write(handle, &mut ov);
+                    *broken = true;
+                    return Err(e);
+                }
+            }
+        }
+        // The server is busy or its reply is still being written: yield for
+        // up to PROGRESS_YIELD after the last progress, then wait for the
+        // write in short slices. A slice lasts a system timer tick and only
+        // the write completing ends it early, so slicing at once stalls a
+        // server blocked on its reply to us.
+        if Instant::now() < yield_until {
+            unsafe {
+                ffi::SwitchToThread();
+            }
+            continue;
+        }
+        unsafe {
+            ffi::WaitForSingleObject(io.write_event, 1);
+        }
+    }
+}
+
+/// Read one packet: a queued one first, then the pipe.
+#[cfg(windows)]
+fn read_packet(
+    handle: ffi::HANDLE,
+    io: Option<&PipeIo>,
+    pending: &mut PendingQueue,
+    buf: &mut [u8],
+) -> Result<usize, NpError> {
+    if pending.queued() {
+        return pending.pop(buf);
+    }
+    match io {
+        Some(io) => overlapped_read(handle, io.read_event, buf),
+        None => raw_recv(handle, buf),
+    }
 }
 
 #[cfg(windows)]
@@ -614,9 +1040,14 @@ fn wait_pipe_readable(handle: ffi::HANDLE, timeout_ms: u32) -> Result<bool, NpEr
 #[cfg(windows)]
 fn raw_recv_with_wait(
     handle: ffi::HANDLE,
+    io: Option<&PipeIo>,
+    pending: &mut PendingQueue,
     buf: &mut [u8],
     wait: &mut ReceiveWait<'_>,
 ) -> Result<usize, NpError> {
+    if pending.queued() {
+        return pending.pop(buf);
+    }
     loop {
         let wait_ms = wait.wait_slice_ms()?;
         if !wait_pipe_readable(handle, wait_ms)? {
@@ -627,21 +1058,23 @@ fn raw_recv_with_wait(
         if wait.aborted() {
             return Err(NpError::Aborted);
         }
-        return raw_recv(handle, buf);
+        return read_packet(handle, io, pending, buf);
     }
 }
 
 #[cfg(windows)]
 fn raw_recv_control(
     handle: ffi::HANDLE,
+    io: Option<&PipeIo>,
+    pending: &mut PendingQueue,
     buf: &mut [u8],
     controlled: bool,
     wait: &mut ReceiveWait<'_>,
 ) -> Result<usize, NpError> {
     if controlled {
-        raw_recv_with_wait(handle, buf, wait)
+        raw_recv_with_wait(handle, io, pending, buf, wait)
     } else {
-        raw_recv(handle, buf)
+        read_packet(handle, io, pending, buf)
     }
 }
 
@@ -680,6 +1113,12 @@ pub struct NpSession {
 
     // In-flight message_id set (client-side only)
     inflight_ids: HashSet<u64>,
+
+    // Overlapped state of a client handle; None on server sessions, whose
+    // handles are synchronous.
+    io: Option<PipeIo>,
+    // Messages read while a pipelined send waited for its write.
+    pending: PendingQueue,
 }
 
 #[cfg(windows)]
@@ -704,9 +1143,18 @@ impl NpSession {
         }
     }
 
-    /// Get the raw HANDLE for WaitForSingleObject integration.
+    /// Get the raw pipe HANDLE. It is not a readability signal: a pipe
+    /// handle is signalled by I/O completion, not by arriving data. Use
+    /// `wait_readable`, and check `has_pending` first: a pipelined send can
+    /// read responses into the session, where the pipe no longer shows them.
     pub fn handle(&self) -> ffi::HANDLE {
         self.handle
+    }
+
+    /// Whether the next receive can return a message read earlier by a
+    /// pipelined send, without the pipe becoming readable.
+    pub fn has_pending(&self) -> bool {
+        self.pending.queued()
     }
 
     /// Get the session role.
@@ -716,6 +1164,9 @@ impl NpSession {
 
     /// Wait until the pipe becomes readable or the timeout expires.
     pub fn wait_readable(&self, timeout_ms: u32) -> Result<bool, NpError> {
+        if self.pending.queued() && self.handle != ffi::INVALID_HANDLE_VALUE {
+            return Ok(true);
+        }
         wait_pipe_readable(self.handle, timeout_ms)
     }
 
@@ -765,7 +1216,14 @@ impl NpSession {
             return Err(NpError::Connect(err));
         }
 
-        match client_handshake(handle, config, &wait) {
+        let io = match PipeIo::new() {
+            Ok(io) => io,
+            Err(e) => {
+                close_handle(handle);
+                return Err(e);
+            }
+        };
+        match client_handshake(handle, io, config, &wait) {
             Ok(session) => Ok(session),
             Err(e) => {
                 close_handle(handle);
@@ -781,12 +1239,58 @@ impl NpSession {
             return Err(NpError::BadParam("session closed".into()));
         }
 
+        // One request in flight (every typed call) writes without
+        // draining; only a pipelining client can deadlock with a server
+        // blocked writing to it.
+        let mut inflight = self.inflight_ids.len();
+        if self.role == Role::Client && hdr.kind == crate::protocol::KIND_REQUEST {
+            inflight += 1;
+        }
+        let bound = if self.io.is_some() && inflight > 1 {
+            pending_bound(self.max_response_payload_bytes, self.packet_size, inflight)
+        } else {
+            0
+        };
+
         let framing = self.framing(true);
         let handle = self.handle;
+        let io = self.io.as_ref();
+        let pending = &mut self.pending;
+        let read_len = self.packet_size as usize;
         let send_buf = &mut self.send_buf;
-        framing::send_message(framing, &mut self.inflight_ids, hdr, payload, |h, p| {
-            raw_send_msg(handle, send_buf, h, p)
-        })
+        let mut broken = false;
+        let result =
+            framing::send_message(framing, &mut self.inflight_ids, hdr, payload, |h, p| {
+                let total = h.len() + p.len();
+                if send_buf.len() < total {
+                    send_buf.resize(total, 0);
+                }
+                send_buf[..h.len()].copy_from_slice(h);
+                send_buf[h.len()..total].copy_from_slice(p);
+                write_packet(
+                    handle,
+                    io,
+                    pending,
+                    bound,
+                    read_len,
+                    &send_buf[..total],
+                    &mut broken,
+                )
+            });
+        if broken {
+            self.break_session();
+        }
+        result
+    }
+
+    /// Close the pipe: a cancelled write leaves the message stream in an
+    /// unknown state, and a drain failure drops inbound messages. Later
+    /// calls fail with `BadParam` and `close` still releases the rest.
+    fn break_session(&mut self) {
+        close_handle(self.handle);
+        self.handle = ffi::INVALID_HANDLE_VALUE;
+        self.pending = PendingQueue::default();
+        self.inflight_ids.clear();
     }
 
     /// Receive one logical message. buf is a scratch buffer for the first read.
@@ -811,13 +1315,15 @@ impl NpSession {
 
         let framing = self.framing(false);
         let handle = self.handle;
+        let io = self.io.as_ref();
+        let pending = &mut self.pending;
         framing::receive_message(
             framing,
             &mut self.inflight_ids,
             buf,
             &mut self.recv_buf,
             &mut self.pkt_buf,
-            |b| raw_recv_control(handle, b, controlled, &mut wait),
+            |b| raw_recv_control(handle, io, pending, b, controlled, &mut wait),
         )
     }
 
@@ -836,6 +1342,9 @@ impl NpSession {
             self.inflight_ids.clear();
         }
         self.recv_buf.clear();
+        self.pending = PendingQueue::default();
+        // No I/O stays posted between calls, so the events can go.
+        self.io = None;
     }
 }
 
@@ -971,7 +1480,7 @@ impl Drop for NpListener {
 }
 
 /// SECURITY_IDENTIFICATION lets the server identify the client but never act
-/// as it.
+/// as it. Overlapped, so a pipelining send can read while its write waits.
 #[cfg(windows)]
 fn create_client_pipe(pipe_name: &[u16]) -> ffi::HANDLE {
     unsafe {
@@ -981,7 +1490,7 @@ fn create_client_pipe(pipe_name: &[u16]) -> ffi::HANDLE {
             0,
             ptr::null(),
             ffi::OPEN_EXISTING,
-            ffi::SECURITY_SQOS_PRESENT | ffi::SECURITY_IDENTIFICATION,
+            ffi::SECURITY_SQOS_PRESENT | ffi::SECURITY_IDENTIFICATION | ffi::FILE_FLAG_OVERLAPPED,
             0,
         )
     }
@@ -1194,6 +1703,7 @@ fn create_pipe_instance(
 #[cfg(windows)]
 fn client_handshake(
     handle: ffi::HANDLE,
+    io: PipeIo,
     config: &ClientConfig,
     wait: &ReceiveWait<'_>,
 ) -> Result<NpSession, NpError> {
@@ -1223,7 +1733,16 @@ fn client_handshake(
         packet_size: pkt_size,
     };
 
-    raw_write(handle, &framing::hello_packet(&hello))?;
+    let mut no_pending = PendingQueue::default();
+    write_packet(
+        handle,
+        Some(&io),
+        &mut no_pending,
+        0,
+        0,
+        &framing::hello_packet(&hello),
+        &mut false,
+    )?;
 
     // Receive HELLO_ACK; a server that never answers must not hold the
     // client past its deadline. A server that rejects the client writes its
@@ -1240,7 +1759,7 @@ fn client_handshake(
         return Err(NpError::Aborted);
     }
     let mut ack_buf = [0u8; 128];
-    let n = raw_recv(handle, &mut ack_buf)?;
+    let n = overlapped_read(handle, io.read_event, &mut ack_buf)?;
 
     let ack: HelloAck = framing::parse_hello_ack(&ack_buf[..n], supported)?;
 
@@ -1265,6 +1784,8 @@ fn client_handshake(
         pkt_buf: Vec::new(),
         send_buf: Vec::new(),
         inflight_ids: HashSet::new(),
+        io: Some(io),
+        pending: PendingQueue::default(),
     })
 }
 
@@ -1315,6 +1836,8 @@ fn server_handshake(
         pkt_buf: Vec::new(),
         send_buf: Vec::new(),
         inflight_ids: HashSet::new(),
+        io: None,
+        pending: PendingQueue::default(),
     })
 }
 
@@ -1611,6 +2134,8 @@ mod tests {
             pkt_buf: Vec::new(),
             send_buf: Vec::new(),
             inflight_ids: HashSet::new(),
+            io: None,
+            pending: PendingQueue::default(),
         };
 
         let mut hdr = Header {
@@ -1857,6 +2382,107 @@ mod tests {
 
         session.close();
         server.join().expect("server join");
+    }
+
+    /// A client pipelining more than the pipe buffers before reading must
+    /// not deadlock with a server blocked writing responses to it.
+    #[cfg(windows)]
+    #[test]
+    fn test_pipeline_beyond_pipe_buffers() {
+        const PAYLOAD: usize = 16 * 1024;
+        const REQUESTS: u64 = 32; // 512 KiB each way, 8x the 64 KiB pipe buffers.
+        fn payload_for(id: u64) -> Vec<u8> {
+            (0..PAYLOAD).map(|i| (id as usize + i) as u8).collect()
+        }
+
+        ensure_run_dir();
+        let svc = unique_service("rs_pipe_progress");
+        let scfg = ServerConfig {
+            max_request_payload_bytes: PAYLOAD as u32,
+            max_response_payload_bytes: PAYLOAD as u32,
+            ..default_server_config()
+        };
+        let mut listener = NpListener::bind(TEST_RUN_DIR, &svc, scfg).expect("bind");
+
+        // Answers each request with blocking writes, one at a time.
+        let server = thread::spawn(move || {
+            let mut session = listener.accept().expect("accept");
+            let mut buf = vec![0u8; 64 * 1024];
+            for _ in 0..REQUESTS {
+                let (hdr, payload) = session.receive(&mut buf).expect("recv");
+                let payload = payload.to_vec();
+                let mut resp = hdr;
+                resp.kind = KIND_RESPONSE;
+                resp.transport_status = protocol::STATUS_OK;
+                session.send(&mut resp, &payload).expect("send");
+            }
+            session.close();
+        });
+
+        let ccfg = ClientConfig {
+            max_request_payload_bytes: PAYLOAD as u32,
+            max_response_payload_bytes: PAYLOAD as u32,
+            ..default_client_config()
+        };
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let client = thread::spawn(move || {
+            let mut session = NpSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
+            for id in 1..=REQUESTS {
+                let mut hdr = Header {
+                    kind: KIND_REQUEST,
+                    code: protocol::METHOD_INCREMENT,
+                    item_count: 1,
+                    message_id: id,
+                    ..Header::default()
+                };
+                session.send(&mut hdr, &payload_for(id)).expect("send");
+            }
+            // The server could read every request only because the sends
+            // drained responses it had written.
+            assert!(
+                session.has_pending(),
+                "no response was queued while sending"
+            );
+            assert!(session.wait_readable(0).expect("wait_readable"));
+            let mut rbuf = vec![0u8; 64 * 1024];
+            for id in 1..=REQUESTS {
+                let (rhdr, rpayload) = session.receive(&mut rbuf).expect("recv");
+                assert_eq!(rhdr.message_id, id);
+                assert_eq!(rpayload, payload_for(id).as_slice());
+            }
+            assert!(!session.has_pending());
+            session.close();
+            let _ = done_tx.send(());
+        });
+
+        // Watchdog only: a deadlock never completes. A client panic drops
+        // done_tx; join then reports the panic itself.
+        match done_rx.recv_timeout(Duration::from_secs(30)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("pipelining beyond the pipe buffers deadlocked")
+            }
+            _ => client.join().expect("client"),
+        }
+        server.join().expect("server join");
+    }
+
+    /// A queued message larger than the receive buffer fails like a pipe
+    /// read with ERROR_MORE_DATA, and the queue moves past it.
+    #[cfg(windows)]
+    #[test]
+    fn test_pending_queue_pop_too_small() {
+        let mut q = PendingQueue::default();
+        for msg in [&b"0123456789"[..], &b"ab"[..]] {
+            q.push(msg);
+        }
+        let mut dst = [0u8; 4];
+        assert!(matches!(
+            q.pop(&mut dst),
+            Err(NpError::Recv(ERROR_MORE_DATA))
+        ));
+        assert_eq!(q.pop(&mut dst).expect("second pop"), 2);
+        assert_eq!(&dst[..2], b"ab");
+        assert!(!q.queued());
     }
 
     #[cfg(windows)]

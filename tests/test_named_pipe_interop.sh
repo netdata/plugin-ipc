@@ -2,7 +2,9 @@
 #
 # test_named_pipe_interop.sh - Cross-language Named Pipe transport interop tests.
 #
-# Tests all 9 directed pairs: C, Rust, and Go servers and clients.
+# Tests all 9 directed pairs: C, Rust, and Go servers and clients, once with
+# one request and once with a client that pipelines more than the pipe
+# buffers hold before reading any response.
 # All binaries use identical wire protocol, FNV-1a pipe name derivation,
 # and auth tokens.
 #
@@ -87,6 +89,7 @@ run_test() {
     local server_bin="$2"
     local client_bin="$3"
     local service="$4"
+    local mode_prefix="${5:-}"
 
     # Skip if either binary is missing
     if [[ ! -x "$server_bin" || ! -x "$client_bin" ]]; then
@@ -99,7 +102,7 @@ run_test() {
 
     local server_log="${RUN_DIR_HOST}/${service}.server.log"
     if ! interop_start_server "$TIMEOUT" "$server_log" \
-        "$server_bin" server "$RUN_DIR" "$service"; then
+        "$server_bin" "${mode_prefix}server" "$RUN_DIR" "$service"; then
         echo -e "${RED}FAIL${NC} (server not ready)"
         cat "$server_log" >&2 2>/dev/null || true
         interop_stop_server
@@ -111,7 +114,7 @@ run_test() {
     # connects once.
     local client_out rc
     set +e
-    client_out=$("$client_bin" client "$RUN_DIR" "$service" 2>&1)
+    client_out=$("$client_bin" "${mode_prefix}client" "$RUN_DIR" "$service" 2>&1)
     rc=$?
     set -e
 
@@ -140,36 +143,32 @@ main() {
     echo "Go binary:   $INTEROP_NP_GO"
     echo ""
 
-    # --- Same-language baseline pairs (3 tests) ---
+    local pass
+    for pass in single pipeline; do
+        local prefix="" label="" tag=""
+        if [[ $pass == pipeline ]]; then
+            prefix="pipeline-" label=" (pipelining)" tag="_pl"
+        fi
 
-    run_test "C server, C client" \
-        "$INTEROP_NP_C" "$INTEROP_NP_C" "interop_np_c_c"
-
-    run_test "Rust server, Rust client" \
-        "$INTEROP_NP_RS" "$INTEROP_NP_RS" "interop_np_rs_rs"
-
-    run_test "Go server, Go client" \
-        "$INTEROP_NP_GO" "$INTEROP_NP_GO" "interop_np_go_go"
-
-    # --- Cross-language pairs (6 tests) ---
-
-    run_test "C server, Rust client" \
-        "$INTEROP_NP_C" "$INTEROP_NP_RS" "interop_np_c_rs"
-
-    run_test "Rust server, C client" \
-        "$INTEROP_NP_RS" "$INTEROP_NP_C" "interop_np_rs_c"
-
-    run_test "C server, Go client" \
-        "$INTEROP_NP_C" "$INTEROP_NP_GO" "interop_np_c_go"
-
-    run_test "Go server, C client" \
-        "$INTEROP_NP_GO" "$INTEROP_NP_C" "interop_np_go_c"
-
-    run_test "Rust server, Go client" \
-        "$INTEROP_NP_RS" "$INTEROP_NP_GO" "interop_np_rs_go"
-
-    run_test "Go server, Rust client" \
-        "$INTEROP_NP_GO" "$INTEROP_NP_RS" "interop_np_go_rs"
+        run_test "C server, C client${label}" \
+            "$INTEROP_NP_C" "$INTEROP_NP_C" "interop_np_c_c${tag}" "$prefix"
+        run_test "Rust server, Rust client${label}" \
+            "$INTEROP_NP_RS" "$INTEROP_NP_RS" "interop_np_rs_rs${tag}" "$prefix"
+        run_test "Go server, Go client${label}" \
+            "$INTEROP_NP_GO" "$INTEROP_NP_GO" "interop_np_go_go${tag}" "$prefix"
+        run_test "C server, Rust client${label}" \
+            "$INTEROP_NP_C" "$INTEROP_NP_RS" "interop_np_c_rs${tag}" "$prefix"
+        run_test "Rust server, C client${label}" \
+            "$INTEROP_NP_RS" "$INTEROP_NP_C" "interop_np_rs_c${tag}" "$prefix"
+        run_test "C server, Go client${label}" \
+            "$INTEROP_NP_C" "$INTEROP_NP_GO" "interop_np_c_go${tag}" "$prefix"
+        run_test "Go server, C client${label}" \
+            "$INTEROP_NP_GO" "$INTEROP_NP_C" "interop_np_go_c${tag}" "$prefix"
+        run_test "Rust server, Go client${label}" \
+            "$INTEROP_NP_RS" "$INTEROP_NP_GO" "interop_np_rs_go${tag}" "$prefix"
+        run_test "Go server, Rust client${label}" \
+            "$INTEROP_NP_GO" "$INTEROP_NP_RS" "interop_np_go_rs${tag}" "$prefix"
+    done
 
     echo ""
     echo -e "=== Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}, ${YELLOW}${SKIP} skipped${NC} ==="

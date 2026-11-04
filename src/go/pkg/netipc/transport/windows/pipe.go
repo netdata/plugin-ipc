@@ -312,17 +312,8 @@ func rawRecv(handle syscall.Handle, buf []byte) (int, error) {
 	var read uint32
 	err := syscall.ReadFile(handle, buf, &read, nil)
 	if err != nil {
-		// ERROR_MORE_DATA (234): message mode pipe message is larger
-		// than the buffer. The data read so far is valid; the
-		// remaining data can be read with another ReadFile call.
-		// For our protocol this should not happen if the buffer is
-		// sized correctly, but treat it as a successful partial read
-		// rather than a fatal error.
-		if err == syscall.Errno(234) {
-			if read > 0 {
-				return int(read), nil
-			}
-		}
+		// A message larger than buf (ERROR_MORE_DATA) fails, as in C and
+		// Rust: returning the part read would make its rest the next message.
 		if isDisconnectError(err) {
 			return 0, ErrDisconnected
 		}

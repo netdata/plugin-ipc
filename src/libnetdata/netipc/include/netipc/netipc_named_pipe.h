@@ -122,7 +122,7 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    HANDLE          pipe;    /* connected pipe handle (native wait object) */
+    HANDLE          pipe;    /* connected pipe handle */
     nipc_np_role_t  role;
 
     /* Negotiated limits */
@@ -142,6 +142,20 @@ typedef struct {
     uint64_t *inflight_ids;
     uint32_t  inflight_count;
     uint32_t  inflight_capacity;
+
+    /* Events of the overlapped client handle's reads and writes; NULL on
+     * server sessions, whose handles are synchronous. */
+    HANDLE read_event;
+    HANDLE write_event;
+
+    /* Messages read while a pipelined send waited for its write, each a
+     * 4-byte length then its bytes; receive returns them first. */
+    uint8_t *pending_buf;
+    size_t   pending_len;
+    size_t   pending_head;
+    size_t   pending_cap;
+    /* Queue bound of the send in progress; 0 writes without draining. */
+    size_t   progress_bound;
 } nipc_np_session_t;
 
 /* ------------------------------------------------------------------ */
@@ -327,7 +341,8 @@ nipc_np_error_t nipc_np_receive_timeout(nipc_np_session_t *session,
  *
  * On success:
  *   - returns NIPC_NP_OK
- *   - sets *readable_out to true if bytes are available
+ *   - sets *readable_out to true if bytes are available or a pipelined
+ *     send queued messages (nipc_np_session_has_pending)
  *   - sets *readable_out to false on timeout with no pending bytes
  *
  * Returns NIPC_NP_ERR_DISCONNECTED if the peer has gone away while waiting.
@@ -340,7 +355,21 @@ nipc_np_error_t nipc_np_wait_readable(nipc_np_session_t *session,
 /*  Utility                                                            */
 /* ------------------------------------------------------------------ */
 
-/* Get the HANDLE for WaitForSingleObject / WaitForMultipleObjects. */
+/*
+ * Whether the next receive can return a message read earlier by a
+ * pipelined send, without the pipe becoming readable.
+ */
+static inline bool nipc_np_session_has_pending(const nipc_np_session_t *s) {
+    return s->pending_head < s->pending_len;
+}
+
+/*
+ * The raw pipe HANDLE. It is not a readability signal: a pipe handle is
+ * signalled by I/O completion, not by arriving data. Use
+ * nipc_np_wait_readable(), and check nipc_np_session_has_pending() first: a
+ * pipelined send can read responses into the session, where the pipe no
+ * longer shows them.
+ */
 static inline HANDLE nipc_np_session_handle(const nipc_np_session_t *s) {
     return s->pipe;
 }

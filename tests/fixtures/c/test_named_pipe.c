@@ -1581,6 +1581,159 @@ static void test_chunked_pipeline(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: pipelining beyond the pipe buffers                           */
+/* ------------------------------------------------------------------ */
+
+#define PROGRESS_PAYLOAD (16u * 1024u)
+#define PROGRESS_REQUESTS 32u /* 512 KiB each way, 8x the 64 KiB buffers */
+
+static void progress_fill(uint8_t *p, uint64_t id)
+{
+    for (size_t i = 0; i < PROGRESS_PAYLOAD; i++)
+        p[i] = (uint8_t)(id + i);
+}
+
+typedef struct {
+    const char *service;
+    HANDLE ready_event;
+    int server_ok;
+} progress_server_ctx_t;
+
+/* Answers each request with blocking writes, one at a time: the server of
+ * the deadlock this guards against. */
+static DWORD WINAPI progress_server_thread(LPVOID arg)
+{
+    progress_server_ctx_t *ctx = (progress_server_ctx_t *)arg;
+    nipc_np_server_config_t cfg = default_server_config();
+    cfg.max_request_payload_bytes = PROGRESS_PAYLOAD;
+    cfg.max_response_payload_bytes = PROGRESS_PAYLOAD;
+
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, ctx->service, &cfg, &listener);
+    SetEvent(ctx->ready_event);
+    if (err != NIPC_NP_OK)
+        return 1;
+
+    nipc_np_session_t session;
+    err = nipc_np_accept(&listener, 1, &session);
+    if (err == NIPC_NP_OK) {
+        static uint8_t buf[64 * 1024];
+        for (uint32_t i = 0; i < PROGRESS_REQUESTS && err == NIPC_NP_OK; i++) {
+            nipc_header_t hdr;
+            const void *payload;
+            size_t payload_len;
+            err = nipc_np_receive(&session, buf, sizeof(buf), &hdr, &payload, &payload_len);
+            if (err != NIPC_NP_OK)
+                break;
+            nipc_header_t resp = hdr;
+            resp.kind = NIPC_KIND_RESPONSE;
+            resp.transport_status = NIPC_STATUS_OK;
+            err = nipc_np_send(&session, &resp, payload, payload_len);
+        }
+        nipc_np_close_session(&session);
+    }
+    ctx->server_ok = (err == NIPC_NP_OK);
+    nipc_np_close_listener(&listener);
+    return 0;
+}
+
+typedef struct {
+    const char *service;
+    int sends_ok;
+    int queued_after_sends;
+    int readable_after_sends;
+    int responses_ok;
+    int drained_at_end;
+} progress_client_ctx_t;
+
+static DWORD WINAPI progress_client_thread(LPVOID arg)
+{
+    progress_client_ctx_t *ctx = (progress_client_ctx_t *)arg;
+    nipc_np_client_config_t ccfg = default_client_config();
+    ccfg.max_request_payload_bytes = PROGRESS_PAYLOAD;
+    ccfg.max_response_payload_bytes = PROGRESS_PAYLOAD;
+
+    nipc_np_session_t session;
+    if (nipc_np_connect(TEST_RUN_DIR, ctx->service, &ccfg, &session) != NIPC_NP_OK)
+        return 1;
+
+    static uint8_t payload[PROGRESS_PAYLOAD];
+    nipc_np_error_t err = NIPC_NP_OK;
+    for (uint64_t id = 1; id <= PROGRESS_REQUESTS && err == NIPC_NP_OK; id++) {
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = id,
+        };
+        progress_fill(payload, id);
+        err = nipc_np_send(&session, &hdr, payload, sizeof(payload));
+    }
+    ctx->sends_ok = (err == NIPC_NP_OK);
+
+    /* The server could read every request only because the sends drained
+     * responses it had written. */
+    ctx->queued_after_sends = nipc_np_session_has_pending(&session);
+    bool readable = false;
+    ctx->readable_after_sends =
+        nipc_np_wait_readable(&session, 0, &readable) == NIPC_NP_OK && readable;
+
+    static uint8_t rbuf[64 * 1024];
+    static uint8_t expected[PROGRESS_PAYLOAD];
+    int ok = ctx->sends_ok;
+    for (uint64_t id = 1; id <= PROGRESS_REQUESTS && ok; id++) {
+        nipc_header_t rhdr;
+        const void *rpayload;
+        size_t rlen = 0;
+        err = nipc_np_receive(&session, rbuf, sizeof(rbuf), &rhdr, &rpayload, &rlen);
+        progress_fill(expected, id);
+        ok = err == NIPC_NP_OK && rhdr.message_id == id && rlen == PROGRESS_PAYLOAD &&
+             memcmp(rpayload, expected, PROGRESS_PAYLOAD) == 0;
+    }
+    ctx->responses_ok = ok;
+    ctx->drained_at_end = !nipc_np_session_has_pending(&session);
+    nipc_np_close_session(&session);
+    return 0;
+}
+
+/* A client pipelining more than the pipe buffers before reading must not
+ * deadlock with a server blocked writing responses to it. */
+static void test_pipeline_beyond_pipe_buffers(void)
+{
+    printf("--- Pipelining beyond the pipe buffers ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    progress_server_ctx_t sctx = {
+        .service = service,
+        .ready_event = CreateEvent(NULL, TRUE, FALSE, NULL),
+    };
+    HANDLE server = test_create_thread(NULL, 0, progress_server_thread, &sctx, 0, NULL);
+    WaitForSingleObject(sctx.ready_event, 5000);
+    CloseHandle(sctx.ready_event);
+
+    progress_client_ctx_t cctx = { .service = service };
+    HANDLE client = test_create_thread(NULL, 0, progress_client_thread, &cctx, 0, NULL);
+
+    /* Watchdog only: a deadlock never completes. */
+    DWORD w = WaitForSingleObject(client, 30000);
+    check("pipeline beyond buffers completes", w == WAIT_OBJECT_0);
+    if (w != WAIT_OBJECT_0)
+        return; /* the threads are stuck; the run reports the failure */
+    CloseHandle(client);
+    WaitForSingleObject(server, 5000);
+    CloseHandle(server);
+
+    check("pipeline beyond buffers sends", cctx.sends_ok);
+    check("pipeline beyond buffers queued responses", cctx.queued_after_sends);
+    check("pipeline beyond buffers wait_readable sees queue", cctx.readable_after_sends);
+    check("pipeline beyond buffers responses", cctx.responses_ok);
+    check("pipeline beyond buffers queue drained", cctx.drained_at_end);
+    check("pipeline beyond buffers server ok", sctx.server_ok);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Test: duplicate / unknown message_id                               */
 /* ------------------------------------------------------------------ */
 
@@ -2974,6 +3127,7 @@ int main(void)
     test_chunked_ping_pong();
     test_chunked_receive_reuses_buffer();
     test_chunked_pipeline();
+    test_pipeline_beyond_pipe_buffers();
     test_auth_failure();
     test_duplicate_message_id();
     test_unknown_response_message_id();

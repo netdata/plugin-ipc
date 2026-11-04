@@ -64,6 +64,14 @@ type Session struct {
 
 	inflightIDs map[uint64]struct{}
 
+	// Overlapped state of a client handle; nil on server sessions, whose
+	// handles are synchronous.
+	io *pipeIO
+	// Messages read while a pipelined send waited for its write.
+	pending pendingQueue
+	// Queue bound of the send in progress; 0 writes without draining.
+	progressBound int
+
 	// Receive state of the call in progress, read by closures built once
 	// per session (initReceiveFns), so a receive allocates nothing.
 	recvWait      receiveWait
@@ -79,9 +87,18 @@ func (s *Session) failAllInflight() {
 	clear(s.inflightIDs)
 }
 
-// Handle returns the raw HANDLE for WaitForSingleObject integration.
+// Handle returns the raw pipe HANDLE. It is not a readability signal:
+// a pipe handle is signalled by I/O completion, not by arriving data. Use
+// WaitReadable, and check HasPending first: a pipelined send can read
+// responses into the session, where the pipe no longer shows them.
 func (s *Session) Handle() syscall.Handle {
 	return s.handle
+}
+
+// HasPending reports whether the next Receive can return a message read
+// earlier by a pipelined send, without the pipe becoming readable.
+func (s *Session) HasPending() bool {
+	return s.pending.queued()
 }
 
 // Role returns the session role.
@@ -99,6 +116,9 @@ func (s *Session) GetRole() Role {
 func (s *Session) WaitReadable(timeoutMs uint32) (bool, error) {
 	if s.handle == syscall.InvalidHandle {
 		return false, wrapErr(ErrBadParam, "session closed")
+	}
+	if s.pending.queued() {
+		return true, nil
 	}
 
 	deadline := monotime.After(time.Duration(timeoutMs) * time.Millisecond)
@@ -153,6 +173,10 @@ func (s *Session) Close() {
 		syscall.CloseHandle(s.handle)
 		s.handle = syscall.InvalidHandle
 	}
+	// No I/O stays posted between calls, so the events can go.
+	s.io.close()
+	s.io = nil
+	s.pending = pendingQueue{}
 	s.recvBuf = nil
 	s.sendBuf = nil
 	s.pktBuf = nil
@@ -168,10 +192,11 @@ const ConnectBusyWaitMs = 1000
 var connectBusyHook func()
 
 // createClientPipe opens with SECURITY_IDENTIFICATION, so the server can
-// identify the client but never act as it.
+// identify the client but never act as it, and overlapped, so a pipelining
+// send can read while its write waits.
 func createClientPipe(name *uint16) (syscall.Handle, error) {
 	return syscall.CreateFile(name, _GENERIC_READ|_GENERIC_WRITE, 0, nil, _OPEN_EXISTING,
-		_SECURITY_SQOS_PRESENT|_SECURITY_IDENTIFICATION, 0)
+		_SECURITY_SQOS_PRESENT|_SECURITY_IDENTIFICATION|_FILE_FLAG_OVERLAPPED, 0)
 }
 
 // connectBusySliceMs is the longest single busy-pipe wait, so an abort ends
@@ -261,9 +286,15 @@ func ConnectTimeout(runDir, serviceName string, config *ClientConfig, timeoutMs 
 		return nil, wrapErr(ErrConnect, "SetNamedPipeHandleState: "+err.Error())
 	}
 
-	session, herr := clientHandshake(handle, config, wait)
+	io, err := newPipeIO()
+	if err != nil {
+		syscall.CloseHandle(handle)
+		return nil, err
+	}
+	session, herr := clientHandshake(handle, io, config, wait)
 	if herr != nil {
 		syscall.CloseHandle(handle)
+		io.close()
 		return nil, herr
 	}
 	return session, nil

@@ -1522,7 +1522,6 @@ fn warm_pipeline_client(
 struct PipelineBatchSlot {
     message_id: u64,
     batch_size: u32,
-    inflight_bytes: usize,
     active: bool,
 }
 
@@ -1568,7 +1567,6 @@ fn run_pipeline_batch_client(
         .collect();
     let mut slots = vec![PipelineBatchSlot::default(); depth];
     let mut recv_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
-    let inflight_budget = session.packet_size as usize * 2;
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
@@ -1588,8 +1586,6 @@ fn run_pipeline_batch_client(
 
         let mut sent = 0usize;
         let mut received = 0usize;
-        let mut outstanding = 0usize;
-        let mut inflight_bytes = 0usize;
         let mut cycle_ok = true;
 
         while received < depth {
@@ -1612,7 +1608,6 @@ fn run_pipeline_batch_client(
                 }
 
                 let (len, _out_count) = bb.finish();
-                let slot_bytes = (HEADER_SIZE + len) * 2;
 
                 let mut hdr = Header {
                     kind: KIND_REQUEST,
@@ -1624,38 +1619,6 @@ fn run_pipeline_batch_client(
                     ..Header::default()
                 };
 
-                while outstanding > 0 && inflight_bytes + slot_bytes > inflight_budget {
-                    match session.receive(&mut recv_buf) {
-                        Ok((resp_hdr, _payload)) => {
-                            if let Some(matched) = slots.iter().position(|pending| {
-                                pending.active && pending.message_id == resp_hdr.message_id
-                            }) {
-                                inflight_bytes -= slots[matched].inflight_bytes;
-                                total_items += slots[matched].batch_size as u64;
-                                slots[matched].active = false;
-                                outstanding -= 1;
-                                received += 1;
-                            } else {
-                                eprintln!(
-                                    "pipeline-batch client: unknown response id {}",
-                                    resp_hdr.message_id
-                                );
-                                cycle_ok = false;
-                                errors += 1;
-                                break;
-                            }
-                        }
-                        Err(_) => {
-                            cycle_ok = false;
-                            errors += 1;
-                            break;
-                        }
-                    }
-                }
-                if !cycle_ok {
-                    break;
-                }
-
                 if session.send(&mut hdr, &req_bufs[slot][..len]).is_err() {
                     cycle_ok = false;
                     errors += 1;
@@ -1665,11 +1628,8 @@ fn run_pipeline_batch_client(
                 slots[slot] = PipelineBatchSlot {
                     message_id: hdr.message_id,
                     batch_size: bs,
-                    inflight_bytes: slot_bytes,
                     active: true,
                 };
-                inflight_bytes += slot_bytes;
-                outstanding += 1;
                 counter += bs as u64;
                 sent += 1;
                 continue;
@@ -1680,10 +1640,8 @@ fn run_pipeline_batch_client(
                     if let Some(matched) = slots.iter().position(|pending| {
                         pending.active && pending.message_id == resp_hdr.message_id
                     }) {
-                        inflight_bytes -= slots[matched].inflight_bytes;
                         total_items += slots[matched].batch_size as u64;
                         slots[matched].active = false;
-                        outstanding -= 1;
                         received += 1;
                     } else {
                         eprintln!(

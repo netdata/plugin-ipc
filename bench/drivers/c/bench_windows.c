@@ -1982,7 +1982,6 @@ int main(int argc, char **argv)
         uint8_t *req_bufs[128];
         uint8_t *recv_buf = NULL;
         size_t req_lens[128];
-        size_t slot_costs[128];
         uint32_t batch_sizes[128];
         uint64_t slot_msg_ids[128];
         bool slot_active[128];
@@ -2005,20 +2004,16 @@ int main(int argc, char **argv)
         uint64_t cpu_start = cpu_ns();
         uint64_t wall_start = now_ns();
         ULONGLONG tick_deadline = GetTickCount64() + (ULONGLONG)duration * 1000;
-        size_t inflight_budget = (size_t)session.packet_size * 2;
 
         while (GetTickCount64() < tick_deadline) {
             rate_limiter_wait(&rl);
             uint64_t t0 = (total_items & 63) == 0 ? now_ns() : 0;
 
-            /* Keep the logical pipeline depth, but drain responses once the
-             * estimated request+response bytes in flight get too large for a
-             * blocking named pipe session. */
+            /* Send the whole depth, then read the responses: the client
+             * send reads responses while its write waits for pipe space. */
             memset(slot_active, 0, sizeof(slot_active));
             int sent = 0;
             int received = 0;
-            int outstanding = 0;
-            size_t inflight_bytes = 0;
             int cycle_ok = 1;
 
             while (received < depth) {
@@ -2048,46 +2043,6 @@ int main(int argc, char **argv)
                     hdrs[slot].transport_status = NIPC_STATUS_OK;
 
                     slot_msg_ids[slot] = hdrs[slot].message_id;
-                    slot_costs[slot] = (NIPC_HEADER_LEN + req_lens[slot]) * 2;
-
-                    while (outstanding > 0 &&
-                           inflight_bytes + slot_costs[slot] > inflight_budget) {
-                        nipc_header_t resp_hdr;
-                        const void *resp_payload;
-                        size_t resp_len;
-                        nipc_np_error_t uerr = nipc_np_receive(&session,
-                            recv_buf, BENCH_BATCH_BUF_SIZE + NIPC_HEADER_LEN,
-                            &resp_hdr, &resp_payload, &resp_len);
-                        if (uerr != NIPC_NP_OK) {
-                            errors++;
-                            cycle_ok = 0;
-                            break;
-                        }
-
-                        int matched = -1;
-                        for (int i = 0; i < depth; i++) {
-                            if (slot_active[i] && slot_msg_ids[i] == resp_hdr.message_id) {
-                                matched = i;
-                                break;
-                            }
-                        }
-                        if (matched < 0) {
-                            fprintf(stderr, "pipeline-batch client: unknown response id %llu\n",
-                                    (unsigned long long)resp_hdr.message_id);
-                            errors++;
-                            cycle_ok = 0;
-                            break;
-                        }
-
-                        inflight_bytes -= slot_costs[matched];
-                        total_items += batch_sizes[matched];
-                        slot_active[matched] = false;
-                        outstanding--;
-                        received++;
-                    }
-                    if (!cycle_ok)
-                        break;
-
                     nipc_np_error_t uerr = nipc_np_send(&session,
                         &hdrs[slot], req_bufs[slot], req_lens[slot]);
                     if (uerr != NIPC_NP_OK) {
@@ -2097,8 +2052,6 @@ int main(int argc, char **argv)
                     }
 
                     slot_active[slot] = true;
-                    inflight_bytes += slot_costs[slot];
-                    outstanding++;
                     counter += bs;
                     sent++;
                     continue;
@@ -2131,10 +2084,8 @@ int main(int argc, char **argv)
                     break;
                 }
 
-                inflight_bytes -= slot_costs[matched];
                 total_items += batch_sizes[matched];
                 slot_active[matched] = false;
-                outstanding--;
                 received++;
             }
 

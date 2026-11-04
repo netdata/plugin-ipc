@@ -77,11 +77,13 @@ Both pass the client check when the client runs as the same account.
 ## Connection lifecycle
 
 1. **Server**: creates a Named Pipe instance with `CreateNamedPipeW`.
-   The pipe is created in message mode with overlapped I/O capability.
-   The server calls `ConnectNamedPipe` to wait for a client connection.
+   The pipe is created in message mode for synchronous I/O. The server
+   calls `ConnectNamedPipe` to wait for a client connection.
 
-2. **Client**: connects to the pipe with `CreateFileW`. The connection
-   is established when the server's `ConnectNamedPipe` completes.
+2. **Client**: connects to the pipe with `CreateFileW` and
+   `FILE_FLAG_OVERLAPPED`, so a pipelining send can read while its write
+   waits (see "Pipelining"). The connection is established when the
+   server's `ConnectNamedPipe` completes.
 
    Between accepting one client and creating the next instance a server
    has no free instance, and `CreateFileW` fails with `ERROR_PIPE_BUSY`.
@@ -170,18 +172,55 @@ See the wire envelope spec for chunk header layout and validation.
 
 ## Pipelining
 
-Pipes are synchronous (no `FILE_FLAG_OVERLAPPED`) in all three languages,
-with each direction's buffer set to the larger of the packet size and
-64 KiB. A send is a blocking `WriteFile` per packet that cannot stop to
-read, so the POSIX "Pipelined sends" progress (`level1-posix-uds.md`) is
-not implemented here yet.
+The pipelining guarantee in `level1-transport.md` ("Pipelining") works like
+this, the same in C, Rust and Go. Each pipe direction buffers the larger of
+the packet size and 64 KiB.
 
-Until it is, a pipelining caller must keep the request and response bytes
-of its unread messages within the pipe buffer: read responses before a
-send that would exceed it. Otherwise, once the responses it is not reading
-fill the pipe, the server blocks sending, stops reading requests, and both
-sides block. A caller with one request in flight (every typed call) is not
-affected.
+- **Handles.** Client handles are overlapped; server handles are
+  synchronous. Every client read and write passes an `OVERLAPPED` with its
+  own manual-reset event and waits for completion before the call returns:
+  no I/O stays posted between calls.
+- **Who.** A client session sending a packet while another request is in
+  flight (the in-flight set holds more than the request being sent). A
+  client with one request in flight (every typed call) waits for each write
+  to complete, and every server session sends with a blocking `WriteFile`.
+  The deadlock needs both peers blocked in send, and client progress alone
+  breaks it.
+- **Send.** The client posts the write, then loops until it completes:
+  while `PeekNamedPipe` reports bytes, it reads whole messages into a
+  per-session pending queue; otherwise it yields (`SwitchToThread`) for up
+  to 1 ms after the last progress, then waits on the write event in short
+  slices (1 ms requested; a slice lasts a system timer tick, and only the
+  write completing ends one early).
+  There is no new timeout: the send waits as long as a blocking write would.
+- **Receive.** Every receive takes messages from the pending queue before
+  the pipe, so reassembly, limits and in-flight validation are unchanged. A
+  message larger than the receive buffer fails the receive, from the queue
+  (which drops that message) as from the pipe (`ERROR_MORE_DATA`, which
+  leaves its rest in the pipe).
+- **Bound.** The queue may hold at most what the in-flight responses can
+  occupy on the wire: in-flight count × (maximum response payload + one
+  32-byte header per packet), plus the 4-byte length the queue keeps with
+  each packet. More fails the send with a protocol error.
+- **Failure.** A send that fails while its write is posted (the bound, a
+  failed peek, read or wait) cancels the write with `CancelIoEx`, waits until the
+  kernel releases it, closes the pipe and fails every in-flight request: a
+  cancelled write leaves the message stream unknown and the dropped bytes
+  cannot be recovered. Later calls on the session fail; closing it still
+  releases the rest.
+- **Peer close.** When `PeekNamedPipe` or a read reports the pipe broken or
+  disconnected, the client stops reading and only waits for the write; the write then
+  fails with the existing send error.
+- **Waiting.** Queued responses no longer show on the pipe. Use
+  `nipc_np_wait_readable` (Rust `NpSession::wait_readable`, Go
+  `Session.WaitReadable`), which reports them, or check
+  `nipc_np_session_has_pending` (Rust `NpSession::has_pending`, Go
+  `Session.HasPending`) and receive without waiting while it is true. The
+  pipe handle (`nipc_np_session_handle`, Rust `NpSession::handle`, Go
+  `Session.Handle`) is not a readability signal: a pipe handle is signalled
+  by I/O completion, not by arriving data. Only a pipelining client fills
+  the queue; server sessions never do.
+- **Session close** frees the queue and the events.
 
 ## Receive timeout and abort
 

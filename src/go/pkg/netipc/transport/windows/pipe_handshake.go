@@ -23,9 +23,9 @@ func helloAckLayoutIncompatible(buf []byte) bool {
 	return framing.HelloAckLayoutIncompatible(buf)
 }
 
-func clientHandshake(handle syscall.Handle, config *ClientConfig, wait receiveWait) (*Session, error) {
+func clientHandshake(handle syscall.Handle, io *pipeIO, config *ClientConfig, wait receiveWait) (*Session, error) {
 	pktSize := applyDefault(config.PacketSize, defaultPacketSize)
-	pending := &Session{handle: handle, role: RoleClient}
+	pending := &Session{handle: handle, role: RoleClient, io: io}
 
 	// A server that never answers must not hold the client past its
 	// deadline; the wait's own error is the result, not a receive failure.
@@ -42,13 +42,13 @@ func clientHandshake(handle syscall.Handle, config *ClientConfig, wait receiveWa
 			AuthToken:               config.AuthToken,
 			PacketSize:              pktSize,
 		},
-		Send: func(pkt []byte) error { return rawWrite(handle, pkt) },
+		Send: pending.writePacket,
 		Recv: func(dst []byte) (int, error) {
 			if err := waitHelloAck(pending, wait); err != nil {
 				waitErr = err
 				return 0, err
 			}
-			return rawRecv(handle, dst)
+			return pending.readPacket(dst)
 		},
 		StatusError:     helloAckStatusError,
 		ErrSend:         func(msg string) error { return wrapErr(ErrSend, msg) },
@@ -66,6 +66,7 @@ func clientHandshake(handle syscall.Handle, config *ClientConfig, wait receiveWa
 	return &Session{
 		handle:                  handle,
 		role:                    RoleClient,
+		io:                      io,
 		MaxRequestPayloadBytes:  ack.AgreedMaxRequestPayloadBytes,
 		MaxRequestBatchItems:    ack.AgreedMaxRequestBatchItems,
 		MaxResponsePayloadBytes: ack.AgreedMaxResponsePayloadBytes,

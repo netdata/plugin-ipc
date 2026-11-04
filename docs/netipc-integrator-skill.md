@@ -199,9 +199,10 @@ Non-negotiable rule:
     `nipc_uds_session_has_pending` (Rust `UdsSession::has_pending`, Go
     `Session.HasPending`): responses read during a send no longer show on
     the fd.
-    Windows Named Pipe sessions may not yet: keep the request and response
-    bytes of unread messages within the 64 KiB pipe buffer and read responses
-    before a send that would exceed it (`level1-windows-np.md`, "Pipelining")
+    Windows Named Pipe sessions do the same (`level1-windows-np.md`,
+    "Pipelining"); wait with `nipc_np_wait_readable` (Rust
+    `NpSession::wait_readable`, Go `Session.WaitReadable`), which reports
+    queued responses, not on the pipe handle
 
 Use L1 for:
 

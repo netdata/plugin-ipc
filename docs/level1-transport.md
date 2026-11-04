@@ -95,9 +95,9 @@ deadlock on buffer size. The in-flight set bounds those kept bytes: more than
 the in-flight responses can occupy is a protocol violation that fails the
 session. A client with one request in flight sends exactly as before.
 
-POSIX baseline sessions (all three languages) implement this; see
-`level1-posix-uds.md`, "Pipelined sends". Windows Named Pipe sessions do not
-yet; see `level1-windows-np.md`, "Pipelining".
+Baseline sessions implement this in all three languages: POSIX in
+`level1-posix-uds.md`, "Pipelined sends", and Windows Named Pipes in
+`level1-windows-np.md`, "Pipelining".
 
 ### 4. Batching
 
@@ -471,7 +471,9 @@ Level 1 exposes native OS wait objects so callers can integrate sessions and
 listeners into their own event loops:
 
 - POSIX: file descriptor (fd)
-- Windows: HANDLE
+- Windows: HANDLE. A Named Pipe session handle is signalled by I/O
+  completion, not by arriving data, so session read-readiness comes from
+  the wait-readable call; see `level1-windows-np.md`, "Pipelining".
 
 Wait objects are available for:
 

@@ -60,10 +60,13 @@ func (s *Session) initReceiveFns() {
 		return
 	}
 	s.recvPacketFn = func(dst []byte) (int, error) {
+		if s.pending.queued() {
+			return s.pending.pop(dst)
+		}
 		if s.recvControl {
 			return s.rawRecvWithTimeout(dst, s.recvWait)
 		}
-		return rawRecv(s.handle, dst)
+		return s.readPacket(dst)
 	}
 	s.failInflights = s.failAllInflight
 }
@@ -134,6 +137,6 @@ func (s *Session) rawRecvWithTimeout(buf []byte, wait receiveWait) (int, error) 
 		if !ready {
 			continue
 		}
-		return rawRecv(s.handle, buf)
+		return s.readPacket(buf)
 	}
 }

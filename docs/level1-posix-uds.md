@@ -298,7 +298,8 @@ this, the same in C, Rust and Go:
   socket, so reassembly, limits and in-flight validation are unchanged.
 - **Bound.** The queue may hold at most what the in-flight responses can
   occupy on the wire: in-flight count × (maximum response payload + one
-  32-byte header per packet). More fails the send with a protocol error; the
+  32-byte header per packet), plus the length the queue keeps with each
+  SEQPACKET datagram. More fails the send with a protocol error; the
   session is shut down and every in-flight request fails, since the dropped
   bytes cannot be recovered.
 - **Peer close.** At EOF or a socket error the client stops reading and
