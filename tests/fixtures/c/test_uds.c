@@ -765,8 +765,13 @@ static void test_eintr_retried(void)
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* HELLO and HELLO_ACK go through send and recv, the request and the
-     * response through sendmsg and recv. */
+     * response through sendmsg and recv; on a stream every packet goes
+     * through sendmsg. */
+#if TEST_UDS_STREAM
+    uds_eintr_wrap_set(0, 4, 4);
+#else
     uds_eintr_wrap_set(2, 2, 4);
+#endif
 
     nipc_uds_client_config_t ccfg = default_client_config();
     nipc_uds_session_t session;
@@ -2197,8 +2202,9 @@ static void test_pipeline_chunked(void)
 /*  Test: Pipelining beyond the socket buffers                         */
 /* ------------------------------------------------------------------ */
 
-/* Small buffers make the deadlock reachable on every platform (FreeBSD and
- * macOS default to 8 KiB, Linux to about 208 KiB). The client's send timeout
+/* Small buffers make the deadlock reachable on every platform (macOS and
+ * FreeBSD 14 default to 8 KiB, FreeBSD 15 to 64 KiB, Linux to about
+ * 208 KiB). The client's send timeout
  * only bounds a failing run: a deadlocked send fails instead of hanging. A
  * passing run never waits on it, and the server has none, so a slow server
  * cannot fail a passing run. */
@@ -2408,8 +2414,8 @@ static void test_pipeline_exceeds_socket_buffers(void)
     cleanup_socket(svc);
 }
 
-#if defined(__APPLE__)
-/* macOS stream: a receive that fails mid-stream shuts the read side, and
+#if TEST_UDS_STREAM
+/* Stream baseline: a receive that fails mid-stream marks the receive side failed, and
  * every later receive must fail. Bytes left in the pending queue are part
  * of that abandoned stream: here a forged response for an in-flight id
  * follows an over-limit header, and must not be delivered. */
@@ -3853,7 +3859,7 @@ static void test_receive_missing_continuation(void)
 /* ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ */
-/*  Stream-socket packet I/O (the macOS baseline; tested everywhere)   */
+/*  Stream-socket packet I/O (macOS and FreeBSD baseline; tested everywhere) */
 /* ------------------------------------------------------------------ */
 
 static size_t encode_test_packet(uint8_t *dst, uint32_t magic,
@@ -4222,7 +4228,7 @@ int main(void)
     test_pipeline_exceeds_socket_buffers(); printf("\n");
     test_pipeline_peer_close_during_send(); printf("\n");
     test_pipeline_pending_bound(); printf("\n");
-#if defined(__APPLE__)
+#if TEST_UDS_STREAM
     test_stream_failed_receive_drops_pending(); printf("\n");
 #endif
 

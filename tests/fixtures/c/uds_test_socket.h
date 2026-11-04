@@ -1,12 +1,12 @@
 /* Socket type of the UDS transport on this platform, for tests that open
- * raw sockets: macOS has no AF_UNIX SOCK_SEQPACKET and carries the same
- * packets over a stream (docs/level1-posix-uds.md). */
+ * raw sockets: macOS and FreeBSD carry the same packets over a stream
+ * (docs/level1-posix-uds.md, "Stream baseline"). */
 #ifndef UDS_TEST_SOCKET_H
 #define UDS_TEST_SOCKET_H
 
 #include <sys/socket.h>
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #define TEST_UDS_SOCK_TYPE SOCK_STREAM
 #define TEST_UDS_STREAM 1
 #else

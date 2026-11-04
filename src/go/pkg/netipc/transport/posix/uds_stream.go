@@ -12,10 +12,12 @@ import (
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 )
 
-// Stream-socket packet I/O, the macOS baseline (macOS has no AF_UNIX
-// SOCK_SEQPACKET). A packet is the 32-byte header plus the bytes it declares,
+// Stream-socket packet I/O, the macOS and FreeBSD baseline (macOS has no
+// AF_UNIX SOCK_SEQPACKET; FreeBSD 15 SEQPACKET keeps record boundaries only
+// with MSG_EOR). A packet is the 32-byte header plus the bytes it declares,
 // so the bytes on the wire match the SEQPACKET transport. Built on every
-// POSIX system so its tests run everywhere; only macOS sessions use it.
+// POSIX system so its tests run everywhere; only macOS and FreeBSD sessions
+// use it.
 
 // streamTestIO, when set by tests, runs before each stream read or write of
 // n bytes: it returns how many bytes the call may move and whether it fails

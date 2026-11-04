@@ -472,8 +472,12 @@ nipc_uds_error_t nipc_uds_receive_timeout(nipc_uds_session_t *session,
 #if NIPC_UDS_STREAM
     /* A timeout or abort before the first byte leaves the stream on a packet
      * boundary. A failure after it does not: the rest of the message is still
-     * queued, so the receive side is shut down and every later receive fails.
-     * Sends stay valid; they always write whole messages. */
+     * queued, so every later receive fails. The session records that instead
+     * of shutting the read side, whose effect differs by OS (FreeBSD 15 fails
+     * the peer's sends, FreeBSD 14 still returns queued bytes). Sends stay
+     * valid; they always write whole messages. */
+    if (session->recv_failed)
+        return NIPC_UDS_ERR_RECV;
     if (!nipc_uds_pending_queued(session)) {
         nipc_uds_error_t werr = nipc_uds_wait_for_readable(session->fd, &wait);
         if (werr != NIPC_UDS_OK)
@@ -484,7 +488,7 @@ nipc_uds_error_t nipc_uds_receive_timeout(nipc_uds_session_t *session,
                                            payload_out, payload_len_out,
                                            &wait);
     if (err != NIPC_UDS_OK) {
-        (void)shutdown(session->fd, SHUT_RD);
+        session->recv_failed = true;
         /* Queued bytes are part of the abandoned stream too. */
         nipc_uds_pending_free(session);
     }

@@ -11,8 +11,8 @@ must follow this contract to interoperate on the same socket.
 `AF_UNIX` / `SOCK_SEQPACKET` — message-oriented, reliable, ordered,
 connection-based Unix domain sockets with preserved message boundaries.
 
-macOS has no `AF_UNIX` `SOCK_SEQPACKET`. There the baseline runs over
-`SOCK_STREAM` with the same bytes on the wire; see "macOS stream baseline".
+macOS and FreeBSD run the baseline over `SOCK_STREAM` with the same bytes
+on the wire; see "Stream baseline".
 
 Every socket and pipe the transport creates (listener, accepted and
 connected sessions, the client abort pipe, SHM region descriptors) is
@@ -140,9 +140,9 @@ fallback.
 SEQPACKET has a kernel-imposed maximum message size. On Linux a datagram
 larger than the sender's `SO_SNDBUF` value (as reported by
 `getsockopt`) minus 32 bytes of kernel accounting overhead fails with
-`EMSGSIZE`, and very large buffers also fail with `ENOBUFS` near 1 MiB. On
-FreeBSD the largest datagram equals `SO_SNDBUF` exactly (no overhead; the
-default is 8192 bytes, `net.local.seqpacket.maxseqpacket`).
+`EMSGSIZE`, and very large buffers also fail with `ENOBUFS` near 1 MiB.
+The stream baseline (macOS, FreeBSD) has its own rule; see "Stream
+baseline".
 
 Each side derives the packet size it proposes as:
 
@@ -151,7 +151,7 @@ limit    = min(SO_SNDBUF - overhead, 262144)   (65536 if SO_SNDBUF cannot be rea
 proposal = configured packet size, if non-zero and below limit; else limit
 ```
 
-`overhead` is 0 on FreeBSD and 32 elsewhere.
+`overhead` is 32 (Linux).
 
 A configured packet size above the limit is clamped silently; it is a
 preference, not a requirement.
@@ -232,11 +232,18 @@ client must close that session and reconnect baseline-only. If a later reconnect
 larger capacities, it establishes a new session with a new `session_id`
 and therefore a different SHM file path.
 
-## macOS stream baseline
+## Stream baseline
 
-macOS has no `AF_UNIX` `SOCK_SEQPACKET`, so its baseline uses `SOCK_STREAM`.
-The handshake, profile bit and packets are unchanged; only how a receiver
-finds packet boundaries differs. C, Rust and Go implement it the same way.
+macOS and FreeBSD run the baseline over `SOCK_STREAM`. The handshake,
+profile bit and packets are unchanged; only how a receiver finds packet
+boundaries differs. C, Rust and Go implement it the same way.
+
+- **Why.** macOS has no `AF_UNIX` `SOCK_SEQPACKET`. FreeBSD 15 keeps
+  `SOCK_SEQPACKET` record boundaries only where the sender sets `MSG_EOR`
+  (`socket(2)`, "SEQUENCED PACKET SOCKET TYPE"), lets a non-blocking send
+  write part of a record, and delivers a record larger than the receive
+  buffer in parts; FreeBSD 14 keeps whole datagrams. A stream behaves the
+  same on every FreeBSD release, so FreeBSD uses it on all of them.
 
 - **Packets.** A packet is the 32-byte header plus the bytes it declares,
   so no framing bytes are added. After an outer header (`NIPC`) the body is
@@ -259,22 +266,30 @@ finds packet boundaries differs. C, Rust and Go implement it the same way.
   SEQPACKET.
 - **Writes.** A packet may take several `sendmsg()` calls; the sender
   resumes after a partial write. Header and body go out without copying.
-  `SO_NOSIGPIPE` is set on every session socket, so a write to a closed
-  peer fails with `EPIPE` instead of raising `SIGPIPE`, also in Go, whose
-  darwin `syscall` package has no `MSG_NOSIGNAL`.
+  A write to a closed peer fails with `EPIPE` instead of raising
+  `SIGPIPE`: FreeBSD sends with `MSG_NOSIGNAL`; macOS sets `SO_NOSIGPIPE`
+  on every session socket, also in Go, whose darwin `syscall` package has
+  no `MSG_NOSIGNAL`.
 - **Partial receive.** A receive timeout or abort before the first byte of
   a message leaves the session usable. Any receive failure after it
   (timeout, abort, malformed or over-limit packet) leaves unread bytes of
-  the message queued, so the receiving side is shut down
-  (`shutdown(SHUT_RD)`) and every later receive fails. Sends stay valid, so
-  a server can still answer a rejected request with `LIMIT_EXCEEDED`.
-- **Socket buffers.** macOS's default `AF_UNIX` stream buffers are 8 KiB
-  per direction, far below Linux's, so a pipelining client's sends wait for
-  buffer space sooner. "Pipelined sends" below keeps that from deadlocking.
+  the message queued, so the session marks its receive side failed and
+  every later receive fails at once, without reading the socket. It does
+  not call `shutdown(SHUT_RD)`: on FreeBSD 15 that fails the peer's sends,
+  and on FreeBSD 14 later receives still return the queued bytes. Sends
+  stay valid, so a server can still answer a rejected request with
+  `LIMIT_EXCEEDED`.
+- **Socket buffers.** The default `AF_UNIX` stream buffers are 8 KiB per
+  direction on macOS and FreeBSD 14 and 64 KiB on FreeBSD 15
+  (`net.local.stream.sendspace`, `recvspace`), far below Linux's, so a
+  pipelining client's sends wait for buffer space sooner. "Pipelined sends"
+  below keeps that from deadlocking.
 - **Connect.** A full listen backlog refuses a connect at once
   (`ECONNREFUSED`), as on FreeBSD; Linux waits for room.
-- **Not available:** SHM profiles. macOS servers and clients offer the
-  baseline only.
+- **SHM.** FreeBSD offers SHM profiles over the stream baseline, as Linux
+  does over SEQPACKET (`level1-posix-shm.md`); the handshake that selects
+  them is the same packets. macOS has no SHM: its servers and clients offer
+  the baseline only.
 
 ## Pipelined sends
 
@@ -286,12 +301,13 @@ this, the same in C, Rust and Go:
   client with one request in flight (every typed call) and every server
   session send with a plain blocking call. The deadlock needs both peers
   blocked in send, and client progress alone breaks it.
-- **Send.** Each packet goes out with `MSG_DONTWAIT` (on macOS, which
-  ignores that flag on a stream send short of buffer space and blocks, the
-  descriptor is made `O_NONBLOCK` for that send and restored after it). On
+- **Send.** Each packet goes out with `MSG_DONTWAIT` (on the stream
+  baseline the descriptor is also made `O_NONBLOCK` for that send and
+  restored after it, because macOS ignores the flag on a stream send short
+  of buffer space and blocks; FreeBSD shares the stream code). On
   `EAGAIN` the client polls for readable and writable. When readable, it reads what is there
   without blocking into a per-session pending queue (SEQPACKET: whole
-  datagrams; macOS stream: raw bytes), then retries the send. A stream send
+  datagrams; stream: raw bytes), then retries the send. A stream send
   resumes after partial writes. There is no new timeout: the send waits as
   long as a blocking send would.
 - **Receive.** Every receive takes packets from the pending queue before the
@@ -319,7 +335,7 @@ this, the same in C, Rust and Go:
 `send()`, `sendmsg()` and `recv()` calls that fail with `EINTR` are
 retried inside the transport. A SEQPACKET call moves a whole message or
 nothing, so a retry can neither duplicate nor split a message. On the
-macOS stream an interrupted call moved no bytes, and partial transfers are
+stream baseline an interrupted call moved no bytes, and partial transfers are
 resumed, so the same holds there. Signals
 delivered to the process therefore never surface as send/receive
 failures.

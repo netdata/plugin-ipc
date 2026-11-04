@@ -4,7 +4,8 @@
 //
 // Connection lifecycle, handshake with profile/limit negotiation,
 // and send/receive with transparent chunking over AF_UNIX SEQPACKET sockets
-// (a stream socket carrying the same packets on macOS, see uds_stream.go).
+// (a stream socket carrying the same packets on macOS and FreeBSD, see
+// uds_stream.go).
 // Wire-compatible with the C and Rust implementations.
 //
 // Pure Go — no cgo. Works with CGO_ENABLED=0.

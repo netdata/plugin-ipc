@@ -51,11 +51,11 @@ fn default_client_config() -> ClientConfig {
 /// stops sending: end the peer's writes there so the receiver sees EOF where
 /// a SEQPACKET receiver sees the packet end.
 fn end_stream_writes(fd: RawFd) {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     unsafe {
         libc::shutdown(fd, libc::SHUT_WR)
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
     let _ = fd;
 }
 
@@ -90,6 +90,7 @@ fn test_session(fd: RawFd, role: Role, packet_size: u32) -> UdsSession {
         pkt_buf: Vec::new(),
         inflight_ids: HashSet::new(),
         pending: Pending::default(),
+        recv_failed: false,
     }
 }
 
@@ -124,15 +125,15 @@ fn test_eintr_retried() {
         session.send(&mut resp, &payload).expect("send");
     });
 
-    // HELLO goes through send (sendmsg on a macOS stream), the request
+    // HELLO goes through send (sendmsg on a stream), the request
     // through sendmsg; HELLO_ACK and the response through recv. Injection is
     // per thread: only this client's calls fail.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
     {
         eintr_inject::SEND.with(|c| c.set(1));
         eintr_inject::SENDMSG.with(|c| c.set(1));
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     eintr_inject::SENDMSG.with(|c| c.set(2));
     eintr_inject::RECV.with(|c| c.set(2));
 
@@ -1173,8 +1174,8 @@ fn test_pipeline_chunked_multi() {
 }
 
 // Pipelining beyond the socket buffers. Small buffers make the deadlock
-// reachable on every platform (FreeBSD and macOS default to 8 KiB, Linux to
-// about 208 KiB). The client's send timeout only bounds a failing run: a
+// reachable on every platform (macOS and FreeBSD 14 default to 8 KiB, FreeBSD
+// 15 to 64 KiB, Linux to about 208 KiB). The client's send timeout only bounds a failing run: a
 // passing run never waits on it, and the server has none, so a slow server
 // cannot fail a passing run.
 const PIPE_BUF_COUNT: usize = 16;
@@ -1335,11 +1336,11 @@ fn test_pipeline_exceeds_socket_buffers() {
     cleanup_socket(&svc);
 }
 
-/// macOS stream: a receive that fails mid-stream shuts the read side, and
+/// Stream baseline: a receive that fails mid-stream marks the receive side failed, and
 /// every later receive must fail. Bytes left in the pending queue are part
 /// of that abandoned stream: here a forged response for an in-flight id
 /// follows an over-limit header, and must not be delivered.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 #[test]
 fn test_stream_failed_receive_drops_pending() {
     let (svc, server, mut session) =
@@ -1944,7 +1945,7 @@ fn test_receive_packet_longer_than_declared_payload() {
     let mut buf = [0u8; 128];
     // A stream has no packet end to check: the message completes and the
     // trailing byte is rejected as the next packet, a truncated header.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     {
         let (_, payload) = session.receive(&mut buf).expect("message delivered");
         assert_eq!(payload, &[0xBE]);
@@ -1952,10 +1953,10 @@ fn test_receive_packet_longer_than_declared_payload() {
     let err = session
         .receive(&mut buf)
         .expect_err("trailing bytes should be rejected");
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
     assert!(matches!(err, UdsError::Protocol(ref msg)
         if msg.contains("exceeds declared payload_len")));
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     assert!(matches!(err, UdsError::Protocol(_)));
 
     unsafe { libc::close(fd1) };
@@ -3204,7 +3205,7 @@ fn test_path_too_long() {
     assert!(matches!(result, Err(UdsError::PathTooLong)));
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 #[test]
 fn test_packet_size_limit_invalid_fd_uses_fallback() {
     assert_eq!(packet_size_limit(-1, 0), DEFAULT_PACKET_SIZE_FALLBACK);
@@ -3215,7 +3216,7 @@ fn test_packet_size_limit_invalid_fd_uses_fallback() {
     );
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 fn set_sndbuf(fd: RawFd, bytes: libc::c_int) {
     let rc = unsafe {
         libc::setsockopt(
@@ -3229,7 +3230,7 @@ fn set_sndbuf(fd: RawFd, bytes: libc::c_int) {
     assert_eq!(rc, 0, "setsockopt(SO_SNDBUF) failed: {}", errno());
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 #[test]
 fn test_packet_size_limit_is_fixed_on_a_stream() {
     assert_eq!(packet_size_limit(-1, 0), PACKET_SIZE_MAX);
@@ -3260,7 +3261,7 @@ fn test_packet_size_limit_is_fixed_on_a_stream() {
     unsafe { libc::close(fd0) };
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 #[test]
 fn test_packet_size_limit_matches_kernel_datagram_limit() {
     // None keeps the system default SO_SNDBUF.
@@ -3400,12 +3401,12 @@ fn test_listener_and_session_sockets_are_cloexec() {
 }
 
 // -----------------------------------------------------------------------
-//  macOS stream baseline
+//  Stream baseline (macOS, FreeBSD)
 // -----------------------------------------------------------------------
 
 /// A receive that consumed part of a message cannot leave the session
 /// usable: the rest is still queued and would be read as a header.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 #[test]
 fn test_stream_partial_receive_ends_reads() {
     let (fd0, fd1) = socketpair_seqpacket();

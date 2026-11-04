@@ -119,6 +119,11 @@ typedef struct {
     size_t   pending_cap;
     size_t   pending_head;   /* next unconsumed byte */
     size_t   pending_tail;   /* end of the stored bytes */
+
+    /* Stream baseline: a receive failed after reading part of a message,
+     * so the stream is off a packet boundary and every later receive
+     * fails. */
+    bool recv_failed;
 } nipc_uds_session_t;
 
 /* ------------------------------------------------------------------ */
@@ -304,7 +309,7 @@ static inline int nipc_uds_session_fd(const nipc_uds_session_t *s) {
 /* True when the next receive can return data read earlier by a pipelined
  * send, without the fd becoming readable. */
 static inline bool nipc_uds_session_has_pending(const nipc_uds_session_t *s) {
-    return s->pending_tail > s->pending_head;
+    return !s->recv_failed && s->pending_tail > s->pending_head;
 }
 
 static inline int nipc_uds_listener_fd(const nipc_uds_listener_t *l) {

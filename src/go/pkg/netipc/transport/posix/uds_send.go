@@ -81,8 +81,9 @@ func (s *Session) sendSessionPacket(hdr, payload []byte) error {
 		return sendPacket(s.fd, hdr, payload)
 	}
 	// macOS ignores MSG_DONTWAIT on a stream send that lacks buffer space
-	// and blocks, so the descriptor is made non-blocking for the send
-	// instead. Sessions are blocking otherwise.
+	// and blocks, so on the stream baseline (macOS, FreeBSD) the descriptor
+	// is made non-blocking for the send instead. Sessions are blocking
+	// otherwise.
 	if streamTransport {
 		if err := syscall.SetNonblock(s.fd, true); err != nil {
 			return wrapErr(ErrSend, err.Error())
@@ -116,7 +117,9 @@ func (s *Session) sendWithProgress(hdr, payload []byte) error {
 	}
 	parts := [2][]byte{hdr, payload}
 	first := 0
-	eof := false
+	// After a failed stream receive the inbound bytes belong to an abandoned
+	// message: never queue them.
+	eof := s.recvFailed
 	for {
 		var iov [2]syscall.Iovec
 		msg := syscall.Msghdr{Iov: &iov[0]}

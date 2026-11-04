@@ -1297,7 +1297,8 @@ Before you define a new service or integrate one into a plugin, answer these:
 
 ### Linux / POSIX
 
-- baseline transport is UDS `SOCK_SEQPACKET`
+- baseline transport is UDS `SOCK_SEQPACKET` on Linux and UDS `SOCK_STREAM`
+  carrying the same packets on macOS and FreeBSD
 - fast path is POSIX SHM, on Linux and FreeBSD (Go: FreeBSD amd64 and 386
   only)
 - on macOS, and for Go on other FreeBSD architectures, every session uses the
@@ -1306,17 +1307,18 @@ Before you define a new service or integrate one into a plugin, answer these:
 - on FreeBSD, SHM needs a run directory on tmpfs or UFS: ZFS rejects the
   region reservation (`posix_fallocate` returns `EINVAL`), so a server with
   its run directory on ZFS serves baseline only
-- FreeBSD's default `SO_SNDBUF` is 8192 bytes, so larger messages are chunked
-  more often there than on Linux
-- macOS has no `SOCK_SEQPACKET`: its baseline is a `SOCK_STREAM` socket that
-  carries the same packets, with the same API, handshake and profile bit, and
-  no SHM. The packet size is 256 KiB regardless of `SO_SNDBUF`. A receive that
+- macOS and FreeBSD use a `SOCK_STREAM` baseline that carries the same
+  packets, with the same API, handshake and profile bit (macOS has no
+  `SOCK_SEQPACKET`; FreeBSD 15 `SOCK_SEQPACKET` does not keep NetIPC's packet
+  boundaries). FreeBSD keeps SHM; macOS has none. The packet size is 256 KiB
+  regardless of `SO_SNDBUF`. A receive that
   fails after reading part of a message (timeout, abort, oversized or
   malformed message) ends further receives on that session; sends still work,
   and the L2 client reconnects as for any broken session. A full listen backlog
-  refuses a connect at once (also on FreeBSD), so size `backlog` for bursts of
-  clients. The listener binds through a private `{service}.d` directory in the
-  run directory; a leftover one from a crashed server is removed on start.
+  refuses a connect at once (macOS and FreeBSD), so size `backlog` for bursts
+  of clients. On macOS the listener binds through a private `{service}.d`
+  directory in the run directory; a leftover one from a crashed server is
+  removed on start.
 
 ### Windows
 

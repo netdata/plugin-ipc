@@ -62,6 +62,9 @@ type Session struct {
 	pending pendingQueue
 	// Queue bound of the send in progress; 0 sends with a blocking call.
 	progressBound int
+	// Stream baseline: a receive failed after reading part of a message, so
+	// the stream is off a packet boundary and every later receive fails.
+	recvFailed bool
 
 	// Receive state of the call in progress, read by closures built once
 	// per session (receiveFns), so a receive allocates nothing.
@@ -176,7 +179,7 @@ func (s *Session) Fd() int {
 // HasPending reports whether the next Receive can return data read earlier
 // by a pipelined send, without the fd becoming readable.
 func (s *Session) HasPending() bool {
-	return s.pending.queued()
+	return !s.recvFailed && s.pending.queued()
 }
 
 // Role returns the session role.

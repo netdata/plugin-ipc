@@ -1,7 +1,8 @@
-//! Stream-socket packet I/O, the macOS baseline (macOS has no AF_UNIX
-//! SOCK_SEQPACKET). A packet is the 32-byte header plus the bytes it
-//! declares, so the bytes on the wire match the SEQPACKET transport. Built
-//! on every POSIX system so its tests run everywhere; only macOS sessions
+//! Stream-socket packet I/O, the macOS and FreeBSD baseline (macOS has no
+//! AF_UNIX SOCK_SEQPACKET; FreeBSD 15 SEQPACKET keeps record boundaries only
+//! with MSG_EOR). A packet is the 32-byte header plus the bytes it declares,
+//! so the bytes on the wire match the SEQPACKET transport. Built on every
+//! POSIX system so its tests run everywhere; only macOS and FreeBSD sessions
 //! use it.
 
 use super::{Pending, ReceiveWait, UdsError, raw_recv, wait_fd_readable};

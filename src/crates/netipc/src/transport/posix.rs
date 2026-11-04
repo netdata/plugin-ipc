@@ -2,7 +2,7 @@
 //!
 //! Connection lifecycle, handshake with profile/limit negotiation,
 //! and send/receive with transparent chunking over AF_UNIX SEQPACKET sockets
-//! (a stream socket carrying the same packets on macOS, see
+//! (a stream socket carrying the same packets on macOS and FreeBSD, see
 //! `posix_stream.rs`). Wire-compatible with the C implementation in
 //! netipc_uds.c.
 
@@ -24,27 +24,27 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_BACKLOG: i32 = 16;
 const DEFAULT_BATCH_ITEMS: u32 = 1;
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "freebsd"), allow(dead_code))]
 const DEFAULT_PACKET_SIZE_FALLBACK: u32 = 65536;
 const PACKET_SIZE_MAX: u32 = 262_144;
-/// Bytes the kernel keeps from SO_SNDBUF for a SEQPACKET datagram: Linux
-/// accepts SO_SNDBUF - 32, FreeBSD the full SO_SNDBUF.
-#[cfg(target_os = "freebsd")]
-const SNDBUF_OVERHEAD: u32 = 0;
-#[cfg(not(any(target_os = "freebsd", target_os = "macos")))]
+/// Bytes Linux keeps from SO_SNDBUF for a SEQPACKET datagram: it accepts
+/// SO_SNDBUF - 32.
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 const SNDBUF_OVERHEAD: u32 = 32;
 
-/// macOS has no AF_UNIX SOCK_SEQPACKET; its baseline is a stream socket
-/// carrying the same packets (docs/level1-posix-uds.md).
-#[cfg(target_os = "macos")]
+/// macOS has no AF_UNIX SOCK_SEQPACKET, and FreeBSD 15 SEQPACKET keeps record
+/// boundaries only where the sender sets MSG_EOR and can write part of a
+/// record. Both use a stream socket carrying the same packets
+/// (docs/level1-posix-uds.md, "Stream baseline").
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub(crate) const SOCK_TYPE: libc::c_int = libc::SOCK_STREAM;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 pub(crate) const SOCK_TYPE: libc::c_int = libc::SOCK_SEQPACKET;
 
 const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
 
 #[path = "posix_stream.rs"]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "freebsd")), allow(dead_code))]
 mod stream;
 
 /// Profiles this platform can provide. POSIX SHM needs a futex-style wait
@@ -271,6 +271,11 @@ pub struct UdsSession {
 
     // Inbound packets read while a pipelined send waited for buffer space
     pending: Pending,
+
+    // Stream baseline: a receive failed after reading part of a message, so
+    // the stream is off a packet boundary and every later receive fails.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "freebsd")), allow(dead_code))]
+    recv_failed: bool,
 }
 
 impl UdsSession {
@@ -304,7 +309,7 @@ impl UdsSession {
     /// True when the next receive can return data read earlier by a
     /// pipelined send, without the fd becoming readable.
     pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
+        !self.recv_failed && !self.pending.is_empty()
     }
 
     /// Get the session role.
@@ -383,10 +388,13 @@ impl UdsSession {
         let bound = pending_bound(self.max_response_payload_bytes, self.packet_size, inflight);
         let read_len = self.packet_size as usize;
         let pending = &mut self.pending;
+        // After a failed stream receive the inbound bytes belong to an
+        // abandoned message: never queue them.
+        let recv_failed = self.recv_failed;
         let mut failed = false;
         let result =
             framing::send_message(framing, &mut self.inflight_ids, hdr, payload, |h, p| {
-                let r = send_with_progress(fd, h, p, pending, read_len, bound);
+                let r = send_with_progress(fd, h, p, pending, read_len, bound, recv_failed);
                 if matches!(r, Err(UdsError::Protocol(_))) {
                     failed = true;
                 }
@@ -423,19 +431,24 @@ impl UdsSession {
         }
 
         let controlled = timeout_ms != 0 || abort.is_some();
-        #[cfg_attr(target_os = "macos", allow(unused_mut))]
+        #[cfg_attr(any(target_os = "macos", target_os = "freebsd"), allow(unused_mut))]
         let mut wait = ReceiveWait::new(timeout_ms, abort);
 
         let framing = self.framing(false);
         let fd = self.fd;
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
         {
             // A timeout or abort before the first byte leaves the stream on a
             // packet boundary. A failure after it does not: the rest of the
-            // message is still queued, so the receive side is shut down and
-            // every later receive fails. Sends stay valid; they always write
-            // whole messages.
+            // message is still queued, so every later receive fails. The
+            // session records that instead of shutting the read side, whose
+            // effect differs by OS (FreeBSD 15 fails the peer's sends,
+            // FreeBSD 14 still returns queued bytes). Sends stay valid; they
+            // always write whole messages.
+            if self.recv_failed {
+                return Err(UdsError::Recv(0));
+            }
             let wait = controlled.then_some(&wait);
             if let Some(wait) = wait
                 && self.pending.is_empty()
@@ -466,14 +479,14 @@ impl UdsSession {
                 },
             );
             if result.is_err() {
-                unsafe { libc::shutdown(fd, libc::SHUT_RD) };
+                self.recv_failed = true;
                 // Queued bytes are part of the abandoned stream too.
                 self.pending = Pending::default();
             }
             result
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
         framing::receive_message(
             framing,
             &mut self.inflight_ids,
@@ -957,7 +970,7 @@ fn build_socket_path(run_dir: &str, service_name: &str) -> Result<String, UdsErr
 /// Linux rejects a datagram larger than SO_SNDBUF minus 32 bytes of
 /// accounting overhead with EMSGSIZE; very large buffers also hit ENOBUFS
 /// near 1 MiB, hence the fixed cap.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 fn packet_size_limit(_fd: RawFd, configured: u32) -> u32 {
     // A stream has no per-message size cap; the fixed cap keeps the first
     // packet's buffer bounded and the chunking code shared.
@@ -968,7 +981,7 @@ fn packet_size_limit(_fd: RawFd, configured: u32) -> u32 {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 fn packet_size_limit(fd: RawFd, configured: u32) -> u32 {
     let mut val: libc::c_int = 0;
     let mut len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
@@ -1003,17 +1016,17 @@ fn packet_size_limit(fd: RawFd, configured: u32) -> u32 {
 
 /// Send one packet: one SEQPACKET message, or all its bytes on a stream.
 fn send_packet(fd: RawFd, hdr: &[u8], payload: &[u8]) -> Result<(), UdsError> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     return stream::send_all(fd, hdr, payload);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
     raw_send_iov(fd, hdr, payload)
 }
 
 /// Send one contiguous handshake packet.
 fn send_control(fd: RawFd, pkt: &[u8]) -> Result<(), UdsError> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     return stream::send_all(fd, pkt, &[]);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
     raw_send(fd, pkt)
 }
 
@@ -1027,9 +1040,9 @@ pub(crate) struct Pending {
     head: usize,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 const PENDING_RECORD_LEN: usize = 0;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 const PENDING_RECORD_LEN: usize = 4;
 
 impl Pending {
@@ -1083,7 +1096,7 @@ impl Pending {
                 return Ok(());
             }
             let n = n as usize;
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
             self.buf[start..start + PENDING_RECORD_LEN].copy_from_slice(&(n as u32).to_ne_bytes());
             self.buf.truncate(start + PENDING_RECORD_LEN + n);
             if self.buf.len() > bound {
@@ -1096,7 +1109,7 @@ impl Pending {
 
     /// SEQPACKET: pops one queued datagram into `dst`, truncating it to
     /// `dst.len()` as recv() does. Returns the bytes copied.
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(any(target_os = "macos", target_os = "freebsd"), allow(dead_code))]
     fn pop_packet(&mut self, dst: &mut [u8]) -> usize {
         let h = self.head;
         let rec = u32::from_ne_bytes(self.buf[h..h + 4].try_into().unwrap()) as usize;
@@ -1108,7 +1121,7 @@ impl Pending {
     }
 
     /// Stream: copies up to `dst.len()` queued bytes. Returns the count.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "freebsd")), allow(dead_code))]
     pub(crate) fn take(&mut self, dst: &mut [u8]) -> usize {
         let n = dst.len().min(self.buf.len() - self.head);
         dst[..n].copy_from_slice(&self.buf[self.head..self.head + n]);
@@ -1134,8 +1147,8 @@ fn pending_bound(max_response_payload: u32, packet_size: u32, inflight: usize) -
 }
 
 /// `send_with_progress_loop`; macOS ignores MSG_DONTWAIT on a stream send
-/// that lacks buffer space and blocks, so the descriptor is made
-/// non-blocking for the send instead.
+/// that lacks buffer space and blocks, so on the stream baseline (macOS,
+/// FreeBSD) the descriptor is made non-blocking for the send instead.
 fn send_with_progress(
     fd: RawFd,
     hdr: &[u8],
@@ -1143,14 +1156,16 @@ fn send_with_progress(
     pending: &mut Pending,
     read_len: usize,
     bound: usize,
+    recv_failed: bool,
 ) -> Result<(), UdsError> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     {
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
             return Err(UdsError::Send(errno()));
         }
-        let result = send_with_progress_loop(fd, hdr, payload, pending, read_len, bound);
+        let result =
+            send_with_progress_loop(fd, hdr, payload, pending, read_len, bound, recv_failed);
         // A descriptor left non-blocking would break later blocking calls;
         // a Send error also fails every in-flight request.
         if unsafe { libc::fcntl(fd, libc::F_SETFL, flags) } < 0 {
@@ -1160,8 +1175,8 @@ fn send_with_progress(
         }
         result
     }
-    #[cfg(not(target_os = "macos"))]
-    send_with_progress_loop(fd, hdr, payload, pending, read_len, bound)
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+    send_with_progress_loop(fd, hdr, payload, pending, read_len, bound, recv_failed)
 }
 
 /// Sends one packet without blocking; while the socket is full, reads what
@@ -1174,14 +1189,21 @@ fn send_with_progress_loop(
     pending: &mut Pending,
     read_len: usize,
     bound: usize,
+    recv_failed: bool,
 ) -> Result<(), UdsError> {
     // A SEQPACKET send moves the whole packet or nothing, so only the
     // stream advances these.
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "freebsd")),
+        allow(unused_mut)
+    )]
     let mut parts = [hdr, payload];
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "freebsd")),
+        allow(unused_mut)
+    )]
     let mut first = 0;
-    let mut eof = false;
+    let mut eof = recv_failed;
     loop {
         let mut iov = [libc::iovec {
             iov_base: std::ptr::null_mut(),
@@ -1204,7 +1226,7 @@ fn send_with_progress_loop(
 
         let n = unsafe { libc::sendmsg(fd, &msg, SEND_FLAGS | libc::MSG_DONTWAIT) };
         if n >= 0 {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "freebsd"))]
             {
                 if n == 0 {
                     return Err(UdsError::Send(0));
@@ -1220,7 +1242,7 @@ fn send_with_progress_loop(
                 parts[first] = &parts[first][left..];
                 continue;
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
             {
                 return if n as usize == hdr.len() + payload.len() {
                     Ok(())
@@ -1256,7 +1278,7 @@ fn send_with_progress_loop(
 }
 
 /// Send header + payload as one SEQPACKET message using sendmsg.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "freebsd"), allow(dead_code))]
 fn raw_send_iov(fd: RawFd, hdr: &[u8], payload: &[u8]) -> Result<(), UdsError> {
     let total = hdr.len() + payload.len();
 
@@ -1345,7 +1367,7 @@ pub(crate) mod eintr_inject {
 }
 
 /// Send a contiguous buffer as one SEQPACKET message.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "freebsd"), allow(dead_code))]
 fn raw_send(fd: RawFd, data: &[u8]) -> Result<(), UdsError> {
     let n = retry_eintr(
         #[cfg(test)]
@@ -1456,7 +1478,7 @@ fn wait_fd_readable(fd: RawFd, wait: &ReceiveWait<'_>) -> Result<(), UdsError> {
     }
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "freebsd"), allow(dead_code))]
 fn raw_recv_with_wait(
     fd: RawFd,
     buf: &mut [u8],
@@ -1466,7 +1488,7 @@ fn raw_recv_with_wait(
     raw_recv(fd, buf)
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "freebsd"), allow(dead_code))]
 fn raw_recv_control(
     fd: RawFd,
     buf: &mut [u8],
@@ -1694,9 +1716,9 @@ fn connect_and_handshake(
     // Receive HELLO_ACK; a server that never answers must not hold the
     // client past its deadline.
     let mut buf = [0u8; 128];
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     let n = stream::recv_packet(fd, &mut buf, 0, Some(wait))?;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
     let n = {
         wait_fd_readable(fd, wait)?;
         raw_recv(fd, &mut buf)?
@@ -1729,6 +1751,7 @@ fn connect_and_handshake(
         pkt_buf: Vec::new(),
         inflight_ids: HashSet::new(),
         pending: Pending::default(),
+        recv_failed: false,
     })
 }
 
@@ -1741,7 +1764,11 @@ fn server_handshake(
     config: &ServerConfig,
     session_id: u64,
     prepare: Option<&mut dyn FnMut(u32, u32, u32) -> bool>,
-    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] wait: &ReceiveWait<'_>,
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "freebsd")),
+        allow(unused_variables)
+    )]
+    wait: &ReceiveWait<'_>,
 ) -> Result<UdsSession, UdsError> {
     let offer = ServerOffer {
         packet_size: packet_size_limit(fd, config.packet_size),
@@ -1762,9 +1789,9 @@ fn server_handshake(
     // Receive HELLO. The caller waited for it; a datagram arrives whole,
     // a stream packet within the same deadline.
     let mut buf = [0u8; 128];
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     let n = stream::recv_packet(fd, &mut buf, 0, Some(wait))?;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
     let n = raw_recv(fd, &mut buf)?;
     let ack = framing::server_negotiate(&buf[..n], &offer, session_id, prepare, |pkt| {
         send_control(fd, pkt)
@@ -1784,6 +1811,7 @@ fn server_handshake(
         pkt_buf: Vec::new(),
         inflight_ids: HashSet::new(),
         pending: Pending::default(),
+        recv_failed: false,
     })
 }
 

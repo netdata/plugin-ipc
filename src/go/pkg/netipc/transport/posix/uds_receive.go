@@ -154,12 +154,20 @@ func (s *Session) initReceiveFns() {
 	s.failInflights = s.failAllInflight
 }
 
+// errRecvFailed is what every receive returns after a stream receive failed
+// inside a message.
+var errRecvFailed = wrapErr(ErrRecv, "an earlier receive failed inside a message")
+
 // receiveStream receives on a stream socket. A timeout or abort before the
 // first byte leaves the stream on a packet boundary. A failure after it does
-// not: the rest of the message is still queued, so the receive side is shut
-// down and every later receive fails. Sends stay valid; they always write
-// whole messages.
+// not: the rest of the message is still queued, so every later receive fails.
+// The session records that instead of shutting the read side, whose effect
+// differs by OS (FreeBSD 15 fails the peer's sends, FreeBSD 14 still returns
+// queued bytes). Sends stay valid; they always write whole messages.
 func (s *Session) receiveStream(buf []byte) (protocol.Header, []byte, error) {
+	if s.recvFailed {
+		return protocol.Header{}, nil, errRecvFailed
+	}
 	if s.recvControl && !s.pending.queued() {
 		if err := pollReadableForReceive(s.fd, s.recvWait); err != nil {
 			return protocol.Header{}, nil, err
@@ -168,7 +176,7 @@ func (s *Session) receiveStream(buf []byte) (protocol.Header, []byte, error) {
 	s.streamFirst = true
 	hdr, payload, err := s.receiveFraming(buf, s.recvStreamFn, true)
 	if err != nil {
-		_ = syscall.Shutdown(s.fd, syscall.SHUT_RD)
+		s.recvFailed = true
 		// Queued bytes are part of the abandoned stream too.
 		s.pending = pendingQueue{}
 	}

@@ -15,18 +15,16 @@
 
 #define NIPC_UDS_PACKET_SIZE_FALLBACK 65536u
 #define NIPC_UDS_PACKET_SIZE_MAX 262144u
-/* Bytes the kernel keeps from SO_SNDBUF for a SEQPACKET datagram: Linux
- * accepts SO_SNDBUF - 32, FreeBSD the full SO_SNDBUF. */
-#if defined(__FreeBSD__)
-#define NIPC_UDS_SNDBUF_OVERHEAD 0
-#else
+/* Bytes Linux keeps from SO_SNDBUF for a SEQPACKET datagram: it accepts
+ * SO_SNDBUF - 32. */
 #define NIPC_UDS_SNDBUF_OVERHEAD 32
-#endif
 
-/* macOS has no AF_UNIX SOCK_SEQPACKET. Its baseline is a stream socket
- * carrying the same packets, each delimited by the length its header
- * declares (docs/level1-posix-uds.md, "macOS stream baseline"). */
-#if defined(__APPLE__)
+/* macOS has no AF_UNIX SOCK_SEQPACKET, and FreeBSD 15 SEQPACKET keeps record
+ * boundaries only where the sender sets MSG_EOR and can write part of a
+ * record. Both use a stream socket carrying the same packets, each delimited
+ * by the length its header declares (docs/level1-posix-uds.md, "Stream
+ * baseline"). */
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #define NIPC_UDS_STREAM 1
 #define NIPC_UDS_SOCK_TYPE SOCK_STREAM
 #else
@@ -74,9 +72,10 @@ typedef struct {
 nipc_uds_wait_t nipc_uds_wait_init(uint32_t timeout_ms, int abort_fd);
 nipc_uds_error_t nipc_uds_wait_for_readable(int fd, const nipc_uds_wait_t *wait);
 
-/* Stream-socket packet I/O (used by sessions on macOS; built on every POSIX
- * system so its tests run everywhere). A packet is the 32-byte header plus
- * the bytes it declares, so the bytes on the wire match SEQPACKET.
+/* Stream-socket packet I/O (used by sessions on macOS and FreeBSD; built
+ * on every POSIX system so its tests run everywhere). A packet is the
+ * 32-byte header plus the bytes it declares, so the bytes on the wire match
+ * SEQPACKET.
  *
  * nipc_uds_stream_read_exact() reads len bytes, waiting before each read
  * when wait is set (NULL blocks). EOF before the first byte is RECV (the

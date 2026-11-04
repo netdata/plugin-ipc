@@ -15,8 +15,8 @@ import (
 )
 
 // Pipelining beyond the socket buffers. Small buffers make the deadlock
-// reachable on every platform (FreeBSD and macOS default to 8 KiB, Linux to
-// about 208 KiB). The client's send timeout only bounds a failing run: a
+// reachable on every platform (macOS and FreeBSD 14 default to 8 KiB, FreeBSD
+// 15 to 64 KiB, Linux to about 208 KiB). The client's send timeout only bounds a failing run: a
 // passing run never waits on it, and the server has none, so a slow server
 // cannot fail a passing run.
 const (

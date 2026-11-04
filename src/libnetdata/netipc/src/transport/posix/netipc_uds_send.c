@@ -147,7 +147,9 @@ static nipc_uds_error_t send_with_progress_loop(nipc_uds_session_t *session,
     }
     struct iovec *cur = iov;
     size_t bound = pending_bound(session);
-    bool eof = false;
+    /* After a failed stream receive the inbound bytes belong to an
+     * abandoned message: never queue them. */
+    bool eof = session->recv_failed;
 
     for (;;) {
         struct msghdr msg;
@@ -204,7 +206,8 @@ static nipc_uds_error_t send_with_progress_loop(nipc_uds_session_t *session,
 }
 
 /* macOS ignores MSG_DONTWAIT on a stream send that lacks buffer space and
- * blocks, so the descriptor is made non-blocking for the send instead. */
+ * blocks, so on the stream baseline (macOS, FreeBSD) the descriptor is made
+ * non-blocking for the send instead. */
 static nipc_uds_error_t send_with_progress(nipc_uds_session_t *session,
                                            const void *hdr, size_t hdr_len,
                                            const void *payload,

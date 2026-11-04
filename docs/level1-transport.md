@@ -491,13 +491,14 @@ Level 1 supports multiple transport backends behind the same API surface:
 
 | Transport | Platform | Characteristics |
 |-----------|----------|-----------------|
-| UDS SEQPACKET | Linux, FreeBSD | Message-oriented, packet-limited, always available |
-| UDS stream | macOS | Same packets over `SOCK_STREAM`, delimited by their headers; always available |
+| UDS SEQPACKET | Linux | Message-oriented, packet-limited, always available |
+| UDS stream | macOS, FreeBSD | Same packets over `SOCK_STREAM`, delimited by their headers; always available |
 | Named Pipe | Windows | Message-oriented, always available |
 
-macOS has no `AF_UNIX` `SOCK_SEQPACKET`. Its baseline carries the same bytes
-under the same profile bit, so peers cannot tell the difference; see
-`level1-posix-uds.md`, "macOS stream baseline".
+macOS has no `AF_UNIX` `SOCK_SEQPACKET`, and FreeBSD 15 `SOCK_SEQPACKET`
+does not keep NetIPC's packet boundaries. Their baseline carries the same
+bytes under the same profile bit, so peers cannot tell the difference; see
+`level1-posix-uds.md`, "Stream baseline".
 
 Baseline transports are always available and require no negotiation beyond
 the standard handshake. They support full pipelining (many in-flight messages).
