@@ -240,7 +240,10 @@ the handshake.
 
 1. Derive the region path: `{run_dir}/{service_name}-{session_id:016x}.ipcshm`.
 2. Create the file via `open(O_RDWR | O_CREAT | O_EXCL, 0600)`.
-   `O_EXCL` ensures no collision with an existing region.
+   `O_EXCL` ensures no collision with an existing region. Then `fchmod`
+   the descriptor to 0600: the file takes `0600 & ~umask`, and a umask
+   without owner read or write would stop the client from attaching
+   read-write.
 3. Allocate the required size (header + request area + response area) with
    native Linux `fallocate(fd, 0, 0, size)` or FreeBSD
    `posix_fallocate(fd, 0, size)` (which returns its error number instead of

@@ -344,9 +344,19 @@ static int acquire_endpoint_lock(const char *run_dir, const char *service_name,
     if (n < 0 || (size_t)n >= sizeof(lock_path))
         return -1;
 
+    /* The file takes 0600 & ~umask. A umask without owner read or write
+     * would leave it unopenable read-write, so a narrower open follows
+     * (flock() works on any access mode) and fchmod() restores 0600 for the
+     * next starter. fchmod() fails only for a file another account owns,
+     * which the lock still works on. */
     int fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0 && errno == EACCES)
+        fd = open(lock_path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0 && errno == EACCES)
+        fd = open(lock_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)
         return -1;
+    (void)fchmod(fd, S_IRUSR | S_IWUSR);
 
     int rc;
     do {

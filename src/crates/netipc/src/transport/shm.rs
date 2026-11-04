@@ -240,6 +240,9 @@ impl ShmContext {
         if fd < 0 {
             return Err(ShmError::Open(errno()));
         }
+        // The file takes 0600 & ~umask; a umask without owner read or write
+        // would stop the client from attaching read-write.
+        unsafe { libc::fchmod(fd, libc::S_IRUSR | libc::S_IWUSR) };
 
         if let Err(e) = allocate_region(fd, region_size) {
             unsafe {

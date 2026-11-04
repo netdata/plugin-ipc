@@ -146,6 +146,9 @@ func shmServerCreate(runDir, serviceName string, sessionID uint64, reqCapacity, 
 		return nil, fmt.Errorf("%w: %v", ErrShmOpen, err)
 	}
 	fd := int(f.Fd())
+	// The file takes 0600 & ~umask; a umask without owner read or write would
+	// stop the client from attaching read-write.
+	_ = syscall.Fchmod(fd, 0o600)
 
 	if err := shmPreallocate(fd, int64(regionSize), fallocate); err != nil {
 		_ = f.Close()

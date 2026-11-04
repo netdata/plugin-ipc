@@ -1498,3 +1498,56 @@ fn test_shm_fds_are_cloexec() {
     assert!(server_ok, "server SHM fd must be close-on-exec");
     assert!(client_ok, "client SHM fd must be close-on-exec");
 }
+
+const UMASK_HELPER_ENV: &str = "NETIPC_SHM_UMASK_HELPER";
+const UMASK_HELPER_TEST: &str = "transport::shm::tests::shm_umask_helper_process";
+
+// The umask is process-wide, so the restrictive-umask case runs in a child
+// test process instead of the multithreaded test runner.
+#[test]
+fn test_shm_attach_under_restrictive_umask() {
+    use std::os::unix::process::CommandExt;
+
+    ensure_run_dir();
+    let mut cmd = std::process::Command::new(std::env::current_exe().expect("current_exe"));
+    cmd.args([UMASK_HELPER_TEST, "--exact", "--test-threads=1"])
+        .env(UMASK_HELPER_ENV, "1")
+        .stdout(std::process::Stdio::null());
+    // SAFETY: umask is async-signal-safe and touches no shared state.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::umask(0o477);
+            Ok(())
+        });
+    }
+    let status = cmd.status().expect("spawn umask helper");
+    assert!(status.success(), "attach under umask 0477 failed: {status}");
+}
+
+/// Child-process entry point. Inert unless spawned by the test above.
+#[test]
+fn shm_umask_helper_process() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if std::env::var_os(UMASK_HELPER_ENV).is_none() {
+        return;
+    }
+    let svc = "rs_shm_umask";
+    let sid: u64 = 7101;
+    cleanup_shm(svc, sid);
+
+    let mut server =
+        ShmContext::server_create(TEST_RUN_DIR, svc, sid, 1024, 1024).expect("server create");
+    let path = format!("{TEST_RUN_DIR}/{svc}-{sid:016x}.ipcshm");
+    let mode = std::fs::metadata(&path)
+        .expect("region stat")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "region file mode");
+    let mut client = ShmContext::client_attach(TEST_RUN_DIR, svc, sid).expect("client attach");
+
+    client.close();
+    server.destroy();
+    cleanup_shm(svc, sid);
+}

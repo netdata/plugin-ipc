@@ -40,10 +40,23 @@ func dialStaleCandidate(path string) error {
 // that already opened it lock an orphaned inode.
 func acquireEndpointLock(runDir, serviceName string) (*os.File, error) {
 	lockPath := runDir + "/" + serviceName + ".lock"
-	fd, err := syscall.Open(lockPath, syscall.O_RDWR|syscall.O_CREAT|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0o600)
+	// The file takes 0600 & ~umask. A umask without owner read or write would
+	// leave it unopenable read-write, so a narrower open follows (flock works
+	// on any access mode) and Fchmod restores 0600 for the next starter.
+	// Fchmod fails only for a file another account owns, which the lock still
+	// works on.
+	const flags = syscall.O_CLOEXEC | syscall.O_NOFOLLOW
+	fd, err := syscall.Open(lockPath, syscall.O_RDWR|syscall.O_CREAT|flags, 0o600)
+	if errors.Is(err, syscall.EACCES) {
+		fd, err = syscall.Open(lockPath, syscall.O_WRONLY|flags, 0)
+	}
+	if errors.Is(err, syscall.EACCES) {
+		fd, err = syscall.Open(lockPath, syscall.O_RDONLY|flags, 0)
+	}
 	if err != nil {
 		return nil, wrapErr(ErrSocket, "lock open: "+err.Error())
 	}
+	_ = syscall.Fchmod(fd, 0o600)
 	for {
 		err = syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
 		if err != syscall.EINTR {

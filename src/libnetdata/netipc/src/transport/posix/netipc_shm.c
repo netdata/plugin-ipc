@@ -498,6 +498,9 @@ nipc_shm_error_t nipc_shm_server_create(const char *run_dir,
         close(dir_fd);
         return NIPC_SHM_ERR_OPEN;
     }
+    /* The file takes 0600 & ~umask; a umask without owner read or write
+     * would stop the client from attaching read-write. */
+    (void)fchmod(fd, S_IRUSR | S_IWUSR);
 
     int allocate_rc;
     do {

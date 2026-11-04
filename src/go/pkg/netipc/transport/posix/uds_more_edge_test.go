@@ -1106,6 +1106,40 @@ func TestListenExcludesStartingServer(t *testing.T) {
 	again.Close()
 }
 
+// A lock file left with a mode missing owner read or write (a server that
+// ran under such a umask) must not block a start, and the start restores it.
+func TestListenOverLeftoverLockModes(t *testing.T) {
+	runDir := testRunDir(t)
+	for _, mode := range []os.FileMode{0o200, 0o400} {
+		service := uniqueService(t)
+		lock := filepath.Join(runDir, service+".lock")
+		_ = os.Remove(lock)
+		if err := os.WriteFile(lock, nil, 0o600); err != nil {
+			t.Fatalf("create lock: %v", err)
+		}
+		if err := os.Chmod(lock, mode); err != nil {
+			t.Fatalf("chmod lock: %v", err)
+		}
+
+		first, err := Listen(runDir, service, defaultServerConfig())
+		if err != nil {
+			t.Fatalf("listen over a %o lock: %v", mode, err)
+		}
+		info, err := os.Stat(lock)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Errorf("lock mode after listen over %o = %v (err %v), want 0600", mode, info.Mode().Perm(), err)
+		}
+		if second, err := Listen(runDir, service, defaultServerConfig()); !errors.Is(err, ErrAddrInUse) {
+			if second != nil {
+				second.Close()
+			}
+			t.Errorf("second server over a %o lock: err = %v, want ErrAddrInUse", mode, err)
+		}
+		first.Close()
+		_ = os.Remove(lock)
+	}
+}
+
 // A child that shares the lock's open file description (as a child forked
 // by another thread does until it execs) must not keep the endpoint once
 // the listener closes.

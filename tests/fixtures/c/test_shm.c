@@ -1100,6 +1100,36 @@ static void test_shm_send_bad_param(void)
           err != NIPC_SHM_OK);
 }
 
+/* A server under a umask without owner read or write must still create a
+ * region its client can attach to read-write. */
+static void test_shm_attach_under_restrictive_umask(void)
+{
+    printf("Test: Client attaches to a region created under umask 0477\n");
+    const char *svc = "shm_umask";
+    cleanup_shm(svc);
+
+    nipc_shm_ctx_t server;
+    mode_t old_mask = umask(0477);
+    nipc_shm_error_t err = nipc_shm_server_create(TEST_RUN_DIR, svc, 1, 4096, 4096, &server);
+    umask(old_mask);
+    check("server create under umask 0477", err == NIPC_SHM_OK);
+    if (err != NIPC_SHM_OK)
+        return;
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s-%016" PRIx64 ".ipcshm", TEST_RUN_DIR, svc,
+             (uint64_t)1);
+    struct stat st;
+    check("region file is 0600", stat(path, &st) == 0 && (st.st_mode & 0777) == 0600);
+
+    nipc_shm_ctx_t client;
+    err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
+    check("client attaches", err == NIPC_SHM_OK);
+    if (err == NIPC_SHM_OK)
+        nipc_shm_close(&client);
+    nipc_shm_destroy(&server);
+}
+
 static void test_shm_bad_magic_file(void)
 {
     printf("Test: Client attach to file with bad magic\n");
@@ -1742,6 +1772,7 @@ int main(void)
     test_server_create_validation();   printf("\n");
     test_server_create_allocation_failures(); printf("\n");
     test_client_attach_validation();   printf("\n");
+    test_shm_attach_under_restrictive_umask(); printf("\n");
     test_shm_close_null();             printf("\n");
     test_shm_send_bad_param();         printf("\n");
     test_shm_bad_magic_file();         printf("\n");

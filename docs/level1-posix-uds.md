@@ -353,6 +353,11 @@ failures.
 - Before it touches the socket path, the server takes an exclusive,
   non-blocking `flock` on `{run_dir}/{service_name}.lock`. The file is
   created owner-only (0600) with `O_CLOEXEC | O_NOFOLLOW`.
+- A umask without owner read or write leaves the file `0600 & ~umask`, which
+  a later read-write open cannot reopen. The server then opens it
+  write-only, or else read-only (`flock` works on any access mode), and
+  `fchmod`s the descriptor back to 0600 after every open. A lock file left
+  by a server that ran under such a umask therefore never blocks a start.
 - If another listener holds the lock, the server fails with
   address-in-use. This closes the window between one server's `bind()`
   and `listen()`, where a connect probe would see a refused socket and

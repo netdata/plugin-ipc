@@ -549,16 +549,42 @@ fn acquire_endpoint_lock(run_dir: &str, service_name: &str) -> Result<EndpointLo
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
 
+    use std::os::unix::fs::PermissionsExt;
+
     let lock_path = format!("{run_dir}/{service_name}.lock");
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(&lock_path)
+    // The file takes 0600 & ~umask. A umask without owner read or write
+    // would leave it unopenable read-write, so a narrower open follows
+    // (flock() works on any access mode) and fchmod() restores 0600 for the
+    // next starter. fchmod() fails only for a file another account owns,
+    // which the lock still works on.
+    let open = |read: bool, write: bool| {
+        std::fs::OpenOptions::new()
+            .read(read)
+            .write(write)
+            .create(read && write)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&lock_path)
+    };
+    let denied = |e: &io::Error| e.raw_os_error() == Some(libc::EACCES);
+    let file = open(true, true)
+        .or_else(|e| {
+            if denied(&e) {
+                open(false, true)
+            } else {
+                Err(e)
+            }
+        })
+        .or_else(|e| {
+            if denied(&e) {
+                open(true, false)
+            } else {
+                Err(e)
+            }
+        })
         .map_err(|e| UdsError::Socket(e.raw_os_error().unwrap_or(0)))?;
+    let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
     loop {
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             return Ok(EndpointLock(file));

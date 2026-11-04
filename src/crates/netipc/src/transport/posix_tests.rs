@@ -597,6 +597,36 @@ fn test_listen_excludes_starting_server() {
     cleanup_socket(&svc);
 }
 
+// A lock file left with a mode missing owner read or write (a server that
+// ran under such a umask) must not block a start, and the start restores it.
+#[test]
+fn test_listen_over_leftover_lock_modes() {
+    use std::os::unix::fs::PermissionsExt;
+    ensure_run_dir();
+    for mode in [0o200, 0o400] {
+        let svc = unique_service("rs_lock_mode");
+        cleanup_socket(&svc);
+        let lock = format!("{TEST_RUN_DIR}/{svc}.lock");
+        let _ = std::fs::remove_file(&lock);
+        std::fs::write(&lock, b"").expect("create lock");
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(mode)).unwrap();
+
+        let first = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config())
+            .unwrap_or_else(|e| panic!("listen over a {mode:o} lock: {e:?}"));
+        let lock_mode = std::fs::metadata(&lock).unwrap().permissions().mode() & 0o777;
+        assert_eq!(lock_mode, 0o600, "lock mode restored from {mode:o}");
+        let second = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config());
+        assert!(
+            matches!(second, Err(UdsError::AddrInUse)),
+            "second server must get AddrInUse, got {:?}",
+            second.as_ref().map(|_| ())
+        );
+        drop(first);
+        cleanup_socket(&svc);
+        let _ = std::fs::remove_file(&lock);
+    }
+}
+
 // A child forked by another thread shares the lock's open file description
 // until it execs. Closing the listener must still free the endpoint.
 #[test]

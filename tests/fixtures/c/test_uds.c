@@ -3034,6 +3034,75 @@ static void test_listen_excludes_starting_server(void)
     cleanup_socket(svc);
 }
 
+static mode_t lock_file_mode(const char *svc)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s.lock", TEST_RUN_DIR, svc);
+    struct stat st;
+    return stat(path, &st) == 0 ? (st.st_mode & 0777) : 0;
+}
+
+/* Under umask, the endpoint lock is created, contended and reclaimed. */
+static void check_lock_under_umask(const char *svc, mode_t mask)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s.lock", TEST_RUN_DIR, svc);
+    unlink(path);
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_uds_listener_t first, second;
+    mode_t old_mask = umask(mask);
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &first);
+    nipc_uds_error_t busy = NIPC_UDS_ERR_SOCKET, again = NIPC_UDS_ERR_SOCKET;
+    if (err == NIPC_UDS_OK) {
+        busy = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &second);
+        if (busy == NIPC_UDS_OK)
+            nipc_uds_close_listener(&second);
+        nipc_uds_close_listener(&first);
+        again = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &second);
+        if (again == NIPC_UDS_OK)
+            nipc_uds_close_listener(&second);
+    }
+    umask(old_mask);
+    printf("  umask %04o: listen=%d second=%d restart=%d lock mode=%04o\n",
+           (unsigned)mask, err, busy, again, (unsigned)lock_file_mode(svc));
+    check("listen creates the lock", err == NIPC_UDS_OK);
+    check("a second server gets ADDR_IN_USE", busy == NIPC_UDS_ERR_ADDR_IN_USE);
+    check("the endpoint restarts", again == NIPC_UDS_OK);
+    check("the lock file is 0600", lock_file_mode(svc) == 0600);
+    cleanup_socket(svc);
+}
+
+/* A leftover lock file of the given mode must not block a start. */
+static void check_lock_leftover_mode(const char *svc, mode_t mode)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s.lock", TEST_RUN_DIR, svc);
+    unlink(path);
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    check("leftover lock created", fd >= 0 && fchmod(fd, mode) == 0);
+    if (fd >= 0)
+        close(fd);
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_uds_listener_t listener;
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &listener);
+    printf("  leftover %04o: listen=%d lock mode=%04o\n", (unsigned)mode, err,
+           (unsigned)lock_file_mode(svc));
+    check("listen over the leftover lock", err == NIPC_UDS_OK);
+    if (err == NIPC_UDS_OK)
+        nipc_uds_close_listener(&listener);
+    check("the lock file is 0600 again", lock_file_mode(svc) == 0600);
+    cleanup_socket(svc);
+}
+
+static void test_listen_lock_restrictive_umask(void)
+{
+    printf("Test: endpoint lock under a umask without owner read or write\n");
+    check_lock_under_umask("test_lock_umask", 0477);
+    check_lock_under_umask("test_lock_umask", 0277);
+    check_lock_leftover_mode("test_lock_leftover", 0200);
+    check_lock_leftover_mode("test_lock_leftover", 0400);
+}
+
 /* A child forked by another thread shares the lock's open file description
  * until it execs. Closing the listener must still free the endpoint. */
 static void test_listen_close_releases_lock_held_by_child(void)
@@ -4250,6 +4319,7 @@ int main(void)
     test_stale_live_server();      printf("\n");
     test_listen_excludes_starting_server(); printf("\n");
     test_listen_close_releases_lock_held_by_child(); printf("\n");
+    test_listen_lock_restrictive_umask(); printf("\n");
     test_listen_bind_failure();    printf("\n");
     test_batch_corrupt_dir();      printf("\n");
     test_connect_malformed_hello_ack(); printf("\n");
