@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // bindOwnerOnly binds fd to path as owner-only (0600, narrowed by the umask).
@@ -16,7 +18,10 @@ import (
 // {serviceName}.d, narrowed to owner-only there, then renamed into place, so
 // it is never reachable with a wider mode and the process-global umask is
 // untouched. The caller holds the endpoint lock, so a leftover directory
-// belongs to a crashed server and is removed first.
+// belongs to a crashed server and is removed first. After the directory is
+// created, every step but bind() goes through a descriptor of it, so a
+// directory swapped in at the same path makes the listen fail instead of
+// placing a socket someone else can reach.
 func bindOwnerOnly(fd int, runDir, serviceName, path string) error {
 	dir := filepath.Join(runDir, serviceName+".d")
 	tmp := filepath.Join(dir, "s")
@@ -44,23 +49,41 @@ func bindOwnerOnly(fd int, runDir, serviceName, path string) error {
 		return sockErr("mkdir bind dir", err)
 	}
 	defer func() { _ = os.Remove(dir) }()
-	// Chmod ignores the umask, so a umask without owner write cannot make the
-	// directory unusable; the socket file below still gets it.
-	if err := os.Chmod(dir, 0o700); err != nil {
+	// Fchmodat ignores the umask, so a umask without owner bits cannot make the
+	// directory unopenable or unusable.
+	if err := unix.Fchmodat(unix.AT_FDCWD, dir, 0o700, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return sockErr("chmod bind dir", err)
+	}
+	dfd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return sockErr("open bind dir", err)
+	}
+	defer func() { _ = unix.Close(dfd) }()
+	var st unix.Stat_t
+	if err := unix.Fstat(dfd, &st); err != nil {
+		return sockErr("stat bind dir", err)
+	}
+	if int(st.Uid) != os.Geteuid() {
+		return sockErr("bind dir", unix.EPERM)
+	}
+	// The descriptor is the directory every later step uses; keep it 0700
+	// even if another one of ours replaced the path.
+	if err := unix.Fchmod(dfd, 0o700); err != nil {
 		return sockErr("chmod bind dir", err)
 	}
 	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: tmp}); err != nil {
 		return sockErr("bind", err)
 	}
-	info, err := os.Stat(tmp)
+	// The bound file carries 0777 & ~umask; keep the umask narrowing.
+	err = unix.Fstatat(dfd, "s", &st, unix.AT_SYMLINK_NOFOLLOW)
 	if err == nil {
-		err = os.Chmod(tmp, info.Mode().Perm()&0o600)
+		err = unix.Fchmodat(dfd, "s", uint32(st.Mode)&0o600, 0)
 	}
 	if err == nil {
-		err = os.Rename(tmp, path)
+		err = unix.Renameat(dfd, "s", unix.AT_FDCWD, path)
 	}
 	if err != nil {
-		_ = os.Remove(tmp)
+		_ = unix.Unlinkat(dfd, "s", 0)
 		return sockErr("place socket", err)
 	}
 	return nil

@@ -38,10 +38,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          python-version: "3.x"
+          python-version: "3.12"
 
+      # Pinned: semgrep 1.183.0 on Python 3.15 crashes (semgrep-core -11).
+      # Bump both together and confirm the scan finishes.
       - name: Install Semgrep
-        run: python -m pip install --upgrade semgrep
+        run: python -m pip install semgrep==1.177.0
 
       - name: Run Semgrep
         run: |

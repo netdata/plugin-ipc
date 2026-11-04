@@ -864,7 +864,10 @@ fn bind_owner_only(
 /// `{service_name}.d`, narrowed to owner-only there, then renamed into
 /// place, so it is never reachable with a wider mode and the process-global
 /// umask is untouched. The caller holds the endpoint lock, so a leftover
-/// directory belongs to a crashed server and is removed first.
+/// directory belongs to a crashed server and is removed first. After the
+/// directory is created, every step but bind() goes through a descriptor of
+/// it, so a directory swapped in at the same path makes the listen fail
+/// instead of placing a socket someone else can reach.
 #[cfg(target_os = "macos")]
 fn bind_owner_only(
     fd: RawFd,
@@ -872,7 +875,8 @@ fn bind_owner_only(
     service_name: &str,
     path: &str,
 ) -> Result<(), UdsError> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+    use std::os::unix::io::AsRawFd;
 
     let io_err = |e: io::Error| UdsError::Socket(e.raw_os_error().unwrap_or(libc::EIO));
     let dir = format!("{run_dir}/{service_name}.d");
@@ -898,23 +902,57 @@ fn bind_owner_only(
         .create(&dir)
         .map_err(io_err)?;
     let result = (|| {
-        // set_permissions ignores the umask, so a umask without owner write
-        // cannot make the directory unusable; the socket file still gets it.
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(io_err)?;
-        bind_unix(fd, &tmp)?;
-        let renamed = (|| {
-            let mode = std::fs::metadata(&tmp)
-                .map_err(io_err)?
-                .permissions()
-                .mode();
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode & 0o600))
-                .map_err(io_err)?;
-            std::fs::rename(&tmp, path).map_err(io_err)
-        })();
-        if renamed.is_err() {
-            let _ = std::fs::remove_file(&tmp);
+        // fchmodat() ignores the umask, so a umask without owner bits cannot
+        // make the directory unopenable or unusable.
+        let c_dir = CString::new(dir.as_str()).map_err(|_| UdsError::PathTooLong)?;
+        if unsafe {
+            libc::fchmodat(
+                libc::AT_FDCWD,
+                c_dir.as_ptr(),
+                0o700,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } < 0
+        {
+            return Err(UdsError::Socket(errno()));
         }
-        renamed
+        let dir_file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&dir)
+            .map_err(io_err)?;
+        if dir_file.metadata().map_err(io_err)?.uid() != unsafe { libc::geteuid() } {
+            return Err(UdsError::Socket(libc::EPERM));
+        }
+        // The descriptor is the directory every later step uses; keep it
+        // 0700 even if another one of ours replaced the path.
+        dir_file
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .map_err(io_err)?;
+        bind_unix(fd, &tmp)?;
+        let dfd = dir_file.as_raw_fd();
+        let name = c"s";
+        let placed = (|| {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstatat(dfd, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } < 0
+            {
+                return Err(UdsError::Socket(errno()));
+            }
+            // The bound file carries 0777 & ~umask; keep the umask narrowing.
+            let mode = st.st_mode & 0o777 & (libc::S_IRUSR | libc::S_IWUSR);
+            if unsafe { libc::fchmodat(dfd, name.as_ptr(), mode, 0) } < 0 {
+                return Err(UdsError::Socket(errno()));
+            }
+            let c_path = CString::new(path).map_err(|_| UdsError::PathTooLong)?;
+            if unsafe { libc::renameat(dfd, name.as_ptr(), libc::AT_FDCWD, c_path.as_ptr()) } < 0 {
+                return Err(UdsError::Socket(errno()));
+            }
+            Ok(())
+        })();
+        if placed.is_err() {
+            unsafe { libc::unlinkat(dfd, name.as_ptr(), 0) };
+        }
+        placed
     })();
     let _ = std::fs::remove_dir(&dir);
     result

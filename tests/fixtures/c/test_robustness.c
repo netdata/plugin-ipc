@@ -1065,15 +1065,28 @@ static void test_shm_attach_stops_when_server_closes_session(void)
 
 /* Sockets and pipes must not leak into children a consumer forks and
  * execs: an inherited session socket keeps the peer from seeing EOF. */
-static bool all_ipc_fds_cloexec(int *checked)
+#define CLOEXEC_MAX_FD 4096
+
+/* Descriptors open when main() starts: the process inherited them (CI
+ * runners pass pipes), so they are not NetIPC's. Marked before any test runs,
+ * so a NetIPC descriptor an earlier test leaked is still checked. */
+static bool g_inherited_fds[CLOEXEC_MAX_FD];
+
+static void mark_inherited_fds(void)
+{
+    for (int fd = 0; fd < CLOEXEC_MAX_FD; fd++)
+        g_inherited_fds[fd] = fcntl(fd, F_GETFD) >= 0;
+}
+
+static bool all_ipc_fds_cloexec(const bool *inherited, int *checked)
 {
     long max_fd = sysconf(_SC_OPEN_MAX);
-    if (max_fd < 0 || max_fd > 4096)
-        max_fd = 4096;
+    if (max_fd < 0 || max_fd > CLOEXEC_MAX_FD)
+        max_fd = CLOEXEC_MAX_FD;
     bool ok = true;
     for (int fd = 3; fd < (int)max_fd; fd++) {
         struct stat st;
-        if (fstat(fd, &st) < 0)
+        if (inherited[fd] || fstat(fd, &st) < 0)
             continue;
         if (!S_ISSOCK(st.st_mode) && !S_ISFIFO(st.st_mode))
             continue;
@@ -1108,7 +1121,7 @@ static void test_ipc_fds_are_cloexec(void)
 
     /* Listener, accepted session, client session and client abort pipe. */
     int checked = 0;
-    bool ok = all_ipc_fds_cloexec(&checked);
+    bool ok = all_ipc_fds_cloexec(g_inherited_fds, &checked);
     printf("    checked %d socket/pipe fds\n", checked);
     check("listener, both session ends and the abort pipe are checked", checked >= 5);
     check("all of them are close-on-exec", ok);
@@ -1220,6 +1233,7 @@ static void test_default_packet_size_carries_large_message(void)
 
 int main(int argc, char **argv)
 {
+    mark_inherited_fds();
 #if defined(__linux__) || defined(__FreeBSD__)
     if (argc == 3 && strcmp(argv[1], "--helper-shm-client") == 0)
         return helper_shm_client(argv[2]);

@@ -323,7 +323,7 @@ start_server() {
     local bin
     bin="$(bench_bin "$lang")"
 
-    mkdir -p "$runtime_dir"
+    mkdir -p -m 0700 "$runtime_dir"
     local server_out="${runtime_dir}/server-${lang}-${svc}.out"
 
     "$bin" "$subcmd" "$runtime_dir_bin" "$svc" "$duration_arg" > "$server_out" 2>&1 &
@@ -642,7 +642,7 @@ ensure_diagnostics_summary_file() {
     fi
 
     DIAGNOSTIC_SUMMARY_FILE="${ROOT_RUN_DIR}/diagnostics-summary.txt"
-    mkdir -p "$ROOT_RUN_DIR"
+    mkdir -p -m 0700 "$ROOT_RUN_DIR"
     cat > "$DIAGNOSTIC_SUMMARY_FILE" <<EOF
 Windows benchmark diagnostic reruns
 root_run_dir=${ROOT_RUN_DIR}
@@ -909,7 +909,7 @@ maybe_diagnose_failed_measurement() {
 
     diagnostic_run_dir "$scenario" "$client_lang" "$server_lang" "$target_rps"
     local diag_run_dir="$DIAGNOSTIC_RUN_DIR"
-    mkdir -p "$diag_run_dir"
+    mkdir -p -m 0700 "$diag_run_dir"
 
     warn "  Diagnostic rerun enabled for ${scenario} ${client_lang}->${server_lang} @ $(target_rps_label "$target_rps")"
     if diagnostic_can_recover_reason "$original_reason"; then
@@ -952,7 +952,7 @@ maybe_diagnose_failed_measurement() {
     MEASURE_RUN_DIR="$RUN_DIR"
     EMIT_CSV_ROWS=0
     ACTIVE_DIAGNOSTIC=1
-    mkdir -p "$RUN_DIR"
+    mkdir -p -m 0700 "$RUN_DIR"
 
     if run_repeated_measurement "$scenario" "$client_lang" "$server_lang" "$target_rps" "$duration" "$measure_fn" "$@"; then
         warn "  Diagnostic rerun succeeded"
@@ -1091,7 +1091,7 @@ run_repeated_measurement() {
     for repeat_idx in $(seq 1 "$REPETITIONS"); do
         MEASURE_RUN_DIR=$(measurement_artifact_dir "$scenario" "$client_lang" "$server_lang" "$target_rps" "$repeat_idx")
         LAST_MEASUREMENT_ARTIFACT_DIR="$MEASURE_RUN_DIR"
-        mkdir -p "$MEASURE_RUN_DIR"
+        mkdir -p -m 0700 "$MEASURE_RUN_DIR"
         log "    sample ${repeat_idx}/${REPETITIONS} (artifacts: ${MEASURE_RUN_DIR})"
         local metrics
         if ! metrics=$("$measure_fn" "$@"); then
@@ -1507,7 +1507,7 @@ measure_lookup_once() {
 
     local line
     local lookup_status
-    mkdir -p "$runtime_dir"
+    mkdir -p -m 0700 "$runtime_dir"
     local lookup_err="${runtime_dir}/lookup-${lang}.err"
     set +e
     line=$("$bin" lookup-bench "$duration" 2>"$lookup_err" | grep "^lookup," | head -1)
@@ -1886,7 +1886,7 @@ main() {
         exit 1
     fi
 
-    mkdir -p "$RUN_DIR"
+    mkdir -p -m 0700 "$RUN_DIR"
 
     # CSV header
     echo "scenario,client,server,target_rps,throughput,p50_us,p95_us,p99_us,client_cpu_pct,server_cpu_pct,total_cpu_pct" > "$OUTPUT_CSV"

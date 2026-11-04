@@ -5,5 +5,3 @@ package posix
 import "syscall"
 
 const sendFlags = syscall.MSG_NOSIGNAL
-
-func setNoSigpipe(int) {}

@@ -4162,6 +4162,15 @@ static void test_listen_bind_dir(void)
     check("listen under umask 0277", ok);
     check("socket mode narrowed by the umask", mode == 0400);
     cleanup_socket(svc);
+
+    /* A umask without owner read must not stop the bind directory from
+     * being opened. */
+    old_mask = umask(0477);
+    ok = listen_and_close(svc, &err, &mode);
+    umask(old_mask);
+    check("listen under umask 0477", ok);
+    check("socket mode narrowed by umask 0477", mode == 0200);
+    cleanup_socket(svc);
 }
 #endif
 

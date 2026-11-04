@@ -1448,7 +1448,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn test_server_objects_dacl_owner_only_windows() {
-        use crate::transport::win_security::{object_dacl_sddl, process_user_sid};
+        use crate::transport::win_security::{object_dacl_sddl, owner_only_dacl_sddl};
         let run_dir = test_run_dir();
         let service = unique_service("rs_win_shm_dacl");
         let mut server = WinShmContext::server_create(
@@ -1461,8 +1461,7 @@ mod tests {
             4096,
         )
         .expect("server_create");
-        let me = process_user_sid().expect("process user SID");
-        let dacl = |mask: &str| format!("D:P(A;;{mask};;;SY)(A;;{mask};;;BA)(A;;{mask};;;{me})");
+        let dacl = |mask: &str| owner_only_dacl_sddl(mask).expect("expected DACL");
         // SECTION_ALL_ACCESS and EVENT_ALL_ACCESS.
         assert_eq!(
             object_dacl_sddl(server.mapping),

@@ -149,7 +149,13 @@ export CARGO_TARGET_DIR=$OUT/cargo
 if [[ -n "$RUST_LINKER" ]]; then
     export "CARGO_TARGET_${RUST_TARGET_ENV}_LINKER=$RUST_LINKER"
 fi
-export "CARGO_TARGET_${RUST_TARGET_ENV}_RUSTFLAGS=-C target-feature=+crt-static"
+RUST_STATIC_FLAGS="-C target-feature=+crt-static"
+# Rust 1.99 links static armv7 glibc binaries as static-pie, which needs
+# rcrt1.o; Debian and Ubuntu armhf cross libcs do not ship it.
+case "$TARGET" in
+    armv7-gnu|armv7-gnu-time64) RUST_STATIC_FLAGS="$RUST_STATIC_FLAGS -C relocation-model=static" ;;
+esac
+export "CARGO_TARGET_${RUST_TARGET_ENV}_RUSTFLAGS=$RUST_STATIC_FLAGS"
 
 run_c() {
     section "C build"

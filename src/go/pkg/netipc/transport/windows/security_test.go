@@ -32,6 +32,11 @@ func objectDACLSDDL(t *testing.T, handle syscall.Handle) string {
 		t.Fatalf("GetSecurityInfo: %v", syscall.Errno(r))
 	}
 	defer syscall.LocalFree(syscall.Handle(sd))
+	return descriptorDACLSDDL(t, sd)
+}
+
+func descriptorDACLSDDL(t *testing.T, sd uintptr) string {
+	t.Helper()
 	var str *uint16
 	r, _, err := procConvertSDToStringSD.Call(sd, _SDDL_REVISION_1,
 		_DACL_SECURITY_INFORMATION, uintptr(unsafe.Pointer(&str)), 0)
@@ -42,13 +47,28 @@ func objectDACLSDDL(t *testing.T, handle syscall.Handle) string {
 	return syscall.UTF16ToString(unsafe.Slice(str, 512))
 }
 
+// ownerOnlyDACL returns the expected DACL as Windows prints it. The round
+// trip applies Windows' own SID aliases, such as LA for the built-in
+// Administrator account that CI runners use.
 func ownerOnlyDACL(t *testing.T, mask string) string {
 	t.Helper()
 	me, err := processUserSID()
 	if err != nil {
 		t.Fatalf("processUserSID: %v", err)
 	}
-	return "D:P(A;;" + mask + ";;;SY)(A;;" + mask + ";;;BA)(A;;" + mask + ";;;" + me + ")"
+	sddl, err := syscall.UTF16PtrFromString(
+		"D:P(A;;" + mask + ";;;SY)(A;;" + mask + ";;;BA)(A;;" + mask + ";;;" + me + ")")
+	if err != nil {
+		t.Fatalf("UTF16PtrFromString: %v", err)
+	}
+	var sd uintptr
+	r, _, callErr := procConvertStringSDToSD.Call(
+		uintptr(unsafe.Pointer(sddl)), _SDDL_REVISION_1, uintptr(unsafe.Pointer(&sd)), 0)
+	if r == 0 {
+		t.Fatalf("ConvertStringSecurityDescriptorToSecurityDescriptor: %v", callErr)
+	}
+	defer syscall.LocalFree(syscall.Handle(sd))
+	return descriptorDACLSDDL(t, sd)
 }
 
 // clientImpersonationLevel returns the impersonation level a pipe client

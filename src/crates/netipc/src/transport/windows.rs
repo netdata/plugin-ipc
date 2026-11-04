@@ -2738,13 +2738,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn test_pipe_dacl_owner_only() {
-        use crate::transport::win_security::{object_dacl_sddl, process_user_sid};
+        use crate::transport::win_security::{object_dacl_sddl, owner_only_dacl_sddl};
         ensure_run_dir();
         let svc = unique_service("rs_dacl");
         let mut listener =
             NpListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("bind");
-        let me = process_user_sid().expect("process user SID");
-        let expected = format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{me})");
+        let expected = owner_only_dacl_sddl("FA").expect("expected DACL");
         assert_eq!(
             object_dacl_sddl(listener.handle).as_deref(),
             Some(expected.as_str())

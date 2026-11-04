@@ -99,6 +99,9 @@ static int remove_bind_dir(const char *dir, const char *tmp)
  * 0777 & ~umask. The socket is bound inside a private 0700 directory,
  * narrowed to owner-only there, then renamed into place, so it is never
  * reachable with a wider mode and the process-global umask is untouched.
+ * After mkdir() every step but bind() goes through a descriptor of the
+ * directory, so a directory swapped in at the same path makes the listen
+ * fail instead of placing a socket someone else can reach.
  * Returns 0, -1 on a socket error, -2 if the bind path is too long. */
 static int bind_owner_only_socket(int fd, const char *run_dir,
                                   const char *service_name, const char *path)
@@ -121,24 +124,47 @@ static int bind_owner_only_socket(int fd, const char *run_dir,
     if (mkdir(dir, S_IRWXU) < 0)
         return -1;
 
+    int saved_errno;
     struct stat st;
-    /* chmod() ignores the umask, so a umask without owner write cannot make
-     * the directory unusable; the socket file below still gets it. */
-    if (chmod(dir, S_IRWXU) < 0 ||
-        bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) < 0)
+    /* fchmodat() ignores the umask, so a umask without owner bits cannot
+     * make the directory unopenable or unusable. */
+    if (fchmodat(AT_FDCWD, dir, S_IRWXU, AT_SYMLINK_NOFOLLOW) < 0)
         goto fail_dir;
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dfd < 0)
+        goto fail_dir;
+    if (fstat(dfd, &st) < 0)
+        goto fail_dfd;
+    if (st.st_uid != geteuid()) {
+        errno = EPERM;
+        goto fail_dfd;
+    }
+    /* The descriptor is the directory every later step uses; keep it 0700
+     * even if another one of ours replaced the path. */
+    if (fchmod(dfd, S_IRWXU) < 0 ||
+        bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) < 0)
+        goto fail_dfd;
     /* The bound file carries 0777 & ~umask; keep the umask narrowing. */
-    if (stat(tmp, &st) < 0 ||
-        chmod(tmp, (st.st_mode & 0777) & (S_IRUSR | S_IWUSR)) < 0 ||
-        rename(tmp, path) < 0)
+    if (fstatat(dfd, "s", &st, AT_SYMLINK_NOFOLLOW) < 0 ||
+        fchmodat(dfd, "s", (st.st_mode & 0777) & (S_IRUSR | S_IWUSR), 0) < 0 ||
+        renameat(dfd, "s", AT_FDCWD, path) < 0)
         goto fail_file;
+    close(dfd);
     (void)rmdir(dir);
     return 0;
 
 fail_file:
-    (void)unlink(tmp);
+    saved_errno = errno;
+    (void)unlinkat(dfd, "s", 0);
+    errno = saved_errno;
+fail_dfd:
+    saved_errno = errno;
+    close(dfd);
+    errno = saved_errno;
 fail_dir:
+    saved_errno = errno;
     (void)rmdir(dir);
+    errno = saved_errno;
     return -1;
 }
 #else

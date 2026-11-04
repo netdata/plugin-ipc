@@ -232,6 +232,40 @@ pub(crate) fn object_dacl_sddl(handle: isize) -> Option<String> {
     {
         return None;
     }
+    let out = descriptor_dacl_sddl(sd);
+    unsafe { ffi::LocalFree(sd) };
+    out
+}
+
+/// The owner-only DACL for `mask` as Windows prints it, for tests. The round
+/// trip applies Windows' own SID aliases, such as LA for the built-in
+/// Administrator account that CI runners use.
+#[cfg(test)]
+pub(crate) fn owner_only_dacl_sddl(mask: &str) -> Option<String> {
+    let me = process_user_sid()?;
+    let sddl = CString::new(format!(
+        "D:P(A;;{mask};;;SY)(A;;{mask};;;BA)(A;;{mask};;;{me})"
+    ))
+    .ok()?;
+    let mut sd: *mut c_void = ptr::null_mut();
+    if unsafe {
+        ffi::ConvertStringSecurityDescriptorToSecurityDescriptorA(
+            sddl.as_ptr(),
+            ffi::SDDL_REVISION_1,
+            &mut sd,
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        return None;
+    }
+    let out = descriptor_dacl_sddl(sd);
+    unsafe { ffi::LocalFree(sd) };
+    out
+}
+
+#[cfg(test)]
+fn descriptor_dacl_sddl(sd: *mut c_void) -> Option<String> {
     let mut s: *mut c_char = ptr::null_mut();
     let ok = unsafe {
         ffi::ConvertSecurityDescriptorToStringSecurityDescriptorA(
@@ -242,7 +276,6 @@ pub(crate) fn object_dacl_sddl(handle: isize) -> Option<String> {
             ptr::null_mut(),
         )
     } != 0;
-    unsafe { ffi::LocalFree(sd) };
     ok.then(|| unsafe { take_local_string(s) })
 }
 

@@ -58,15 +58,21 @@ with mode `0777 & ~umask`, so it binds in a private directory instead:
    crashed server is removed: a directory holding only `s` is emptied and
    removed, any other non-directory at that name is unlinked. A directory
    with other content is never deleted; `listen` fails with a socket error.
-2. `mkdir {service_name}.d` (mode 0700, set again with `chmod` so a umask
-   without owner bits cannot make it unusable), `bind()` to
-   `{service_name}.d/s`, then `chmod` the socket file to its created mode
-   `& 0600`, which keeps the umask narrowing.
-3. `rename()` it to `{service_name}.sock` and remove the directory.
+2. `mkdir {service_name}.d` (mode 0700), set 0700 again with `fchmodat`
+   (`AT_SYMLINK_NOFOLLOW`) so a umask without owner bits cannot make it
+   unopenable or unusable, then open it with `O_DIRECTORY | O_NOFOLLOW`,
+   refuse it unless the process's effective user owns it, and `fchmod` the
+   descriptor to 0700.
+3. `bind()` to `{service_name}.d/s`, then, relative to the directory
+   descriptor, `fchmodat` the socket file to its created mode `& 0600`
+   (which keeps the umask narrowing) and `renameat` it to
+   `{service_name}.sock`. Remove the directory.
 
 No other user can reach the socket while its mode is wider, and the
-process-global umask is never changed. The temporary path must also fit
-`sun_path`.
+process-global umask is never changed. Every step after `mkdir` except
+`bind()` goes through the directory descriptor, so a directory swapped in
+at the same path makes `listen` fail instead of placing a socket another
+account can reach. The temporary path must also fit `sun_path`.
 
 ## Profile bit
 
