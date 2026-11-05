@@ -68,7 +68,7 @@ func (c *Client) opRemainingMs() uint32 {
 	if ms > int64(^uint32(0)) {
 		return ^uint32(0)
 	}
-	return uint32(ms)
+	return uint32(ms) // #nosec G115 -- ms is positive and bounded by uint32 max above.
 }
 
 // callReconnectFailure reports why a call ended when its reconnect failed.
