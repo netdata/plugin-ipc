@@ -8,6 +8,8 @@ Status: completed
 
 Sub-state: implemented in C, Rust and Go (endpoint lock and SHM region file); validated on Linux, macOS and FreeBSD.
 
+Regression (2026-11-05): the Rust SHM umask test broke the CI coverage job; repaired, see `## Regression - 2026-11-05`.
+
 ## Requirements
 
 ### Purpose
@@ -205,7 +207,7 @@ A POSIX server now starts and reports a running peer as address-in-use under any
 
 - A file that is reopened later must not rely on the umask to keep the opener's own access; restore its mode through the descriptor.
 - Running existing test binaries under an unusual umask found this; keep restrictive-umask cases in the suites for every file NetIPC creates and reopens.
-- Process-wide state such as the umask is tested by re-running the test binary as a child, never by changing it inside a multithreaded test runner. Manual experiments under such a umask leave debris (directories without owner read) that breaks later runs; restore owner access afterwards.
+- Process-wide state such as the umask is tested by re-running the test binary as a child, never by changing it inside a multithreaded test runner. The child restores it before exit, since coverage runtimes write their files then. Manual experiments under such a umask leave debris (directories without owner read) that breaks later runs; restore owner access afterwards.
 
 ## Followup
 
@@ -216,3 +218,34 @@ None.
 None yet.
 
 Append regression entries here only after this SOW was completed or closed and later testing or use found broken behavior. Use a dated `## Regression - YYYY-MM-DD` heading at the end of the file. Never prepend regression content above the original SOW narrative.
+
+## Regression - 2026-11-05
+
+What broke:
+
+- Codacy Coverage on `bbc55a2` failed in "Generate coverage reports": `llvm-profdata merge` died with SIGILL. On `d54b22c` that step passed (only the upload failed, decision 5 of SOW-0050).
+
+Evidence:
+
+- Reproduced locally with `cargo llvm-cov --no-report --lib -- umask` and `cargo llvm-cov report`: the same SIGILL. The child process of `test_shm_attach_under_restrictive_umask` inherits the coverage environment and wrote its `.profraw` under umask 0477 as mode 0200 (`--w-------`), which the merge cannot read.
+
+Why validation missed it:
+
+- The SOW validation ran the correctness suites but not the coverage scripts, which are the only runs that write profile files from the umask child.
+
+Repair:
+
+- The Rust child now sets umask 0477 itself and restores the previous value through a drop guard (`UmaskGuard`, also on panic) instead of the parent setting it in `pre_exec`; the Go child restores it with `defer`. Files the process writes at exit keep their normal mode. The C tests already restore the umask right after the call under test.
+
+Validation:
+
+- `cargo llvm-cov` on the umask tests: both profile files are mode 0664 and the report merges.
+- `tests/run-coverage-rust.sh`: 92.26% lines, threshold 90%, passes.
+- `tests/run-coverage-go.sh`: runs; 88.4% against its 90% threshold, the same as `d54b22c` (88.3%, measured from a `git archive` export), so the shortfall predates this SOW. The CI workflows do not run this threshold.
+- The Rust test still fails with the region `fchmod` commented out and passes with it.
+- Correctness: Linux `cargo test` 401 and Go transport tests ok, `go vet` (also FreeBSD 386), gofmt and rustfmt clean; FreeBSD 15.1 and 14.3 `cargo test` 401, Go transport tests on amd64 and 386 ok.
+- Status returned to `completed` and the SOW moved back to `done/` in the repair commit.
+
+Artifact updates:
+
+- No spec, doc or skill change: the defect was in test code. Lesson added: a child test that changes process-wide state must restore it before exit, because coverage runtimes write files at exit.

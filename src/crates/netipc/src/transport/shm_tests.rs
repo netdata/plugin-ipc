@@ -1506,22 +1506,24 @@ const UMASK_HELPER_TEST: &str = "transport::shm::tests::shm_umask_helper_process
 // test process instead of the multithreaded test runner.
 #[test]
 fn test_shm_attach_under_restrictive_umask() {
-    use std::os::unix::process::CommandExt;
-
     ensure_run_dir();
-    let mut cmd = std::process::Command::new(std::env::current_exe().expect("current_exe"));
-    cmd.args([UMASK_HELPER_TEST, "--exact", "--test-threads=1"])
+    let status = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+        .args([UMASK_HELPER_TEST, "--exact", "--test-threads=1"])
         .env(UMASK_HELPER_ENV, "1")
-        .stdout(std::process::Stdio::null());
-    // SAFETY: umask is async-signal-safe and touches no shared state.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::umask(0o477);
-            Ok(())
-        });
-    }
-    let status = cmd.status().expect("spawn umask helper");
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("spawn umask helper");
     assert!(status.success(), "attach under umask 0477 failed: {status}");
+}
+
+/// Restores the umask on drop, also on panic, so files the process writes
+/// at exit (coverage profiles) keep their normal mode.
+struct UmaskGuard(libc::mode_t);
+
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        unsafe { libc::umask(self.0) };
+    }
 }
 
 /// Child-process entry point. Inert unless spawned by the test above.
@@ -1532,6 +1534,7 @@ fn shm_umask_helper_process() {
     if std::env::var_os(UMASK_HELPER_ENV).is_none() {
         return;
     }
+    let _umask = UmaskGuard(unsafe { libc::umask(0o477) });
     let svc = "rs_shm_umask";
     let sid: u64 = 7101;
     cleanup_shm(svc, sid);

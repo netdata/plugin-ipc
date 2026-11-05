@@ -29,7 +29,9 @@ func TestShmUmaskHelperProcess(t *testing.T) {
 	if os.Getenv(shmUmaskHelperEnv) == "" {
 		return
 	}
-	syscall.Umask(0o477)
+	// Restore the umask before exit so files the process writes then
+	// (coverage data) keep their normal mode.
+	defer syscall.Umask(syscall.Umask(0o477))
 	svc := "go_shm_umask"
 	cleanupShmFiles(t, svc)
 	defer cleanupShmFiles(t, svc)
