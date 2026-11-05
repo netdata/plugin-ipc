@@ -8,6 +8,8 @@ Status: completed
 
 Sub-state: fixes implemented and validated locally and on the macOS, Windows and FreeBSD hosts; CI rerun on the pushed commit is recorded in SOW-0050's preflight.
 
+Regression (2026-11-05): `mkdir -m 0700` broke `tests/run-windows-bench.sh` on MSYS; repaired, see `## Regression - 2026-11-05`.
+
 ## Requirements
 
 ### Purpose
@@ -267,3 +269,32 @@ The vendoring candidate's CI and scanner failures are fixed: Windows DACL tests 
 None yet.
 
 Append regression entries here only after this SOW was completed or closed and later testing or use found broken behavior. Use a dated `## Regression - YYYY-MM-DD` heading at the end of the file. Never prepend regression content above the original SOW narrative.
+
+## Regression - 2026-11-05
+
+What broke:
+
+- The SOW-0050 decision 8A Windows run of `80a56de` stopped before its first benchmark: `mkdir: cannot change permissions of '/tmp/netipc-bench-394060': Permission denied`. The `63919ec` run, without this SOW's script change, ran to the end on the same host.
+
+Evidence:
+
+- On the Windows test host (MSYS2, root mounted `noacl`), `mkdir -p -m 0700 /tmp/x` exits 1 with the same message, while `mkdir` followed by `chmod 0700` exits 0; MSYS cannot apply POSIX modes on that mount and `mkdir -m` reports it.
+- The Windows benchmark drivers are native MinGW binaries; the run-directory ownership and group/world-write check in `tests/fixtures/c/interop_path.h` is compiled only for POSIX and MSYS-runtime builds (`#if defined(_WIN32) && !defined(__MSYS__)` takes the stat-only branch). The Windows script never needed a 0700 directory.
+
+Why validation missed it:
+
+- This SOW validated the Windows Rust and Go suites but did not run `tests/run-windows-bench.sh` after changing it.
+
+Repair:
+
+- `tests/run-windows-bench.sh`: the 7 run-directory sites are back to `mkdir -p`, as at `63919ec`. `tests/run-posix-bench.sh` keeps `mkdir -p -m 0700`, which the POSIX drivers need.
+
+Validation:
+
+- `bash -n` passes; shellcheck reports the same 5 SC2034 warnings as before the repair (none on the changed lines).
+- Windows host: `NIPC_BENCH_SCENARIOS=lookup NIPC_BENCH_CLIENTS=c bash tests/run-windows-bench.sh <csv> 2` on the `80a56de` tree with the repaired script exits 0 and writes its row (lookup c 45.7M/s).
+- Status returned to `completed` and the SOW moved back to `done/` in the repair commit.
+
+Artifact updates:
+
+- No spec, doc or skill change; the bench run directory mode is not documented for Windows. Lesson: a script change is validated by running that script on every platform it serves.
