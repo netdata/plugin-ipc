@@ -10,6 +10,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "test_lock_cleanup.h"
+
 #define AUTH_TOKEN        0xDEADBEEFCAFEBABEull
 #define TEST_RUN_DIR      "/tmp/nipc_service_limits"
 #define RESPONSE_BUF_SIZE 65536
@@ -33,6 +35,7 @@ static void unique_service(char *buf, size_t len, const char *prefix)
 {
     int n = __sync_add_and_fetch(&g_service_counter, 1);
     snprintf(buf, len, "%s_%d_%ld", prefix, n, (long)getpid());
+    test_locks_track(TEST_RUN_DIR, buf);
 }
 
 static nipc_server_config_t default_typed_server_config(void)

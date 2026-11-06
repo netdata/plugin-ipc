@@ -1359,7 +1359,7 @@ Pending.
 
 ## Followup
 
-None yet.
+- 2026-10-31: the Netdata consumer steps of the "Downstream Vendoring Plan" (step 7: OVERSIZED_ITEM / PAYLOAD_EXCEEDED handling and status names) were never done; the statuses are already vendored in Netdata. They are now tracked in SOW-0050, including a confirmed network-viewer caching bug. This SOW closes after the pre-vendoring full POSIX and Windows benchmark run.
 
 ## Regression Log
 

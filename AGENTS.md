@@ -212,6 +212,24 @@ A SOW cannot be completed until Validation records:
 
 Generic "N/A" is invalid.
 
+### Test Cadence
+
+Validation has three classes with different costs and triggers.
+
+1. Correctness tests (unit, robustness, interop, Netdata Linux targets, Windows suites):
+   - are deterministic and take seconds: they synchronize threads and processes on events (listening signals, handler flags, server test events, READY lines), never on sleeps, polling or retry loops, and pass or fail in one run. A sleep is allowed only as a stimulus whose length the outcome does not depend on (for example a handler slower than a poll slice), and each one is recorded in the SOW that adds it;
+   - shorten production waits through the per-instance test timings (C `*_for_tests` under `NIPC_INTERNAL_TESTING`, Rust crate-internal setters, Go unexported fields), never by changing production defaults;
+   - run after every fix and at every SOW close;
+   - target the affected surface: the touched languages, transports and platforms, plus their interop pairs. A wider run is needed only when the change crosses those boundaries (shared wire format, a cross-language contract, a build system change);
+   - before triaging a timing failure, check whether the test processes were stalled during the run: sample `/proc/pressure/{cpu,memory,io}` and `/proc/vmstat` (`compact_stall`, `allocstall_*`) while it runs. Memory pressure measures allocator stall time, not free RAM. Rerun once the stalls are gone before treating the failure as a bug, and never attribute it to another workload without evidence.
+2. Extended tests (fuzz, stress, randomized chaos, lookup scale) are not correctness tests. Default CTest, `cargo test` and `go test` runs exclude them (`NETIPC_EXTENDED_TESTS=OFF`, Go `netipc_extended` build tag, Rust `#[ignore]`). Run them with `tests/run-extended-fuzz.sh` and `tests/run-extended-stress.sh` only before vendoring, and only when the vendored changes touch what they exercise.
+3. Performance tests (`tests/run-posix-bench.sh`, `tests/run-windows-bench.sh`) take hours, so they run only when a change can affect what they measure:
+   - they measure established-session steady state: per-request encode/decode, dispatch, transport send/receive, SHM signalling, batching, pipelining, snapshot refresh and cache lookup;
+   - changes outside those paths do not need a benchmark run. Examples: connection setup and handshake, reconnect, error mapping, paths that run only after an idle timeout, shutdown, close-on-exec flags, tests, docs, build scripts;
+   - every SOW gate records a performance assessment: which changed code, if any, runs per request on an established session, with file:line evidence. When that assessment is uncertain, ask the user before planning a benchmark run.
+   - When the assessment says a change can affect those paths, the benchmark run waits until every planned fix touching them is in, then the affected suites run once. If they show regressions, fix all of them, then rerun once. Never benchmark between fixes, and never re-benchmark after each regression fix. Each SOW lands as one commit, so bisect a regression by SOW commit.
+   - A SOW whose purpose is performance (an optimization, a benchmark investigation, a floor change) runs the benchmark rows it needs.
+
 ### Artifact Maintenance Gate
 
 Every SOW close must explicitly record whether each durable artifact class was updated or why no update was needed:
@@ -259,7 +277,7 @@ Runtime input skills:
 
 - `.agents/skills/project-netdata-vendoring/SKILL.md`
   Trigger: any work that copies, syncs, vendors, merges, or checks NetIPC source changes into a Netdata checkout.
-  Purpose: require source `plugin-ipc` CI and GitHub code/security scanner preflight before touching Netdata's vendored NetIPC copy.
+  Purpose: require source `plugin-ipc` CI, GitHub code/security scanner, and performance-assessment preflight before touching Netdata's vendored NetIPC copy.
 
 Output/reference skills:
 
@@ -272,15 +290,21 @@ Output/reference skills:
 - Configure/build C plus available Rust and Go pieces: `make`
 - Explicit configure/build: `cmake -S . -B build` then `cmake --build build`
 - The standalone Rust package uses language edition 2024 with MSRV 1.91.
-  Validate both Rust 1.91.0 and latest stable. Keep style edition 2021 explicit
-  through `rustfmt.toml` until the coordinated SOW-0035 style migration.
+  Validate both Rust 1.91.0 and latest stable. `rustfmt.toml` selects style
+  edition 2024 explicitly; `cargo fmt --check` must pass with both toolchains.
 - Local validation and benchmark commands must run at low scheduler priority so the workstation desktop stays responsive. Prefer `tests/run-low-priority.sh <command> [args...]` for direct commands; project validation scripts under `tests/*.sh` already self-reexec through this helper. The helper uses `nice -n 19` plus `ionice -c 3` when available, and falls back on platforms without `ionice`.
 - Run CTest after configure/build: `tests/run-low-priority.sh ctest --test-dir build --output-on-failure`
 - POSIX coverage: `bash tests/run-coverage-c.sh`, `bash tests/run-coverage-rust.sh`, `bash tests/run-coverage-go.sh`
 - POSIX interop examples: `bash tests/interop_codec.sh`, `bash tests/test_uds_interop.sh`, `bash tests/test_shm_interop.sh`, `bash tests/test_service_interop.sh`
 - `tests/interop_codec.sh` configures `build/`; do not run it in parallel with CTest or another build-directory validation command.
+- Netdata Linux targets (32-bit, ARM, musl): `bash tests/run-linux-target.sh <target> [c] [rust] [go] [interop]`; targets and required cross toolchains are listed in the script header. C test fixtures use fixed `/tmp` paths: never run two targets in parallel on one host.
+- FreeBSD (no CI runner; run manually on a FreeBSD host before vendoring and after any change to POSIX transport, service, build or test code): with `cmake`, `ninja`, `bash`, Rust and Go installed, run `cmake -S . -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure`, then `cargo test` in `src/crates/netipc` and `go test ./...` in `src/go`. FreeBSD runs SHM (Go SHM on amd64 and 386 only, so on amd64 also run `GOARCH=386 go test ./...` in `src/go`); keep the build directory and `/tmp` on UFS or tmpfs, since ZFS rejects the region reservation and the SHM suites need it.
+- macOS (CI workflow `.github/workflows/macos.yml`; run on a macOS host after any change to POSIX transport, service, build or test code): with `cmake`, Rust and Go installed, run `cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on-failure`, then `cargo test` in `src/crates/netipc`, `go test ./...` in `src/go`, and `bash tests/test_uds_interop.sh`, `tests/test_service_interop.sh`, `tests/test_cache_interop.sh`, `tests/test_lookup_scale_interop.sh`, `tests/interop_codec.sh`. macOS runs the UDS stream baseline (`docs/level1-posix-uds.md`, "Stream baseline"; FreeBSD uses it too) and has no SHM, so the SHM suites are not built there. Code paths of test scripts that macOS runs must work on its bash 3.2 (no `{fd}` redirections, `mapfile`, associative arrays); the stream helpers are compiled and unit-tested on Linux too.
+- Extended (non-correctness) suites, before vendoring only: `bash tests/run-extended-fuzz.sh`, `bash tests/run-extended-stress.sh`
+- Interop scripts share `tests/interop-lib.sh` (start a fixture server, block on its READY line, stop it with an identity check).
+- Robustness reproduction tests: C `test_robustness` / `test_win_robustness`, Rust `service::raw::tests::robustness` / `service::raw::windows_tests::robustness`, Go `TestRobust*` / `TestWinRobust*`. They always run; there is no skip gate.
 - Windows validation scripts are under `tests/run-*-windows*.sh` and `tests/test_*_win*.sh`; use the specific script matching the touched transport/API.
-- Benchmark generation: `bash tests/generate-benchmarks-posix.sh` or `bash tests/generate-benchmarks-windows.sh`
+- Benchmarks (only when Test Cadence calls for them): measure with `bash tests/run-posix-bench.sh <csv> [duration]` or `bash tests/run-windows-bench.sh <csv> [duration]`, then render the report and check floors with `bash tests/generate-benchmarks-posix.sh` or `bash tests/generate-benchmarks-windows.sh`
 - Netdata vendor diff: `bash ./diff-netdata-vendor.sh /path/to/netdata`
 - Netdata vendor copy: `bash ./vendor-to-netdata.sh /path/to/netdata`
 
@@ -290,8 +314,9 @@ Output/reference skills:
 - Preserve the layer boundaries in `docs/code-organization.md`: Codec owns wire format; transport owns connection/framing/profile mechanics; service owns typed orchestration and snapshot helpers.
 - Cross-language interoperability is mandatory across C, Rust, and Go. Do not change one language implementation without checking the corresponding contract and other language implementations.
 - Go must remain pure Go without `cgo`.
-- Performance claims require benchmark evidence. Do not adjust benchmark floors or accept parity gaps without a fact-based analysis.
-- Before any Netdata vendoring work, load `.agents/skills/project-netdata-vendoring/SKILL.md` and complete its preflight even if the user did not explicitly ask for CI, scanner, or drift checks. Do not modify Netdata's vendored NetIPC copy until the active SOW records: the candidate `plugin-ipc` source commit; GitHub Actions/check-run evidence; GitHub code-scanning, Dependabot, and secret-scanning evidence; the last source-to-Netdata vendoring baseline; a two-way gap analysis of what changed in `plugin-ipc` since that baseline and what changed in Netdata's vendored NetIPC copy since that baseline; and a migration plan for every drift class. Failing, pending, cancelled, timed-out, or untriaged open scanner findings block vendoring unless they are fixed, documented as evidence-backed false positives, or explicitly risk-accepted by the user in the SOW. Unknown baseline, unexplained downstream drift, or no migration plan also blocks vendoring.
+- Performance claims require benchmark evidence. When a benchmark run is needed and how it is batched is defined in Test Cadence. Do not adjust benchmark floors or accept parity gaps without a fact-based analysis.
+- Before any Netdata vendoring work, load `.agents/skills/project-netdata-vendoring/SKILL.md` and complete its preflight even if the user did not explicitly ask for CI, scanner, or drift checks. Do not modify Netdata's vendored NetIPC copy until the active SOW records: the candidate `plugin-ipc` source commit; GitHub Actions/check-run evidence; GitHub code-scanning, Dependabot, and secret-scanning evidence; the last source-to-Netdata vendoring baseline; a two-way gap analysis of what changed in `plugin-ipc` since that baseline and what changed in Netdata's vendored NetIPC copy since that baseline; a migration plan for every drift class; and the performance assessment of the vendored changes, with the benchmark comparison when that assessment called for a run (Test Cadence). Failing, pending, cancelled, timed-out, or untriaged open scanner findings block vendoring unless they are fixed, documented as evidence-backed false positives, or explicitly risk-accepted by the user in the SOW. Unknown baseline, unexplained downstream drift, or no migration plan also blocks vendoring.
+- Zero-known-bug policy: confirmed bugs are fixed, not documented. A reproduction test exists to prove a bug is real and then to prove the fix; never land it behind a skip gate, environment switch, or "known bug" marker, and never close work with a confirmed bug left open. Fix design decisions still go to the user.
 - Archived TODO history under `.agents/sow/todo-history/TODO-*` is existing project memory. Do not move, delete, or rewrite those archived notes without explicit user approval; track future classification or migration through a SOW.
 
 ### Preservation Notes

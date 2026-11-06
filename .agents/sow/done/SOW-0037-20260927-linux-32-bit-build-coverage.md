@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: open
+Status: closed
 
-Sub-state: separately tracked build gaps discovered during SOW-0036; no implementation started.
+Sub-state: merged into SOW-0046 by user decision (2026-10-29). SOW-0046 delivered the Go part and owns all remaining scope; see `.agents/sow/current/SOW-0046-20261029-go-cross-platform-build.md`.
 
 ## Requirements
 
@@ -46,7 +46,7 @@ thread closure. SOW-0036 corrects the SHM Timespec construction separately.
 
 ## Pre-Implementation Gate
 
-Status: blocked
+Status: superseded; merged into SOW-0046, whose gate covers this scope.
 
 Problem / root-cause model: architecture-width assumptions and libc-dependent
 pthread_t types prevent cross-target compilation.
@@ -105,15 +105,25 @@ Investigate and complete the pre-implementation gate before starting edits.
 
 Recorded reproducible compile failures from SOW-0036.
 
+### 2026-10-29
+
+SOW-0046 delivered the Go part of this SOW: Go 386 `Iovlen` width, the
+missing `SYS_SENDMSG` (socketcall on linux/386), the oversized test literals,
+Go test execution on 386/arm/arm64 in Runtime Safety CI, and a 32-bit SHM
+attach overflow fix in C, Rust and Go. Remaining scope here: the Rust ARM musl
+`pthread_t` test compile failure, and executing the C and Rust test suites and
+interop on 32-bit targets (the C/Rust attach fix from SOW-0046 is verified on
+64-bit only, because no local 32-bit C/Rust toolchain exists).
+
 ## Validation
 
-This pending SOW records compiler evidence only; implementation acceptance,
-real-use testing, review, same-failure scan and artifact gates remain required
-when activated. Status open agrees with pending directory.
+Closed without separate implementation; acceptance evidence, reviews, same-failure
+scan and artifact gates are recorded in SOW-0046. Status closed agrees with the
+done directory.
 
 ## Outcome
 
-Tracked; not implemented.
+Closed as merged into SOW-0046 (user decision 2026-10-29). No work remains here; acceptance criteria are validated in SOW-0046.
 
 ## Lessons Extracted
 

@@ -85,6 +85,20 @@ message_id.
 If a caller needs ordered results for dependent work, it should use batching
 (one message, ordered items). Pipelining is for independent work.
 
+A pipelining client may send all its requests before reading any response,
+whatever the bytes in flight. Once those bytes exceed what the socket buffers
+hold, the server blocks sending responses the client is not reading, and stops
+reading requests. A client send that blocks then must not wait for the server:
+while it waits for buffer space, it reads the responses that arrive and keeps
+them for later receives. Both peers keep making progress, so pipelining cannot
+deadlock on buffer size. The in-flight set bounds those kept bytes: more than
+the in-flight responses can occupy is a protocol violation that fails the
+session. A client with one request in flight sends exactly as before.
+
+Baseline sessions implement this in all three languages: POSIX in
+`level1-posix-uds.md`, "Pipelined sends", and Windows Named Pipes in
+`level1-windows-np.md`, "Pipelining".
+
 ### 4. Batching
 
 Batching is a Level 1 framing feature, not a typed-method feature.
@@ -185,7 +199,12 @@ Level 1 manages the full lifecycle of transport connections:
   clients. One listener serves one service endpoint.
 - **Accept**: accept incoming client connections on a listener. Each accepted
   connection becomes an independent session after completing the handshake.
-  A listener must support multiple concurrent sessions.
+  A listener must support multiple concurrent sessions. Accept is split in
+  two steps: taking the connection (no bytes read), then running the server
+  handshake with a deadline and an abort signal. This lets a server run the
+  handshake outside its accept loop, so one stalled client cannot block
+  others. The one-step accept remains as a convenience; it applies the
+  server handshake deadline below without an abort signal.
 - **Close**: tear down a session or a listener. Closing a session releases
   its transport resources. Closing a listener stops accepting new connections
   but does not forcibly terminate existing sessions (that is a higher-level
@@ -194,8 +213,15 @@ Level 1 manages the full lifecycle of transport connections:
 ### Handshake
 
 Every new session begins with a handshake over the baseline transport. The
-handshake is a single request-response exchange using control messages. It
-establishes:
+handshake is a single request-response exchange using control messages.
+
+The server bounds its wait for HELLO. The managed server (Level 2) drops a
+connection that has not delivered HELLO within 5000 ms
+(`NIPC_SERVER_HANDSHAKE_TIMEOUT_MS` in C, `SERVER_HANDSHAKE_TIMEOUT_MS` in
+Rust, `ServerHandshakeTimeoutMs` in Go), and abandons the wait at once when
+it is stopped.
+
+The handshake establishes:
 
 - **Authorization**: the client presents a caller-supplied auth token. The
   server verifies it. If verification fails, the session is rejected. The
@@ -219,6 +245,9 @@ establishes:
   server). Both sides use this single negotiated packet size for chunking on
   the connection. The negotiated packet size must be strictly greater than the
   header size (32 bytes); if it is not, the server rejects the handshake.
+  Each side's proposal must not exceed the largest message its own transport
+  can send in one packet, and the client rejects a negotiated size larger
+  than its proposal.
 
 ### Handshake strategy
 
@@ -280,8 +309,8 @@ sequenceDiagram
     S->>S: Validate HELLO and auth
     S->>S: Choose selected_profile = SHM
     S->>S: Compute final session limits
-    S->>S: Provision SHM resources for this session
-    S->>S: Allocate session_id tied to this SHM session
+    S->>S: Allocate session_id for this session
+    S->>S: Provision SHM resources named by session_id
     S-->>C: HELLO_ACK(status=OK,\nselected_profile=SHM,\nfinal limits, packet_size, session_id)
     Note over C,S: Server-side SHM is already prepared for immediate client attach
 ```
@@ -442,7 +471,9 @@ Level 1 exposes native OS wait objects so callers can integrate sessions and
 listeners into their own event loops:
 
 - POSIX: file descriptor (fd)
-- Windows: HANDLE
+- Windows: HANDLE. A Named Pipe session handle is signalled by I/O
+  completion, not by arriving data, so session read-readiness comes from
+  the wait-readable call; see `level1-windows-np.md`, "Pipelining".
 
 Wait objects are available for:
 
@@ -460,8 +491,14 @@ Level 1 supports multiple transport backends behind the same API surface:
 
 | Transport | Platform | Characteristics |
 |-----------|----------|-----------------|
-| UDS SEQPACKET | Linux, FreeBSD, macOS | Message-oriented, packet-limited, always available |
+| UDS SEQPACKET | Linux | Message-oriented, packet-limited, always available |
+| UDS stream | macOS, FreeBSD | Same packets over `SOCK_STREAM`, delimited by their headers; always available |
 | Named Pipe | Windows | Message-oriented, always available |
+
+macOS has no `AF_UNIX` `SOCK_SEQPACKET`, and FreeBSD 15 `SOCK_SEQPACKET`
+does not keep NetIPC's packet boundaries. Their baseline carries the same
+bytes under the same profile bit, so peers cannot tell the difference; see
+`level1-posix-uds.md`, "Stream baseline".
 
 Baseline transports are always available and require no negotiation beyond
 the standard handshake. They support full pipelining (many in-flight messages).
@@ -472,6 +509,7 @@ They may require chunking for large messages.
 | Transport | Platform | Synchronization |
 |-----------|----------|-----------------|
 | SHM | Linux | Futex-based |
+| SHM | FreeBSD | `_umtx_op`-based (Go: amd64 and 386 only) |
 | SHM | Windows | WaitOnAddress / named events |
 
 SHM transports are negotiated upgrades from the corresponding baseline
@@ -496,8 +534,15 @@ prohibition. Callers that need pipelining over SHM should pipeline at the
 batch level (one batch message in flight containing multiple items) or fall
 back to the baseline transport.
 
-FreeBSD and macOS do not have SHM backends. They always use the baseline UDS
-transport.
+macOS, and Go on FreeBSD architectures other than amd64 and 386, do not have
+SHM backends. They always use the baseline UDS transport: there the POSIX
+handshake masks both the client's offered profiles and the server's supported
+and preferred profiles to the baseline bit, whatever the caller configured, so
+a misconfigured peer can never negotiate an SHM profile. The SHM API still
+exists in C and Go and reports "unsupported"; the Rust crate compiles the POSIX
+SHM module only on Linux and FreeBSD. On FreeBSD a server whose run directory
+is on ZFS cannot reserve region files and serves baseline (see
+`level1-posix-shm.md`).
 
 ### Transport selection
 

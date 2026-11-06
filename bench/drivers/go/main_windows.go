@@ -838,6 +838,10 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 	wallStart := nowNS()
 	tickDeadline := tickMSWin() + uint64(durationSec)*1000
 
+	// Declared once: Send takes &hdr, so it escapes to the heap; inside the
+	// loop that would be one allocation per request.
+	var hdr protocol.Header
+
 	for tickMSWin() < tickDeadline {
 		rl.wait()
 
@@ -867,7 +871,7 @@ func runBatchPingPongClientWin(runDir, service string, profiles uint32, duration
 		reqLen, _ := bb.Finish()
 
 		msgSeq++
-		hdr := protocol.Header{
+		hdr = protocol.Header{
 			Kind:            protocol.KindRequest,
 			Code:            protocol.MethodIncrement,
 			Flags:           protocol.FlagBatch,
@@ -1076,6 +1080,10 @@ func runPipelineClientWin(runDir, service string, durationSec int, targetRPS uin
 
 	runtime.GC()
 
+	// Declared once: Send takes &hdr, so it escapes to the heap; inside the
+	// loop that would be one allocation per request.
+	var hdr protocol.Header
+
 	for tickMSWin() < tickDeadline {
 		rl.wait()
 
@@ -1088,7 +1096,7 @@ func runPipelineClientWin(runDir, service string, durationSec int, targetRPS uin
 			binary.NativeEndian.PutUint64(reqPayload[:], val)
 
 			msgSeq++
-			hdr := protocol.Header{
+			hdr = protocol.Header{
 				Kind:            protocol.KindRequest,
 				Code:            protocol.MethodIncrement,
 				ItemCount:       1,
@@ -1204,21 +1212,17 @@ func warmPipelineClientWin(session *windows.Session, recvBuf []byte, reqPayload 
 // ---------------------------------------------------------------------------
 
 type pipelineBatchSlotWin struct {
-	messageID     uint64
-	batchSize     uint32
-	inflightBytes uint64
-	active        bool
+	messageID uint64
+	batchSize uint32
+	active    bool
 }
 
 func warmPipelineBatchClientWin(session *windows.Session, reqBufs [][]byte, recvBuf []byte, itemBuf []byte, depth int) error {
 	slots := make([]pipelineBatchSlotWin, depth)
 	var counter, msgSeq uint64
-	inflightBudget := uint64(session.PacketSize) * 2
 
 	sent := 0
 	received := 0
-	outstanding := 0
-	inflightBytes := uint64(0)
 
 	for received < depth {
 		if sent < depth {
@@ -1247,42 +1251,15 @@ func warmPipelineBatchClientWin(session *windows.Session, reqBufs [][]byte, recv
 				TransportStatus: protocol.StatusOK,
 			}
 
-			slotBytes := uint64((protocol.HeaderSize + reqLen) * 2)
-			for outstanding > 0 && inflightBytes+slotBytes > inflightBudget {
-				respHdr, _, err := session.Receive(recvBuf)
-				if err != nil {
-					return fmt.Errorf("pipeline-batch warmup recv: %w", err)
-				}
-
-				matched := -1
-				for i := range slots {
-					if slots[i].active && slots[i].messageID == respHdr.MessageID {
-						matched = i
-						break
-					}
-				}
-				if matched < 0 {
-					return fmt.Errorf("pipeline-batch warmup unknown response id %d", respHdr.MessageID)
-				}
-
-				inflightBytes -= slots[matched].inflightBytes
-				slots[matched].active = false
-				outstanding--
-				received++
-			}
-
 			if err := session.Send(&hdr, reqBufs[slot][:reqLen]); err != nil {
 				return fmt.Errorf("pipeline-batch warmup send: %w", err)
 			}
 
 			slots[slot] = pipelineBatchSlotWin{
-				messageID:     hdr.MessageID,
-				batchSize:     bs,
-				inflightBytes: slotBytes,
-				active:        true,
+				messageID: hdr.MessageID,
+				batchSize: bs,
+				active:    true,
 			}
-			inflightBytes += slotBytes
-			outstanding++
 			counter += uint64(bs)
 			sent++
 			continue
@@ -1304,9 +1281,7 @@ func warmPipelineBatchClientWin(session *windows.Session, reqBufs [][]byte, recv
 			return fmt.Errorf("pipeline-batch warmup unknown response id %d", respHdr.MessageID)
 		}
 
-		inflightBytes -= slots[matched].inflightBytes
 		slots[matched].active = false
-		outstanding--
 		received++
 	}
 
@@ -1351,7 +1326,6 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 	recvBuf := make([]byte, batchBufSizeWin+protocol.HeaderSize)
 
 	var counter, totalItems, errors, msgSeq uint64
-	inflightBudget := uint64(session.PacketSize) * 2
 
 	if err := warmPipelineBatchClientWin(session, reqBufs, recvBuf, itemBuf, depth); err != nil {
 		fmt.Fprintf(os.Stderr, "pipeline-batch warmup: %v\n", err)
@@ -1365,6 +1339,10 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 	tickDeadline := tickMSWin() + uint64(durationSec)*1000
 	rng := newXorShift32Win()
 
+	// Declared once: Send takes &hdr, so it escapes to the heap; inside the
+	// loop that would be one allocation per request.
+	var hdr protocol.Header
+
 	for tickMSWin() < tickDeadline {
 		rl.wait()
 
@@ -1375,8 +1353,6 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 
 		sent := 0
 		received := 0
-		outstanding := 0
-		inflightBytes := uint64(0)
 		cycleOK := true
 
 		for received < depth {
@@ -1395,47 +1371,13 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 				reqLen, _ := bb.Finish()
 
 				msgSeq++
-				hdr := protocol.Header{
+				hdr = protocol.Header{
 					Kind:            protocol.KindRequest,
 					Code:            protocol.MethodIncrement,
 					Flags:           protocol.FlagBatch,
 					ItemCount:       bs,
 					MessageID:       msgSeq,
 					TransportStatus: protocol.StatusOK,
-				}
-
-				slotBytes := uint64((protocol.HeaderSize + reqLen) * 2)
-
-				for outstanding > 0 && inflightBytes+slotBytes > inflightBudget {
-					respHdr, _, rerr := session.Receive(recvBuf)
-					if rerr != nil {
-						errors++
-						cycleOK = false
-						break
-					}
-
-					matched := -1
-					for i := range slots {
-						if slots[i].active && slots[i].messageID == respHdr.MessageID {
-							matched = i
-							break
-						}
-					}
-					if matched < 0 {
-						fmt.Fprintf(os.Stderr, "pipeline-batch client: unknown response id %d\n", respHdr.MessageID)
-						errors++
-						cycleOK = false
-						break
-					}
-
-					inflightBytes -= slots[matched].inflightBytes
-					totalItems += uint64(slots[matched].batchSize)
-					slots[matched].active = false
-					outstanding--
-					received++
-				}
-				if !cycleOK {
-					break
 				}
 
 				if serr := session.Send(&hdr, reqBufs[slot][:reqLen]); serr != nil {
@@ -1445,13 +1387,10 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 				}
 
 				slots[slot] = pipelineBatchSlotWin{
-					messageID:     hdr.MessageID,
-					batchSize:     bs,
-					inflightBytes: slotBytes,
-					active:        true,
+					messageID: hdr.MessageID,
+					batchSize: bs,
+					active:    true,
 				}
-				inflightBytes += slotBytes
-				outstanding++
 				counter += uint64(bs)
 				sent++
 				continue
@@ -1478,10 +1417,8 @@ func runPipelineBatchClientWin(runDir, service string, durationSec int, targetRP
 				break
 			}
 
-			inflightBytes -= slots[matched].inflightBytes
 			totalItems += uint64(slots[matched].batchSize)
 			slots[matched].active = false
-			outstanding--
 			received++
 		}
 
@@ -1629,12 +1566,16 @@ func runPingPongClientWin(runDir, service string, profiles uint32, durationSec i
 	wallStart := nowNS()
 	tickDeadline := tickMSWin() + uint64(durationSec)*1000
 
+	// Declared once: Send takes &hdr, so it escapes to the heap; inside the
+	// loop that would be one allocation per request.
+	var hdr protocol.Header
+
 	for tickMSWin() < tickDeadline {
 		rl.wait()
 
 		binary.NativeEndian.PutUint64(reqPayload[:], counter)
 
-		hdr := protocol.Header{
+		hdr = protocol.Header{
 			Kind:            protocol.KindRequest,
 			Code:            protocol.MethodIncrement,
 			Flags:           0,

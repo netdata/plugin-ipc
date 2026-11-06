@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: paused
+Status: completed
 
-Sub-state: paused by user decision on 2026-06-11 so `SOW-0016` can take current active slot for a timeout/abort liveness fix. Resume from Codacy test/bench exclusion and refreshed production-source maintainability baseline work.
+Sub-state: closed 2026-10-31 after refreshing the metrics and selecting the next target; the continuing file-by-file work moves to SOW-0057 and the Go version drift to SOW-0058.
 
 ## Requirements
 
@@ -1082,19 +1082,28 @@ Lessons:
 
 Follow-up mapping:
 
-- Netdata re-vendor work is planned in this SOW and will be performed after the SDK commit is pushed.
+- Netdata re-vendor work from this SOW shipped in later vendorings (`netdata/netdata#22936`, merged 2026-07-01, closed in SOW-0027).
+
+### 2026-10-31 close-out
+
+- Codacy Cloud, public API, `main` `63919ecb7d` (2026-09-27): grade A (99), 33 issues, 60453 LOC (tests and benchmarks excluded by `.codacy.yml` `exclude_paths`, which Cloud honors), coverage 90.6%, complex files 32%, duplicated files 32% (baseline at `dbf77a8595`: 42% / 41%, with tests counted). Goals: 10% / 10%.
+- The 33 issues are all Trivy Go standard-library findings on `go.mod` (`go 1.26.0`); Netdata has since moved to `go 1.27.0`, so the version rule this SOW recorded is now out of date: tracked in SOW-0058.
+- Next target, by evidence: `jscpd --min-tokens 50` over production sources (branch tip `dbfa64a`) finds 9.6% duplicated lines; the largest pair is Rust `transport/windows.rs` (745 lines) / `transport/posix.rs` (577). Tracked with the full ranking in SOW-0057.
 
 ## Outcome
 
-Pending.
+Codacy metrics now cover production code only (tests and benchmarks excluded through `.codacy.yml`, which Cloud honors). Complex files fell from 42% to 32% and duplicated files from 41% to 32%. The next production target is selected with evidence.
 
 ## Lessons Extracted
 
-Pending.
+- Codacy Cloud reads path excludes from a root `.codacy.yml`, not from `.codacy/codacy.config.json`.
+- Codacy's duplicated-files metric counts any file with one duplicated block, so it stays far above line-level duplication (32% of files vs 9.6% of lines here); pick targets by duplicated lines, then confirm with the Cloud metric.
 
 ## Followup
 
-None yet.
+- File-by-file duplication work: SOW-0057.
+- Go 1.27 alignment and the Trivy findings: SOW-0058.
+- Search of this SOW for defer/later/follow-up/future/TODO/pending: the July re-vendor plan (shipped, see above) and historical narrative.
 
 ## Regression Log
 

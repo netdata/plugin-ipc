@@ -2,12 +2,9 @@
 
 ## Status
 
-Status: paused
+Status: completed
 
-Sub-state: paused on 2026-07-12 so SOW-0030 can take the active slot for the
-fleet-observed SHM SIGBUS crash. The earlier L3 API decision was resolved by using the
-direct L2 snapshot path; resume from final validation, artifact maintenance, review,
-and lifecycle closure for the already merged Netdata vendor update.
+Sub-state: closed 2026-10-31 on existing evidence: the Netdata vendor update merged on 2026-07-01 (`netdata/netdata#22936`). Paused 2026-07-12 for SOW-0030; resumed only for final validation and lifecycle closure.
 
 ## Requirements
 
@@ -287,7 +284,8 @@ Acceptance criteria evidence:
 - Source post-backport preflight completed before Netdata vendoring: CI/checks, GitHub code scanning, Dependabot, secret scanning, and Codacy Cloud were checked for `bb7a73e0e2b871352eeb3c4403afbd69649a351d`.
 - Two-way gap analysis completed before vendoring and recorded in the 2026-07-01 execution log.
 - Valid Netdata-only vendored-source drift was backported to `plugin-ipc` before any Netdata copy.
-- Netdata vendoring is implemented in the target checkout and the eBPF L2 adaptation builds; the first PR commit exposed CI/scanner findings that are being fixed source-first before re-vendoring.
+- Netdata vendoring is implemented in the target checkout and the eBPF L2 adaptation builds; the first PR commit exposed CI/scanner findings, fixed source-first before re-vendoring.
+- Final state (checked 2026-10-31, read-only `gh`): `netdata/netdata#22936` "Update vendored NetIPC to 98ec474" merged 2026-07-01T13:51:31Z, head `e5f57a1e93`, merge commit `ca9a5426a6`. The vendored source commit `98ec474` is an ancestor of plugin-ipc `HEAD`.
 
 Tests or equivalent validation:
 
@@ -298,7 +296,9 @@ Tests or equivalent validation:
   - `git diff --check`;
   - SOW audit.
 - GitHub/Codacy validation for the new source backport commit passed as recorded above.
-- Source-side CI/scanner repair validation passed locally as recorded in the 2026-07-01 execution log. Remote source CI/scanner validation is pending until the repair commit is pushed.
+- Source-side CI/scanner repair validation passed locally as recorded in the 2026-07-01 execution log.
+- Remote source checks on the vendored commit `98ec474`: 46 check runs succeeded; `Valgrind` was skipped on the 2026-07-01 run and a later 2026-07-07 run was cancelled: the run that gated vendoring skipped it, and the cancelled run came six days after the merge. Open GitHub code-scanning alerts on plugin-ipc: 0 (2026-10-31).
+- PR check snapshot (2026-10-31): 107 pass, 20 skipping, 20 fail. All 20 failures are `Build / Test Source Build (...)` jobs that completed about two hours after the merge (e.g. check run 84540364193, completed 15:52 UTC) and failed in Docker buildx with "repository does not contain ref refs/pull/22936/merge": a post-merge re-run against a deleted merge ref, not a code failure.
 
 Real-use evidence:
 
@@ -308,7 +308,7 @@ Real-use evidence:
 
 Reviewer findings:
 
-- Not started.
+- No external review. Netdata maintainers reviewed and merged the PR.
 
 Same-failure scan:
 
@@ -326,7 +326,7 @@ Artifact maintenance gate:
 - Specs: no update needed until implementation changes behavior.
 - End-user/operator docs: no update needed until implementation changes behavior.
 - End-user/operator skills: no update needed until implementation changes behavior.
-- SOW lifecycle: moved from pending to current before source backport and Netdata vendoring; remains in progress until Netdata commit, post-vendor checks, and final review are complete.
+- SOW lifecycle: moved to `done/` at close. The `umask()` suppressions added during the scanner repair are superseded by SOW-0032, which removed the `umask()` calls.
 
 Specs update:
 
@@ -354,7 +354,7 @@ Follow-up mapping:
 
 ## Outcome
 
-In progress. Source backport and pre-vendor checks are complete, Netdata vendoring is copied, and the eBPF consumer now builds against the vendored opaque NetIPC cache API by using direct L2 snapshot access. Draft PR `netdata/netdata#22936` is open; its first commit exposed Go fix, Codacy, and Sonar findings that are being repaired source-first before re-vendoring. Post-vendor CI/scanner checks and final SOW closure are not complete yet.
+Completed. The NetIPC memory-safety fixes reached Netdata through the source-first vendoring path: Netdata-only drift was backported, the CI and scanner findings from the first PR commit were fixed in plugin-ipc, and `netdata/netdata#22936` (vendoring plugin-ipc `98ec474`, with the eBPF consumer switched to direct L2 snapshot access) merged on 2026-07-01.
 
 ## Lessons Extracted
 
@@ -362,7 +362,8 @@ In progress. Source backport and pre-vendor checks are complete, Netdata vendori
 
 ## Followup
 
-None yet.
+- Later NetIPC changes reach Netdata through SOW-0050.
+- Search of this SOW for defer/later/follow-up/future/TODO/pending: remaining matches are historical narrative (the July "pending" states, now resolved above) and the SOW-0050 reference.
 
 ## Regression Log
 

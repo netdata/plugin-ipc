@@ -2,8 +2,10 @@
 #
 # run-extended-fuzz.sh - Extended fuzz testing for netipc protocol.
 #
-# Runs all fuzz targets with longer durations than CTest:
-#   - Go: 8 fuzz targets x 60s each
+# Fuzz targets are not correctness tests: Go fuzz files build only with the
+# netipc_extended tag and Rust proptests are #[ignore]d, so default test runs
+# skip them. This script runs them with long durations:
+#   - Go: 12 fuzz targets x 60s each
 #   - C:  standalone fuzz harness with 1MB random data
 #   - Rust: proptest with 100000 cases (via env var)
 #
@@ -91,7 +93,7 @@ run_go_fuzz() {
     for target in "${targets[@]}"; do
         log "  ${target} (${FUZZTIME}s)..."
         local output
-        if output=$(cd "${GO_PKG_DIR}" && CGO_ENABLED=0 go test \
+        if output=$(cd "${GO_PKG_DIR}" && CGO_ENABLED=0 go test -tags netipc_extended \
             -fuzz="^${target}$" -fuzztime="${FUZZTIME}s" \
             ./pkg/netipc/protocol/ 2>&1); then
             pass "Go ${target}"
@@ -164,7 +166,7 @@ run_rust_fuzz() {
 
     log "  Running proptest with PROPTEST_CASES=100000..."
     if (cd "${RUST_CRATE_DIR}" && \
-        PROPTEST_CASES=100000 run cargo test protocol -- --test-threads=1 2>&1); then
+        PROPTEST_CASES=100000 run cargo test proptests -- --ignored --test-threads=1 2>&1); then
         pass "Rust proptest (100000 cases)"
     else
         fail "Rust proptest (100000 cases)"

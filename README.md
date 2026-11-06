@@ -102,7 +102,9 @@ See:
 
 | Platform | Baseline transport | Negotiated fast path | Languages |
 |---|---|---|---|
-| POSIX / Linux | Unix domain `SOCK_SEQPACKET` | POSIX shared memory | C, Rust, Go |
+| Linux | Unix domain `SOCK_SEQPACKET` | POSIX shared memory | C, Rust, Go |
+| FreeBSD | Unix domain `SOCK_STREAM`, same packets | POSIX shared memory (Go: amd64 and 386 only; run directory on tmpfs or UFS, not ZFS) | C, Rust, Go |
+| macOS | Unix domain `SOCK_STREAM`, same packets | none | C, Rust, Go |
 | Windows | Named Pipes | Windows shared memory | C, Rust, Go |
 
 Important facts:
@@ -357,8 +359,8 @@ Recommended reading order:
 The standalone Rust package uses Rust edition 2024 and requires Rust 1.91 or
 newer. Use the latest stable toolchain for normal development; CI also compiles
 every target with Rust 1.91.0 to enforce the minimum. The repository
-`rustfmt.toml` keeps formatting on style edition 2021 independently of the
-language edition.
+`rustfmt.toml` selects style edition 2024 explicitly, matching the language
+edition and Netdata's Rust workspace.
 
 ### Linux / POSIX
 

@@ -6,6 +6,13 @@
 //!
 //!   interop_named_pipe client <run_dir> <service_name>
 //!     Connects, sends 1 message, verifies echo, exits 0 on success.
+//!
+//!   interop_named_pipe pipeline-server <run_dir> <service_name>
+//!     Like server, but echoes PIPELINE_REQUESTS messages one at a time.
+//!
+//!   interop_named_pipe pipeline-client <run_dir> <service_name>
+//!     Sends PIPELINE_REQUESTS messages before reading any response (more
+//!     than the pipe buffers hold), then verifies the echoes in order.
 
 #[cfg(windows)]
 use netipc::protocol::{self, Header};
@@ -14,6 +21,11 @@ use netipc::transport::windows::{ClientConfig, NpListener, NpSession, ServerConf
 
 #[cfg(windows)]
 const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;
+#[cfg(windows)]
+const PIPELINE_PAYLOAD: usize = 16 * 1024;
+/// 512 KiB each way, 8x the 64 KiB pipe buffers.
+#[cfg(windows)]
+const PIPELINE_REQUESTS: u64 = 32;
 
 #[cfg(windows)]
 fn server_config() -> ServerConfig {
@@ -129,6 +141,67 @@ fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Er
     }
 }
 
+#[cfg(windows)]
+fn pipeline_payload(id: u64) -> Vec<u8> {
+    (0..PIPELINE_PAYLOAD)
+        .map(|i| (id as u8).wrapping_add(i as u8))
+        .collect()
+}
+
+#[cfg(windows)]
+fn run_pipeline_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut listener = NpListener::bind(run_dir, service, server_config())?;
+
+    println!("READY");
+
+    let mut session = listener.accept()?;
+    let mut buf = vec![0u8; 65600];
+    for _ in 0..PIPELINE_REQUESTS {
+        let (hdr, payload) = session.receive(&mut buf)?;
+        let payload = payload.to_vec();
+        let mut resp = hdr;
+        resp.kind = protocol::KIND_RESPONSE;
+        resp.transport_status = protocol::STATUS_OK;
+        session.send(&mut resp, &payload)?;
+    }
+
+    session.close();
+    listener.close();
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_pipeline_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut session = NpSession::connect(run_dir, service, &client_config())?;
+
+    for id in 1..=PIPELINE_REQUESTS {
+        let mut hdr = Header {
+            kind: protocol::KIND_REQUEST,
+            code: protocol::METHOD_INCREMENT,
+            item_count: 1,
+            message_id: id,
+            ..Header::default()
+        };
+        session.send(&mut hdr, &pipeline_payload(id))?;
+    }
+
+    let mut rbuf = vec![0u8; 65600];
+    for id in 1..=PIPELINE_REQUESTS {
+        let (rhdr, rpayload) = session.receive(&mut rbuf)?;
+        if rhdr.kind != protocol::KIND_RESPONSE
+            || rhdr.message_id != id
+            || rpayload != pipeline_payload(id).as_slice()
+        {
+            println!("FAIL");
+            return Err(format!("response {id} out of order or corrupted").into());
+        }
+    }
+
+    session.close();
+    println!("PASS");
+    Ok(())
+}
+
 fn main() {
     #[cfg(not(windows))]
     {
@@ -141,7 +214,7 @@ fn main() {
         let args: Vec<String> = std::env::args().collect();
         if args.len() != 4 {
             eprintln!(
-                "Usage: {} <server|client> <run_dir> <service_name>",
+                "Usage: {} <server|client|pipeline-server|pipeline-client> <run_dir> <service_name>",
                 args[0]
             );
             std::process::exit(1);
@@ -154,6 +227,8 @@ fn main() {
         let result = match mode.as_str() {
             "server" => run_server(run_dir, service),
             "client" => run_client(run_dir, service),
+            "pipeline-server" => run_pipeline_server(run_dir, service),
+            "pipeline-client" => run_pipeline_client(run_dir, service),
             _ => {
                 eprintln!("Unknown mode: {mode}");
                 std::process::exit(1);

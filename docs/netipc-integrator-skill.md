@@ -37,6 +37,16 @@ The Rust ABI runner also asserts the compiled layout for each requested mode;
 both timeout behavior and the expected ABI must pass.
 The C ABI fixture does not replace building and testing each language consumer
 for the target architecture or measuring the deployed service's CPU use.
+The C POSIX transport sources define `_FILE_OFFSET_BITS 64` themselves, so a
+32-bit consumer built with the legacy `off_t`/`time_t` layout needs no extra
+flags; no public header exposes `off_t` or `struct stat`.
+Runtime Safety CI vets the Go packages on amd64, 386, arm, arm64, riscv64,
+loong64, ppc64le, s390x and mips64le Linux. It also builds and runs the full C,
+Rust and Go suites plus C/Rust/Go interop on every Linux target Netdata ships:
+x86_64 musl, i386 glibc and musl, armv7 glibc (legacy and time64 layouts) and
+musl, armv6 musl and aarch64 glibc and musl, using QEMU for ARM. Run one target
+locally with `bash tests/run-linux-target.sh <target>`; the script header lists
+targets and required toolchains.
 
 ## Core Reality
 
@@ -74,7 +84,8 @@ Before adding anything, internalize these facts:
 Current implemented layers:
 
 - L1 transport
-  - POSIX: UDS baseline + POSIX SHM fast path
+  - POSIX: UDS baseline + POSIX SHM fast path (SHM on Linux and FreeBSD;
+    Go on FreeBSD amd64 and 386 only)
   - Windows: Named Pipe baseline + Win SHM fast path
 - Codec
   - typed encode/decode
@@ -181,6 +192,17 @@ Non-negotiable rule:
   - raw payload encode/decode
   - batch and chunk rules
   - single-owner or externally locked access to each raw session object
+  - pipelining limits: POSIX client sessions may send every request before
+    reading any response (a send that waits for buffer space reads the
+    responses that arrive; see `level1-posix-uds.md`, "Pipelined sends").
+    A caller that waits on the session fd before receiving must first check
+    `nipc_uds_session_has_pending` (Rust `UdsSession::has_pending`, Go
+    `Session.HasPending`): responses read during a send no longer show on
+    the fd.
+    Windows Named Pipe sessions do the same (`level1-windows-np.md`,
+    "Pipelining"); wait with `nipc_np_wait_readable` (Rust
+    `NpSession::wait_readable`, Go `Session.WaitReadable`), which reports
+    queued responses, not on the pipe handle
 
 Use L1 for:
 
@@ -362,6 +384,12 @@ Netdata-specific integration rules:
 - stale socket/SHM paths from dead processes are reclaimed automatically on
   server start, regardless of run-dir permissions; only a live server's
   endpoint blocks a new server (address-in-use)
+- on POSIX each server also holds an exclusive lock on
+  `{run_dir}/{service}.lock` for its whole life; the file stays after the
+  server exits and must not be deleted while a server may be starting, so
+  two servers that start at the same time cannot both claim the endpoint
+- on POSIX the listener socket is owner-only (`0600`), so the provider and
+  its consumers must run as the same user (Netdata's plugins do)
 - if provider and consumer do not agree on auth token or run dir, the client
   will stay in `AUTH_FAILED` or `NOT_FOUND`
 
@@ -383,6 +411,21 @@ as explicit assumptions, not as implementation details they can reinterpret.
 - Managed servers are concurrent.
   - The server accept loop can run multiple client sessions concurrently up to
     `worker_count`.
+  - When all workers are busy, a new connection waits up to 200 ms for a
+    worker to finish, then is closed before HELLO_ACK, so the client's
+    connect fails and it retries on its next refresh; size
+    `worker_count` for the number of long-lived clients you expect.
+  - A connection that never sends HELLO holds a worker for at most 5000 ms.
+  - Clients can connect once the server listens. C `nipc_server_init()`
+    creates the listener before it returns; Rust and Go create it inside
+    `run()` / `Run()`, so code that starts a server and then its clients
+    waits for Rust `listening_signal()` / Go `Listening()` (see
+    [level2-typed-api.md](level2-typed-api.md#readiness)) instead of
+    polling or retrying connects.
+  - On Windows, a connect that finds every pipe instance busy waits up to
+    1000 ms for one, never past the call or refresh deadline, then fails.
+  - Stop/destroy give sessions 1000 ms to finish, then interrupt their
+    blocking I/O, so a client that stopped reading cannot hold shutdown.
   - Handler code must therefore assume concurrent execution.
   - Evidence:
     - [netipc_service.h](../src/libnetdata/netipc/include/netipc/netipc_service.h)
@@ -623,9 +666,10 @@ Operational meaning:
   - connection was previously READY and failed
   - `refresh()` will reconnect
 - `AUTH_FAILED`
-  - handshake auth check failed
+  - handshake auth check failed, or on Windows the pipe is owned by an
+    account other than the client's own, SYSTEM or Administrators
   - this is not a transient network condition
-  - fix config or auth token
+  - fix config or auth token, or run server and client as the same account
 - `INCOMPATIBLE`
   - protocol/layout/negotiation mismatch
   - this is not a transient network condition
@@ -660,6 +704,15 @@ L2 typed calls are also bounded:
 
 - a per-call timeout of zero uses the client context default
 - the default client context timeout is 30000 ms
+- one deadline covers the whole call, including the reconnect, handshake and
+  SHM attach between attempts; a reconnect cut short by the deadline reports
+  the timeout error
+- `refresh()` is bounded by the client context call timeout, so a server that
+  accepts but never answers cannot stall the caller's loop longer than that;
+  while an abort is pending `refresh()` does not connect
+- a call on a client that is not READY fails at once with the not-ready error
+  (C `NIPC_ERR_NOT_READY`, Rust `NipcError::NotReady`, Go
+  `protocol.ErrNotReady`)
 - payload budgets and logical-call ceilings come from initialization config or
   documented defaults, not scattered hardcoded literals
 - named defaults are not protocol hard limits; explicit initialization config
@@ -675,6 +728,26 @@ L2 typed calls are also bounded:
 - timeout and abort have distinct errors, so shutdown handling does not need
   to guess whether the peer disconnected
 - abort is sticky until the caller clears it or closes the client/cache helper
+- a call blocked waiting for its response notices an abort within 100 ms on
+  every transport
+- a peer that is gone (closed, crashed, or killed) is reported as a distinct
+  disconnected error (C `NIPC_ERR_DISCONNECTED`, Rust
+  `NipcError::Disconnected`, Go `protocol.ErrDisconnected`) after the one
+  reconnect retry also fails; earlier releases reported it as `TRUNCATED` /
+  "buffer too short"
+- any other send/receive I/O failure is a distinct transport error (C
+  `NIPC_ERR_TRANSPORT`, Rust `NipcError::Transport`, Go
+  `protocol.ErrTransport`); earlier releases reported it as `TRUNCATED` or
+  `NOT_READY`. `TRUNCATED` now means a short or corrupt message only
+- SHM calls notice a crashed server within about 100 ms instead of waiting for
+  the call timeout, and SHM servers free the worker of a crashed client within
+  about 100 ms; both rely on the session socket/pipe, so do not close or
+  duplicate it outside NetIPC
+- NetIPC sockets, pipes and SHM descriptors are close-on-exec, so consumers
+  that fork and exec children do not need to close them in the child
+- the transport-level `nipc_shm_owner_alive` / `ShmContext::owner_alive` /
+  `OwnerAlive` helper was removed: it could not detect a replaced region and
+  was wrong across PID namespaces
 
 Implication:
 
@@ -692,8 +765,11 @@ Current required behavior:
 - if backing-store allocation fails, including `ENOSPC`, SHM preparation returns a
   normal allocation-stage error; it must not reach a mapped write or terminate the host
   process with `SIGBUS`
-- managed servers remove SHM from that session's supported and preferred profiles and
-  continue over baseline when baseline is configured
+- managed servers create SHM only for a handshake that selected an SHM profile, after
+  authorization and limit checks and before HELLO_ACK, sized from the final limits;
+  baseline sessions and rejected clients create no region
+- on preparation failure, managed servers drop that profile within the same handshake
+  and select again, continuing over baseline when baseline is configured
 - an explicitly SHM-only configuration has no fallback transport and may reject or
   retry the session
 - Linux sandbox/seccomp policy must allow `fallocate` or arrange an ordinary errno
@@ -1221,13 +1297,36 @@ Before you define a new service or integrate one into a plugin, answer these:
 
 ### Linux / POSIX
 
-- baseline transport is UDS `SOCK_SEQPACKET`
-- fast path is POSIX SHM
+- baseline transport is UDS `SOCK_SEQPACKET` on Linux and UDS `SOCK_STREAM`
+  carrying the same packets on macOS and FreeBSD
+- fast path is POSIX SHM, on Linux and FreeBSD (Go: FreeBSD amd64 and 386
+  only)
+- on macOS, and for Go on other FreeBSD architectures, every session uses the
+  UDS baseline: the handshake drops SHM profiles from any configuration, so the
+  same caller configuration works everywhere
+- on FreeBSD, SHM needs a run directory on tmpfs or UFS: ZFS rejects the
+  region reservation (`posix_fallocate` returns `EINVAL`), so a server with
+  its run directory on ZFS serves baseline only
+- macOS and FreeBSD use a `SOCK_STREAM` baseline that carries the same
+  packets, with the same API, handshake and profile bit (macOS has no
+  `SOCK_SEQPACKET`; FreeBSD 15 `SOCK_SEQPACKET` does not keep NetIPC's packet
+  boundaries). FreeBSD keeps SHM; macOS has none. The packet size is 256 KiB
+  regardless of `SO_SNDBUF`. A receive that
+  fails after reading part of a message (timeout, abort, oversized or
+  malformed message) ends further receives on that session; sends still work,
+  and the L2 client reconnects as for any broken session. A full listen backlog
+  refuses a connect at once (macOS and FreeBSD), so size `backlog` for bursts
+  of clients. On macOS the listener binds through a private `{service}.d`
+  directory in the run directory; a leftover one from a crashed server is
+  removed on start.
 
 ### Windows
 
 - baseline transport is Named Pipe
 - fast path is Windows SHM
+- pipes and SHM objects grant access only to SYSTEM, Administrators and the
+  server's own account, and refuse remote (SMB) clients: run server and
+  clients as the same account (Netdata: LocalSystem)
 
 ### Cross-platform rule
 
@@ -1310,6 +1409,10 @@ it should:
 7. Add the public typed facade, not just raw helpers.
 8. Add L3 only if the dataset needs local owned cache + lookup.
 9. Add tests for codec, L2, interop, and L3 if applicable.
+   - Correctness tests synchronize on events (listening signal, handler
+     flags, session exits), never on sleeps or retry loops; fuzz and
+     stress tests go behind `tests/run-extended-fuzz.sh` /
+     `tests/run-extended-stress.sh`.
 10. Add operational logs at the plugin boundary.
 11. Validate Linux and Windows behavior before claiming the integration is ready.
    - Run long local validation and benchmarks through

@@ -168,7 +168,50 @@ Load this skill for any task involving:
    If any downstream vendored-source change is not understood, do not run
    `vendor-to-netdata.sh`.
 
-7. Record the CI/scanner preflight in the active SOW before vendoring.
+7. Assess performance impact (AGENTS.md, Test Cadence).
+
+   Benchmarks take hours; run them only when the vendored changes can affect
+   established-session steady state. Collect the SOW gate performance
+   assessments for every source change since the baseline (step 5), and
+   record in the active SOW whether any changed code runs per request on an
+   established session, with file:line evidence.
+
+   - No such change (connection setup, reconnect, error mapping, idle-timeout
+     paths, shutdown, tests, docs, build): no benchmark run; record the
+     assessment.
+   - Such a change exists: run the affected suites once on the candidate
+     commit:
+
+     ```bash
+     # Measure (run-*), then render the report and check floors (generate-*).
+     bash tests/run-posix-bench.sh benchmarks-posix.csv
+     bash tests/generate-benchmarks-posix.sh
+     # On the Windows host:
+     bash tests/run-windows-bench.sh benchmarks-windows.csv
+     bash tests/generate-benchmarks-windows.sh
+     ```
+
+     Compare against the committed CSVs (`git diff`). If rows regress beyond
+     noise, fix all regressions, then rerun once; bisect by SOW commit.
+   - Assessment uncertain: ask the user before running anything.
+
+   A regression that is neither fixed nor explicitly accepted by the user
+   blocks vendoring.
+
+   Extended suites (fuzz, stress, randomized chaos, lookup scale) are not
+   part of correctness runs. Run them once on the candidate commit when the
+   vendored changes touch what they exercise (codecs and decoders for fuzz;
+   concurrency, session lifecycle or transports for stress), and record the
+   result or the reason none was needed:
+
+   ```bash
+   bash tests/run-extended-fuzz.sh
+   bash tests/run-extended-stress.sh
+   ```
+
+   A failure blocks vendoring until it is fixed.
+
+8. Record the CI/scanner preflight in the active SOW before vendoring.
 
    Include:
 
@@ -178,7 +221,7 @@ Load this skill for any task involving:
    - Dependabot and secret-scanning summary;
    - decision: proceed, block, or proceed with explicit risk acceptance.
 
-8. Only after the CI/scanner preflight and two-way migration plan pass, update
+9. Only after the CI/scanner preflight and two-way migration plan pass, update
    the Netdata vendored copy using the project-local vendor workflow.
 
    ```bash
@@ -187,7 +230,7 @@ Load this skill for any task involving:
    bash ./diff-netdata-vendor.sh /path/to/netdata
    ```
 
-9. Validate in the Netdata checkout.
+10. Validate in the Netdata checkout.
 
    Run the targeted Netdata build/tests required by the active SOW. At minimum,
    prove:
@@ -210,6 +253,8 @@ Stop and report if any of these are true:
 - either side has NetIPC changes since the last vendoring that are not
   understood;
 - the active SOW does not contain a migration plan for both directions;
+- the performance assessment is missing, or a benchmark run it called for
+  shows a regression that is neither fixed nor explicitly accepted by the user;
 - source tree has uncommitted changes that are intended for vendoring;
 - Netdata checkout has unrelated changes that would be hard to isolate.
 
@@ -228,5 +273,7 @@ Netdata vendoring preflight:
 - Upstream gap: <summary of plugin-ipc changes since baseline>
 - Downstream gap: <summary of Netdata vendored changes since baseline>
 - Migration plan: <preserve/backport/overwrite/decision summary>
+- Performance: <assessment; benchmark run or why none was needed; regressions fixed/accepted/none>
+- Extended suites: <fuzz/stress run and result, or why none was needed>
 - Decision: proceed | blocked | proceed with user-accepted risk
 ```

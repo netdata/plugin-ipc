@@ -210,6 +210,22 @@ must periodically yield so an infinite wait does not monopolize a core.
 - On peer close detection, the detecting side must report the session
   as disconnected (graceful close, equivalent to `io.EOF`).
 
+### Detecting a crashed peer
+
+A crashed process never sets its close flag. The named-pipe session stays
+open for the whole SHM session and the kernel breaks it when the peer
+process exits, so the pipe is the crash signal for both sides:
+
+- The probe is a zero-wait `PeekNamedPipe`; a disconnect error (see
+  `level1-windows-np.md`, "Disconnect detection") means the peer is gone.
+  No data flows on the pipe during an SHM session.
+- It runs only after a wait slice expires with no message: the server
+  after each idle receive poll (100 ms), the client after each idle slice
+  of its response wait (100 ms).
+- A server that sees the peer gone ends the session (freeing the worker
+  and the region). A client fails the in-flight call with a disconnected
+  error.
+
 ## Memory ordering
 
 - Sequence number and length stores use interlocked (atomic) operations
@@ -232,9 +248,13 @@ throughput.
 
 ### Server creates a per-session region
 
-The server creates one SHM region per accepted session, after the
-handshake negotiates an SHM profile. The kernel object names are
-derived from the `session_id` assigned during the handshake.
+The server creates one SHM region per accepted session, inside the
+handshake: after HELLO validation, authorization, profile selection and
+the limit checks pick an SHM profile, and before HELLO_ACK. It creates the
+objects for the selected profile only; baseline sessions and rejected
+handshakes create none. The region is sized from the final request and
+response payload limits plus the message header. The kernel object names
+are derived from the `session_id` assigned to the handshake.
 
 1. Derive kernel object names using `session_id` (see naming section).
 2. Create a page-file-backed mapping via `CreateFileMappingW` using
@@ -245,16 +265,19 @@ derived from the `session_id` assigned during the handshake.
 3. Map the view via `MapViewOfFile`.
 4. Write the header: magic, version, header_len, profile, offsets,
    capacities, spin_tries. Initialize all volatile fields to zero.
+   The mapping takes the same protected owner-only DACL as the pipe
+   (SYSTEM, Administrators and the server's account; see the Named Pipe
+   access policy), so other accounts cannot open it.
 5. If SHM_HYBRID: create `req_event` and `resp_event` as auto-reset
    kernel events (`CreateEventW` with `bManualReset = FALSE`).
    Auto-reset is required: `SetEvent` wakes exactly one waiter and
    resets automatically, which matches the one-writer/one-reader-per-
-   direction model.
+   direction model. Both events take the owner-only DACL too.
 6. The region is now ready for the client.
 
 `CreateFileMappingW` and `MapViewOfFile` failures are SHM preparation errors. Managed
-servers remove Windows SHM profiles and continue over the Named Pipe baseline when it
-is configured. Windows does not use the Linux file-backed `fallocate` lifecycle.
+servers remove the failed Windows SHM profile from that handshake and select again,
+continuing over the Named Pipe baseline when it is configured. Windows does not use the Linux file-backed `fallocate` lifecycle.
 
 The server must track all active per-session SHM regions so they can
 be cleaned up on session close and server shutdown.
@@ -274,6 +297,11 @@ objects in place.
 5. Read offsets, capacities, and spin_tries from the header.
 6. If SHM_HYBRID: open `req_event` and `resp_event` kernel events.
 7. The client is now ready to publish requests and consume responses.
+
+If the objects cannot be opened yet, the client retries. Between retries
+it probes the session pipe; if the server already broke it (refused at
+worker capacity, or died), the client stops retrying, reports the connect
+as failed, and keeps SHM enabled for its next connect.
 
 ### Server destroys a per-session region
 

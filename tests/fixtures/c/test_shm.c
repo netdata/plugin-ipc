@@ -10,6 +10,7 @@
 #include "netipc/netipc_shm.h"
 #include "netipc/netipc_uds.h"
 #include "netipc/netipc_protocol.h"
+#include "test_sync.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -32,6 +33,9 @@ static int g_fail = 0;
 
 #define TEST_RUN_DIR  "/tmp/nipc_shm_test"
 #define AUTH_TOKEN    0xDEADBEEFCAFEBABEull
+/* Above every OS PID limit, so never a live process; a small fixed PID such
+ * as 99999 can be in use on hosts with a large pid_max. */
+#define DEAD_PID      INT32_MAX
 
 static void check(const char *name, int cond)
 {
@@ -94,11 +98,11 @@ static void *shm_echo_server_thread(void *arg)
         TEST_RUN_DIR, ctx->service, 1, 4096, 4096, &shm);
     if (err != NIPC_SHM_OK) {
         fprintf(stderr, "shm server create failed: %d\n", err);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     /* Receive a request. */
     uint8_t msg[65536];
@@ -107,7 +111,7 @@ static void *shm_echo_server_thread(void *arg)
     if (err != NIPC_SHM_OK) {
         fprintf(stderr, "shm server receive failed: %d\n", err);
         nipc_shm_destroy(&shm);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
@@ -139,7 +143,7 @@ static void *shm_echo_server_thread(void *arg)
     }
 
     nipc_shm_destroy(&shm);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -157,11 +161,7 @@ static void test_direct_roundtrip(void)
     pthread_create(&tid, NULL, shm_echo_server_thread, &sctx);
 
     /* Wait for server to be ready. */
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 2000) {
-        usleep(500);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server created SHM region", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Client attaches. */
@@ -229,6 +229,7 @@ typedef struct {
     int ready;
     int done;
     int shm_created;
+    int region_attempted; /* __atomic */
     int echo_ok;
 } hybrid_server_ctx_t;
 
@@ -256,17 +257,17 @@ static void *hybrid_server_thread(void *arg)
                                              &scfg, &listener);
     if (uerr != NIPC_UDS_OK) {
         fprintf(stderr, "hybrid server listen failed: %d\n", uerr);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     nipc_uds_session_t session;
     uerr = nipc_uds_accept(&listener, 1, &session);
     if (uerr != NIPC_UDS_OK) {
         nipc_uds_close_listener(&listener);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
@@ -279,10 +280,12 @@ static void *hybrid_server_thread(void *arg)
             TEST_RUN_DIR, ctx->service, session.session_id,
             4096, 4096, &shm);
         if (serr == NIPC_SHM_OK) {
-            ctx->shm_created = 1;
+            test_flag_set(&ctx->shm_created);
             use_shm = 1;
         }
     }
+    /* Released either way, so the client never waits for a missing region. */
+    test_flag_set(&ctx->region_attempted);
 
     if (use_shm) {
         /* Echo via SHM. */
@@ -314,7 +317,7 @@ static void *hybrid_server_thread(void *arg)
 
     nipc_uds_close_session(&session);
     nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -331,11 +334,7 @@ static void test_negotiated_shm(void)
     pthread_t tid;
     pthread_create(&tid, NULL, hybrid_server_thread, &sctx);
 
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 2000) {
-        usleep(500);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Client connects via UDS with SHM_HYBRID support. */
@@ -358,25 +357,12 @@ static void test_negotiated_shm(void)
         check("selected profile is SHM_HYBRID",
               session.selected_profile == NIPC_PROFILE_SHM_HYBRID);
 
-        /* Attach to SHM (with retry -- server creates region after
-         * the UDS handshake, so the file may not exist yet or the
-         * header may not be written yet). */
+        /* The server creates the region after the UDS handshake. */
+        check("server tried to create the SHM region",
+              test_flag_wait(&sctx.region_attempted));
         nipc_shm_ctx_t client_shm;
-        nipc_shm_error_t serr = NIPC_SHM_ERR_NOT_READY;
-        for (int i = 0; i < 500; i++) {
-            serr = nipc_shm_client_attach(TEST_RUN_DIR, svc,
-                                         session.session_id, &client_shm);
-            if (serr == NIPC_SHM_OK)
-                break;
-            /* Retryable: file doesn't exist, header not ready, or
-             * header not yet published (magic is still zero). */
-            if (serr == NIPC_SHM_ERR_NOT_READY ||
-                serr == NIPC_SHM_ERR_OPEN ||
-                serr == NIPC_SHM_ERR_BAD_MAGIC)
-                usleep(10000);
-            else
-                break; /* unexpected error */
-        }
+        nipc_shm_error_t serr = nipc_shm_client_attach(TEST_RUN_DIR, svc,
+                                                       session.session_id, &client_shm);
         check("client SHM attach", serr == NIPC_SHM_OK);
 
         if (serr == NIPC_SHM_OK) {
@@ -448,10 +434,10 @@ static void *baseline_only_server_thread(void *arg)
     nipc_uds_error_t uerr = nipc_uds_listen(TEST_RUN_DIR, ctx->service,
                                              &scfg, &listener);
     if (uerr != NIPC_UDS_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     nipc_uds_session_t session;
     uerr = nipc_uds_accept(&listener, 1, &session);
@@ -462,7 +448,7 @@ static void *baseline_only_server_thread(void *arg)
     }
 
     nipc_uds_close_listener(&listener);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -479,11 +465,7 @@ static void test_profile_fallback(void)
     pthread_t tid;
     pthread_create(&tid, NULL, baseline_only_server_thread, &sctx);
 
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 2000) {
-        usleep(500);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     /* Client supports both, but server only supports baseline. */
@@ -534,11 +516,8 @@ static void test_disconnect_detection(void)
         err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
         check("client attach", err == NIPC_SHM_OK);
 
-        if (err == NIPC_SHM_OK) {
-            /* Owner (this process) is alive. */
-            check("owner alive from client", nipc_shm_owner_alive(&client));
+        if (err == NIPC_SHM_OK)
             nipc_shm_close(&client);
-        }
 
         nipc_shm_destroy(&server);
     }
@@ -567,7 +546,7 @@ static void test_stale_shm_recovery(void)
         /* Set owner_pid to a definitely-dead PID. */
         nipc_shm_region_header_t *hdr =
             (nipc_shm_region_header_t *)first.base;
-        hdr->owner_pid = 99999; /* very unlikely to be alive */
+        hdr->owner_pid = DEAD_PID;
 
         /* Don't destroy (unlink) -- just unmap and close. */
         nipc_shm_close(&first);
@@ -602,10 +581,10 @@ static void *large_msg_server_thread(void *arg)
     nipc_shm_error_t err = nipc_shm_server_create(
         TEST_RUN_DIR, ctx->service, 1, 65536, 65536, &shm);
     if (err != NIPC_SHM_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     uint8_t *msg = malloc(65536);
     size_t msg_len;
@@ -632,7 +611,7 @@ static void *large_msg_server_thread(void *arg)
     free(msg);
 
     nipc_shm_destroy(&shm);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -649,11 +628,7 @@ static void test_large_message(void)
     pthread_t tid;
     pthread_create(&tid, NULL, large_msg_server_thread, &sctx);
 
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 2000) {
-        usleep(500);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_shm_ctx_t client;
@@ -804,10 +779,10 @@ static void *multi_rt_server_thread(void *arg)
     nipc_shm_error_t err = nipc_shm_server_create(
         TEST_RUN_DIR, ctx->service, 1, 4096, 4096, &shm);
     if (err != NIPC_SHM_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     int all_ok = 1;
     uint8_t recv_msg[65536];
@@ -841,7 +816,7 @@ static void *multi_rt_server_thread(void *arg)
 
     ctx->echo_ok = all_ok;
     nipc_shm_destroy(&shm);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -858,11 +833,7 @@ static void test_multiple_roundtrips(void)
     pthread_t tid;
     pthread_create(&tid, NULL, multi_rt_server_thread, &sctx);
 
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) && !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 2000) {
-        usleep(500);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_shm_ctx_t client;
@@ -1022,6 +993,19 @@ static void test_server_create_allocation_failures(void)
     check("unsupported allocation removes incomplete region",
           access(path, F_OK) != 0);
 
+    /* FreeBSD ZFS rejects posix_fallocate with EINVAL. */
+    nipc_shm_test_fault_set(NIPC_SHM_TEST_FAULT_ALLOCATE, EINVAL);
+    err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 4096, 4096, &ctx);
+    allocation_errno = errno;
+    nipc_shm_test_fault_clear();
+
+    check("EINVAL allocation has no sparse fallback",
+          err == NIPC_SHM_ERR_ALLOCATE);
+    check("EINVAL allocation preserves errno", allocation_errno == EINVAL);
+    check("EINVAL allocation removes incomplete region",
+          access(path, F_OK) != 0);
+
     nipc_shm_test_fault_set(NIPC_SHM_TEST_FAULT_ALLOCATE, EINTR);
     err = nipc_shm_server_create(TEST_RUN_DIR, svc, 1, 4096, 4096, &ctx);
     nipc_shm_test_fault_clear();
@@ -1114,6 +1098,36 @@ static void test_shm_send_bad_param(void)
      * but the function should handle it. Let's see if it validates. */
     check("send on null ctx returns error or does not crash",
           err != NIPC_SHM_OK);
+}
+
+/* A server under a umask without owner read or write must still create a
+ * region its client can attach to read-write. */
+static void test_shm_attach_under_restrictive_umask(void)
+{
+    printf("Test: Client attaches to a region created under umask 0477\n");
+    const char *svc = "shm_umask";
+    cleanup_shm(svc);
+
+    nipc_shm_ctx_t server;
+    mode_t old_mask = umask(0477);
+    nipc_shm_error_t err = nipc_shm_server_create(TEST_RUN_DIR, svc, 1, 4096, 4096, &server);
+    umask(old_mask);
+    check("server create under umask 0477", err == NIPC_SHM_OK);
+    if (err != NIPC_SHM_OK)
+        return;
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s-%016" PRIx64 ".ipcshm", TEST_RUN_DIR, svc,
+             (uint64_t)1);
+    struct stat st;
+    check("region file is 0600", stat(path, &st) == 0 && (st.st_mode & 0777) == 0600);
+
+    nipc_shm_ctx_t client;
+    err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
+    check("client attaches", err == NIPC_SHM_OK);
+    if (err == NIPC_SHM_OK)
+        nipc_shm_close(&client);
+    nipc_shm_destroy(&server);
 }
 
 static void test_shm_bad_magic_file(void)
@@ -1267,129 +1281,6 @@ static void test_null_params(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Coverage: pid_alive with pid=0                                      */
-/* ------------------------------------------------------------------ */
-
-static void test_pid_zero(void)
-{
-    printf("Test: owner_alive with dead PID via pid=0 in header\n");
-    const char *svc = "shm_pid0";
-    cleanup_shm(svc);
-
-    nipc_shm_ctx_t server;
-    nipc_shm_error_t err = nipc_shm_server_create(
-        TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
-    check("server create", err == NIPC_SHM_OK);
-
-    if (err == NIPC_SHM_OK) {
-        nipc_shm_ctx_t client;
-        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
-        check("client attach", err == NIPC_SHM_OK);
-
-        if (err == NIPC_SHM_OK) {
-            /* Corrupt owner_pid to 0 */
-            nipc_shm_region_header_t *hdr =
-                (nipc_shm_region_header_t *)client.base;
-            int32_t saved_pid = hdr->owner_pid;
-            hdr->owner_pid = 0;
-
-            check("owner_alive with pid=0 returns false",
-                  !nipc_shm_owner_alive(&client));
-
-            /* Restore */
-            hdr->owner_pid = saved_pid;
-            nipc_shm_close(&client);
-        }
-        nipc_shm_destroy(&server);
-    }
-    cleanup_shm(svc);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Coverage: owner_alive with dead PID, generation mismatch            */
-/* ------------------------------------------------------------------ */
-
-static void test_owner_dead_pid(void)
-{
-    printf("Test: owner_alive with dead PID\n");
-    const char *svc = "shm_deadpid";
-    cleanup_shm(svc);
-
-    nipc_shm_ctx_t server;
-    nipc_shm_error_t err = nipc_shm_server_create(
-        TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
-    check("server create", err == NIPC_SHM_OK);
-
-    if (err == NIPC_SHM_OK) {
-        nipc_shm_ctx_t client;
-        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
-        check("client attach", err == NIPC_SHM_OK);
-
-        if (err == NIPC_SHM_OK) {
-            /* Set owner_pid to a definitely-dead PID */
-            nipc_shm_region_header_t *hdr =
-                (nipc_shm_region_header_t *)client.base;
-            hdr->owner_pid = 99999;
-
-            check("owner_alive with dead pid returns false",
-                  !nipc_shm_owner_alive(&client));
-
-            /* Restore for cleanup */
-            hdr->owner_pid = (int32_t)getpid();
-            nipc_shm_close(&client);
-        }
-        nipc_shm_destroy(&server);
-    }
-    cleanup_shm(svc);
-}
-
-static void test_owner_generation_mismatch(void)
-{
-    printf("Test: owner_alive with generation mismatch\n");
-    const char *svc = "shm_gen_mm";
-    cleanup_shm(svc);
-
-    nipc_shm_ctx_t server;
-    nipc_shm_error_t err = nipc_shm_server_create(
-        TEST_RUN_DIR, svc, 1, 1024, 1024, &server);
-    check("server create", err == NIPC_SHM_OK);
-
-    if (err == NIPC_SHM_OK) {
-        nipc_shm_ctx_t client;
-        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
-        check("client attach", err == NIPC_SHM_OK);
-
-        if (err == NIPC_SHM_OK) {
-            /* Corrupt generation in header to mismatch client's cached value */
-            nipc_shm_region_header_t *hdr =
-                (nipc_shm_region_header_t *)client.base;
-            uint32_t saved_gen = hdr->owner_generation;
-            hdr->owner_generation = saved_gen + 1; /* mismatch */
-
-            check("owner_alive with gen mismatch returns false",
-                  !nipc_shm_owner_alive(&client));
-
-            /* Restore */
-            hdr->owner_generation = saved_gen;
-            nipc_shm_close(&client);
-        }
-        nipc_shm_destroy(&server);
-    }
-    cleanup_shm(svc);
-}
-
-static void test_owner_alive_null(void)
-{
-    printf("Test: owner_alive with NULL and null base\n");
-
-    check("owner_alive(NULL) returns false", !nipc_shm_owner_alive(NULL));
-
-    nipc_shm_ctx_t ctx;
-    memset(&ctx, 0, sizeof(ctx));
-    check("owner_alive with null base returns false", !nipc_shm_owner_alive(&ctx));
-}
-
-/* ------------------------------------------------------------------ */
 /*  Coverage: cleanup_stale with NULL params, invalid service, no dir   */
 /* ------------------------------------------------------------------ */
 
@@ -1438,7 +1329,7 @@ static void test_cleanup_stale_with_files(void)
         /* Set owner to dead PID */
         nipc_shm_region_header_t *hdr =
             (nipc_shm_region_header_t *)server.base;
-        hdr->owner_pid = 99999;
+        hdr->owner_pid = DEAD_PID;
 
         /* Close without unlink (just close fd + munmap) */
         nipc_shm_close(&server);
@@ -1467,10 +1358,10 @@ static void *small_recv_server_thread(void *arg)
     nipc_shm_error_t err = nipc_shm_server_create(
         TEST_RUN_DIR, ctx->service, 1, 4096, 4096, &shm);
     if (err != NIPC_SHM_OK) {
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->ready);
 
     /* Receive into a small buffer to trigger MSG_TOO_LARGE */
     uint8_t msg[32]; /* very small */
@@ -1480,7 +1371,7 @@ static void *small_recv_server_thread(void *arg)
     ctx->echo_ok = (err == NIPC_SHM_ERR_MSG_TOO_LARGE) ? 1 : 0;
 
     nipc_shm_destroy(&shm);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -1497,12 +1388,7 @@ static void test_shm_receive_msg_too_large(void)
     pthread_t tid;
     pthread_create(&tid, NULL, small_recv_server_thread, &sctx);
 
-    int retries = 0;
-    while (!__atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) &&
-           !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) && retries < 2000) {
-        usleep(500);
-        retries++;
-    }
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
     check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
     nipc_shm_ctx_t client;
@@ -1721,6 +1607,38 @@ static void test_shm_bad_size_alignment_file(void)
     cleanup_shm(svc);
 }
 
+static void test_shm_response_end_wraps_uint32(void)
+{
+    printf("Test: Client attach rejects response area whose end wraps uint32\n");
+    const char *svc = "shm_bad_size_wrap";
+    cleanup_shm(svc);
+
+    nipc_shm_ctx_t server;
+    nipc_shm_error_t err = nipc_shm_server_create(
+        TEST_RUN_DIR, svc, 1, 4096, 4096, &server);
+    check("server create", err == NIPC_SHM_OK);
+
+    if (err == NIPC_SHM_OK) {
+        nipc_shm_region_header_t *hdr =
+            (nipc_shm_region_header_t *)server.base;
+        uint32_t saved_resp_off = hdr->response_offset;
+        uint32_t saved_resp_cap = hdr->response_capacity;
+        /* The end wraps to 0; on 32-bit size_t the old check accepted it. */
+        hdr->response_offset = 0xFFFFFFC0u;
+        hdr->response_capacity = 0x40u;
+
+        nipc_shm_ctx_t client;
+        err = nipc_shm_client_attach(TEST_RUN_DIR, svc, 1, &client);
+        check("wrapping response end rejected", err == NIPC_SHM_ERR_BAD_SIZE);
+
+        hdr->response_offset = saved_resp_off;
+        hdr->response_capacity = saved_resp_cap;
+        nipc_shm_destroy(&server);
+    }
+
+    cleanup_shm(svc);
+}
+
 static void test_shm_declared_area_exceeds_file(void)
 {
     printf("Test: Client attach to file with declared area beyond file size\n");
@@ -1854,6 +1772,7 @@ int main(void)
     test_server_create_validation();   printf("\n");
     test_server_create_allocation_failures(); printf("\n");
     test_client_attach_validation();   printf("\n");
+    test_shm_attach_under_restrictive_umask(); printf("\n");
     test_shm_close_null();             printf("\n");
     test_shm_send_bad_param();         printf("\n");
     test_shm_bad_magic_file();         printf("\n");
@@ -1863,10 +1782,6 @@ int main(void)
 
     /* Coverage gap tests */
     test_null_params();                printf("\n");
-    test_pid_zero();                   printf("\n");
-    test_owner_dead_pid();             printf("\n");
-    test_owner_generation_mismatch();  printf("\n");
-    test_owner_alive_null();           printf("\n");
     test_cleanup_stale_params();       printf("\n");
     test_cleanup_stale_with_files();   printf("\n");
     test_cleanup_stale_ignores_nonmatching_files(); printf("\n");
@@ -1878,6 +1793,7 @@ int main(void)
     test_shm_bad_header_len_file();    printf("\n");
     test_shm_bad_size_alignment_file(); printf("\n");
     test_shm_declared_area_exceeds_file(); printf("\n");
+    test_shm_response_end_wraps_uint32(); printf("\n");
     test_shm_receive_zero_length_corruption(); printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);

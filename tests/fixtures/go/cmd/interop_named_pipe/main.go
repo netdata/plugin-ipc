@@ -9,6 +9,13 @@
 //
 //	interop_named_pipe client <run_dir> <service_name>
 //	  Connects, sends 1 message, verifies echo, exits 0 on success.
+//
+//	interop_named_pipe pipeline-server <run_dir> <service_name>
+//	  Like server, but echoes pipelineRequests messages one at a time.
+//
+//	interop_named_pipe pipeline-client <run_dir> <service_name>
+//	  Sends pipelineRequests messages before reading any response (more
+//	  than the pipe buffers hold), then verifies the echoes in order.
 package main
 
 import (
@@ -21,6 +28,11 @@ import (
 )
 
 const authToken uint64 = 0xDEADBEEFCAFEBABE
+
+const (
+	pipelinePayload  = 16 * 1024
+	pipelineRequests = 32 // 512 KiB each way, 8x the 64 KiB pipe buffers.
+)
 
 func serverConfig() windows.ServerConfig {
 	return windows.ServerConfig{
@@ -149,9 +161,93 @@ func runClient(runDir, service string) int {
 	return 1
 }
 
+func pipelinePayloadFor(id uint64) []byte {
+	p := make([]byte, pipelinePayload)
+	for i := range p {
+		p[i] = byte(id) + byte(i)
+	}
+	return p
+}
+
+func runPipelineServer(runDir, service string) int {
+	listener, err := windows.Listen(runDir, service, serverConfig())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "server: listen failed: %v\n", err)
+		return 1
+	}
+	defer listener.Close()
+
+	fmt.Println("READY")
+
+	session, err := listener.Accept()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "server: accept failed: %v\n", err)
+		return 1
+	}
+	defer session.Close()
+
+	buf := make([]byte, 65600)
+	for i := 0; i < pipelineRequests; i++ {
+		hdr, payload, err := session.Receive(buf)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "server: receive %d failed: %v\n", i, err)
+			return 1
+		}
+		resp := hdr
+		resp.Kind = protocol.KindResponse
+		resp.TransportStatus = protocol.StatusOK
+		if err := session.Send(&resp, payload); err != nil {
+			fmt.Fprintf(os.Stderr, "server: send %d failed: %v\n", i, err)
+			return 1
+		}
+	}
+	return 0
+}
+
+func runPipelineClient(runDir, service string) int {
+	cfg := clientConfig()
+	session, err := windows.Connect(runDir, service, &cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "client: connect failed: %v\n", err)
+		return 1
+	}
+	defer session.Close()
+
+	for id := uint64(1); id <= pipelineRequests; id++ {
+		hdr := protocol.Header{
+			Kind:      protocol.KindRequest,
+			Code:      protocol.MethodIncrement,
+			ItemCount: 1,
+			MessageID: id,
+		}
+		if err := session.Send(&hdr, pipelinePayloadFor(id)); err != nil {
+			fmt.Fprintf(os.Stderr, "client: send %d failed: %v\n", id, err)
+			return 1
+		}
+	}
+
+	rbuf := make([]byte, 65600)
+	for id := uint64(1); id <= pipelineRequests; id++ {
+		rhdr, rpayload, err := session.Receive(rbuf)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "client: receive %d failed: %v\n", id, err)
+			fmt.Println("FAIL")
+			return 1
+		}
+		if rhdr.Kind != protocol.KindResponse || rhdr.MessageID != id ||
+			!bytes.Equal(rpayload, pipelinePayloadFor(id)) {
+			fmt.Fprintf(os.Stderr, "client: response %d out of order or corrupted\n", id)
+			fmt.Println("FAIL")
+			return 1
+		}
+	}
+	fmt.Println("PASS")
+	return 0
+}
+
 func main() {
 	if len(os.Args) != 4 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <server|client> <run_dir> <service_name>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s <server|client|pipeline-server|pipeline-client> <run_dir> <service_name>\n", os.Args[0])
 		os.Exit(1)
 	}
 
@@ -165,6 +261,10 @@ func main() {
 		rc = runServer(runDir, service)
 	case "client":
 		rc = runClient(runDir, service)
+	case "pipeline-server":
+		rc = runPipelineServer(runDir, service)
+	case "pipeline-client":
+		rc = runPipelineClient(runDir, service)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown mode: %s\n", mode)
 		rc = 1
