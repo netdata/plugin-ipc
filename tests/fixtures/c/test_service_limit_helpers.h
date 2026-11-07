@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "test_lock_cleanup.h"
+#include "test_sync.h"
 
 #define AUTH_TOKEN        0xDEADBEEFCAFEBABEull
 #define TEST_RUN_DIR      "/tmp/nipc_service_limits"
@@ -165,15 +166,25 @@ static void *managed_server_thread(void *arg)
                                               &ctx->service_handler);
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed for %s: %d\n", ctx->service, err);
-        __atomic_store_n(&ctx->init_ok, 0, __ATOMIC_RELEASE);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_sync_lock();
+        ctx->init_ok = 0;
+        ctx->done = 1;
+        test_sync_broadcast();
+        test_sync_unlock();
         return NULL;
     }
 
-    __atomic_store_n(&ctx->init_ok, 1, __ATOMIC_RELEASE);
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    /* The listener accepts connections from here on; run takes them over. */
+    test_sync_lock();
+    ctx->init_ok = 1;
+    ctx->ready = 1;
+    test_sync_broadcast();
+    test_sync_unlock();
     nipc_server_run(&ctx->server);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_sync_lock();
+    ctx->done = 1;
+    test_sync_broadcast();
+    test_sync_unlock();
     return NULL;
 }
 
@@ -196,15 +207,17 @@ static int start_server_named(server_thread_ctx_t *ctx,
     }
 
     check("server thread created", 1);
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    uint64_t deadline = test_sync_deadline();
+    test_sync_lock();
+    while (!ctx->ready && !ctx->done && test_sync_wait_until(deadline))
+        ;
+    int ready = ctx->ready;
+    int init_ok = ctx->init_ok;
+    test_sync_unlock();
 
-    check("server ready", __atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE) == 1);
-    check("server init ok", __atomic_load_n(&ctx->init_ok, __ATOMIC_ACQUIRE) == 1);
-    return __atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE) == 1 &&
-           __atomic_load_n(&ctx->init_ok, __ATOMIC_ACQUIRE) == 1;
+    check("server ready", ready == 1);
+    check("server init ok", init_ok == 1);
+    return ready == 1 && init_ok == 1;
 }
 
 static int start_default_server_named(server_thread_ctx_t *ctx,
@@ -225,16 +238,12 @@ static void stop_server_drain(server_thread_ctx_t *ctx, pthread_t tid)
     nipc_server_destroy(&ctx->server);
 }
 
-static int refresh_until_ready(nipc_client_ctx_t *client, int max_tries, useconds_t sleep_us)
+/* The server listens before start_server_named() returns, so one refresh
+ * connects: the handshake waits until the run loop accepts. */
+static int refresh_ready(nipc_client_ctx_t *client)
 {
-    for (int i = 0; i < max_tries; i++) {
-        nipc_client_refresh(client);
-        if (nipc_client_ready(client))
-            return 1;
-        usleep(sleep_us);
-    }
-
-    return 0;
+    nipc_client_refresh(client);
+    return nipc_client_ready(client);
 }
 
 static void ensure_run_dir(void)

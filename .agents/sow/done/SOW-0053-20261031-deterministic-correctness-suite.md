@@ -226,3 +226,27 @@ Correctness suites in C, Rust and Go are event-synchronized and run in seconds. 
 ## Regression Log
 
 None yet.
+
+## Regression - 2026-11-07
+
+What broke:
+
+- The default-CTest suites `test_service_payload_limits` and `test_service_method_limits` still synchronized with sleeps: `tests/fixtures/c/test_service_limit_helpers.h` polled server readiness with `usleep(500)` up to 2000 times and connected clients through `refresh_until_ready` (up to 200 refreshes with 10 ms sleeps). This contradicts the acceptance criterion that correctness tests synchronize on events (reported on netdata/plugin-ipc#18, review comment 4496633289).
+
+Why validation missed it:
+
+- The same-failure search listed the sleep sites of the files the SOW rewrote; this shared helper header was not in that set.
+
+Repair:
+
+- The server thread publishes `ready`, `init_ok` and `done` under the `test_sync.h` lock and broadcasts; `start_server_named` blocks on the condition variable with the `TEST_WAIT_LIMIT_MS` bound that only expires on a bug.
+- `refresh_until_ready` is replaced by `refresh_ready`: the server listens before `start_server_named` returns, so one refresh connects (the handshake waits until the run loop accepts).
+
+Validation:
+
+- `ctest -R 'service_(payload|method)_limits'`: 2/2 passed in 0.83 s.
+- Same-failure search over `tests/fixtures/c` for `usleep|Sleep(`: the remaining sites are the accepted stimulus sleeps listed in this SOW's Execution Log (`interop_service*.c` handler delay, `test_win_shm.c` delayed send, `test_shm_timeout`, `test_cache`, `test_robustness`), `Sleep(INFINITE)` in the Windows robustness child processes (killed by the test), and the stress and chaos suites.
+
+Artifact updates:
+
+- None beyond this section: the rule is already in AGENTS.md (Test Cadence) and `tests/fixtures/c/test_sync.h`.

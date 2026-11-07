@@ -19,7 +19,7 @@ static void test_typed_request_overflow_reconnect_guards(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("typed baseline request-overflow client ready",
-              refresh_until_ready(&client, 200, 10000) && client.shm == NULL);
+              refresh_ready(&client) && client.shm == NULL);
 
         if (nipc_client_ready(&client)) {
             nipc_cgroups_resp_view_t view = {0};
@@ -56,7 +56,7 @@ static void test_typed_request_overflow_reconnect_guards(void)
         nipc_client_config_t ccfg = default_typed_hybrid_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("typed hybrid request-overflow client ready",
-              refresh_until_ready(&client, 200, 10000) && client.shm != NULL);
+              refresh_ready(&client) && client.shm != NULL);
 
         if (nipc_client_ready(&client) && client.shm != NULL) {
             nipc_cgroups_resp_view_t view = {0};
@@ -96,7 +96,7 @@ static void test_typed_request_overflow_reconnect_guards(void)
         nipc_client_config_t ccfg = default_typed_hybrid_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("typed hybrid no-growth overflow client ready",
-              refresh_until_ready(&client, 200, 10000) && client.shm != NULL);
+              refresh_ready(&client) && client.shm != NULL);
 
         if (nipc_client_ready(&client) && client.shm != NULL) {
             nipc_cgroups_resp_view_t view = {0};
@@ -138,7 +138,7 @@ static void test_typed_response_overflow_reconnect_guards(void)
         nipc_client_config_t ccfg = default_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("typed baseline response-overflow client ready",
-              refresh_until_ready(&client, 200, 10000) && client.shm == NULL);
+              refresh_ready(&client) && client.shm == NULL);
 
         if (nipc_client_ready(&client)) {
             nipc_cgroups_resp_view_t view = {0};
@@ -176,7 +176,7 @@ static void test_typed_response_overflow_reconnect_guards(void)
         nipc_client_config_t ccfg = default_typed_hybrid_client_config();
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
         check("typed hybrid response-overflow client ready",
-              refresh_until_ready(&client, 200, 10000) && client.shm != NULL);
+              refresh_ready(&client) && client.shm != NULL);
 
         if (nipc_client_ready(&client) && client.shm != NULL) {
             nipc_cgroups_resp_view_t view = {0};
@@ -223,7 +223,7 @@ static void test_typed_dispatch_overflow_reconnect_guard(void)
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     check("typed dispatch-overflow client ready",
-          refresh_until_ready(&client, 200, 10000) && client.shm == NULL);
+          refresh_ready(&client) && client.shm == NULL);
 
     if (nipc_client_ready(&client)) {
         nipc_cgroups_resp_view_t view = {0};
