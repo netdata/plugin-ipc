@@ -627,6 +627,77 @@ fn test_listen_over_leftover_lock_modes() {
     }
 }
 
+const LOCK_UMASK_HELPER_ENV: &str = "NETIPC_LOCK_UMASK_HELPER";
+const LOCK_UMASK_HELPER_TEST: &str = "transport::posix::tests::lock_umask_helper_process";
+
+// The umask is process-wide, so the restrictive-umask case runs in a child
+// test process instead of the multithreaded test runner.
+#[test]
+fn test_listen_lock_under_restrictive_umask() {
+    ensure_run_dir();
+    for mask in ["477", "277"] {
+        let status = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+            .args([LOCK_UMASK_HELPER_TEST, "--exact", "--test-threads=1"])
+            .env(LOCK_UMASK_HELPER_ENV, mask)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("spawn umask helper");
+        assert!(
+            status.success(),
+            "endpoint lock under umask {mask} failed: {status}"
+        );
+    }
+}
+
+/// Restores the umask on drop, also on panic, so files the process writes
+/// at exit (coverage profiles) keep their normal mode.
+struct UmaskGuard(libc::mode_t);
+
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        unsafe { libc::umask(self.0) };
+    }
+}
+
+/// Child-process entry point. Inert unless spawned by the test above.
+#[test]
+fn lock_umask_helper_process() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(mask) = std::env::var_os(LOCK_UMASK_HELPER_ENV) else {
+        return;
+    };
+    let mask = libc::mode_t::from_str_radix(mask.to_str().expect("mask"), 8).expect("octal mask");
+    let svc = format!("rs_lock_umask_{mask:o}");
+    let lock = format!("{TEST_RUN_DIR}/{svc}.lock");
+    cleanup_socket(&svc);
+    let _ = std::fs::remove_file(&lock);
+
+    {
+        let _umask = UmaskGuard(unsafe { libc::umask(mask) });
+        let first = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config())
+            .unwrap_or_else(|e| panic!("listen under umask {mask:o}: {e:?}"));
+        let second = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config());
+        assert!(
+            matches!(second, Err(UdsError::AddrInUse)),
+            "second server must get AddrInUse, got {:?}",
+            second.as_ref().map(|_| ())
+        );
+        drop(first);
+        let again = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config())
+            .unwrap_or_else(|e| panic!("restart under umask {mask:o}: {e:?}"));
+        drop(again);
+    }
+    let lock_mode = std::fs::metadata(&lock)
+        .expect("lock stat")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(lock_mode, 0o600, "lock mode under umask {mask:o}");
+    cleanup_socket(&svc);
+    let _ = std::fs::remove_file(&lock);
+}
+
 // A child forked by another thread shares the lock's open file description
 // until it execs. Closing the listener must still free the endpoint.
 #[test]

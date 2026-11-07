@@ -249,3 +249,25 @@ Validation:
 Artifact updates:
 
 - No spec, doc or skill change: the defect was in test code. Lesson added: a child test that changes process-wide state must restore it before exit, because coverage runtimes write files at exit.
+
+## Regression - 2026-11-07
+
+What broke:
+
+- Acceptance criterion "Rust and Go lock tests under a restrictive umask" was not met: Rust and Go only tested leftover 0200/0400 lock files (`test_listen_over_leftover_lock_modes`, `TestListenOverLeftoverLockModes`); lock creation under a restrictive umask was tested in C only (reported on netdata/plugin-ipc#18, review comment 4496524331).
+
+Why validation missed it:
+
+- The Rust and Go reproductions were written from the macOS failures, which came from leftover files; the umask-creation case was checked against the C test only.
+
+Repair:
+
+- Rust `test_listen_lock_under_restrictive_umask` and Go `TestListenLockUnderRestrictiveUmask` run a child test process under umask 0477 and 0277 (the umask is process-wide), as the SHM umask tests do: first listen succeeds, a second server gets address-in-use, the endpoint restarts, and the lock file is 0600. The child restores the umask before exit.
+
+Validation:
+
+- Both pass on Linux. With the Rust lock `set_permissions(0600)` removed, the Rust test fails (lock mode assertion), so it detects the defect this SOW fixed.
+
+Artifact updates:
+
+- None: tests only.

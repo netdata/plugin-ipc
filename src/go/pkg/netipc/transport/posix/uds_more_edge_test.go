@@ -1140,6 +1140,70 @@ func TestListenOverLeftoverLockModes(t *testing.T) {
 	}
 }
 
+const lockUmaskHelperEnv = "NETIPC_LOCK_UMASK_HELPER"
+
+// The umask is process-wide, so the restrictive-umask case runs in a child
+// test process instead of the parallel test runner.
+func TestListenLockUnderRestrictiveUmask(t *testing.T) {
+	testRunDir(t)
+	for _, mask := range []string{"477", "277"} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestLockUmaskHelperProcess$", "-test.v")
+		cmd.Env = append(os.Environ(), lockUmaskHelperEnv+"="+mask)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("endpoint lock under umask %s failed: %v\n%s", mask, err, out)
+		}
+	}
+}
+
+// TestLockUmaskHelperProcess is the child entry point; it is inert unless
+// spawned by TestListenLockUnderRestrictiveUmask.
+func TestLockUmaskHelperProcess(t *testing.T) {
+	maskText := os.Getenv(lockUmaskHelperEnv)
+	if maskText == "" {
+		return
+	}
+	var mask int
+	if _, err := fmt.Sscanf(maskText, "%o", &mask); err != nil {
+		t.Fatalf("mask %q: %v", maskText, err)
+	}
+	runDir := testRunDir(t)
+	service := "go_lock_umask_" + maskText
+	lock := filepath.Join(runDir, service+".lock")
+	_ = os.Remove(lock)
+	_ = os.Remove(filepath.Join(runDir, service+".sock"))
+
+	func() {
+		// Restore the umask before exit so files the process writes then
+		// (coverage data) keep their normal mode.
+		defer syscall.Umask(syscall.Umask(mask))
+		first, err := Listen(runDir, service, defaultServerConfig())
+		if err != nil {
+			t.Fatalf("listen under umask %o: %v", mask, err)
+		}
+		if second, err := Listen(runDir, service, defaultServerConfig()); !errors.Is(err, ErrAddrInUse) {
+			if second != nil {
+				second.Close()
+			}
+			t.Errorf("second server under umask %o: err = %v, want ErrAddrInUse", mask, err)
+		}
+		first.Close()
+		again, err := Listen(runDir, service, defaultServerConfig())
+		if err != nil {
+			t.Fatalf("restart under umask %o: %v", mask, err)
+		}
+		again.Close()
+	}()
+
+	info, err := os.Stat(lock)
+	if err != nil {
+		t.Fatalf("lock stat: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("lock mode under umask %o = %o, want 600", mask, mode)
+	}
+	_ = os.Remove(lock)
+}
+
 // A child that shares the lock's open file description (as a child forked
 // by another thread does until it execs) must not keep the endpoint once
 // the listener closes.
