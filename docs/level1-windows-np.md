@@ -89,8 +89,11 @@ Both pass the client check when the client runs as the same account.
    has no free instance, and `CreateFileW` fails with `ERROR_PIPE_BUSY`.
    The client then waits with `WaitNamedPipeW`, for at most 1000 ms
    (C `NIPC_NP_CONNECT_BUSY_WAIT_MS`, Rust `CONNECT_BUSY_WAIT_MS`, Go
-   `ConnectBusyWaitMs`), and tries `CreateFileW` once more. Any other
-   failure, or a second failure, fails the connect.
+   `ConnectBusyWaitMs`). `WaitNamedPipeW` does not reserve the instance it
+   reports, so another client may take it first: the client retries
+   `CreateFileW` after each successful wait, and waits again on
+   `ERROR_PIPE_BUSY`, until that bound ends. Any other failure fails the
+   connect.
 
    The bounded connect (C `nipc_np_connect_timeout()`, Rust
    `NpSession::connect_with_timeout()`, Go `ConnectTimeout()`) takes a
@@ -98,14 +101,20 @@ Both pass the client check when the client runs as the same account.
    `AtomicBool`, Go a channel). The busy wait then also ends at that
    deadline, in `WaitNamedPipeW` slices of at most 100 ms so an abort ends
    it promptly, and the wait for HELLO_ACK ends at the same deadline. Expiry
-   returns a timeout error, an abort an aborted error. `connect()` is the
+   returns a timeout error, an abort an aborted error; both are checked
+   before the pipe is opened, so a connect that starts expired or aborted
+   never takes a pipe instance. `connect()` is the
    bounded connect without a deadline or abort. A pipe that disconnected
    while the client waits for HELLO_ACK is still read, because a server
    that rejects the client writes its reply and then closes.
 
    On the server, accept is split: `nipc_np_accept_pending()` (C),
    `NpListener::accept_pending()` (Rust) and `Listener.AcceptPending()`
-   (Go) return the connected pipe instance without reading;
+   (Go) return the connected pipe instance without reading, after
+   creating the next instance for the next client. When that creation
+   fails, accept returns a create-pipe error, disconnects the client and
+   keeps its instance as the listener's, so the next accept listens on it
+   again;
    `nipc_np_accept_handshake()`, `PendingPipe::handshake()` and
    `PendingConn.Handshake()` then wait for HELLO with a timeout (0 = none)
    and, in Rust and Go, an abort signal. Expiry returns a timeout error,
@@ -183,7 +192,8 @@ the packet size and 64 KiB.
 - **Who.** A client session sending a packet while another request is in
   flight (the in-flight set holds more than the request being sent). A
   client with one request in flight (every typed call) waits for each write
-  to complete, and every server session sends with a blocking `WriteFile`.
+  to complete, bounded by its deadline and abort when it has them (below),
+  and every server session sends with a blocking `WriteFile`.
   The deadlock needs both peers blocked in send, and client progress alone
   breaks it.
 - **Send.** The client posts the write, then loops until it completes:
@@ -192,7 +202,16 @@ the packet size and 64 KiB.
   to 1 ms after the last progress, then waits on the write event in short
   slices (1 ms requested; a slice lasts a system timer tick, and only the
   write completing ends one early).
-  There is no new timeout: the send waits as long as a blocking write would.
+  A send without a deadline or abort waits as long as a blocking write
+  would.
+- **Deadline and abort.** A client send with a deadline or abort
+  (`nipc_np_send_timeout`, Rust `NpSession::send_with_control`, Go
+  `Session.SendTimeout`; every typed call passes both) also ends when the
+  deadline passes or the abort is raised before its write completes. C
+  waits on the write and abort events together; Rust and Go recheck the
+  abort flag at least every 100 ms. The send returns the timeout or aborted
+  error and fails as below: part of the message may already be on the
+  wire.
 - **Receive.** Every receive takes messages from the pending queue before
   the pipe, so reassembly, limits and in-flight validation are unchanged. A
   message larger than the receive buffer fails the receive, from the queue
@@ -203,7 +222,7 @@ the packet size and 64 KiB.
   32-byte header per packet), plus the 4-byte length the queue keeps with
   each packet. More fails the send with a protocol error.
 - **Failure.** A send that fails while its write is posted (the bound, a
-  failed peek, read or wait) cancels the write with `CancelIoEx`, waits until the
+  failed peek, read or wait, the deadline or an abort) cancels the write with `CancelIoEx`, waits until the
   kernel releases it, closes the pipe and fails every in-flight request: a
   cancelled write leaves the message stream unknown and the dropped bytes
   cannot be recovered. Later calls on the session fail; closing it still

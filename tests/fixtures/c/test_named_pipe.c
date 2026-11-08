@@ -102,6 +102,10 @@ typedef enum {
     FAKE_ACK_SELECTED_NOT_OFFERED,
     FAKE_ACK_SELECTED_NONE,
     FAKE_ACK_SELECTED_TWO,
+    FAKE_ACK_TRAILING_BYTES,
+    FAKE_ACK_LONG_PAYLOAD,
+    FAKE_ACK_PACKET_ABOVE_PROPOSAL,
+    FAKE_ACK_PACKET_HEADER_ONLY,
 } fake_ack_mode_t;
 
 typedef enum {
@@ -380,14 +384,24 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
                                        NIPC_KIND_CONTROL, NIPC_CODE_HELLO_ACK,
                                        NIPC_STATUS_UNSUPPORTED, payload, payload_len);
     } else {
+        uint32_t agreed = packet_size;
+        if (ctx->mode == FAKE_ACK_PACKET_ABOVE_PROPOSAL)
+            agreed = packet_size + 1;
+        if (ctx->mode == FAKE_ACK_PACKET_HEADER_ONLY)
+            agreed = NIPC_HEADER_LEN;
         size_t payload_len = build_valid_hello_ack_payload(payload, sizeof(payload),
-                                                           packet_size, 1);
+                                                           agreed, 1);
         if (ctx->mode == FAKE_ACK_BAD_LAYOUT) {
             nipc_hello_ack_t ack = { .layout_version = 2 };
             payload_len = nipc_hello_ack_encode(&ack, payload, sizeof(payload));
         }
         if (ctx->mode == FAKE_ACK_BAD_PAYLOAD)
             payload_len = 8;
+        if (ctx->mode == FAKE_ACK_LONG_PAYLOAD) {
+            /* A valid ACK, then 16 more payload bytes the header declares. */
+            memset(payload + payload_len, 0, 16);
+            payload_len += 16;
+        }
         if (ctx->mode == FAKE_ACK_SELECTED_NOT_OFFERED ||
             ctx->mode == FAKE_ACK_SELECTED_NONE ||
             ctx->mode == FAKE_ACK_SELECTED_TWO) {
@@ -402,6 +416,11 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
         msg_len = build_control_packet(msg, sizeof(msg),
                                        NIPC_KIND_CONTROL, NIPC_CODE_HELLO_ACK,
                                        NIPC_STATUS_OK, payload, payload_len);
+        if (ctx->mode == FAKE_ACK_TRAILING_BYTES && msg_len > 0) {
+            /* A valid ACK message, then 16 bytes its header does not declare. */
+            memset(msg + msg_len, 0, 16);
+            msg_len += 16;
+        }
     }
 
     if (!raw_pipe_write(pipe, msg, (DWORD)msg_len)) {
@@ -1882,6 +1901,14 @@ static void test_unknown_response_message_id(void)
     check("unknown-id server ok", ctx.server_ok);
 }
 
+/* NIPC_NP_OK in alternate_expected means "no alternate": a handshake that
+ * succeeds never matches a rejection case. */
+static bool handshake_err_matches(nipc_np_error_t err, nipc_np_error_t expected,
+                                  nipc_np_error_t alternate)
+{
+    return err == expected || (alternate != NIPC_NP_OK && err == alternate);
+}
+
 static void test_client_handshake_rejections(void)
 {
     printf("--- Client handshake protocol rejections ---\n");
@@ -1905,6 +1932,10 @@ static void test_client_handshake_rejections(void)
         { "HELLO_ACK selecting an unoffered profile", FAKE_ACK_SELECTED_NOT_OFFERED, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
         { "HELLO_ACK selecting no profile", FAKE_ACK_SELECTED_NONE, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
         { "HELLO_ACK selecting two profiles", FAKE_ACK_SELECTED_TWO, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "HELLO_ACK with bytes after its payload", FAKE_ACK_TRAILING_BYTES, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "HELLO_ACK declaring a 64-byte payload", FAKE_ACK_LONG_PAYLOAD, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "HELLO_ACK packet size above the proposal", FAKE_ACK_PACKET_ABOVE_PROPOSAL, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "HELLO_ACK packet size without payload room", FAKE_ACK_PACKET_HEADER_ONLY, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -1934,10 +1965,11 @@ static void test_client_handshake_rejections(void)
         ccfg.packet_size = cases[i].packet_size;
         nipc_np_session_t session;
         nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
-        if (err != cases[i].expected && err != cases[i].alternate_expected)
+        bool matched = handshake_err_matches(err, cases[i].expected,
+                                             cases[i].alternate_expected);
+        if (!matched)
             printf("    note: %s returned %d\n", cases[i].name, (int)err);
-        check(cases[i].name,
-              err == cases[i].expected || err == cases[i].alternate_expected);
+        check(cases[i].name, matched);
         if (err == NIPC_NP_OK)
             nipc_np_close_session(&session);
 
@@ -2002,10 +2034,11 @@ static void test_server_handshake_rejections(void)
         nipc_np_session_t session;
         err = nipc_np_accept(&listener, 1, &session);
         SetEvent(accepted_event);
-        if (err != cases[i].expected && err != cases[i].alternate_expected)
+        bool matched = handshake_err_matches(err, cases[i].expected,
+                                             cases[i].alternate_expected);
+        if (!matched)
             printf("    note: %s returned %d\n", cases[i].name, (int)err);
-        check(cases[i].name,
-              err == cases[i].expected || err == cases[i].alternate_expected);
+        check(cases[i].name, matched);
         if (err == NIPC_NP_OK)
             nipc_np_close_session(&session);
 
@@ -2521,7 +2554,7 @@ static void test_zero_chunk_budget_rejected(void)
         .ready_event = ready_event,
         .result = 0,
         .mode = FAKE_ACK_GOOD_THEN_CLOSE,
-        .packet_size = NIPC_HEADER_LEN,
+        .packet_size = NIPC_NP_DEFAULT_PACKET_SIZE,
     };
 
     HANDLE thread = test_create_thread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
@@ -2535,12 +2568,14 @@ static void test_zero_chunk_budget_rejected(void)
     CloseHandle(ready_event);
 
     nipc_np_client_config_t ccfg = default_client_config();
-    ccfg.packet_size = NIPC_HEADER_LEN;
     nipc_np_session_t session;
     nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
     check("zero-budget connect", err == NIPC_NP_OK);
 
     if (err == NIPC_NP_OK) {
+        /* The handshake rejects a packet size without payload room, so
+         * forge one to reach the send guard. */
+        session.packet_size = NIPC_HEADER_LEN;
         uint8_t payload[1] = { 0x22 };
         nipc_header_t hdr = {
             .kind = NIPC_KIND_REQUEST,
@@ -2911,6 +2946,200 @@ static void test_connect_waits_for_busy_pipe(void)
 }
 
 
+typedef struct {
+    nipc_np_listener_t *listener;
+    const wchar_t *pipe_name;
+    HANDLE thief;
+    int busy_seen;
+    int thief_ready;
+    int accept_ok;
+} stolen_accept_ctx_t;
+
+static void stolen_busy_hook(void *user)
+{
+    test_flag_set(&((stolen_accept_ctx_t *)user)->busy_seen);
+}
+
+/* Runs in the connecting thread once WaitNamedPipeW reported the instance
+ * the server created on accept: a third client takes it first, once. */
+static void stolen_waited_hook(void *user)
+{
+    stolen_accept_ctx_t *ctx = (stolen_accept_ctx_t *)user;
+    if (ctx->thief != INVALID_HANDLE_VALUE)
+        return;
+    ctx->thief = CreateFileW(ctx->pipe_name, GENERIC_READ | GENERIC_WRITE, 0,
+                             NULL, OPEN_EXISTING, 0, NULL);
+    test_flag_set(&ctx->thief_ready);
+}
+
+/* Accept the holder once the client found the pipe busy, then the thief
+ * that took the freed instance, then the waiting client's handshake. */
+static DWORD WINAPI stolen_accept_thread(LPVOID arg)
+{
+    stolen_accept_ctx_t *ctx = (stolen_accept_ctx_t *)arg;
+    nipc_np_server_config_t cfg = default_server_config();
+    HANDLE first = INVALID_HANDLE_VALUE;
+    HANDLE second = INVALID_HANDLE_VALUE;
+    HANDLE third = INVALID_HANDLE_VALUE;
+
+    if (!test_flag_wait(&ctx->busy_seen))
+        return 1;
+    if (nipc_np_accept_pending(ctx->listener, &first) != NIPC_NP_OK)
+        return 1;
+    if (test_flag_wait(&ctx->thief_ready) &&
+        nipc_np_accept_pending(ctx->listener, &second) == NIPC_NP_OK &&
+        nipc_np_accept_pending(ctx->listener, &third) == NIPC_NP_OK) {
+        nipc_np_session_t session;
+        if (nipc_np_accept_handshake(third, &cfg, 3, TEST_WAIT_LIMIT_MS,
+                                     &session) == NIPC_NP_OK) {
+            ctx->accept_ok = 1;
+            nipc_np_close_session(&session);
+        }
+    }
+    if (second != INVALID_HANDLE_VALUE) {
+        DisconnectNamedPipe(second);
+        CloseHandle(second);
+    }
+    DisconnectNamedPipe(first);
+    CloseHandle(first);
+    return 0;
+}
+
+static void test_connect_retries_stolen_instance(void)
+{
+    printf("--- Connect retries when another client takes the freed instance ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_np_server_config_t scfg = default_server_config();
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, service, &scfg, &listener);
+    check("listen for stolen instance", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK)
+        return;
+
+    wchar_t pipe_name[NIPC_NP_MAX_PIPE_NAME];
+    nipc_np_build_pipe_name(pipe_name, NIPC_NP_MAX_PIPE_NAME, TEST_RUN_DIR, service);
+    HANDLE holder = CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                                OPEN_EXISTING, 0, NULL);
+    check("holder takes the only instance", holder != INVALID_HANDLE_VALUE);
+
+    stolen_accept_ctx_t ctx = { .listener = &listener, .pipe_name = pipe_name,
+                                .thief = INVALID_HANDLE_VALUE };
+    nipc_np_set_connect_busy_hook_for_tests(stolen_busy_hook, &ctx);
+    nipc_np_set_connect_waited_hook_for_tests(stolen_waited_hook, &ctx);
+    HANDLE thread = test_create_thread(NULL, 0, stolen_accept_thread, &ctx, 0, NULL);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_np_session_t session;
+    err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("thief took the freed instance", ctx.thief != INVALID_HANDLE_VALUE);
+    check("connect retries after the instance was taken", err == NIPC_NP_OK);
+    if (err == NIPC_NP_OK)
+        nipc_np_close_session(&session);
+
+    /* Release the accept thread when connect failed before its steps. */
+    test_flag_set(&ctx.busy_seen);
+    test_flag_set(&ctx.thief_ready);
+    if (err != NIPC_NP_OK)
+        nipc_np_close_listener(&listener);
+    WaitForSingleObject(thread, TEST_WAIT_LIMIT_MS);
+    CloseHandle(thread);
+    nipc_np_set_connect_busy_hook_for_tests(NULL, NULL);
+    nipc_np_set_connect_waited_hook_for_tests(NULL, NULL);
+    check("server accepted the retrying client", ctx.accept_ok);
+
+    if (ctx.thief != INVALID_HANDLE_VALUE)
+        CloseHandle(ctx.thief);
+    if (holder != INVALID_HANDLE_VALUE)
+        CloseHandle(holder);
+    nipc_np_close_listener(&listener);
+}
+
+/* The disconnected instance takes no client until accept listens on it
+ * again, so the next client finds the pipe busy first. */
+static DWORD WINAPI failed_instance_accept_thread(LPVOID arg)
+{
+    busy_accept_ctx_t *ctx = (busy_accept_ctx_t *)arg;
+    nipc_np_server_config_t cfg = default_server_config();
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+
+    if (!test_flag_wait(&ctx->busy_seen))
+        return 1;
+    if (nipc_np_accept_pending(ctx->listener, &pipe) != NIPC_NP_OK)
+        return 1;
+    nipc_np_session_t session;
+    if (nipc_np_accept_handshake(pipe, &cfg, 1, TEST_WAIT_LIMIT_MS,
+                                 &session) == NIPC_NP_OK) {
+        ctx->accept_ok = 1;
+        nipc_np_close_session(&session);
+    }
+    return 0;
+}
+
+
+/* A failed replacement instance drops the accepted client and keeps the
+ * listener's instance, so the next client is still accepted. */
+static void test_accept_survives_failed_instance(void)
+{
+    printf("--- Accept keeps listening after a failed replacement instance ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_np_server_config_t scfg = default_server_config();
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, service, &scfg, &listener);
+    check("listen for failed instance", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK)
+        return;
+
+    wchar_t pipe_name[NIPC_NP_MAX_PIPE_NAME];
+    nipc_np_build_pipe_name(pipe_name, NIPC_NP_MAX_PIPE_NAME, TEST_RUN_DIR, service);
+    HANDLE dropped = CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                                 OPEN_EXISTING, 0, NULL);
+    check("first client connects", dropped != INVALID_HANDLE_VALUE);
+
+    nipc_np_fail_next_instances_for_tests(1);
+    HANDLE session_pipe = INVALID_HANDLE_VALUE;
+    err = nipc_np_accept_pending(&listener, &session_pipe);
+    nipc_np_fail_next_instances_for_tests(0);
+    check("accept reports the failed instance", err == NIPC_NP_ERR_CREATE_PIPE);
+    check("no session pipe is returned", session_pipe == INVALID_HANDLE_VALUE);
+    check("listener keeps its instance", listener.pipe != INVALID_HANDLE_VALUE);
+
+    DWORD avail = 0;
+    BOOL peek = PeekNamedPipe(dropped, NULL, 0, NULL, &avail, NULL);
+    check("first client was disconnected", !peek);
+
+    busy_accept_ctx_t ctx = { .listener = &listener };
+    nipc_np_set_connect_busy_hook_for_tests(busy_hook, &ctx);
+    HANDLE thread = test_create_thread(NULL, 0, failed_instance_accept_thread,
+                                       &ctx, 0, NULL);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_np_session_t session;
+    err = nipc_np_connect_timeout(TEST_RUN_DIR, service, &ccfg,
+                                  TEST_WAIT_LIMIT_MS, NULL, &session);
+    check("next client connects", err == NIPC_NP_OK);
+    if (err == NIPC_NP_OK)
+        nipc_np_close_session(&session);
+
+    test_flag_set(&ctx.busy_seen);
+    if (err != NIPC_NP_OK)
+        nipc_np_close_listener(&listener);
+    WaitForSingleObject(thread, TEST_WAIT_LIMIT_MS);
+    CloseHandle(thread);
+    nipc_np_set_connect_busy_hook_for_tests(NULL, NULL);
+    check("server accepted the next client", ctx.accept_ok);
+
+    if (dropped != INVALID_HANDLE_VALUE)
+        CloseHandle(dropped);
+    nipc_np_close_listener(&listener);
+}
+
+
 /* ------------------------------------------------------------------ */
 /*  Test: access policy                                                */
 /* ------------------------------------------------------------------ */
@@ -3146,6 +3375,8 @@ int main(void)
     test_bad_params_and_noop_close();
     test_accept_on_closed_listener();
     test_connect_waits_for_busy_pipe();
+    test_connect_retries_stolen_instance();
+    test_accept_survives_failed_instance();
     test_pipe_dacl_owner_only();
     test_remote_client_rejected();
     test_untrusted_server_rejected();

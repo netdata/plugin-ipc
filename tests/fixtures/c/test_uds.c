@@ -123,6 +123,8 @@ typedef enum {
     MALFORMED_ACK_SELECTED_NOT_OFFERED,
     MALFORMED_ACK_SELECTED_NONE,
     MALFORMED_ACK_SELECTED_TWO,
+    MALFORMED_ACK_TRAILING_BYTES,
+    MALFORMED_ACK_LONG_PAYLOAD,
 } malformed_ack_mode_t;
 
 typedef struct {
@@ -464,7 +466,9 @@ static void *malformed_ack_server_thread(void *arg)
             case MALFORMED_ACK_PACKET_ABOVE_PROPOSAL:
             case MALFORMED_ACK_SELECTED_NOT_OFFERED:
             case MALFORMED_ACK_SELECTED_NONE:
-            case MALFORMED_ACK_SELECTED_TWO: {
+            case MALFORMED_ACK_SELECTED_TWO:
+            case MALFORMED_ACK_TRAILING_BYTES:
+            case MALFORMED_ACK_LONG_PAYLOAD: {
                 nipc_hello_t hello;
                 if (n < NIPC_HEADER_LEN ||
                     nipc_hello_decode(buf + NIPC_HEADER_LEN, (size_t)n - NIPC_HEADER_LEN,
@@ -482,7 +486,11 @@ static void *malformed_ack_server_thread(void *arg)
                     .agreed_packet_size = hello.packet_size + 1,
                     .session_id = 1,
                 };
-                if (ctx->mode != MALFORMED_ACK_PACKET_ABOVE_PROPOSAL) {
+                if (ctx->mode == MALFORMED_ACK_TRAILING_BYTES ||
+                    ctx->mode == MALFORMED_ACK_LONG_PAYLOAD) {
+                    /* A valid ACK, then 16 more bytes in the same packet. */
+                    ack.agreed_packet_size = hello.packet_size;
+                } else if (ctx->mode != MALFORMED_ACK_PACKET_ABOVE_PROPOSAL) {
                     /* The client offers baseline only. */
                     ack.agreed_packet_size = hello.packet_size;
                     ack.selected_profile =
@@ -492,7 +500,9 @@ static void *malformed_ack_server_thread(void *arg)
                             : (NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID);
                 }
                 uint8_t ack_buf[48];
-                uint8_t pkt[NIPC_HEADER_LEN + sizeof(ack_buf)];
+                uint8_t pkt[NIPC_HEADER_LEN + sizeof(ack_buf) + 16];
+                size_t extra = (ctx->mode == MALFORMED_ACK_TRAILING_BYTES ||
+                                ctx->mode == MALFORMED_ACK_LONG_PAYLOAD) ? 16 : 0;
                 nipc_header_t hdr = {
                     .magic = NIPC_MAGIC_MSG,
                     .version = NIPC_VERSION,
@@ -500,13 +510,16 @@ static void *malformed_ack_server_thread(void *arg)
                     .kind = NIPC_KIND_CONTROL,
                     .code = NIPC_CODE_HELLO_ACK,
                     .transport_status = NIPC_STATUS_OK,
-                    .payload_len = sizeof(ack_buf),
+                    .payload_len = sizeof(ack_buf) +
+                        (ctx->mode == MALFORMED_ACK_LONG_PAYLOAD ? 16 : 0),
                     .item_count = 1,
                 };
+                memset(pkt, 0, sizeof(pkt));
                 nipc_hello_ack_encode(&ack, ack_buf, sizeof(ack_buf));
                 nipc_header_encode(&hdr, pkt, sizeof(pkt));
                 memcpy(pkt + NIPC_HEADER_LEN, ack_buf, sizeof(ack_buf));
-                send(cfd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+                send(cfd, pkt, NIPC_HEADER_LEN + sizeof(ack_buf) + extra,
+                     MSG_NOSIGNAL);
                 break;
             }
             }
@@ -751,9 +764,12 @@ static void test_ping_pong(void)
  * once with EINTR first. */
 static void test_eintr_retried(void)
 {
-    printf("Test: EINTR on send, sendmsg and recv is retried\n");
+    printf("Test: EINTR on accept, send, sendmsg and recv is retried\n");
     const char *svc = "test_eintr";
     cleanup_socket(svc);
+
+    /* The server's first accept is interrupted before a client arrives. */
+    uds_eintr_wrap_set_accept(1);
 
     server_ctx_t sctx = {
         .service      = svc,
@@ -805,7 +821,10 @@ static void test_eintr_retried(void)
 
     pthread_join(tid, NULL);
     check("every injected EINTR was hit", uds_eintr_wrap_pending() == 0);
+    check("the injected accept EINTR was hit",
+          uds_eintr_wrap_accept_pending() == 0);
     uds_eintr_wrap_set(0, 0, 0);
+    uds_eintr_wrap_set_accept(0);
     cleanup_socket(svc);
 }
 
@@ -1222,6 +1241,46 @@ static void test_platform_profile_mask(void)
     check("client connect", err == NIPC_UDS_OK);
     if (err == NIPC_UDS_OK) {
         check("selected profile matches the platform", session.selected_profile == want);
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* An unassigned profile bit offered and preferred by both peers is never
+ * selected: they would otherwise run baseline under that label. */
+static void test_unassigned_profile_bit(void)
+{
+    printf("Test 6c: Unassigned profile bit is never selected\n");
+    const char *svc = "test_unassigned_profile";
+    cleanup_socket(svc);
+    const uint32_t unassigned = 0x08u;
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    scfg.supported_profiles = NIPC_PROFILE_BASELINE | unassigned;
+    scfg.preferred_profiles = unassigned;
+
+    server_ctx_t sctx = {
+        .service      = svc,
+        .config       = scfg,
+        .accept_count = 1,
+        .echo_count   = 0,
+    };
+
+    pthread_t tid = start_echo_server(&sctx);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    ccfg.supported_profiles = NIPC_PROFILE_BASELINE | unassigned;
+    ccfg.preferred_profiles = unassigned;
+
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("client connect", err == NIPC_UDS_OK);
+    if (err == NIPC_UDS_OK) {
+        check("baseline selected instead of the unassigned bit",
+              session.selected_profile == NIPC_PROFILE_BASELINE);
         nipc_uds_close_session(&session);
     }
 
@@ -2414,6 +2473,117 @@ static void test_pipeline_exceeds_socket_buffers(void)
     cleanup_socket(svc);
 }
 
+/* A receive into a buffer too small for a header fails without reading a
+ * byte, so the message stays queued and the session stays usable. */
+static void test_receive_undersized_buffer_keeps_session(void)
+{
+    printf("Test: Undersized receive buffer keeps the session\n");
+    int sv[2] = {-1, -1};
+    check("socketpair",
+          socketpair(AF_UNIX, TEST_UDS_SOCK_TYPE, 0, sv) == 0);
+    if (sv[0] < 0 || sv[1] < 0)
+        return;
+
+    nipc_uds_session_t rx, tx;
+    memset(&rx, 0, sizeof(rx));
+    rx.fd = sv[0];
+    rx.role = NIPC_UDS_ROLE_SERVER;
+    rx.packet_size = 4096;
+    rx.max_request_payload_bytes = 1024;
+    rx.max_request_batch_items = 1;
+    memset(&tx, 0, sizeof(tx));
+    tx.fd = sv[1];
+    tx.role = NIPC_UDS_ROLE_SERVER;
+    tx.packet_size = 4096;
+
+    nipc_header_t hdr = {
+        .kind = NIPC_KIND_REQUEST, .code = 1, .item_count = 1,
+        .message_id = 7,
+    };
+    uint8_t payload[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    check("request sent",
+          nipc_uds_send(&tx, &hdr, payload, sizeof(payload)) == NIPC_UDS_OK);
+
+    uint8_t small[NIPC_HEADER_LEN - 1];
+    uint8_t rbuf[256];
+    nipc_header_t rhdr;
+    const void *rp = NULL;
+    size_t rlen = 0;
+    check("undersized buffer rejected",
+          nipc_uds_receive(&rx, small, sizeof(small), &rhdr, &rp, &rlen) ==
+              NIPC_UDS_ERR_BAD_PARAM);
+    check("request still received",
+          nipc_uds_receive_timeout(&rx, rbuf, sizeof(rbuf), &rhdr, &rp, &rlen,
+                                   1000, -1) == NIPC_UDS_OK &&
+              rhdr.message_id == 7 && rlen == sizeof(payload) &&
+              memcmp(rp, payload, sizeof(payload)) == 0);
+
+    free(rx.recv_buf);
+    nipc_uds_pending_free(&rx);
+    close(sv[0]);
+    close(sv[1]);
+}
+
+#if !TEST_UDS_STREAM
+/* A datagram longer than its header declares is a protocol error. The
+ * pending queue, filled while a send waits for buffer space, must keep the
+ * whole datagram so its receive rejects it as the direct receive does,
+ * instead of storing it cut to packet_size and accepting it. */
+static void test_pending_oversized_datagram_rejected(void)
+{
+    printf("Test: Oversized datagram rejected from the pending queue\n");
+    int sv[2] = {-1, -1};
+    check("socketpair", socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) == 0);
+    if (sv[0] < 0 || sv[1] < 0)
+        return;
+
+    nipc_uds_session_t s;
+    memset(&s, 0, sizeof(s));
+    s.fd = sv[0];
+    s.role = NIPC_UDS_ROLE_SERVER;
+    s.packet_size = 2 * NIPC_HEADER_LEN;
+    s.max_request_payload_bytes = 1024;
+    s.max_request_batch_items = 1;
+
+    /* The header declares exactly packet_size; 16 more bytes follow. */
+    uint8_t dgram[2 * NIPC_HEADER_LEN + 16];
+    memset(dgram, 0xAB, sizeof(dgram));
+    nipc_header_t hdr = {
+        .magic = NIPC_MAGIC_MSG, .version = NIPC_VERSION,
+        .header_len = NIPC_HEADER_LEN, .kind = NIPC_KIND_REQUEST,
+        .code = 1, .item_count = 1, .message_id = 1,
+        .payload_len = NIPC_HEADER_LEN,
+    };
+    nipc_header_encode(&hdr, dgram, NIPC_HEADER_LEN);
+
+    uint8_t rbuf[256];
+    nipc_header_t rhdr;
+    const void *rp;
+    size_t rlen;
+
+    check("direct datagram sent",
+          send(sv[1], dgram, sizeof(dgram), 0) == (ssize_t)sizeof(dgram));
+    check("direct receive rejects it",
+          nipc_uds_receive(&s, rbuf, sizeof(rbuf), &rhdr, &rp, &rlen) ==
+              NIPC_UDS_ERR_PROTOCOL);
+
+    check("queued datagram sent",
+          send(sv[1], dgram, sizeof(dgram), 0) == (ssize_t)sizeof(dgram));
+    bool eof = false;
+    check("drain queues it",
+          nipc_uds_pending_drain(&s, 4096, &eof) == NIPC_UDS_OK && !eof &&
+              nipc_uds_pending_queued(&s));
+    check("pending receive rejects it",
+          nipc_uds_receive(&s, rbuf, sizeof(rbuf), &rhdr, &rp, &rlen) ==
+              NIPC_UDS_ERR_PROTOCOL);
+    check("pending queue consumed", !nipc_uds_pending_queued(&s));
+
+    nipc_uds_pending_free(&s);
+    close(sv[0]);
+    close(sv[1]);
+}
+#endif
+
 #if TEST_UDS_STREAM
 /* Stream baseline: a receive that fails mid-stream marks the receive side failed, and
  * every later receive must fail. Bytes left in the pending queue are part
@@ -3101,6 +3271,7 @@ static void test_listen_lock_restrictive_umask(void)
     check_lock_under_umask("test_lock_umask", 0277);
     check_lock_leftover_mode("test_lock_leftover", 0200);
     check_lock_leftover_mode("test_lock_leftover", 0400);
+    check_lock_leftover_mode("test_lock_leftover", 0000);
 }
 
 /* A child forked by another thread shares the lock's open file description
@@ -3148,6 +3319,31 @@ static void test_listen_close_releases_lock_held_by_child(void)
 /* ------------------------------------------------------------------ */
 /*  Coverage: listen on invalid path (bind failure)                     */
 /* ------------------------------------------------------------------ */
+
+/* An empty run_dir or a NULL config/out is a caller error, not a path. */
+static void test_listen_connect_bad_params(void)
+{
+    printf("Test: empty run_dir and NULL parameters are rejected\n");
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_listener_t listener;
+    nipc_uds_session_t session;
+
+    check("listen with empty run_dir",
+          nipc_uds_listen("", "test_bad_params", &scfg, &listener) == NIPC_UDS_ERR_BAD_PARAM);
+    check("listen with NULL run_dir",
+          nipc_uds_listen(NULL, "test_bad_params", &scfg, &listener) == NIPC_UDS_ERR_BAD_PARAM);
+    check("listen with NULL config",
+          nipc_uds_listen(TEST_RUN_DIR, "test_bad_params", NULL, &listener) == NIPC_UDS_ERR_BAD_PARAM);
+    check("listen with NULL out",
+          nipc_uds_listen(TEST_RUN_DIR, "test_bad_params", &scfg, NULL) == NIPC_UDS_ERR_BAD_PARAM);
+    check("connect with empty run_dir",
+          nipc_uds_connect("", "test_bad_params", &ccfg, &session) == NIPC_UDS_ERR_BAD_PARAM);
+    check("connect with NULL config",
+          nipc_uds_connect(TEST_RUN_DIR, "test_bad_params", NULL, &session) == NIPC_UDS_ERR_BAD_PARAM);
+    check("connect with NULL out",
+          nipc_uds_connect(TEST_RUN_DIR, "test_bad_params", &ccfg, NULL) == NIPC_UDS_ERR_BAD_PARAM);
+}
 
 static void test_listen_bind_failure(void)
 {
@@ -3275,6 +3471,14 @@ static void test_connect_malformed_hello_ack(void)
           "HELLO_ACK selecting no profile rejected" },
         { "test_ack_sel_two", MALFORMED_ACK_SELECTED_TWO, NIPC_UDS_ERR_PROTOCOL,
           "HELLO_ACK selecting two profiles rejected" },
+#if !TEST_UDS_STREAM
+        /* A stream has no packet boundary: bytes after the payload are
+         * read as the next packet. */
+        { "test_ack_trailing", MALFORMED_ACK_TRAILING_BYTES, NIPC_UDS_ERR_PROTOCOL,
+          "HELLO_ACK packet with bytes after its payload rejected" },
+#endif
+        { "test_ack_long", MALFORMED_ACK_LONG_PAYLOAD, NIPC_UDS_ERR_PROTOCOL,
+          "HELLO_ACK declaring a 64-byte payload rejected" },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -3311,10 +3515,10 @@ static void test_connect_malformed_hello_ack(void)
 /*  Coverage: malformed client HELLO payload on server accept          */
 /* ------------------------------------------------------------------ */
 
-static void test_accept_malformed_hello_payload(void)
+/* Sends pkt as a raw client's HELLO and returns the server's accept result. */
+static nipc_uds_error_t accept_raw_hello(const char *svc, const void *pkt,
+                                         size_t len)
 {
-    printf("Test: Accept rejects malformed HELLO payload\n");
-    const char *svc = "test_bad_hello_payload";
     cleanup_socket(svc);
 
     accept_result_server_ctx_t sctx = {
@@ -3344,28 +3548,63 @@ static void test_accept_malformed_hello_payload(void)
         strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
         int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
         check("raw client connect", rc == 0);
-
-        if (rc == 0) {
-            uint8_t pkt[NIPC_HEADER_LEN + 4] = {0};
-            nipc_header_t hdr = {
-                .magic = NIPC_MAGIC_MSG,
-                .version = NIPC_VERSION,
-                .header_len = NIPC_HEADER_LEN,
-                .kind = NIPC_KIND_CONTROL,
-                .code = NIPC_CODE_HELLO,
-                .payload_len = 4,
-                .item_count = 1,
-            };
-            nipc_header_encode(&hdr, pkt, sizeof(pkt));
-            send(fd, pkt, sizeof(pkt), MSG_NOSIGNAL);
-        }
+        if (rc == 0)
+            send(fd, pkt, len, MSG_NOSIGNAL);
         close(fd);
     }
 
     pthread_join(tid, NULL);
-    check("malformed HELLO payload rejected",
-          sctx.accept_err == NIPC_UDS_ERR_PROTOCOL);
     cleanup_socket(svc);
+    return sctx.accept_err;
+}
+
+static void test_accept_malformed_hello_payload(void)
+{
+    printf("Test: Accept rejects malformed HELLO payload\n");
+
+    nipc_header_t hdr = {
+        .magic = NIPC_MAGIC_MSG,
+        .version = NIPC_VERSION,
+        .header_len = NIPC_HEADER_LEN,
+        .kind = NIPC_KIND_CONTROL,
+        .code = NIPC_CODE_HELLO,
+        .payload_len = 4,
+        .item_count = 1,
+    };
+    uint8_t pkt[NIPC_HEADER_LEN + NIPC_HELLO_WIRE_SIZE + 16];
+    memset(pkt, 0, sizeof(pkt));
+    nipc_header_encode(&hdr, pkt, sizeof(pkt));
+    check("malformed HELLO payload rejected",
+          accept_raw_hello("test_bad_hello_payload", pkt,
+                           NIPC_HEADER_LEN + 4) == NIPC_UDS_ERR_PROTOCOL);
+
+    /* A valid HELLO followed by 16 more bytes in the same packet, then one
+     * whose header declares those 16 bytes too. */
+    nipc_hello_t hello = {
+        .layout_version = 1,
+        .supported_profiles = NIPC_PROFILE_BASELINE,
+        .max_request_payload_bytes = 1024,
+        .max_request_batch_items = 1,
+        .max_response_payload_bytes = 1024,
+        .max_response_batch_items = 1,
+        .packet_size = 4096,
+    };
+    memset(pkt, 0, sizeof(pkt));
+    hdr.payload_len = NIPC_HELLO_WIRE_SIZE;
+    nipc_header_encode(&hdr, pkt, sizeof(pkt));
+    nipc_hello_encode(&hello, pkt + NIPC_HEADER_LEN, NIPC_HELLO_WIRE_SIZE);
+#if !TEST_UDS_STREAM
+    /* SEQPACKET only: on a stream the extra bytes are the next packet. */
+    check("HELLO packet with bytes after its payload rejected",
+          accept_raw_hello("test_hello_trailing", pkt, sizeof(pkt)) ==
+              NIPC_UDS_ERR_PROTOCOL);
+#endif
+
+    hdr.payload_len = NIPC_HELLO_WIRE_SIZE + 16;
+    nipc_header_encode(&hdr, pkt, sizeof(pkt));
+    check("HELLO declaring a 60-byte payload rejected",
+          accept_raw_hello("test_hello_long", pkt, sizeof(pkt)) ==
+              NIPC_UDS_ERR_PROTOCOL);
 }
 
 static void test_accept_incompatible_hello_version(void)
@@ -4286,6 +4525,7 @@ int main(void)
     test_bad_auth();               printf("\n");
     test_profile_mismatch();       printf("\n");
     test_platform_profile_mask();  printf("\n");
+    test_unassigned_profile_bit(); printf("\n");
     test_request_payload_over_cap(); printf("\n");
     test_stale_recovery();         printf("\n");
     test_stale_recovery_reclaims_regular_file(); printf("\n");
@@ -4306,8 +4546,11 @@ int main(void)
     test_pipeline_exceeds_socket_buffers(); printf("\n");
     test_pipeline_peer_close_during_send(); printf("\n");
     test_pipeline_pending_bound(); printf("\n");
+    test_receive_undersized_buffer_keeps_session(); printf("\n");
 #if TEST_UDS_STREAM
     test_stream_failed_receive_drops_pending(); printf("\n");
+#else
+    test_pending_oversized_datagram_rejected(); printf("\n");
 #endif
 
     /* Coverage gap tests */
@@ -4320,6 +4563,7 @@ int main(void)
     test_listen_excludes_starting_server(); printf("\n");
     test_listen_close_releases_lock_held_by_child(); printf("\n");
     test_listen_lock_restrictive_umask(); printf("\n");
+    test_listen_connect_bad_params(); printf("\n");
     test_listen_bind_failure();    printf("\n");
     test_batch_corrupt_dir();      printf("\n");
     test_connect_malformed_hello_ack(); printf("\n");

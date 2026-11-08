@@ -53,6 +53,16 @@ func acquireEndpointLock(runDir, serviceName string) (*os.File, error) {
 	if errors.Is(err, syscall.EACCES) {
 		fd, err = syscall.Open(lockPath, syscall.O_RDONLY|flags, 0)
 	}
+	if errors.Is(err, syscall.EACCES) {
+		// A crash between the creating open and Fchmod under such a umask
+		// leaves mode 000. Repair a regular file this account owns; run_dir
+		// writers are trusted, so the path check suffices.
+		var st syscall.Stat_t
+		if syscall.Lstat(lockPath, &st) == nil && st.Mode&syscall.S_IFMT == syscall.S_IFREG &&
+			int(st.Uid) == os.Geteuid() && syscall.Chmod(lockPath, 0o600) == nil {
+			fd, err = syscall.Open(lockPath, syscall.O_RDWR|flags, 0)
+		}
+	}
 	if err != nil {
 		return nil, wrapErr(ErrSocket, "lock open: "+err.Error())
 	}

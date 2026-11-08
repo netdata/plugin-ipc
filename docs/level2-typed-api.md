@@ -277,9 +277,10 @@ Every synchronous Level 2 client call is bounded. A per-call timeout of
 zero means "use the client context default"; the default is 30000 ms.
 One deadline covers the whole call: every attempt, the reconnect and
 handshake between attempts, any SHM attach after a reconnect, and every
-overflow-driven reconnect. The deadline applies to the complete logical
-response, including baseline transport chunk continuations and SHM
-response waits. A timeout returns a distinct timeout error rather than
+overflow-driven reconnect. The deadline applies to the request send, which
+ends at the deadline when the server stops reading, and to the complete
+logical response, including baseline transport chunk continuations and SHM
+response waits; the response waits only for what the send left of it. A timeout returns a distinct timeout error rather than
 being collapsed into disconnect or protocol failure; a reconnect that ends
 because the deadline passed reports the timeout too.
 
@@ -296,7 +297,8 @@ client. A call that observes the abort signal returns a distinct aborted
 error and is not retried. While an abort is pending, `refresh()` does not
 connect, and an abort raised during a connect or handshake ends it. A call
 or refresh blocked waiting for its peer observes an abort within 100 ms on
-every transport, including SHM response waits; an implementation may
+every transport, including a request send blocked on a full socket or pipe
+and SHM response waits; an implementation may
 notice it sooner (for example C polls an abort descriptor together with
 the socket), but callers must not rely on faster than 100 ms.
 
@@ -626,7 +628,11 @@ up resources:
 - A stop is remembered: a stop issued before the run loop starts makes it
   return at once. A managed server is single-use.
 - Stop only signals; the run loop owns the listener and closes it when it
-  exits.
+  exits. On POSIX that closes the listening socket and removes the socket
+  file at once, while the endpoint lock stays held until every worker of
+  the server has exited (C releases it in `nipc_server_drain()` or
+  `nipc_server_destroy()` after joining the workers), so no other server
+  takes the endpoint while this one still serves sessions.
 - Handshakes in progress observe the stop and end at once.
 - Sessions get a 1000 ms grace period to finish on their own. After it,
   the server interrupts blocking session I/O, so a worker blocked sending

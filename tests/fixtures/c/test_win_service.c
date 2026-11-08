@@ -559,6 +559,36 @@ static void test_snapshot_calls(void)
     stop_server(&sctx, server_thread);
 }
 
+/* supported_profiles = 0 is the documented default: baseline. */
+static void test_server_zero_profiles_selects_baseline(void)
+{
+    printf("--- Server with supported_profiles = 0 serves baseline ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_zero_prof");
+
+    nipc_server_config_t config = default_server_config();
+    config.supported_profiles = 0;
+    config.preferred_profiles = 0;
+    server_thread_ctx_t sctx;
+    HANDLE server_thread = start_server_named(&sctx, service, 1, &config,
+                                              &full_service_handler);
+    if (!server_thread)
+        return;
+
+    nipc_client_ctx_t client;
+    nipc_client_config_t ccfg = default_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    check("client ready against a zero-profile server", refresh_ready(&client));
+    nipc_cgroups_resp_view_t view;
+    check("call against a zero-profile server succeeds",
+          nipc_client_ready(&client) &&
+          nipc_client_call_cgroups_snapshot(&client, &view) == NIPC_OK);
+
+    nipc_client_close(&client);
+    stop_server(&sctx, server_thread);
+}
+
 static void test_client_call_timeout_on_wedged_peer(void)
 {
     printf("--- Client call timeout on wedged peer ---\n");
@@ -592,6 +622,139 @@ static void test_client_call_timeout_on_wedged_peer(void)
 
     nipc_client_close(&client);
     stop_server(&sctx, server_thread);
+}
+
+/* A server that completes the handshake and never reads, so a request
+ * larger than the pipe buffers blocks the client's write. */
+#define STALLED_READER_REQUEST_BYTES (8u * 1024u * 1024u)
+#define STALLED_READER_PIDS (1024u * 1024u)
+
+typedef struct {
+    const char *service;
+    int ready;
+    int reading_started;
+    int release;
+} stalled_reader_ctx_t;
+
+static DWORD WINAPI stalled_reader_server_thread(LPVOID arg)
+{
+    stalled_reader_ctx_t *ctx = (stalled_reader_ctx_t *)arg;
+    nipc_np_listener_t listener;
+    nipc_np_session_t session;
+    nipc_np_server_config_t scfg = {
+        .supported_profiles = NIPC_PROFILE_BASELINE,
+        .max_request_payload_bytes = STALLED_READER_REQUEST_BYTES,
+        .max_request_batch_items = 16,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .max_response_batch_items = 16,
+        .auth_token = AUTH_TOKEN,
+    };
+
+    memset(&listener, 0, sizeof(listener));
+    memset(&session, 0, sizeof(session));
+    if (nipc_np_listen(TEST_RUN_DIR, ctx->service, &scfg, &listener) !=
+        NIPC_NP_OK) {
+        test_flag_set(&ctx->ready);
+        test_flag_set(&ctx->reading_started);
+        return 0;
+    }
+    test_flag_set(&ctx->ready);
+
+    if (nipc_np_accept(&listener, 1, &session) == NIPC_NP_OK) {
+        /* The request's first bytes arrived: the client is in its write. */
+        bool readable = false;
+        (void)nipc_np_wait_readable(&session, 10000, &readable);
+        test_flag_set(&ctx->reading_started);
+        (void)test_flag_wait(&ctx->release);
+        nipc_np_close_session(&session);
+    } else {
+        test_flag_set(&ctx->reading_started);
+    }
+    nipc_np_close_listener(&listener);
+    return 0;
+}
+
+typedef struct {
+    nipc_client_ctx_t *client;
+    const uint32_t *pids;
+    uint32_t timeout_ms;
+    nipc_error_t err;
+} stalled_send_call_ctx_t;
+
+static DWORD WINAPI stalled_send_call_thread(LPVOID arg)
+{
+    stalled_send_call_ctx_t *ctx = (stalled_send_call_ctx_t *)arg;
+    nipc_apps_lookup_resp_view_t view;
+    ctx->err = nipc_client_call_apps_lookup_timeout(
+        ctx->client, ctx->pids, STALLED_READER_PIDS, &view, ctx->timeout_ms);
+    return 0;
+}
+
+/* A request the server never reads ends at the call deadline, or on abort,
+ * instead of blocking in the write. */
+static void test_client_send_bounded_by_deadline_and_abort(void)
+{
+    printf("--- Client send bounded by deadline and abort ---\n");
+
+    uint32_t *pids = calloc(STALLED_READER_PIDS, sizeof(*pids));
+    check("stalled send pids allocated", pids != NULL);
+    if (!pids)
+        return;
+    for (uint32_t i = 0; i < STALLED_READER_PIDS; i++)
+        pids[i] = i + 1;
+
+    for (int use_abort = 0; use_abort <= 1; use_abort++) {
+        char service[64];
+        unique_service(service, sizeof(service),
+                       use_abort ? "svc_send_abort" : "svc_send_deadline");
+
+        stalled_reader_ctx_t sctx = {.service = service};
+        HANDLE server_thread = test_create_thread(
+            NULL, 0, stalled_reader_server_thread, &sctx, 0, NULL);
+        check("stalled reader thread created", server_thread != NULL);
+        if (!server_thread)
+            break;
+        check("stalled reader listening", test_flag_wait(&sctx.ready));
+
+        nipc_client_ctx_t client;
+        nipc_client_config_t ccfg = default_client_config();
+        ccfg.max_request_payload_bytes = STALLED_READER_REQUEST_BYTES;
+        ccfg.max_logical_lookup_items = STALLED_READER_PIDS;
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("stalled send client ready", refresh_ready(&client));
+
+        stalled_send_call_ctx_t cctx = {
+            .client = &client,
+            .pids = pids,
+            .timeout_ms = use_abort ? 30000u : 200u,
+        };
+        ULONGLONG start = GetTickCount64();
+        HANDLE call_thread = test_create_thread(
+            NULL, 0, stalled_send_call_thread, &cctx, 0, NULL);
+        check("stalled send call thread created", call_thread != NULL);
+        if (call_thread) {
+            if (use_abort) {
+                check("server saw the request start",
+                      test_flag_wait(&sctx.reading_started));
+                nipc_client_abort(&client);
+            }
+            WaitForSingleObject(call_thread, INFINITE);
+            CloseHandle(call_thread);
+        }
+        ULONGLONG elapsed = GetTickCount64() - start;
+        test_flag_set(&sctx.release);
+        WaitForSingleObject(server_thread, INFINITE);
+        CloseHandle(server_thread);
+
+        if (use_abort)
+            check("blocked send returns aborted", cctx.err == NIPC_ERR_ABORTED);
+        else
+            check("blocked send returns timeout", cctx.err == NIPC_ERR_TIMEOUT);
+        check("blocked send ends promptly", elapsed < 5000);
+
+        nipc_client_close(&client);
+    }
+    free(pids);
 }
 
 static void test_client_abort_unblocks_call(void)
@@ -1055,7 +1218,9 @@ int main(void)
     test_client_lifecycle();
     test_client_lifecycle_ready();
     test_snapshot_calls();
+    test_server_zero_profiles_selects_baseline();
     test_client_call_timeout_on_wedged_peer();
+    test_client_send_bounded_by_deadline_and_abort();
     test_client_abort_unblocks_call();
     /* Broken-session retry and cache subcases need a smaller Windows-only
      * harness. In this monolithic executable they deadlock intermittently

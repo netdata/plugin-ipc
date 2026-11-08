@@ -301,7 +301,12 @@ objects in place.
 If the objects cannot be opened yet, the client retries. Between retries
 it probes the session pipe; if the server already broke it (refused at
 worker capacity, or died), the client stops retrying, reports the connect
-as failed, and keeps SHM enabled for its next connect.
+as failed, and keeps SHM enabled for its next connect: the session failed,
+not the attach. A call deadline or an abort that ends the wait also keeps
+SHM enabled. When the attach itself fails, or its own timeout ends the
+wait, with the pipe still connected, the client closes the session,
+removes SHM from its later proposals, and reconnects over the Named Pipe
+baseline (see `level1-windows-np.md`).
 
 ### Server destroys a per-session region
 

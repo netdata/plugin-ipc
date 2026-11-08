@@ -6,6 +6,8 @@ Status: completed
 
 Sub-state: closed 2026-10-31 on existing evidence: the Netdata vendor update merged on 2026-07-01 (`netdata/netdata#22936`). Paused 2026-07-12 for SOW-0030; resumed only for final validation and lifecycle closure.
 
+Correction (2026-11-07, SOW-0070): no `diff-netdata-vendor.sh` result was recorded at close, so this record does not prove source-to-Netdata parity for `netdata/netdata#22936`. The next vendoring (SOW-0050) reconstructed the baseline from both repositories and records its own before and after vendor diffs.
+
 ## Requirements
 
 ### Purpose

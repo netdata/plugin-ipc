@@ -1094,6 +1094,8 @@ Follow-up mapping:
 
 Codacy metrics now cover production code only (tests and benchmarks excluded through `.codacy.yml`, which Cloud honors). Complex files fell from 42% to 32% and duplicated files from 41% to 32%. The next production target is selected with evidence.
 
+Correction (2026-11-07, SOW-0070): the 42% / 41% baseline counted tests and the 32% / 32% result counts production code only, so the two do not measure the same scope; the result is a production-only rebaseline, not evidence that complexity or duplication fell.
+
 ## Lessons Extracted
 
 - Codacy Cloud reads path excludes from a root `.codacy.yml`, not from `.codacy/codacy.config.json`.

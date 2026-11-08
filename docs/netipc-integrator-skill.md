@@ -41,10 +41,12 @@ The C POSIX transport sources define `_FILE_OFFSET_BITS 64` themselves, so a
 32-bit consumer built with the legacy `off_t`/`time_t` layout needs no extra
 flags; no public header exposes `off_t` or `struct stat`.
 Runtime Safety CI vets the Go packages on amd64, 386, arm, arm64, riscv64,
-loong64, ppc64le, s390x and mips64le Linux. It also builds and runs the full C,
-Rust and Go suites plus C/Rust/Go interop on every Linux target Netdata ships:
-x86_64 musl, i386 glibc and musl, armv7 glibc (legacy and time64 layouts) and
-musl, armv6 musl and aarch64 glibc and musl, using QEMU for ARM. Run one target
+loong64, ppc64le, s390x and mips64le Linux. It also builds and runs the C and Rust suites
+plus C/Rust/Go interop on every Linux target Netdata ships: x86_64 musl, i386
+glibc and musl, armv7 glibc (legacy and time64 layouts) and musl, armv6 musl and
+aarch64 glibc and musl, using QEMU for ARM. The Go suites run on the glibc
+targets and on armv6 musl; the other musl targets skip them, because pure Go
+does not link libc and the matching glibc target covers the same architecture. Run one target
 locally with `bash tests/run-linux-target.sh <target>`; the script header lists
 targets and required toolchains.
 
@@ -1310,8 +1312,9 @@ Before you define a new service or integrate one into a plugin, answer these:
 - macOS and FreeBSD use a `SOCK_STREAM` baseline that carries the same
   packets, with the same API, handshake and profile bit (macOS has no
   `SOCK_SEQPACKET`; FreeBSD 15 `SOCK_SEQPACKET` does not keep NetIPC's packet
-  boundaries). FreeBSD keeps SHM; macOS has none. The packet size is 256 KiB
-  regardless of `SO_SNDBUF`. A receive that
+  boundaries). FreeBSD keeps SHM; macOS has none. The packet size defaults
+  to 256 KiB regardless of `SO_SNDBUF`; a smaller configured packet size
+  still applies. A receive that
   fails after reading part of a message (timeout, abort, oversized or
   malformed message) ends further receives on that session; sends still work,
   and the L2 client reconnects as for any broken session. A full listen backlog

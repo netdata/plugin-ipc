@@ -577,6 +577,19 @@ static DWORD WINAPI refresh_fn(LPVOID arg)
     return 0;
 }
 
+typedef struct {
+    HANDLE pipe;
+    BOOL connected;
+} connect_pipe_job_t;
+
+static DWORD WINAPI connect_pipe_fn(LPVOID arg)
+{
+    connect_pipe_job_t *job = (connect_pipe_job_t *)arg;
+    job->connected = ConnectNamedPipe(job->pipe, NULL) ||
+                     GetLastError() == ERROR_PIPE_CONNECTED;
+    return 0;
+}
+
 static void test_abort_ends_refresh_waiting_for_hello_ack(void)
 {
     printf("K4: abort ends a refresh waiting for HELLO_ACK\n");
@@ -590,8 +603,19 @@ static void test_abort_ends_refresh_waiting_for_hello_ack(void)
     nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
 
     HANDLE t = test_create_thread(NULL, 0, refresh_fn, &client, 0, NULL);
-    BOOL connected = ConnectNamedPipe(pipe, NULL) || GetLastError() == ERROR_PIPE_CONNECTED;
-    check("client connected to the fake server", connected);
+    /* A client that never connects must fail the test, not hang it. */
+    connect_pipe_job_t connect_job = {.pipe = pipe, .connected = FALSE};
+    HANDLE ct = test_create_thread(NULL, 0, connect_pipe_fn, &connect_job, 0, NULL);
+    BOOL connect_done = ct && WaitForSingleObject(ct, 5000) == WAIT_OBJECT_0;
+    check("client connected to the fake server",
+          connect_done && connect_job.connected);
+    if (!connect_done) {
+        /* The thread may still be blocked on the pipe: report and stop. */
+        printf("FATAL: fake server connect did not complete\n");
+        fflush(stdout);
+        ExitProcess(1);
+    }
+    CloseHandle(ct);
     nipc_client_abort(&client);
     BOOL finished = WaitForSingleObject(t, 2000) == WAIT_OBJECT_0;
 

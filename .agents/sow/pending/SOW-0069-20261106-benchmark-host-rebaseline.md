@@ -87,9 +87,10 @@ Sensitive data handling plan:
 
 Implementation plan:
 
-1. Record host state in the bench scripts' output.
-2. Measure the workstation under controlled settings, with user approval for any change.
-3. Re-baseline CSVs and review floors with the user.
+1. Record host state (CPU governor, frequency, kernel, mitigations, power plan; by role, never host names) as durable metadata in each benchmark CSV or a committed sidecar, and make `tests/generate-benchmarks-posix.sh` and `tests/generate-benchmarks-windows.sh` require it and print it in the committed reports.
+2. Measure the Linux workstation under controlled settings, with user approval for any change, and run an A/B against the June baseline.
+3. Windows host: capture the same host state, A/B the current tree against the June numbers under controlled settings, and analyse the SHM ping-pong and snapshot-shm stability-gate failures (per-run spread, scheduling and timer effects) until they are fixed or the gate handles them with evidence.
+4. Re-baseline both CSVs and review floors with the user.
 
 Validation plan:
 

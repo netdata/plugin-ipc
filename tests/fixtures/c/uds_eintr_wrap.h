@@ -11,6 +11,11 @@ void uds_eintr_wrap_set(unsigned send_count, unsigned sendmsg_count,
  * may. */
 void uds_short_io_set(unsigned recv_count, unsigned sendmsg_count);
 
+/* Make the next accept_count accept4() calls fail with EINTR, as a signal
+ * arriving while the server waits for a client does. */
+void uds_eintr_wrap_set_accept(unsigned accept_count);
+unsigned uds_eintr_wrap_accept_pending(void);
+
 /* Injections not consumed yet (EINTR and short I/O). */
 unsigned uds_eintr_wrap_pending(void);
 

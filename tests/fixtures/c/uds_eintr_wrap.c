@@ -114,6 +114,27 @@ ssize_t __wrap_recv(int fd, void *buf, size_t len, int flags)
     return __real_recv(fd, buf, len, flags);
 }
 
+static unsigned g_accept_eintr;
+
+void uds_eintr_wrap_set_accept(unsigned accept_count)
+{
+    __atomic_store_n(&g_accept_eintr, accept_count, __ATOMIC_RELEASE);
+}
+
+unsigned uds_eintr_wrap_accept_pending(void)
+{
+    return __atomic_load_n(&g_accept_eintr, __ATOMIC_ACQUIRE);
+}
+
+int __real_accept4(int fd, struct sockaddr *addr, socklen_t *len, int flags);
+
+int __wrap_accept4(int fd, struct sockaddr *addr, socklen_t *len, int flags)
+{
+    if (take(&g_accept_eintr))
+        return -1;
+    return __real_accept4(fd, addr, len, flags);
+}
+
 static const char *g_bind_probe_path;
 static int g_bind_probe_mode = -1;
 

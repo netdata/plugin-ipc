@@ -29,7 +29,9 @@ and execs would keep a dead peer's socket open and hide the disconnect.
 
 Example: `/run/netdata/cgroups-snapshot.sock`
 
-- `run_dir` is caller-supplied (typically `/run/netdata` on Linux)
+- `run_dir` is caller-supplied (typically `/run/netdata` on Linux) and must
+  not be empty; an empty `run_dir` is rejected, since it would place the
+  endpoint at the filesystem root
 - `service_name` is the service identity string
 - The path must not exceed the platform's `sun_path` limit
 
@@ -69,16 +71,24 @@ with mode `0777 & ~umask`, so it binds in a private directory instead:
    `{service_name}.sock`. Remove the directory.
 
 No other user can reach the socket while its mode is wider, and the
-process-global umask is never changed. Every step after `mkdir` except
-`bind()` goes through the directory descriptor, so a directory swapped in
-at the same path makes `listen` fail instead of placing a socket another
-account can reach. The temporary path must also fit `sun_path`.
+process-global umask is never changed. `fchmodat` and `open` still resolve
+the directory by path, but neither follows a symlink, and the ownership
+check on the opened descriptor refuses a directory another account swapped
+in. After that check every step except `bind()` goes through the directory
+descriptor, so a directory swapped in after it makes `listen` fail instead
+of placing a socket another account can reach. The temporary path must also
+fit `sun_path`.
 
 ## Profile bit
 
 UDS SEQPACKET is profile bit 0 (`0x01`), named `UDS_SEQPACKET`.
 This is the baseline profile — always supported, always available as
 fallback.
+
+A POSIX endpoint offers and accepts only the profiles it implements: the
+baseline plus `SHM_HYBRID` and `SHM_FUTEX` on Linux and FreeBSD, the
+baseline alone elsewhere. Configured bits outside that set are dropped
+before the handshake, so a peer can never select an unassigned profile.
 
 ## Connection lifecycle
 
@@ -303,10 +313,12 @@ The pipelining guarantee in `level1-transport.md` ("Pipelining") works like
 this, the same in C, Rust and Go:
 
 - **Who.** A client session sending a packet while another request is in
-  flight (the in-flight set holds more than the request being sent). A
-  client with one request in flight (every typed call) and every server
-  session send with a plain blocking call. The deadlock needs both peers
-  blocked in send, and client progress alone breaks it.
+  flight (the in-flight set holds more than the request being sent), and a
+  client send with a deadline or abort (`nipc_uds_send_timeout`, Rust
+  `UdsSession::send_with_control`, Go `Session.SendTimeout`; every typed
+  call passes both). Any other client send and every server session send
+  use a plain blocking call. The deadlock needs both peers blocked in send,
+  and client progress alone breaks it.
 - **Send.** Each packet goes out with `MSG_DONTWAIT` (on the stream
   baseline the descriptor is also made `O_NONBLOCK` for that send and
   restored after it, because macOS ignores the flag on a stream send short
@@ -314,8 +326,14 @@ this, the same in C, Rust and Go:
   `EAGAIN` the client polls for readable and writable. When readable, it reads what is there
   without blocking into a per-session pending queue (SEQPACKET: whole
   datagrams; stream: raw bytes), then retries the send. A stream send
-  resumes after partial writes. There is no new timeout: the send waits as
+  resumes after partial writes. A send without a deadline or abort waits as
   long as a blocking send would.
+- **Deadline and abort.** A bounded send polls with the time left before
+  its deadline; C also polls the abort descriptor, Rust and Go recheck the
+  abort flag at least every 100 ms. When the deadline passes or the abort
+  is raised before the message is sent, the send returns the timeout or
+  aborted error, shuts the session down and fails every in-flight request:
+  part of the message may already be on the wire.
 - **Receive.** Every receive takes packets from the pending queue before the
   socket, so reassembly, limits and in-flight validation are unchanged.
 - **Bound.** The queue may hold at most what the in-flight responses can
@@ -342,9 +360,11 @@ this, the same in C, Rust and Go:
 retried inside the transport. A SEQPACKET call moves a whole message or
 nothing, so a retry can neither duplicate nor split a message. On the
 stream baseline an interrupted call moved no bytes, and partial transfers are
-resumed, so the same holds there. Signals
-delivered to the process therefore never surface as send/receive
-failures.
+resumed, so the same holds there. A server's `accept()` that fails with
+`EINTR` is retried too, so a signal never ends an accept loop. Signals
+delivered to the process therefore never surface as accept, send or receive
+failures. The Go runtime installs its signal handlers with `SA_RESTART`, so
+the kernel restarts these calls for Go before they can return `EINTR`.
 
 ## Stale endpoint recovery
 
@@ -358,13 +378,20 @@ failures.
   write-only, or else read-only (`flock` works on any access mode), and
   `fchmod`s the descriptor back to 0600 after every open. A lock file left
   by a server that ran under such a umask therefore never blocks a start.
+  A crash between the creating open and that `fchmod` can leave mode 000,
+  which no access mode opens; when the file is a regular file owned by the
+  server's account, the server `chmod`s it to 0600 and opens it again.
 - If another listener holds the lock, the server fails with
   address-in-use. This closes the window between one server's `bind()`
   and `listen()`, where a connect probe would see a refused socket and
   unlink a live endpoint.
 - The listener holds the lock for its whole life and releases it after
   it unlinks the socket at close. The kernel releases it when the
-  process dies.
+  process dies. A listener can stop listening first (C
+  `nipc_uds_stop_listening()`, Rust `UdsListener::stop_listening()`, Go
+  `Listener.StopListening()`): that closes the socket and unlinks its file
+  but keeps the lock until close, which a server uses to keep the endpoint
+  while it finishes its sessions.
 - Every release, at close and on a failed listen, unlocks (`LOCK_UN`)
   before it closes the fd. A child forked by another thread shares the
   lock's open file description until it execs, so a plain close would

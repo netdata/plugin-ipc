@@ -6,6 +6,8 @@ Status: completed
 
 Sub-state: reopened 2026-10-29 because the first close parked C/Rust 32-bit coverage in SOW-0037 (the user ruled an untestable Netdata target a blocker); completed 2026-10-30 with C, Rust and Go suites and interop executed on every Netdata Linux target. See `## Reopened - 2026-10-29` and `## Validation (reopened scope)`.
 
+Correction (2026-11-07, SOW-0070): the Go suites ran once per architecture, on the glibc targets and on armv6-musl; the other four musl targets skip Go by design (pure Go does not link libc), as the validation table shows. The CI matrix had not run on GitHub at close; it has run since, in the Runtime Safety `linux-targets` job.
+
 ## Requirements
 
 ### Purpose

@@ -1857,9 +1857,7 @@ func main() {
 		service := os.Args[3]
 		duration := defaultDurationWin
 		if len(os.Args) >= 5 {
-			if d, err := strconv.Atoi(os.Args[4]); err == nil {
-				duration = d
-			}
+			duration = parseDurationArg(os.Args[4])
 		}
 
 		os.MkdirAll(runDir, 0700)
@@ -1892,9 +1890,7 @@ func main() {
 		service := os.Args[3]
 		duration := defaultDurationWin
 		if len(os.Args) >= 5 {
-			if d, err := strconv.Atoi(os.Args[4]); err == nil {
-				duration = d
-			}
+			duration = parseDurationArg(os.Args[4])
 		}
 
 		os.MkdirAll(runDir, 0700)
@@ -1916,7 +1912,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 
 		var profiles uint32
@@ -1939,7 +1935,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 
 		var profiles uint32
@@ -1962,7 +1958,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 
 		var profiles uint32
@@ -1985,7 +1981,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 		depth, _ := strconv.Atoi(os.Args[6])
 		if depth < 1 {
@@ -2001,7 +1997,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 		depth, _ := strconv.Atoi(os.Args[6])
 		if depth < 1 {

@@ -99,6 +99,20 @@ static inline void latency_record(latency_recorder_t *lr, uint64_t ns)
         lr->samples[lr->count++] = ns;
 }
 
+/* A duration that is not a positive number of seconds would wrap the
+ * nanosecond deadline arithmetic; reject it up front. */
+static int parse_duration(const char *arg)
+{
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(arg, &end, 10);
+    if (errno != 0 || end == arg || *end != '\0' || v <= 0 || v > 86400L * 365) {
+        fprintf(stderr, "invalid duration '%s': want a positive number of seconds\n", arg);
+        exit(1);
+    }
+    return (int)v;
+}
+
 static int cmp_u64(const void *a, const void *b)
 {
     uint64_t va = *(const uint64_t *)a;
@@ -1438,7 +1452,7 @@ int main(int argc, char **argv)
         if (nipc_test_resolve_run_dir(argv[2], run_dir, sizeof(run_dir)) != 0)
             return 1;
         const char *service = argv[3];
-        int duration = (argc >= 5) ? atoi(argv[4]) : DEFAULT_DURATION;
+        int duration = (argc >= 5) ? parse_duration(argv[4]) : DEFAULT_DURATION;
 
         uint32_t profiles;
         uint16_t expected_method_code;
@@ -1479,7 +1493,7 @@ int main(int argc, char **argv)
         if (nipc_test_resolve_run_dir(argv[2], run_dir, sizeof(run_dir)) != 0)
             return 1;
         const char *service = argv[3];
-        int duration = atoi(argv[4]);
+        int duration = parse_duration(argv[4]);
         uint64_t target_rps = (uint64_t)strtoull(argv[5], NULL, 10);
 
         uint32_t profiles;
@@ -1512,7 +1526,7 @@ int main(int argc, char **argv)
         if (nipc_test_resolve_run_dir(argv[2], run_dir, sizeof(run_dir)) != 0)
             return 1;
         const char *service = argv[3];
-        int duration = atoi(argv[4]);
+        int duration = parse_duration(argv[4]);
         uint64_t target_rps = (uint64_t)strtoull(argv[5], NULL, 10);
 
         uint32_t profiles;
@@ -1544,7 +1558,7 @@ int main(int argc, char **argv)
         if (nipc_test_resolve_run_dir(argv[2], run_dir, sizeof(run_dir)) != 0)
             return 1;
         const char *service = argv[3];
-        int duration = (argc >= 5) ? atoi(argv[4]) : DEFAULT_DURATION;
+        int duration = (argc >= 5) ? parse_duration(argv[4]) : DEFAULT_DURATION;
 
         uint32_t profiles;
         if (strcmp(cmd, "uds-batch-ping-pong-server") == 0)
@@ -1570,7 +1584,7 @@ int main(int argc, char **argv)
         if (nipc_test_resolve_run_dir(argv[2], run_dir, sizeof(run_dir)) != 0)
             return 1;
         const char *service = argv[3];
-        int duration = atoi(argv[4]);
+        int duration = parse_duration(argv[4]);
         uint64_t target_rps = (uint64_t)strtoull(argv[5], NULL, 10);
 
         uint32_t profiles;
@@ -1600,7 +1614,7 @@ int main(int argc, char **argv)
         if (nipc_test_resolve_run_dir(argv[2], run_dir, sizeof(run_dir)) != 0)
             return 1;
         const char *service = argv[3];
-        int duration = atoi(argv[4]);
+        int duration = parse_duration(argv[4]);
         uint64_t target_rps = (uint64_t)strtoull(argv[5], NULL, 10);
         int depth = atoi(argv[6]);
         if (depth < 1) depth = 1;
@@ -1743,7 +1757,7 @@ int main(int argc, char **argv)
             usage(argv[0]);
             return 1;
         }
-        int duration = atoi(argv[2]);
+        int duration = parse_duration(argv[2]);
         return run_lookup_bench(duration);
     }
 
@@ -1752,7 +1766,7 @@ int main(int argc, char **argv)
             usage(argv[0]);
             return 1;
         }
-        int duration = atoi(argv[2]);
+        int duration = parse_duration(argv[2]);
         const char *scenario = argv[3];
         uint64_t target_rps = (uint64_t)strtoull(argv[4], NULL, 10);
         return run_lookup_method_bench(duration, scenario, target_rps);
@@ -1769,7 +1783,7 @@ int main(int argc, char **argv)
         if (nipc_test_resolve_run_dir(argv[2], run_dir, sizeof(run_dir)) != 0)
             return 1;
         const char *service = argv[3];
-        int duration = atoi(argv[4]);
+        int duration = parse_duration(argv[4]);
         uint64_t target_rps = (uint64_t)strtoull(argv[5], NULL, 10);
         int depth = atoi(argv[6]);
 

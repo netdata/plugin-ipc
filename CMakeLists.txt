@@ -325,7 +325,7 @@ if(NOT NETIPC_WINDOWS_RUNTIME)
         target_compile_definitions(test_uds PRIVATE NIPC_TEST_EINTR_WRAP=1)
         target_link_options(test_uds PRIVATE
             "LINKER:--wrap=send" "LINKER:--wrap=sendmsg" "LINKER:--wrap=__sendmsg64"
-            "LINKER:--wrap=recv" "LINKER:--wrap=bind")
+            "LINKER:--wrap=recv" "LINKER:--wrap=bind" "LINKER:--wrap=accept4")
     endif()
     add_test(NAME test_uds COMMAND test_uds)
     set_tests_properties(test_uds PROPERTIES TIMEOUT 30)
@@ -489,10 +489,11 @@ if(CARGO_EXECUTABLE)
     if(NETIPC_WINDOWS_RUNTIME)
         set(NETIPC_RUST_TRANSPORT_FILTER "transport::")
     else()
-        set(NETIPC_RUST_TRANSPORT_FILTER "transport::posix::")
+        # transport::shm:: has its own entry; framing is shared by both.
+        set(NETIPC_RUST_TRANSPORT_FILTER "transport::posix::" "transport::framing::")
     endif()
     add_test(NAME test_uds_rust
-        COMMAND ${CARGO_EXECUTABLE} test ${NETIPC_RUST_TRANSPORT_FILTER}
+        COMMAND ${CARGO_EXECUTABLE} test -- ${NETIPC_RUST_TRANSPORT_FILTER}
         WORKING_DIRECTORY "${NETIPC_RUST_CRATE_DIR}"
     )
     set_tests_properties(test_uds_rust PROPERTIES

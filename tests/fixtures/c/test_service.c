@@ -408,6 +408,7 @@ typedef struct {
     nipc_managed_server_t server;
     test_server_events_t events;
     nipc_server_handler_fn handler;
+    bool zero_profiles; /* configure supported_profiles = 0 (the default) */
     int ready;  /* use __atomic builtins for cross-thread access */
     int done;   /* use __atomic builtins for cross-thread access */
 } server_thread_ctx_t;
@@ -417,6 +418,8 @@ static void *server_thread_fn(void *arg)
     server_thread_ctx_t *ctx = (server_thread_ctx_t *)arg;
 
     nipc_uds_server_config_t scfg = default_server_config();
+    if (ctx->zero_profiles)
+        scfg.supported_profiles = 0;
 
     nipc_error_t err = nipc_server_init(&ctx->server,
         TEST_RUN_DIR, ctx->service, &scfg,
@@ -967,6 +970,40 @@ static void test_client_lifecycle(void)
     cleanup_all(svc);
 }
 
+/* supported_profiles = 0 is the documented default: baseline. */
+static void test_server_zero_profiles_selects_baseline(void)
+{
+    printf("Test: server with supported_profiles = 0 serves baseline\n");
+    const char *svc = "svc_zero_profiles";
+    cleanup_all(svc);
+
+    server_thread_ctx_t sctx;
+    memset(&sctx, 0, sizeof(sctx));
+    sctx.service = svc;
+    sctx.handler = test_cgroups_handler;
+    sctx.zero_profiles = true;
+    pthread_t tid;
+    pthread_create(&tid, NULL, server_thread_fn, &sctx);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
+    check("zero-profile server started",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_client_ctx_t client;
+    nipc_client_config_t ccfg = default_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+    nipc_client_refresh(&client);
+    check("client is READY against a zero-profile server",
+          nipc_client_ready(&client));
+
+    nipc_cgroups_resp_view_t view;
+    check("call against a zero-profile server succeeds",
+          nipc_client_call_cgroups_snapshot(&client, &view) == NIPC_OK);
+
+    nipc_client_close(&client);
+    stop_server(&sctx, tid);
+    cleanup_all(svc);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Test 2: Typed cgroups snapshot call                                */
 /* ------------------------------------------------------------------ */
@@ -1074,6 +1111,136 @@ static void test_client_call_timeout_on_wedged_peer(void)
     cleanup_all(svc);
 }
 
+/* A server that completes the handshake and never reads, so a request
+ * larger than the socket buffers blocks the client's send. */
+#define STALLED_READER_REQUEST_BYTES (8u * 1024u * 1024u)
+#define STALLED_READER_PIDS (1024u * 1024u)
+
+typedef struct {
+    const char *service;
+    int ready;
+    int reading_started;
+    int release;
+} stalled_reader_ctx_t;
+
+static void *stalled_reader_server_fn(void *arg)
+{
+    stalled_reader_ctx_t *ctx = (stalled_reader_ctx_t *)arg;
+    nipc_uds_listener_t listener;
+    nipc_uds_session_t session;
+    nipc_uds_server_config_t scfg = {
+        .supported_profiles = NIPC_PROFILE_BASELINE,
+        .max_request_payload_bytes = STALLED_READER_REQUEST_BYTES,
+        .max_request_batch_items = 1,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .max_response_batch_items = 1,
+        .auth_token = AUTH_TOKEN,
+        .backlog = 4,
+    };
+
+    memset(&listener, 0, sizeof(listener));
+    memset(&session, 0, sizeof(session));
+    listener.fd = -1;
+    session.fd = -1;
+    if (nipc_uds_listen(TEST_RUN_DIR, ctx->service, &scfg, &listener) !=
+        NIPC_UDS_OK) {
+        test_flag_set(&ctx->ready);
+        test_flag_set(&ctx->reading_started);
+        return NULL;
+    }
+    test_flag_set(&ctx->ready);
+
+    if (nipc_uds_accept(&listener, 1, &session) == NIPC_UDS_OK) {
+        /* The request's first bytes arrived: the client is in its send. */
+        struct pollfd pfd = {.fd = session.fd, .events = POLLIN};
+        (void)poll(&pfd, 1, 10000);
+        test_flag_set(&ctx->reading_started);
+        (void)test_flag_wait(&ctx->release);
+        nipc_uds_close_session(&session);
+    } else {
+        test_flag_set(&ctx->reading_started);
+    }
+    nipc_uds_close_listener(&listener);
+    return NULL;
+}
+
+typedef struct {
+    nipc_client_ctx_t *client;
+    const uint32_t *pids;
+    uint32_t timeout_ms;
+    nipc_error_t err;
+} stalled_send_call_ctx_t;
+
+static void *stalled_send_call_fn(void *arg)
+{
+    stalled_send_call_ctx_t *ctx = (stalled_send_call_ctx_t *)arg;
+    nipc_apps_lookup_resp_view_t view;
+    ctx->err = nipc_client_call_apps_lookup_timeout(
+        ctx->client, ctx->pids, STALLED_READER_PIDS, &view, ctx->timeout_ms);
+    return NULL;
+}
+
+/* A request the server never reads ends at the call deadline, or on abort,
+ * instead of blocking in the send. */
+static void test_client_send_bounded_by_deadline_and_abort(void)
+{
+    printf("Test: Client send bounded by deadline and abort\n");
+
+    uint32_t *pids = calloc(STALLED_READER_PIDS, sizeof(*pids));
+    check("stalled send pids allocated", pids != NULL);
+    if (!pids)
+        return;
+    for (uint32_t i = 0; i < STALLED_READER_PIDS; i++)
+        pids[i] = i + 1;
+
+    for (int use_abort = 0; use_abort <= 1; use_abort++) {
+        const char *svc = use_abort ? "svc_send_abort" : "svc_send_deadline";
+        cleanup_all(svc);
+
+        stalled_reader_ctx_t sctx = {.service = svc};
+        pthread_t server_tid;
+        pthread_create(&server_tid, NULL, stalled_reader_server_fn, &sctx);
+        check("stalled reader listening", test_flag_wait(&sctx.ready));
+
+        nipc_client_ctx_t client;
+        nipc_client_config_t ccfg = default_client_config();
+        ccfg.max_request_payload_bytes = STALLED_READER_REQUEST_BYTES;
+        ccfg.max_logical_lookup_items = STALLED_READER_PIDS;
+        nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+        nipc_client_refresh(&client);
+        check("stalled send client is READY", nipc_client_ready(&client));
+
+        stalled_send_call_ctx_t cctx = {
+            .client = &client,
+            .pids = pids,
+            .timeout_ms = use_abort ? 30000u : 200u,
+        };
+        uint64_t start = monotonic_msec();
+        pthread_t call_tid;
+        pthread_create(&call_tid, NULL, stalled_send_call_fn, &cctx);
+        if (use_abort) {
+            check("server saw the request start",
+                  test_flag_wait(&sctx.reading_started));
+            nipc_client_abort(&client);
+        }
+        pthread_join(call_tid, NULL);
+        uint64_t elapsed = monotonic_msec() - start;
+        test_flag_set(&sctx.release);
+        pthread_join(server_tid, NULL);
+
+        if (use_abort) {
+            check("blocked send returns aborted", cctx.err == NIPC_ERR_ABORTED);
+        } else {
+            check("blocked send returns timeout", cctx.err == NIPC_ERR_TIMEOUT);
+        }
+        check("blocked send ends promptly", elapsed < 5000u);
+
+        nipc_client_close(&client);
+        cleanup_all(svc);
+    }
+    free(pids);
+}
+
 static void test_client_abort_unblocks_call(void)
 {
     printf("Test: Client abort unblocks in-flight call\n");
@@ -1119,6 +1286,106 @@ static void test_client_abort_unblocks_call(void)
     test_flag_set(&g_blocking_handler_release);
     nipc_client_close(&client);
     stop_server(&sctx, tid);
+    cleanup_all(svc);
+}
+
+typedef struct {
+    const char *service;
+    nipc_managed_server_t server;
+    int ready;
+    int run_returned;
+    int destroy;
+    int destroyed;
+} shutdown_order_ctx_t;
+
+static void *shutdown_order_server_fn(void *arg)
+{
+    shutdown_order_ctx_t *ctx = (shutdown_order_ctx_t *)arg;
+    nipc_uds_server_config_t scfg = default_server_config();
+    if (nipc_server_init(&ctx->server, TEST_RUN_DIR, ctx->service, &scfg, 1,
+                         NIPC_METHOD_CGROUPS_SNAPSHOT,
+                         blocking_cgroups_handler, NULL) != NIPC_OK) {
+        test_flag_set(&ctx->run_returned);
+        test_flag_set(&ctx->destroyed);
+        return NULL;
+    }
+    test_server_use_test_timings(&ctx->server, NULL);
+    test_flag_set(&ctx->ready);
+    nipc_server_run(&ctx->server);
+    test_flag_set(&ctx->run_returned);
+    (void)test_flag_wait(&ctx->destroy);
+    nipc_server_destroy(&ctx->server);
+    test_flag_set(&ctx->destroyed);
+    return NULL;
+}
+
+/* A second server on the same endpoint starts only while none holds it. */
+static bool endpoint_free(const char *service)
+{
+    nipc_managed_server_t other;
+    nipc_uds_server_config_t scfg = default_server_config();
+    if (nipc_server_init(&other, TEST_RUN_DIR, service, &scfg, 1,
+                         NIPC_METHOD_CGROUPS_SNAPSHOT,
+                         test_cgroups_handler, NULL) != NIPC_OK)
+        return false;
+    nipc_server_destroy(&other);
+    return true;
+}
+
+/* Run closes the listening socket when its loop exits; the endpoint lock
+ * stays held until every worker of the server has exited. */
+static void test_server_shutdown_order(void)
+{
+    printf("Test: server shutdown closes the socket first, the endpoint last\n");
+    const char *svc = "svc_shutdown_order";
+    cleanup_all(svc);
+    __atomic_store_n(&g_blocking_handler_entered, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_blocking_handler_release, 0, __ATOMIC_RELEASE);
+
+    shutdown_order_ctx_t sctx;
+    memset(&sctx, 0, sizeof(sctx));
+    sctx.service = svc;
+    pthread_t tid;
+    pthread_create(&tid, NULL, shutdown_order_server_fn, &sctx);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.run_returned);
+    check("shutdown-order server started",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_client_ctx_t client;
+    nipc_client_config_t ccfg = default_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+    nipc_client_refresh(&client);
+    check("shutdown-order client is READY", nipc_client_ready(&client));
+
+    snapshot_call_thread_ctx_t call_ctx;
+    memset(&call_ctx, 0, sizeof(call_ctx));
+    call_ctx.client = &client;
+    pthread_t call_tid;
+    pthread_create(&call_tid, NULL, snapshot_call_thread_fn, &call_ctx);
+    (void)test_flag_wait_any(&g_blocking_handler_entered, NULL);
+
+    nipc_server_stop(&sctx.server);
+    (void)test_flag_wait(&sctx.run_returned);
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, svc);
+    check("socket file removed when run returns",
+          access(path, F_OK) != 0 && errno == ENOENT);
+    check("endpoint held while a worker runs", !endpoint_free(svc));
+
+    /* Destroy shuts the blocked worker's socket after its grace, which
+     * fails the client's call; the worker itself stays in the handler. */
+    test_flag_set(&sctx.destroy);
+    pthread_join(call_tid, NULL);
+    check("blocked call fails once destroy shuts its socket",
+          call_ctx.err != NIPC_OK);
+    check("endpoint held until the worker exits", !endpoint_free(svc));
+
+    test_flag_set(&g_blocking_handler_release);
+    (void)test_flag_wait(&sctx.destroyed);
+    pthread_join(tid, NULL);
+    check("endpoint free after destroy", endpoint_free(svc));
+
+    nipc_client_close(&client);
     cleanup_all(svc);
 }
 
@@ -7421,7 +7688,10 @@ int main(void)
 
     test_client_lifecycle();       printf("\n");
     test_cgroups_call();           printf("\n");
+    test_server_zero_profiles_selects_baseline(); printf("\n");
+    test_server_shutdown_order(); printf("\n");
     test_client_call_timeout_on_wedged_peer(); printf("\n");
+    test_client_send_bounded_by_deadline_and_abort(); printf("\n");
     test_client_abort_unblocks_call(); printf("\n");
     test_cgroups_lookup_call();    printf("\n");
     test_apps_lookup_call();       printf("\n");

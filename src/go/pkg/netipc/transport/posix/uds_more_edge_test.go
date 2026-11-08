@@ -1110,7 +1110,7 @@ func TestListenExcludesStartingServer(t *testing.T) {
 // ran under such a umask) must not block a start, and the start restores it.
 func TestListenOverLeftoverLockModes(t *testing.T) {
 	runDir := testRunDir(t)
-	for _, mode := range []os.FileMode{0o200, 0o400} {
+	for _, mode := range []os.FileMode{0o200, 0o400, 0o000} {
 		service := uniqueService(t)
 		lock := filepath.Join(runDir, service+".lock")
 		_ = os.Remove(lock)
@@ -1126,8 +1126,10 @@ func TestListenOverLeftoverLockModes(t *testing.T) {
 			t.Fatalf("listen over a %o lock: %v", mode, err)
 		}
 		info, err := os.Stat(lock)
-		if err != nil || info.Mode().Perm() != 0o600 {
-			t.Errorf("lock mode after listen over %o = %v (err %v), want 0600", mode, info.Mode().Perm(), err)
+		if err != nil {
+			t.Errorf("stat lock after listen over %o: %v", mode, err)
+		} else if info.Mode().Perm() != 0o600 {
+			t.Errorf("lock mode after listen over %o = %v, want 0600", mode, info.Mode().Perm())
 		}
 		if second, err := Listen(runDir, service, defaultServerConfig()); !errors.Is(err, ErrAddrInUse) {
 			if second != nil {
@@ -1137,6 +1139,23 @@ func TestListenOverLeftoverLockModes(t *testing.T) {
 		}
 		first.Close()
 		_ = os.Remove(lock)
+	}
+}
+
+// An empty run_dir is a caller error: Go would otherwise put the socket in
+// the working directory and the lock at "/<name>.lock".
+func TestEmptyRunDirRejected(t *testing.T) {
+	if l, err := Listen("", "go_empty_run_dir", defaultServerConfig()); !errors.Is(err, ErrBadParam) {
+		if l != nil {
+			l.Close()
+		}
+		t.Errorf("Listen with empty run_dir: err = %v, want ErrBadParam", err)
+	}
+	if s, err := Connect("", "go_empty_run_dir", defaultClientConfigPtr()); !errors.Is(err, ErrBadParam) {
+		if s != nil {
+			s.Close()
+		}
+		t.Errorf("Connect with empty run_dir: err = %v, want ErrBadParam", err)
 	}
 }
 
@@ -1278,5 +1297,40 @@ func TestServerHandshakeWaitKeepsTimeoutAndAbort(t *testing.T) {
 		if !errors.Is(err, tc.want) {
 			t.Errorf("%s: %v, want %v", tc.name, err, tc.want)
 		}
+	}
+}
+
+// A receive into a buffer too small for a header fails without reading a
+// byte, so the message stays queued and the session stays usable.
+func TestReceiveUndersizedBufferKeepsSession(t *testing.T) {
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, sockType, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	newSession := func(fd int) *Session {
+		return &Session{
+			fd:                     fd,
+			role:                   RoleServer,
+			PacketSize:             4096,
+			MaxRequestPayloadBytes: 1024,
+			MaxRequestBatchItems:   1,
+		}
+	}
+	rx, tx := newSession(fds[0]), newSession(fds[1])
+	defer rx.Close()
+	defer tx.Close()
+
+	payload := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	hdr := protocol.Header{Kind: protocol.KindRequest, Code: 1, ItemCount: 1, MessageID: 7}
+	if err := tx.Send(&hdr, payload); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	if _, _, err := rx.Receive(make([]byte, protocol.HeaderSize-1)); !errors.Is(err, ErrBadParam) {
+		t.Fatalf("undersized buffer: expected ErrBadParam, got %v", err)
+	}
+	h, p, err := rx.ReceiveTimeout(make([]byte, 256), 1000, nil)
+	if err != nil || h.MessageID != 7 || string(p) != string(payload) {
+		t.Fatalf("request still received: hdr %+v payload %v err %v", h, p, err)
 	}
 }

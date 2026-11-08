@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: in-progress
+Status: paused
 
-Sub-state: vendored; source PR netdata/plugin-ipc#18 and Netdata PR netdata/netdata#24633 open for review (2026-11-06). Closes when the Netdata PR CI, Windows build included, passes.
+Sub-state: paused 2026-11-07 for SOW-0070 (PR review findings); Netdata consumer fixes done locally in the worktree; re-vendor after SOW-0070.
 
 ## Requirements
 
@@ -65,11 +65,11 @@ Status: ready (preflight passed 2026-11-06)
 
 Problem / root-cause model:
 
-- Netdata's vendored NetIPC lacks the fixes of the SOWs completed since the last vendoring. The candidate source commit is `2eee40a` (branch `sow-0040-robustness-repro-tests`); the gate's evidence comes from the vendoring preflight, recorded in the Execution Log as it completes.
+- Netdata's vendored NetIPC lacks the fixes of the SOWs completed since the last vendoring. The first vendoring (2026-11-06) used source commit `4261919` (branch `sow-0040-robustness-repro-tests`), after `2eee40a` and the later SOW-0066 and SOW-0067 fixes; the re-vendoring after SOW-0070 uses that SOW's commit. Each candidate's preflight evidence is in the Execution Log.
 
 Evidence reviewed:
 
-- To be produced by the preflight at activation; this SOW cannot start before SOW-0043 completes, so the evidence cannot exist yet.
+- The vendoring preflight in the Execution Log: CI and check runs, code-scanning, Dependabot and secret-scanning results with each alert's disposition, the reconstructed baseline and two-way gap analysis, the migration plan, and the same-host benchmark A/B (decisions of 2026-11-04 and 2026-11-06).
 
 Affected contracts and surfaces:
 
@@ -107,7 +107,8 @@ Open-source reference evidence:
 
 Open decisions:
 
-- Push and PR approval (user).
+- Push and PR approval: resolved (2026-11-06, user; netdata/plugin-ipc#18 and netdata/netdata#24633 are open).
+- Remaining close condition: Netdata PR CI passes on the re-vendored commit.
 
 ## Implications And Decisions
 
@@ -199,25 +200,73 @@ See the implementation plan above.
   - SHM ping-pong fails the stability gate on both commits on this host, so it gives no signal either way. Since the last vendoring (`63919ec`), the Windows SHM C and Rust code changed only in `nipc_win_shm_server_create` (DACL, SOW-0045) and in formatting; the Go change is SOW-0063's hot-path work.
   - The vendoring reference is `63919ec` (what Netdata runs today), not `95c53ef`.
 
+### 2026-11-06
+
+- PR checks on netdata/plugin-ipc#18 (head `9568f4e`, library sources equal to `4261919`): 41 pass, 4 skipped, 1 failure, "C, Rust, and Go Coverage" in its Codacy upload step only (decision 5). CodeQL first failed on new alert 7767 (`cpp/path-injection`, `netipc_uds_lifecycle.c:352`), the same finding as the dismissed 7761 at lines moved by SOW-0067; dismissed as a false positive (user, "1a"); CodeQL then passes and open code-scanning alerts are 0.
+- PR checks on netdata/netdata#24633 (head `42313ad410`): 124 pass, 20 skipped, 1 failure, the SonarCloud quality gate. "Build Windows", "Test Windows installer" and the Go `windows/amd64` builds pass, which proves the `netipc_win_security.c` list entry and the `advapi32` link.
+- SonarCloud findings, triaged and posted on the Netdata PR (user, "2a"):
+  - BLOCKER c:S3519 (`netipc_named_pipe.c:1784`): false positive. `recv_buf` is grown to at least `payload_len` (`ensure_recv_buf`, lines 1600-1611, called at 1718); a first read longer than the message is rejected (1699); continuation chunks are checked for header size (1752), header fields (1765-1768) and payload length (1775); `assembled + chunk_data > payload_len` is rejected before the copy (1780).
+  - 8 MAJOR c:S2753 (`netipc_win_shm.c` lines 40-163): test-only fault injection; the file-local enum has the same enumerators and values as the public test enum under `NIPC_INTERNAL_TESTING`, which Netdata never defines; the code is unchanged since `63919ec`, only shifted.
+  - Duplication on new code 3.2% against a 3% limit: vendored transport and test code; no refactor in a vendoring PR.
+
 ## Validation
 
-Pending activation.
+Acceptance criteria evidence:
+
+- Vendoring preflight recorded and passing: candidate `4261919` (CI on `80a56de` and `4261919`, same library sources), code scanning, Dependabot and secret scanning 0 open, baseline `63919ec` / `netdata/netdata @ 22f029781d`, two-way gap analysis, migration plan, performance assessment with same-host A/B and user acceptance (decisions 2026-11-06), extended fuzz 15/15 and stress 7/7 (Implications And Decisions).
+- Post-vendor normalized diff: no C, Rust or Go differences; Netdata-only wrappers, workspace manifest and Go module path preserved.
+- Netdata builds and its NetIPC consumers pass on Linux; the Windows build passes in the Netdata PR CI (2026-11-06 log).
+- PRs opened only at the user's request (decision 4A).
+
+Tests or equivalent validation:
+
+- Netdata worktree on Linux: full build without NetIPC warnings; `apps-lookup-protocol-test`, `apps-lookup-netipc-lock-test`, `apps-cgroups-lookup-client-abort-test`, `cgroup-lookup-netipc-test`; `go test ./pkg/netipc/...`, `go vet`; `cargo test -p netipc` 401; `cargo fmt --check`, `cargo doc` 0 warnings.
+- Netdata PR CI: 124 checks pass, Windows build and installer included.
+- Source suites per SOW (SOW-0031 to SOW-0067) on Linux, FreeBSD 14.3 and 15.1, macOS and Windows.
+
+Real-use evidence:
+
+- Netdata's apps and cgroups lookup tests start the real plugin-side NetIPC servers and clients from the vendored tree.
+
+Reviewer findings:
+
+- SonarCloud and CodeQL findings on the PRs are triaged above, with evidence; no code change was needed.
+
+Same-failure scan:
+
+- Vendored `.c` files against Netdata's build lists: `netipc_win_security.c` was the only one missing. System libraries called by new code: only `advapi32` (security descriptors), now linked.
 
 Sensitive data gate:
 
-- Pending close. Checked so far: this SOW cites Netdata evidence as `netdata/netdata @ commit` with repo-relative paths, test hosts by role, and no tokens, private endpoints or workstation paths; the Codacy token is named only by its secret name.
+- This SOW cites Netdata evidence as `netdata/netdata @ commit` with repo-relative paths, test hosts by role, and no tokens, private endpoints or workstation paths; the Codacy token is named only by its secret name. The worktree path is under the user's home and recorded with `~`.
+
+Artifact maintenance gate:
+
+- AGENTS.md: no update; no workflow change.
+- Runtime project skills: `project-netdata-vendoring` step 10 now requires checking Netdata's build lists and link libraries, and records that the Windows build is proven by the Netdata PR CI (lesson below).
+- Specs: no update; vendoring changes no protocol or API.
+- End-user/operator docs: no update; the vendor scripts and their usage did not change.
+- End-user/operator skills: `docs/netipc-integrator-skill.md` unaffected; no API or workflow change in this SOW.
+- SOW lifecycle: `Status: completed`, moved to `done/` in this commit; follow-ups tracked as SOW-0068 and SOW-0069.
+
+Performance assessment:
+
+- Same-host A/B against `63919ec` on both hosts (Implications And Decisions); possible costs of about 5% (Windows snapshot-baseline) and about 2% (POSIX Go-client SHM batch) accepted by the user (decision 1A).
 
 ## Outcome
 
-Pending activation.
+Netdata PR netdata/netdata#24633 vendors plugin-ipc `4261919` with the Windows build-list and `advapi32` link changes; its CI passes except the SonarCloud gate, whose findings are triaged as false positives on the PR. Source PR netdata/plugin-ipc#18 carries the SOWs since the previous vendoring. Merging both is the user's and the maintainers' decision.
 
 ## Lessons Extracted
 
-Pending activation.
+- `vendor-to-netdata.sh` copies sources but not build integration: a new `.c` file and the system libraries it calls must be added to Netdata's CMake by hand, and only the Netdata Windows CI proves the Windows side. Recorded in the vendoring skill.
+- Two sequential five-hour benchmark runs cannot resolve differences under about 20% on these hosts; row-interleaved runs with CPU pinning can. Host-wide drift since June is tracked by SOW-0069.
 
 ## Followup
 
-None yet.
+- SOW-0068 (pending): restore Go coverage to its 90% threshold.
+- SOW-0069 (pending): benchmark host drift and floor re-baseline.
+- Codacy coverage upload permission: user action, accepted in decision 5; not code.
 
 ## Regression Log
 

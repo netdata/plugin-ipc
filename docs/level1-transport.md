@@ -405,7 +405,9 @@ message size. Level 1 handles this transparently:
   metadata to detect wrong packet order, wrong message identity, and
   accidental desync. The sender reuses offsets over the original message
   buffer — no copying or splitting of the payload data. The send blocks until
-  all chunks of the single logical message are transmitted.
+  all chunks of the single logical message are transmitted, or until a
+  client send's deadline or abort ends it (the transport documents describe
+  how).
 
 - **Receiver**: reads the first chunk and its outer header. Allocates the full
   logical message buffer once from the metadata in the first chunk. Receives
@@ -470,7 +472,10 @@ Level 1 monitors connection health at the transport level:
 Level 1 exposes native OS wait objects so callers can integrate sessions and
 listeners into their own event loops:
 
-- POSIX: file descriptor (fd)
+- POSIX: file descriptor (fd). A UDS session may already hold received
+  responses that do not show on the fd, so check for them before waiting:
+  C `nipc_uds_session_has_pending()`, Rust `UdsSession::has_pending()`, Go
+  `Session.HasPending()`.
 - Windows: HANDLE. A Named Pipe session handle is signalled by I/O
   completion, not by arriving data, so session read-readiness comes from
   the wait-readable call; see `level1-windows-np.md`, "Pipelining".

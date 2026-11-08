@@ -901,6 +901,11 @@ static void test_server_create_validation(void)
           nipc_shm_server_create(NULL, "svc", 1, 4096, 4096, &ctx)
               == NIPC_SHM_ERR_BAD_PARAM);
 
+    /* Empty run_dir */
+    check("empty run_dir",
+          nipc_shm_server_create("", "svc", 1, 4096, 4096, &ctx)
+              == NIPC_SHM_ERR_BAD_PARAM);
+
     /* NULL service_name */
     check("null service_name",
           nipc_shm_server_create(TEST_RUN_DIR, NULL, 1, 4096, 4096, &ctx)

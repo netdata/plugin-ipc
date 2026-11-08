@@ -94,6 +94,17 @@ fn test_session(fd: RawFd, role: Role, packet_size: u32) -> UdsSession {
     }
 }
 
+/// Read one HELLO from a raw server socket. A stream socket may return it
+/// in parts, so read until the whole packet is in.
+fn recv_hello(fd: RawFd, buf: &mut [u8]) -> usize {
+    let want = HEADER_SIZE + HELLO_PAYLOAD_SIZE;
+    let mut got = 0;
+    while got < want {
+        got += raw_recv(fd, &mut buf[got..want]).expect("recv hello");
+    }
+    got
+}
+
 fn raw_listener_fd(service: &str) -> RawFd {
     let path = build_socket_path(TEST_RUN_DIR, service).expect("socket path");
     let fd = unsafe { libc::socket(libc::AF_UNIX, SOCK_TYPE, 0) };
@@ -115,7 +126,10 @@ fn test_eintr_retried() {
 
     let listener = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("listen");
     let server_thread = thread::spawn(move || {
-        let mut session = listener.accept().expect("accept");
+        // The server's first accept is interrupted before a client arrives.
+        eintr_inject::ACCEPT.with(|c| c.set(1));
+        let mut session = listener.accept().expect("accept survives EINTR");
+        assert_eq!(eintr_inject::pending(), 0, "the accept EINTR was hit");
         let mut buf = [0u8; 8192];
         let (hdr, payload) = session.receive(&mut buf).expect("recv");
         let payload = payload.to_vec();
@@ -603,7 +617,7 @@ fn test_listen_excludes_starting_server() {
 fn test_listen_over_leftover_lock_modes() {
     use std::os::unix::fs::PermissionsExt;
     ensure_run_dir();
-    for mode in [0o200, 0o400] {
+    for mode in [0o200, 0o400, 0o000] {
         let svc = unique_service("rs_lock_mode");
         cleanup_socket(&svc);
         let lock = format!("{TEST_RUN_DIR}/{svc}.lock");
@@ -625,6 +639,19 @@ fn test_listen_over_leftover_lock_modes() {
         cleanup_socket(&svc);
         let _ = std::fs::remove_file(&lock);
     }
+}
+
+// An empty run_dir is a caller error: it would put the socket at "/<name>".
+#[test]
+fn test_empty_run_dir_rejected() {
+    assert!(matches!(
+        UdsListener::bind("", "rs_empty_run_dir", default_server_config()),
+        Err(UdsError::BadParam(_))
+    ));
+    assert!(matches!(
+        UdsSession::connect("", "rs_empty_run_dir", &default_client_config()),
+        Err(UdsError::BadParam(_))
+    ));
 }
 
 const LOCK_UMASK_HELPER_ENV: &str = "NETIPC_LOCK_UMASK_HELPER";
@@ -1499,6 +1526,111 @@ fn test_pipeline_peer_close_during_send() {
     drop(session);
     server.join().expect("server join");
     cleanup_socket(&svc);
+}
+
+/// A receive that times out leaves the client's in-flight requests pending,
+/// as in C and Go: only a lost peer fails them. The late response is then
+/// still accepted.
+#[test]
+fn test_receive_timeout_keeps_inflight() {
+    let (fd0, fd1) = socketpair_seqpacket();
+    let mut client = test_session(fd0, Role::Client, 4096);
+    let mut server = test_session(fd1, Role::Server, 4096);
+    client.inflight_ids.insert(9);
+
+    let mut buf = [0u8; 256];
+    let err = client
+        .receive_with_control(&mut buf, 1, None)
+        .expect_err("nothing to receive");
+    assert!(matches!(err, UdsError::Timeout), "timeout: {err:?}");
+    assert!(client.inflight_ids.contains(&9), "in-flight id kept");
+
+    let mut hdr = Header {
+        kind: KIND_RESPONSE,
+        code: 1,
+        item_count: 1,
+        message_id: 9,
+        ..Header::default()
+    };
+    server.send(&mut hdr, &[1, 2, 3, 4]).expect("late response");
+    let (h, _) = client.receive(&mut buf).expect("late response accepted");
+    assert_eq!(h.message_id, 9);
+}
+
+/// A receive into a buffer too small for a header fails without reading a
+/// byte, so the message stays queued and the session stays usable.
+#[test]
+fn test_receive_undersized_buffer_keeps_session() {
+    let (fd0, fd1) = socketpair_seqpacket();
+    let mut rx = test_session(fd0, Role::Server, 4096);
+    let mut tx = test_session(fd1, Role::Server, 4096);
+
+    let payload = [1u8, 2, 3, 4, 5, 6, 7, 8];
+    let mut hdr = Header {
+        kind: KIND_REQUEST,
+        code: 1,
+        item_count: 1,
+        message_id: 7,
+        ..Header::default()
+    };
+    tx.send(&mut hdr, &payload).expect("request sent");
+
+    let mut small = [0u8; HEADER_SIZE - 1];
+    let err = rx.receive(&mut small).expect_err("undersized buffer");
+    assert!(matches!(err, UdsError::BadParam(_)), "undersized: {err:?}");
+
+    let mut buf = [0u8; 256];
+    let (h, p) = rx
+        .receive_with_control(&mut buf, 1000, None)
+        .expect("request still received");
+    assert_eq!(h.message_id, 7);
+    assert_eq!(p, &payload);
+}
+
+/// A datagram longer than its header declares is a protocol error. The
+/// pending queue, filled while a send waits for buffer space, must keep the
+/// whole datagram so its receive rejects it as the direct receive does,
+/// instead of storing it cut to packet_size and accepting it.
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+#[test]
+fn test_pending_oversized_datagram_rejected() {
+    let (fd0, fd1) = socketpair_seqpacket();
+    let packet_size = 2 * HEADER_SIZE;
+    let mut session = test_session(fd0, Role::Server, packet_size as u32);
+
+    // The header declares exactly packet_size; 16 more bytes follow.
+    let mut dgram = vec![0xABu8; packet_size + 16];
+    let hdr = Header {
+        magic: MAGIC_MSG,
+        version: VERSION,
+        header_len: protocol::HEADER_LEN,
+        kind: KIND_REQUEST,
+        code: 1,
+        flags: 0,
+        transport_status: protocol::STATUS_OK,
+        payload_len: HEADER_SIZE as u32,
+        item_count: 1,
+        message_id: 1,
+    };
+    hdr.encode(&mut dgram[..HEADER_SIZE]);
+    let mut buf = [0u8; 256];
+
+    raw_send(fd1, &dgram).expect("direct datagram");
+    let err = session.receive(&mut buf).expect_err("direct receive");
+    assert!(matches!(err, UdsError::Protocol(_)), "direct: {err:?}");
+
+    raw_send(fd1, &dgram).expect("queued datagram");
+    let mut eof = false;
+    session
+        .pending
+        .drain(fd0, packet_size, 4096, &mut eof)
+        .expect("drain");
+    assert!(!eof && !session.pending.is_empty(), "drain queues it");
+    let err = session.receive(&mut buf).expect_err("pending receive");
+    assert!(matches!(err, UdsError::Protocol(_)), "pending: {err:?}");
+    assert!(session.pending.is_empty(), "pending queue consumed");
+
+    unsafe { libc::close(fd1) };
 }
 
 /// A server that sends more than the in-flight responses can occupy fails
@@ -2620,6 +2752,40 @@ fn test_profile_preference_selects_shm_futex() {
     cleanup_socket(&svc);
 }
 
+// An unassigned profile bit offered and preferred by both peers is never
+// selected: they would otherwise run baseline under that label.
+#[test]
+fn test_unassigned_profile_bit_not_selected() {
+    ensure_run_dir();
+    let svc = unique_service("rs_unassigned_prof");
+    cleanup_socket(&svc);
+    const UNASSIGNED: u32 = 0x08;
+
+    let svc_clone = svc.clone();
+    let scfg = ServerConfig {
+        supported_profiles: PROFILE_BASELINE | UNASSIGNED,
+        preferred_profiles: UNASSIGNED,
+        ..default_server_config()
+    };
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc_clone, scfg).expect("listen");
+    let server_thread = thread::spawn(move || {
+        let session = listener.accept().expect("accept");
+        assert_eq!(session.selected_profile, PROFILE_BASELINE);
+    });
+
+    let ccfg = ClientConfig {
+        supported_profiles: PROFILE_BASELINE | UNASSIGNED,
+        preferred_profiles: UNASSIGNED,
+        ..default_client_config()
+    };
+    let session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
+    assert_eq!(session.selected_profile, PROFILE_BASELINE);
+
+    drop(session);
+    server_thread.join().expect("server join");
+    cleanup_socket(&svc);
+}
+
 #[test]
 fn test_zero_supported_profiles_defaults_to_baseline() {
     ensure_run_dir();
@@ -2684,7 +2850,7 @@ fn test_connect_rejects_bad_hello_ack_kind() {
         assert!(client_fd >= 0, "accept failed: {}", errno());
 
         let mut hello = [0u8; 128];
-        let n = raw_recv(client_fd, &mut hello).expect("recv hello");
+        let n = recv_hello(client_fd, &mut hello);
         assert!(n >= HEADER_SIZE + HELLO_PAYLOAD_SIZE);
 
         let ack = HelloAck {
@@ -2747,7 +2913,7 @@ fn test_connect_rejects_selected_profile_not_offered() {
             assert!(client_fd >= 0, "accept failed: {}", errno());
 
             let mut buf = [0u8; 128];
-            let n = raw_recv(client_fd, &mut buf).expect("recv hello");
+            let n = recv_hello(client_fd, &mut buf);
             let hello = Hello::decode(&buf[HEADER_SIZE..n]).expect("decode hello");
 
             let ack = HelloAck {
@@ -2815,7 +2981,7 @@ fn test_connect_rejects_bad_hello_ack_status() {
         assert!(client_fd >= 0, "accept failed: {}", errno());
 
         let mut hello = [0u8; 128];
-        let _ = raw_recv(client_fd, &mut hello).expect("recv hello");
+        let _ = recv_hello(client_fd, &mut hello);
 
         let ack = HelloAck {
             layout_version: 1,
@@ -2869,7 +3035,7 @@ fn test_connect_rejects_bad_hello_ack_version_as_incompatible() {
         assert!(client_fd >= 0, "accept failed: {}", errno());
 
         let mut hello = [0u8; 128];
-        let _ = raw_recv(client_fd, &mut hello).expect("recv hello");
+        let _ = recv_hello(client_fd, &mut hello);
 
         let ack = HelloAck {
             layout_version: 1,
@@ -2923,7 +3089,7 @@ fn test_connect_rejects_incompatible_hello_ack_status() {
         assert!(client_fd >= 0, "accept failed: {}", errno());
 
         let mut hello = [0u8; 128];
-        let _ = raw_recv(client_fd, &mut hello).expect("recv hello");
+        let _ = recv_hello(client_fd, &mut hello);
 
         let ack = HelloAck {
             layout_version: 1,
@@ -2977,7 +3143,7 @@ fn test_connect_rejects_bad_hello_ack_layout_as_incompatible() {
         assert!(client_fd >= 0, "accept failed: {}", errno());
 
         let mut hello = [0u8; 128];
-        let _ = raw_recv(client_fd, &mut hello).expect("recv hello");
+        let _ = recv_hello(client_fd, &mut hello);
 
         let ack = HelloAck {
             layout_version: 2,
@@ -3031,7 +3197,7 @@ fn test_connect_rejects_truncated_hello_ack() {
         assert!(client_fd >= 0, "accept failed: {}", errno());
 
         let mut hello = [0u8; 128];
-        let _ = raw_recv(client_fd, &mut hello).expect("recv hello");
+        let _ = recv_hello(client_fd, &mut hello);
 
         let hdr = Header {
             magic: MAGIC_MSG,
@@ -3405,7 +3571,7 @@ fn test_connect_rejects_agreed_packet_size_above_proposal() {
         assert!(client_fd >= 0, "accept failed: {}", errno());
 
         let mut hello_buf = [0u8; 128];
-        let n = raw_recv(client_fd, &mut hello_buf).expect("recv hello");
+        let n = recv_hello(client_fd, &mut hello_buf);
         let hello = Hello::decode(&hello_buf[HEADER_SIZE..n]).expect("decode hello");
 
         let ack = HelloAck {

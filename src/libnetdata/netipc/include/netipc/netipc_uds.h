@@ -66,7 +66,7 @@ typedef struct {
     uint32_t max_response_payload_bytes;/* 0 = use default */
     uint32_t max_response_batch_items;  /* 0 = use default (1) */
     uint64_t auth_token;
-    uint32_t packet_size;              /* 0 = kernel limit; capped at SO_SNDBUF-32 and 256 KiB */
+    uint32_t packet_size;              /* 0 = transport limit (SEQPACKET: SO_SNDBUF-32; stream: 256 KiB); capped at 256 KiB */
 } nipc_uds_client_config_t;
 
 /* ------------------------------------------------------------------ */
@@ -81,7 +81,7 @@ typedef struct {
     uint32_t max_response_payload_bytes; /* 0 = use default */
     uint32_t max_response_batch_items;   /* 0 = use default (1) */
     uint64_t auth_token;                 /* expected token from clients */
-    uint32_t packet_size;               /* 0 = kernel limit; capped at SO_SNDBUF-32 and 256 KiB */
+    uint32_t packet_size;               /* 0 = transport limit (SEQPACKET: SO_SNDBUF-32; stream: 256 KiB); capped at 256 KiB */
     int      backlog;                   /* listen backlog, 0 = default (16) */
 } nipc_uds_server_config_t;
 
@@ -232,8 +232,15 @@ nipc_uds_error_t nipc_uds_connect_timeout(const char *run_dir,
 void nipc_uds_close_session(nipc_uds_session_t *session);
 
 /*
- * Close a listener. Stops accepting, closes the socket, unlinks
- * the socket file.
+ * Stop accepting: close the listening socket and unlink the socket file,
+ * keeping the endpoint lock, so no other server takes the endpoint while
+ * this one still serves its sessions. Idempotent.
+ */
+void nipc_uds_stop_listening(nipc_uds_listener_t *listener);
+
+/*
+ * Close a listener: stop listening if still listening, then release the
+ * endpoint lock. Idempotent.
  */
 void nipc_uds_close_listener(nipc_uds_listener_t *listener);
 
@@ -260,6 +267,22 @@ nipc_uds_error_t nipc_uds_send(nipc_uds_session_t *session,
                                 nipc_header_t *hdr,
                                 const void *payload,
                                 size_t payload_len);
+
+/*
+ * nipc_uds_send() with an optional deadline and abort fd for a client
+ * session. timeout_ms == 0 waits without a deadline; abort_fd < 0 disables
+ * abort waiting. While the socket lacks buffer space the send reads the
+ * peer's bytes as a pipelined send does. If the deadline passes or abort_fd
+ * becomes readable before the message is sent, returns NIPC_UDS_ERR_TIMEOUT
+ * or NIPC_UDS_ERR_ABORTED and shuts the session down, since part of the
+ * message may already be on the wire.
+ */
+nipc_uds_error_t nipc_uds_send_timeout(nipc_uds_session_t *session,
+                                        nipc_header_t *hdr,
+                                        const void *payload,
+                                        size_t payload_len,
+                                        uint32_t timeout_ms,
+                                        int abort_fd);
 
 /*
  * Receive one logical message. Blocks until a complete message arrives.

@@ -137,7 +137,7 @@ See the gate.
 
 Acceptance criteria evidence:
 
-- Duplication: jscpd `--min-tokens 50` on the Rust transport files (tests included) went from 49 clones, 587 duplicated lines (12.8%, `posix.rs` + `windows.rs`, 4578 lines) to 29 clones, 338 duplicated lines (7.9%, `posix.rs` + `windows.rs` + `framing.rs`, 4289 lines). Remaining clones are the per-transport parts the design keeps (config types, session fields and accessors, handshake wrappers, `Hello` literal, session construction) and Windows test fixtures.
+- Duplication: jscpd `--min-tokens 50` on the Rust transport files (tests included) went from 49 clones, 587 duplicated lines (12.8%, `posix.rs` + `windows.rs`, 4578 lines) to 29 clones, 338 duplicated lines (7.9%, `posix.rs` + `windows.rs` + `framing.rs`, 4289 lines). Correction (2026-11-07, SOW-0070): re-running jscpd 5.3.1 `--min-tokens 50` on those three files at commit `7b73adc` gives 29 clones, 309 duplicated lines (7.2%), the figure SOW-0060 uses. Remaining clones are the per-transport parts the design keeps (config types, session fields and accessors, handshake wrappers, `Hello` literal, session construction) and Windows test fixtures.
 - No behavior change except the two recorded fixes (Windows receive gains the `u32::MAX` total check; 32-bit overflow fixed on both transports). Error variants and messages are unchanged.
 - Codacy duplicated-files percentage: measured after push (tracked in SOW-0050's post-push Codacy re-check).
 

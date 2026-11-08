@@ -199,6 +199,7 @@ Same-failure search:
 
 - Other process-global state changes in the library: `grep -rn "umask\|setlocale\|signal(\|sigaction\|chdir" src/libnetdata/netipc src/crates/netipc/src src/go/pkg` — no other process-global mutation in transport code.
 - Other created files: the endpoint lock (`0600`, `O_NOFOLLOW`) and SHM regions (`0600`, `O_EXCL`) already pass explicit modes and need no umask change.
+  Correction (2026-11-07, SOW-0070): this was wrong. An explicit create mode is still narrowed by the umask, so a umask without owner read or write left lock files and SHM regions the owner could not reopen; SOW-0067 fixed that, and SOW-0070 repairs a mode-000 lock file left by a crash.
 
 Performance assessment:
 
@@ -220,6 +221,8 @@ Artifact maintenance gate:
 ## Outcome
 
 C, Rust and Go create the POSIX listener socket owner-only through `fchmod` on the unbound socket. The C library no longer changes the process umask, so other threads of an embedding program keep their file modes, and Rust and Go sockets no longer depend on the ambient umask.
+
+Correction (2026-11-07, SOW-0070): no implementation changes the umask any more, but on Linux and FreeBSD the socket file still gets `0600 & ~umask`, so a umask that removes owner read or write still narrows it (`docs/level1-posix-uds.md`, "Socket permissions"). An arbitrary umask is therefore not harmless.
 
 ## Lessons Extracted
 

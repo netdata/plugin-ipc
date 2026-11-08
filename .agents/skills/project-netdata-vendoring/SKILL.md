@@ -219,6 +219,10 @@ Load this skill for any task involving:
    - GitHub Actions/check-run summary;
    - code-scanning summary by tool and severity;
    - Dependabot and secret-scanning summary;
+   - Go version alignment: the `go` directive in the three plugin-ipc
+     `go.mod` files equals Netdata's `src/go/go.mod`, and `GoVersionOverride`
+     in the three `osv-scanner.toml` files equals the patch release Netdata
+     pins in `packaging/check-for-go-toolchain.sh`; fix any mismatch first;
    - decision: proceed, block, or proceed with explicit risk acceptance.
 
 9. Only after the CI/scanner preflight and two-way migration plan pass, update
@@ -237,7 +241,15 @@ Load this skill for any task involving:
 
    - the vendor diff is expected after copying;
    - Netdata-only wrapper files were not overwritten;
-   - unrelated Netdata files were not staged or modified by the vendoring step.
+   - unrelated Netdata files were not staged or modified by the vendoring step;
+   - every vendored `.c` file is in Netdata's build lists
+     (`src/libnetdata/SourceLists.cmake`), and every system library the new
+     code calls is linked to the `netipc` target in
+     `src/libnetdata/CMakeLists.txt` (the script does not edit either file).
+
+   Netdata builds `netipc` on Linux and Windows only; the Windows build is
+   proven by the Netdata PR's "Build Windows" check, so the SOW stays open
+   until that check passes.
 
 ## Blockers
 

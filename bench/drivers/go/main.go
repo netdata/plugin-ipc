@@ -1546,6 +1546,13 @@ func main() {
 	cmd := os.Args[1]
 	rc := 0
 
+	// Without Go SHM the handshake falls back to baseline, so an SHM row
+	// would silently measure UDS.
+	if !goShmSupported && strings.Contains(cmd, "shm-") {
+		fmt.Fprintf(os.Stderr, "%s: Go has no POSIX SHM transport on this platform\n", cmd)
+		os.Exit(1)
+	}
+
 	switch cmd {
 	case "uds-ping-pong-client", "shm-ping-pong-client",
 		"uds-batch-ping-pong-client", "shm-batch-ping-pong-client",
@@ -1568,9 +1575,7 @@ func main() {
 		service := os.Args[3]
 		duration := defaultDuration
 		if len(os.Args) >= 5 {
-			if d, err := strconv.Atoi(os.Args[4]); err == nil {
-				duration = d
-			}
+			duration = parseDurationArg(os.Args[4])
 		}
 
 		if err := os.MkdirAll(runDir, 0700); err != nil { // #nosec G703 -- benchmark driver uses caller-provided temporary run directory.
@@ -1606,9 +1611,7 @@ func main() {
 		service := os.Args[3]
 		duration := defaultDuration
 		if len(os.Args) >= 5 {
-			if d, err := strconv.Atoi(os.Args[4]); err == nil {
-				duration = d
-			}
+			duration = parseDurationArg(os.Args[4])
 		}
 
 		if err := os.MkdirAll(runDir, 0700); err != nil { // #nosec G703 -- benchmark driver uses caller-provided temporary run directory.
@@ -1633,7 +1636,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 
 		var profiles uint32
@@ -1656,7 +1659,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 
 		var profiles uint32
@@ -1679,7 +1682,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 
 		var profiles uint32
@@ -1702,7 +1705,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 		depth, _ := strconv.Atoi(os.Args[6])
 		if depth < 1 {
@@ -1718,7 +1721,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 		depth, _ := strconv.Atoi(os.Args[6])
 		if depth < 1 {
@@ -1732,7 +1735,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Usage: %s lookup-bench <duration_sec>\n", os.Args[0])
 			os.Exit(1)
 		}
-		duration, _ := strconv.Atoi(os.Args[2])
+		duration := parseDurationArg(os.Args[2])
 		rc = runLookupBench(duration)
 
 	case "lookup-method-bench":
@@ -1740,7 +1743,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Usage: %s lookup-method-bench <duration_sec> <scenario> <target_rps>\n", os.Args[0])
 			os.Exit(1)
 		}
-		duration, _ := strconv.Atoi(os.Args[2])
+		duration := parseDurationArg(os.Args[2])
 		targetRPS, _ := strconv.ParseUint(os.Args[4], 10, 64)
 		rc = runLookupMethodBench(duration, os.Args[3], targetRPS)
 

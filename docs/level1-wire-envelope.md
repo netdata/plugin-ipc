@@ -253,6 +253,16 @@ Clarifications:
   - all packed item payloads
 - `max_request_batch_items` and `max_response_batch_items` are item-count
   ceilings, enforced independently from payload-byte ceilings.
+- On every transport, a client rejects a HELLO_ACK whose
+  `agreed_packet_size` exceeds its own `packet_size` proposal, or is not
+  greater than the 32-byte header, as a protocol error: it sizes its
+  buffers, and on SEQPACKET its datagrams, from its proposal.
+- HELLO carries exactly 44 payload bytes and HELLO_ACK exactly 48. A
+  receiver rejects any other `payload_len` as a protocol error, after the
+  layout check, so a future layout is still reported as incompatible. On
+  message-oriented transports (SEQPACKET, Named Pipe) the packet must also
+  be exactly the header plus that payload; on the stream baseline the bytes
+  after the payload are read as the next packet.
 
 ### Handshake rejection semantics
 

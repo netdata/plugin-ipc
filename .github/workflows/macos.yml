@@ -70,5 +70,4 @@ jobs:
           bash tests/test_uds_interop.sh
           bash tests/test_service_interop.sh
           bash tests/test_cache_interop.sh
-          bash tests/test_lookup_scale_interop.sh
           bash tests/interop_codec.sh

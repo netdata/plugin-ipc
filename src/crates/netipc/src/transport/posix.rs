@@ -47,11 +47,13 @@ const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
 #[cfg_attr(not(any(target_os = "macos", target_os = "freebsd")), allow(dead_code))]
 mod stream;
 
-/// Profiles this platform can provide. POSIX SHM needs a futex-style wait
-/// (Linux futex, FreeBSD `_umtx_op`), so other POSIX systems offer and
-/// accept the baseline profile only.
+/// Profiles this platform can provide; unassigned bits are never offered or
+/// accepted. POSIX SHM needs a futex-style wait (Linux futex, FreeBSD
+/// `_umtx_op`), so other POSIX systems offer and accept the baseline
+/// profile only.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-const PLATFORM_PROFILES: u32 = u32::MAX;
+const PLATFORM_PROFILES: u32 =
+    PROFILE_BASELINE | protocol::PROFILE_SHM_HYBRID | protocol::PROFILE_SHM_FUTEX;
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 const PLATFORM_PROFILES: u32 = PROFILE_BASELINE;
 
@@ -165,6 +167,9 @@ impl FramingError for UdsError {
     fn fails_session(&self) -> bool {
         matches!(self, UdsError::Send(_))
     }
+    fn is_recv_failure(&self) -> bool {
+        matches!(self, UdsError::Recv(_))
+    }
 }
 
 impl std::error::Error for UdsError {}
@@ -193,7 +198,8 @@ pub struct ClientConfig {
     pub max_response_payload_bytes: u32,
     pub max_response_batch_items: u32,
     pub auth_token: u64,
-    /// 0 = kernel limit; always capped at SO_SNDBUF - 32 and 256 KiB.
+    /// 0 = transport limit (SEQPACKET: SO_SNDBUF - 32; stream: 256 KiB);
+    /// always capped at 256 KiB.
     pub packet_size: u32,
 }
 
@@ -222,7 +228,8 @@ pub struct ServerConfig {
     pub max_response_payload_bytes: u32,
     pub max_response_batch_items: u32,
     pub auth_token: u64,
-    /// 0 = kernel limit; always capped at SO_SNDBUF - 32 and 256 KiB.
+    /// 0 = transport limit (SEQPACKET: SO_SNDBUF - 32; stream: 256 KiB);
+    /// always capped at 256 KiB.
     pub packet_size: u32,
     /// listen() backlog, 0 = default (16).
     pub backlog: i32,
@@ -367,6 +374,23 @@ impl UdsSession {
     /// If the total message (32 + payload_len) exceeds packet_size, the
     /// message is chunked transparently.
     pub fn send(&mut self, hdr: &mut Header, payload: &[u8]) -> Result<(), UdsError> {
+        self.send_with_control(hdr, payload, 0, None)
+    }
+
+    /// `send` with an optional deadline and abort flag for a client session.
+    ///
+    /// `timeout_ms == 0` waits without a deadline. While the socket lacks
+    /// buffer space the send reads the peer's bytes as a pipelined send
+    /// does. If the deadline passes or `abort` is set before the message is
+    /// sent, returns `UdsError::Timeout` or `UdsError::Aborted` and shuts
+    /// the session down, since part of the message may be on the wire.
+    pub fn send_with_control(
+        &mut self,
+        hdr: &mut Header,
+        payload: &[u8],
+        timeout_ms: u32,
+        abort: Option<&AtomicBool>,
+    ) -> Result<(), UdsError> {
         if self.fd < 0 {
             return Err(UdsError::BadParam("session closed".into()));
         }
@@ -374,12 +398,14 @@ impl UdsSession {
         let framing = self.framing(true);
         let fd = self.fd;
 
-        // One request in flight (every typed call) keeps the plain blocking
-        // send; only a pipelining client can deadlock with a server blocked
-        // sending to it.
+        // A client send with a deadline or abort, or with another request in
+        // flight (a pipelining client can deadlock with a server blocked
+        // sending to it), waits in the progress loop; anything else keeps the
+        // plain blocking send.
+        let controlled = timeout_ms != 0 || abort.is_some();
         let inflight = self.inflight_ids.len()
             + usize::from(framing.client && hdr.kind == crate::protocol::KIND_REQUEST);
-        if !(framing.client && inflight > 1) {
+        if !(framing.client && (inflight > 1 || controlled)) {
             return framing::send_message(framing, &mut self.inflight_ids, hdr, payload, |h, p| {
                 send_packet(fd, h, p)
             });
@@ -391,17 +417,31 @@ impl UdsSession {
         // After a failed stream receive the inbound bytes belong to an
         // abandoned message: never queue them.
         let recv_failed = self.recv_failed;
+        let wait = controlled.then(|| ReceiveWait::new(timeout_ms, abort));
         let mut failed = false;
         let result =
             framing::send_message(framing, &mut self.inflight_ids, hdr, payload, |h, p| {
-                let r = send_with_progress(fd, h, p, pending, read_len, bound, recv_failed);
-                if matches!(r, Err(UdsError::Protocol(_))) {
+                let r = send_with_progress(
+                    fd,
+                    h,
+                    p,
+                    pending,
+                    read_len,
+                    bound,
+                    recv_failed,
+                    wait.as_ref(),
+                );
+                if matches!(
+                    r,
+                    Err(UdsError::Protocol(_) | UdsError::Timeout | UdsError::Aborted)
+                ) {
                     failed = true;
                 }
                 r
             });
         if failed {
-            // Inbound bytes were dropped: the session cannot continue.
+            // Inbound bytes were dropped, or the message stopped part way:
+            // the session cannot continue.
             unsafe { libc::shutdown(fd, libc::SHUT_RDWR) };
             self.inflight_ids.clear();
         }
@@ -429,6 +469,10 @@ impl UdsSession {
         if self.fd < 0 {
             return Err(UdsError::BadParam("session closed".into()));
         }
+        // Rejected before any byte is read, so the session stays usable.
+        if buf.len() < HEADER_SIZE {
+            return Err(UdsError::BadParam("receive buffer too small".into()));
+        }
 
         let controlled = timeout_ms != 0 || abort.is_some();
         #[cfg_attr(any(target_os = "macos", target_os = "freebsd"), allow(unused_mut))]
@@ -439,9 +483,10 @@ impl UdsSession {
 
         #[cfg(any(target_os = "macos", target_os = "freebsd"))]
         {
-            // A timeout or abort before the first byte leaves the stream on a
-            // packet boundary. A failure after it does not: the rest of the
-            // message is still queued, so every later receive fails. The
+            // A failure before the first byte (a timeout or abort, also one
+            // that fires after the wait below) leaves the stream on a packet
+            // boundary. A failure after it does not: the rest of the message
+            // is still queued, so every later receive fails. The
             // session records that instead of shutting the read side, whose
             // effect differs by OS (FreeBSD 15 fails the peer's sends,
             // FreeBSD 14 still returns queued bytes). Sends stay valid; they
@@ -457,6 +502,7 @@ impl UdsSession {
             }
             let pending = &mut self.pending;
             let mut first = true;
+            let mut consumed = false;
             let result = framing::receive_message(
                 framing,
                 &mut self.inflight_ids,
@@ -473,12 +519,13 @@ impl UdsSession {
                         framing.max_payload,
                         framing.max_items,
                         wait,
+                        &mut consumed,
                     );
                     first = false;
                     r
                 },
             );
-            if result.is_err() {
+            if result.is_err() && consumed {
                 self.recv_failed = true;
                 // Queued bytes are part of the abandoned stream too.
                 self.pending = Pending::default();
@@ -538,6 +585,18 @@ pub(crate) type ListenHook = (String, Box<dyn Fn() + Send>);
 #[cfg(test)]
 pub(crate) static LISTEN_HOOK: std::sync::Mutex<Option<ListenHook>> = std::sync::Mutex::new(None);
 
+/// Make a lock file this account owns openable again (mode 0600). Only a
+/// regular file is touched; `lstat` does not follow a symlink.
+fn repair_unopenable_lock(lock_path: &str) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    match std::fs::symlink_metadata(lock_path) {
+        Ok(meta) if meta.file_type().is_file() && meta.uid() == unsafe { libc::geteuid() } => {
+            std::fs::set_permissions(lock_path, std::fs::Permissions::from_mode(0o600)).is_ok()
+        }
+        _ => false,
+    }
+}
+
 /// Take the endpoint lock `{run_dir}/{service_name}.lock`. A server's
 /// socket file exists from bind() until listen(), and connects in that
 /// window are refused just as for a dead server's leftover file, so a
@@ -579,6 +638,16 @@ fn acquire_endpoint_lock(run_dir: &str, service_name: &str) -> Result<EndpointLo
         .or_else(|e| {
             if denied(&e) {
                 open(true, false)
+            } else {
+                Err(e)
+            }
+        })
+        .or_else(|e| {
+            // A crash between the creating open and fchmod() under such a
+            // umask leaves mode 000. Repair a regular file this account
+            // owns; run_dir writers are trusted, so the path check suffices.
+            if denied(&e) && repair_unopenable_lock(&lock_path) {
+                open(true, true)
             } else {
                 Err(e)
             }
@@ -718,11 +787,15 @@ impl UdsListener {
     /// Accept one connection without handshaking, so the caller can run the
     /// handshake on another thread. Blocks until a client connects.
     pub fn accept_pending(&self) -> Result<PendingConnection, UdsError> {
-        let fd = accept_cloexec(self.fd);
-        if fd < 0 {
-            return Err(UdsError::Accept(errno()));
-        }
-        Ok(PendingConnection { fd })
+        // A signal that interrupts the wait is retried: it must not end the
+        // server's accept loop.
+        let fd = retry_eintr(
+            #[cfg(test)]
+            &eintr_inject::ACCEPT,
+            || accept_cloexec(self.fd) as isize,
+        )
+        .map_err(UdsError::Accept)?;
+        Ok(PendingConnection { fd: fd as RawFd })
     }
 }
 
@@ -790,17 +863,28 @@ impl Drop for PendingConnection {
     }
 }
 
-impl Drop for UdsListener {
-    fn drop(&mut self) {
+impl UdsListener {
+    /// Stop accepting: close the listening socket and remove the socket
+    /// file, keeping the endpoint lock until the listener drops, so no other
+    /// server takes the endpoint while this one still serves its sessions.
+    /// Idempotent.
+    pub fn stop_listening(&mut self) {
         if self.fd >= 0 {
             unsafe {
                 libc::close(self.fd);
             }
             self.fd = -1;
         }
-        if self.path.exists() {
+        if !self.path.as_os_str().is_empty() {
             let _ = std::fs::remove_file(&self.path);
+            self.path = PathBuf::new();
         }
+    }
+}
+
+impl Drop for UdsListener {
+    fn drop(&mut self) {
+        self.stop_listening();
     }
 }
 
@@ -890,10 +974,12 @@ fn bind_owner_only(
 /// `{service_name}.d`, narrowed to owner-only there, then renamed into
 /// place, so it is never reachable with a wider mode and the process-global
 /// umask is untouched. The caller holds the endpoint lock, so a leftover
-/// directory belongs to a crashed server and is removed first. After the
-/// directory is created, every step but bind() goes through a descriptor of
-/// it, so a directory swapped in at the same path makes the listen fail
-/// instead of placing a socket someone else can reach.
+/// directory belongs to a crashed server and is removed first. fchmodat()
+/// and open() resolve the directory by path without following a symlink,
+/// and the owner check on the opened descriptor refuses a directory another
+/// account swapped in. After that check every step but bind() goes through
+/// the descriptor, so a later swap makes the listen fail instead of placing
+/// a socket someone else can reach.
 #[cfg(target_os = "macos")]
 fn bind_owner_only(
     fd: RawFd,
@@ -1014,6 +1100,10 @@ fn validate_service_name(name: &str) -> Result<(), UdsError> {
 
 /// Build `{run_dir}/{service_name}.sock` and validate length.
 fn build_socket_path(run_dir: &str, service_name: &str) -> Result<String, UdsError> {
+    // An empty run_dir would put the socket at "/<name>".
+    if run_dir.is_empty() {
+        return Err(UdsError::BadParam("empty run_dir".into()));
+    }
     validate_service_name(service_name)?;
 
     let path = format!("{run_dir}/{service_name}.sock");
@@ -1123,8 +1213,10 @@ impl Pending {
 
     /// Reads without blocking until the socket has nothing more to read, EOF
     /// or an error (both set `eof`). Queued bytes beyond `bound` are a
-    /// protocol failure. A datagram larger than `read_len` is stored
-    /// truncated, and the receive path rejects it.
+    /// protocol failure. Each datagram is stored whole, so its later
+    /// receive sees what a direct receive sees: one longer than `read_len`,
+    /// a protocol violation, is rejected there instead of being stored cut
+    /// short.
     fn drain(
         &mut self,
         fd: RawFd,
@@ -1137,6 +1229,37 @@ impl Pending {
             self.head = 0;
         }
         loop {
+            #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
+            let read_len = {
+                // MSG_TRUNC reports the full length on Linux 3.4 and later;
+                // older kernels report at most the probe length.
+                let mut probe = 0u8;
+                let full = unsafe {
+                    libc::recv(
+                        fd,
+                        &mut probe as *mut u8 as *mut libc::c_void,
+                        1,
+                        libc::MSG_DONTWAIT | libc::MSG_PEEK | libc::MSG_TRUNC,
+                    )
+                };
+                if full <= 0 {
+                    match errno() {
+                        _ if full == 0 => *eof = true,
+                        libc::EINTR => continue,
+                        e if e == libc::EAGAIN || e == libc::EWOULDBLOCK => {}
+                        // A socket error: the retried send reports it.
+                        _ => *eof = true,
+                    }
+                    return Ok(());
+                }
+                let full = full as usize;
+                if full > bound {
+                    return Err(UdsError::Protocol(
+                        "inbound bytes exceed the in-flight responses".into(),
+                    ));
+                }
+                read_len.max(full)
+            };
             let start = self.buf.len();
             self.buf.resize(start + PENDING_RECORD_LEN + read_len, 0);
             let dst = &mut self.buf[start + PENDING_RECORD_LEN..];
@@ -1213,6 +1336,7 @@ fn pending_bound(max_response_payload: u32, packet_size: u32, inflight: usize) -
 /// `send_with_progress_loop`; macOS ignores MSG_DONTWAIT on a stream send
 /// that lacks buffer space and blocks, so on the stream baseline (macOS,
 /// FreeBSD) the descriptor is made non-blocking for the send instead.
+#[allow(clippy::too_many_arguments)]
 fn send_with_progress(
     fd: RawFd,
     hdr: &[u8],
@@ -1221,6 +1345,7 @@ fn send_with_progress(
     read_len: usize,
     bound: usize,
     recv_failed: bool,
+    wait: Option<&ReceiveWait<'_>>,
 ) -> Result<(), UdsError> {
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     {
@@ -1228,8 +1353,16 @@ fn send_with_progress(
         if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
             return Err(UdsError::Send(errno()));
         }
-        let result =
-            send_with_progress_loop(fd, hdr, payload, pending, read_len, bound, recv_failed);
+        let result = send_with_progress_loop(
+            fd,
+            hdr,
+            payload,
+            pending,
+            read_len,
+            bound,
+            recv_failed,
+            wait,
+        );
         // A descriptor left non-blocking would break later blocking calls;
         // a Send error also fails every in-flight request.
         if unsafe { libc::fcntl(fd, libc::F_SETFL, flags) } < 0 {
@@ -1240,12 +1373,23 @@ fn send_with_progress(
         result
     }
     #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
-    send_with_progress_loop(fd, hdr, payload, pending, read_len, bound, recv_failed)
+    send_with_progress_loop(
+        fd,
+        hdr,
+        payload,
+        pending,
+        read_len,
+        bound,
+        recv_failed,
+        wait,
+    )
 }
 
 /// Sends one packet without blocking; while the socket is full, reads what
-/// the peer sent into `pending`, so both peers keep making progress. No
-/// timeout: it waits as long as a blocking send would.
+/// the peer sent into `pending`, so both peers keep making progress.
+/// Without a wait it waits as long as a blocking send would; with one it
+/// ends at the deadline or abort.
+#[allow(clippy::too_many_arguments)]
 fn send_with_progress_loop(
     fd: RawFd,
     hdr: &[u8],
@@ -1254,6 +1398,7 @@ fn send_with_progress_loop(
     read_len: usize,
     bound: usize,
     recv_failed: bool,
+    wait: Option<&ReceiveWait<'_>>,
 ) -> Result<(), UdsError> {
     // A SEQPACKET send moves the whole packet or nothing, so only the
     // stream advances these.
@@ -1323,17 +1468,26 @@ fn send_with_progress_loop(
 
         // After EOF only writability matters; the retried send reports a
         // closed peer.
+        let timeout = match wait {
+            Some(wait) => wait.poll_timeout_ms()?,
+            None => -1,
+        };
         let mut pfd = libc::pollfd {
             fd,
             events: libc::POLLOUT | if eof { 0 } else { libc::POLLIN },
             revents: 0,
         };
-        if unsafe { libc::poll(&mut pfd, 1, -1) } < 0 {
+        let rc = unsafe { libc::poll(&mut pfd, 1, timeout) };
+        if rc < 0 {
             let e = errno();
             if e == libc::EINTR {
                 continue;
             }
             return Err(UdsError::Send(e));
+        }
+        if rc == 0 {
+            // poll_timeout_ms() reports the deadline and the abort flag.
+            continue;
         }
         if !eof && pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
             pending.drain(fd, read_len, bound, &mut eof)?;
@@ -1411,6 +1565,7 @@ pub(crate) mod eintr_inject {
         pub(crate) static SEND: Cell<u32> = const { Cell::new(0) };
         pub(crate) static SENDMSG: Cell<u32> = const { Cell::new(0) };
         pub(crate) static RECV: Cell<u32> = const { Cell::new(0) };
+        pub(crate) static ACCEPT: Cell<u32> = const { Cell::new(0) };
     }
 
     pub(crate) fn take(counter: &'static LocalKey<Cell<u32>>) -> bool {
@@ -1426,7 +1581,10 @@ pub(crate) mod eintr_inject {
 
     /// Injections on this thread not consumed yet.
     pub(crate) fn pending() -> u32 {
-        SEND.with(Cell::get) + SENDMSG.with(Cell::get) + RECV.with(Cell::get)
+        SEND.with(Cell::get)
+            + SENDMSG.with(Cell::get)
+            + RECV.with(Cell::get)
+            + ACCEPT.with(Cell::get)
     }
 }
 

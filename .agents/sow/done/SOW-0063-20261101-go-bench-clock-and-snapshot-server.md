@@ -85,7 +85,7 @@ Evidence reviewed: Analysis (profiles, escape analysis, context-switch counts, t
 Affected contracts and surfaces:
 
 - Go benchmark driver (POSIX) timing: rows stay comparable; the CSV format is unchanged.
-- Go library internals: SHM wait clock, typed server dispatch and session loop, typed client request header, protocol builders/decoders gain internal reset/in-place forms. No exported API is removed or changed; any new exported helper is additive and documented.
+- Go library internals: SHM wait clock, typed server dispatch and session loop, typed client request header, protocol builders/decoders gain internal reset/in-place forms. No exported API is removed or changed; any new exported helper is additive and documented. Correction (2026-11-07, SOW-0070): decision 6C later changed exported Go types on purpose (`protocol.StringReverseView.Str`, `protocol.DispatchStringReverse`, `raw.StringReverseHandler` take borrowed `[]byte`); see Implications And Decisions.
 - Wire format, C and Rust code, Windows Go driver (already uses a QPC `nowNS`): unchanged, except test helpers in C and Rust that create endpoints (lock cleanup).
 
 Existing patterns to reuse: client scratch buffers (`ensureClientScratch`), the session loop's per-session buffers, `testing.AllocsPerRun`, existing socket cleanup helpers in each language's tests.

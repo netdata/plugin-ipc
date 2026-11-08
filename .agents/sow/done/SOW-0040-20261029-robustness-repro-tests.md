@@ -233,6 +233,8 @@ Follow-up mapping:
 
 Executable reproductions for every reported problem and for the testable code-review siblings now live in the C, Rust and Go suites on Linux and Windows, gated behind `NETIPC_REPRO_KNOWN_BUGS=1`, with always-on guards for behavior that is already correct.
 
+Correction (2026-11-07, SOW-0070): the exception is N8 (overflow-resize retry budget), which has no reproduction here; its test was tracked in SOW-0043's acceptance criteria (see Followup).
+
 ## Lessons Extracted
 
 - Existing suites missed these bugs because SHM tests never exceeded the worker count, timeout tests used sub-100 ms timeouts or aborts, and no test held a silent or hung peer while a second client connected.

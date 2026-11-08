@@ -4,7 +4,7 @@
 
 Status: closed
 
-Sub-state: merged into SOW-0046 by user decision (2026-10-29). SOW-0046 delivered the Go part and owns all remaining scope; see `.agents/sow/current/SOW-0046-20261029-go-cross-platform-build.md`.
+Sub-state: merged into SOW-0046 by user decision (2026-10-29). SOW-0046 delivered the Go part and owns all remaining scope; see `.agents/sow/done/SOW-0046-20261029-go-cross-platform-build.md`. Correction (2026-11-07, SOW-0070): the link pointed at `current/`; SOW-0046 has since completed and delivered that remaining scope.
 
 ## Requirements
 
