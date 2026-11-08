@@ -1120,6 +1120,7 @@ typedef struct {
     const char *service;
     int ready;
     int reading_started;
+    int request_seen;
     int release;
 } stalled_reader_ctx_t;
 
@@ -1153,7 +1154,8 @@ static void *stalled_reader_server_fn(void *arg)
     if (nipc_uds_accept(&listener, 1, &session) == NIPC_UDS_OK) {
         /* The request's first bytes arrived: the client is in its send. */
         struct pollfd pfd = {.fd = session.fd, .events = POLLIN};
-        (void)poll(&pfd, 1, 10000);
+        if (poll(&pfd, 1, 10000) > 0 && (pfd.revents & POLLIN))
+            __atomic_store_n(&ctx->request_seen, 1, __ATOMIC_RELEASE);
         test_flag_set(&ctx->reading_started);
         (void)test_flag_wait(&ctx->release);
         nipc_uds_close_session(&session);
@@ -1220,7 +1222,8 @@ static void test_client_send_bounded_by_deadline_and_abort(void)
         pthread_create(&call_tid, NULL, stalled_send_call_fn, &cctx);
         if (use_abort) {
             check("server saw the request start",
-                  test_flag_wait(&sctx.reading_started));
+                  test_flag_wait(&sctx.reading_started) &&
+                      __atomic_load_n(&sctx.request_seen, __ATOMIC_ACQUIRE));
             nipc_client_abort(&client);
         }
         pthread_join(call_tid, NULL);

@@ -1255,7 +1255,7 @@ static void test_unassigned_profile_bit(void)
     printf("Test 6c: Unassigned profile bit is never selected\n");
     const char *svc = "test_unassigned_profile";
     cleanup_socket(svc);
-    const uint32_t unassigned = 0x08u;
+    const uint32_t unassigned = 0x10u;
 
     nipc_uds_server_config_t scfg = default_server_config();
     scfg.supported_profiles = NIPC_PROFILE_BASELINE | unassigned;
@@ -1281,6 +1281,41 @@ static void test_unassigned_profile_bit(void)
     if (err == NIPC_UDS_OK) {
         check("baseline selected instead of the unassigned bit",
               session.selected_profile == NIPC_PROFILE_BASELINE);
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
+/* A deadline-bounded send of an untracked message with nothing in flight
+ * sizes its pending queue for one response instead of dividing by zero. */
+static void test_bounded_control_send_idle(void)
+{
+    printf("Test 6d: Bounded control send with nothing in flight\n");
+    const char *svc = "test_bounded_control_idle";
+    cleanup_socket(svc);
+
+    server_ctx_t sctx = {
+        .service      = svc,
+        .config       = default_server_config(),
+        .accept_count = 1,
+        .echo_count   = 1,
+    };
+    pthread_t tid = start_echo_server(&sctx);
+    check("server ready", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("client connect", err == NIPC_UDS_OK);
+    if (err == NIPC_UDS_OK) {
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_CONTROL,
+            .message_id = 1,
+        };
+        err = nipc_uds_send_timeout(&session, &hdr, NULL, 0, 5000, -1);
+        check("bounded control send succeeds", err == NIPC_UDS_OK);
         nipc_uds_close_session(&session);
     }
 
@@ -3212,6 +3247,24 @@ static mode_t lock_file_mode(const char *svc)
     return stat(path, &st) == 0 ? (st.st_mode & 0777) : 0;
 }
 
+typedef struct {
+    const char *lock_path;
+    char tmp_path[320];
+    int calls;
+    mode_t tmp_mode;
+    int lock_visible;
+} lock_publish_probe_t;
+
+static void probe_lock_publish(const char *tmp_path, void *user)
+{
+    lock_publish_probe_t *probe = user;
+    struct stat st;
+    probe->calls++;
+    snprintf(probe->tmp_path, sizeof(probe->tmp_path), "%s", tmp_path);
+    probe->tmp_mode = stat(tmp_path, &st) == 0 ? (st.st_mode & 0777) : 0;
+    probe->lock_visible = lstat(probe->lock_path, &st) == 0;
+}
+
 /* Under umask, the endpoint lock is created, contended and reclaimed. */
 static void check_lock_under_umask(const char *svc, mode_t mask)
 {
@@ -3220,8 +3273,11 @@ static void check_lock_under_umask(const char *svc, mode_t mask)
     unlink(path);
     nipc_uds_server_config_t scfg = default_server_config();
     nipc_uds_listener_t first, second;
+    lock_publish_probe_t probe = { .lock_path = path };
+    nipc_uds_set_lock_publish_hook_for_tests(probe_lock_publish, &probe);
     mode_t old_mask = umask(mask);
     nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &first);
+    nipc_uds_set_lock_publish_hook_for_tests(NULL, NULL);
     nipc_uds_error_t busy = NIPC_UDS_ERR_SOCKET, again = NIPC_UDS_ERR_SOCKET;
     if (err == NIPC_UDS_OK) {
         busy = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &second);
@@ -3239,6 +3295,10 @@ static void check_lock_under_umask(const char *svc, mode_t mask)
     check("a second server gets ADDR_IN_USE", busy == NIPC_UDS_ERR_ADDR_IN_USE);
     check("the endpoint restarts", again == NIPC_UDS_OK);
     check("the lock file is 0600", lock_file_mode(svc) == 0600);
+    struct stat st;
+    check("the lock is 0600 before it gets its name",
+          probe.calls == 1 && probe.tmp_mode == 0600 && !probe.lock_visible);
+    check("the temporary name is gone", lstat(probe.tmp_path, &st) < 0);
     cleanup_socket(svc);
 }
 
@@ -3269,9 +3329,9 @@ static void test_listen_lock_restrictive_umask(void)
     printf("Test: endpoint lock under a umask without owner read or write\n");
     check_lock_under_umask("test_lock_umask", 0477);
     check_lock_under_umask("test_lock_umask", 0277);
+    check_lock_under_umask("test_lock_umask", 0777);
     check_lock_leftover_mode("test_lock_leftover", 0200);
     check_lock_leftover_mode("test_lock_leftover", 0400);
-    check_lock_leftover_mode("test_lock_leftover", 0000);
 }
 
 /* A child forked by another thread shares the lock's open file description
@@ -4526,6 +4586,7 @@ int main(void)
     test_profile_mismatch();       printf("\n");
     test_platform_profile_mask();  printf("\n");
     test_unassigned_profile_bit(); printf("\n");
+    test_bounded_control_send_idle(); printf("\n");
     test_request_payload_over_cap(); printf("\n");
     test_stale_recovery();         printf("\n");
     test_stale_recovery_reclaims_regular_file(); printf("\n");

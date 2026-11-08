@@ -411,7 +411,13 @@ impl UdsSession {
             });
         }
 
-        let bound = pending_bound(self.max_response_payload_bytes, self.packet_size, inflight);
+        // A bounded send of an untracked message can run with nothing in
+        // flight; it still gets one response's room.
+        let bound = pending_bound(
+            self.max_response_payload_bytes,
+            self.packet_size,
+            inflight.max(1),
+        );
         let read_len = self.packet_size as usize;
         let pending = &mut self.pending;
         // After a failed stream receive the inbound bytes belong to an
@@ -585,16 +591,48 @@ pub(crate) type ListenHook = (String, Box<dyn Fn() + Send>);
 #[cfg(test)]
 pub(crate) static LISTEN_HOOK: std::sync::Mutex<Option<ListenHook>> = std::sync::Mutex::new(None);
 
-/// Make a lock file this account owns openable again (mode 0600). Only a
-/// regular file is touched; `lstat` does not follow a symlink.
-fn repair_unopenable_lock(lock_path: &str) -> bool {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    match std::fs::symlink_metadata(lock_path) {
-        Ok(meta) if meta.file_type().is_file() && meta.uid() == unsafe { libc::geteuid() } => {
-            std::fs::set_permissions(lock_path, std::fs::Permissions::from_mode(0o600)).is_ok()
+/// Runs just before a new endpoint lock file is linked to its final name.
+#[cfg(test)]
+pub(crate) type LockPublishHook = Box<dyn Fn(&str) + Send>;
+#[cfg(test)]
+pub(crate) static LOCK_PUBLISH_HOOK: std::sync::Mutex<Option<LockPublishHook>> =
+    std::sync::Mutex::new(None);
+
+/// A file created under a umask without owner bits stays unopenable if the
+/// process dies before fchmod(), so a missing lock gets its name only once
+/// it is 0600. Best effort: the caller's creating open covers every failure,
+/// such as a filesystem without hard links, and a losing link means another
+/// starter published the file first.
+fn publish_endpoint_lock(lock_path: &str) {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp = format!(
+        "{lock_path}.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let Ok(file) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&tmp)
+    else {
+        return;
+    };
+    let restricted = file
+        .set_permissions(std::fs::Permissions::from_mode(0o600))
+        .is_ok();
+    drop(file);
+    if restricted {
+        #[cfg(test)]
+        if let Some(hook) = LOCK_PUBLISH_HOOK.lock().unwrap().as_ref() {
+            hook(&tmp);
         }
-        _ => false,
+        let _ = std::fs::hard_link(&tmp, lock_path);
     }
+    let _ = std::fs::remove_file(&tmp);
 }
 
 /// Take the endpoint lock `{run_dir}/{service_name}.lock`. A server's
@@ -611,43 +649,41 @@ fn acquire_endpoint_lock(run_dir: &str, service_name: &str) -> Result<EndpointLo
     use std::os::unix::fs::PermissionsExt;
 
     let lock_path = format!("{run_dir}/{service_name}.lock");
-    // The file takes 0600 & ~umask. A umask without owner read or write
-    // would leave it unopenable read-write, so a narrower open follows
-    // (flock() works on any access mode) and fchmod() restores 0600 for the
-    // next starter. fchmod() fails only for a file another account owns,
-    // which the lock still works on.
-    let open = |read: bool, write: bool| {
+    // A file left with mode bits missing, by an older build or a fallback
+    // create under a umask without owner read or write, may not reopen
+    // read-write, so a narrower open follows (flock() works on any access
+    // mode) and fchmod() restores 0600 for the next starter. fchmod() fails
+    // only for a file another account owns, which the lock still works on.
+    let open_mode = |read: bool, write: bool, create: bool| {
         std::fs::OpenOptions::new()
             .read(read)
             .write(write)
-            .create(read && write)
+            .create(create)
             .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
             .open(&lock_path)
     };
     let denied = |e: &io::Error| e.raw_os_error() == Some(libc::EACCES);
-    let file = open(true, true)
+    let file = open_mode(true, true, false)
         .or_else(|e| {
-            if denied(&e) {
-                open(false, true)
+            if e.raw_os_error() == Some(libc::ENOENT) {
+                publish_endpoint_lock(&lock_path);
+                open_mode(true, true, true)
             } else {
                 Err(e)
             }
         })
         .or_else(|e| {
             if denied(&e) {
-                open(true, false)
+                open_mode(false, true, false)
             } else {
                 Err(e)
             }
         })
         .or_else(|e| {
-            // A crash between the creating open and fchmod() under such a
-            // umask leaves mode 000. Repair a regular file this account
-            // owns; run_dir writers are trusted, so the path check suffices.
-            if denied(&e) && repair_unopenable_lock(&lock_path) {
-                open(true, true)
+            if denied(&e) {
+                open_mode(true, false, false)
             } else {
                 Err(e)
             }

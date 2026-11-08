@@ -292,18 +292,30 @@ static inline void latency_record(latency_recorder_t *lr, uint64_t ns)
         lr->samples[lr->count++] = ns;
 }
 
-/* A duration that is not a positive number of seconds would wrap the
- * nanosecond deadline arithmetic; reject it up front. */
-static int parse_duration(const char *arg)
+/* A duration outside the range would wrap the nanosecond deadline
+ * arithmetic; reject it up front. The cap keeps the
+ * timer thread's DWORD millisecond wait from wrapping. */
+static int parse_duration_from(const char *arg, long min)
 {
     char *end = NULL;
     errno = 0;
     long v = strtol(arg, &end, 10);
-    if (errno != 0 || end == arg || *end != '\0' || v <= 0 || v > 86400L * 365) {
-        fprintf(stderr, "invalid duration '%s': want a positive number of seconds\n", arg);
+    if (errno != 0 || end == arg || *end != '\0' || v < min || v > 4000000L) {
+        fprintf(stderr, "invalid duration '%s'\n", arg);
         exit(1);
     }
     return (int)v;
+}
+
+static int parse_duration(const char *arg)
+{
+    return parse_duration_from(arg, 1);
+}
+
+/* Zero runs a server without its stop timer. */
+static int parse_server_duration(const char *arg)
+{
+    return parse_duration_from(arg, 0);
 }
 
 static int cmp_u64(const void *a, const void *b)
@@ -1642,7 +1654,7 @@ int main(int argc, char **argv)
 
         const char *run_dir = argv[2];
         const char *service = argv[3];
-        int duration = (argc >= 5) ? parse_duration(argv[4]) : DEFAULT_DURATION;
+        int duration = (argc >= 5) ? parse_server_duration(argv[4]) : DEFAULT_DURATION;
 
         CreateDirectoryA(run_dir, NULL);
 
@@ -1683,7 +1695,7 @@ int main(int argc, char **argv)
 
         const char *run_dir = argv[2];
         const char *service = argv[3];
-        int duration = (argc >= 5) ? parse_duration(argv[4]) : DEFAULT_DURATION;
+        int duration = (argc >= 5) ? parse_server_duration(argv[4]) : DEFAULT_DURATION;
 
         CreateDirectoryA(run_dir, NULL);
 

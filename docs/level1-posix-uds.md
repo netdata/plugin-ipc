@@ -86,8 +86,8 @@ This is the baseline profile — always supported, always available as
 fallback.
 
 A POSIX endpoint offers and accepts only the profiles it implements: the
-baseline plus `SHM_HYBRID` and `SHM_FUTEX` on Linux and FreeBSD, the
-baseline alone elsewhere. Configured bits outside that set are dropped
+baseline plus `SHM_HYBRID` and `SHM_FUTEX` on Linux and FreeBSD (Go on
+FreeBSD only on amd64 and 386), the baseline alone elsewhere. Configured bits outside that set are dropped
 before the handshake, so a peer can never select an unassigned profile.
 
 ## Connection lifecycle
@@ -371,16 +371,21 @@ the kernel restarts these calls for Go before they can return `EINTR`.
 ### Endpoint lock
 
 - Before it touches the socket path, the server takes an exclusive,
-  non-blocking `flock` on `{run_dir}/{service_name}.lock`. The file is
-  created owner-only (0600) with `O_CLOEXEC | O_NOFOLLOW`.
-- A umask without owner read or write leaves the file `0600 & ~umask`, which
-  a later read-write open cannot reopen. The server then opens it
-  write-only, or else read-only (`flock` works on any access mode), and
-  `fchmod`s the descriptor back to 0600 after every open. A lock file left
-  by a server that ran under such a umask therefore never blocks a start.
-  A crash between the creating open and that `fchmod` can leave mode 000,
-  which no access mode opens; when the file is a regular file owned by the
-  server's account, the server `chmod`s it to 0600 and opens it again.
+  non-blocking `flock` on `{run_dir}/{service_name}.lock`, opened with
+  `O_CLOEXEC | O_NOFOLLOW`.
+- A missing lock file gets its name only once it is 0600, so a umask without
+  owner bits and a crash cannot leave an unopenable lock: the server creates
+  `{service_name}.lock.{pid}.{sequence}.tmp`, `fchmod`s it to 0600, hard-links
+  it to the lock name and unlinks the temporary name. Losing the link to
+  another starter is success. A crash can leave the temporary file behind;
+  it is harmless and nothing reads it. If any of these steps fails, for
+  example on a filesystem without hard links, the server creates the lock
+  file directly.
+- A lock file whose mode lacks owner read or write is opened write-only, or
+  else read-only (`flock` works on any access mode), and every open
+  `fchmod`s the descriptor back to 0600. A lock file at mode 000 is not
+  repaired: the listen fails until an operator removes it, unless the
+  process can bypass file permissions.
 - If another listener holds the lock, the server fails with
   address-in-use. This closes the window between one server's `bind()`
   and `listen()`, where a connect probe would see a refused socket and

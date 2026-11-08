@@ -281,7 +281,7 @@ nipc_uds_error_t nipc_uds_pending_drain(nipc_uds_session_t *s, size_t bound,
          * direct receive sees: one longer than packet_size, a protocol
          * violation, is rejected there instead of being stored cut short.
          * MSG_TRUNC reports the full length on Linux 3.4 and later; older
-         * kernels report at most read_len. */
+         * kernels report at most the probe length. */
         uint8_t probe;
         ssize_t full = recv(s->fd, &probe, sizeof(probe),
                             MSG_DONTWAIT | MSG_PEEK | MSG_TRUNC);

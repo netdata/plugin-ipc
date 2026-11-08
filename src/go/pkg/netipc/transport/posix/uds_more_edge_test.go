@@ -1110,7 +1110,7 @@ func TestListenExcludesStartingServer(t *testing.T) {
 // ran under such a umask) must not block a start, and the start restores it.
 func TestListenOverLeftoverLockModes(t *testing.T) {
 	runDir := testRunDir(t)
-	for _, mode := range []os.FileMode{0o200, 0o400, 0o000} {
+	for _, mode := range []os.FileMode{0o200, 0o400} {
 		service := uniqueService(t)
 		lock := filepath.Join(runDir, service+".lock")
 		_ = os.Remove(lock)
@@ -1165,7 +1165,7 @@ const lockUmaskHelperEnv = "NETIPC_LOCK_UMASK_HELPER"
 // test process instead of the parallel test runner.
 func TestListenLockUnderRestrictiveUmask(t *testing.T) {
 	testRunDir(t)
-	for _, mask := range []string{"477", "277"} {
+	for _, mask := range []string{"477", "277", "777"} {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestLockUmaskHelperProcess$", "-test.v")
 		cmd.Env = append(os.Environ(), lockUmaskHelperEnv+"="+mask)
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -1191,11 +1191,25 @@ func TestLockUmaskHelperProcess(t *testing.T) {
 	_ = os.Remove(lock)
 	_ = os.Remove(filepath.Join(runDir, service+".sock"))
 
+	var published []string
+	var tmpMode os.FileMode
+	lockVisible := false
+	hook := func(tmp string) {
+		published = append(published, tmp)
+		if info, err := os.Stat(tmp); err == nil {
+			tmpMode = info.Mode().Perm()
+		}
+		_, err := os.Lstat(lock)
+		lockVisible = err == nil
+	}
+	lockPublishHook.Store(&hook)
+
 	func() {
 		// Restore the umask before exit so files the process writes then
 		// (coverage data) keep their normal mode.
 		defer syscall.Umask(syscall.Umask(mask))
 		first, err := Listen(runDir, service, defaultServerConfig())
+		lockPublishHook.Store(nil)
 		if err != nil {
 			t.Fatalf("listen under umask %o: %v", mask, err)
 		}
@@ -1219,6 +1233,13 @@ func TestLockUmaskHelperProcess(t *testing.T) {
 	}
 	if mode := info.Mode().Perm(); mode != 0o600 {
 		t.Errorf("lock mode under umask %o = %o, want 600", mask, mode)
+	}
+	if len(published) != 1 || tmpMode != 0o600 || lockVisible {
+		t.Fatalf("publish: names=%v mode=%o lock visible=%v, want one name, 600, false",
+			published, tmpMode, lockVisible)
+	}
+	if _, err := os.Lstat(published[0]); err == nil {
+		t.Errorf("temporary name %s was left behind", published[0])
 	}
 	_ = os.Remove(lock)
 }

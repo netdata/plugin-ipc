@@ -247,7 +247,7 @@ Artifact maintenance gate:
 - Specs: no update; vendoring changes no protocol or API.
 - End-user/operator docs: no update; the vendor scripts and their usage did not change.
 - End-user/operator skills: `docs/netipc-integrator-skill.md` unaffected; no API or workflow change in this SOW.
-- SOW lifecycle: `Status: completed`, moved to `done/` in this commit; follow-ups tracked as SOW-0068 and SOW-0069.
+- SOW lifecycle: follow-ups tracked as SOW-0068 and SOW-0069. Correction (2026-11-08, SOW-0070): this SOW is `paused` in `current/`; it moves to `done/` after the re-vendoring and the Netdata PR CI.
 
 Performance assessment:
 

@@ -339,6 +339,45 @@ void nipc_uds_set_listen_hook_for_tests(void (*hook)(void *user), void *user)
     g_listen_hook = hook;
 }
 
+static void (*g_lock_publish_hook)(const char *tmp_path, void *user);
+static void *g_lock_publish_hook_user;
+
+void nipc_uds_set_lock_publish_hook_for_tests(
+    void (*hook)(const char *tmp_path, void *user), void *user)
+{
+    g_lock_publish_hook_user = user;
+    g_lock_publish_hook = hook;
+}
+
+/* A file created under a umask without owner bits stays unopenable if the
+ * process dies before fchmod(), so a missing lock gets its name only once it
+ * is 0600. Best effort: the caller's creating open covers every failure,
+ * such as a filesystem without hard links, and a losing link() means another
+ * starter published the file first. */
+static void publish_endpoint_lock(const char *lock_path)
+{
+    static unsigned seq;
+    char tmp[sizeof(((struct sockaddr_un *)0)->sun_path) + 64];
+    int n = snprintf(tmp, sizeof(tmp), "%s.%ld.%u.tmp", lock_path,
+                     (long)getpid(),
+                     __atomic_fetch_add(&seq, 1u, __ATOMIC_RELAXED));
+    if (n < 0 || (size_t)n >= sizeof(tmp))
+        return;
+
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                  0600);
+    if (fd < 0)
+        return;
+    int restricted = fchmod(fd, S_IRUSR | S_IWUSR) == 0;
+    close(fd);
+    if (restricted) {
+        if (g_lock_publish_hook)
+            g_lock_publish_hook(tmp, g_lock_publish_hook_user);
+        (void)link(tmp, lock_path);
+    }
+    unlink(tmp);
+}
+
 /* Take the endpoint lock {run_dir}/{service_name}.lock. A server's socket
  * file exists from bind() until listen(), and connects in that window are
  * refused just as for a dead server's leftover file, so a connect probe
@@ -357,25 +396,20 @@ static int acquire_endpoint_lock(const char *run_dir, const char *service_name,
     if (n < 0 || (size_t)n >= sizeof(lock_path))
         return -1;
 
-    /* The file takes 0600 & ~umask. A umask without owner read or write
-     * would leave it unopenable read-write, so a narrower open follows
-     * (flock() works on any access mode) and fchmod() restores 0600 for the
-     * next starter. fchmod() fails only for a file another account owns,
-     * which the lock still works on. */
-    int fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    /* A file left with mode bits missing, by an older build or a fallback
+     * create under a umask without owner read or write, may not reopen
+     * read-write, so a narrower open follows (flock() works on any access
+     * mode) and fchmod() restores 0600 for the next starter. fchmod() fails
+     * only for a file another account owns, which the lock still works on. */
+    int fd = open(lock_path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0 && errno == ENOENT) {
+        publish_endpoint_lock(lock_path);
+        fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    }
     if (fd < 0 && errno == EACCES)
         fd = open(lock_path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0 && errno == EACCES)
         fd = open(lock_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0 && errno == EACCES) {
-        /* A crash between the creating open and fchmod() under such a
-         * umask leaves mode 000. Repair a regular file this account owns;
-         * run_dir writers are trusted, so the path check suffices. */
-        struct stat st;
-        if (lstat(lock_path, &st) == 0 && S_ISREG(st.st_mode) &&
-            st.st_uid == geteuid() && chmod(lock_path, S_IRUSR | S_IWUSR) == 0)
-            fd = open(lock_path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
-    }
     if (fd < 0)
         return -1;
     (void)fchmod(fd, S_IRUSR | S_IWUSR);

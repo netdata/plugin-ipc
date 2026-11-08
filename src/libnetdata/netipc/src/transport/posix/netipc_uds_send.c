@@ -102,9 +102,12 @@ static void fill_envelope(nipc_header_t *hdr, size_t payload_len)
     hdr->payload_len = (uint32_t)payload_len;
 }
 
-/* Wire bytes the in-flight responses can occupy: the queue bound. */
+/* Wire bytes the in-flight responses can occupy: the queue bound. A bounded
+ * send of an untracked message can run with nothing in flight; it still
+ * gets one response's room, as the peer may be mid-response. */
 static size_t pending_bound(const nipc_uds_session_t *session)
 {
+    size_t inflight = session->inflight_count ? session->inflight_count : 1;
     size_t payload = session->max_response_payload_bytes;
     size_t budget = session->packet_size > NIPC_HEADER_LEN
         ? (size_t)session->packet_size - NIPC_HEADER_LEN : 1;
@@ -113,9 +116,9 @@ static size_t pending_bound(const nipc_uds_session_t *session)
     if (packets > (SIZE_MAX - payload) / per_packet)
         return SIZE_MAX;
     size_t per_response = payload + packets * per_packet;
-    if (per_response > SIZE_MAX / session->inflight_count)
+    if (per_response > SIZE_MAX / inflight)
         return SIZE_MAX;
-    return per_response * session->inflight_count;
+    return per_response * inflight;
 }
 
 /* A failure inside a progress send leaves a partial message on the wire or

@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: implemented and validated (2026-11-08). SOW-0050 resumes with the re-vendoring, the push, macOS CI and the 168 thread replies.
+Sub-state: implemented and validated (2026-11-08), including the regression at the end of this file. SOW-0050 resumes with the re-vendoring and the Netdata PR replies.
 
 ## Requirements
 
@@ -215,6 +215,7 @@ Follow-up decisions, 2026-11-07:
 
 10. T2 (user: "we need to be aligned with netdata on this"): `GoVersionOverride` follows the Go patch release Netdata ships. Netdata keeps `go 1.27.0` in `src/go/go.mod` and builds with go1.27.3 (netdata/netdata @ 42313ad410, `packaging/check-for-go-toolchain.sh:136-184`); Netdata runs no Go stdlib vulnerability scanner. The three `osv-scanner.toml` files now set `1.27.3` and name that pin as their source; the vendoring preflight skill checks the alignment. Deleting them was considered and rejected: OSV would then scan the 1.27.0 stdlib, which neither CI nor Netdata ships, and `supply-chain-security.yml` fails on any finding.
 11. Decision 7B revised to out of scope (user: "freebsd 13.x is EOL since April. We don't need to support that", then "A"). Netdata's `.github/data/distros.yml:517-521` (netdata/netdata @ 42313ad410) still lists `freebsd 13-STABLE` as Community support, its only FreeBSD entry, so the list looks stale; FreeBSD is validated on 14.3 and 15.1. The CodeRabbit thread gets this evidence in its reply.
+12. F17 revised after the first CI run on `6b14803` (see Regression - 2026-11-08): flawfinder and Semgrep flag the path-based `chmod` of the lock repair. Options were to annotate the line, to prevent the mode-000 file, or to remove the repair. User chose prevention ("B"): a missing lock is created under a temporary name, made 0600 and hard-linked into place. A file already at mode 000 is no longer repaired.
 
 ## Plan
 
@@ -271,17 +272,17 @@ See Implementation plan.
 - T2: the three `osv-scanner.toml` files set `GoVersionOverride = "1.27.3"` (decision 10); `project-netdata-vendoring` preflight step 8 checks the `go` directive and the override against Netdata.
 - Overlapped Named Pipe I/O passes no byte-count pointer (pi 4496633078): C `overlapped_recv`/`start_overlapped_send`, Rust `overlapped_read`/`start_overlapped_write`, Go `pipe_overlapped.go` read and write now pass NULL, as the Win32 `ReadFile`/`WriteFile` docs require for asynchronous calls; the count already came from `GetOverlappedResult`, so behaviour is unchanged. The write start returned while the write could be pending, leaving the pointer to a dead local. Cross-checks: Rust Windows clippy (only pre-existing lints), Go `GOOS=windows go vet` (only the pre-existing `shm.go` unsafe.Pointer notes). Not yet built or run on the Windows host (busy benchmarking). nd 4496664636 is a duplicate of F18.
 - Handoff (2026-11-07, session restart):
-  - Benchmarks (decision 2A) were started on frozen copies of the tree before the overlapped-I/O change: POSIX `tests/run-posix-bench.sh` into the scratch CSV `abfull-s70-posix.csv`, Windows `tests/run-windows-bench.sh` into `~/abfull-s70-windows.csv` on the Windows host, to compare with the `4261919` runs of 2026-11-05 (`abfull-4261919-{posix,windows}.csv`). Both were children of the session; if the restart killed them, rerun both once (the overlapped change does not affect what they measure: it changes one argument).
-  - Next: Windows host build and suites for the overlapped change (`~/win-ctest-full.sh`, `~/win-rust-go.sh`) after the benchmark; benchmark comparison; replies for all 168 open bot threads (118 on plugin-ipc#18, 50 on netdata#24633; an earlier count of 149 read only the first page of plugin-ipc threads), drafted in the scratch file `thread-replies.json`: 82 fixed, 18 corrected, 3 duplicates of fixed findings, 64 rejected with evidence, 1 out of scope, from the Findings and the triage notes (false positives and duplicates) in the scratch file `triage-notes.md`; fill Validation, Outcome, Lessons, Followup; commit SOW-0070; re-vendor (SOW-0050); ask the user before pushing.
+  - Benchmarks (decision 2A) were started on frozen copies of the tree before the overlapped-I/O change: POSIX `tests/run-posix-bench.sh` into the scratch CSV `abfull-s70-posix.csv`, Windows `tests/run-windows-bench.sh` into a scratch CSV on the Windows host, to compare with the `4261919` runs of 2026-11-05 (`abfull-4261919-{posix,windows}.csv`). Both were children of the session; if the restart killed them, rerun both once (the overlapped change does not affect what they measure: it changes one argument).
+  - Next: Windows host build and suites for the overlapped change (CTest, `cargo test`, `go test`) after the benchmark; benchmark comparison; replies for all 168 open bot threads (118 on plugin-ipc#18, 50 on netdata#24633; an earlier count of 149 read only the first page of plugin-ipc threads), drafted in the scratch file `thread-replies.json`: 82 fixed, 18 corrected, 3 duplicates of fixed findings, 64 rejected with evidence, 1 out of scope, from the Findings and the triage notes (false positives and duplicates) in the scratch file `triage-notes.md`; fill Validation, Outcome, Lessons, Followup; commit SOW-0070; re-vendor (SOW-0050); ask the user before pushing.
 - After the restart: `cargo fmt` rewrapped one call in `transport/posix.rs`; `cargo fmt --check` passes with Rust 1.91.0 and stable, `cargo +1.91.0 check --all-targets` is clean, `cargo clippy --all-targets` reports exactly the warnings of HEAD (no new one), `gofmt -l` is empty for the three Go modules, `go vet` passes for linux, freebsd and darwin. The Windows benchmark survived the restart; the POSIX one did not and was restarted from the same frozen tree.
 
 ## Validation
 
 Acceptance criteria evidence:
 
-- Every finding is fixed or answered: F1-F29, D1-D8, T1-T11 and R1-R12 are each recorded in the Execution Log with the change, the test and the spec or record touched; the FreeBSD 13 item is out of scope (decision 11). The 168 open review threads (118 on netdata/plugin-ipc#18, 50 on netdata/netdata#24633) each have a drafted individual reply: 82 fixed, 18 corrected, 3 duplicates of fixed findings, 64 rejected with file or spec evidence, 1 out of scope.
+- Every finding is fixed or answered: F1-F29, D1-D8, T1-T11 and R1-R12 are each recorded in the Execution Log with the change, the test and the spec or record touched; the FreeBSD 13 item is out of scope (decision 11). The 168 open review threads (118 on netdata/plugin-ipc#18, 50 on netdata/netdata#24633) each have an individual reply, posted and resolved on netdata/plugin-ipc#18 at `6b14803`; the 50 on netdata/netdata#24633 wait for the re-vendored code under SOW-0050: 82 fixed, 18 corrected, 3 duplicates of fixed findings, 64 rejected with file or spec evidence, 1 out of scope.
 - Interoperability: C/Rust/Go interop suites pass on Linux (codec 18, UDS 9, SHM 18, service 9, cache) and through CTest on FreeBSD and Windows. Specs updated: `level1-posix-uds.md`, `level1-windows-np.md`, `level1-transport.md`, `level1-windows-shm.md`, `level1-wire-envelope.md`, `level2-typed-api.md`.
-- Correctness: Linux CTest 32/32, `cargo test` 412, `go test ./...` ok; Windows CTest 20/20, Rust 280, Go ok; FreeBSD 14.3 and 15.1 CTest (after the F22 test fix) with `test_uds` 303/0, `cargo test` 411, Go and Go 386 ok; extended fuzz 15/15 and stress 7/7. macOS: CI after the push (no macOS host).
+- Correctness: Linux CTest 32/32, `cargo test` 412, `go test ./...` ok; Windows CTest 20/20, Rust 280, Go ok; FreeBSD 14.3 and 15.1 CTest (after the F22 test fix) with `test_uds` 303/0, `cargo test` 411, Go and Go 386 ok; extended fuzz 15/15 and stress 7/7. macOS: `macOS stream baseline (C, Rust, Go, interop)` passed on `6b14803`.
 - Benchmarks (bounded send runs per request on established sessions, so the full suites ran once after all fixes, against the `4261919` runs on the same hosts):
   - POSIX: 345 rows, median ratio 1.00; lookup, snapshot-baseline and pipeline rows within 0.87-1.05. The run exits non-zero on 26 floor rows, the same 26 rows the `4261919` run missed; floor rebaselining for this host is tracked by `pending/SOW-0069`. The nine worst rows (0.45-0.74, all SHM or ping-pong, which also reached 1.65 upward) were rerun as six interleaved A/B rounds of both builds: ratios 0.93-1.07, each row's range overlapping the baseline range. No regression.
   - Windows: 194 rows comparable, median ratio 1.00, worst 0.82 (within the 0.58-1.42 spread earlier sequential runs showed on unchanged rows). The run exits non-zero because five max-rate `shm-ping-pong` rows with C or Rust servers failed the sample-stability check: their samples are bimodal (about 1.0M at 1 us p50 and 2.3-2.9M at 0.4 us p50; the upper mode matches the baseline), and this SOW changes no per-request Windows SHM code (C and Rust untouched, Go adds one length check on receive; bench driver changes are argument parsing only). Three interleaved A/B rounds of both builds on the six `shm-ping-pong` rows with C or Rust servers: each build lost 4 of 18 row-runs to the same stability check, and median ratios were 0.91-1.08 with overlapping ranges. No regression; the instability belongs to the host and is part of the stability analysis in `pending/SOW-0069`.
@@ -346,4 +347,36 @@ Every confirmed defect from the automated reviews of netdata/plugin-ipc#18 and n
 
 ## Regression Log
 
-None yet.
+## Regression - 2026-11-08
+
+What broke:
+
+- `C Static Analysis` (flawfinder level 5, CWE-362) and `Codacy Local Analysis` (Semgrep `c_race_rule-chmod`, code-scanning alert 7768) failed on `6b14803`, both on the `chmod` that F17 added at `netipc_uds_lifecycle.c:376`. They passed on `9568f4e`.
+- A new automated review of `6b14803` opened 34 more threads, some on code this SOW added: a bounded send of an untracked message with nothing in flight divided by zero in `pending_bound` (N3 C, N14 Go).
+
+Evidence:
+
+- CI run ids 42460571771 (flawfinder) and 42460571682 (Codacy). Go `TestBoundedControlSendIdle` panics with "integer divide by zero" with the fix reverted.
+- `C, Rust, and Go Coverage` also fails, on both `9568f4e` and `6b14803`, at the Codacy upload: "No Write permission on Project". It is a repository token problem, not this code; recorded for SOW-0050.
+
+Why validation missed it:
+
+- flawfinder and Semgrep run only in CI and were not run locally before the push; flawfinder is available locally and now runs before a push.
+- The bounded-send tests only sent tracked requests, so `inflight_count` was never zero there.
+
+Repair:
+
+- F17 (decision 12): `publish_endpoint_lock` in C, Rust and Go creates `{service}.lock.{pid}.{seq}.tmp`, `fchmod`s it to 0600, hard-links it to the lock name and unlinks the temporary name. Any failure falls through to the previous creating open, so a filesystem without hard links keeps working. `level1-posix-uds.md` updated. Tests check through a publish hook, under umasks 0477, 0277 and 0777, that the file is 0600 before the lock name exists and that the temporary name is gone.
+- Fixed from the new review (24 threads): N1 (above), N3/N14 zero in-flight bound in C, Go and Rust with tests (the C division is undefined behaviour that GCC folds at this build's optimisation level, so only the Go test is a reproduction), N8 extended stress on macOS through `workflow_dispatch` plus `AGENTS.md`, N10 and N27 this SOW's record, N11/N16 fixtures prove the request arrived, N15/N18 bench duration caps, N17 Go `StopListening` serialized (no deterministic test: proving a call stays blocked needs a timing wait), N20, N23 and N34 SOW records, N21, N33 and N35 docs, N22 truncated HELLO in a Rust fixture, N24/N26/N28 unassigned-bit tests use `0x10`, N25/N31 C server duration 0 restored, N32 comment.
+- Rejected with evidence (11 threads, each answered in its thread): N2, N4, N5, N6, N7, N9, N12, N13, N19, N29, N30.
+
+Validation:
+
+- Linux CTest 32/32, `cargo test` 413, Go ok; `cargo fmt --check` on 1.91.0 and stable, `cargo +1.91.0 check --all-targets`, `go vet` for linux, freebsd, darwin and windows, flawfinder level 5: 0 hits.
+- Windows CTest 20/20, Rust 280, Go ok. FreeBSD 14.3 and 15.1: CTest 31/31, `cargo test` 412, Go and Go 386 ok. macOS: CI on the push.
+- Performance: no benchmark rerun. Lock creation runs once per listen, and `pending_bound` only changes its result when nothing is in flight, which no benchmark row does (every row sends tracked requests).
+
+Artifacts:
+
+- Specs: `level1-posix-uds.md` (lock creation, FreeBSD Go SHM architectures). Docs: `netipc-integrator-skill.md` (x86_64 coverage). `AGENTS.md`: macOS extended command. Project skills: `project-netdata-vendoring` unaffected. SOW records: SOW-0050, SOW-0053, SOW-0065.
+- Lesson: run the locally available static analyzers before pushing, and wait for CI and the automated reviewer before posting replies that describe the pushed code.

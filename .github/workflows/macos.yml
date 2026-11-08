@@ -71,3 +71,9 @@ jobs:
           bash tests/test_service_interop.sh
           bash tests/test_cache_interop.sh
           bash tests/interop_codec.sh
+
+      # Lookup-scale interop is an extended suite: run it before vendoring
+      # with `gh workflow run macos.yml --ref <branch>`.
+      - name: Extended stress (manual runs only)
+        if: github.event_name == 'workflow_dispatch'
+        run: bash tests/run-extended-stress.sh

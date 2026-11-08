@@ -343,6 +343,11 @@ static inline int nipc_uds_listener_fd(const nipc_uds_listener_t *l) {
 /* Run hook(user) inside nipc_uds_listen() between bind() and listen(), so
  * tests can hold a listener in that window. Process-wide; NULL clears. */
 void nipc_uds_set_listen_hook_for_tests(void (*hook)(void *user), void *user);
+
+/* Run hook(tmp_path, user) just before a new endpoint lock file is linked to
+ * its final name. Process-wide; NULL clears. */
+void nipc_uds_set_lock_publish_hook_for_tests(
+    void (*hook)(const char *tmp_path, void *user), void *user);
 #endif
 
 #ifdef __cplusplus

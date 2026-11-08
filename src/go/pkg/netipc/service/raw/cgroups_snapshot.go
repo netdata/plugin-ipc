@@ -7,8 +7,8 @@ import (
 )
 
 // SnapshotHandler serves a single CGROUPS_SNAPSHOT service kind. The request
-// borrows the receive buffer and the builder writes into the response
-// buffer; both are valid only during the call, so copy what you keep.
+// is decoded into scalar fields, and the builder writes into the response
+// buffer, which is valid only during the call.
 type SnapshotHandler func(*protocol.CgroupsRequest, *protocol.CgroupsBuilder) bool
 
 // SnapshotMaxItems returns the item budget for a single snapshot service kind.

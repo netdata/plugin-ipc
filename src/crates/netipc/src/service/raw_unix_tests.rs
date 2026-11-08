@@ -671,6 +671,13 @@ fn start_raw_hello_ack_server(service: &str, packet: Vec<u8>) -> RawHelloAckServ
             }
             return Err(format!("recv: {}", std::io::Error::last_os_error()));
         }
+        if got < hello_len {
+            unsafe {
+                libc::close(client_fd);
+                libc::close(fd);
+            }
+            return Err(format!("truncated HELLO: {got} of {hello_len} bytes"));
+        }
 
         let wrote = unsafe {
             libc::send(

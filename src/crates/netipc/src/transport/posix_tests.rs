@@ -617,7 +617,7 @@ fn test_listen_excludes_starting_server() {
 fn test_listen_over_leftover_lock_modes() {
     use std::os::unix::fs::PermissionsExt;
     ensure_run_dir();
-    for mode in [0o200, 0o400, 0o000] {
+    for mode in [0o200, 0o400] {
         let svc = unique_service("rs_lock_mode");
         cleanup_socket(&svc);
         let lock = format!("{TEST_RUN_DIR}/{svc}.lock");
@@ -662,7 +662,7 @@ const LOCK_UMASK_HELPER_TEST: &str = "transport::posix::tests::lock_umask_helper
 #[test]
 fn test_listen_lock_under_restrictive_umask() {
     ensure_run_dir();
-    for mask in ["477", "277"] {
+    for mask in ["477", "277", "777"] {
         let status = std::process::Command::new(std::env::current_exe().expect("current_exe"))
             .args([LOCK_UMASK_HELPER_TEST, "--exact", "--test-threads=1"])
             .env(LOCK_UMASK_HELPER_ENV, mask)
@@ -700,10 +700,25 @@ fn lock_umask_helper_process() {
     cleanup_socket(&svc);
     let _ = std::fs::remove_file(&lock);
 
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (hook_seen, hook_lock) = (seen.clone(), lock.clone());
+    *LOCK_PUBLISH_HOOK.lock().unwrap() = Some(Box::new(move |tmp: &str| {
+        let mode = std::fs::metadata(tmp)
+            .expect("tmp stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        let visible = std::fs::symlink_metadata(&hook_lock).is_ok();
+        hook_seen
+            .lock()
+            .unwrap()
+            .push((tmp.to_string(), mode, visible));
+    }));
     {
         let _umask = UmaskGuard(unsafe { libc::umask(mask) });
         let first = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config())
             .unwrap_or_else(|e| panic!("listen under umask {mask:o}: {e:?}"));
+        *LOCK_PUBLISH_HOOK.lock().unwrap() = None;
         let second = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config());
         assert!(
             matches!(second, Err(UdsError::AddrInUse)),
@@ -721,6 +736,15 @@ fn lock_umask_helper_process() {
         .mode()
         & 0o777;
     assert_eq!(lock_mode, 0o600, "lock mode under umask {mask:o}");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "the new lock is published once");
+    let (tmp, tmp_mode, lock_visible) = &seen[0];
+    assert_eq!(*tmp_mode, 0o600, "mode before the lock gets its name");
+    assert!(!*lock_visible, "the lock name appears only after the link");
+    assert!(
+        std::fs::symlink_metadata(tmp).is_err(),
+        "the temporary name is gone"
+    );
     cleanup_socket(&svc);
     let _ = std::fs::remove_file(&lock);
 }
@@ -2759,7 +2783,7 @@ fn test_unassigned_profile_bit_not_selected() {
     ensure_run_dir();
     let svc = unique_service("rs_unassigned_prof");
     cleanup_socket(&svc);
-    const UNASSIGNED: u32 = 0x08;
+    const UNASSIGNED: u32 = 0x10;
 
     let svc_clone = svc.clone();
     let scfg = ServerConfig {
@@ -2781,6 +2805,38 @@ fn test_unassigned_profile_bit_not_selected() {
     let session = UdsSession::connect(TEST_RUN_DIR, &svc, &ccfg).expect("connect");
     assert_eq!(session.selected_profile, PROFILE_BASELINE);
 
+    drop(session);
+    server_thread.join().expect("server join");
+    cleanup_socket(&svc);
+}
+
+// A deadline-bounded send of an untracked message with nothing in flight
+// still has room for one response in its pending queue.
+#[test]
+fn test_bounded_control_send_idle() {
+    ensure_run_dir();
+    let svc = unique_service("rs_bounded_control");
+    cleanup_socket(&svc);
+    let listener = UdsListener::bind(TEST_RUN_DIR, &svc, default_server_config()).expect("listen");
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let server_thread = thread::spawn(move || {
+        let session = listener.accept().expect("accept");
+        let _ = release_rx.recv();
+        drop(session);
+    });
+
+    let mut session =
+        UdsSession::connect(TEST_RUN_DIR, &svc, &default_client_config()).expect("connect");
+    let mut hdr = Header {
+        kind: protocol::KIND_CONTROL,
+        message_id: 1,
+        ..Header::default()
+    };
+    session
+        .send_with_control(&mut hdr, &[], 5000, None)
+        .expect("bounded control send");
+
+    drop(release_tx);
     drop(session);
     server_thread.join().expect("server join");
     cleanup_socket(&svc);

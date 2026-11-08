@@ -938,7 +938,7 @@ func TestUnassignedProfileBitNotSelected(t *testing.T) {
 	service := uniqueService(t)
 	defer os.Remove(filepath.Join(runDir, service+".sock"))
 
-	const unassigned = 0x08
+	const unassigned = 0x10
 	sCfg := defaultServerConfig()
 	sCfg.SupportedProfiles = protocol.ProfileBaseline | unassigned
 	sCfg.PreferredProfiles = unassigned
@@ -964,6 +964,35 @@ func TestUnassignedProfileBitNotSelected(t *testing.T) {
 
 	if client.SelectedProfile != protocol.ProfileBaseline || sr.session.SelectedProfile != protocol.ProfileBaseline {
 		t.Errorf("selected = 0x%x/0x%x, want baseline", client.SelectedProfile, sr.session.SelectedProfile)
+	}
+}
+
+// A deadline-bounded send of an untracked message with nothing in flight
+// still has room for one response in its pending queue.
+func TestBoundedControlSendIdle(t *testing.T) {
+	runDir := testRunDir(t)
+	service := uniqueService(t)
+	defer os.Remove(filepath.Join(runDir, service+".sock"))
+
+	listener := startListener(t, runDir, service, defaultServerConfig())
+	defer listener.Close()
+	acceptCh := acceptAsync(listener)
+
+	cCfg := defaultClientConfig()
+	client, err := Connect(runDir, service, &cCfg)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer client.Close()
+	sr := <-acceptCh
+	if sr.err != nil {
+		t.Fatalf("Accept failed: %v", sr.err)
+	}
+	defer sr.session.Close()
+
+	hdr := protocol.Header{Kind: protocol.KindControl, MessageID: 1}
+	if err := client.SendTimeout(&hdr, nil, 5000, nil); err != nil {
+		t.Fatalf("bounded control send: %v", err)
 	}
 }
 

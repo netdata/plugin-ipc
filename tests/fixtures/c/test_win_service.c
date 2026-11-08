@@ -633,6 +633,7 @@ typedef struct {
     const char *service;
     int ready;
     int reading_started;
+    int request_seen;
     int release;
 } stalled_reader_ctx_t;
 
@@ -663,7 +664,9 @@ static DWORD WINAPI stalled_reader_server_thread(LPVOID arg)
     if (nipc_np_accept(&listener, 1, &session) == NIPC_NP_OK) {
         /* The request's first bytes arrived: the client is in its write. */
         bool readable = false;
-        (void)nipc_np_wait_readable(&session, 10000, &readable);
+        if (nipc_np_wait_readable(&session, 10000, &readable) == NIPC_NP_OK &&
+            readable)
+            InterlockedExchange((volatile LONG *)&ctx->request_seen, 1);
         test_flag_set(&ctx->reading_started);
         (void)test_flag_wait(&ctx->release);
         nipc_np_close_session(&session);
@@ -735,7 +738,9 @@ static void test_client_send_bounded_by_deadline_and_abort(void)
         if (call_thread) {
             if (use_abort) {
                 check("server saw the request start",
-                      test_flag_wait(&sctx.reading_started));
+                      test_flag_wait(&sctx.reading_started) &&
+                          InterlockedCompareExchange(
+                              (volatile LONG *)&sctx.request_seen, 0, 0));
                 nipc_client_abort(&client);
             }
             WaitForSingleObject(call_thread, INFINITE);

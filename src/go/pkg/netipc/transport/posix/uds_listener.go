@@ -14,6 +14,7 @@ import (
 // Listener is a listening UDS endpoint.
 type Listener struct {
 	mu            sync.Mutex
+	stopMu        sync.Mutex
 	fd            int
 	config        ServerConfig
 	path          string
@@ -224,6 +225,11 @@ func (l *Listener) Close() {
 // keeping the endpoint lock until Close, so no other server takes the
 // endpoint while this one still serves its sessions. Idempotent.
 func (l *Listener) StopListening() {
+	// A concurrent caller waits for the unlink, so Close cannot release the
+	// endpoint while another Close is still removing the socket file.
+	l.stopMu.Lock()
+	defer l.stopMu.Unlock()
+
 	l.mu.Lock()
 	fd := l.fd
 	path := l.path

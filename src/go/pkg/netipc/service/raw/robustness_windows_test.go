@@ -589,7 +589,9 @@ func startWinStalledReader(t *testing.T, svc string, started, release chan struc
 			return
 		}
 		defer session.Close()
-		_, _ = session.WaitReadable(10_000)
+		if readable, err := session.WaitReadable(10_000); err != nil || !readable {
+			t.Errorf("no request bytes arrived: readable=%v err=%v", readable, err)
+		}
 		close(started)
 		select {
 		case <-release:

@@ -225,8 +225,6 @@ Correctness suites in C, Rust and Go are event-synchronized and run in seconds. 
 
 ## Regression Log
 
-None yet.
-
 ## Regression - 2026-11-07
 
 What broke:

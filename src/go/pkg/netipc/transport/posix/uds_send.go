@@ -48,7 +48,9 @@ func (s *Session) SendTimeout(hdr *protocol.Header, payload []byte, timeoutMs ui
 	}
 	s.progressBound = 0
 	if s.role == RoleClient && (inflight > 1 || s.sendBounded) {
-		s.progressBound = pendingBound(s.MaxResponsePayloadBytes, s.PacketSize, inflight)
+		// A bounded send of an untracked message can run with nothing in
+		// flight; it still gets one response's room.
+		s.progressBound = pendingBound(s.MaxResponsePayloadBytes, s.PacketSize, max(inflight, 1))
 	}
 
 	return framing.SessionSend(framing.SessionSendConfig{

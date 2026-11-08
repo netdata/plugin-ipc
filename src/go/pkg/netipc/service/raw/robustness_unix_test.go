@@ -718,7 +718,9 @@ func startStalledReader(t *testing.T, svc string, started, release chan struct{}
 		}
 		defer session.Close()
 		pfd := syspoll.PollFd{Fd: int32(session.Fd()), Events: syspoll.In} // #nosec G115 -- test fds are small.
-		_, _ = syspoll.Poll(&pfd, 10_000)
+		if n, err := syspoll.Poll(&pfd, 10_000); err != 0 || n == 0 {
+			t.Errorf("no request bytes arrived: n=%d err=%v", n, err)
+		}
 		close(started)
 		select {
 		case <-release:

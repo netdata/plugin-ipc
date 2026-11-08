@@ -46,7 +46,8 @@ plus C/Rust/Go interop on every Linux target Netdata ships: x86_64 musl, i386
 glibc and musl, armv7 glibc (legacy and time64 layouts) and musl, armv6 musl and
 aarch64 glibc and musl, using QEMU for ARM. The Go suites run on the glibc
 targets and on armv6 musl; the other musl targets skip them, because pure Go
-does not link libc and the matching glibc target covers the same architecture. Run one target
+does not link libc and the same architecture's glibc run covers them (for
+x86_64, the host job). Run one target
 locally with `bash tests/run-linux-target.sh <target>`; the script header lists
 targets and required toolchains.
 
