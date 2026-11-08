@@ -6,7 +6,7 @@ import (
 	"strconv"
 )
 
-// maxDurationSec matches the C drivers' one-year bound.
+// maxDurationSec matches the C POSIX driver's one-year bound.
 const maxDurationSec = 86400 * 365
 
 // parseDurationArg exits on a duration outside 1..maxDurationSec: a value

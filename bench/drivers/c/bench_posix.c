@@ -1422,7 +1422,7 @@ static int run_lookup_method_bench(int duration_sec,
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "Usage:\n"
+        "Usage (a server duration_sec of 0 runs without a stop timer):\n"
         "  %s uds-ping-pong-server   <run_dir> <service> [duration_sec]\n"
         "  %s uds-ping-pong-client   <run_dir> <service> <duration_sec> <target_rps>\n"
         "  %s shm-ping-pong-server   <run_dir> <service> [duration_sec]\n"

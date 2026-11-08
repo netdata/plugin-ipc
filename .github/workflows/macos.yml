@@ -74,6 +74,6 @@ jobs:
 
       # Lookup-scale interop is an extended suite: run it before vendoring
       # with `gh workflow run macos.yml --ref <branch>`.
-      - name: Extended stress (manual runs only)
+      - name: Lookup-scale interop (manual runs only)
         if: github.event_name == 'workflow_dispatch'
-        run: bash tests/run-extended-stress.sh
+        run: bash tests/test_lookup_scale_interop.sh

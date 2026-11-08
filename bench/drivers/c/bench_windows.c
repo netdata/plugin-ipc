@@ -292,9 +292,8 @@ static inline void latency_record(latency_recorder_t *lr, uint64_t ns)
         lr->samples[lr->count++] = ns;
 }
 
-/* A duration outside the range would wrap the nanosecond deadline
- * arithmetic; reject it up front. The cap keeps the
- * timer thread's DWORD millisecond wait from wrapping. */
+/* Reject a duration the driver cannot time. The cap keeps the timer
+ * thread's DWORD millisecond wait from wrapping. */
 static int parse_duration_from(const char *arg, long min)
 {
     char *end = NULL;
@@ -1608,7 +1607,7 @@ static int run_lookup_bench(int duration_sec)
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "Usage:\n"
+        "Usage (a server duration_sec of 0 runs without a stop timer):\n"
         "  %s np-ping-pong-server         <run_dir> <service> [duration_sec]\n"
         "  %s np-ping-pong-client         <run_dir> <service> <duration_sec> <target_rps>\n"
         "  %s shm-ping-pong-server        <run_dir> <service> [duration_sec]\n"

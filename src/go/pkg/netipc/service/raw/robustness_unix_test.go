@@ -718,8 +718,13 @@ func startStalledReader(t *testing.T, svc string, started, release chan struct{}
 		}
 		defer session.Close()
 		pfd := syspoll.PollFd{Fd: int32(session.Fd()), Events: syspoll.In} // #nosec G115 -- test fds are small.
-		if n, err := syspoll.Poll(&pfd, 10_000); err != 0 || n == 0 {
-			t.Errorf("no request bytes arrived: n=%d err=%v", n, err)
+		// The Go runtime's preemption signal can interrupt a raw poll.
+		n, errno := syspoll.Poll(&pfd, 10_000)
+		for errno == syscall.EINTR {
+			n, errno = syspoll.Poll(&pfd, 10_000)
+		}
+		if errno != 0 || n == 0 || pfd.Revents&syspoll.In == 0 {
+			t.Errorf("no request bytes arrived: n=%d revents=%#x errno=%v", n, pfd.Revents, errno)
 		}
 		close(started)
 		select {
