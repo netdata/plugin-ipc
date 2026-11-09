@@ -373,7 +373,10 @@ static void publish_endpoint_lock(const char *lock_path)
     if (restricted) {
         if (g_lock_publish_hook)
             g_lock_publish_hook(tmp, g_lock_publish_hook_user);
-        (void)link(tmp, lock_path);
+        /* A (void) cast does not silence warn_unused_result under
+         * _FORTIFY_SOURCE; a failed link() is handled by the caller. */
+        int linked = link(tmp, lock_path);
+        (void)linked;
     }
     unlink(tmp);
 }

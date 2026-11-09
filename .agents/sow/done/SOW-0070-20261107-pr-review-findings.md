@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: implemented and validated (2026-11-08), including the regression at the end of this file. SOW-0050 resumes with the re-vendoring and the Netdata PR replies.
+Sub-state: implemented and validated (2026-11-08), including the two regressions at the end of this file (2026-11-08 and 2026-11-09). SOW-0050 resumes with the re-vendoring and the Netdata PR replies.
 
 ## Requirements
 
@@ -381,3 +381,34 @@ Artifacts:
 - Specs: `level1-posix-uds.md` (lock creation, FreeBSD Go SHM architectures). Docs: `netipc-integrator-skill.md` (x86_64 coverage). `AGENTS.md`: macOS extended command. Project skills: `project-netdata-vendoring` unaffected. SOW records: SOW-0050, SOW-0053, SOW-0065.
 - A review of `3fb1bef` added six comments, all fixed here: the Go stalled-reader poll retries `EINTR` and requires `POLLIN`, the macOS manual step runs only lookup-scale interop, and three bench comments and usage lines were corrected. Its three CodeQL alerts (`cpp/path-injection` on the caller-supplied `run_dir`, `cpp/stack-address-escape` on two test hooks) are false positives of classes already triaged on this repository (alerts 7633, 7641).
 - Lesson: run the locally available static analyzers before pushing, and wait for CI and the automated reviewer before posting replies that describe the pushed code.
+
+## Regression - 2026-11-09
+
+What broke:
+
+- The SOW-0050 re-vendoring of `278125c` into Netdata built with a new warning in NetIPC code: `netipc_uds_lifecycle.c:376`, `ignoring return value of 'link' declared with attribute 'warn_unused_result'` (`-Wunused-result`). `publish_endpoint_lock` (decision 12) discarded the result with a `(void)` cast, which GCC does not accept for this attribute. The earlier vendoring built with no warning in NetIPC sources.
+
+Evidence:
+
+- Netdata compiles NetIPC with `-O2 -D_FORTIFY_SOURCE=3` (from `compile_commands.json` in the Netdata worktree build); glibc marks `link()` `warn_unused_result` only under `_FORTIFY_SOURCE`.
+- A plugin-ipc Release build with `-O2 -D_FORTIFY_SOURCE=3 -Wall -Wextra` reproduces it and shows one more library warning: `-Wmisleading-indentation` at `netipc_uds_receive.c:363` and `:383`, from four tab-indented lines in a file indented with spaces (formatting only; the guarded statements are correct).
+
+Why validation missed it:
+
+- plugin-ipc builds and CI configure without `_FORTIFY_SOURCE` (the local build is `Debug`), so the attribute is not active there; the fortified build happens only downstream.
+
+Repair:
+
+- `netipc_uds_lifecycle.c`: keep the `link()` result in a local and discard it, with a comment on why. Rust and Go have no equivalent warning.
+- `netipc_uds_receive.c`: the four tab indents replaced with spaces.
+
+Validation:
+
+- Fortified Release build: no warning in library sources. Linux CTest 32/32. FreeBSD 14.3 and 15.1: C build and CTest 31/31 (Rust and Go unchanged).
+- Performance: no benchmark run. Lock creation runs once per listen; the receive change is whitespace only.
+
+Artifacts:
+
+- Project skill `project-netdata-vendoring`: step 10 now requires no warning in vendored NetIPC sources and gives the fortified build command to run before pushing. Specs, docs and `AGENTS.md`: unaffected (no behavior change). SOW-0050 records the re-vendoring.
+- Lesson: before vendoring, build the C library with Netdata's optimisation and fortify flags, since plugin-ipc's own builds do not enable `_FORTIFY_SOURCE`.
+

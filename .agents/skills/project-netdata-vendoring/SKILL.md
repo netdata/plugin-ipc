@@ -245,7 +245,16 @@ Load this skill for any task involving:
    - every vendored `.c` file is in Netdata's build lists
      (`src/libnetdata/SourceLists.cmake`), and every system library the new
      code calls is linked to the `netipc` target in
-     `src/libnetdata/CMakeLists.txt` (the script does not edit either file).
+     `src/libnetdata/CMakeLists.txt` (the script does not edit either file);
+   - the Netdata build reports no warning in vendored NetIPC sources. Netdata
+     compiles them with `-O2 -D_FORTIFY_SOURCE=3`, which plugin-ipc's own
+     builds do not enable, so check this before pushing the source commit:
+
+     ```bash
+     cmake -S . -B .tmp/fortify-build -DCMAKE_BUILD_TYPE=Release \
+       -DCMAKE_C_FLAGS="-O2 -D_FORTIFY_SOURCE=3 -Wall -Wextra"
+     cmake --build .tmp/fortify-build 2>&1 | grep 'src/libnetdata.*warning:'
+     ```
 
    Netdata builds `netipc` on Linux and Windows only; the Windows build is
    proven by the Netdata PR's "Build Windows" check, so the SOW stays open
