@@ -234,6 +234,17 @@ Load this skill for any task involving:
    bash ./diff-netdata-vendor.sh /path/to/netdata
    ```
 
+   `vendor-to-netdata.sh` prints the Go import-path rewrite but does not run
+   it, and `diff-netdata-vendor.sh` normalizes import paths, so it reports no
+   difference either way. Apply the rewrite in the Netdata checkout (no `.bak`
+   files), then confirm no upstream path is left:
+
+   ```bash
+   grep -rlZ 'github.com/netdata/plugin-ipc/go' src/go/pkg/netipc --include='*.go' |
+     xargs -0 -r sed -i 's|github.com/netdata/plugin-ipc/go|github.com/netdata/netdata/go/plugins|g'
+   grep -rl 'github.com/netdata/plugin-ipc/go' src/go/pkg/netipc   # expect no output
+   ```
+
 10. Validate in the Netdata checkout.
 
    Run the targeted Netdata build/tests required by the active SOW. At minimum,

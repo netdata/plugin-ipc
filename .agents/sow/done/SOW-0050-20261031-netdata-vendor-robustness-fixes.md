@@ -2,9 +2,9 @@
 
 ## Status
 
-Status: paused
+Status: completed
 
-Sub-state: paused 2026-11-07 for SOW-0070 (PR review findings); Netdata consumer fixes done locally in the worktree; re-vendor after SOW-0070.
+Sub-state: delivered 2026-11-09. netdata/netdata#24633 vendors plugin-ipc `d3c94a5` with the consumer fixes; its CI passes except the triaged SonarCloud gate. Merging is the user's and the maintainers' decision.
 
 ## Requirements
 
@@ -108,7 +108,7 @@ Open-source reference evidence:
 Open decisions:
 
 - Push and PR approval: resolved (2026-11-06, user; netdata/plugin-ipc#18 and netdata/netdata#24633 are open).
-- Remaining close condition: Netdata PR CI passes on the re-vendored commit.
+- Remaining close condition: Netdata PR CI passes on the re-vendored commit. Met 2026-11-09 (Validation).
 
 ## Implications And Decisions
 
@@ -155,6 +155,9 @@ Ordering (2026-10-31, user): the full POSIX and Windows benchmark run happens af
 
 - Code-scanning alerts on `278125c` (2026-11-09, user, "1b": dismiss all four, no code change), all in `netipc_uds_lifecycle.c`: 7769 `cpp/path-injection` (line 404, the endpoint lock path from the caller's `run_dir`, the same finding as the dismissed 7761 and 7767) dismissed as a false positive; 7770 and 7771 `cpp/stack-address-escape` (lines 348 and 338, the test-only hook setters; the tests in `tests/fixtures/c/test_uds.c` reset each hook to NULL before returning) dismissed as used in tests; 7768 Semgrep `c_race_rule-chmod` (line 376, from a scan before `3fb1bef` removed the `chmod`) dismissed as stale. Open code-scanning alerts after the dismissals: 0.
 - Codacy Coverage upload on `278125c`: the same "No Write permission on Project" refusal as decision 5. The repository secret `CODACY_API_TOKEN` was last updated on 2026-06-03, and the reporter version is 14.1.3 in both the last passing run (main, 2026-09-27) and the failing runs (since 2026-11-04). Cause (user, 2026-11-09): Codacy revoked every token without an expiration date and now requires tokens to expire within one year; the revoked token produces this refusal. The repair is a new token with an expiration date, stored in the repository secret by an account with Codacy access. Decision 5 still applies to this vendoring.
+- Re-vendoring (2026-11-09) into the worktree `~/src/PRs/netipc-vendor-20261106`. Downstream: no commit on `netdata/netdata` master touched the vendored trees or the NetIPC build lists since `3483002881`. Vendoring `278125c` built with a new NetIPC warning (`link()` unused result under `_FORTIFY_SOURCE`), fixed in plugin-ipc `d3c94a5` (SOW-0070 regression 2026-11-09); `d3c94a5` vendored, Go import paths rewritten by hand (the script only prints the command), `diff-netdata-vendor.sh` reports no C, Rust or Go differences, and no vendored `.c` file is missing from the build lists.
+- Netdata validation on `d3c94a5` (Linux): full build with no warning in NetIPC sources; `apps-lookup-protocol-test`, `apps-lookup-netipc-lock-test`, `apps-cgroups-lookup-client-abort-test`, `cgroup-lookup-netipc-test`, `network-viewer-apps-lookup-client-test` pass; `go test ./pkg/netipc/...` and `go vet` pass; `cargo test -p netipc` 413 passed; `cargo fmt --check` and `cargo doc` (0 warnings) clean. `GOOS=windows go vet` reports `possible misuse of unsafe.Pointer` on the `MapViewOfFile` address conversions in `transport/windows/shm.go`; the same conversions exist in `63919ec`, and CI vets Linux only.
+- Found during this validation: the three lookup tests left their `mkdtemp` run directory behind, because the endpoint lock file (kept on disk by design) made `rmdir` fail. They now remove `{run_dir}/{service}.lock` first, and a rerun leaves no directory. Netdata commit `d2343836cc` (local) holds the re-vendor, the consumer fixes (items above) and this test cleanup.
 
 ## Plan
 
@@ -220,11 +223,13 @@ Acceptance criteria evidence:
 - Post-vendor normalized diff: no C, Rust or Go differences; Netdata-only wrappers, workspace manifest and Go module path preserved.
 - Netdata builds and its NetIPC consumers pass on Linux; the Windows build passes in the Netdata PR CI (2026-11-06 log).
 - PRs opened only at the user's request (decision 4A).
+- Re-vendoring (2026-11-09): candidate `d3c94a5`. Preflight: plugin-ipc#18 checks on `d3c94a5` pass except "C, Rust, and Go Coverage" (Codacy upload, decision 5; the token was revoked by Codacy) and GitHub's managed "Code Quality: PR #18" job, which failed on an HTTP 504 downloading the CodeQL bundle and cannot be retried (it passed on every earlier commit; CodeQL itself passed after a rerun of the same 504). Code scanning, Dependabot and secret scanning: 0, 0, 0 open. Downstream drift: none since `3483002881`. Performance: `3fb1bef`, `278125c` and `d3c94a5` change no established-session per-request path (lock creation runs once per listen, the zero in-flight bound applies only with nothing in flight, the receive change is whitespace); the benchmark evidence of 2026-11-06 stands. Extended suites: the 2026-11-05 runs stand; the later changes touch lock creation, a send bound with nothing in flight, `StopListening` and the Go stalled-reader poll, which the stress suites run without change in coverage, and no codec or decoder.
 
 Tests or equivalent validation:
 
 - Netdata worktree on Linux: full build without NetIPC warnings; `apps-lookup-protocol-test`, `apps-lookup-netipc-lock-test`, `apps-cgroups-lookup-client-abort-test`, `cgroup-lookup-netipc-test`; `go test ./pkg/netipc/...`, `go vet`; `cargo test -p netipc` 401; `cargo fmt --check`, `cargo doc` 0 warnings.
 - Netdata PR CI: 124 checks pass, Windows build and installer included.
+- Re-vendored `d3c94a5` (Netdata `d2343836cc`): Linux build without NetIPC warnings under Netdata's `-O2 -D_FORTIFY_SOURCE=3`; the five lookup tests pass and leave no temporary directory; `go test`, `go vet`, `cargo test -p netipc` 413, `cargo fmt --check`, `cargo doc` 0 warnings. Netdata PR CI on `d2343836cc`: 124 pass, 20 skipped, 1 failure (SonarCloud, below); "Build Windows" passes. Eight jobs first failed on HTTP 504 downloads from GitHub (eBPF release artifacts, the golangci-lint action) and passed when rerun.
 - Source suites per SOW (SOW-0031 to SOW-0067) on Linux, FreeBSD 14.3 and 15.1, macOS and Windows.
 
 Real-use evidence:
@@ -234,10 +239,14 @@ Real-use evidence:
 Reviewer findings:
 
 - SonarCloud and CodeQL findings on the PRs are triaged above, with evidence; no code change was needed.
+- SonarCloud on `d2343836cc`: the gate fails on the same two conditions as on `42313ad410`: the c:S3519 false positive (`netipc_named_pipe.c:1921` now; the copy is preceded by the `assembled + chunk_data > payload_len` check) and duplication 3.2% against 3%. The other open issues are code smells outside the gate.
+- PR review replies: 46 on plugin-ipc#18 and 50 on netdata#24633, posted and resolved; 0 unresolved threads on either PR. CodeQL alerts 7768 to 7771 dismissed (user, "1b").
+- `GOOS=windows go vet` flags `possible misuse of unsafe.Pointer` on the `MapViewOfFile` address conversions in `transport/windows/shm.go`. Rejected with evidence: the address is a mapped view outside the Go heap, so the garbage collector never moves or frees it; the same conversions exist in `63919ec`.
 
 Same-failure scan:
 
 - Vendored `.c` files against Netdata's build lists: `netipc_win_security.c` was the only one missing. System libraries called by new code: only `advapi32` (security descriptors), now linked.
+- Re-vendoring: no vendored `.c` file missing from the lists; fortified library build: no other warning in library sources; every Netdata test that creates a NetIPC run directory (the three lookup tests) now removes the lock file.
 
 Sensitive data gate:
 
@@ -246,11 +255,11 @@ Sensitive data gate:
 Artifact maintenance gate:
 
 - AGENTS.md: no update; no workflow change.
-- Runtime project skills: `project-netdata-vendoring` step 10 now requires checking Netdata's build lists and link libraries, and records that the Windows build is proven by the Netdata PR CI (lesson below).
+- Runtime project skills: `project-netdata-vendoring` step 10 now requires checking Netdata's build lists and link libraries, and records that the Windows build is proven by the Netdata PR CI (lesson below). Step 9 now gives the Go import-path rewrite to run by hand; step 10 the fortified-build warning check (SOW-0070 regression 2026-11-09).
 - Specs: no update; vendoring changes no protocol or API.
 - End-user/operator docs: no update; the vendor scripts and their usage did not change.
 - End-user/operator skills: `docs/netipc-integrator-skill.md` unaffected; no API or workflow change in this SOW.
-- SOW lifecycle: follow-ups tracked as SOW-0068 and SOW-0069. Correction (2026-11-08, SOW-0070): this SOW is `paused` in `current/`; it moves to `done/` after the re-vendoring and the Netdata PR CI.
+- SOW lifecycle: follow-ups tracked as SOW-0068 and SOW-0069. Correction (2026-11-08, SOW-0070): this SOW is `paused` in `current/`; it moves to `done/` after the re-vendoring and the Netdata PR CI. Done 2026-11-09: `completed`, moved to `done/`.
 
 Performance assessment:
 
@@ -258,18 +267,20 @@ Performance assessment:
 
 ## Outcome
 
-Netdata PR netdata/netdata#24633 vendors plugin-ipc `4261919` with the Windows build-list and `advapi32` link changes; its CI passes except the SonarCloud gate, whose findings are triaged as false positives on the PR. Source PR netdata/plugin-ipc#18 carries the SOWs since the previous vendoring. Merging both is the user's and the maintainers' decision.
+Netdata PR netdata/netdata#24633 vendors plugin-ipc `d3c94a5` (first `4261919`, re-vendored after SOW-0070) with the consumer fixes for `OVERSIZED_ITEM` and `PAYLOAD_EXCEEDED`, the lookup-test cleanup, and the Windows build-list and `advapi32` link changes; its CI passes except the SonarCloud gate, whose findings are triaged as false positives on the PR. Source PR netdata/plugin-ipc#18 carries the SOWs since the previous vendoring. Merging both is the user's and the maintainers' decision.
 
 ## Lessons Extracted
 
 - `vendor-to-netdata.sh` copies sources but not build integration: a new `.c` file and the system libraries it calls must be added to Netdata's CMake by hand, and only the Netdata Windows CI proves the Windows side. Recorded in the vendoring skill.
+- The vendor script leaves the Go import rewrite to the operator, and Netdata compiles with fortify flags plugin-ipc does not use; both now sit in the vendoring skill.
+- NetIPC keeps the endpoint lock file on disk by design, so every consumer test that removes its run directory must remove the lock file first.
 - Two sequential five-hour benchmark runs cannot resolve differences under about 20% on these hosts; row-interleaved runs with CPU pinning can. Host-wide drift since June is tracked by SOW-0069.
 
 ## Followup
 
 - SOW-0068 (pending): restore Go coverage to its 90% threshold.
 - SOW-0069 (pending): benchmark host drift and floor re-baseline.
-- Codacy coverage upload permission: user action, accepted in decision 5; not code.
+- Codacy coverage upload: Codacy revoked every token without an expiry date. User action, accepted in decision 5: create a token that expires within one year and store it in `CODACY_API_TOKEN`. Not code.
 
 ## Regression Log
 
