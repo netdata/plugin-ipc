@@ -4723,12 +4723,13 @@ static void test_listen_bind_dir(void)
     rmdir(sub);
     rmdir(dir);
 
-    /* The umask still narrows the mode, as with fchmod() on Linux. */
+    /* macOS sets the socket to exactly 0600, so a umask without owner
+     * write cannot leave an endpoint its own user cannot reach. */
     mode_t old_mask = umask(0277);
     bool ok = listen_and_close(svc, &err, &mode);
     umask(old_mask);
     check("listen under umask 0277", ok);
-    check("socket mode narrowed by the umask", mode == 0400);
+    check("socket mode 0600 under umask 0277", mode == 0600);
     cleanup_socket(svc);
 
     /* A umask without owner read must not stop the bind directory from
@@ -4737,7 +4738,7 @@ static void test_listen_bind_dir(void)
     ok = listen_and_close(svc, &err, &mode);
     umask(old_mask);
     check("listen under umask 0477", ok);
-    check("socket mode narrowed by umask 0477", mode == 0200);
+    check("socket mode 0600 under umask 0477", mode == 0600);
     cleanup_socket(svc);
 }
 #endif

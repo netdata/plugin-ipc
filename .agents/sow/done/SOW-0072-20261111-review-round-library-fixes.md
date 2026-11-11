@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: implemented and validated (2026-11-11). The re-vendoring into netdata/netdata#24633 and the thread replies follow the push, recorded in SOW-0050 as for the previous re-vendorings.
+Sub-state: regression 2026-11-11 (macOS C test, see the end of this file) repaired. Implemented and validated (2026-11-11). The re-vendoring into netdata/netdata#24633 and the thread replies follow the push, recorded in SOW-0050 as for the previous re-vendorings.
 
 ## Requirements
 
@@ -255,3 +255,27 @@ All confirmed findings from both PRs are fixed in C, Rust and Go on POSIX and Wi
 None yet.
 
 Append regression entries here only after this SOW was completed or closed and later testing or use found broken behavior. Use a dated `## Regression - YYYY-MM-DD` heading at the end of the file. Never prepend regression content above the original SOW narrative.
+
+## Regression - 2026-11-11
+
+What broke:
+
+- macOS CI on `04f71b1` (`macos.yml` run 43122445371): CTest `test_uds` failed 2 checks, "socket mode narrowed by the umask" and "socket mode narrowed by umask 0477". The macOS-only block of `test_listen_socket_mode_macos` in `tests/fixtures/c/test_uds.c` still expected the umask to narrow the socket (`0400`, `0200`), the rule decision 7 replaced with exactly `0600`. The job stops at CTest, so its Rust, Go and interop steps were skipped.
+
+Why validation missed it:
+
+- The block is under `#ifdef __APPLE__`, so the Linux and FreeBSD builds never compiled it, and the same-failure search for #3 looked at the code paths, not at macOS-only test expectations. Rust and Go already expected `0600` on macOS.
+
+Repair:
+
+- The two checks expect `0600` under umasks `0277` and `0477`, and the comment states the rule.
+
+Validation:
+
+- macOS CI on the repair commit (CTest, Rust, Go, interop); its result is recorded with the re-vendoring in SOW-0050. Linux and FreeBSD do not compile the changed block, and `GOOS=darwin go vet` on the transport package is clean.
+
+Artifact updates:
+
+- None beyond this test: the spec and the Rust and Go tests already state `0600`.
+- Lesson: a rule change on one platform includes a search of that platform's conditional test code (`#ifdef __APPLE__`, `cfg(target_os = "macos")`, `_darwin` files), which the local builds do not compile.
+
