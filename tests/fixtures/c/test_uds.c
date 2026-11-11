@@ -150,6 +150,7 @@ typedef enum {
     RAW_RESP_BATCH_COUNT_EXCEEDED,
     RAW_RESP_BAD_CONTINUATION_HEADER,
     RAW_RESP_MISSING_CONTINUATION,
+    RAW_RESP_EXTRA_CONTINUATION,
     RAW_RESP_TRAILING_PACKET,
 } raw_response_mode_t;
 
@@ -249,6 +250,53 @@ static void send_bad_or_missing_continuation_response(int fd,
         };
         nipc_chunk_header_encode(&chk, chunk_buf, sizeof(chunk_buf));
         send(fd, chunk_buf, sizeof(chunk_buf), MSG_NOSIGNAL);
+    }
+}
+
+/* The continuations are half the budget, so the message needs one more
+ * chunk than the count it declares. */
+static void send_extra_continuation_response(int fd, uint32_t packet_size,
+                                             const nipc_header_t *request)
+{
+    uint8_t payload_buf[160];
+    memset(payload_buf, 0xBD, sizeof(payload_buf));
+    size_t budget = (size_t)packet_size - NIPC_HEADER_LEN;
+    size_t first_payload = budget < sizeof(payload_buf) ? budget : sizeof(payload_buf);
+    size_t rest = sizeof(payload_buf) - first_payload;
+    uint32_t declared = (uint32_t)(1 + (rest + budget - 1) / budget);
+
+    uint8_t pkt[NIPC_HEADER_LEN + sizeof(payload_buf)];
+    nipc_header_t resp = {
+        .magic = NIPC_MAGIC_MSG,
+        .version = NIPC_VERSION,
+        .header_len = NIPC_HEADER_LEN,
+        .kind = NIPC_KIND_RESPONSE,
+        .code = request->code,
+        .message_id = request->message_id,
+        .item_count = 1,
+        .transport_status = NIPC_STATUS_OK,
+        .payload_len = sizeof(payload_buf),
+    };
+    nipc_header_encode(&resp, pkt, NIPC_HEADER_LEN);
+    memcpy(pkt + NIPC_HEADER_LEN, payload_buf, first_payload);
+    send(fd, pkt, NIPC_HEADER_LEN + first_payload, MSG_NOSIGNAL);
+
+    size_t half = rest / 2;
+    for (uint32_t ci = 1; ci <= 2; ci++) {
+        size_t len = ci == 1 ? half : rest - half;
+        nipc_chunk_header_t chk = {
+            .magic = NIPC_MAGIC_CHUNK,
+            .version = NIPC_VERSION,
+            .flags = 0,
+            .message_id = request->message_id,
+            .total_message_len = (uint32_t)(NIPC_HEADER_LEN + sizeof(payload_buf)),
+            .chunk_index = ci,
+            .chunk_count = declared,
+            .chunk_payload_len = (uint32_t)len,
+        };
+        nipc_chunk_header_encode(&chk, pkt, NIPC_HEADER_LEN);
+        memcpy(pkt + NIPC_HEADER_LEN, payload_buf, len);
+        send(fd, pkt, NIPC_HEADER_LEN + len, MSG_NOSIGNAL);
     }
 }
 
@@ -661,6 +709,10 @@ static void *raw_response_server_thread(void *arg)
                 pkt[NIPC_HEADER_LEN + 1] = 0xEF;
                 nipc_header_encode(&resp, pkt, NIPC_HEADER_LEN);
                 send(session.fd, pkt, sizeof(pkt), MSG_NOSIGNAL);
+                break;
+            }
+            case RAW_RESP_EXTRA_CONTINUATION: {
+                send_extra_continuation_response(session.fd, session.packet_size, &hdr);
                 break;
             }
             case RAW_RESP_BAD_CONTINUATION_HEADER:
@@ -2661,6 +2713,10 @@ static void test_stream_failed_receive_drops_pending(void)
         check("over-limit response rejected",
               nipc_uds_receive(&session, rbuf, sizeof(rbuf), &rhdr, &rp,
                                &rlen) == NIPC_UDS_ERR_LIMIT_EXCEEDED);
+        /* No response can arrive any more, so the request in flight has
+         * failed. */
+        check("in-flight requests failed with the receive side",
+              session.inflight_count == 0);
         check("later receive fails",
               nipc_uds_receive(&session, rbuf, sizeof(rbuf), &rhdr, &rp,
                                &rlen) != NIPC_UDS_OK);
@@ -3265,6 +3321,19 @@ static void probe_lock_publish(const char *tmp_path, void *user)
     probe->lock_visible = lstat(probe->lock_path, &st) == 0;
 }
 
+/* connect() needs write permission on the socket file. macOS sets the socket
+ * to exactly 0600; Linux and FreeBSD keep the umask narrowing and refuse to
+ * listen when it removes owner write. */
+static bool socket_unreachable_under_umask(mode_t mask)
+{
+#ifdef __APPLE__
+    (void)mask;
+    return false;
+#else
+    return (mask & S_IWUSR) != 0;
+#endif
+}
+
 /* Under umask, the endpoint lock is created, contended and reclaimed. */
 static void check_lock_under_umask(const char *svc, mode_t mask)
 {
@@ -3291,9 +3360,18 @@ static void check_lock_under_umask(const char *svc, mode_t mask)
     umask(old_mask);
     printf("  umask %04o: listen=%d second=%d restart=%d lock mode=%04o\n",
            (unsigned)mask, err, busy, again, (unsigned)lock_file_mode(svc));
-    check("listen creates the lock", err == NIPC_UDS_OK);
-    check("a second server gets ADDR_IN_USE", busy == NIPC_UDS_ERR_ADDR_IN_USE);
-    check("the endpoint restarts", again == NIPC_UDS_OK);
+    if (socket_unreachable_under_umask(mask)) {
+        /* The socket would lack owner write, so the listen fails after it
+         * took the lock; the lock is still created 0600 and released. */
+        check("listen fails on the socket mode", err == NIPC_UDS_ERR_SOCKET);
+        check("the endpoint starts under a usable umask",
+              nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &second) == NIPC_UDS_OK);
+        nipc_uds_close_listener(&second);
+    } else {
+        check("listen creates the lock", err == NIPC_UDS_OK);
+        check("a second server gets ADDR_IN_USE", busy == NIPC_UDS_ERR_ADDR_IN_USE);
+        check("the endpoint restarts", again == NIPC_UDS_OK);
+    }
     check("the lock file is 0600", lock_file_mode(svc) == 0600);
     struct stat st;
     check("the lock is 0600 before it gets its name",
@@ -3322,6 +3400,67 @@ static void check_lock_leftover_mode(const char *svc, mode_t mode)
         nipc_uds_close_listener(&listener);
     check("the lock file is 0600 again", lock_file_mode(svc) == 0600);
     cleanup_socket(svc);
+}
+
+/* Under umask, the socket either reaches its own user or the listen fails;
+ * it never exists without owner write. */
+static void check_socket_under_umask(const char *svc, mode_t mask)
+{
+    cleanup_socket(svc);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/%s.sock", TEST_RUN_DIR, svc);
+    const char *path = addr.sun_path;
+    nipc_uds_server_config_t scfg = default_server_config();
+    nipc_uds_listener_t listener;
+    mode_t old_mask = umask(mask);
+    nipc_uds_error_t err = nipc_uds_listen(TEST_RUN_DIR, svc, &scfg, &listener);
+    int listen_errno = errno;
+    umask(old_mask);
+    struct stat st;
+    int have_socket = lstat(path, &st) == 0;
+    printf("  umask %04o: listen=%d errno=%d socket mode=%04o\n", (unsigned)mask,
+           err, err == NIPC_UDS_OK ? 0 : listen_errno,
+           have_socket ? (unsigned)(st.st_mode & 0777) : 0u);
+    if (socket_unreachable_under_umask(mask)) {
+        check("listen fails with EACCES",
+              err == NIPC_UDS_ERR_SOCKET && listen_errno == EACCES);
+        check("no unreachable socket is left", !have_socket);
+        if (err == NIPC_UDS_OK)
+            nipc_uds_close_listener(&listener);
+        cleanup_socket(svc);
+        return;
+    }
+    check("listen succeeds", err == NIPC_UDS_OK);
+    check("the socket has owner write and no group or other bits",
+          have_socket && (st.st_mode & S_IWUSR) && (st.st_mode & 077) == 0);
+#ifdef __APPLE__
+    check("the macOS socket is exactly 0600",
+          have_socket && (st.st_mode & 0777) == 0600);
+#endif
+    if (err == NIPC_UDS_OK) {
+#if TEST_UDS_STREAM
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+#else
+        int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+#endif
+        check("its own user can connect",
+              fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+        if (fd >= 0)
+            close(fd);
+        nipc_uds_close_listener(&listener);
+    }
+    cleanup_socket(svc);
+}
+
+static void test_listen_socket_restrictive_umask(void)
+{
+    printf("Test: listener socket under a umask without owner read or write\n");
+    check_socket_under_umask("test_sock_umask", 0077);
+    check_socket_under_umask("test_sock_umask", 0477);
+    check_socket_under_umask("test_sock_umask", 0277);
+    check_socket_under_umask("test_sock_umask", 0777);
 }
 
 static void test_listen_lock_restrictive_umask(void)
@@ -4222,6 +4361,67 @@ static void test_receive_missing_continuation(void)
     cleanup_socket(svc);
 }
 
+static void test_receive_extra_continuation(void)
+{
+    printf("Test: Receive rejects more continuations than declared\n");
+    const char *svc = "test_extra_chunk";
+    cleanup_socket(svc);
+
+    nipc_uds_server_config_t scfg = default_server_config();
+    scfg.packet_size = 128;
+    scfg.max_response_payload_bytes = 4096;
+
+    raw_response_server_ctx_t sctx = {
+        .service = svc,
+        .config = scfg,
+        .mode = RAW_RESP_EXTRA_CONTINUATION,
+        .ready = 0,
+        .done = 0,
+    };
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, raw_response_server_thread, &sctx);
+
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
+    check("raw-response server ready",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_uds_client_config_t ccfg = default_client_config();
+    ccfg.packet_size = 128;
+    ccfg.max_response_payload_bytes = 4096;
+
+    nipc_uds_session_t session;
+    nipc_uds_error_t err = nipc_uds_connect(TEST_RUN_DIR, svc, &ccfg, &session);
+    check("connect", err == NIPC_UDS_OK);
+
+    if (err == NIPC_UDS_OK) {
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = 7016,
+        };
+        uint8_t payload[] = { 0xAF };
+        nipc_uds_error_t serr = nipc_uds_send(&session, &hdr, payload, sizeof(payload));
+        check("send request ok", serr == NIPC_UDS_OK);
+
+        if (serr == NIPC_UDS_OK) {
+            uint8_t buf[128];
+            nipc_header_t resp_hdr;
+            const void *resp_payload;
+            size_t resp_payload_len;
+            nipc_uds_error_t rerr = nipc_uds_receive(&session, buf, sizeof(buf),
+                                                     &resp_hdr, &resp_payload, &resp_payload_len);
+            check("extra continuation rejected", rerr == NIPC_UDS_ERR_CHUNK);
+        }
+
+        nipc_uds_close_session(&session);
+    }
+
+    pthread_join(tid, NULL);
+    cleanup_socket(svc);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Coverage: close_session(NULL)                                       */
 /* ------------------------------------------------------------------ */
@@ -4624,6 +4824,7 @@ int main(void)
     test_listen_excludes_starting_server(); printf("\n");
     test_listen_close_releases_lock_held_by_child(); printf("\n");
     test_listen_lock_restrictive_umask(); printf("\n");
+    test_listen_socket_restrictive_umask(); printf("\n");
     test_listen_connect_bad_params(); printf("\n");
     test_listen_bind_failure();    printf("\n");
     test_batch_corrupt_dir();      printf("\n");
@@ -4638,6 +4839,7 @@ int main(void)
     test_receive_item_count_exceeds_limit(); printf("\n");
     test_receive_bad_continuation_header(); printf("\n");
     test_receive_missing_continuation(); printf("\n");
+    test_receive_extra_continuation(); printf("\n");
     test_close_session_null();     printf("\n");
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);

@@ -303,7 +303,11 @@ it probes the session pipe; if the server already broke it (refused at
 worker capacity, or died), the client stops retrying, reports the connect
 as failed, and keeps SHM enabled for its next connect: the session failed,
 not the attach. A call deadline or an abort that ends the wait also keeps
-SHM enabled. When the attach itself fails, or its own timeout ends the
+SHM enabled, except that the second call deadline in a row that ends the
+wait with the pipe still connected counts as an attach failure
+(`level2-typed-api.md`). Only a mapping or event that cannot be opened yet,
+or a header without its magic yet, is retried; every other error fails the
+attach at once. When the attach itself fails, or its own timeout ends the
 wait, with the pipe still connected, the client closes the session,
 removes SHM from its later proposals, and reconnects over the Named Pipe
 baseline (see `level1-windows-np.md`).

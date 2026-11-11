@@ -42,6 +42,12 @@ identical pipe names from the same inputs.
 Named Pipe is profile bit 0 (`0x01`), named `NAMED_PIPE`.
 This is the Windows baseline profile.
 
+A Windows endpoint offers and accepts only the profiles it implements: the
+baseline, `SHM_HYBRID` (`0x02`) and `SHM_BUSYWAIT` (`0x04`, see
+`level1-windows-shm.md`). Configured bits outside that set, `0x08` included,
+are dropped before the handshake, so a peer can never select a profile
+Windows has no implementation for.
+
 ## Access policy
 
 NetIPC services are local, and server and clients run as the same account
@@ -285,7 +291,7 @@ Where:
   prevent unauthorized access to the shared region)
 - `service` = `service_name` (same character rules as the pipe name:
   alphanumeric, dash, underscore, dot only; reject otherwise)
-- `profile` = the selected profile number (1, 2, 4, or 8)
+- `profile` = the selected SHM profile number (2 or 4)
 - `session_id` = the server-assigned session identifier from HELLO_ACK
 
 The Named Pipe connection remains open for the session lifetime. The

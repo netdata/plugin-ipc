@@ -21,7 +21,7 @@ The user asked whether NetIPC is enabled in Netdata on all platforms and archite
 Facts:
 
 - Netdata builds the netipc library on Linux and Windows only, and every consumer is Linux-only (evidence in the spec).
-- An apps lookup link on FreeBSD, macOS or Windows would display nothing: network-viewer uses only cgroup fields, and lookups need a start time that the protocol defines only on Linux.
+- An apps lookup link on FreeBSD, macOS or Windows would display nothing: network-viewer uses only cgroup fields, and lookups need a process start time: the `starttime` field exists on every platform, but only Linux has a usable nonzero value for it.
 
 Inferences:
 

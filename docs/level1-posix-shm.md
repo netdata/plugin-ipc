@@ -312,12 +312,16 @@ place.
    violation is a bad-size error.
 7. The client is now ready to publish requests and consume responses.
 
-If the file does not exist or is undersized (server has not yet
-finished creating it), the client treats this as a retryable
-protocol-not-ready condition. Between retries the client probes the
+If the file does not exist, cannot be opened yet, is undersized, or has no
+magic yet (server has not yet finished creating it), the client treats
+this as a retryable protocol-not-ready condition; every other error fails
+the attach at once. Between retries the client probes the
 session socket (see "Peer liveness"); if the server already closed it
 (refused at worker capacity, or died), the client stops retrying, reports
-the connect as failed, and keeps SHM enabled for its next connect.
+the connect as failed, and keeps SHM enabled for its next connect. When the
+call deadline ends the wait, SHM also stays enabled, except that the second
+such wait in a row with the session still connected fails the attach
+(`level2-typed-api.md`).
 
 ### Peer liveness
 

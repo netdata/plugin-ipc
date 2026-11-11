@@ -26,6 +26,7 @@ Facts:
 - Per package on `292c6dc` (Linux): `protocol` 88.3%, `transport/posix` 84.9%, `service/raw` 90.3%; `service/internal/transportconfig`, `service/apps_lookup`, `service/cgroups_lookup` and `service/cgroups_snapshot` 100%.
 - The last recorded pass is 90.0% in SOW-0004 (`.agents/sow/done/SOW-0004-20260525-cgroups-apps-lookup-methods.md:2079`).
 - No GitHub workflow runs this threshold; Codacy Coverage uploads the Go profile without a gate (`tests/generate-codacy-coverage.sh`).
+- C has the same gap (found during SOW-0072 validation, 2026-11-11): `tests/run-coverage-c.sh` (90% per file, `tests/run-coverage-c.sh:44`) fails on `netipc_uds.c` 84.8% and `netipc_shm.c` 89.8%, identical on `dce436c` (from a `git archive` export) and with the SOW-0072 changes; the total is 91.1%. No workflow runs this gate either. Go on `dce436c`: 88.0%. Whether this SOW also covers C is confirmed with the user at activation.
 
 Inferences:
 

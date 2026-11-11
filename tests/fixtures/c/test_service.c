@@ -6331,6 +6331,62 @@ out:
     return NULL;
 }
 
+typedef struct {
+    const char *service;
+    int sessions;
+    int ready;
+    int done;
+    int accepted;
+    uint32_t selected[4];
+} fake_shm_sessions_ctx_t;
+
+/* Negotiates SHM without ever creating a region, for ctx->sessions sessions
+ * one after the other; each is served until the client closes it. */
+static void *fake_shm_sessions_server_thread_fn(void *arg)
+{
+    fake_shm_sessions_ctx_t *ctx = (fake_shm_sessions_ctx_t *)arg;
+    nipc_uds_listener_t listener;
+    nipc_uds_server_config_t scfg = {
+        .supported_profiles = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
+        .preferred_profiles = NIPC_PROFILE_SHM_HYBRID,
+        .max_request_payload_bytes = 4096,
+        .max_request_batch_items = 1,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .max_response_batch_items = 1,
+        .auth_token = AUTH_TOKEN,
+        .backlog = 4,
+    };
+
+    memset(&listener, 0, sizeof(listener));
+    listener.fd = -1;
+    if (nipc_uds_listen(TEST_RUN_DIR, ctx->service, &scfg, &listener) != NIPC_UDS_OK) {
+        test_flag_set(&ctx->done);
+        return NULL;
+    }
+    test_flag_set(&ctx->ready);
+
+    for (int i = 0; i < ctx->sessions && i < 4; i++) {
+        nipc_uds_session_t session;
+        memset(&session, 0, sizeof(session));
+        session.fd = -1;
+        if (accept_with_timeout(&listener, (uint64_t)i + 1, 30000, &session) != NIPC_UDS_OK)
+            break;
+        ctx->selected[i] = session.selected_profile;
+        ctx->accepted++;
+        uint8_t recv_buf[4096];
+        nipc_header_t hdr;
+        const void *payload;
+        size_t payload_len;
+        (void)nipc_uds_receive(&session, recv_buf, sizeof(recv_buf), &hdr,
+                               &payload, &payload_len);
+        nipc_uds_close_session(&session);
+    }
+
+    nipc_uds_close_listener(&listener);
+    test_flag_set(&ctx->done);
+    return NULL;
+}
+
 static void test_shm_l2_service(void)
 {
     printf("Test: SHM-mode snapshot service\n");
@@ -7676,6 +7732,65 @@ static void test_client_shm_attach_failure_falls_back_to_baseline(void)
     cleanup_all(svc);
 }
 
+/* A region that never becomes attachable, with a call timeout below the SHM
+ * attach timeout: every attach wait ends at the call deadline. The first one
+ * keeps SHM; the second in a row drops it, so the third connect runs on the
+ * baseline instead of every call ending at its deadline. */
+static void test_client_shm_persistent_call_bound_failure_falls_back(void)
+{
+    printf("Test: Persistent call-bound SHM attach failure falls back to baseline\n");
+    const char *svc = "svc_shm_call_bound";
+    cleanup_all(svc);
+
+    fake_shm_sessions_ctx_t sctx;
+    memset(&sctx, 0, sizeof(sctx));
+    sctx.service = svc;
+    sctx.sessions = 3;
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, fake_shm_sessions_server_thread_fn, &sctx);
+    (void)test_flag_wait_any(&sctx.ready, &sctx.done);
+    check("call-bound server started",
+          __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
+
+    nipc_client_config_t ccfg = {
+        .supported_profiles         = NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID,
+        .preferred_profiles         = NIPC_PROFILE_SHM_HYBRID,
+        .max_request_batch_items    = 1,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .auth_token                 = AUTH_TOKEN,
+        .call_timeout_ms            = 100,
+    };
+
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
+    nipc_client_set_shm_attach_timeout_for_tests(&client, 5000);
+
+    (void)nipc_client_refresh(&client);
+    check("first refresh ends at the call deadline", !nipc_client_ready(&client));
+    check("one call-bound attach failure keeps SHM",
+          (client.transport_config.supported_profiles & NIPC_PROFILE_SHM_HYBRID) != 0);
+    (void)nipc_client_refresh(&client);
+    check("second refresh ends at the call deadline", !nipc_client_ready(&client));
+    check("a second call-bound attach failure in a row drops SHM",
+          (client.transport_config.supported_profiles & NIPC_PROFILE_SHM_HYBRID) == 0);
+    check("third refresh connects", nipc_client_refresh(&client) && nipc_client_ready(&client));
+    check("third session runs on the baseline without SHM",
+          client.session_valid && client.shm == NULL &&
+          client.session.selected_profile == NIPC_PROFILE_BASELINE);
+
+    nipc_client_close(&client);
+    pthread_join(tid, NULL);
+
+    check("server saw three sessions", sctx.accepted == 3);
+    check("server selected SHM, SHM, baseline",
+          sctx.selected[0] == NIPC_PROFILE_SHM_HYBRID &&
+          sctx.selected[1] == NIPC_PROFILE_SHM_HYBRID &&
+          sctx.selected[2] == NIPC_PROFILE_BASELINE);
+
+    cleanup_all(svc);
+}
+
 #endif
 /* ------------------------------------------------------------------ */
 /*  Main                                                               */
@@ -7765,6 +7880,7 @@ int main(void)
     test_shm_negotiation_falls_back_to_baseline_on_obstructed_region(); printf("\n");
     test_shm_allocation_failure_falls_back_to_working_baseline(); printf("\n");
     test_client_shm_attach_failure_falls_back_to_baseline(); printf("\n");
+    test_client_shm_persistent_call_bound_failure_falls_back(); printf("\n");
 #endif
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);

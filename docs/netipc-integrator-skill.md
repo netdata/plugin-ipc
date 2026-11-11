@@ -792,6 +792,10 @@ Current required behavior:
   - remove SHM from future proposals for that client context
   - reconnect with a new handshake
   - continue on baseline if that reconnect succeeds
+- a call deadline that ends the attach wait keeps SHM enabled once; the
+  second time in a row, with the session still connected, counts as an
+  attach failure, so a region that never becomes attachable costs at most
+  two calls that end at their deadline
 
 This is not same-session fallback.
 

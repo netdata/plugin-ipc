@@ -23,6 +23,9 @@ static int g_fail = 0;
 static volatile LONG g_service_counter = 0;
 static HANDLE g_block_entered = NULL;
 static HANDLE g_block_release = NULL;
+/* Read end of a pipe nobody writes: a handler blocked on it returns only
+ * when the server cancels the worker's synchronous I/O. */
+static HANDLE g_cancel_read = NULL;
 
 #define AUTH_TOKEN        0xDEADBEEFCAFEBABEull
 #define TEST_RUN_DIR      "C:\\Temp\\nipc_win_service_guards"
@@ -337,6 +340,35 @@ static nipc_error_t raw_increment_handler(void *user,
     return dispatch_increment_request(request_hdr, request_payload, request_len,
                                       response_buf, response_buf_size,
                                       response_len_out, on_increment);
+}
+
+static bool on_increment_until_cancelled(void *user, uint64_t request, uint64_t *response)
+{
+    (void)user;
+    uint8_t byte;
+    DWORD got = 0;
+
+    if (g_block_entered)
+        SetEvent(g_block_entered);
+    if (g_cancel_read)
+        (void)ReadFile(g_cancel_read, &byte, 1, &got, NULL);
+
+    *response = request + 1;
+    return true;
+}
+
+static nipc_error_t raw_increment_until_cancelled_handler(void *user,
+                                                          const nipc_header_t *request_hdr,
+                                                          const uint8_t *request_payload,
+                                                          size_t request_len,
+                                                          uint8_t *response_buf,
+                                                          size_t response_buf_size,
+                                                          size_t *response_len_out)
+{
+    (void)user;
+    return dispatch_increment_request(request_hdr, request_payload, request_len,
+                                      response_buf, response_buf_size,
+                                      response_len_out, on_increment_until_cancelled);
 }
 
 static nipc_error_t raw_blocking_increment_handler(void *user,
@@ -706,37 +738,14 @@ static void test_worker_limit_rejects_extra_client(void)
     check("worker-limit server tracks active session",
           server_has_sessions(&sctx.server, 1));
 
+    /* With every worker busy, the server closes the extra connection
+     * before HELLO_ACK (docs/level2-typed-api.md, worker limit). */
     nipc_np_client_config_t ccfg = default_client_config();
     nipc_np_session_t second = { .pipe = INVALID_HANDLE_VALUE };
-    check("worker-limit second client connect ok",
-          nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &second) == NIPC_NP_OK);
-    if (second.pipe != INVALID_HANDLE_VALUE) {
-        uint8_t req_buf[NIPC_INCREMENT_PAYLOAD_SIZE];
-        uint8_t recv_buf[128];
-        nipc_header_t req = {0};
-        nipc_header_t resp_hdr;
-        const void *payload = NULL;
-        size_t payload_len = 0;
-        size_t req_len = nipc_increment_encode(99, req_buf, sizeof(req_buf));
-        bool rejected = false;
-
-        req.kind = NIPC_KIND_REQUEST;
-        req.code = NIPC_METHOD_INCREMENT;
-        req.item_count = 1;
-        req.message_id = 201;
-        req.transport_status = NIPC_STATUS_OK;
-
-        if (req_len == 0 ||
-            nipc_np_send(&second, &req, req_buf, req_len) != NIPC_NP_OK) {
-            rejected = true;
-        } else if (nipc_np_receive(&second, recv_buf, sizeof(recv_buf),
-                                   &resp_hdr, &payload, &payload_len) != NIPC_NP_OK) {
-            rejected = true;
-        }
-
-        check("worker-limit extra client is rejected", rejected);
+    check("worker-limit extra client is refused before the handshake",
+          nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &second) != NIPC_NP_OK);
+    if (second.pipe != INVALID_HANDLE_VALUE)
         nipc_np_close_session(&second);
-    }
 
     SetEvent(g_block_release);
     check("worker-limit first client finished",
@@ -784,8 +793,10 @@ static void test_session_thread_create_fault_recovers(void)
 
     nipc_np_client_config_t raw_ccfg = default_client_config();
     nipc_np_session_t dropped = { .pipe = INVALID_HANDLE_VALUE };
-    check("thread-create fault connect completes",
-          nipc_np_connect(TEST_RUN_DIR, service, &raw_ccfg, &dropped) == NIPC_NP_OK);
+    /* The worker runs the handshake, so a connection whose worker thread
+     * cannot be created is closed before HELLO_ACK. */
+    check("thread-create fault connect is refused",
+          nipc_np_connect(TEST_RUN_DIR, service, &raw_ccfg, &dropped) != NIPC_NP_OK);
     if (dropped.pipe != INVALID_HANDLE_VALUE)
         nipc_np_close_session(&dropped);
 
@@ -1345,12 +1356,13 @@ static void test_drain_timeout_on_blocked_handler(void)
     nipc_np_server_config_t scfg = default_server_config();
     HANDLE server_thread = start_raw_server_named(
         &sctx, service, 4, &scfg,
-        NIPC_METHOD_INCREMENT, raw_blocking_increment_handler);
+        NIPC_METHOD_INCREMENT, raw_increment_until_cancelled_handler);
     if (!server_thread)
         return;
 
     g_block_entered = CreateEvent(NULL, TRUE, FALSE, NULL);
-    g_block_release = CreateEvent(NULL, TRUE, FALSE, NULL);
+    HANDLE cancel_write = NULL;
+    check("cancel pipe created", CreatePipe(&g_cancel_read, &cancel_write, NULL, 0));
 
     blocking_client_ctx_t client_ctx = {
         .done_event = CreateEvent(NULL, TRUE, FALSE, NULL),
@@ -1372,15 +1384,13 @@ static void test_drain_timeout_on_blocked_handler(void)
     HANDLE drain_thread = test_create_thread(NULL, 0, drain_thread_proc, &drain_ctx, 0, NULL);
     check("drain thread created", drain_thread != NULL);
 
-    SetEvent(g_block_release);
-
+    /* The handler stays blocked until the drain's deadline passes and the
+     * server cancels the worker's I/O, so the drain cannot finish in time. */
     check("drain thread finished",
           drain_thread != NULL && WaitForSingleObject(drain_ctx.done_event, 10000) == WAIT_OBJECT_0);
     check("drain reports timeout", drain_ctx.drained == FALSE);
     check("blocking client finished",
           client_thread != NULL && WaitForSingleObject(client_ctx.done_event, 10000) == WAIT_OBJECT_0);
-    check("blocking increment eventually succeeds",
-          client_ctx.err == NIPC_OK && client_ctx.value_out == 42);
     check("server thread exits after timed-out drain",
           WaitForSingleObject(server_thread, 10000) == WAIT_OBJECT_0);
 
@@ -1391,6 +1401,9 @@ static void test_drain_timeout_on_blocked_handler(void)
     CloseHandle(client_ctx.done_event);
     CloseHandle(drain_ctx.done_event);
     close_block_events();
+    CloseHandle(g_cancel_read);
+    CloseHandle(cancel_write);
+    g_cancel_read = NULL;
     CloseHandle(server_thread);
 }
 

@@ -237,12 +237,17 @@ Load this skill for any task involving:
    `vendor-to-netdata.sh` prints the Go import-path rewrite but does not run
    it, and `diff-netdata-vendor.sh` normalizes import paths, so it reports no
    difference either way. Apply the rewrite in the Netdata checkout (no `.bak`
-   files), then confirm no upstream path is left:
+   files), then confirm no upstream path is left. The paths are relative, so
+   the subshell runs from the Netdata root; run from plugin-ipc, the same
+   paths would rewrite plugin-ipc's own Go tree:
 
    ```bash
-   grep -rlZ 'github.com/netdata/plugin-ipc/go' src/go/pkg/netipc --include='*.go' |
-     xargs -0 -r sed -i 's|github.com/netdata/plugin-ipc/go|github.com/netdata/netdata/go/plugins|g'
-   grep -rl 'github.com/netdata/plugin-ipc/go' src/go/pkg/netipc   # expect no output
+   (
+     cd /path/to/netdata &&
+     grep -rlZ 'github.com/netdata/plugin-ipc/go' src/go/pkg/netipc --include='*.go' |
+       xargs -0 -r sed -i 's|github.com/netdata/plugin-ipc/go|github.com/netdata/netdata/go/plugins|g' &&
+     ! grep -rl 'github.com/netdata/plugin-ipc/go' src/go/pkg/netipc
+   )
    ```
 
 10. Validate in the Netdata checkout.
@@ -261,10 +266,16 @@ Load this skill for any task involving:
      compiles them with `-O2 -D_FORTIFY_SOURCE=3`, which plugin-ipc's own
      builds do not enable, so check this before pushing the source commit:
 
+     The optimization level goes in `CMAKE_C_FLAGS_RELEASE`, since the
+     Release defaults (`-O3`) come after `CMAKE_C_FLAGS` and would override
+     it. The build must succeed and its log must hold no library warning:
+
      ```bash
-     cmake -S . -B .tmp/fortify-build -DCMAKE_BUILD_TYPE=Release \
-       -DCMAKE_C_FLAGS="-O2 -D_FORTIFY_SOURCE=3 -Wall -Wextra"
-     cmake --build .tmp/fortify-build 2>&1 | grep 'src/libnetdata.*warning:'
+     cmake -S . -B .tmp/fortify-o2 -DCMAKE_BUILD_TYPE=Release \
+       -DCMAKE_C_FLAGS_RELEASE="-O2 -DNDEBUG" \
+       -DCMAKE_C_FLAGS="-D_FORTIFY_SOURCE=3 -Wall -Wextra"
+     cmake --build .tmp/fortify-o2 > .tmp/fortify-o2.log 2>&1 &&
+       ! grep 'src/libnetdata.*warning:' .tmp/fortify-o2.log
      ```
 
    Netdata builds `netipc` on Linux and Windows only; the Windows build is

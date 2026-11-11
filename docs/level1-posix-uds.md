@@ -38,11 +38,18 @@ Example: `/run/netdata/cgroups-snapshot.sock`
 ## Socket permissions
 
 The listener socket file is owner-only: mode `0600`, narrowed further by the
-process umask. C, Rust and Go set it the same way: `fchmod(fd, 0600)` on the
+process umask on Linux and FreeBSD, exactly `0600` on macOS. C, Rust and Go set it the same way: `fchmod(fd, 0600)` on the
 unbound socket, then `bind()`. Linux and FreeBSD create the socket file with
 the unbound socket's mode, so the file never exists with a wider mode, no
 path-based `chmod` runs, and the process-global umask is never changed (other
 threads of the embedding process may be creating files at the same time).
+
+`connect()` needs write permission on the socket file. On Linux and FreeBSD,
+after `bind()`, the socket file must keep owner write: when the umask removed
+it (for example umask `0277`), the file is unlinked and `listen` fails with a
+socket error (`EACCES`), instead of publishing an endpoint its own user cannot
+reach. A umask that removes only owner read (for example `0477`, socket mode
+`0200`) still works.
 
 Consequences:
 
@@ -66,8 +73,8 @@ with mode `0777 & ~umask`, so it binds in a private directory instead:
    refuse it unless the process's effective user owns it, and `fchmod` the
    descriptor to 0700.
 3. `bind()` to `{service_name}.d/s`, then, relative to the directory
-   descriptor, `fchmodat` the socket file to its created mode `& 0600`
-   (which keeps the umask narrowing) and `renameat` it to
+   descriptor, `fchmodat` the socket file to exactly `0600` (so the umask
+   cannot leave it without owner write) and `renameat` it to
    `{service_name}.sock`. Remove the directory.
 
 No other user can reach the socket while its mode is wider, and the
@@ -289,8 +296,9 @@ boundaries differs. C, Rust and Go implement it the same way.
 - **Partial receive.** A receive timeout or abort before the first byte of
   a message leaves the session usable. Any receive failure after it
   (timeout, abort, malformed or over-limit packet) leaves unread bytes of
-  the message queued, so the session marks its receive side failed and
-  every later receive fails at once, without reading the socket. It does
+  the message queued, so the session marks its receive side failed, fails
+  every request in flight (no response can arrive any more), and every
+  later receive fails at once, without reading the socket. It does
   not call `shutdown(SHUT_RD)`: on FreeBSD 15 that fails the peer's sends,
   and on FreeBSD 14 later receives still return the queued bytes. Sends
   stay valid, so a server can still answer a rejected request with

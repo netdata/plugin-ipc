@@ -90,6 +90,7 @@ typedef enum {
     FAKE_ACK_GOOD_THEN_BAD_CHUNK_HEADER,
     FAKE_ACK_GOOD_THEN_CHUNK_LEN_MISMATCH,
     FAKE_ACK_GOOD_THEN_CHUNK_OVERFLOW,
+    FAKE_ACK_GOOD_THEN_EXTRA_CHUNK,
     FAKE_ACK_GOOD_THEN_LIMITED_RESPONSE,
     FAKE_ACK_GOOD_THEN_TOO_MANY_ITEMS,
     FAKE_ACK_GOOD_THEN_BAD_BATCH_DIR,
@@ -450,6 +451,7 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
         ctx->mode == FAKE_ACK_GOOD_THEN_BAD_CHUNK_HEADER ||
         ctx->mode == FAKE_ACK_GOOD_THEN_CHUNK_LEN_MISMATCH ||
         ctx->mode == FAKE_ACK_GOOD_THEN_CHUNK_OVERFLOW ||
+        ctx->mode == FAKE_ACK_GOOD_THEN_EXTRA_CHUNK ||
         ctx->mode == FAKE_ACK_GOOD_THEN_LIMITED_RESPONSE ||
         ctx->mode == FAKE_ACK_GOOD_THEN_TOO_MANY_ITEMS ||
         ctx->mode == FAKE_ACK_GOOD_THEN_BAD_BATCH_DIR ||
@@ -685,6 +687,53 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
             if (!raw_pipe_write(pipe, chunk_pkt, (DWORD)sizeof(chunk_pkt))) {
                 CloseHandle(pipe);
                 return 1;
+            }
+        } else if (ctx->mode == FAKE_ACK_GOOD_THEN_EXTRA_CHUNK) {
+            /* 64 bytes remain after the first packet, one continuation's
+             * worth; two 32-byte ones need a chunk the count does not
+             * declare. */
+            uint8_t payload_bytes[160];
+            memset(payload_bytes, 0xAB, sizeof(payload_bytes));
+
+            nipc_header_t resp_hdr = {
+                .magic = NIPC_MAGIC_MSG,
+                .version = NIPC_VERSION,
+                .header_len = NIPC_HEADER_LEN,
+                .kind = NIPC_KIND_RESPONSE,
+                .code = req_hdr.code,
+                .flags = 0,
+                .item_count = 1,
+                .message_id = req_hdr.message_id,
+                .payload_len = sizeof(payload_bytes),
+                .transport_status = NIPC_STATUS_OK,
+            };
+
+            uint8_t first_pkt[128];
+            nipc_header_encode(&resp_hdr, first_pkt, NIPC_HEADER_LEN);
+            memcpy(first_pkt + NIPC_HEADER_LEN, payload_bytes, 96);
+            if (!raw_pipe_write(pipe, first_pkt, NIPC_HEADER_LEN + 96)) {
+                CloseHandle(pipe);
+                return 1;
+            }
+
+            for (uint32_t ci = 1; ci <= 2; ci++) {
+                nipc_chunk_header_t chk = {
+                    .magic = NIPC_MAGIC_CHUNK,
+                    .version = NIPC_VERSION,
+                    .flags = 0,
+                    .message_id = req_hdr.message_id,
+                    .total_message_len = NIPC_HEADER_LEN + sizeof(payload_bytes),
+                    .chunk_index = ci,
+                    .chunk_count = 2,
+                    .chunk_payload_len = 32,
+                };
+                uint8_t chunk_pkt[NIPC_HEADER_LEN + 32];
+                nipc_chunk_header_encode(&chk, chunk_pkt, NIPC_HEADER_LEN);
+                memcpy(chunk_pkt + NIPC_HEADER_LEN, payload_bytes + 96 + 32 * (ci - 1), 32);
+                if (!raw_pipe_write(pipe, chunk_pkt, (DWORD)sizeof(chunk_pkt))) {
+                    CloseHandle(pipe);
+                    return 1;
+                }
             }
         } else if (ctx->mode == FAKE_ACK_GOOD_THEN_LIMITED_RESPONSE) {
             uint8_t first_pkt[NIPC_HEADER_LEN];
@@ -1120,6 +1169,8 @@ typedef struct {
     HANDLE      ready_event;
     int         accept_ok;
     uint32_t    accepted_selected_profile;
+    uint32_t    server_supported_profiles; /* 0 = default */
+    uint32_t    server_preferred_profiles; /* used with server_supported_profiles */
 } preferred_profile_thread_ctx_t;
 
 static DWORD WINAPI preferred_profile_server_thread(LPVOID arg)
@@ -1127,6 +1178,10 @@ static DWORD WINAPI preferred_profile_server_thread(LPVOID arg)
     preferred_profile_thread_ctx_t *ctx = (preferred_profile_thread_ctx_t *)arg;
     nipc_np_server_config_t cfg = default_server_config();
     cfg.preferred_profiles = NIPC_PROFILE_BASELINE;
+    if (ctx->server_supported_profiles) {
+        cfg.supported_profiles = ctx->server_supported_profiles;
+        cfg.preferred_profiles = ctx->server_preferred_profiles;
+    }
 
     nipc_np_listener_t listener;
     nipc_np_error_t err = nipc_np_listen(ctx->run_dir, ctx->service, &cfg, &listener);
@@ -1191,6 +1246,56 @@ static void test_preferred_profile_selection(void)
     CloseHandle(thread);
     check("preferred-profile server accepted", ctx.accept_ok);
     check("preferred-profile server selected baseline",
+          ctx.accepted_selected_profile == NIPC_PROFILE_BASELINE);
+}
+
+/* A profile bit Windows does not implement, offered and preferred by both
+ * peers, is never selected: they would otherwise run the pipe under that
+ * label. 0x08 is assigned on POSIX only. */
+static void test_unassigned_profile_bit(void)
+{
+    printf("--- Unassigned profile bit is never selected ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+    const uint32_t unassigned = NIPC_PROFILE_SHM_WAITADDR;
+
+    HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    preferred_profile_thread_ctx_t ctx = {
+        .run_dir = TEST_RUN_DIR,
+        .service = service,
+        .ready_event = ready_event,
+        .server_supported_profiles = NIPC_PROFILE_BASELINE | unassigned,
+        .server_preferred_profiles = unassigned,
+    };
+
+    HANDLE thread = test_create_thread(NULL, 0, preferred_profile_server_thread, &ctx, 0, NULL);
+    check("unassigned-profile server thread created", thread != NULL);
+    if (!thread) {
+        CloseHandle(ready_event);
+        return;
+    }
+
+    WaitForSingleObject(ready_event, 5000);
+    CloseHandle(ready_event);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    ccfg.supported_profiles = NIPC_PROFILE_BASELINE | unassigned;
+    ccfg.preferred_profiles = unassigned;
+
+    nipc_np_session_t session;
+    nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("unassigned-profile client connect", err == NIPC_NP_OK);
+    if (err == NIPC_NP_OK) {
+        check("unassigned-profile client selected baseline",
+              session.selected_profile == NIPC_PROFILE_BASELINE);
+        nipc_np_close_session(&session);
+    }
+
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    check("unassigned-profile server accepted", ctx.accept_ok);
+    check("unassigned-profile server selected baseline",
           ctx.accepted_selected_profile == NIPC_PROFILE_BASELINE);
 }
 
@@ -2323,6 +2428,7 @@ static void test_chunk_receive_error_paths(void)
         { "bad continuation chunk header rejected", FAKE_ACK_GOOD_THEN_BAD_CHUNK_HEADER, NIPC_NP_ERR_CHUNK },
         { "continuation chunk length mismatch rejected", FAKE_ACK_GOOD_THEN_CHUNK_LEN_MISMATCH, NIPC_NP_ERR_CHUNK },
         { "continuation chunk overflow rejected", FAKE_ACK_GOOD_THEN_CHUNK_OVERFLOW, NIPC_NP_ERR_CHUNK },
+        { "more continuations than declared rejected", FAKE_ACK_GOOD_THEN_EXTRA_CHUNK, NIPC_NP_ERR_CHUNK },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -3353,6 +3459,7 @@ int main(void)
     test_service_validation();
     test_ping_pong();
     test_preferred_profile_selection();
+    test_unassigned_profile_bit();
     test_chunked_ping_pong();
     test_chunked_receive_reuses_buffer();
     test_chunked_pipeline();

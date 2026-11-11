@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: implemented and validated (2026-11-08), including the regressions at the end of this file (2026-11-08, 2026-11-09 and 2026-11-11). The 2026-11-11 fix is re-vendored into netdata/netdata#24633.
+Sub-state: implemented and validated (2026-11-08), including the regressions at the end of this file (2026-11-08, 2026-11-09 and 2026-11-11). The 2026-11-11 fix (`ce6834e`) is re-vendored into netdata/netdata#24633 by Netdata commit `b53818fab6`.
 
 ## Requirements
 
@@ -247,7 +247,7 @@ See Implementation plan.
 - F2 + F7 (decision 3A): a POSIX listener can stop listening (close the socket, unlink its file) while keeping the endpoint lock (new C `nipc_uds_stop_listening()`, Rust `UdsListener::stop_listening()`, Go `Listener.StopListening()`). Every server's run closes the listening socket when its accept loop exits; the lock is released only after the workers are joined (C drain and destroy release it after joining, Rust drops the listener after `stop_workers`, Go's deferred `Close` runs after `stopSessionWorkers`). C drain previously never closed the listener and C destroy released the lock before joining workers; Rust and Go kept the socket open until workers exited, so a client reconnecting during shutdown waited out its call timeout on a socket nobody accepted. Windows already closed the listening instance first, and its pipe name stays owned while session instances exist. Tests: C `test_server_shutdown_order`, Rust `test_robust_shutdown_closes_socket_before_endpoint`, Go `TestRobustShutdownClosesSocketBeforeEndpoint`; all failed before the fix. Specs `level1-posix-uds.md` (endpoint lock) and `level2-typed-api.md` (shutdown) updated.
 - F3 + F4: run and drain/destroy now meet through a store-then-load handshake that needs no lock: run publishes the active loop and then checks the stop; a stop publishes itself and then checks the loop (C POSIX sequentially consistent atomics, C Windows interlocked full barriers). Either the stop waits for the loop, or run sees the stop and returns without touching the session lock (POSIX) or the listener (Windows). The race needs destroy to land between run's checks and its first lock, and its effect is undefined behaviour without a reliable symptom, so it has no deterministic test; the fix holds by construction. Rust and Go own the listener inside run and are not affected.
 - F8: Go lookups now return the capacity reconnect's own error when the item fits the client's limit, as C and Rust do; only an item above the client's limit falls back (apps: overflow, cgroups: oversized marker). Test `TestLookupCapacityReconnectFailureReported` (a reconnect to a socket that never answers must report the lookup timeout; a reconnect to a vanished endpoint must report overflow, not a later "not ready"); failed before the fix.
-- F9: the SHM attach wait treats a tie between the call's remaining time and the attach timeout as call-bound (`<=`) in C, Rust and Go, POSIX and Windows. All three round the remaining time up, so the tie means the call deadline comes first, and SHM is no longer disabled for it. The boundary depends on sub-millisecond timing, so there is no deterministic test.
+- F9: the SHM attach wait treats a tie between the call's remaining time and the attach timeout as call-bound (`<=`) in C, Rust and Go, POSIX and Windows. Rust and Go round the remaining time up, so the tie means the call deadline comes first; C takes both values as whole milliseconds on one clock, so a tie ends both waits together. Either way SHM is no longer disabled for it. The boundary depends on sub-millisecond timing, so there is no deterministic test.
 - F10: a Go Windows worker whose thread handle cannot be opened is refused before HELLO_ACK, as at capacity, because stop could not cancel its blocking pipe I/O. `openWorkerThread` is a test seam. Test `TestWinRobustWorkerWithoutThreadHandleRefused` (Windows host).
 - F11: C Windows reads the learned payload limits with interlocked access in the accept path and in the growth loops.
 - F12: the C POSIX HELLO wait is bounded by one monotonic handshake deadline: time lost to EINTR counts, the last poll slice ends at the deadline, and the handshake read that follows gets the remaining time instead of one poll slice. Rust and Go already pass the whole handshake timeout to one stop-aware call. Timing-only effect; no deterministic test.
@@ -422,7 +422,7 @@ What broke:
 Evidence:
 
 - The review fix in `3fb1bef` made the Go stalled reader (`startStalledReader`, and `startWinStalledReader` on Windows) fail the test unless request bytes arrive within 10 s, in both variants.
-- The call deadline starts before the request is encoded (`client.go` `beginOp`). Under `-race` on one core, encoding the test's 1M-PID request takes 191-229 ms (measured locally, 3 runs), against the variant's 200 ms deadline; without `-race` it takes 2-10 ms. When the encode outlasts the deadline, the client correctly returns `ErrTimeout` before writing, and no bytes ever reach the reader.
+- The call deadline starts before the request is encoded (`newLookupDeadline`, `lookup_common.go:110`, called by `CallAppsLookupWithTimeout`). Under `-race` on one core, encoding the test's 1M-PID request takes 191-229 ms (measured locally, 3 runs), against the variant's 200 ms deadline; without `-race` it takes 2-10 ms. When the encode outlasts the deadline, the client correctly returns `ErrTimeout` before writing, and no bytes ever reach the reader.
 - C (`test_service.c` / `test_win_service.c` `test_client_send_bounded_by_deadline_and_abort`) checks that the request reached the server only in the abort variant; Rust ignores the poll result. Go was the only one asserting it in the deadline variant.
 
 Why validation missed it:
@@ -445,4 +445,4 @@ Artifacts:
 
 - Specs, docs, project skills and `AGENTS.md`: unaffected. Test code only, and AGENTS.md Test Cadence already requires outcomes that do not depend on timing.
 - Lesson: in a deadline test, a fake peer must not assert progress that the deadline can legitimately preempt. The deadline covers the whole call, encoding included.
-- The fix reaches Netdata through a re-vendoring into netdata/netdata#24633.
+- The fix reaches Netdata through a re-vendoring into netdata/netdata#24633 (Netdata commit `b53818fab6`).

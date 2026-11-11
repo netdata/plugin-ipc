@@ -288,7 +288,13 @@ because the deadline passed reports the timeout too.
 its connect, handshake and SHM attach end once that timeout passes, so a
 server that accepts but never answers cannot hold the caller's loop. When
 the call deadline, not the SHM attach timeout, ends an SHM attach wait,
-SHM stays enabled for the next connect.
+SHM stays enabled for the next connect. A second such wait in a row that
+ends with the session still connected counts as an attach failure (below),
+so a region that never becomes attachable cannot make every call end at its
+deadline; a successful attach resets the count. Only errors a server that
+has not finished its setup can cause (the region or its objects cannot be
+opened yet, or the magic is not written yet) are waited for; any other
+attach error is an attach failure at once.
 
 Every Level 2 client context also exposes an abort signal that is safe to
 trigger from another thread while one thread is blocked in a typed call.

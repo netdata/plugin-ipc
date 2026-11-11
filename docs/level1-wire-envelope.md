@@ -154,7 +154,9 @@ Total: 32 bytes.
 - `total_message_len` must be > 0.
 - The receiver validates `magic`, `message_id`, `chunk_index`, and
   `chunk_count` on every continuation chunk. Any mismatch is a
-  protocol violation.
+  protocol violation, and so is a continuation whose index reaches the
+  declared count: a sender whose chunks are smaller than the budget would
+  need more chunks than it may declare.
 
 ## Handshake payloads
 

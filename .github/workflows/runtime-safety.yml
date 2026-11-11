@@ -307,6 +307,8 @@ jobs:
             test_win_service_payload_limits \
             test_win_robustness \
             test_win_service_extra \
+            test_win_service_guards \
+            test_win_service_guards_extra \
             test_win_stress \
             interop_named_pipe_c \
             interop_named_pipe_rs \
@@ -324,4 +326,4 @@ jobs:
       - name: Run Windows runtime tests
         run: |
           set -euo pipefail
-          ctest --test-dir build-windows --output-on-failure -j1 -R "^(test_named_pipe|test_win_shm|test_win_service|test_win_service_payload_limits|test_win_robustness|test_win_service_extra|test_named_pipe_interop|test_win_shm_interop|test_service_win_interop|test_service_win_shm_interop|test_cache_win_interop|test_cache_win_shm_interop)$"
+          ctest --test-dir build-windows --output-on-failure -j1 -R "^(test_named_pipe|test_win_shm|test_win_service|test_win_service_payload_limits|test_win_robustness|test_win_service_extra|test_win_service_guards|test_win_service_guards_extra|test_named_pipe_interop|test_win_shm_interop|test_service_win_interop|test_service_win_shm_interop|test_cache_win_interop|test_cache_win_shm_interop)$"

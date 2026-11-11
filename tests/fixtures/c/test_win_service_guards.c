@@ -26,6 +26,9 @@ static int g_fail = 0;
 static volatile LONG g_service_counter = 0;
 static HANDLE g_block_entered = NULL;
 static HANDLE g_block_release = NULL;
+/* Read end of a pipe nobody writes: a handler blocked on it returns only
+ * when the server cancels the worker's synchronous I/O. */
+static HANDLE g_cancel_read = NULL;
 
 #define AUTH_TOKEN        0xDEADBEEFCAFEBABEull
 #define TEST_RUN_DIR      "C:\\Temp\\nipc_win_service_guards"
@@ -365,6 +368,35 @@ static nipc_error_t raw_increment_batch_handler(void *user,
 
     *response_len_out = nipc_batch_builder_finish(&builder, NULL);
     return (*response_len_out > 0) ? NIPC_OK : NIPC_ERR_OVERFLOW;
+}
+
+static bool on_increment_until_cancelled(void *user, uint64_t request, uint64_t *response)
+{
+    (void)user;
+    uint8_t byte;
+    DWORD got = 0;
+
+    if (g_block_entered)
+        SetEvent(g_block_entered);
+    if (g_cancel_read)
+        (void)ReadFile(g_cancel_read, &byte, 1, &got, NULL);
+
+    *response = request + 1;
+    return true;
+}
+
+static nipc_error_t raw_increment_until_cancelled_handler(void *user,
+                                                          const nipc_header_t *request_hdr,
+                                                          const uint8_t *request_payload,
+                                                          size_t request_len,
+                                                          uint8_t *response_buf,
+                                                          size_t response_buf_size,
+                                                          size_t *response_len_out)
+{
+    (void)user;
+    return dispatch_increment_request(request_hdr, request_payload, request_len,
+                                      response_buf, response_buf_size,
+                                      response_len_out, on_increment_until_cancelled);
 }
 
 static nipc_error_t raw_blocking_increment_handler(void *user,
@@ -992,6 +1024,107 @@ static void test_client_batch_and_string_guards(void)
     }
 }
 
+typedef struct {
+    const char *service;
+    HANDLE ready_event;
+    volatile LONG listen_ok;
+    volatile LONG accepted;
+    volatile LONG selected[3];
+} fake_hybrid_sessions_ctx_t;
+
+/* Negotiates hybrid WinSHM without ever creating its objects, for three
+ * sessions one after the other; each is served until the client closes it. */
+static DWORD WINAPI fake_hybrid_sessions_thread(LPVOID arg)
+{
+    fake_hybrid_sessions_ctx_t *ctx = (fake_hybrid_sessions_ctx_t *)arg;
+    nipc_np_listener_t listener = {0};
+    nipc_np_server_config_t scfg = default_hybrid_server_config();
+
+    listener.pipe = INVALID_HANDLE_VALUE;
+    if (nipc_np_listen(TEST_RUN_DIR, ctx->service, &scfg, &listener) != NIPC_NP_OK) {
+        SetEvent(ctx->ready_event);
+        return 1;
+    }
+    InterlockedExchange(&ctx->listen_ok, 1);
+    SetEvent(ctx->ready_event);
+
+    for (int i = 0; i < 3; i++) {
+        nipc_np_session_t session = {0};
+        session.pipe = INVALID_HANDLE_VALUE;
+        if (nipc_np_accept(&listener, (uint64_t)i + 1, &session) != NIPC_NP_OK)
+            break;
+        InterlockedExchange(&ctx->selected[i], (LONG)session.selected_profile);
+        InterlockedIncrement(&ctx->accepted);
+        uint8_t recv_buf[4096];
+        nipc_header_t hdr;
+        const void *payload;
+        size_t payload_len;
+        (void)nipc_np_receive(&session, recv_buf, sizeof(recv_buf), &hdr,
+                              &payload, &payload_len);
+        nipc_np_close_session(&session);
+    }
+
+    nipc_np_close_listener(&listener);
+    return 0;
+}
+
+/* Objects that never appear, with a call timeout below the WinSHM attach
+ * timeout: every attach wait ends at the call deadline. The first one keeps
+ * WinSHM; the second in a row drops it, so the third connect runs on the
+ * baseline instead of every call ending at its deadline. */
+static void test_hybrid_persistent_call_bound_failure_falls_back(void)
+{
+    printf("--- Persistent call-bound hybrid attach failure falls back to baseline ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_hybrid_call_bound");
+
+    fake_hybrid_sessions_ctx_t sctx = {0};
+    sctx.service = service;
+    sctx.ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    HANDLE server_thread = test_create_thread(NULL, 0, fake_hybrid_sessions_thread, &sctx, 0, NULL);
+    check("call-bound fake server thread created", server_thread != NULL);
+    if (!server_thread) {
+        CloseHandle(sctx.ready_event);
+        return;
+    }
+    WaitForSingleObject(sctx.ready_event, 10000);
+    CloseHandle(sctx.ready_event);
+    check("call-bound fake server listening",
+          InterlockedCompareExchange(&sctx.listen_ok, 0, 0) == 1);
+
+    nipc_client_ctx_t client;
+    nipc_client_config_t ccfg = default_typed_hybrid_client_config();
+    ccfg.call_timeout_ms = 100;
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    nipc_client_set_shm_attach_timeout_for_tests(&client, 5000);
+
+    (void)nipc_client_refresh(&client);
+    check("first refresh ends at the call deadline", !nipc_client_ready(&client));
+    check("one call-bound attach failure keeps WinSHM",
+          (client.transport_config.supported_profiles & NIPC_WIN_SHM_PROFILE_HYBRID) != 0);
+    (void)nipc_client_refresh(&client);
+    check("second refresh ends at the call deadline", !nipc_client_ready(&client));
+    check("a second call-bound attach failure in a row drops WinSHM",
+          (client.transport_config.supported_profiles & NIPC_WIN_SHM_PROFILE_HYBRID) == 0);
+    check("third refresh connects",
+          nipc_client_refresh(&client) && nipc_client_ready(&client));
+    check("third session runs on the baseline without WinSHM",
+          client.session_valid && client.shm == NULL &&
+          client.session.selected_profile == NIPC_PROFILE_BASELINE);
+
+    nipc_client_close(&client);
+    check("call-bound fake server exited",
+          WaitForSingleObject(server_thread, 10000) == WAIT_OBJECT_0);
+    CloseHandle(server_thread);
+    check("server saw three sessions",
+          InterlockedCompareExchange(&sctx.accepted, 0, 0) == 3);
+    check("server selected hybrid, hybrid, baseline",
+          sctx.selected[0] == NIPC_WIN_SHM_PROFILE_HYBRID &&
+          sctx.selected[1] == NIPC_WIN_SHM_PROFILE_HYBRID &&
+          sctx.selected[2] == NIPC_PROFILE_BASELINE);
+}
+
 static void test_hybrid_attach_failure_falls_back_to_baseline(void)
 {
     printf("--- Hybrid attach failure falls back to baseline ---\n");
@@ -1105,7 +1238,7 @@ static void test_hybrid_typed_snapshot_response_guards(void)
         { FAKE_HYBRID_RESP_BAD_MESSAGE_ID, "typed wrong SHM response message_id", NIPC_ERR_BAD_LAYOUT, false },
         { FAKE_HYBRID_RESP_LIMIT_EXCEEDED, "typed SHM limit exceeded", NIPC_ERR_OVERFLOW, true },
         { FAKE_HYBRID_RESP_UNSUPPORTED, "typed SHM unsupported response", NIPC_ERR_BAD_LAYOUT, false },
-        { FAKE_HYBRID_RESP_DISCONNECT, "typed missing SHM response after request", NIPC_ERR_TRUNCATED, false },
+        { FAKE_HYBRID_RESP_DISCONNECT, "typed missing SHM response after request", NIPC_ERR_DISCONNECTED, false },
     };
 
     printf("--- Hybrid typed snapshot response guards ---\n");
@@ -1822,12 +1955,13 @@ static void test_drain_timeout_on_blocked_handler(void)
     nipc_np_server_config_t scfg = default_server_config();
     HANDLE server_thread = start_raw_server_named(
         &sctx, service, 4, &scfg,
-        NIPC_METHOD_INCREMENT, raw_blocking_increment_handler);
+        NIPC_METHOD_INCREMENT, raw_increment_until_cancelled_handler);
     if (!server_thread)
         return;
 
     g_block_entered = CreateEvent(NULL, TRUE, FALSE, NULL);
-    g_block_release = CreateEvent(NULL, TRUE, FALSE, NULL);
+    HANDLE cancel_write = NULL;
+    check("cancel pipe created", CreatePipe(&g_cancel_read, &cancel_write, NULL, 0));
 
     blocking_client_ctx_t client_ctx = {
         .done_event = CreateEvent(NULL, TRUE, FALSE, NULL),
@@ -1849,15 +1983,13 @@ static void test_drain_timeout_on_blocked_handler(void)
     HANDLE drain_thread = test_create_thread(NULL, 0, drain_thread_proc, &drain_ctx, 0, NULL);
     check("drain thread created", drain_thread != NULL);
 
-    SetEvent(g_block_release);
-
+    /* The handler stays blocked until the drain's deadline passes and the
+     * server cancels the worker's I/O, so the drain cannot finish in time. */
     check("drain thread finished",
           drain_thread != NULL && WaitForSingleObject(drain_ctx.done_event, 10000) == WAIT_OBJECT_0);
     check("drain reports timeout", drain_ctx.drained == FALSE);
     check("blocking client finished",
           client_thread != NULL && WaitForSingleObject(client_ctx.done_event, 10000) == WAIT_OBJECT_0);
-    check("blocking increment eventually succeeds",
-          client_ctx.err == NIPC_OK && client_ctx.value_out == 42);
     check("server thread exits after timed-out drain",
           WaitForSingleObject(server_thread, 10000) == WAIT_OBJECT_0);
 
@@ -1868,9 +2000,10 @@ static void test_drain_timeout_on_blocked_handler(void)
     CloseHandle(client_ctx.done_event);
     CloseHandle(drain_ctx.done_event);
     CloseHandle(g_block_entered);
-    CloseHandle(g_block_release);
+    CloseHandle(g_cancel_read);
+    CloseHandle(cancel_write);
     g_block_entered = NULL;
-    g_block_release = NULL;
+    g_cancel_read = NULL;
     CloseHandle(server_thread);
 }
 
@@ -1881,6 +2014,7 @@ int main(void)
 
     test_client_batch_and_string_guards();
     test_hybrid_attach_failure_falls_back_to_baseline();
+    test_hybrid_persistent_call_bound_failure_falls_back();
     test_hybrid_client_rejects_malformed_responses();
     test_hybrid_typed_snapshot_response_guards();
     test_hybrid_client_send_buffer_guard();
