@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: implemented and validated (2026-11-08), including the two regressions at the end of this file (2026-11-08 and 2026-11-09). SOW-0050 resumes with the re-vendoring and the Netdata PR replies.
+Sub-state: implemented and validated (2026-11-08), including the regressions at the end of this file (2026-11-08, 2026-11-09 and 2026-11-11). The 2026-11-11 fix is re-vendored into netdata/netdata#24633.
 
 ## Requirements
 
@@ -412,3 +412,37 @@ Artifacts:
 - Project skill `project-netdata-vendoring`: step 10 now requires no warning in vendored NetIPC sources and gives the fortified build command to run before pushing. Specs, docs and `AGENTS.md`: unaffected (no behavior change). SOW-0050 records the re-vendoring.
 - Lesson: before vendoring, build the C library with Netdata's optimisation and fortify flags, since plugin-ipc's own builds do not enable `_FORTIFY_SOURCE`.
 
+
+## Regression - 2026-11-11
+
+What broke:
+
+- Netdata CI on netdata/netdata#24633 (head `75b92c216d`, Go Tests workflow, `go test -race`) failed `TestRobustSendBoundedByDeadlineAndAbort/send_deadline`: `robustness_unix_test.go:727: no request bytes arrived: n=0 revents=0x0 errno=errno 0`. The call itself returned the expected `ErrTimeout`; only the fake server's assertion failed. The same commit passed earlier runs.
+
+Evidence:
+
+- The review fix in `3fb1bef` made the Go stalled reader (`startStalledReader`, and `startWinStalledReader` on Windows) fail the test unless request bytes arrive within 10 s, in both variants.
+- The call deadline starts before the request is encoded (`client.go` `beginOp`). Under `-race` on one core, encoding the test's 1M-PID request takes 191-229 ms (measured locally, 3 runs), against the variant's 200 ms deadline; without `-race` it takes 2-10 ms. When the encode outlasts the deadline, the client correctly returns `ErrTimeout` before writing, and no bytes ever reach the reader.
+- C (`test_service.c` / `test_win_service.c` `test_client_send_bounded_by_deadline_and_abort`) checks that the request reached the server only in the abort variant; Rust ignores the poll result. Go was the only one asserting it in the deadline variant.
+
+Why validation missed it:
+
+- plugin-ipc's Go runs are fast enough that the encode stays well under 200 ms; the race-enabled run on a loaded Netdata CI runner was the first to cross it. The assertion's outcome depended on timing, which the test policy forbids.
+
+Repair:
+
+- Go Unix and Windows stalled readers record whether request bytes arrived instead of failing; the abort variant, which waits for the request to start before aborting, asserts it, as C does. The deadline variant asserts only the result (`ErrTimeout`) and the bound, as C and Rust do.
+- Both tests close the client before joining the reader, as Rust does, so a reader still waiting for bytes wakes on the hang-up instead of sitting out its 10 s wait.
+
+Validation:
+
+- Forced the failure condition with a temporary 1 ms deadline (encoding always outlasts it), restored afterwards: Linux `go test -race -count=3` passes in 2.9 s (before the close reorder each run sat out the 10 s wait); Windows (costa-win11, Go 1.27.3, `-count=3`; `-race` needs MinGW cgo, which that host's MSYS shell lacks) passes with the deadline variant at 10 ms.
+- Normal runs: Linux `go test -race ./pkg/netipc/service/raw/` and `go test ./pkg/netipc/...` pass; `go vet` for linux and windows clean; Windows `TestWinRobustSendBoundedByDeadlineAndAbort` passes; FreeBSD 14.3 and 15.1, amd64 and `GOARCH=386`, pass.
+- Same-failure search: the other timed waits in test peers (`pipe_integration_test.go:357,376,397`, `pipe_test.go:236`, `posix_tests.rs:602`, `raw_robustness_unix_tests.rs:898`) wait for an event that already happened or assert that nothing arrived, so their outcome does not depend on timing. C asserts the request start only in the abort variant already.
+- Performance: no benchmark run; test code only.
+
+Artifacts:
+
+- Specs, docs, project skills and `AGENTS.md`: unaffected. Test code only, and AGENTS.md Test Cadence already requires outcomes that do not depend on timing.
+- Lesson: in a deadline test, a fake peer must not assert progress that the deadline can legitimately preempt. The deadline covers the whole call, encoding included.
+- The fix reaches Netdata through a re-vendoring into netdata/netdata#24633.
