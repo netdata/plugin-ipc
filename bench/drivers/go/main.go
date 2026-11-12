@@ -90,8 +90,30 @@ func durationNanos(d time.Duration) uint64 {
 	return uint64(d.Nanoseconds()) // #nosec G115 -- d is checked non-negative above.
 }
 
-func recordLatency(lr *latencyRecorder, start, end time.Time) {
-	lr.record(durationNanos(end.Sub(start)))
+func recordLatency(lr *latencyRecorder, start, end uint64) {
+	if end > start {
+		lr.record(end - start)
+	} else {
+		lr.record(0)
+	}
+}
+
+// monoBase anchors nowNs; time.Since on a time carrying a monotonic reading
+// reads only the monotonic clock, one read per call like the C harness.
+var monoBase = time.Now()
+
+// nowNs returns monotonic nanoseconds since process start.
+func nowNs() uint64 {
+	return durationNanos(time.Since(monoBase))
+}
+
+// loopNow is a client loop's clock: the end time of the request the
+// iteration just recorded, or a fresh reading when it recorded none.
+func loopNow(end uint64) uint64 {
+	if end != 0 {
+		return end
+	}
+	return nowNs()
 }
 
 func estimateSamples(defaultSamples int, targetRPS uint64, durationSec int) int {
@@ -167,8 +189,8 @@ func (lr *latencyRecorder) percentile(pct float64) uint64 {
 // ---------------------------------------------------------------------------
 
 type rateLimiter struct {
-	interval time.Duration
-	next     time.Time
+	interval uint64 // nanoseconds
+	next     uint64 // nowNs time of the next send
 	limited  bool
 }
 
@@ -178,8 +200,8 @@ func newRateLimiter(targetRPS uint64) *rateLimiter {
 	}
 	intervalNs := 1_000_000_000 / targetRPS
 	return &rateLimiter{
-		interval: time.Duration(intervalNs) * time.Nanosecond, // #nosec G115 -- intervalNs is bounded by 1e9.
-		next:     time.Now(),
+		interval: intervalNs,
+		next:     nowNs(),
 		limited:  true,
 	}
 }
@@ -188,11 +210,11 @@ func (rl *rateLimiter) wait() {
 	if !rl.limited {
 		return
 	}
-	now := time.Now()
-	if now.Before(rl.next) {
-		time.Sleep(rl.next.Sub(now))
+	now := nowNs()
+	if now < rl.next {
+		time.Sleep(time.Duration(rl.next - now)) // #nosec G115 -- the wait is below one interval, at most 1e9 ns.
 	}
-	rl.next = rl.next.Add(rl.interval)
+	rl.next += rl.interval
 }
 
 // ---------------------------------------------------------------------------
@@ -482,10 +504,16 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 	var counter, totalItems, errors, msgSeq uint64
 
 	cpuStart := cpuNS()
-	wallStart := time.Now()
-	deadline := time.Duration(durationSec) * time.Second
+	wallStart := nowNs()
+	deadline := wallStart + uint64(durationSec)*1_000_000_000 // #nosec G115 -- durationSec is a small positive CLI value.
+	var end uint64
 
-	for time.Since(wallStart) < deadline {
+	// Declared once: Send takes &hdr, so it escapes to the heap; inside the
+	// loop that would be one allocation per request.
+	var hdr protocol.Header
+
+	for now := wallStart; now < deadline; now = loopNow(end) {
+		end = 0
 		rl.wait()
 
 		// Random batch size 2-1000 (server treats itemCount==1 as non-batch)
@@ -514,7 +542,7 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 		reqLen, _ := bb.Finish()
 
 		msgSeq++
-		hdr := protocol.Header{
+		hdr = protocol.Header{
 			Kind:            protocol.KindRequest,
 			Code:            protocol.MethodIncrement,
 			Flags:           protocol.FlagBatch,
@@ -523,7 +551,7 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 			TransportStatus: protocol.StatusOK,
 		}
 
-		t0 := time.Now()
+		t0 := nowNs()
 
 		if shm != nil {
 			// SHM path
@@ -605,7 +633,8 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 				}
 			}
 
-			t1 := time.Now()
+			t1 := nowNs()
+			end = t1
 			recordLatency(lr, t0, t1)
 			_ = batchOK
 			totalItems += uint64(batchSize)
@@ -662,7 +691,8 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 				}
 			}
 
-			t1 := time.Now()
+			t1 := nowNs()
+			end = t1
 			recordLatency(lr, t0, t1)
 			_ = batchOK
 			totalItems += uint64(batchSize)
@@ -671,7 +701,7 @@ func runBatchPingPongClient(runDir, service string, profiles uint32, durationSec
 		counter += uint64(batchSize)
 	}
 
-	wallSec := time.Since(wallStart).Seconds()
+	wallSec := float64(nowNs()-wallStart) / 1e9
 	cpuEnd := cpuNS()
 	cpuSec := float64(cpuEnd-cpuStart) / 1e9
 	throughput := float64(totalItems) / wallSec
@@ -720,16 +750,22 @@ func runPipelineClient(runDir, service string, durationSec int, targetRPS uint64
 	var counter, requests, errors, msgSeq uint64
 
 	cpuStart := cpuNS()
-	wallStart := time.Now()
-	deadline := time.Duration(durationSec) * time.Second
+	wallStart := nowNs()
+	deadline := wallStart + uint64(durationSec)*1_000_000_000 // #nosec G115 -- durationSec is a small positive CLI value.
+	var end uint64
 
 	recvBuf := make([]byte, 256)
 	var reqPayload [8]byte
 
-	for time.Since(wallStart) < deadline {
+	// Declared once: Send takes &hdr, so it escapes to the heap; inside the
+	// loop that would be one allocation per request.
+	var hdr protocol.Header
+
+	for now := wallStart; now < deadline; now = loopNow(end) {
+		end = 0
 		rl.wait()
 
-		t0 := time.Now()
+		t0 := nowNs()
 
 		// Send `depth` requests with unique message IDs
 		sendOK := true
@@ -738,7 +774,7 @@ func runPipelineClient(runDir, service string, durationSec int, targetRPS uint64
 			binary.NativeEndian.PutUint64(reqPayload[:], val)
 
 			msgSeq++
-			hdr := protocol.Header{
+			hdr = protocol.Header{
 				Kind:            protocol.KindRequest,
 				Code:            protocol.MethodIncrement,
 				ItemCount:       1,
@@ -777,7 +813,8 @@ func runPipelineClient(runDir, service string, durationSec int, targetRPS uint64
 			}
 		}
 
-		t1 := time.Now()
+		t1 := nowNs()
+		end = t1
 		recordLatency(lr, t0, t1)
 
 		depth64, ok := u64FromNonNegativeInt(depth)
@@ -789,7 +826,7 @@ func runPipelineClient(runDir, service string, durationSec int, targetRPS uint64
 		requests += depth64
 	}
 
-	wallSec := time.Since(wallStart).Seconds()
+	wallSec := float64(nowNs()-wallStart) / 1e9
 	cpuEnd := cpuNS()
 	cpuSec := float64(cpuEnd-cpuStart) / 1e9
 	throughput := float64(requests) / wallSec
@@ -848,13 +885,19 @@ func runPipelineBatchClient(runDir, service string, durationSec int, targetRPS u
 	var counter, totalItems, errors, msgSeq uint64
 
 	cpuStart := cpuNS()
-	wallStart := time.Now()
-	deadline := time.Duration(durationSec) * time.Second
+	wallStart := nowNs()
+	deadline := wallStart + uint64(durationSec)*1_000_000_000 // #nosec G115 -- durationSec is a small positive CLI value.
+	var end uint64
 
-	for time.Since(wallStart) < deadline {
+	// Declared once: Send takes &hdr, so it escapes to the heap; inside the
+	// loop that would be one allocation per request.
+	var hdr protocol.Header
+
+	for now := wallStart; now < deadline; now = loopNow(end) {
+		end = 0
 		rl.wait()
 
-		t0 := time.Now()
+		t0 := nowNs()
 
 		// Build and send `depth` batch requests
 		sendOK := true
@@ -880,7 +923,7 @@ func runPipelineBatchClient(runDir, service string, durationSec int, targetRPS u
 			reqLen, _ := bb.Finish()
 
 			msgSeq++
-			hdr := protocol.Header{
+			hdr = protocol.Header{
 				Kind:            protocol.KindRequest,
 				Code:            protocol.MethodIncrement,
 				Flags:           protocol.FlagBatch,
@@ -912,11 +955,12 @@ func runPipelineBatchClient(runDir, service string, durationSec int, targetRPS u
 			totalItems += uint64(batchSizes[d])
 		}
 
-		t1 := time.Now()
+		t1 := nowNs()
+		end = t1
 		recordLatency(lr, t0, t1)
 	}
 
-	wallSec := time.Since(wallStart).Seconds()
+	wallSec := float64(nowNs()-wallStart) / 1e9
 	cpuEnd := cpuNS()
 	cpuSec := float64(cpuEnd-cpuStart) / 1e9
 	throughput := float64(totalItems) / wallSec
@@ -994,15 +1038,21 @@ func runPingPongClient(runDir, service string, profiles uint32, durationSec int,
 	recvBuf := make([]byte, 256)
 
 	cpuStart := cpuNS()
-	wallStart := time.Now()
-	deadline := time.Duration(durationSec) * time.Second
+	wallStart := nowNs()
+	deadline := wallStart + uint64(durationSec)*1_000_000_000 // #nosec G115 -- durationSec is a small positive CLI value.
+	var end uint64
 
-	for time.Since(wallStart) < deadline {
+	// Declared once: Send takes &hdr, so it escapes to the heap; inside the
+	// loop that would be one allocation per request.
+	var hdr protocol.Header
+
+	for now := wallStart; now < deadline; now = loopNow(end) {
+		end = 0
 		rl.wait()
 
 		binary.NativeEndian.PutUint64(reqPayload[:], counter)
 
-		hdr := protocol.Header{
+		hdr = protocol.Header{
 			Kind:            protocol.KindRequest,
 			Code:            protocol.MethodIncrement,
 			Flags:           0,
@@ -1012,7 +1062,7 @@ func runPingPongClient(runDir, service string, profiles uint32, durationSec int,
 			PayloadLen:      8,
 		}
 
-		t0 := time.Now()
+		t0 := nowNs()
 
 		if shm != nil {
 			// SHM path
@@ -1062,14 +1112,15 @@ func runPingPongClient(runDir, service string, profiles uint32, durationSec int,
 			}
 		}
 
-		t1 := time.Now()
+		t1 := nowNs()
+		end = t1
 		recordLatency(lr, t0, t1)
 
 		counter++
 		requests++
 	}
 
-	wallSec := time.Since(wallStart).Seconds()
+	wallSec := float64(nowNs()-wallStart) / 1e9
 	cpuEnd := cpuNS()
 	cpuSec := float64(cpuEnd-cpuStart) / 1e9
 	throughput := float64(requests) / wallSec
@@ -1119,15 +1170,18 @@ func runSnapshotClient(runDir, service string, profiles uint32, durationSec int,
 	var requests, errors uint64
 
 	cpuStart := cpuNS()
-	wallStart := time.Now()
-	deadline := time.Duration(durationSec) * time.Second
-	for time.Since(wallStart) < deadline {
+	wallStart := nowNs()
+	deadline := wallStart + uint64(durationSec)*1_000_000_000 // #nosec G115 -- durationSec is a small positive CLI value.
+	var end uint64
+	for now := wallStart; now < deadline; now = loopNow(end) {
+		end = 0
 		rl.wait()
 
-		t0 := time.Now()
+		t0 := nowNs()
 
 		view, err := client.CallSnapshot()
-		t1 := time.Now()
+		t1 := nowNs()
+		end = t1
 
 		if err != nil {
 			errors++
@@ -1144,7 +1198,7 @@ func runSnapshotClient(runDir, service string, profiles uint32, durationSec int,
 		requests++
 	}
 
-	wallSec := time.Since(wallStart).Seconds()
+	wallSec := float64(nowNs()-wallStart) / 1e9
 	cpuEnd := cpuNS()
 	cpuSec := float64(cpuEnd-cpuStart) / 1e9
 	throughput := float64(requests) / wallSec
@@ -1219,10 +1273,12 @@ func runLookupBench(durationSec int) int {
 	var lookups, hits uint64
 
 	cpuStart := cpuNS()
-	wallStart := time.Now()
-	deadline := time.Duration(durationSec) * time.Second
+	wallStart := nowNs()
+	deadline := wallStart + uint64(durationSec)*1_000_000_000 // #nosec G115 -- durationSec is a small positive CLI value.
+	var end uint64
 
-	for time.Since(wallStart) < deadline {
+	for now := wallStart; now < deadline; now = loopNow(end) {
+		end = 0
 		guard := cache.ReadLock()
 		for _, it := range items {
 			if guard.Get(it.hash, it.name) != nil {
@@ -1233,7 +1289,7 @@ func runLookupBench(durationSec int) int {
 		guard.Unlock()
 	}
 
-	wallSec := time.Since(wallStart).Seconds()
+	wallSec := float64(nowNs()-wallStart) / 1e9
 	cpuEnd := cpuNS()
 	cpuSec := float64(cpuEnd-cpuStart) / 1e9
 	throughput := float64(lookups) / wallSec
@@ -1341,12 +1397,14 @@ func runLookupMethodBench(durationSec int, scenario string, targetRPS uint64) in
 
 	var requests, errors uint64
 	cpuStart := cpuNS()
-	wallStart := time.Now()
-	deadline := time.Duration(durationSec) * time.Second
+	wallStart := nowNs()
+	deadline := wallStart + uint64(durationSec)*1_000_000_000 // #nosec G115 -- durationSec is a small positive CLI value.
+	var end uint64
 
-	for time.Since(wallStart) < deadline {
+	for now := wallStart; now < deadline; now = loopNow(end) {
+		end = 0
 		rl.wait()
-		t0 := time.Now()
+		t0 := nowNs()
 
 		var err error
 		var respLen int
@@ -1441,11 +1499,13 @@ func runLookupMethodBench(durationSec int, scenario string, targetRPS uint64) in
 			continue
 		}
 
-		recordLatency(lr, t0, time.Now())
+		t1 := nowNs()
+		end = t1
+		recordLatency(lr, t0, t1)
 		requests++
 	}
 
-	wallSec := time.Since(wallStart).Seconds()
+	wallSec := float64(nowNs()-wallStart) / 1e9
 	cpuEnd := cpuNS()
 	cpuSec := float64(cpuEnd-cpuStart) / 1e9
 	throughput := float64(requests) / wallSec
@@ -1486,6 +1546,13 @@ func main() {
 	cmd := os.Args[1]
 	rc := 0
 
+	// Without Go SHM the handshake falls back to baseline, so an SHM row
+	// would silently measure UDS.
+	if !goShmSupported && strings.Contains(cmd, "shm-") {
+		fmt.Fprintf(os.Stderr, "%s: Go has no POSIX SHM transport on this platform\n", cmd)
+		os.Exit(1)
+	}
+
 	switch cmd {
 	case "uds-ping-pong-client", "shm-ping-pong-client",
 		"uds-batch-ping-pong-client", "shm-batch-ping-pong-client",
@@ -1508,9 +1575,7 @@ func main() {
 		service := os.Args[3]
 		duration := defaultDuration
 		if len(os.Args) >= 5 {
-			if d, err := strconv.Atoi(os.Args[4]); err == nil {
-				duration = d
-			}
+			duration = parseDurationArg(os.Args[4])
 		}
 
 		if err := os.MkdirAll(runDir, 0700); err != nil { // #nosec G703 -- benchmark driver uses caller-provided temporary run directory.
@@ -1546,9 +1611,7 @@ func main() {
 		service := os.Args[3]
 		duration := defaultDuration
 		if len(os.Args) >= 5 {
-			if d, err := strconv.Atoi(os.Args[4]); err == nil {
-				duration = d
-			}
+			duration = parseDurationArg(os.Args[4])
 		}
 
 		if err := os.MkdirAll(runDir, 0700); err != nil { // #nosec G703 -- benchmark driver uses caller-provided temporary run directory.
@@ -1573,7 +1636,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 
 		var profiles uint32
@@ -1596,7 +1659,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 
 		var profiles uint32
@@ -1619,7 +1682,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 
 		var profiles uint32
@@ -1642,7 +1705,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 		depth, _ := strconv.Atoi(os.Args[6])
 		if depth < 1 {
@@ -1658,7 +1721,7 @@ func main() {
 		}
 		runDir := os.Args[2]
 		service := os.Args[3]
-		duration, _ := strconv.Atoi(os.Args[4])
+		duration := parseDurationArg(os.Args[4])
 		targetRPS, _ := strconv.ParseUint(os.Args[5], 10, 64)
 		depth, _ := strconv.Atoi(os.Args[6])
 		if depth < 1 {
@@ -1672,7 +1735,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Usage: %s lookup-bench <duration_sec>\n", os.Args[0])
 			os.Exit(1)
 		}
-		duration, _ := strconv.Atoi(os.Args[2])
+		duration := parseDurationArg(os.Args[2])
 		rc = runLookupBench(duration)
 
 	case "lookup-method-bench":
@@ -1680,7 +1743,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Usage: %s lookup-method-bench <duration_sec> <scenario> <target_rps>\n", os.Args[0])
 			os.Exit(1)
 		}
-		duration, _ := strconv.Atoi(os.Args[2])
+		duration := parseDurationArg(os.Args[2])
 		targetRPS, _ := strconv.ParseUint(os.Args[4], 10, 64)
 		rc = runLookupMethodBench(duration, os.Args[3], targetRPS)
 

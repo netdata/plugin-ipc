@@ -19,24 +19,24 @@ fn main() {
 
 #[cfg(windows)]
 use netipc::protocol::{
-    self, batch_item_get, increment_decode, increment_encode, BatchBuilder, Header, FLAG_BATCH,
-    HEADER_SIZE, INCREMENT_PAYLOAD_SIZE, KIND_REQUEST, KIND_RESPONSE, MAGIC_MSG,
-    METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE, STATUS_OK, VERSION,
+    self, BatchBuilder, FLAG_BATCH, HEADER_SIZE, Header, INCREMENT_PAYLOAD_SIZE, KIND_REQUEST,
+    KIND_RESPONSE, MAGIC_MSG, METHOD_CGROUPS_SNAPSHOT, METHOD_INCREMENT, PROFILE_BASELINE,
+    STATUS_OK, VERSION, batch_item_get, increment_decode, increment_encode,
 };
 #[cfg(windows)]
 use netipc::service::cgroups::{CgroupsClient, ClientConfig as TypedClientConfig};
 #[cfg(windows)]
 use netipc::service::raw::{
-    increment_dispatch, snapshot_dispatch, CgroupsCache, CgroupsCacheItem, DispatchHandler,
-    ManagedServer,
+    CgroupsCache, CgroupsCacheItem, DispatchHandler, ManagedServer, increment_dispatch,
+    snapshot_dispatch,
 };
 #[cfg(windows)]
-use netipc::transport::win_shm::{WinShmContext, PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID};
+use netipc::transport::win_shm::{PROFILE_HYBRID as WIN_SHM_PROFILE_HYBRID, WinShmContext};
 #[cfg(windows)]
 use netipc::transport::windows::{ClientConfig, NpSession, ServerConfig};
 
 #[cfg(windows)]
-use std::sync::{atomic::Ordering, OnceLock};
+use std::sync::{OnceLock, atomic::Ordering};
 #[cfg(windows)]
 use std::time::{Duration, Instant};
 #[cfg(windows)]
@@ -938,11 +938,7 @@ fn run_ping_pong_client(
         eprintln!("client: {} errors", errors);
     }
 
-    if errors > 0 {
-        1
-    } else {
-        0
-    }
+    if errors > 0 { 1 } else { 0 }
 }
 
 #[cfg(windows)]
@@ -1098,11 +1094,7 @@ fn run_snapshot_client(
         eprintln!("client: {} errors", errors);
     }
 
-    if errors > 0 {
-        1
-    } else {
-        0
-    }
+    if errors > 0 { 1 } else { 0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -1331,11 +1323,7 @@ fn run_batch_ping_pong_client(
         );
     }
 
-    if errors > 0 {
-        1
-    } else {
-        0
-    }
+    if errors > 0 { 1 } else { 0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -1477,11 +1465,7 @@ fn run_pipeline_client(
         eprintln!("pipeline client: {} errors", errors);
     }
 
-    if errors > 0 {
-        1
-    } else {
-        0
-    }
+    if errors > 0 { 1 } else { 0 }
 }
 
 #[cfg(windows)]
@@ -1538,7 +1522,6 @@ fn warm_pipeline_client(
 struct PipelineBatchSlot {
     message_id: u64,
     batch_size: u32,
-    inflight_bytes: usize,
     active: bool,
 }
 
@@ -1584,7 +1567,6 @@ fn run_pipeline_batch_client(
         .collect();
     let mut slots = vec![PipelineBatchSlot::default(); depth];
     let mut recv_buf = vec![0u8; BENCH_BATCH_BUF_SIZE + HEADER_SIZE];
-    let inflight_budget = session.packet_size as usize * 2;
 
     let cpu_start = cpu_ns();
     let wall_start = Instant::now();
@@ -1604,8 +1586,6 @@ fn run_pipeline_batch_client(
 
         let mut sent = 0usize;
         let mut received = 0usize;
-        let mut outstanding = 0usize;
-        let mut inflight_bytes = 0usize;
         let mut cycle_ok = true;
 
         while received < depth {
@@ -1628,7 +1608,6 @@ fn run_pipeline_batch_client(
                 }
 
                 let (len, _out_count) = bb.finish();
-                let slot_bytes = (HEADER_SIZE + len) * 2;
 
                 let mut hdr = Header {
                     kind: KIND_REQUEST,
@@ -1640,38 +1619,6 @@ fn run_pipeline_batch_client(
                     ..Header::default()
                 };
 
-                while outstanding > 0 && inflight_bytes + slot_bytes > inflight_budget {
-                    match session.receive(&mut recv_buf) {
-                        Ok((resp_hdr, _payload)) => {
-                            if let Some(matched) = slots.iter().position(|pending| {
-                                pending.active && pending.message_id == resp_hdr.message_id
-                            }) {
-                                inflight_bytes -= slots[matched].inflight_bytes;
-                                total_items += slots[matched].batch_size as u64;
-                                slots[matched].active = false;
-                                outstanding -= 1;
-                                received += 1;
-                            } else {
-                                eprintln!(
-                                    "pipeline-batch client: unknown response id {}",
-                                    resp_hdr.message_id
-                                );
-                                cycle_ok = false;
-                                errors += 1;
-                                break;
-                            }
-                        }
-                        Err(_) => {
-                            cycle_ok = false;
-                            errors += 1;
-                            break;
-                        }
-                    }
-                }
-                if !cycle_ok {
-                    break;
-                }
-
                 if session.send(&mut hdr, &req_bufs[slot][..len]).is_err() {
                     cycle_ok = false;
                     errors += 1;
@@ -1681,11 +1628,8 @@ fn run_pipeline_batch_client(
                 slots[slot] = PipelineBatchSlot {
                     message_id: hdr.message_id,
                     batch_size: bs,
-                    inflight_bytes: slot_bytes,
                     active: true,
                 };
-                inflight_bytes += slot_bytes;
-                outstanding += 1;
                 counter += bs as u64;
                 sent += 1;
                 continue;
@@ -1696,10 +1640,8 @@ fn run_pipeline_batch_client(
                     if let Some(matched) = slots.iter().position(|pending| {
                         pending.active && pending.message_id == resp_hdr.message_id
                     }) {
-                        inflight_bytes -= slots[matched].inflight_bytes;
                         total_items += slots[matched].batch_size as u64;
                         slots[matched].active = false;
-                        outstanding -= 1;
                         received += 1;
                     } else {
                         eprintln!(
@@ -1750,11 +1692,7 @@ fn run_pipeline_batch_client(
         eprintln!("pipeline-batch client: {} errors", errors);
     }
 
-    if errors > 0 {
-        1
-    } else {
-        0
-    }
+    if errors > 0 { 1 } else { 0 }
 }
 
 // ---------------------------------------------------------------------------

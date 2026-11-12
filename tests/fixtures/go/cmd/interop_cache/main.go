@@ -87,16 +87,26 @@ func testHandler() cgroups.Handler {
 	}
 }
 
-func waitForSocket(runDir, service string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	path := fmt.Sprintf("%s/%s.sock", runDir, service)
-	for time.Now().Before(deadline) {
-		if info, err := os.Stat(path); err == nil && info.Mode()&os.ModeSocket != 0 { // #nosec G703 -- interop fixture probes caller-provided temporary socket path.
-			return true
-		}
-		time.Sleep(10 * time.Millisecond)
+type listeningServer interface {
+	Listening() <-chan struct{}
+	Stop()
+}
+
+// waitListening reports whether server accepts connections. On false it
+// has reported why and Run has returned.
+func waitListening(server listeningServer, serverErr chan error) bool {
+	select {
+	case <-server.Listening():
+		return true
+	case err := <-serverErr:
+		fmt.Fprintf(os.Stderr, "server: Run returned before listening: %v\n", err)
+		return false
+	case <-time.After(5 * time.Second):
+		server.Stop()
+		<-serverErr
+		fmt.Fprintf(os.Stderr, "server: not listening after 5s\n")
+		return false
 	}
-	return false
 }
 
 func runServer(runDir, service string) int {
@@ -112,13 +122,7 @@ func runServer(runDir, service string) int {
 		serverErr <- server.Run()
 	}()
 
-	if !waitForSocket(runDir, service, 5*time.Second) {
-		server.Stop()
-		if err := <-serverErr; err != nil {
-			fmt.Fprintf(os.Stderr, "server: %v\n", err)
-		} else {
-			fmt.Fprintf(os.Stderr, "server: socket not ready\n")
-		}
+	if !waitListening(server, serverErr) {
 		return 1
 	}
 
@@ -134,14 +138,7 @@ func runServer(runDir, service string) int {
 func runClient(runDir, service string) int {
 	cache := cgroups.NewCache(runDir, service, clientConfig())
 
-	updated := false
-	for i := 0; i < 200; i++ {
-		if cache.Refresh() {
-			updated = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	updated := cache.Refresh()
 	if !updated || !cache.Ready() {
 		fmt.Fprintf(os.Stderr, "client: cache not ready after refresh\n")
 		fmt.Println("FAIL")

@@ -8,6 +8,7 @@
 
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_protocol.h"
+#include "test_sync.h"
 
 #include <inttypes.h>
 #include <pthread.h>
@@ -142,13 +143,14 @@ static bool start_server(server_ctx_t *sctx)
                                               &scfg, 4, &service_handler);
     if (err != NIPC_OK)
         return false;
+    test_server_use_test_timings(&sctx->server, NULL);
 
     pthread_t tid;
     if (pthread_create(&tid, NULL, server_thread, sctx) != 0)
         return false;
     sctx->thread = tid;
 
-    usleep(50000); /* 50ms for server to start */
+    /* init bound the listener, so clients may connect right away. */
     sctx->started = true;
     return true;
 }

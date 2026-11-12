@@ -573,7 +573,7 @@ run_pair_once_to_row() {
     local retry_csv="${retry_run_dir}/row.csv"
     local status=0
 
-    mkdir -p "$retry_run_dir"
+    mkdir -p -m 0700 "$retry_run_dir"
     echo "scenario,client,server,target_rps,throughput,p50_us,p95_us,p99_us,client_cpu_pct,server_cpu_pct,total_cpu_pct" > "$retry_csv"
 
     OUTPUT_CSV="$retry_csv"
@@ -902,7 +902,7 @@ main() {
         exit 1
     fi
 
-    mkdir -p "$RUN_DIR"
+    mkdir -p -m 0700 "$RUN_DIR"
 
     # CSV header
     echo "scenario,client,server,target_rps,throughput,p50_us,p95_us,p99_us,client_cpu_pct,server_cpu_pct,total_cpu_pct" > "$OUTPUT_CSV"

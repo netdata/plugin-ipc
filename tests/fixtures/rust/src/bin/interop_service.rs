@@ -49,9 +49,22 @@ mod posix_only {
         }
     }
 
+    /// NIPC_HANDLER_DELAY_MS makes every snapshot handler slow, so interop runs
+    /// prove that clients wait past their internal 100 ms abort-poll slice.
+    fn handler_delay() {
+        if let Some(ms) = std::env::var("NIPC_HANDLER_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&ms| ms > 0 && ms <= 10_000)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+    }
+
     fn server_handler() -> Handler {
         Handler {
             handle: Some(std::sync::Arc::new(|request, builder| {
+                handler_delay();
                 if request.layout_version != 1 || request.flags != 0 {
                     return false;
                 }
@@ -375,21 +388,36 @@ mod posix_only {
         }
     }
 
-    fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut server = ManagedServer::new(run_dir, service, server_config(), server_handler());
-
-        // Signal readiness
+    /// Run a server on its own thread, print READY once it accepts
+    /// connections, and stop it after 10 s if the test never kills this
+    /// process.
+    fn serve(
+        listening: netipc::service::ListeningSignal,
+        stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        run: impl FnOnce() -> Result<(), netipc::protocol::NipcError> + Send + 'static,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let runner = std::thread::spawn(run);
+        if !listening.wait(std::time::Duration::from_secs(5)) {
+            stop_flag.store(false, std::sync::atomic::Ordering::Release);
+            let _ = runner.join();
+            return Err("server not listening after 5s".into());
+        }
         println!("READY");
 
-        // Stop after 10s timeout (interop test should finish sooner)
-        let stop_flag = server.running_flag();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(10));
             stop_flag.store(false, std::sync::atomic::Ordering::Release);
         });
 
-        server.run()?;
+        runner.join().map_err(|_| "server thread panicked")??;
         Ok(())
+    }
+
+    fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut server = ManagedServer::new(run_dir, service, server_config(), server_handler());
+        let listening = server.listening_signal();
+        let stop_flag = server.running_flag();
+        serve(listening, stop_flag, move || server.run())
     }
 
     fn run_apps_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -400,17 +428,9 @@ mod posix_only {
             apps_lookup_handler(),
             8,
         );
-
-        println!("READY");
-
+        let listening = server.listening_signal();
         let stop_flag = server.running_flag();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(10));
-            stop_flag.store(false, std::sync::atomic::Ordering::Release);
-        });
-
-        server.run()?;
-        Ok(())
+        serve(listening, stop_flag, move || server.run())
     }
 
     fn run_cgroups_lookup_server(
@@ -424,17 +444,9 @@ mod posix_only {
             cgroups_lookup_handler(),
             8,
         );
-
-        println!("READY");
-
+        let listening = server.listening_signal();
         let stop_flag = server.running_flag();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(10));
-            stop_flag.store(false, std::sync::atomic::Ordering::Release);
-        });
-
-        server.run()?;
-        Ok(())
+        serve(listening, stop_flag, move || server.run())
     }
 
     fn run_apps_mixed_server(
@@ -448,17 +460,9 @@ mod posix_only {
             apps_lookup_mixed_handler(),
             2,
         );
-
-        println!("READY");
-
+        let listening = server.listening_signal();
         let stop_flag = server.running_flag();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(10));
-            stop_flag.store(false, std::sync::atomic::Ordering::Release);
-        });
-
-        server.run()?;
-        Ok(())
+        serve(listening, stop_flag, move || server.run())
     }
 
     fn run_cgroups_mixed_server(
@@ -472,17 +476,9 @@ mod posix_only {
             cgroups_lookup_mixed_handler(),
             2,
         );
-
-        println!("READY");
-
+        let listening = server.listening_signal();
         let stop_flag = server.running_flag();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(10));
-            stop_flag.store(false, std::sync::atomic::Ordering::Release);
-        });
-
-        server.run()?;
-        Ok(())
+        serve(listening, stop_flag, move || server.run())
     }
 
     fn large_lookup_pids(item_count: usize) -> Vec<u32> {
@@ -495,26 +491,16 @@ mod posix_only {
             .collect()
     }
 
+    /// The server printed READY after binding, so one refresh connects.
     fn wait_apps_client_ready(client: &mut AppsLookupClient) -> bool {
-        for _ in 0..200 {
-            client.refresh();
-            if client.ready() {
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        false
+        client.refresh();
+        client.ready()
     }
 
+    /// The server printed READY after binding, so one refresh connects.
     fn wait_cgroups_lookup_client_ready(client: &mut CgroupsLookupClient) -> bool {
-        for _ in 0..200 {
-            client.refresh();
-            if client.ready() {
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        false
+        client.refresh();
+        client.ready()
     }
 
     fn run_apps_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -749,13 +735,7 @@ mod posix_only {
 
     fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
         let mut client = CgroupsClient::new(run_dir, service, client_config());
-        for _ in 0..200 {
-            client.refresh();
-            if client.ready() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        client.refresh();
 
         if !client.ready() {
             return Err("client not ready".into());

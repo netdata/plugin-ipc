@@ -10,7 +10,7 @@
  *   3. Valid header with wrong magic
  *   4. Valid header with payload_len exceeding negotiated limit
  *   5. Partial chunk (start chunking, don't send all chunks)
- *   6. Connect, send nothing, disconnect after 100ms
+ *   6. Connect, send nothing, disconnect once the server waits for HELLO
  *   7. Connect, send half a header, disconnect
  *   8. SHM chaos: random bytes in request area
  *
@@ -24,6 +24,8 @@
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_uds.h"
 #include "netipc/netipc_shm.h"
+#include "test_sync.h"
+#include "uds_test_socket.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -137,6 +139,7 @@ static nipc_error_t test_cgroups_handler(void *user,
 typedef struct {
     const char *service;
     nipc_managed_server_t server;
+    test_server_events_t events;
     int ready;   /* __atomic */
     int done;    /* __atomic */
 } chaos_server_ctx_t;
@@ -163,14 +166,15 @@ static void *chaos_server_fn(void *arg)
 
     if (err != NIPC_OK) {
         fprintf(stderr, "chaos server init failed: %d\n", err);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_server_use_test_timings(&ctx->server, &ctx->events);
+    test_flag_set(&ctx->ready);
     nipc_server_run(&ctx->server);
     nipc_server_destroy(&ctx->server);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -183,11 +187,7 @@ static void start_chaos_server(chaos_server_ctx_t *sctx, const char *service,
     __atomic_store_n(&sctx->done, 0, __ATOMIC_RELAXED);
 
     pthread_create(tid, NULL, chaos_server_fn, sctx);
-
-    for (int i = 0; i < 4000
-         && !__atomic_load_n(&sctx->ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx->done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx->ready, &sctx->done);
 }
 
 static void stop_chaos_server(chaos_server_ctx_t *sctx, pthread_t tid)
@@ -212,18 +212,8 @@ static bool verify_server_alive(const char *service)
     nipc_client_ctx_t client;
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
 
-    /* Try connecting with retries (server may be processing disconnect) */
-    bool connected = false;
-    for (int r = 0; r < 200; r++) {
-        nipc_client_refresh(&client);
-        if (nipc_client_ready(&client)) {
-            connected = true;
-            break;
-        }
-        usleep(5000);
-    }
-
-    if (!connected) {
+    nipc_client_refresh(&client);
+    if (!nipc_client_ready(&client)) {
         nipc_client_close(&client);
         return false;
     }
@@ -271,7 +261,7 @@ static int raw_connect(const char *service)
     char path[256];
     snprintf(path, sizeof(path), "%s/%s.sock", TEST_RUN_DIR, service);
 
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    int fd = socket(AF_UNIX, TEST_UDS_SOCK_TYPE, 0);
     if (fd < 0) return -1;
 
     struct sockaddr_un addr;
@@ -359,10 +349,12 @@ static void test_truncated_payload(void)
     start_chaos_server(&sctx, svc, &tid);
     check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
+    int attacks = 0;
     for (int i = 0; i < 10; i++) {
         nipc_uds_session_t session;
         int fd = chaos_connect(svc, &session);
-        if (fd < 0) { usleep(10000); continue; }
+        if (fd < 0)
+            continue;
 
         /* Build a valid header claiming 1000 bytes of payload */
         nipc_header_t hdr = {0};
@@ -387,10 +379,12 @@ static void test_truncated_payload(void)
         session.fd = -1;
         free(session.recv_buf);
 
-        usleep(5000);
+        /* The worker must notice the attack and exit. */
+        if (test_server_wait_session_exits(&sctx.events, 1))
+            attacks++;
     }
 
-    usleep(100000);
+    check("all 10 attacked sessions exited", attacks == 10);
     bool alive = verify_server_alive(svc);
     check("server alive after truncated payload attacks", alive);
 
@@ -413,10 +407,12 @@ static void test_wrong_magic(void)
     start_chaos_server(&sctx, svc, &tid);
     check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
+    int attacks = 0;
     for (int i = 0; i < 10; i++) {
         nipc_uds_session_t session;
         int fd = chaos_connect(svc, &session);
-        if (fd < 0) { usleep(10000); continue; }
+        if (fd < 0)
+            continue;
 
         /* Build a header with bad magic */
         nipc_header_t hdr = {0};
@@ -444,10 +440,12 @@ static void test_wrong_magic(void)
         session.fd = -1;
         free(session.recv_buf);
 
-        usleep(5000);
+        /* The worker must notice the attack and exit. */
+        if (test_server_wait_session_exits(&sctx.events, 1))
+            attacks++;
     }
 
-    usleep(100000);
+    check("all 10 attacked sessions exited", attacks == 10);
     bool alive = verify_server_alive(svc);
     check("server alive after wrong-magic attacks", alive);
 
@@ -470,10 +468,12 @@ static void test_payload_exceeds_limit(void)
     start_chaos_server(&sctx, svc, &tid);
     check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
+    int attacks = 0;
     for (int i = 0; i < 10; i++) {
         nipc_uds_session_t session;
         int fd = chaos_connect(svc, &session);
-        if (fd < 0) { usleep(10000); continue; }
+        if (fd < 0)
+            continue;
 
         /* Claim a huge payload_len (exceeds negotiated max) */
         nipc_header_t hdr = {0};
@@ -494,10 +494,12 @@ static void test_payload_exceeds_limit(void)
         session.fd = -1;
         free(session.recv_buf);
 
-        usleep(5000);
+        /* The worker must notice the attack and exit. */
+        if (test_server_wait_session_exits(&sctx.events, 1))
+            attacks++;
     }
 
-    usleep(100000);
+    check("all 10 attacked sessions exited", attacks == 10);
     bool alive = verify_server_alive(svc);
     check("server alive after limit-exceeding attacks", alive);
 
@@ -520,10 +522,12 @@ static void test_partial_chunk(void)
     start_chaos_server(&sctx, svc, &tid);
     check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
+    int attacks = 0;
     for (int i = 0; i < 10; i++) {
         nipc_uds_session_t session;
         int fd = chaos_connect(svc, &session);
-        if (fd < 0) { usleep(10000); continue; }
+        if (fd < 0)
+            continue;
 
         /* Send chunk 0 of 3 (then disconnect without sending chunks 1,2) */
         nipc_chunk_header_t chk = {0};
@@ -549,10 +553,12 @@ static void test_partial_chunk(void)
         session.fd = -1;
         free(session.recv_buf);
 
-        usleep(5000);
+        /* The worker must notice the attack and exit. */
+        if (test_server_wait_session_exits(&sctx.events, 1))
+            attacks++;
     }
 
-    usleep(100000);
+    check("all 10 attacked sessions exited", attacks == 10);
     bool alive = verify_server_alive(svc);
     check("server alive after partial-chunk attacks", alive);
 
@@ -579,21 +585,20 @@ static void test_silent_connect_disconnect(void)
     for (int i = 0; i < 20; i++) {
         /* Raw connect (no handshake) */
         int fd = raw_connect(svc);
-        if (fd < 0) {
-            usleep(10000);
+        if (fd < 0)
             continue;
-        }
-        connected++;
 
-        /* Wait 100ms, then disconnect without sending anything */
-        usleep(100000);
+        /* Disconnect without sending anything once a worker waits for
+         * HELLO, then wait for that worker to exit. */
+        bool waiting = test_server_wait_handshakes(&sctx.events, 1);
         close(fd);
+        if (waiting && test_server_wait_session_exits(&sctx.events, 1))
+            connected++;
     }
 
     printf("    %d silent connects\n", connected);
-    check("silent connects succeeded", connected >= 10);
+    check("every silent connect was accepted and released", connected == 20);
 
-    usleep(200000);
     bool alive = verify_server_alive(svc);
     check("server alive after silent connect/disconnect", alive);
 
@@ -620,25 +625,21 @@ static void test_half_header(void)
     for (int i = 0; i < 20; i++) {
         /* Raw connect (no handshake) */
         int fd = raw_connect(svc);
-        if (fd < 0) {
-            usleep(10000);
+        if (fd < 0)
             continue;
-        }
 
         /* Send only 12 bytes of a 32-byte header */
         uint8_t partial[12];
         fill_random(partial, sizeof(partial));
         ssize_t n = send(fd, partial, sizeof(partial), MSG_NOSIGNAL);
-        if (n > 0) sent_count++;
-
-        usleep(50000);
         close(fd);
+        if (n > 0 && test_server_wait_session_exits(&sctx.events, 1))
+            sent_count++;
     }
 
     printf("    %d half-header sends\n", sent_count);
-    check("half-header sends succeeded", sent_count >= 10);
+    check("every half-header session was released", sent_count == 20);
 
-    usleep(200000);
     bool alive = verify_server_alive(svc);
     check("server alive after half-header attacks", alive);
 
@@ -677,17 +678,8 @@ static void test_shm_chaos(void)
         nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
 
         /* Connect and do one normal call to ensure SHM is set up */
-        bool connected = false;
-        for (int r = 0; r < 200; r++) {
-            nipc_client_refresh(&client);
-            if (nipc_client_ready(&client)) {
-                connected = true;
-                break;
-            }
-            usleep(5000);
-        }
-
-        if (connected) {
+        nipc_client_refresh(&client);
+        if (nipc_client_ready(&client)) {
             nipc_cgroups_resp_view_t view;
             nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
             check("initial SHM call succeeded", err == NIPC_OK);
@@ -893,24 +885,32 @@ static void test_rapid_chaos_mix(void)
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
 
-int main(void)
+int main(int argc, char **argv)
 {
+    /* Randomized attacks are not correctness tests: they run only with
+     * --extended, from tests/run-extended-stress.sh. */
+    bool extended = argc > 1 && strcmp(argv[1], "--extended") == 0;
+
     signal(SIGPIPE, SIG_IGN);
     srand((unsigned int)time(NULL));
     ensure_run_dir();
     setbuf(stdout, NULL);
 
-    printf("=== Transport-Level Chaos Tests (Phase H9) ===\n\n");
+    printf("=== Transport-Level Chaos Tests (Phase H9)%s ===\n\n",
+           extended ? " - randomized" : "");
 
-    test_random_bytes_after_handshake();   printf("\n");
-    test_truncated_payload();               printf("\n");
-    test_wrong_magic();                     printf("\n");
-    test_payload_exceeds_limit();           printf("\n");
-    test_partial_chunk();                   printf("\n");
-    test_silent_connect_disconnect();       printf("\n");
-    test_half_header();                     printf("\n");
-    test_shm_chaos();                       printf("\n");
-    test_rapid_chaos_mix();                 printf("\n");
+    if (extended) {
+        test_random_bytes_after_handshake();   printf("\n");
+        test_shm_chaos();                       printf("\n");
+        test_rapid_chaos_mix();                 printf("\n");
+    } else {
+        test_truncated_payload();               printf("\n");
+        test_wrong_magic();                     printf("\n");
+        test_payload_exceeds_limit();           printf("\n");
+        test_partial_chunk();                   printf("\n");
+        test_silent_connect_disconnect();       printf("\n");
+        test_half_header();                     printf("\n");
+    }
 
     printf("=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

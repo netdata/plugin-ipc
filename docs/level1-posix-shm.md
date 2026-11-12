@@ -3,12 +3,29 @@
 ## Purpose
 
 This document defines the shared memory region layout, synchronization
-protocol, and lifecycle rules for the POSIX SHM transport on Linux.
+protocol, and lifecycle rules for the POSIX SHM transport on Linux and
+FreeBSD.
 All implementations (C, Rust, Go) must use this exact layout and
 synchronization protocol to interoperate on the same shared region.
 
-This transport is Linux-only. FreeBSD and macOS fall back to UDS
-baseline.
+This transport runs on Linux and FreeBSD. C and Rust support it on every
+FreeBSD architecture; Go supports it on FreeBSD amd64 and 386 only. macOS,
+and Go on other FreeBSD architectures, fall back to UDS baseline. Where SHM
+is not supported the C and Go SHM APIs remain available and return an
+"unsupported" error (`NIPC_SHM_ERR_UNSUPPORTED`, `ErrShmUnsupported`); the
+Rust crate compiles the POSIX SHM module only on Linux and FreeBSD.
+
+The platforms differ only in the system calls behind three operations; the
+region layout and the protocol are the same:
+
+| Operation | Linux | FreeBSD |
+|---|---|---|
+| Wait on a signal word | `futex(FUTEX_WAIT)` | `_umtx_op(UMTX_OP_WAIT_UINT)` |
+| Wake waiters | `futex(FUTEX_WAKE)` | `_umtx_op(UMTX_OP_WAKE)` |
+| Reserve the region file | `fallocate(fd, 0, 0, size)` | `posix_fallocate(fd, 0, size)` |
+
+On FreeBSD the shared (not `_PRIVATE`) umtx operations are required: they
+key on the mapped object, so a wake reaches waiters in other processes.
 
 ## Region file path
 
@@ -24,7 +41,8 @@ Each session gets its own SHM region. Multiple concurrent clients each
 have independent regions with independent request/response areas,
 sequence numbers, and futex signal words.
 
-Created by the server via `open` + native Linux `fallocate` on a filesystem path.
+Created by the server via `open` + a reserving allocation (Linux `fallocate`,
+FreeBSD `posix_fallocate`) on a filesystem path.
 The complete range is allocated before it is mapped, so capacity exhaustion is
 reported as a normal creation error instead of a later `SIGBUS` during mapped access.
 The client opens the same path after the handshake negotiates an SHM
@@ -175,7 +193,14 @@ kernel-assisted blocking:
 3. The publisher always calls `futex(FUTEX_WAKE)` after advancing the
    sequence, regardless of whether the consumer is spinning or waiting.
 
-Futex timeout arguments must use the selected Linux syscall's ABI, not assume
+On FreeBSD the wait is `_umtx_op(UMTX_OP_WAIT_UINT)` with a relative
+`struct _umtx_time` on `CLOCK_MONOTONIC` (its size passed in the `uaddr`
+argument), and the wake is `_umtx_op(UMTX_OP_WAKE)`. A wait whose expected
+value is already stale returns success at once, where a Linux futex returns
+`EAGAIN`. Both are spurious-wakeup-safe because the consumer re-checks the
+sequence number after every return.
+
+Linux futex timeout arguments must use the selected syscall's ABI, not assume
 that libc's `struct timespec` has the same layout. In particular, 32-bit libc
 may use 64-bit seconds while the legacy syscall expects two 32-bit fields.
 All receive budgets are unsigned 32-bit milliseconds: their relative seconds
@@ -205,15 +230,24 @@ protocol prohibition.
 
 ### Server creates a per-session region
 
-The server creates one SHM region per accepted session, after the
-handshake negotiates an SHM profile. The region path is derived from
-the `session_id` assigned during the handshake.
+The server creates one SHM region per accepted session, inside the
+handshake: after HELLO validation, authorization, profile selection and
+the limit checks pick an SHM profile, and before HELLO_ACK. Baseline
+sessions and rejected handshakes create no region. The region is sized
+from the final request and response payload limits plus the message
+header. The region path is derived from the `session_id` assigned to
+the handshake.
 
 1. Derive the region path: `{run_dir}/{service_name}-{session_id:016x}.ipcshm`.
 2. Create the file via `open(O_RDWR | O_CREAT | O_EXCL, 0600)`.
-   `O_EXCL` ensures no collision with an existing region.
+   `O_EXCL` ensures no collision with an existing region. Then `fchmod`
+   the descriptor to 0600: the file takes `0600 & ~umask`, and a umask
+   without owner read or write would stop the client from attaching
+   read-write.
 3. Allocate the required size (header + request area + response area) with
-   native Linux `fallocate(fd, 0, 0, size)`. Retry `EINTR`; any other failure
+   native Linux `fallocate(fd, 0, 0, size)` or FreeBSD
+   `posix_fallocate(fd, 0, size)` (which returns its error number instead of
+   setting `errno`). Retry `EINTR`; any other failure
    aborts SHM preparation, closes and unlinks the new region, and reports the
    allocation-stage transport error. Do not fall back to sparse `ftruncate`
    or an allocation mechanism without the same reservation guarantee.
@@ -231,6 +265,13 @@ allocation-stage error (`NIPC_SHM_ERR_ALLOCATE`, `ShmError::Allocate`, or
 in their error values. Managed services remove SHM from that session's negotiation and
 continue over baseline when baseline is configured. An explicitly SHM-only service has
 no fallback transport and may reject or retry the session.
+
+FreeBSD ZFS does not support `posix_fallocate` and rejects it with `EINVAL`, so
+a server whose run directory is on ZFS (for example Netdata's default
+`/var/run/netdata` on a ZFS-root install) never prepares SHM and serves every
+session over baseline. tmpfs and UFS reserve the space and report exhaustion as
+`ENOSPC`. To get SHM on such a system, point the run directory at tmpfs or UFS
+(Netdata: `NETDATA_RUN_DIR`).
 
 Linux runtime sandboxes must allow the `fallocate` system call or arrange for it to
 return an ordinary error such as `EPERM`, `ENOSYS`, or `EOPNOTSUPP`. NetIPC can convert
@@ -262,12 +303,58 @@ place.
 3. Validate the file size (must be >= header_len).
 4. `mmap` the region.
 5. Validate the header: magic, version, header_len.
-6. Read offsets and capacities from the header.
+6. Read offsets and capacities from the header and validate them: both
+   offsets at or after the aligned header end, both capacities non-zero,
+   all four values 64-byte aligned, the response area starting at or after
+   the aligned end of the request area, and both areas ending within the
+   file. Area ends are computed without wrapping (for example in 64-bit
+   arithmetic), so a forged header cannot pass on 32-bit platforms. A
+   violation is a bad-size error.
 7. The client is now ready to publish requests and consume responses.
 
-If the file does not exist or is undersized (server has not yet
-finished creating it), the client treats this as a retryable
-protocol-not-ready condition.
+The server creates the region in place: create with mode 0600, `fchmod`
+to 0600 (the umask may have narrowed the create), zero-fill, then write the
+header. Until it finishes, the client can see a missing file, a file it may
+not open yet (`EACCES` before the `fchmod`), an undersized file, a zero
+magic, or a header whose ring offsets and capacities are not written yet.
+So any failure to open the file, an undersized file, any magic mismatch,
+and a ring offset inside the header or a zero ring capacity are retried
+until the deadline; every other error (version, header length, rings that
+overflow or do not fit the file, mapping) fails the attach at once. A permanent open or
+magic error costs at most the attach wait, bounded by the fallback rule in
+`level2-typed-api.md`. Between retries the client probes the
+session socket (see "Peer liveness"); if the server already closed it
+(refused at worker capacity, or died), the client stops retrying, reports
+the connect as failed, and keeps SHM enabled for its next connect. The
+probe runs before each deadline check, so a server that closed the socket
+is never taken for an attach failure, whichever deadline ends the wait.
+When the call deadline ends the wait, SHM also stays enabled, except that
+the second such wait in a row with the session still connected fails the
+attach (`level2-typed-api.md`). When the attach timeout ends the wait first
+(it is shorter than the call's remaining time) with the session still
+connected, the attach fails; a tie between the two counts as the call
+deadline.
+
+### Peer liveness
+
+The UDS session socket stays open for the whole SHM session. SHM waits
+cannot see a peer that exits, but the kernel closes that process's socket
+end, so the socket is the dead-peer signal for both sides:
+
+- The probe is a zero-wait `poll()` for `POLLHUP`, `POLLERR`, `POLLNVAL`
+  (and `POLLRDHUP` where available); readable data is checked with a
+  non-blocking `MSG_PEEK` receive, where 0 bytes means end of stream. No
+  data flows on the socket during an SHM session.
+- It runs only after a wait slice expires with no message, never while
+  messages flow: the server after each idle receive poll (100 ms), the
+  client after each idle slice of its response wait (100 ms).
+- A server that sees the peer gone ends the session (freeing the worker
+  and the region). A client fails the in-flight call with a disconnected
+  error.
+- Process liveness (`kill(pid, 0)`) is not used: it is wrong across PID
+  namespaces and after PID reuse.
+- Session sockets are close-on-exec, so a child that a consumer forks and
+  execs cannot keep a dead peer's socket open.
 
 ### Server destroys a per-session region
 
@@ -320,6 +407,11 @@ behind by a previous server instance that crashed or was killed:
 3. Stale files are unlinked only in a safe `{run_dir}`. Live files and files in
    unsafe shared directories are left in place.
 
+The scan and its stat checks must work with 64-bit inode numbers and directory
+offsets on 32-bit platforms; the C transport sources enable large-file
+interfaces themselves, so 32-bit builds with the legacy `off_t` layout do not
+silently skip the scan.
+
 This cleanup runs once at server startup, before the listener begins
 accepting connections. It is the safety net for crashes and hard
 reboots.
@@ -363,5 +455,5 @@ diagnostic to report 4-byte pointers, 4/8-byte seconds fields and 8/16-byte
 timespecs for time32/time64 respectively; a missing or unexpected layout fails
 the run even when the timeout assertions pass. Runtime Safety CI checks both
 C ARM glibc layouts and both Rust ARM musl layouts. Emulation validates syscall ABI
-behavior; it does not establish production CPU usage or full C/Rust/Go support
-for that architecture.
+behavior; it does not establish production CPU usage. Full C/Rust/Go suites and
+interop for each Netdata Linux target run through `tests/run-linux-target.sh`.

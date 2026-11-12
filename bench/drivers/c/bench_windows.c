@@ -40,6 +40,7 @@
 #include <process.h>
 #include <signal.h>
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
@@ -67,6 +68,63 @@
 #ifndef _strdup
 #define _strdup strdup
 #endif
+#endif
+
+#ifdef __MSYS__
+#include <pthread.h>
+
+/* The MSYS runtime does not support threads started with CreateThread:
+ * under load such a thread may never run and the process dies silently.
+ * Start threads with pthread_create; each duplicates its own handle for the
+ * creator, so callers keep waiting on and closing a real thread handle. */
+typedef struct {
+    LPTHREAD_START_ROUTINE fn;
+    void *arg;
+    HANDLE started;
+    HANDLE thread;
+} bench_thread_start_t;
+
+static void *bench_thread_trampoline(void *p)
+{
+    bench_thread_start_t *start = p;
+    LPTHREAD_START_ROUTINE fn = start->fn;
+    void *arg = start->arg;
+    HANDLE thread = NULL;
+    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+                         &thread, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        thread = NULL;
+    start->thread = thread;
+    /* start lives on the creator's stack: no access after this. */
+    SetEvent(start->started);
+    if (thread)
+        fn(arg);
+    return NULL;
+}
+
+static HANDLE bench_create_thread(LPTHREAD_START_ROUTINE fn, void *arg)
+{
+    bench_thread_start_t start = {
+        .fn = fn,
+        .arg = arg,
+        .started = CreateEventW(NULL, TRUE, FALSE, NULL),
+    };
+    if (!start.started)
+        return NULL;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, bench_thread_trampoline, &start) != 0) {
+        CloseHandle(start.started);
+        return NULL;
+    }
+    pthread_detach(thread);
+    WaitForSingleObject(start.started, INFINITE);
+    CloseHandle(start.started);
+    return start.thread;
+}
+#else
+static HANDLE bench_create_thread(LPTHREAD_START_ROUTINE fn, void *arg)
+{
+    return CreateThread(NULL, 0, fn, arg, 0, NULL);
+}
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -232,6 +290,31 @@ static inline void latency_record(latency_recorder_t *lr, uint64_t ns)
 {
     if (lr->count < lr->capacity)
         lr->samples[lr->count++] = ns;
+}
+
+/* Reject a duration the driver cannot time. The cap keeps the timer
+ * thread's DWORD millisecond wait from wrapping. */
+static int parse_duration_from(const char *arg, long min)
+{
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(arg, &end, 10);
+    if (errno != 0 || end == arg || *end != '\0' || v < min || v > 4000000L) {
+        fprintf(stderr, "invalid duration '%s'\n", arg);
+        exit(1);
+    }
+    return (int)v;
+}
+
+static int parse_duration(const char *arg)
+{
+    return parse_duration_from(arg, 1);
+}
+
+/* Zero runs a server without its stop timer. */
+static int parse_server_duration(const char *arg)
+{
+    return parse_duration_from(arg, 0);
 }
 
 static int cmp_u64(const void *a, const void *b)
@@ -535,7 +618,7 @@ static HANDLE start_timer_thread(int duration_sec, bench_timer_ctx_t *ctx)
     if (!ctx->cancel_event)
         return NULL;
 
-    HANDLE timer = CreateThread(NULL, 0, timer_thread, ctx, 0, NULL);
+    HANDLE timer = bench_create_thread(timer_thread, ctx);
     if (!timer) {
         CloseHandle(ctx->cancel_event);
         ctx->cancel_event = NULL;
@@ -666,7 +749,7 @@ static int run_server(const char *run_dir, const char *service,
     bench_server_thread_ctx_t thread_ctx = {
         .server = &server,
     };
-    HANDLE server_thread = CreateThread(NULL, 0, bench_server_thread, &thread_ctx, 0, NULL);
+    HANDLE server_thread = bench_create_thread(bench_server_thread, &thread_ctx);
     if (!server_thread) {
         fprintf(stderr, "server thread create failed: %lu\n", (unsigned long)GetLastError());
         g_server = NULL;
@@ -752,7 +835,7 @@ static int run_server_batch(const char *run_dir, const char *service,
     bench_server_thread_ctx_t thread_ctx = {
         .server = &server,
     };
-    HANDLE server_thread = CreateThread(NULL, 0, bench_server_thread, &thread_ctx, 0, NULL);
+    HANDLE server_thread = bench_create_thread(bench_server_thread, &thread_ctx);
     if (!server_thread) {
         fprintf(stderr, "batch server thread create failed: %lu\n",
                 (unsigned long)GetLastError());
@@ -1524,7 +1607,7 @@ static int run_lookup_bench(int duration_sec)
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "Usage:\n"
+        "Usage (a server duration_sec of 0 runs without a stop timer):\n"
         "  %s np-ping-pong-server         <run_dir> <service> [duration_sec]\n"
         "  %s np-ping-pong-client         <run_dir> <service> <duration_sec> <target_rps>\n"
         "  %s shm-ping-pong-server        <run_dir> <service> [duration_sec]\n"
@@ -1570,7 +1653,7 @@ int main(int argc, char **argv)
 
         const char *run_dir = argv[2];
         const char *service = argv[3];
-        int duration = (argc >= 5) ? atoi(argv[4]) : DEFAULT_DURATION;
+        int duration = (argc >= 5) ? parse_server_duration(argv[4]) : DEFAULT_DURATION;
 
         CreateDirectoryA(run_dir, NULL);
 
@@ -1611,7 +1694,7 @@ int main(int argc, char **argv)
 
         const char *run_dir = argv[2];
         const char *service = argv[3];
-        int duration = (argc >= 5) ? atoi(argv[4]) : DEFAULT_DURATION;
+        int duration = (argc >= 5) ? parse_server_duration(argv[4]) : DEFAULT_DURATION;
 
         CreateDirectoryA(run_dir, NULL);
 
@@ -1637,7 +1720,7 @@ int main(int argc, char **argv)
 
         const char *run_dir = argv[2];
         const char *service = argv[3];
-        int duration = atoi(argv[4]);
+        int duration = parse_duration(argv[4]);
         uint64_t target_rps = (uint64_t)strtoull(argv[5], NULL, 10);
 
         uint32_t profiles;
@@ -1667,7 +1750,7 @@ int main(int argc, char **argv)
 
         const char *run_dir = argv[2];
         const char *service = argv[3];
-        int duration = atoi(argv[4]);
+        int duration = parse_duration(argv[4]);
         uint64_t target_rps = (uint64_t)strtoull(argv[5], NULL, 10);
 
         uint32_t profiles;
@@ -1697,7 +1780,7 @@ int main(int argc, char **argv)
 
         const char *run_dir = argv[2];
         const char *service = argv[3];
-        int duration = atoi(argv[4]);
+        int duration = parse_duration(argv[4]);
         uint64_t target_rps = (uint64_t)strtoull(argv[5], NULL, 10);
 
         uint32_t profiles;
@@ -1725,7 +1808,7 @@ int main(int argc, char **argv)
 
         const char *run_dir = argv[2];
         const char *service = argv[3];
-        int duration = atoi(argv[4]);
+        int duration = parse_duration(argv[4]);
         uint64_t target_rps = (uint64_t)strtoull(argv[5], NULL, 10);
         int depth = atoi(argv[6]);
         if (depth < 1) depth = 1;
@@ -1880,7 +1963,7 @@ int main(int argc, char **argv)
 
         const char *run_dir = argv[2];
         const char *service = argv[3];
-        int duration = atoi(argv[4]);
+        int duration = parse_duration(argv[4]);
         uint64_t target_rps = (uint64_t)strtoull(argv[5], NULL, 10);
         int depth = atoi(argv[6]);
         if (depth < 1) depth = 1;
@@ -1925,7 +2008,6 @@ int main(int argc, char **argv)
         uint8_t *req_bufs[128];
         uint8_t *recv_buf = NULL;
         size_t req_lens[128];
-        size_t slot_costs[128];
         uint32_t batch_sizes[128];
         uint64_t slot_msg_ids[128];
         bool slot_active[128];
@@ -1948,20 +2030,16 @@ int main(int argc, char **argv)
         uint64_t cpu_start = cpu_ns();
         uint64_t wall_start = now_ns();
         ULONGLONG tick_deadline = GetTickCount64() + (ULONGLONG)duration * 1000;
-        size_t inflight_budget = (size_t)session.packet_size * 2;
 
         while (GetTickCount64() < tick_deadline) {
             rate_limiter_wait(&rl);
             uint64_t t0 = (total_items & 63) == 0 ? now_ns() : 0;
 
-            /* Keep the logical pipeline depth, but drain responses once the
-             * estimated request+response bytes in flight get too large for a
-             * blocking named pipe session. */
+            /* Send the whole depth, then read the responses: the client
+             * send reads responses while its write waits for pipe space. */
             memset(slot_active, 0, sizeof(slot_active));
             int sent = 0;
             int received = 0;
-            int outstanding = 0;
-            size_t inflight_bytes = 0;
             int cycle_ok = 1;
 
             while (received < depth) {
@@ -1991,46 +2069,6 @@ int main(int argc, char **argv)
                     hdrs[slot].transport_status = NIPC_STATUS_OK;
 
                     slot_msg_ids[slot] = hdrs[slot].message_id;
-                    slot_costs[slot] = (NIPC_HEADER_LEN + req_lens[slot]) * 2;
-
-                    while (outstanding > 0 &&
-                           inflight_bytes + slot_costs[slot] > inflight_budget) {
-                        nipc_header_t resp_hdr;
-                        const void *resp_payload;
-                        size_t resp_len;
-                        nipc_np_error_t uerr = nipc_np_receive(&session,
-                            recv_buf, BENCH_BATCH_BUF_SIZE + NIPC_HEADER_LEN,
-                            &resp_hdr, &resp_payload, &resp_len);
-                        if (uerr != NIPC_NP_OK) {
-                            errors++;
-                            cycle_ok = 0;
-                            break;
-                        }
-
-                        int matched = -1;
-                        for (int i = 0; i < depth; i++) {
-                            if (slot_active[i] && slot_msg_ids[i] == resp_hdr.message_id) {
-                                matched = i;
-                                break;
-                            }
-                        }
-                        if (matched < 0) {
-                            fprintf(stderr, "pipeline-batch client: unknown response id %llu\n",
-                                    (unsigned long long)resp_hdr.message_id);
-                            errors++;
-                            cycle_ok = 0;
-                            break;
-                        }
-
-                        inflight_bytes -= slot_costs[matched];
-                        total_items += batch_sizes[matched];
-                        slot_active[matched] = false;
-                        outstanding--;
-                        received++;
-                    }
-                    if (!cycle_ok)
-                        break;
-
                     nipc_np_error_t uerr = nipc_np_send(&session,
                         &hdrs[slot], req_bufs[slot], req_lens[slot]);
                     if (uerr != NIPC_NP_OK) {
@@ -2040,8 +2078,6 @@ int main(int argc, char **argv)
                     }
 
                     slot_active[slot] = true;
-                    inflight_bytes += slot_costs[slot];
-                    outstanding++;
                     counter += bs;
                     sent++;
                     continue;
@@ -2074,10 +2110,8 @@ int main(int argc, char **argv)
                     break;
                 }
 
-                inflight_bytes -= slot_costs[matched];
                 total_items += batch_sizes[matched];
                 slot_active[matched] = false;
-                outstanding--;
                 received++;
             }
 
@@ -2122,7 +2156,7 @@ int main(int argc, char **argv)
             usage(argv[0]);
             return 1;
         }
-        return run_lookup_bench(atoi(argv[2]));
+        return run_lookup_bench(parse_duration(argv[2]));
     }
 
     fprintf(stderr, "Unknown subcommand: %s\n", cmd);

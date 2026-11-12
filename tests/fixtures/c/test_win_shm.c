@@ -10,6 +10,8 @@
 #include "netipc/netipc_win_shm.h"
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_protocol.h"
+#include "test_sync.h"
+#include "test_win_security.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,22 +66,14 @@ static void fill_long_run_dir(char *buf, size_t len)
     buf[len - 1] = '\0';
 }
 
-static nipc_win_shm_error_t attach_client_retry(const char *service,
-                                                uint64_t session_id,
-                                                uint32_t profile,
-                                                nipc_win_shm_ctx_t *ctx)
+/* Callers create the server region first, so one attach succeeds. */
+static nipc_win_shm_error_t attach_client(const char *service,
+                                          uint64_t session_id,
+                                          uint32_t profile,
+                                          nipc_win_shm_ctx_t *ctx)
 {
-    nipc_win_shm_error_t err = NIPC_WIN_SHM_ERR_OPEN_MAPPING;
-
-    for (int i = 0; i < 100; i++) {
-        err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
-                                         session_id, profile, ctx);
-        if (err == NIPC_WIN_SHM_OK)
-            break;
-        Sleep(10);
-    }
-
-    return err;
+    return nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
+                                      session_id, profile, ctx);
 }
 
 /* Build a complete message (outer header + payload) for SHM. */
@@ -256,6 +250,7 @@ static void test_header_layout(void)
 typedef struct {
     const char *service;
     int result;
+    int created; /* __atomic: raised once the server tried to create */
 } server_args_t;
 
 static DWORD WINAPI server_thread(LPVOID arg)
@@ -267,6 +262,7 @@ static DWORD WINAPI server_thread(LPVOID arg)
     nipc_win_shm_error_t err = nipc_win_shm_server_create(
         TEST_RUN_DIR, sa->service, AUTH_TOKEN, 1,
         NIPC_WIN_SHM_PROFILE_HYBRID, 65536, 65536, &ctx);
+    test_flag_set(&sa->created);
     if (err != NIPC_WIN_SHM_OK) {
         fprintf(stderr, "server: create failed: %d\n", err);
         return 1;
@@ -317,22 +313,17 @@ static void test_basic_roundtrip(void)
     unique_service(service, sizeof(service));
 
     server_args_t sa = { .service = service };
-    HANDLE thread = CreateThread(NULL, 0, server_thread, &sa, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, server_thread, &sa, 0, NULL);
     check("server thread created", thread != NULL);
     if (!thread) return;
 
-    /* Give server time to create mapping */
-    Sleep(100);
+    (void)test_flag_wait(&sa.created);
 
     /* Client side */
     nipc_win_shm_ctx_t client;
-    nipc_win_shm_error_t err = NIPC_WIN_SHM_ERR_OPEN_MAPPING;
-    for (int i = 0; i < 100; i++) {
-        err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
-                                          1, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
-        if (err == NIPC_WIN_SHM_OK) break;
-        Sleep(10);
-    }
+    nipc_win_shm_error_t err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
+                                                          1, NIPC_WIN_SHM_PROFILE_HYBRID,
+                                                          &client);
     check("client attach", err == NIPC_WIN_SHM_OK);
 
     if (err == NIPC_WIN_SHM_OK) {
@@ -379,6 +370,7 @@ typedef struct {
     const char *service;
     int count;
     int result;
+    int created; /* __atomic: raised once the server tried to create */
 } multi_server_args_t;
 
 static DWORD WINAPI multi_server_thread(LPVOID arg)
@@ -390,6 +382,7 @@ static DWORD WINAPI multi_server_thread(LPVOID arg)
     nipc_win_shm_error_t err = nipc_win_shm_server_create(
         TEST_RUN_DIR, sa->service, AUTH_TOKEN, 1,
         NIPC_WIN_SHM_PROFILE_HYBRID, 65536, 65536, &ctx);
+    test_flag_set(&sa->created);
     if (err != NIPC_WIN_SHM_OK) return 1;
 
     uint8_t msg[65536];
@@ -430,19 +423,14 @@ static void test_multiple_roundtrips(void)
     unique_service(service, sizeof(service));
 
     multi_server_args_t sa = { .service = service, .count = 10 };
-    HANDLE thread = CreateThread(NULL, 0, multi_server_thread, &sa, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, multi_server_thread, &sa, 0, NULL);
     if (!thread) { g_fail++; return; }
 
-    Sleep(100);
+    (void)test_flag_wait(&sa.created);
 
     nipc_win_shm_ctx_t client;
-    nipc_win_shm_error_t err = NIPC_WIN_SHM_ERR_OPEN_MAPPING;
-    for (int i = 0; i < 100; i++) {
-        err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
+    nipc_win_shm_error_t err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
                                           1, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
-        if (err == NIPC_WIN_SHM_OK) break;
-        Sleep(10);
-    }
 
     int all_ok = (err == NIPC_WIN_SHM_OK);
 
@@ -489,6 +477,7 @@ static DWORD WINAPI busywait_server_thread(LPVOID arg)
     nipc_win_shm_error_t err = nipc_win_shm_server_create(
         TEST_RUN_DIR, sa->service, AUTH_TOKEN, 2,
         NIPC_WIN_SHM_PROFILE_BUSYWAIT, 65536, 65536, &ctx);
+    test_flag_set(&sa->created);
     if (err != NIPC_WIN_SHM_OK)
         return 1;
 
@@ -526,22 +515,16 @@ static void test_busywait_roundtrip(void)
     unique_service(service, sizeof(service));
 
     server_args_t sa = { .service = service };
-    HANDLE thread = CreateThread(NULL, 0, busywait_server_thread, &sa, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, busywait_server_thread, &sa, 0, NULL);
     check("busywait server thread created", thread != NULL);
     if (!thread)
         return;
 
-    Sleep(100);
+    (void)test_flag_wait(&sa.created);
 
     nipc_win_shm_ctx_t client;
-    nipc_win_shm_error_t err = NIPC_WIN_SHM_ERR_OPEN_MAPPING;
-    for (int i = 0; i < 100; i++) {
-        err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
+    nipc_win_shm_error_t err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
                                           2, NIPC_WIN_SHM_PROFILE_BUSYWAIT, &client);
-        if (err == NIPC_WIN_SHM_OK)
-            break;
-        Sleep(10);
-    }
     check("busywait client attach", err == NIPC_WIN_SHM_OK);
 
     if (err == NIPC_WIN_SHM_OK) {
@@ -585,6 +568,7 @@ static void test_busywait_roundtrip(void)
 typedef struct {
     const char *service;
     int result;
+    int created; /* __atomic: raised once the server tried to create */
 } small_recv_args_t;
 
 static DWORD WINAPI small_recv_server_thread(LPVOID arg)
@@ -596,6 +580,7 @@ static DWORD WINAPI small_recv_server_thread(LPVOID arg)
     nipc_win_shm_error_t err = nipc_win_shm_server_create(
         TEST_RUN_DIR, sa->service, AUTH_TOKEN, 3,
         NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &ctx);
+    test_flag_set(&sa->created);
     if (err != NIPC_WIN_SHM_OK)
         return 1;
 
@@ -616,22 +601,16 @@ static void test_receive_msg_too_large(void)
     unique_service(service, sizeof(service));
 
     small_recv_args_t sa = { .service = service };
-    HANDLE thread = CreateThread(NULL, 0, small_recv_server_thread, &sa, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, small_recv_server_thread, &sa, 0, NULL);
     check("small-recv server thread created", thread != NULL);
     if (!thread)
         return;
 
-    Sleep(100);
+    (void)test_flag_wait(&sa.created);
 
     nipc_win_shm_ctx_t client;
-    nipc_win_shm_error_t err = NIPC_WIN_SHM_ERR_OPEN_MAPPING;
-    for (int i = 0; i < 100; i++) {
-        err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
+    nipc_win_shm_error_t err = nipc_win_shm_client_attach(TEST_RUN_DIR, service, AUTH_TOKEN,
                                           3, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
-        if (err == NIPC_WIN_SHM_OK)
-            break;
-        Sleep(10);
-    }
     check("small-recv client attach", err == NIPC_WIN_SHM_OK);
 
     if (err == NIPC_WIN_SHM_OK) {
@@ -1069,6 +1048,31 @@ static void test_server_create_rejects_existing_objects(void)
     nipc_win_shm_destroy(&first);
 }
 
+static void test_server_objects_dacl_owner_only(void)
+{
+    printf("--- SHM mapping and events grant only SYSTEM, Administrators and self ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_win_shm_ctx_t ctx = {0};
+    nipc_win_shm_error_t err = nipc_win_shm_server_create(
+        TEST_RUN_DIR, service, AUTH_TOKEN, 79,
+        NIPC_WIN_SHM_PROFILE_HYBRID, 4096, 4096, &ctx);
+    check("server create for DACL check", err == NIPC_WIN_SHM_OK);
+    if (err != NIPC_WIN_SHM_OK)
+        return;
+
+    check("mapping DACL is owner-only",
+          test_object_dacl_owner_only(ctx.mapping, SECTION_ALL_ACCESS));
+    check("request event DACL is owner-only",
+          test_object_dacl_owner_only(ctx.req_event, EVENT_ALL_ACCESS));
+    check("response event DACL is owner-only",
+          test_object_dacl_owner_only(ctx.resp_event, EVENT_ALL_ACCESS));
+
+    nipc_win_shm_destroy(&ctx);
+}
+
 static void test_server_create_rejects_region_size_overflow(void)
 {
     printf("--- Server create rejects region size overflow ---\n");
@@ -1329,7 +1333,7 @@ static void test_hybrid_receive_timeout_and_disconnect(void)
         return;
 
     nipc_win_shm_ctx_t client;
-    err = attach_client_retry(service, 6, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+    err = attach_client(service, 6, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
     check("hybrid timeout client attach", err == NIPC_WIN_SHM_OK);
     if (err != NIPC_WIN_SHM_OK) {
         nipc_win_shm_destroy(&server);
@@ -1395,7 +1399,7 @@ static void test_hybrid_receive_zero_timeout_waits_for_data(void)
         return;
 
     nipc_win_shm_ctx_t client;
-    err = attach_client_retry(service, 16, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+    err = attach_client(service, 16, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
     check("hybrid zero-timeout client attach", err == NIPC_WIN_SHM_OK);
     if (err != NIPC_WIN_SHM_OK) {
         nipc_win_shm_destroy(&server);
@@ -1413,7 +1417,7 @@ static void test_hybrid_receive_zero_timeout_waits_for_data(void)
         .payload_len = 4,
         .result = 1,
     };
-    HANDLE thread = CreateThread(NULL, 0, delayed_send_thread, &sa, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, delayed_send_thread, &sa, 0, NULL);
     check("hybrid zero-timeout sender thread created", thread != NULL);
     if (!thread) {
         nipc_win_shm_close(&client);
@@ -1462,7 +1466,7 @@ static void test_hybrid_receive_recheck_observes_ready_data(void)
         return;
 
     nipc_win_shm_ctx_t client;
-    err = attach_client_retry(service, 17, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+    err = attach_client(service, 17, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
     check("hybrid recheck client attach", err == NIPC_WIN_SHM_OK);
     if (err != NIPC_WIN_SHM_OK) {
         nipc_win_shm_destroy(&server);
@@ -1523,7 +1527,7 @@ static void test_busywait_receive_timeout_and_disconnect(void)
         return;
 
     nipc_win_shm_ctx_t client;
-    err = attach_client_retry(service, 7, NIPC_WIN_SHM_PROFILE_BUSYWAIT, &client);
+    err = attach_client(service, 7, NIPC_WIN_SHM_PROFILE_BUSYWAIT, &client);
     check("busywait timeout client attach", err == NIPC_WIN_SHM_OK);
     if (err != NIPC_WIN_SHM_OK) {
         nipc_win_shm_destroy(&server);
@@ -1564,7 +1568,7 @@ static void test_hybrid_server_receive_disconnect_advances_req_seq(void)
         return;
 
     nipc_win_shm_ctx_t client;
-    err = attach_client_retry(service, 18, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+    err = attach_client(service, 18, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
     check("hybrid server-disconnect client attach", err == NIPC_WIN_SHM_OK);
     if (err != NIPC_WIN_SHM_OK) {
         nipc_win_shm_destroy(&server);
@@ -1601,7 +1605,7 @@ static void test_busywait_server_receive_disconnect_advances_req_seq(void)
         return;
 
     nipc_win_shm_ctx_t client;
-    err = attach_client_retry(service, 17, NIPC_WIN_SHM_PROFILE_BUSYWAIT, &client);
+    err = attach_client(service, 17, NIPC_WIN_SHM_PROFILE_BUSYWAIT, &client);
     check("busywait server-disconnect client attach", err == NIPC_WIN_SHM_OK);
     if (err != NIPC_WIN_SHM_OK) {
         nipc_win_shm_destroy(&server);
@@ -1638,7 +1642,7 @@ static void test_client_receive_msg_too_large_response(void)
         return;
 
     nipc_win_shm_ctx_t client;
-    err = attach_client_retry(service, 8, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
+    err = attach_client(service, 8, NIPC_WIN_SHM_PROFILE_HYBRID, &client);
     check("large-response client attach", err == NIPC_WIN_SHM_OK);
     if (err != NIPC_WIN_SHM_OK) {
         nipc_win_shm_destroy(&server);
@@ -1699,6 +1703,7 @@ int main(void)
     test_header_layout();
     test_service_name_validation();
     test_server_create_rejects_existing_objects();
+    test_server_objects_dacl_owner_only();
     test_server_create_rejects_region_size_overflow();
     test_client_attach_validation();
     test_win32_fault_injection();

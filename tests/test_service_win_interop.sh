@@ -5,6 +5,7 @@
 # Tests all 9 directed pairs: C, Rust, and Go servers and clients.
 # Each test starts a managed server with a cgroups handler (3 items),
 # the client connects, calls snapshot, verifies items.
+# All pairs run twice: once normally and once with a 300 ms server handler.
 #
 # Expects:
 #   $INTEROP_SVC_C    path to the C interop_service_win binary
@@ -16,6 +17,7 @@
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/run-low-priority.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/interop-lib.sh"
 netipc_low_priority_self "$@"
 
 RED='\033[0;31m'
@@ -27,7 +29,7 @@ PASS=0
 FAIL=0
 SKIP=0
 TIMEOUT=10
-CLIENT_FAIL_REASON=""
+HANDLER_DELAY_MS=""
 
 # Resolve binary paths
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -50,58 +52,10 @@ else
 fi
 
 cleanup() {
-    local pids
-    pids=$(jobs -p 2>/dev/null) || true
-    if [[ -n "$pids" ]]; then
-        for pid in $pids; do
-            stop_server "$pid" >/dev/null 2>&1 || true
-        done
-    fi
+    interop_stop_server
     rm -rf "$RUN_DIR_HOST"
 }
 trap cleanup EXIT
-
-stop_server() {
-    local server_pid="$1"
-    local waited=0
-    local win_pid
-
-    if ! kill -0 "$server_pid" 2>/dev/null; then
-        wait "$server_pid" 2>/dev/null || true
-        return 0
-    fi
-
-    kill "$server_pid" 2>/dev/null || true
-
-    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
-        if ! kill -0 "$server_pid" 2>/dev/null; then
-            wait "$server_pid" 2>/dev/null || true
-            return 0
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    win_pid=$(ps -W 2>/dev/null | awk -v pid="$server_pid" '$1 == pid {print $4; exit}')
-    if [[ -n "$win_pid" ]] && command -v taskkill.exe >/dev/null 2>&1; then
-        taskkill.exe //PID "$win_pid" //T //F >/dev/null 2>&1 || true
-    elif [[ -n "$win_pid" ]] && command -v taskkill >/dev/null 2>&1; then
-        taskkill //PID "$win_pid" //T //F >/dev/null 2>&1 || true
-    fi
-
-    waited=0
-    while [[ $waited -lt 50 ]]; do
-        if ! kill -0 "$server_pid" 2>/dev/null; then
-            wait "$server_pid" 2>/dev/null || true
-            return 0
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    wait "$server_pid" 2>/dev/null || true
-    return 1
-}
 
 check_binaries() {
     local missing=0
@@ -122,44 +76,6 @@ check_binaries() {
     fi
 }
 
-run_client_with_ready_retry() {
-    local client_bin="$1"
-    local service="$2"
-    local max_attempts=$((TIMEOUT * 10))
-    local attempt
-    local client_out
-    local rc
-
-    CLIENT_FAIL_REASON=""
-
-    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-        set +e
-        client_out=$(env NIPC_PROFILE="${NIPC_PROFILE:-}" "$client_bin" client "$RUN_DIR" "$service" 2>&1)
-        rc=$?
-        set -e
-
-        if [[ $rc -eq 0 ]] && echo "$client_out" | grep -q "^PASS$"; then
-            return 0
-        fi
-
-        if echo "$client_out" | grep -q "^client: not ready$" &&
-           [[ $attempt -lt $max_attempts ]]; then
-            sleep 0.1
-            continue
-        fi
-
-        if [[ $rc -eq 0 ]]; then
-            CLIENT_FAIL_REASON="client output: $client_out"
-        else
-            CLIENT_FAIL_REASON="client exit code $rc, output: $client_out"
-        fi
-        return 1
-    done
-
-    CLIENT_FAIL_REASON="client did not become ready after ${TIMEOUT}s"
-    return 1
-}
-
 run_test() {
     local name="$1"
     local server_bin="$2"
@@ -174,59 +90,67 @@ run_test() {
 
     echo -n "  $name ... "
 
-    local server_pid
     local server_log="${RUN_DIR_HOST}/${service}.server.log"
-    env NIPC_PROFILE="${NIPC_PROFILE:-}" "$server_bin" server "$RUN_DIR" "$service" > "$server_log" 2>&1 &
-    server_pid=$!
-
-    local waited=0
-    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
-        if ! kill -0 "$server_pid" 2>/dev/null; then
-            echo -e "${RED}FAIL${NC} (server exited early)"
-            cat "$server_log" >&2 2>/dev/null || true
-            FAIL=$((FAIL + 1))
-            return
-        fi
-        if grep -q "^READY$" "$server_log" 2>/dev/null; then
-            break
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    if [[ $waited -ge $((TIMEOUT * 10)) ]]; then
-        echo -e "${RED}FAIL${NC} (server not ready after ${TIMEOUT}s)"
-        kill "$server_pid" 2>/dev/null || true
-        wait "$server_pid" 2>/dev/null || true
+    if ! interop_start_server "$TIMEOUT" "$server_log" \
+        env NIPC_PROFILE="${NIPC_PROFILE:-}" NIPC_HANDLER_DELAY_MS="$HANDLER_DELAY_MS" \
+        "$server_bin" server "$RUN_DIR" "$service"; then
+        echo -e "${RED}FAIL${NC} (server not ready)"
+        cat "$server_log" >&2 2>/dev/null || true
+        interop_stop_server
         FAIL=$((FAIL + 1))
         return
     fi
 
-    local test_ok=1
-    local fail_reason=""
+    # The server printed READY after binding, so the client connects once.
+    local client_out rc
+    set +e
+    client_out=$(env NIPC_PROFILE="${NIPC_PROFILE:-}" "$client_bin" client "$RUN_DIR" "$service" 2>&1)
+    rc=$?
+    set -e
 
-    if ! run_client_with_ready_retry "$client_bin" "$service"; then
-        test_ok=0
-        fail_reason="$CLIENT_FAIL_REASON"
-    fi
+    interop_stop_server
 
-    if ! stop_server "$server_pid"; then
-        test_ok=0
-        if [[ -n "$fail_reason" ]]; then
-            fail_reason="${fail_reason}; server did not exit cleanly"
-        else
-            fail_reason="server did not exit cleanly"
-        fi
-    fi
-
-    if [[ $test_ok -eq 0 ]]; then
-        echo -e "${RED}FAIL${NC} (${fail_reason})"
+    if [[ $rc -ne 0 ]] || ! echo "$client_out" | grep -q "^PASS$"; then
+        echo -e "${RED}FAIL${NC} (client exit code $rc, output: $client_out)"
         FAIL=$((FAIL + 1))
         return
     fi
 
     echo -e "${GREEN}PASS${NC}"
     PASS=$((PASS + 1))
+}
+
+# Run all 9 directed pairs; HANDLER_DELAY_MS slows every server handler.
+run_all_pairs() {
+    local suffix="$1"
+    local label="$2"
+
+    run_test "C server, C client${label}" \
+        "$INTEROP_SVC_C" "$INTEROP_SVC_C" "svc_c_c${suffix}"
+
+    run_test "Rust server, Rust client${label}" \
+        "$INTEROP_SVC_RS" "$INTEROP_SVC_RS" "svc_rs_rs${suffix}"
+
+    run_test "Go server, Go client${label}" \
+        "$INTEROP_SVC_GO" "$INTEROP_SVC_GO" "svc_go_go${suffix}"
+
+    run_test "C server, Rust client${label}" \
+        "$INTEROP_SVC_C" "$INTEROP_SVC_RS" "svc_c_rs${suffix}"
+
+    run_test "Rust server, C client${label}" \
+        "$INTEROP_SVC_RS" "$INTEROP_SVC_C" "svc_rs_c${suffix}"
+
+    run_test "C server, Go client${label}" \
+        "$INTEROP_SVC_C" "$INTEROP_SVC_GO" "svc_c_go${suffix}"
+
+    run_test "Go server, C client${label}" \
+        "$INTEROP_SVC_GO" "$INTEROP_SVC_C" "svc_go_c${suffix}"
+
+    run_test "Rust server, Go client${label}" \
+        "$INTEROP_SVC_RS" "$INTEROP_SVC_GO" "svc_rs_go${suffix}"
+
+    run_test "Go server, Rust client${label}" \
+        "$INTEROP_SVC_GO" "$INTEROP_SVC_RS" "svc_go_rs${suffix}"
 }
 
 main() {
@@ -240,32 +164,12 @@ main() {
     echo "Go binary:   $INTEROP_SVC_GO"
     echo ""
 
-    run_test "C server, C client" \
-        "$INTEROP_SVC_C" "$INTEROP_SVC_C" "svc_c_c"
+    run_all_pairs "" ""
 
-    run_test "Rust server, Rust client" \
-        "$INTEROP_SVC_RS" "$INTEROP_SVC_RS" "svc_rs_rs"
-
-    run_test "Go server, Go client" \
-        "$INTEROP_SVC_GO" "$INTEROP_SVC_GO" "svc_go_go"
-
-    run_test "C server, Rust client" \
-        "$INTEROP_SVC_C" "$INTEROP_SVC_RS" "svc_c_rs"
-
-    run_test "Rust server, C client" \
-        "$INTEROP_SVC_RS" "$INTEROP_SVC_C" "svc_rs_c"
-
-    run_test "C server, Go client" \
-        "$INTEROP_SVC_C" "$INTEROP_SVC_GO" "svc_c_go"
-
-    run_test "Go server, C client" \
-        "$INTEROP_SVC_GO" "$INTEROP_SVC_C" "svc_go_c"
-
-    run_test "Rust server, Go client" \
-        "$INTEROP_SVC_RS" "$INTEROP_SVC_GO" "svc_rs_go"
-
-    run_test "Go server, Rust client" \
-        "$INTEROP_SVC_GO" "$INTEROP_SVC_RS" "svc_go_rs"
+    # Handlers slower than the clients' 100 ms abort-poll slice must still
+    # complete within the call timeout (SOW-0041).
+    HANDLER_DELAY_MS=300
+    run_all_pairs "_slow" " (300 ms handler)"
 
     echo ""
     echo -e "=== Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}, ${YELLOW}${SKIP} skipped${NC} ==="

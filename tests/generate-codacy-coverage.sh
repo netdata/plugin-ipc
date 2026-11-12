@@ -147,7 +147,7 @@ generate_rust_coverage() {
     (
         cd "$RUST_CRATE_DIR"
         run cargo llvm-cov clean --workspace
-        run cargo llvm-cov --lib --no-report -- --test-threads=1
+        run cargo llvm-cov --lib --no-report
         run cargo llvm-cov report \
             --lcov \
             --ignore-filename-regex "$RUST_IGNORE_REGEX" \

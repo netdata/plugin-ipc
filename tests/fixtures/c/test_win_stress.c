@@ -16,6 +16,7 @@
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_win_shm.h"
+#include "test_sync.h"
 #include "test_win_raw_client_helpers.h"
 
 #include <stdio.h>
@@ -179,7 +180,7 @@ static HANDLE start_server(server_thread_ctx_t *ctx,
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     InterlockedExchange(&ctx->init_ok, 0);
 
-    HANDLE thread = CreateThread(NULL, 0, managed_server_thread, ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, managed_server_thread, ctx, 0, NULL);
     check("server thread created", thread != NULL);
     if (!thread)
         return NULL;
