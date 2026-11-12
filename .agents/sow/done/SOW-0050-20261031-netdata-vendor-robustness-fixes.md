@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: delivered 2026-11-12. netdata/netdata#24633 vendors plugin-ipc `792eb3c` (SOW-0072 review fixes) with the consumer fixes; its CI passes except the SonarCloud duplication condition. Previously delivered 2026-11-09 with `d3c94a5`. Merging is the user's and the maintainers' decision. netdata/netdata#24633 vendors plugin-ipc `d3c94a5` with the consumer fixes; its CI passes except the triaged SonarCloud gate. Merging is the user's and the maintainers' decision.
+Sub-state: delivered 2026-11-12. netdata/netdata#24633 vendors plugin-ipc `792eb3c` (SOW-0072 review fixes) with the consumer fixes; its CI passes except the SonarCloud duplication condition. Previously delivered 2026-11-09 with `d3c94a5`. Merging is the user's and the maintainers' decision.
 
 ## Requirements
 
