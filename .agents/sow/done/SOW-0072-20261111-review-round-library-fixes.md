@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: implemented, validated and re-vendored. Library commits `04f71b1`, `142f289` (regression 2026-11-11, macOS C test) and `792eb3c` (regression 2026-11-12, review round), plus a docs and record commit for the second review round of 2026-11-12. macOS CI passed on `142f289` (run 43123299102) and `792eb3c` (run 43125452973); extended fuzz 15/15 and stress 7/7 on the `04f71b1` tree, the candidate's decoders and transports (validation 2026-11-11 and 2026-11-12, below). Re-vendored into netdata/netdata#24633 as `b41982210f` (`142f289`) and `6aaaeea23a` (`792eb3c`); the Netdata-side record is SOW-0050.
+Sub-state: implemented, validated and re-vendored. Library commits `04f71b1`, `142f289` (regression 2026-11-11, macOS C test) and `792eb3c` (regression 2026-11-12, review round), plus a docs and record commit for the second review round of 2026-11-12. macOS CI passed on `142f289` (run 43123299102) and `792eb3c` (run 43125452973); extended fuzz 15/15 on the `04f71b1` tree and stress 7/7 on `04f71b1` and again on `5e68489` (after the attach-loop change) (validation 2026-11-11 and 2026-11-12, below). Re-vendored into netdata/netdata#24633 as `b41982210f` (`142f289`) and `6aaaeea23a` (`792eb3c`); the Netdata-side record is SOW-0050.
 
 ## Requirements
 
@@ -152,7 +152,7 @@ Open-source reference evidence:
 
 Open decisions:
 
-- Resolved: decisions 6-9 below.
+- Resolved: decisions 6-11 below (6-9 user, 10 assistant, 11 user).
 
 ## Implications And Decisions
 
@@ -160,8 +160,8 @@ Open decisions:
 7. Socket mode under a umask without owner write (#3), user 2026-11-11: option A. macOS sets the socket exactly `0600` (it sits in a private 0700 directory until the rename). Linux and FreeBSD check the bound file after `bind` and fail `listen` with a socket error (`EACCES`) when owner write is missing. Assistant clarification within A: the check is for owner write only, the permission `connect` needs on Linux, FreeBSD and macOS; requiring owner read too would break umask `0477` (file `0200`), which works today and is tested by SOW-0067. Rejected: B, path-based `chmod` after bind (SOW-0032); C, a private bind directory on every POSIX platform (endpoint layout change in every language and in Netdata).
 8. Drain-path zeroing (#5), user 2026-11-11: option B, rejected with evidence; no change.
 9. Benchmarks for #9, user 2026-11-11: option A, performance assessment only, no benchmark run.
-11. SHM attach retry classes (user 2026-11-12, option B, surgical): the code keeps retrying every open failure and every magic mismatch until the deadline; the specs (`docs/level2-typed-api.md`, `docs/level1-posix-shm.md`, `docs/level1-windows-shm.md`) now say so and why. The server creates the region in place (`netipc_shm.c:486-560`: create 0600, `fchmod`, zero-fill, header; Windows zero-fills the view, `netipc_win_shm.c:401-405`), so a missing file, `EACCES` before the `fchmod`, an undersized file and a zero magic are all transient, and a permanent error in those classes costs at most the bounded attach wait (decision 6). Rejected: A, retrying only `ENOENT`/`EACCES`, size 0 and zero magic, which needs errno and magic detail in every language's error types.
 10. Windows C guard executables (assistant decision, 2026-11-11, recorded for user review): validation found that `test_win_service_guards` and `test_win_service_guards_extra` fail on this tree and identically on `dce436c` (1 and 3 assertions). They were never in CTest (`CMakeLists.txt`: "coverage-only", kept out for CTest timing) and Windows CI only built them for CodeQL, so their expectations went stale unnoticed. This SOW's acceptance requires the Windows suites to pass, so they are fixed here: stale expectations follow the spec, the racy drain test is made deterministic, and both executables are registered in CTest, the Windows CI job (`runtime-safety.yml`) and `tests/run-windows-msys-validation.sh`. They run in 5.6 s and 0.2 s. Alternative not taken: keeping them coverage-only, which is how they rotted.
+11. SHM attach retry classes (user 2026-11-12, option B, surgical): the code keeps retrying every open failure and every magic mismatch until the deadline; the specs (`docs/level2-typed-api.md`, `docs/level1-posix-shm.md`, `docs/level1-windows-shm.md`) now say so and why. The server creates the region in place (`netipc_shm.c:486-560`: create 0600, `fchmod`, zero-fill, header; Windows zero-fills the view, `netipc_win_shm.c:401-405`), so a missing file, `EACCES` before the `fchmod`, an undersized file and a zero magic are all transient, and a permanent error in those classes costs at most the bounded attach wait (decision 6). Rejected: A, retrying only `ENOENT`/`EACCES`, size 0 and zero magic, which needs errno and magic detail in every language's error types.
 
 ## Plan
 
@@ -204,7 +204,7 @@ Tests or equivalent validation (2026-11-11, low priority):
 - FreeBSD 14.3 and 15.1: CTest 31/31, `cargo test` 415 passed, `go test ./...` and `GOARCH=386 go test ./...` pass on both; the stream (#7), chunk (#9) and umask (#3) tests ran.
 - Windows host: Rust 282 passed (including the #1 and #4 tests); Go all packages pass (the #1, #4 and #9 tests confirmed with `-v`); C CTest 22/22 including both guard executables, which also pass 3 of 3 direct runs.
 - macOS: `.github/workflows/macos.yml` failed on `04f71b1` (regression 2026-11-11, below) and passed on `142f289` (run 43123299102) and `792eb3c` (run 43125452973), CTest, Rust, Go and interop.
-- Extended fuzz (#9 touches the receive path) and stress (transports): `tests/run-extended-fuzz.sh` 15/15 and `tests/run-extended-stress.sh` 7/7 on the `04f71b1` tree (2026-11-12). Later commits change no codec or decoder.
+- Extended fuzz (#9 touches the receive path) and stress (transports): `tests/run-extended-fuzz.sh` 15/15 and `tests/run-extended-stress.sh` 7/7 on the `04f71b1` tree (2026-11-12). Later commits change no codec or decoder, so the fuzz result carries; `792eb3c` changes the SHM attach loops, so stress ran again on `5e68489` (which contains it): 7/7.
 
 Real-use evidence:
 

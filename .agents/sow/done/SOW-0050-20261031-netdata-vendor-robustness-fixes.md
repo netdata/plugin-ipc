@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: delivered 2026-11-09. netdata/netdata#24633 vendors plugin-ipc `d3c94a5` with the consumer fixes; its CI passes except the triaged SonarCloud gate. Merging is the user's and the maintainers' decision.
+Sub-state: delivered 2026-11-12. netdata/netdata#24633 vendors plugin-ipc `792eb3c` (SOW-0072 review fixes) with the consumer fixes; its CI passes except the SonarCloud duplication condition. Previously delivered 2026-11-09 with `d3c94a5`. Merging is the user's and the maintainers' decision. netdata/netdata#24633 vendors plugin-ipc `d3c94a5` with the consumer fixes; its CI passes except the triaged SonarCloud gate. Merging is the user's and the maintainers' decision.
 
 ## Requirements
 
@@ -215,6 +215,12 @@ See the implementation plan above.
   - 8 MAJOR c:S2753 (`netipc_win_shm.c` lines 40-163): test-only fault injection; the file-local enum has the same enumerators and values as the public test enum under `NIPC_INTERNAL_TESTING`, which Netdata never defines; the code is unchanged since `63919ec`, only shifted.
   - Duplication on new code 3.2% against a 3% limit: vendored transport and test code; no refactor in a vendoring PR.
 
+### 2026-11-12
+
+- Re-vendoring of `ce6834e` (SOW-0070 regression 2026-11-11) as Netdata `b53818fab6`, recorded late: it was pushed to the PR on 2026-11-11 and not recorded here then.
+- Re-vendoring for SOW-0072 (review findings on both PRs): Netdata `b41982210f` vendors plugin-ipc `142f289` with the network-viewer test fix (cache mutex initialized around `run_overflow_status_test()`), and `6aaaeea23a` vendors `792eb3c` (the second review round).
+- PR thread replies: 15 threads on netdata#24633 and 29 on plugin-ipc#18 answered one by one, with the fix commit or the evidence for a rejection; 0 unresolved threads on either PR afterwards.
+
 ## Validation
 
 Acceptance criteria evidence:
@@ -225,7 +231,11 @@ Acceptance criteria evidence:
 - PRs opened only at the user's request (decision 4A).
 - Re-vendoring (2026-11-09): candidate `d3c94a5`. Preflight: plugin-ipc#18 checks on `d3c94a5` pass except "C, Rust, and Go Coverage" (Codacy upload, decision 5; the token was revoked by Codacy) and GitHub's managed "Code Quality: PR #18" job, which failed on an HTTP 504 downloading the CodeQL bundle and cannot be retried (it passed on every earlier commit; CodeQL itself passed after a rerun of the same 504). Code scanning, Dependabot and secret scanning: 0, 0, 0 open. Downstream drift: none since `3483002881`. Performance: `3fb1bef`, `278125c` and `d3c94a5` change no established-session per-request path (lock creation runs once per listen, the zero in-flight bound applies only with nothing in flight, the receive change is whitespace); the benchmark evidence of 2026-11-06 stands. Extended suites: the 2026-11-05 runs stand; the later changes touch lock creation, a send bound with nothing in flight, `StopListening` and the Go stalled-reader poll, which the stress suites run without change in coverage, and no codec or decoder.
 
+- Re-vendoring (2026-11-12): candidate `792eb3c` (first `142f289`). Preflight: plugin-ipc#18 checks on `142f289` and `792eb3c` pass, macOS included, except "C, Rust, and Go Coverage" (Codacy upload, decision 5). Code scanning, Dependabot and secret scanning: 0, 0, 0 open. Downstream drift: no `netdata/netdata` master commit since `3483002881` touches the vendored trees, the NetIPC build lists or the NetIPC consumers (the only network-viewer change, `00cfa2052e`, is in the topology code). Performance: the changes run once per message chunk only in the new `chunk_index < chunk_count` comparison (SOW-0072 decision 9, assessment only); everything else is handshake, connect, attach, listen or failure paths, so the benchmark evidence of 2026-11-06 stands. Extended suites, replacing the 2026-11-09 "no codec or decoder" assessment, since SOW-0072 changes the receive path: `tests/run-extended-fuzz.sh` 15/15 on the `04f71b1` tree (the later commits change no codec or decoder) and `tests/run-extended-stress.sh` 7/7 on `04f71b1` and on `5e68489`, which contains the `792eb3c` attach-loop change. The vendor diff after the copy and the Go import rewrite: no C, Rust or Go differences; no vendored file added or removed, so the build lists need no change.
+
 Tests or equivalent validation:
+
+- Re-vendored `792eb3c` (Netdata `6aaaeea23a`, and `142f289` as `b41982210f` before it): Linux build with no warning in NetIPC sources; the five lookup tests pass; `go test ./pkg/netipc/...`, `go vet`, `cargo test -p netipc` 416, `cargo fmt --check`, `cargo doc` 0 warnings; the fortified `-O2 -D_FORTIFY_SOURCE=3` library build has no library warning. Netdata PR CI on `6aaaeea23a`: 123 pass, 21 skipped, 1 failure (SonarCloud, below); "Build Windows", "Test Windows installer" and the Go `windows/amd64` builds pass.
 
 - Netdata worktree on Linux: full build without NetIPC warnings; `apps-lookup-protocol-test`, `apps-lookup-netipc-lock-test`, `apps-cgroups-lookup-client-abort-test`, `cgroup-lookup-netipc-test`; `go test ./pkg/netipc/...`, `go vet`; `cargo test -p netipc` 401; `cargo fmt --check`, `cargo doc` 0 warnings.
 - Netdata PR CI: 124 checks pass, Windows build and installer included.
@@ -240,7 +250,8 @@ Reviewer findings:
 
 - SonarCloud and CodeQL findings on the PRs are triaged above, with evidence; no code change was needed.
 - SonarCloud on `d2343836cc`: the gate fails on the same two conditions as on `42313ad410`: the c:S3519 false positive (`netipc_named_pipe.c:1921` now; the copy is preceded by the `assembled + chunk_data > payload_len` check) and duplication 3.2% against 3%. The other open issues are code smells outside the gate.
-- PR review replies: 46 on plugin-ipc#18 and 50 on netdata#24633, posted and resolved; 0 unresolved threads on either PR. CodeQL alerts 7768 to 7771 dismissed (user, "1b").
+- PR review replies: 46 on plugin-ipc#18 and 50 on netdata#24633, posted and resolved; 0 unresolved threads on either PR. Review round of 2026-11-12: 29 more on plugin-ipc#18 and 15 on netdata#24633 (SOW-0072); 0 unresolved afterwards.
+- SonarCloud on `6aaaeea23a`: the gate fails only on duplication on new code, 3.3% against 3% (vendored transport and test code); the reliability condition (the c:S3519 false positive) now passes. CodeQL alerts 7768 to 7771 dismissed (user, "1b").
 - `GOOS=windows go vet` flags `possible misuse of unsafe.Pointer` on the `MapViewOfFile` address conversions in `transport/windows/shm.go`. Rejected with evidence: the address is a mapped view outside the Go heap, so the garbage collector never moves or frees it; the same conversions exist in `63919ec`.
 
 Same-failure scan:
@@ -259,7 +270,7 @@ Artifact maintenance gate:
 - Specs: no update; vendoring changes no protocol or API.
 - End-user/operator docs: no update; the vendor scripts and their usage did not change.
 - End-user/operator skills: `docs/netipc-integrator-skill.md` unaffected; no API or workflow change in this SOW.
-- SOW lifecycle: follow-ups tracked as SOW-0068 and SOW-0069. Correction (2026-11-08, SOW-0070): this SOW is `paused` in `current/`; it moves to `done/` after the re-vendoring and the Netdata PR CI. Done 2026-11-09: `completed`, moved to `done/`.
+- SOW lifecycle: follow-ups tracked as SOW-0068 and SOW-0069. Correction (2026-11-08, SOW-0070): this SOW is `paused` in `current/`; it moves to `done/` after the re-vendoring and the Netdata PR CI. Done 2026-11-09: `completed`, moved to `done/`. Reopened 2026-11-12 for the SOW-0072 re-vendoring; `completed` again and moved to `done/` in the same commit.
 
 Performance assessment:
 
@@ -267,7 +278,7 @@ Performance assessment:
 
 ## Outcome
 
-Netdata PR netdata/netdata#24633 vendors plugin-ipc `d3c94a5` (first `4261919`, re-vendored after SOW-0070) with the consumer fixes for `OVERSIZED_ITEM` and `PAYLOAD_EXCEEDED`, the lookup-test cleanup, and the Windows build-list and `advapi32` link changes; its CI passes except the SonarCloud gate, whose findings are triaged as false positives on the PR. Source PR netdata/plugin-ipc#18 carries the SOWs since the previous vendoring. Merging both is the user's and the maintainers' decision.
+Netdata PR netdata/netdata#24633 vendors plugin-ipc `792eb3c` (first `4261919`, re-vendored after SOW-0070 as `d3c94a5` and `ce6834e`, and after SOW-0072) with the consumer fixes for `OVERSIZED_ITEM` and `PAYLOAD_EXCEEDED`, the lookup-test cleanup, and the Windows build-list and `advapi32` link changes; its CI passes except the SonarCloud gate, whose findings are triaged as false positives on the PR. Source PR netdata/plugin-ipc#18 carries the SOWs since the previous vendoring. Merging both is the user's and the maintainers' decision.
 
 ## Lessons Extracted
 

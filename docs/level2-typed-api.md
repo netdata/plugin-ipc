@@ -293,8 +293,8 @@ ends with the session still connected counts as an attach failure (below),
 so a region that never becomes attachable cannot make every call end at its
 deadline; a successful attach resets the count. Only the error classes a
 server that has not finished its setup can cause are waited for: any
-failure to open the region or its objects, an undersized region (POSIX) and
-any magic mismatch. A permanent error in those classes costs at most this
+failure to open the region or its objects, an undersized region or ring
+fields not written yet (POSIX), and any magic mismatch. A permanent error in those classes costs at most this
 bounded wait. Any other attach error is an attach failure at once.
 
 Every Level 2 client context also exposes an abort signal that is safe to

@@ -315,10 +315,12 @@ place.
 The server creates the region in place: create with mode 0600, `fchmod`
 to 0600 (the umask may have narrowed the create), zero-fill, then write the
 header. Until it finishes, the client can see a missing file, a file it may
-not open yet (`EACCES` before the `fchmod`), an undersized file, or a zero
-magic. So any failure to open the file, an undersized file, and any magic
-mismatch are retried until the deadline; every other error (version,
-header length, sizes, mapping) fails the attach at once. A permanent open or
+not open yet (`EACCES` before the `fchmod`), an undersized file, a zero
+magic, or a header whose ring offsets and capacities are not written yet.
+So any failure to open the file, an undersized file, any magic mismatch,
+and a ring offset inside the header or a zero ring capacity are retried
+until the deadline; every other error (version, header length, rings that
+overflow or do not fit the file, mapping) fails the attach at once. A permanent open or
 magic error costs at most the attach wait, bounded by the fallback rule in
 `level2-typed-api.md`. Between retries the client probes the
 session socket (see "Peer liveness"); if the server already closed it
