@@ -38,7 +38,8 @@ Example: `/run/netdata/cgroups-snapshot.sock`
 ## Socket permissions
 
 The listener socket file is owner-only: mode `0600`, narrowed further by the
-process umask on Linux and FreeBSD, exactly `0600` on macOS. C, Rust and Go set it the same way: `fchmod(fd, 0600)` on the
+process umask on Linux and FreeBSD, exactly `0600` on macOS. On Linux and
+FreeBSD, C, Rust and Go set it the same way: `fchmod(fd, 0600)` on the
 unbound socket, then `bind()`. Linux and FreeBSD create the socket file with
 the unbound socket's mode, so the file never exists with a wider mode, no
 path-based `chmod` runs, and the process-global umask is never changed (other

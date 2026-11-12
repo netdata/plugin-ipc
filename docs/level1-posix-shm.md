@@ -312,10 +312,15 @@ place.
    violation is a bad-size error.
 7. The client is now ready to publish requests and consume responses.
 
-If the file does not exist, cannot be opened yet, is undersized, or has no
-magic yet (server has not yet finished creating it), the client treats
-this as a retryable protocol-not-ready condition; every other error fails
-the attach at once. Between retries the client probes the
+The server creates the region in place: create with mode 0600, `fchmod`
+to 0600 (the umask may have narrowed the create), zero-fill, then write the
+header. Until it finishes, the client can see a missing file, a file it may
+not open yet (`EACCES` before the `fchmod`), an undersized file, or a zero
+magic. So any failure to open the file, an undersized file, and any magic
+mismatch are retried until the deadline; every other error (version,
+header length, sizes, mapping) fails the attach at once. A permanent open or
+magic error costs at most the attach wait, bounded by the fallback rule in
+`level2-typed-api.md`. Between retries the client probes the
 session socket (see "Peer liveness"); if the server already closed it
 (refused at worker capacity, or died), the client stops retrying, reports
 the connect as failed, and keeps SHM enabled for its next connect. The
@@ -323,8 +328,10 @@ probe runs before each deadline check, so a server that closed the socket
 is never taken for an attach failure, whichever deadline ends the wait.
 When the call deadline ends the wait, SHM also stays enabled, except that
 the second such wait in a row with the session still connected fails the
-attach (`level2-typed-api.md`). When the attach timeout ends the wait with
-the session still connected, the attach fails.
+attach (`level2-typed-api.md`). When the attach timeout ends the wait first
+(it is shorter than the call's remaining time) with the session still
+connected, the attach fails; a tie between the two counts as the call
+deadline.
 
 ### Peer liveness
 

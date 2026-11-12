@@ -291,10 +291,11 @@ the call deadline, not the SHM attach timeout, ends an SHM attach wait,
 SHM stays enabled for the next connect. A second such wait in a row that
 ends with the session still connected counts as an attach failure (below),
 so a region that never becomes attachable cannot make every call end at its
-deadline; a successful attach resets the count. Only errors a server that
-has not finished its setup can cause (the region or its objects cannot be
-opened yet, or the magic is not written yet) are waited for; any other
-attach error is an attach failure at once.
+deadline; a successful attach resets the count. Only the error classes a
+server that has not finished its setup can cause are waited for: any
+failure to open the region or its objects, an undersized region (POSIX) and
+any magic mismatch. A permanent error in those classes costs at most this
+bounded wait. Any other attach error is an attach failure at once.
 
 Every Level 2 client context also exposes an abort signal that is safe to
 trigger from another thread while one thread is blocked in a typed call.

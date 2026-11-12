@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: regression 2026-11-12 (review round on `04f71b1` and `142f289`, see the end of this file) repaired; regression 2026-11-11 (macOS C test) repaired. Implemented and validated (2026-11-11). The re-vendoring into netdata/netdata#24633 and the thread replies follow the push, recorded in SOW-0050 as for the previous re-vendorings.
+Sub-state: implemented, validated and re-vendored. Library commits `04f71b1`, `142f289` (regression 2026-11-11, macOS C test) and `792eb3c` (regression 2026-11-12, review round), plus a docs and record commit for the second review round of 2026-11-12. macOS CI passed on `142f289` (run 43123299102) and `792eb3c` (run 43125452973); extended fuzz 15/15 and stress 7/7 on the `04f71b1` tree, the candidate's decoders and transports (validation 2026-11-11 and 2026-11-12, below). Re-vendored into netdata/netdata#24633 as `b41982210f` (`142f289`) and `6aaaeea23a` (`792eb3c`); the Netdata-side record is SOW-0050.
 
 ## Requirements
 
@@ -160,6 +160,7 @@ Open decisions:
 7. Socket mode under a umask without owner write (#3), user 2026-11-11: option A. macOS sets the socket exactly `0600` (it sits in a private 0700 directory until the rename). Linux and FreeBSD check the bound file after `bind` and fail `listen` with a socket error (`EACCES`) when owner write is missing. Assistant clarification within A: the check is for owner write only, the permission `connect` needs on Linux, FreeBSD and macOS; requiring owner read too would break umask `0477` (file `0200`), which works today and is tested by SOW-0067. Rejected: B, path-based `chmod` after bind (SOW-0032); C, a private bind directory on every POSIX platform (endpoint layout change in every language and in Netdata).
 8. Drain-path zeroing (#5), user 2026-11-11: option B, rejected with evidence; no change.
 9. Benchmarks for #9, user 2026-11-11: option A, performance assessment only, no benchmark run.
+11. SHM attach retry classes (user 2026-11-12, option B, surgical): the code keeps retrying every open failure and every magic mismatch until the deadline; the specs (`docs/level2-typed-api.md`, `docs/level1-posix-shm.md`, `docs/level1-windows-shm.md`) now say so and why. The server creates the region in place (`netipc_shm.c:486-560`: create 0600, `fchmod`, zero-fill, header; Windows zero-fills the view, `netipc_win_shm.c:401-405`), so a missing file, `EACCES` before the `fchmod`, an undersized file and a zero magic are all transient, and a permanent error in those classes costs at most the bounded attach wait (decision 6). Rejected: A, retrying only `ENOENT`/`EACCES`, size 0 and zero magic, which needs errno and magic detail in every language's error types.
 10. Windows C guard executables (assistant decision, 2026-11-11, recorded for user review): validation found that `test_win_service_guards` and `test_win_service_guards_extra` fail on this tree and identically on `dce436c` (1 and 3 assertions). They were never in CTest (`CMakeLists.txt`: "coverage-only", kept out for CTest timing) and Windows CI only built them for CodeQL, so their expectations went stale unnoticed. This SOW's acceptance requires the Windows suites to pass, so they are fixed here: stale expectations follow the spec, the racy drain test is made deterministic, and both executables are registered in CTest, the Windows CI job (`runtime-safety.yml`) and `tests/run-windows-msys-validation.sh`. They run in 5.6 s and 0.2 s. Alternative not taken: keeping them coverage-only, which is how they rotted.
 
 ## Plan
@@ -202,8 +203,8 @@ Tests or equivalent validation (2026-11-11, low priority):
 - Coverage scripts: `run-coverage-rust.sh` passes; `run-coverage-c.sh` (per-file 90%: `netipc_uds.c` 84.8%, `netipc_shm.c` 89.8%) and `run-coverage-go.sh` (88.1%) fail, with the same C numbers and Go 88.0% on `dce436c` measured from a `git archive` export: pre-existing, not caused by this SOW, tracked by SOW-0068. The umask child tests pass under coverage.
 - FreeBSD 14.3 and 15.1: CTest 31/31, `cargo test` 415 passed, `go test ./...` and `GOARCH=386 go test ./...` pass on both; the stream (#7), chunk (#9) and umask (#3) tests ran.
 - Windows host: Rust 282 passed (including the #1 and #4 tests); Go all packages pass (the #1, #4 and #9 tests confirmed with `-v`); C CTest 22/22 including both guard executables, which also pass 3 of 3 direct runs.
-- macOS: `.github/workflows/macos.yml` runs on the pushed commit; its result is recorded with the push in SOW-0050.
-- Extended fuzz (#9 touches the receive path): runs once on the candidate before the re-vendoring (vendoring preflight, SOW-0050).
+- macOS: `.github/workflows/macos.yml` failed on `04f71b1` (regression 2026-11-11, below) and passed on `142f289` (run 43123299102) and `792eb3c` (run 43125452973), CTest, Rust, Go and interop.
+- Extended fuzz (#9 touches the receive path) and stress (transports): `tests/run-extended-fuzz.sh` 15/15 and `tests/run-extended-stress.sh` 7/7 on the `04f71b1` tree (2026-11-12). Later commits change no codec or decoder.
 
 Real-use evidence:
 
@@ -253,7 +254,7 @@ All confirmed findings from both PRs are fixed in C, Rust and Go on POSIX and Wi
 
 ## Regression Log
 
-None yet.
+Regressions 2026-11-11 (macOS C test) and 2026-11-12 (review round) are appended at the end of this file.
 
 Append regression entries here only after this SOW was completed or closed and later testing or use found broken behavior. Use a dated `## Regression - YYYY-MM-DD` heading at the end of the file. Never prepend regression content above the original SOW narrative.
 
@@ -313,7 +314,15 @@ Validation (2026-11-12, low priority):
 - Linux: CTest 32/32; `cargo test` 417; `cargo fmt --check` with 1.91.0 and stable; `go test ./...`, `go test -race` on `service/...` and `transport/...`; UDS, SHM, service, cache and codec interop all pass.
 - FreeBSD 14.3 and 15.1: CTest 31/31, `cargo test`, `go test ./...` and `GOARCH=386 go test ./...` pass on both.
 - Windows host: Rust 282 passed, Go all packages, CTest 22/22 (both guard tests with the new properties).
-- macOS: CI on the commit.
+- macOS: CI passed on `792eb3c` (run 43125452973).
+- Re-vendored as Netdata `6aaaeea23a`: Linux build with no NetIPC warning, the five lookup tests, `go test`, `go vet`, `cargo test -p netipc` 416, `cargo fmt --check`, `cargo doc` 0 warnings, fortified `-O2` library build clean.
 - Performance: only the connect-time attach loop changed; nothing runs per request on an established session. No benchmark.
 - Artifacts: vendoring skill (both checks); specs `docs/level2-typed-api.md` (attach-failure paragraph), `docs/level1-posix-shm.md` and `docs/level1-windows-shm.md` (liveness probe before each deadline check) and the integrator skill `docs/netipc-integrator-skill.md` (SHM attach failure) now state that a peer gone during the attach wait is not an attach failure; `AGENTS.md` unaffected.
+
+Second review round on `792eb3c` (2026-11-12, 13 threads, validated against the code):
+
+- Fixed, records: this SOW's status now names every library commit, the macOS runs, the extended-suite results and the Netdata commits; the Regression Log points at the appended sections; SOW-0070's F9 entry keeps its original sentence with a dated correction, as its R1-R12 records do.
+- Fixed, specs: `docs/level1-posix-uds.md` limits the `fchmod`-before-`bind` procedure to Linux and FreeBSD; `docs/level1-posix-shm.md` and `docs/level1-windows-shm.md` state the tie rule at the attach-timeout boundary; the retry classes follow decision 11.
+- Decision 11 (user, option B) answers the four code threads on the retry classes (Rust and Go, Unix and Windows) and the two spec threads on the same rule.
+- No vendored source changed in this round, so Netdata `6aaaeea23a` stays the vendored state.
 

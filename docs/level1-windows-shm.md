@@ -306,10 +306,13 @@ as failed, and keeps SHM enabled for its next connect: the session failed,
 not the attach. A call deadline or an abort that ends the wait also keeps
 SHM enabled, except that the second call deadline in a row that ends the
 wait with the pipe still connected counts as an attach failure
-(`level2-typed-api.md`). Only a mapping or event that cannot be opened yet,
-or a header without its magic yet, is retried; every other error fails the
-attach at once. When the attach itself fails, or its own timeout ends the
-wait, with the pipe still connected, the client closes the session,
+(`level2-typed-api.md`). Any failure to open the mapping or an event and
+any magic mismatch (the server zero-fills the view before it writes the
+header) are retried until the deadline; every other error fails the attach
+at once. A permanent open or magic error costs at most the attach wait,
+bounded by the fallback rule in `level2-typed-api.md`. When the attach itself fails, or its own timeout ends the
+wait first (a tie with the call deadline counts as the call deadline), with
+the pipe still connected, the client closes the session,
 removes SHM from its later proposals, and reconnects over the Named Pipe
 baseline (see `level1-windows-np.md`).
 
