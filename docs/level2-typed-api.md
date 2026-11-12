@@ -339,7 +339,10 @@ If handshake selects an SHM profile and the client cannot attach SHM
 locally, Level 2 must close that session, remove SHM from future transport
 proposals for that client context, reconnect with a new handshake, and
 continue on baseline if that reconnect succeeds. This is not same-session
-fallback; it is recovery through a new session.
+fallback; it is recovery through a new session. A server that closes the
+session while the client waits for its region is not an attach failure,
+whichever deadline ends the wait: the connect fails and SHM stays enabled
+for the next one.
 
 ### 6. No hidden background threads (client)
 

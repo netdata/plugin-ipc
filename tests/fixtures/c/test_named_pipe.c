@@ -1251,7 +1251,7 @@ static void test_preferred_profile_selection(void)
 
 /* A profile bit Windows does not implement, offered and preferred by both
  * peers, is never selected: they would otherwise run the pipe under that
- * label. 0x08 is assigned on POSIX only. */
+ * label. 0x08 (SHM_WAITADDR) is reserved and no transport implements it. */
 static void test_unassigned_profile_bit(void)
 {
     printf("--- Unassigned profile bit is never selected ---\n");

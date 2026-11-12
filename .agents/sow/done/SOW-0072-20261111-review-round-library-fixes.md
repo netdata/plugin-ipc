@@ -4,7 +4,7 @@
 
 Status: completed
 
-Sub-state: regression 2026-11-11 (macOS C test, see the end of this file) repaired. Implemented and validated (2026-11-11). The re-vendoring into netdata/netdata#24633 and the thread replies follow the push, recorded in SOW-0050 as for the previous re-vendorings.
+Sub-state: regression 2026-11-12 (review round on `04f71b1` and `142f289`, see the end of this file) repaired; regression 2026-11-11 (macOS C test) repaired. Implemented and validated (2026-11-11). The re-vendoring into netdata/netdata#24633 and the thread replies follow the push, recorded in SOW-0050 as for the previous re-vendorings.
 
 ## Requirements
 
@@ -56,6 +56,7 @@ Current state (per finding, netdata#24633 numbering):
 - #10: Go robustness tests block on channel receives without a bound after their watchdog fired (`robustness_windows_test.go`, `robustness_unix_test.go`); each wait is bounded by a second mechanism, but the file header claims more than that.
 - #11: `server_accept_loop_enter` clears `acceptor_started` when it sees a stop, and `nipc_server_run` then stores `running = false` (`netipc_service_posix_server.c:36,162`). Destroy waits only for `acceptor_started`, so it can free the server before that store. The Windows server stores `running = 0` before `accept_loop_active = 0` (`netipc_service_win_server.c:166-167`) and is not affected.
 - #13: C comments say the remaining time is rounded up (`netipc_service_posix_client_connect.c:131-132`, `netipc_service_win_client_connect.c:133-134`); `nipc_service_common_client_op_remaining_ms` (`netipc_service_common.c:207-214`) returns the exact integer difference. Both deadlines are whole milliseconds on the same clock, so the tie rule (`<=`) is still right. SOW-0070 line 250 records the same inaccuracy.
+- #12 and #15 (one finding raised by two bots): Netdata's `run_overflow_status_test()` (`src/collectors/network-viewer.plugin/tests/test_network_viewer_apps_lookup_client.c`, Netdata worktree of netdata/netdata#24633) applies a lookup response, which locks `apps_lookup_cache_mutex`, without `nv_apps_lookup_init()`, which owns that mutex: locking an uninitialized mutex works only on zeroed storage. Fixed in the Netdata test (init before, destroy after), not in the library.
 - #14: "waiting costs nothing" (C POSIX and Windows server, Rust `common.rs:83-84`, Go `server.go:141-145`): the accept loop waits up to two poll slices, so clients queued behind the refused one wait too; they would be refused as well while every worker is busy.
 
 Rejected (evidence for the replies):
@@ -278,4 +279,41 @@ Artifact updates:
 
 - None beyond this test: the spec and the Rust and Go tests already state `0600`.
 - Lesson: a rule change on one platform includes a search of that platform's conditional test code (`#ifdef __APPLE__`, `cfg(target_os = "macos")`, `_darwin` files), which the local builds do not compile.
+
+## Regression - 2026-11-12
+
+What broke (review of `04f71b1` and `142f289` on plugin-ipc#18, 7 threads; all validated against the code):
+
+- SHM attach loop (C POSIX and Windows connect, Rust and Go Unix and Windows clients): the deadline was checked before peer liveness and abort, and only the call-bound branch probed the peer. A server that died in the last retry slot before the SHM attach deadline was taken for an SHM failure and SHM was removed for the client's lifetime, against decision 6 and the loop's own rule. Present before this SOW (`keep_shm = call_bound` on `dce436c`); this SOW's counter kept the order.
+- `test_win_service_guards` and `test_win_service_guards_extra` were registered in CTest without the `TIMEOUT` and `RUN_SERIAL` every other Windows service test sets.
+- The Go SHM tests' server helpers (`serveSessionsUntilClosed` and the older attach-failure and raw-server waits, 8 receives in `shm_posix_test.go` and `shm_windows_test.go`) and the Rust twins (`serve_sessions_until_closed`, the WinSHM call-bound test) waited without a bound.
+- The vendoring skill's import-rewrite check and fortified-build check read a `grep` error (status 2) as success through `! grep` and `xargs -r`.
+- The new profile-mask test comments (C, Rust, Go) said `0x08` is assigned on POSIX; it is SHM_WAITADDR, reserved, implemented by no transport (`docs/level1-windows-shm.md`, profile table).
+- This SOW's Analysis had no entry for #12 and #15.
+
+Rejected with evidence:
+
+- "The Rust permanent-attach-error test's premise is wrong because the server unlinks the stale region": the test serves sessions from a bare `UdsListener` (`serve_sessions_until_closed`), which never creates or reclaims an SHM region, so the pre-written bad-version region stays; the test fails on the code before this SOW.
+
+Why validation missed it:
+
+- The attach-loop order was reviewed for the call-bound branch only, the branch the counter changed. The test-helper bound and the CTest properties followed the files' older patterns, not the bounded-wait rule (#10) or the neighbouring Windows tests.
+
+Repair:
+
+- All six attach loops check abort, then peer liveness, then the deadline; the deadline branch only applies the call-bound counter. No deterministic test: the window is the server closing between the last liveness probe and the deadline, with no hook in between.
+- `TIMEOUT 120` and `RUN_SERIAL TRUE` for both guard tests.
+- Go waits through `recvWithin`; Rust helpers report through a channel read with `recv_timeout(TEST_WAIT_LIMIT)`.
+- Skill: each `grep` status is checked on its own (1 = no match passes; 2 fails); both blocks run in a subshell. Checked on a scratch tree: rewrite, already clean, unreadable directory (fails with 2).
+- Comments name `0x08` as reserved and unimplemented.
+- Analysis entry for #12 and #15.
+
+Validation (2026-11-12, low priority):
+
+- Linux: CTest 32/32; `cargo test` 417; `cargo fmt --check` with 1.91.0 and stable; `go test ./...`, `go test -race` on `service/...` and `transport/...`; UDS, SHM, service, cache and codec interop all pass.
+- FreeBSD 14.3 and 15.1: CTest 31/31, `cargo test`, `go test ./...` and `GOARCH=386 go test ./...` pass on both.
+- Windows host: Rust 282 passed, Go all packages, CTest 22/22 (both guard tests with the new properties).
+- macOS: CI on the commit.
+- Performance: only the connect-time attach loop changed; nothing runs per request on an established session. No benchmark.
+- Artifacts: vendoring skill (both checks); specs `docs/level2-typed-api.md` (attach-failure paragraph), `docs/level1-posix-shm.md` and `docs/level1-windows-shm.md` (liveness probe before each deadline check) and the integrator skill `docs/netipc-integrator-skill.md` (SHM attach failure) now state that a peer gone during the attach wait is not an attach failure; `AGENTS.md` unaffected.
 

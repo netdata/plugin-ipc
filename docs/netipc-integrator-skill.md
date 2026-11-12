@@ -796,6 +796,8 @@ Current required behavior:
   second time in a row, with the session still connected, counts as an
   attach failure, so a region that never becomes attachable costs at most
   two calls that end at their deadline
+- a server that closes the session during the attach wait is not an
+  attach failure: the connect fails and SHM stays enabled
 
 This is not same-session fallback.
 

@@ -241,12 +241,21 @@ Load this skill for any task involving:
    the subshell runs from the Netdata root; run from plugin-ipc, the same
    paths would rewrite plugin-ipc's own Go tree:
 
+   `grep` exits 1 for no match and 2 for an error, so each status is checked
+   on its own; only "no match" passes the final check:
+
    ```bash
    (
-     cd /path/to/netdata &&
-     grep -rlZ 'github.com/netdata/plugin-ipc/go' src/go/pkg/netipc --include='*.go' |
-       xargs -0 -r sed -i 's|github.com/netdata/plugin-ipc/go|github.com/netdata/netdata/go/plugins|g' &&
-     ! grep -rl 'github.com/netdata/plugin-ipc/go' src/go/pkg/netipc
+     cd /path/to/netdata || exit 1
+     pat='github.com/netdata/plugin-ipc/go'
+     files=$(grep -rl "$pat" src/go/pkg/netipc --include='*.go'); rc=$?
+     [ "$rc" -le 1 ] || exit "$rc"
+     if [ -n "$files" ]; then
+       printf '%s\n' "$files" |
+         xargs -d '\n' sed -i "s|$pat|github.com/netdata/netdata/go/plugins|g" || exit 1
+     fi
+     grep -rl "$pat" src/go/pkg/netipc; rc=$?
+     [ "$rc" -eq 1 ]
    )
    ```
 
@@ -271,11 +280,13 @@ Load this skill for any task involving:
      it. The build must succeed and its log must hold no library warning:
 
      ```bash
-     cmake -S . -B .tmp/fortify-o2 -DCMAKE_BUILD_TYPE=Release \
-       -DCMAKE_C_FLAGS_RELEASE="-O2 -DNDEBUG" \
-       -DCMAKE_C_FLAGS="-D_FORTIFY_SOURCE=3 -Wall -Wextra"
-     cmake --build .tmp/fortify-o2 > .tmp/fortify-o2.log 2>&1 &&
-       ! grep 'src/libnetdata.*warning:' .tmp/fortify-o2.log
+     (
+       cmake -S . -B .tmp/fortify-o2 -DCMAKE_BUILD_TYPE=Release \
+         -DCMAKE_C_FLAGS_RELEASE="-O2 -DNDEBUG" \
+         -DCMAKE_C_FLAGS="-D_FORTIFY_SOURCE=3 -Wall -Wextra" || exit 1
+       cmake --build .tmp/fortify-o2 > .tmp/fortify-o2.log 2>&1 || exit 1
+       grep 'src/libnetdata.*warning:' .tmp/fortify-o2.log; [ "$?" -eq 1 ]
+     )
      ```
 
    Netdata builds `netipc` on Linux and Windows only; the Windows build is

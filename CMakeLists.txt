@@ -984,6 +984,10 @@ if(NETIPC_WINDOWS_RUNTIME)
     )
     target_compile_definitions(test_win_service_guards PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_win_service_guards COMMAND test_win_service_guards)
+    set_tests_properties(test_win_service_guards PROPERTIES
+        TIMEOUT 120
+        RUN_SERIAL TRUE
+    )
 
     add_executable(test_win_service_guards_extra tests/fixtures/c/test_win_service_guards_extra.c)
     target_link_libraries(test_win_service_guards_extra PRIVATE
@@ -991,6 +995,10 @@ if(NETIPC_WINDOWS_RUNTIME)
     )
     target_compile_definitions(test_win_service_guards_extra PRIVATE NIPC_INTERNAL_TESTING=1)
     add_test(NAME test_win_service_guards_extra COMMAND test_win_service_guards_extra)
+    set_tests_properties(test_win_service_guards_extra PROPERTIES
+        TIMEOUT 120
+        RUN_SERIAL TRUE
+    )
 
     add_executable(test_win_stress tests/fixtures/c/test_win_stress.c)
     target_link_libraries(test_win_stress PRIVATE

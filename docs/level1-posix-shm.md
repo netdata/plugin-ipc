@@ -318,10 +318,13 @@ this as a retryable protocol-not-ready condition; every other error fails
 the attach at once. Between retries the client probes the
 session socket (see "Peer liveness"); if the server already closed it
 (refused at worker capacity, or died), the client stops retrying, reports
-the connect as failed, and keeps SHM enabled for its next connect. When the
-call deadline ends the wait, SHM also stays enabled, except that the second
-such wait in a row with the session still connected fails the attach
-(`level2-typed-api.md`).
+the connect as failed, and keeps SHM enabled for its next connect. The
+probe runs before each deadline check, so a server that closed the socket
+is never taken for an attach failure, whichever deadline ends the wait.
+When the call deadline ends the wait, SHM also stays enabled, except that
+the second such wait in a row with the session still connected fails the
+attach (`level2-typed-api.md`). When the attach timeout ends the wait with
+the session still connected, the attach fails.
 
 ### Peer liveness
 

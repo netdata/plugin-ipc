@@ -298,8 +298,9 @@ objects in place.
 6. If SHM_HYBRID: open `req_event` and `resp_event` kernel events.
 7. The client is now ready to publish requests and consume responses.
 
-If the objects cannot be opened yet, the client retries. Between retries
-it probes the session pipe; if the server already broke it (refused at
+If the objects cannot be opened yet, the client retries. Between retries,
+and before each deadline check, it probes the session pipe; if the server
+already broke it (refused at
 worker capacity, or died), the client stops retrying, reports the connect
 as failed, and keeps SHM enabled for its next connect: the session failed,
 not the attach. A call deadline or an abort that ends the wait also keeps
