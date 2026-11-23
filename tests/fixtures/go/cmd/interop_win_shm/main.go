@@ -15,7 +15,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/protocol"
 	"github.com/netdata/plugin-ipc/go/pkg/netipc/transport/windows"
@@ -86,17 +85,9 @@ func runServer(runDir, service string) int {
 }
 
 func runClient(runDir, service string) int {
-	// Retry attach
-	var ctx *windows.WinShmContext
-	var err error
-	for i := 0; i < 500; i++ {
-		ctx, err = windows.WinShmClientAttach(runDir, service, authToken, 1,
-			windows.WinShmProfileHybrid)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// The server prints READY only after creating the region.
+	ctx, err := windows.WinShmClientAttach(runDir, service, authToken, 1,
+		windows.WinShmProfileHybrid)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "client: attach failed: %v\n", err)
 		return 1

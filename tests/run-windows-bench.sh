@@ -106,6 +106,35 @@ BENCH_GO="${BUILD_DIR}/bin/bench_windows_go.exe"
 #  Helpers
 # ---------------------------------------------------------------------------
 
+# taskkill lives in System32, which a minimal PATH may lack.
+taskkill_bin() {
+    if command -v taskkill.exe >/dev/null 2>&1; then
+        command -v taskkill.exe
+    else
+        cygpath -u "${SYSTEMROOT:-C:\\Windows}\\System32\\taskkill.exe"
+    fi
+}
+
+# MSYS-runtime servers blocked in a Win32 wait never act on SIGTERM, so a
+# plain kill can leave them running and a following wait blocks forever.
+force_stop_pid() {
+    local pid="$1"
+    local winpid=""
+    local waited=0
+
+    kill "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 20 ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        winpid=$(ps -W | awk -v p="$pid" '$1 == p { print $4; exit }' 2>/dev/null || true)
+        if [ -n "$winpid" ]; then
+            "$(taskkill_bin)" //PID "$winpid" //T //F >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
 cleanup() {
     if [ "${NIPC_KEEP_RUN_DIR:-0}" = "1" ]; then
         warn "Preserving RUN_DIR: $ROOT_RUN_DIR"
@@ -113,7 +142,7 @@ cleanup() {
         rm -rf "$ROOT_RUN_DIR"
     fi
     for pid in "${SERVER_PIDS[@]:-}"; do
-        kill "$pid" 2>/dev/null || true
+        force_stop_pid "$pid"
         wait "$pid" 2>/dev/null || true
     done
 }
@@ -319,7 +348,7 @@ start_server() {
 
     err "Server $lang ($subcmd) did not print READY within 10s"
     cat "$server_out" >&2
-    kill "$pid" 2>/dev/null || true
+    force_stop_pid "$pid"
     return 1
 }
 
@@ -374,7 +403,7 @@ stop_server() {
     if kill -0 "$pid" 2>/dev/null; then
         forced_stop=1
         warn "  Server ${lang} (${svc}) did not exit cleanly within ${SERVER_STOP_GRACE_SEC}s; forcing kill"
-        kill "$pid" 2>/dev/null || true
+        force_stop_pid "$pid"
     fi
 
     if ! wait "$pid" 2>/dev/null; then

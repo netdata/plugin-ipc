@@ -2,6 +2,8 @@
 
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_protocol.h"
+#include "test_sync.h"
+#include "test_lock_cleanup.h"
 #include "netipc_service_common.h"
 
 #include <pthread.h>
@@ -34,6 +36,7 @@ static void unique_service(char *buf, size_t len, const char *prefix)
 {
     int n = __sync_add_and_fetch(&g_service_counter, 1);
     snprintf(buf, len, "%s_%d_%ld", prefix, n, (long)getpid());
+    test_locks_track(TEST_RUN_DIR, buf);
 }
 
 static int cache_has(nipc_cgroups_cache_t *cache, uint32_t hash, const char *name)
@@ -136,6 +139,7 @@ typedef struct {
     nipc_server_config_t config;
     nipc_cgroups_service_handler_t service_handler;
     nipc_managed_server_t server;
+    test_server_events_t events;
     int ready;
     int done;
     int init_ok;
@@ -152,14 +156,15 @@ static void *managed_server_thread(void *arg)
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed for %s: %d\n", ctx->service, err);
         __atomic_store_n(&ctx->init_ok, 0, __ATOMIC_RELEASE);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
     __atomic_store_n(&ctx->init_ok, 1, __ATOMIC_RELEASE);
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_server_use_test_timings(&ctx->server, &ctx->events);
+    test_flag_set(&ctx->ready);
     nipc_server_run(&ctx->server);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -182,10 +187,7 @@ static int start_server_named(server_thread_ctx_t *ctx,
     }
 
     check("server thread created", 1);
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&ctx->ready, &ctx->done);
 
     check("server ready", __atomic_load_n(&ctx->ready, __ATOMIC_ACQUIRE) == 1);
     check("server init ok", __atomic_load_n(&ctx->init_ok, __ATOMIC_ACQUIRE) == 1);
@@ -211,30 +213,18 @@ static void stop_server_drain(server_thread_ctx_t *ctx, pthread_t tid)
     nipc_server_destroy(&ctx->server);
 }
 
-static int refresh_until_ready(nipc_client_ctx_t *client, int max_tries, useconds_t sleep_us)
+/* One refresh, then report whether the client is ready. */
+static int refresh_ready(nipc_client_ctx_t *client)
 {
-    for (int i = 0; i < max_tries; i++) {
-        nipc_client_refresh(client);
-        if (nipc_client_ready(client))
-            return 1;
-        usleep(sleep_us);
-    }
-
-    return 0;
+    nipc_client_refresh(client);
+    return nipc_client_ready(client);
 }
 
-static int refresh_until_state(nipc_client_ctx_t *client,
-                               nipc_client_state_t target_state,
-                               int max_tries,
-                               useconds_t sleep_us)
+/* One refresh, then report whether the client reached target_state. */
+static int refresh_to_state(nipc_client_ctx_t *client,
+                            nipc_client_state_t target_state)
 {
-    for (int i = 0; i < max_tries; i++) {
-        nipc_client_refresh(client);
-        if (client->state == target_state)
-            return 1;
-        usleep(sleep_us);
-    }
-
+    nipc_client_refresh(client);
     return client->state == target_state;
 }
 
@@ -242,6 +232,77 @@ static void clear_test_faults(void)
 {
     nipc_posix_service_test_fault_clear();
 }
+
+#if defined(__linux__) || defined(__FreeBSD__)
+static int shm_regions_created(server_thread_ctx_t *ctx)
+{
+    test_sync_lock();
+    int n = ctx->events.shm_created;
+    test_sync_unlock();
+    return n;
+}
+#endif
+
+/* The server creates a session's SHM region only when the handshake
+ * selects SHM, and falls back to baseline in the same handshake when the
+ * region cannot be created. The region exists before HELLO_ACK, so a
+ * client that is READY has already been counted. */
+#if defined(__linux__) || defined(__FreeBSD__)
+static void test_shm_region_only_for_shm_sessions(void)
+{
+    printf("--- SHM region created only for SHM sessions ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_shm_after_negotiation");
+
+    server_thread_ctx_t sctx;
+    pthread_t tid;
+    nipc_server_config_t scfg = default_typed_hybrid_server_config();
+    if (!start_server_named(&sctx, service, 4, &scfg, &full_service_handler, &tid))
+        return;
+
+    nipc_client_ctx_t client;
+    nipc_cgroups_resp_view_t view;
+
+    nipc_client_config_t baseline_cfg = default_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &baseline_cfg);
+    check("baseline client ready", refresh_ready(&client) && client.shm == NULL);
+    check("baseline client call works",
+          nipc_client_call_cgroups_snapshot(&client, &view) == NIPC_OK);
+    check("baseline session created no SHM region", shm_regions_created(&sctx) == 0);
+    nipc_client_close(&client);
+
+    nipc_client_config_t bad_auth_cfg = default_typed_hybrid_client_config();
+    bad_auth_cfg.auth_token = AUTH_TOKEN + 1;
+    nipc_client_init(&client, TEST_RUN_DIR, service, &bad_auth_cfg);
+    check("rejected client reports auth failure",
+          refresh_to_state(&client, NIPC_CLIENT_AUTH_FAILED));
+    check("rejected client created no SHM region", shm_regions_created(&sctx) == 0);
+    nipc_client_close(&client);
+
+    nipc_client_config_t shm_cfg = default_typed_hybrid_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &shm_cfg);
+    check("SHM client ready on SHM", refresh_ready(&client) && client.shm != NULL);
+    check("SHM client call works",
+          nipc_client_call_cgroups_snapshot(&client, &view) == NIPC_OK);
+    check("SHM session created one region", shm_regions_created(&sctx) == 1);
+    nipc_client_close(&client);
+
+    nipc_posix_service_test_fault_set(
+        NIPC_POSIX_SERVICE_TEST_FAULT_SERVER_SHM_CTX_CALLOC, 0);
+    nipc_client_init(&client, TEST_RUN_DIR, service, &shm_cfg);
+    check("failed region falls back to baseline in one handshake",
+          refresh_ready(&client) && client.shm == NULL &&
+          client.session.selected_profile == NIPC_PROFILE_BASELINE);
+    clear_test_faults();
+    check("fallback session call works",
+          nipc_client_call_cgroups_snapshot(&client, &view) == NIPC_OK);
+    check("failed region was not counted", shm_regions_created(&sctx) == 1);
+    nipc_client_close(&client);
+
+    stop_server_drain(&sctx, tid);
+}
+#endif
 
 static void ensure_run_dir(void)
 {
@@ -414,17 +475,18 @@ static void test_client_fault_injection_disconnects_and_recovers(void)
         nipc_posix_service_test_fault_set(
             NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_RESPONSE_BUF_REALLOC, 0);
         check("response buffer alloc fault disconnects client",
-              refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 20, 10000));
+              refresh_to_state(&client, NIPC_CLIENT_DISCONNECTED));
         check("response buffer alloc fault leaves client not ready",
               !nipc_client_ready(&client));
         clear_test_faults();
         check("response buffer alloc fault recovers",
-              refresh_until_ready(&client, 100, 10000));
+              refresh_ready(&client));
 
         nipc_client_close(&client);
         stop_server_drain(&sctx, tid);
     }
 
+#if defined(__linux__) || defined(__FreeBSD__)
     {
         char service[64];
         unique_service(service, sizeof(service), "svc_client_send_fault");
@@ -442,15 +504,17 @@ static void test_client_fault_injection_disconnects_and_recovers(void)
         nipc_posix_service_test_fault_set(
             NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC, 0);
         check("send buffer alloc fault disconnects hybrid client",
-              refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 20, 10000));
+              refresh_to_state(&client, NIPC_CLIENT_DISCONNECTED));
         clear_test_faults();
         check("send buffer alloc fault recovers",
-              refresh_until_ready(&client, 200, 10000) && client.shm != NULL);
+              refresh_ready(&client) && client.shm != NULL);
 
         nipc_client_close(&client);
         stop_server_drain(&sctx, tid);
     }
+#endif
 
+#if defined(__linux__) || defined(__FreeBSD__)
     {
         char service[64];
         unique_service(service, sizeof(service), "svc_client_shm_ctx_fault");
@@ -468,16 +532,17 @@ static void test_client_fault_injection_disconnects_and_recovers(void)
         nipc_posix_service_test_fault_set(
             NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_SHM_CTX_CALLOC, 0);
         check("client SHM ctx alloc fault disconnects hybrid client",
-              refresh_until_state(&client, NIPC_CLIENT_DISCONNECTED, 20, 10000));
+              refresh_to_state(&client, NIPC_CLIENT_DISCONNECTED));
         check("client SHM ctx alloc fault leaves session invalid",
               !client.session_valid && client.shm == NULL);
         clear_test_faults();
         check("client SHM ctx alloc fault recovers",
-              refresh_until_ready(&client, 200, 10000) && client.shm != NULL);
+              refresh_ready(&client) && client.shm != NULL);
 
         nipc_client_close(&client);
         stop_server_drain(&sctx, tid);
     }
+#endif
 }
 
 static void test_server_init_fault_injection(void)
@@ -575,6 +640,9 @@ int main(void)
     test_common_service_helpers();
     test_lookup_remaining_timeout_helpers();
     test_client_fault_injection_disconnects_and_recovers();
+#if defined(__linux__) || defined(__FreeBSD__)
+    test_shm_region_only_for_shm_sessions();
+#endif
     test_server_init_fault_injection();
     test_cache_fault_injection();
 

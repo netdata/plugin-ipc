@@ -95,33 +95,43 @@ mod posix_only {
         }
     }
 
-    fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut server = ManagedServer::new(run_dir, service, server_config(), server_handler());
-
+    /// Run a server on its own thread, print READY once it accepts
+    /// connections, and stop it after 10 s if the test never kills this
+    /// process.
+    fn serve(
+        listening: netipc::service::ListeningSignal,
+        stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        run: impl FnOnce() -> Result<(), netipc::protocol::NipcError> + Send + 'static,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let runner = std::thread::spawn(run);
+        if !listening.wait(std::time::Duration::from_secs(5)) {
+            stop_flag.store(false, std::sync::atomic::Ordering::Release);
+            let _ = runner.join();
+            return Err("server not listening after 5s".into());
+        }
         println!("READY");
 
-        let stop_flag = server.running_flag();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(10));
             stop_flag.store(false, std::sync::atomic::Ordering::Release);
         });
 
-        server.run()?;
+        runner.join().map_err(|_| "server thread panicked")??;
         Ok(())
+    }
+
+    fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut server = ManagedServer::new(run_dir, service, server_config(), server_handler());
+        let listening = server.listening_signal();
+        let stop_flag = server.running_flag();
+        serve(listening, stop_flag, move || server.run())
     }
 
     fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
         let cache = CgroupsCache::new(run_dir, service, client_config());
 
         // Refresh to populate cache
-        let mut updated = false;
-        for _ in 0..200 {
-            if cache.refresh() {
-                updated = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        let updated = cache.refresh();
         if !updated || !cache.ready() {
             return Err("cache not ready after refresh".into());
         }

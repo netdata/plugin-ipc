@@ -168,7 +168,50 @@ Load this skill for any task involving:
    If any downstream vendored-source change is not understood, do not run
    `vendor-to-netdata.sh`.
 
-7. Record the CI/scanner preflight in the active SOW before vendoring.
+7. Assess performance impact (AGENTS.md, Test Cadence).
+
+   Benchmarks take hours; run them only when the vendored changes can affect
+   established-session steady state. Collect the SOW gate performance
+   assessments for every source change since the baseline (step 5), and
+   record in the active SOW whether any changed code runs per request on an
+   established session, with file:line evidence.
+
+   - No such change (connection setup, reconnect, error mapping, idle-timeout
+     paths, shutdown, tests, docs, build): no benchmark run; record the
+     assessment.
+   - Such a change exists: run the affected suites once on the candidate
+     commit:
+
+     ```bash
+     # Measure (run-*), then render the report and check floors (generate-*).
+     bash tests/run-posix-bench.sh benchmarks-posix.csv
+     bash tests/generate-benchmarks-posix.sh
+     # On the Windows host:
+     bash tests/run-windows-bench.sh benchmarks-windows.csv
+     bash tests/generate-benchmarks-windows.sh
+     ```
+
+     Compare against the committed CSVs (`git diff`). If rows regress beyond
+     noise, fix all regressions, then rerun once; bisect by SOW commit.
+   - Assessment uncertain: ask the user before running anything.
+
+   A regression that is neither fixed nor explicitly accepted by the user
+   blocks vendoring.
+
+   Extended suites (fuzz, stress, randomized chaos, lookup scale) are not
+   part of correctness runs. Run them once on the candidate commit when the
+   vendored changes touch what they exercise (codecs and decoders for fuzz;
+   concurrency, session lifecycle or transports for stress), and record the
+   result or the reason none was needed:
+
+   ```bash
+   bash tests/run-extended-fuzz.sh
+   bash tests/run-extended-stress.sh
+   ```
+
+   A failure blocks vendoring until it is fixed.
+
+8. Record the CI/scanner preflight in the active SOW before vendoring.
 
    Include:
 
@@ -176,9 +219,13 @@ Load this skill for any task involving:
    - GitHub Actions/check-run summary;
    - code-scanning summary by tool and severity;
    - Dependabot and secret-scanning summary;
+   - Go version alignment: the `go` directive in the three plugin-ipc
+     `go.mod` files equals Netdata's `src/go/go.mod`, and `GoVersionOverride`
+     in the three `osv-scanner.toml` files equals the patch release Netdata
+     pins in `packaging/check-for-go-toolchain.sh`; fix any mismatch first;
    - decision: proceed, block, or proceed with explicit risk acceptance.
 
-8. Only after the CI/scanner preflight and two-way migration plan pass, update
+9. Only after the CI/scanner preflight and two-way migration plan pass, update
    the Netdata vendored copy using the project-local vendor workflow.
 
    ```bash
@@ -187,14 +234,64 @@ Load this skill for any task involving:
    bash ./diff-netdata-vendor.sh /path/to/netdata
    ```
 
-9. Validate in the Netdata checkout.
+   `vendor-to-netdata.sh` prints the Go import-path rewrite but does not run
+   it, and `diff-netdata-vendor.sh` normalizes import paths, so it reports no
+   difference either way. Apply the rewrite in the Netdata checkout (no `.bak`
+   files), then confirm no upstream path is left. The paths are relative, so
+   the subshell runs from the Netdata root; run from plugin-ipc, the same
+   paths would rewrite plugin-ipc's own Go tree:
+
+   `grep` exits 1 for no match and 2 for an error, so each status is checked
+   on its own; only "no match" passes the final check:
+
+   ```bash
+   (
+     cd /path/to/netdata || exit 1
+     pat='github.com/netdata/plugin-ipc/go'
+     files=$(grep -rl "$pat" src/go/pkg/netipc --include='*.go'); rc=$?
+     [ "$rc" -le 1 ] || exit "$rc"
+     if [ -n "$files" ]; then
+       printf '%s\n' "$files" |
+         xargs -d '\n' sed -i "s|$pat|github.com/netdata/netdata/go/plugins|g" || exit 1
+     fi
+     grep -rl "$pat" src/go/pkg/netipc; rc=$?
+     [ "$rc" -eq 1 ]
+   )
+   ```
+
+10. Validate in the Netdata checkout.
 
    Run the targeted Netdata build/tests required by the active SOW. At minimum,
    prove:
 
    - the vendor diff is expected after copying;
    - Netdata-only wrapper files were not overwritten;
-   - unrelated Netdata files were not staged or modified by the vendoring step.
+   - unrelated Netdata files were not staged or modified by the vendoring step;
+   - every vendored `.c` file is in Netdata's build lists
+     (`src/libnetdata/SourceLists.cmake`), and every system library the new
+     code calls is linked to the `netipc` target in
+     `src/libnetdata/CMakeLists.txt` (the script does not edit either file);
+   - the Netdata build reports no warning in vendored NetIPC sources. Netdata
+     compiles them with `-O2 -D_FORTIFY_SOURCE=3`, which plugin-ipc's own
+     builds do not enable, so check this before pushing the source commit:
+
+     The optimization level goes in `CMAKE_C_FLAGS_RELEASE`, since the
+     Release defaults (`-O3`) come after `CMAKE_C_FLAGS` and would override
+     it. The build must succeed and its log must hold no library warning:
+
+     ```bash
+     (
+       cmake -S . -B .tmp/fortify-o2 -DCMAKE_BUILD_TYPE=Release \
+         -DCMAKE_C_FLAGS_RELEASE="-O2 -DNDEBUG" \
+         -DCMAKE_C_FLAGS="-D_FORTIFY_SOURCE=3 -Wall -Wextra" || exit 1
+       cmake --build .tmp/fortify-o2 > .tmp/fortify-o2.log 2>&1 || exit 1
+       grep 'src/libnetdata.*warning:' .tmp/fortify-o2.log; [ "$?" -eq 1 ]
+     )
+     ```
+
+   Netdata builds `netipc` on Linux and Windows only; the Windows build is
+   proven by the Netdata PR's "Build Windows" check, so the SOW stays open
+   until that check passes.
 
 ## Blockers
 
@@ -210,6 +307,8 @@ Stop and report if any of these are true:
 - either side has NetIPC changes since the last vendoring that are not
   understood;
 - the active SOW does not contain a migration plan for both directions;
+- the performance assessment is missing, or a benchmark run it called for
+  shows a regression that is neither fixed nor explicitly accepted by the user;
 - source tree has uncommitted changes that are intended for vendoring;
 - Netdata checkout has unrelated changes that would be hard to isolate.
 
@@ -228,5 +327,7 @@ Netdata vendoring preflight:
 - Upstream gap: <summary of plugin-ipc changes since baseline>
 - Downstream gap: <summary of Netdata vendored changes since baseline>
 - Migration plan: <preserve/backport/overwrite/decision summary>
+- Performance: <assessment; benchmark run or why none was needed; regressions fixed/accepted/none>
+- Extended suites: <fuzz/stress run and result, or why none was needed>
 - Decision: proceed | blocked | proceed with user-accepted risk
 ```

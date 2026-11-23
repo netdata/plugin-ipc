@@ -10,7 +10,7 @@
 #[cfg(windows)]
 use netipc::protocol::{self, Header};
 #[cfg(windows)]
-use netipc::transport::win_shm::{WinShmContext, PROFILE_HYBRID};
+use netipc::transport::win_shm::{PROFILE_HYBRID, WinShmContext};
 
 #[cfg(windows)]
 const AUTH_TOKEN: u64 = 0xDEADBEEFCAFEBABE;
@@ -75,23 +75,8 @@ fn run_server(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Er
 
 #[cfg(windows)]
 fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Retry attach -- server may not be fully ready yet
-    let mut ctx = None;
-    for _ in 0..500 {
-        let attempt = WinShmContext::client_attach(run_dir, service, AUTH_TOKEN, 1, PROFILE_HYBRID);
-        match attempt {
-            Ok(c) => {
-                ctx = Some(c);
-                break;
-            }
-            Err(netipc::transport::win_shm::WinShmError::OpenMapping(_))
-            | Err(netipc::transport::win_shm::WinShmError::BadMagic) => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-    let mut ctx = ctx.ok_or("client: attach failed after retries")?;
+    // The server prints READY only after creating the region.
+    let mut ctx = WinShmContext::client_attach(run_dir, service, AUTH_TOKEN, 1, PROFILE_HYBRID)?;
 
     // Build payload with known pattern
     let payload: Vec<u8> = (0..256).map(|i| (i & 0xFF) as u8).collect();

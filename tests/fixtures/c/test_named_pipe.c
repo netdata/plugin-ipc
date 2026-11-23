@@ -9,6 +9,8 @@
 
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_protocol.h"
+#include "test_sync.h"
+#include "test_win_security.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -88,6 +90,7 @@ typedef enum {
     FAKE_ACK_GOOD_THEN_BAD_CHUNK_HEADER,
     FAKE_ACK_GOOD_THEN_CHUNK_LEN_MISMATCH,
     FAKE_ACK_GOOD_THEN_CHUNK_OVERFLOW,
+    FAKE_ACK_GOOD_THEN_EXTRA_CHUNK,
     FAKE_ACK_GOOD_THEN_LIMITED_RESPONSE,
     FAKE_ACK_GOOD_THEN_TOO_MANY_ITEMS,
     FAKE_ACK_GOOD_THEN_BAD_BATCH_DIR,
@@ -97,6 +100,13 @@ typedef enum {
     FAKE_ACK_GOOD_THEN_ZERO_MESSAGE,
     FAKE_ACK_GOOD_THEN_TRAILING_RESPONSE,
     FAKE_ACK_CLOSE_BEFORE_ACK,
+    FAKE_ACK_SELECTED_NOT_OFFERED,
+    FAKE_ACK_SELECTED_NONE,
+    FAKE_ACK_SELECTED_TWO,
+    FAKE_ACK_TRAILING_BYTES,
+    FAKE_ACK_LONG_PAYLOAD,
+    FAKE_ACK_PACKET_ABOVE_PROPOSAL,
+    FAKE_ACK_PACKET_HEADER_ONLY,
 } fake_ack_mode_t;
 
 typedef enum {
@@ -120,6 +130,7 @@ typedef struct {
 typedef struct {
     const char *service;
     HANDLE ready_event;
+    HANDLE accepted_event; /* set once the server's accept returned */
     int result;
     fake_hello_mode_t mode;
 } fake_client_thread_ctx_t;
@@ -157,28 +168,24 @@ static HANDLE create_raw_pipe(const char *service, uint32_t buf_size, wchar_t *p
         NULL);
 }
 
+/* The listener exists before callers connect; WaitNamedPipeW covers an
+ * instance that is momentarily busy. */
 static HANDLE connect_raw_pipe(const wchar_t *pipe_name)
 {
-    for (int i = 0; i < 100; i++) {
-        HANDLE h = CreateFileW(
-            pipe_name,
-            GENERIC_READ | GENERIC_WRITE,
-            0,
-            NULL,
-            OPEN_EXISTING,
-            0,
-            NULL);
-        if (h != INVALID_HANDLE_VALUE) {
-            DWORD mode = PIPE_READMODE_MESSAGE;
-            if (!SetNamedPipeHandleState(h, &mode, NULL, NULL)) {
-                CloseHandle(h);
-                return INVALID_HANDLE_VALUE;
-            }
-            return h;
-        }
-        Sleep(10);
+    HANDLE h = CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                           OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PIPE_BUSY &&
+        WaitNamedPipeW(pipe_name, TEST_WAIT_LIMIT_MS))
+        h = CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                        OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return INVALID_HANDLE_VALUE;
+    DWORD mode = PIPE_READMODE_MESSAGE;
+    if (!SetNamedPipeHandleState(h, &mode, NULL, NULL)) {
+        CloseHandle(h);
+        return INVALID_HANDLE_VALUE;
     }
-    return INVALID_HANDLE_VALUE;
+    return h;
 }
 
 static int connect_named_pipe_server(HANDLE pipe)
@@ -378,17 +385,43 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
                                        NIPC_KIND_CONTROL, NIPC_CODE_HELLO_ACK,
                                        NIPC_STATUS_UNSUPPORTED, payload, payload_len);
     } else {
+        uint32_t agreed = packet_size;
+        if (ctx->mode == FAKE_ACK_PACKET_ABOVE_PROPOSAL)
+            agreed = packet_size + 1;
+        if (ctx->mode == FAKE_ACK_PACKET_HEADER_ONLY)
+            agreed = NIPC_HEADER_LEN;
         size_t payload_len = build_valid_hello_ack_payload(payload, sizeof(payload),
-                                                           packet_size, 1);
+                                                           agreed, 1);
         if (ctx->mode == FAKE_ACK_BAD_LAYOUT) {
             nipc_hello_ack_t ack = { .layout_version = 2 };
             payload_len = nipc_hello_ack_encode(&ack, payload, sizeof(payload));
         }
         if (ctx->mode == FAKE_ACK_BAD_PAYLOAD)
             payload_len = 8;
+        if (ctx->mode == FAKE_ACK_LONG_PAYLOAD) {
+            /* A valid ACK, then 16 more payload bytes the header declares. */
+            memset(payload + payload_len, 0, 16);
+            payload_len += 16;
+        }
+        if (ctx->mode == FAKE_ACK_SELECTED_NOT_OFFERED ||
+            ctx->mode == FAKE_ACK_SELECTED_NONE ||
+            ctx->mode == FAKE_ACK_SELECTED_TWO) {
+            /* The client offers baseline only; selected_profile is at offset 12. */
+            uint32_t selected =
+                ctx->mode == FAKE_ACK_SELECTED_NOT_OFFERED ? NIPC_PROFILE_SHM_HYBRID
+                : ctx->mode == FAKE_ACK_SELECTED_NONE
+                    ? 0
+                    : (NIPC_PROFILE_BASELINE | NIPC_PROFILE_SHM_HYBRID);
+            memcpy(payload + 12, &selected, sizeof(selected));
+        }
         msg_len = build_control_packet(msg, sizeof(msg),
                                        NIPC_KIND_CONTROL, NIPC_CODE_HELLO_ACK,
                                        NIPC_STATUS_OK, payload, payload_len);
+        if (ctx->mode == FAKE_ACK_TRAILING_BYTES && msg_len > 0) {
+            /* A valid ACK message, then 16 bytes its header does not declare. */
+            memset(msg + msg_len, 0, 16);
+            msg_len += 16;
+        }
     }
 
     if (!raw_pipe_write(pipe, msg, (DWORD)msg_len)) {
@@ -418,6 +451,7 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
         ctx->mode == FAKE_ACK_GOOD_THEN_BAD_CHUNK_HEADER ||
         ctx->mode == FAKE_ACK_GOOD_THEN_CHUNK_LEN_MISMATCH ||
         ctx->mode == FAKE_ACK_GOOD_THEN_CHUNK_OVERFLOW ||
+        ctx->mode == FAKE_ACK_GOOD_THEN_EXTRA_CHUNK ||
         ctx->mode == FAKE_ACK_GOOD_THEN_LIMITED_RESPONSE ||
         ctx->mode == FAKE_ACK_GOOD_THEN_TOO_MANY_ITEMS ||
         ctx->mode == FAKE_ACK_GOOD_THEN_BAD_BATCH_DIR ||
@@ -654,6 +688,53 @@ static DWORD WINAPI fake_ack_server_thread(LPVOID arg)
                 CloseHandle(pipe);
                 return 1;
             }
+        } else if (ctx->mode == FAKE_ACK_GOOD_THEN_EXTRA_CHUNK) {
+            /* 64 bytes remain after the first packet, one continuation's
+             * worth; two 32-byte ones need a chunk the count does not
+             * declare. */
+            uint8_t payload_bytes[160];
+            memset(payload_bytes, 0xAB, sizeof(payload_bytes));
+
+            nipc_header_t resp_hdr = {
+                .magic = NIPC_MAGIC_MSG,
+                .version = NIPC_VERSION,
+                .header_len = NIPC_HEADER_LEN,
+                .kind = NIPC_KIND_RESPONSE,
+                .code = req_hdr.code,
+                .flags = 0,
+                .item_count = 1,
+                .message_id = req_hdr.message_id,
+                .payload_len = sizeof(payload_bytes),
+                .transport_status = NIPC_STATUS_OK,
+            };
+
+            uint8_t first_pkt[128];
+            nipc_header_encode(&resp_hdr, first_pkt, NIPC_HEADER_LEN);
+            memcpy(first_pkt + NIPC_HEADER_LEN, payload_bytes, 96);
+            if (!raw_pipe_write(pipe, first_pkt, NIPC_HEADER_LEN + 96)) {
+                CloseHandle(pipe);
+                return 1;
+            }
+
+            for (uint32_t ci = 1; ci <= 2; ci++) {
+                nipc_chunk_header_t chk = {
+                    .magic = NIPC_MAGIC_CHUNK,
+                    .version = NIPC_VERSION,
+                    .flags = 0,
+                    .message_id = req_hdr.message_id,
+                    .total_message_len = NIPC_HEADER_LEN + sizeof(payload_bytes),
+                    .chunk_index = ci,
+                    .chunk_count = 2,
+                    .chunk_payload_len = 32,
+                };
+                uint8_t chunk_pkt[NIPC_HEADER_LEN + 32];
+                nipc_chunk_header_encode(&chk, chunk_pkt, NIPC_HEADER_LEN);
+                memcpy(chunk_pkt + NIPC_HEADER_LEN, payload_bytes + 96 + 32 * (ci - 1), 32);
+                if (!raw_pipe_write(pipe, chunk_pkt, (DWORD)sizeof(chunk_pkt))) {
+                    CloseHandle(pipe);
+                    return 1;
+                }
+            }
         } else if (ctx->mode == FAKE_ACK_GOOD_THEN_LIMITED_RESPONSE) {
             uint8_t first_pkt[NIPC_HEADER_LEN];
             nipc_header_t resp_hdr = {
@@ -877,8 +958,10 @@ static DWORD WINAPI fake_hello_client_thread(LPVOID arg)
     }
 
     ctx->result = raw_pipe_write(pipe, msg, (DWORD)msg_len);
+    /* Keep the pipe open until the server judged the HELLO, so it reads
+     * the bad packet rather than a disconnect. */
     if (ctx->result)
-        Sleep(50);
+        WaitForSingleObject(ctx->accepted_event, TEST_WAIT_LIMIT_MS);
     CloseHandle(pipe);
     return ctx->result ? 0 : 1;
 }
@@ -1028,7 +1111,7 @@ static void test_ping_pong(void)
         .ready_event = ready_event,
     };
 
-    HANDLE thread = CreateThread(NULL, 0, server_thread, &ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, server_thread, &ctx, 0, NULL);
     WaitForSingleObject(ready_event, 5000);
     CloseHandle(ready_event);
 
@@ -1086,6 +1169,8 @@ typedef struct {
     HANDLE      ready_event;
     int         accept_ok;
     uint32_t    accepted_selected_profile;
+    uint32_t    server_supported_profiles; /* 0 = default */
+    uint32_t    server_preferred_profiles; /* used with server_supported_profiles */
 } preferred_profile_thread_ctx_t;
 
 static DWORD WINAPI preferred_profile_server_thread(LPVOID arg)
@@ -1093,6 +1178,10 @@ static DWORD WINAPI preferred_profile_server_thread(LPVOID arg)
     preferred_profile_thread_ctx_t *ctx = (preferred_profile_thread_ctx_t *)arg;
     nipc_np_server_config_t cfg = default_server_config();
     cfg.preferred_profiles = NIPC_PROFILE_BASELINE;
+    if (ctx->server_supported_profiles) {
+        cfg.supported_profiles = ctx->server_supported_profiles;
+        cfg.preferred_profiles = ctx->server_preferred_profiles;
+    }
 
     nipc_np_listener_t listener;
     nipc_np_error_t err = nipc_np_listen(ctx->run_dir, ctx->service, &cfg, &listener);
@@ -1131,7 +1220,7 @@ static void test_preferred_profile_selection(void)
         .accepted_selected_profile = 0,
     };
 
-    HANDLE thread = CreateThread(NULL, 0, preferred_profile_server_thread, &ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, preferred_profile_server_thread, &ctx, 0, NULL);
     check("preferred-profile server thread created", thread != NULL);
     if (!thread) {
         CloseHandle(ready_event);
@@ -1157,6 +1246,56 @@ static void test_preferred_profile_selection(void)
     CloseHandle(thread);
     check("preferred-profile server accepted", ctx.accept_ok);
     check("preferred-profile server selected baseline",
+          ctx.accepted_selected_profile == NIPC_PROFILE_BASELINE);
+}
+
+/* A profile bit Windows does not implement, offered and preferred by both
+ * peers, is never selected: they would otherwise run the pipe under that
+ * label. 0x08 (SHM_WAITADDR) is reserved and no transport implements it. */
+static void test_unassigned_profile_bit(void)
+{
+    printf("--- Unassigned profile bit is never selected ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+    const uint32_t unassigned = NIPC_PROFILE_SHM_WAITADDR;
+
+    HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    preferred_profile_thread_ctx_t ctx = {
+        .run_dir = TEST_RUN_DIR,
+        .service = service,
+        .ready_event = ready_event,
+        .server_supported_profiles = NIPC_PROFILE_BASELINE | unassigned,
+        .server_preferred_profiles = unassigned,
+    };
+
+    HANDLE thread = test_create_thread(NULL, 0, preferred_profile_server_thread, &ctx, 0, NULL);
+    check("unassigned-profile server thread created", thread != NULL);
+    if (!thread) {
+        CloseHandle(ready_event);
+        return;
+    }
+
+    WaitForSingleObject(ready_event, 5000);
+    CloseHandle(ready_event);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    ccfg.supported_profiles = NIPC_PROFILE_BASELINE | unassigned;
+    ccfg.preferred_profiles = unassigned;
+
+    nipc_np_session_t session;
+    nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("unassigned-profile client connect", err == NIPC_NP_OK);
+    if (err == NIPC_NP_OK) {
+        check("unassigned-profile client selected baseline",
+              session.selected_profile == NIPC_PROFILE_BASELINE);
+        nipc_np_close_session(&session);
+    }
+
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    check("unassigned-profile server accepted", ctx.accept_ok);
+    check("unassigned-profile server selected baseline",
           ctx.accepted_selected_profile == NIPC_PROFILE_BASELINE);
 }
 
@@ -1206,7 +1345,7 @@ static void test_auth_failure(void)
         .ready_event = ready_event,
     };
 
-    HANDLE thread = CreateThread(NULL, 0, server_auth_thread, &ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, server_auth_thread, &ctx, 0, NULL);
     WaitForSingleObject(ready_event, 5000);
     CloseHandle(ready_event);
 
@@ -1304,7 +1443,7 @@ static void test_chunked_ping_pong(void)
         .ready_event = ready_event,
     };
 
-    HANDLE thread = CreateThread(NULL, 0, chunked_server_thread, &ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, chunked_server_thread, &ctx, 0, NULL);
     WaitForSingleObject(ready_event, 5000);
     CloseHandle(ready_event);
 
@@ -1380,7 +1519,7 @@ static void test_chunked_receive_reuses_buffer(void)
         .ready_event = ready_event,
     };
 
-    HANDLE thread = CreateThread(NULL, 0, chunked_server_thread, &ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, chunked_server_thread, &ctx, 0, NULL);
     WaitForSingleObject(ready_event, 5000);
     CloseHandle(ready_event);
 
@@ -1480,7 +1619,7 @@ static void test_chunked_pipeline(void)
         .ready_event = ready_event,
     };
 
-    HANDLE thread = CreateThread(NULL, 0, chunked_server_thread, &ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, chunked_server_thread, &ctx, 0, NULL);
     WaitForSingleObject(ready_event, 5000);
     CloseHandle(ready_event);
 
@@ -1566,6 +1705,159 @@ static void test_chunked_pipeline(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: pipelining beyond the pipe buffers                           */
+/* ------------------------------------------------------------------ */
+
+#define PROGRESS_PAYLOAD (16u * 1024u)
+#define PROGRESS_REQUESTS 32u /* 512 KiB each way, 8x the 64 KiB buffers */
+
+static void progress_fill(uint8_t *p, uint64_t id)
+{
+    for (size_t i = 0; i < PROGRESS_PAYLOAD; i++)
+        p[i] = (uint8_t)(id + i);
+}
+
+typedef struct {
+    const char *service;
+    HANDLE ready_event;
+    int server_ok;
+} progress_server_ctx_t;
+
+/* Answers each request with blocking writes, one at a time: the server of
+ * the deadlock this guards against. */
+static DWORD WINAPI progress_server_thread(LPVOID arg)
+{
+    progress_server_ctx_t *ctx = (progress_server_ctx_t *)arg;
+    nipc_np_server_config_t cfg = default_server_config();
+    cfg.max_request_payload_bytes = PROGRESS_PAYLOAD;
+    cfg.max_response_payload_bytes = PROGRESS_PAYLOAD;
+
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, ctx->service, &cfg, &listener);
+    SetEvent(ctx->ready_event);
+    if (err != NIPC_NP_OK)
+        return 1;
+
+    nipc_np_session_t session;
+    err = nipc_np_accept(&listener, 1, &session);
+    if (err == NIPC_NP_OK) {
+        static uint8_t buf[64 * 1024];
+        for (uint32_t i = 0; i < PROGRESS_REQUESTS && err == NIPC_NP_OK; i++) {
+            nipc_header_t hdr;
+            const void *payload;
+            size_t payload_len;
+            err = nipc_np_receive(&session, buf, sizeof(buf), &hdr, &payload, &payload_len);
+            if (err != NIPC_NP_OK)
+                break;
+            nipc_header_t resp = hdr;
+            resp.kind = NIPC_KIND_RESPONSE;
+            resp.transport_status = NIPC_STATUS_OK;
+            err = nipc_np_send(&session, &resp, payload, payload_len);
+        }
+        nipc_np_close_session(&session);
+    }
+    ctx->server_ok = (err == NIPC_NP_OK);
+    nipc_np_close_listener(&listener);
+    return 0;
+}
+
+typedef struct {
+    const char *service;
+    int sends_ok;
+    int queued_after_sends;
+    int readable_after_sends;
+    int responses_ok;
+    int drained_at_end;
+} progress_client_ctx_t;
+
+static DWORD WINAPI progress_client_thread(LPVOID arg)
+{
+    progress_client_ctx_t *ctx = (progress_client_ctx_t *)arg;
+    nipc_np_client_config_t ccfg = default_client_config();
+    ccfg.max_request_payload_bytes = PROGRESS_PAYLOAD;
+    ccfg.max_response_payload_bytes = PROGRESS_PAYLOAD;
+
+    nipc_np_session_t session;
+    if (nipc_np_connect(TEST_RUN_DIR, ctx->service, &ccfg, &session) != NIPC_NP_OK)
+        return 1;
+
+    static uint8_t payload[PROGRESS_PAYLOAD];
+    nipc_np_error_t err = NIPC_NP_OK;
+    for (uint64_t id = 1; id <= PROGRESS_REQUESTS && err == NIPC_NP_OK; id++) {
+        nipc_header_t hdr = {
+            .kind = NIPC_KIND_REQUEST,
+            .code = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = id,
+        };
+        progress_fill(payload, id);
+        err = nipc_np_send(&session, &hdr, payload, sizeof(payload));
+    }
+    ctx->sends_ok = (err == NIPC_NP_OK);
+
+    /* The server could read every request only because the sends drained
+     * responses it had written. */
+    ctx->queued_after_sends = nipc_np_session_has_pending(&session);
+    bool readable = false;
+    ctx->readable_after_sends =
+        nipc_np_wait_readable(&session, 0, &readable) == NIPC_NP_OK && readable;
+
+    static uint8_t rbuf[64 * 1024];
+    static uint8_t expected[PROGRESS_PAYLOAD];
+    int ok = ctx->sends_ok;
+    for (uint64_t id = 1; id <= PROGRESS_REQUESTS && ok; id++) {
+        nipc_header_t rhdr;
+        const void *rpayload;
+        size_t rlen = 0;
+        err = nipc_np_receive(&session, rbuf, sizeof(rbuf), &rhdr, &rpayload, &rlen);
+        progress_fill(expected, id);
+        ok = err == NIPC_NP_OK && rhdr.message_id == id && rlen == PROGRESS_PAYLOAD &&
+             memcmp(rpayload, expected, PROGRESS_PAYLOAD) == 0;
+    }
+    ctx->responses_ok = ok;
+    ctx->drained_at_end = !nipc_np_session_has_pending(&session);
+    nipc_np_close_session(&session);
+    return 0;
+}
+
+/* A client pipelining more than the pipe buffers before reading must not
+ * deadlock with a server blocked writing responses to it. */
+static void test_pipeline_beyond_pipe_buffers(void)
+{
+    printf("--- Pipelining beyond the pipe buffers ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    progress_server_ctx_t sctx = {
+        .service = service,
+        .ready_event = CreateEvent(NULL, TRUE, FALSE, NULL),
+    };
+    HANDLE server = test_create_thread(NULL, 0, progress_server_thread, &sctx, 0, NULL);
+    WaitForSingleObject(sctx.ready_event, 5000);
+    CloseHandle(sctx.ready_event);
+
+    progress_client_ctx_t cctx = { .service = service };
+    HANDLE client = test_create_thread(NULL, 0, progress_client_thread, &cctx, 0, NULL);
+
+    /* Watchdog only: a deadlock never completes. */
+    DWORD w = WaitForSingleObject(client, 30000);
+    check("pipeline beyond buffers completes", w == WAIT_OBJECT_0);
+    if (w != WAIT_OBJECT_0)
+        return; /* the threads are stuck; the run reports the failure */
+    CloseHandle(client);
+    WaitForSingleObject(server, 5000);
+    CloseHandle(server);
+
+    check("pipeline beyond buffers sends", cctx.sends_ok);
+    check("pipeline beyond buffers queued responses", cctx.queued_after_sends);
+    check("pipeline beyond buffers wait_readable sees queue", cctx.readable_after_sends);
+    check("pipeline beyond buffers responses", cctx.responses_ok);
+    check("pipeline beyond buffers queue drained", cctx.drained_at_end);
+    check("pipeline beyond buffers server ok", sctx.server_ok);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Test: duplicate / unknown message_id                               */
 /* ------------------------------------------------------------------ */
 
@@ -1625,7 +1917,7 @@ static void test_duplicate_message_id(void)
         .ready_event = ready_event,
     };
 
-    HANDLE thread = CreateThread(NULL, 0, server_thread, &ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, server_thread, &ctx, 0, NULL);
     WaitForSingleObject(ready_event, 5000);
     CloseHandle(ready_event);
 
@@ -1679,7 +1971,7 @@ static void test_unknown_response_message_id(void)
         .ready_event = ready_event,
     };
 
-    HANDLE thread = CreateThread(NULL, 0, wrong_id_server_thread, &ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, wrong_id_server_thread, &ctx, 0, NULL);
     WaitForSingleObject(ready_event, 5000);
     CloseHandle(ready_event);
 
@@ -1714,6 +2006,14 @@ static void test_unknown_response_message_id(void)
     check("unknown-id server ok", ctx.server_ok);
 }
 
+/* NIPC_NP_OK in alternate_expected means "no alternate": a handshake that
+ * succeeds never matches a rejection case. */
+static bool handshake_err_matches(nipc_np_error_t err, nipc_np_error_t expected,
+                                  nipc_np_error_t alternate)
+{
+    return err == expected || (alternate != NIPC_NP_OK && err == alternate);
+}
+
 static void test_client_handshake_rejections(void)
 {
     printf("--- Client handshake protocol rejections ---\n");
@@ -1734,6 +2034,13 @@ static void test_client_handshake_rejections(void)
         { "bad HELLO_ACK layout", FAKE_ACK_BAD_LAYOUT, NIPC_NP_ERR_INCOMPATIBLE, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
         { "bad HELLO_ACK payload", FAKE_ACK_BAD_PAYLOAD, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
         { "peer closes before HELLO_ACK", FAKE_ACK_CLOSE_BEFORE_ACK, NIPC_NP_ERR_RECV, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "HELLO_ACK selecting an unoffered profile", FAKE_ACK_SELECTED_NOT_OFFERED, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "HELLO_ACK selecting no profile", FAKE_ACK_SELECTED_NONE, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "HELLO_ACK selecting two profiles", FAKE_ACK_SELECTED_TWO, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "HELLO_ACK with bytes after its payload", FAKE_ACK_TRAILING_BYTES, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "HELLO_ACK declaring a 64-byte payload", FAKE_ACK_LONG_PAYLOAD, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "HELLO_ACK packet size above the proposal", FAKE_ACK_PACKET_ABOVE_PROPOSAL, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
+        { "HELLO_ACK packet size without payload room", FAKE_ACK_PACKET_HEADER_ONLY, NIPC_NP_ERR_PROTOCOL, NIPC_NP_OK, NIPC_NP_DEFAULT_PACKET_SIZE },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -1749,7 +2056,7 @@ static void test_client_handshake_rejections(void)
             .packet_size = cases[i].packet_size,
         };
 
-        HANDLE thread = CreateThread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
+        HANDLE thread = test_create_thread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
         check("fake ack server thread created", thread != NULL);
         if (!thread) {
             CloseHandle(ready_event);
@@ -1763,10 +2070,11 @@ static void test_client_handshake_rejections(void)
         ccfg.packet_size = cases[i].packet_size;
         nipc_np_session_t session;
         nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
-        if (err != cases[i].expected && err != cases[i].alternate_expected)
+        bool matched = handshake_err_matches(err, cases[i].expected,
+                                             cases[i].alternate_expected);
+        if (!matched)
             printf("    note: %s returned %d\n", cases[i].name, (int)err);
-        check(cases[i].name,
-              err == cases[i].expected || err == cases[i].alternate_expected);
+        check(cases[i].name, matched);
         if (err == NIPC_NP_OK)
             nipc_np_close_session(&session);
 
@@ -1807,17 +2115,20 @@ static void test_server_handshake_rejections(void)
             continue;
 
         HANDLE ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+        HANDLE accepted_event = CreateEvent(NULL, TRUE, FALSE, NULL);
         fake_client_thread_ctx_t ctx = {
             .service = service,
             .ready_event = ready_event,
+            .accepted_event = accepted_event,
             .result = 0,
             .mode = cases[i].mode,
         };
 
-        HANDLE thread = CreateThread(NULL, 0, fake_hello_client_thread, &ctx, 0, NULL);
+        HANDLE thread = test_create_thread(NULL, 0, fake_hello_client_thread, &ctx, 0, NULL);
         check("fake hello client thread created", thread != NULL);
         if (!thread) {
             CloseHandle(ready_event);
+            CloseHandle(accepted_event);
             nipc_np_close_listener(&listener);
             continue;
         }
@@ -1827,15 +2138,18 @@ static void test_server_handshake_rejections(void)
 
         nipc_np_session_t session;
         err = nipc_np_accept(&listener, 1, &session);
-        if (err != cases[i].expected && err != cases[i].alternate_expected)
+        SetEvent(accepted_event);
+        bool matched = handshake_err_matches(err, cases[i].expected,
+                                             cases[i].alternate_expected);
+        if (!matched)
             printf("    note: %s returned %d\n", cases[i].name, (int)err);
-        check(cases[i].name,
-              err == cases[i].expected || err == cases[i].alternate_expected);
+        check(cases[i].name, matched);
         if (err == NIPC_NP_OK)
             nipc_np_close_session(&session);
 
         WaitForSingleObject(thread, 5000);
         CloseHandle(thread);
+        CloseHandle(accepted_event);
         check("fake hello client completed", ctx.result == 1);
         nipc_np_close_listener(&listener);
     }
@@ -1857,7 +2171,7 @@ static void test_receive_after_peer_disconnect(void)
         .packet_size = NIPC_NP_DEFAULT_PACKET_SIZE,
     };
 
-    HANDLE thread = CreateThread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
     check("disconnect fake server thread created", thread != NULL);
     if (!thread) {
         CloseHandle(ready_event);
@@ -1942,7 +2256,7 @@ static void test_disconnect_clears_all_inflight(void)
         .result = 0,
     };
 
-    HANDLE thread = CreateThread(NULL, 0, disconnect_inflight_server_thread, &ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, disconnect_inflight_server_thread, &ctx, 0, NULL);
     check("disconnect-inflight server thread created", thread != NULL);
     if (!thread) {
         CloseHandle(ready_event);
@@ -2006,7 +2320,7 @@ static void test_receive_after_zero_byte_message(void)
         .packet_size = NIPC_NP_DEFAULT_PACKET_SIZE,
     };
 
-    HANDLE thread = CreateThread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
     check("zero-message fake server thread created", thread != NULL);
     if (!thread) {
         CloseHandle(ready_event);
@@ -2052,7 +2366,7 @@ static void test_chunk_validation_error(void)
         .packet_size = 128,
     };
 
-    HANDLE thread = CreateThread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
     check("chunk fake server thread created", thread != NULL);
     if (!thread) {
         CloseHandle(ready_event);
@@ -2114,6 +2428,7 @@ static void test_chunk_receive_error_paths(void)
         { "bad continuation chunk header rejected", FAKE_ACK_GOOD_THEN_BAD_CHUNK_HEADER, NIPC_NP_ERR_CHUNK },
         { "continuation chunk length mismatch rejected", FAKE_ACK_GOOD_THEN_CHUNK_LEN_MISMATCH, NIPC_NP_ERR_CHUNK },
         { "continuation chunk overflow rejected", FAKE_ACK_GOOD_THEN_CHUNK_OVERFLOW, NIPC_NP_ERR_CHUNK },
+        { "more continuations than declared rejected", FAKE_ACK_GOOD_THEN_EXTRA_CHUNK, NIPC_NP_ERR_CHUNK },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -2129,7 +2444,7 @@ static void test_chunk_receive_error_paths(void)
             .packet_size = 128,
         };
 
-        HANDLE thread = CreateThread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
+        HANDLE thread = test_create_thread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
         check("chunk recv fake server thread created", thread != NULL);
         if (!thread) {
             CloseHandle(ready_event);
@@ -2209,7 +2524,7 @@ static void test_response_limit_validation(void)
             .packet_size = NIPC_NP_DEFAULT_PACKET_SIZE,
         };
 
-        HANDLE thread = CreateThread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
+        HANDLE thread = test_create_thread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
         check("limit fake server thread created", thread != NULL);
         if (!thread) {
             CloseHandle(ready_event);
@@ -2286,7 +2601,7 @@ static void test_response_protocol_validation(void)
             .packet_size = NIPC_NP_DEFAULT_PACKET_SIZE,
         };
 
-        HANDLE thread = CreateThread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
+        HANDLE thread = test_create_thread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
         check("protocol fake server thread created", thread != NULL);
         if (!thread) {
             CloseHandle(ready_event);
@@ -2345,10 +2660,10 @@ static void test_zero_chunk_budget_rejected(void)
         .ready_event = ready_event,
         .result = 0,
         .mode = FAKE_ACK_GOOD_THEN_CLOSE,
-        .packet_size = NIPC_HEADER_LEN,
+        .packet_size = NIPC_NP_DEFAULT_PACKET_SIZE,
     };
 
-    HANDLE thread = CreateThread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, fake_ack_server_thread, &ctx, 0, NULL);
     check("zero-budget fake server thread created", thread != NULL);
     if (!thread) {
         CloseHandle(ready_event);
@@ -2359,12 +2674,14 @@ static void test_zero_chunk_budget_rejected(void)
     CloseHandle(ready_event);
 
     nipc_np_client_config_t ccfg = default_client_config();
-    ccfg.packet_size = NIPC_HEADER_LEN;
     nipc_np_session_t session;
     nipc_np_error_t err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
     check("zero-budget connect", err == NIPC_NP_OK);
 
     if (err == NIPC_NP_OK) {
+        /* The handshake rejects a packet size without payload room, so
+         * forge one to reach the send guard. */
+        session.packet_size = NIPC_HEADER_LEN;
         uint8_t payload[1] = { 0x22 };
         nipc_header_t hdr = {
             .kind = NIPC_KIND_REQUEST,
@@ -2480,7 +2797,7 @@ static void test_wait_readable(void)
         .disconnect_ok = 0,
     };
 
-    HANDLE thread = CreateThread(NULL, 0, wait_readable_server_thread, &ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, wait_readable_server_thread, &ctx, 0, NULL);
     check("wait-readable server thread created", thread != NULL);
     if (!thread) {
         CloseHandle(ready_event);
@@ -2647,6 +2964,454 @@ static void test_accept_on_closed_listener(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: connect while every pipe instance is busy                    */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    nipc_np_listener_t *listener;
+    int busy_seen;
+    int accept_ok;
+} busy_accept_ctx_t;
+
+static void busy_hook(void *user)
+{
+    test_flag_set(&((busy_accept_ctx_t *)user)->busy_seen);
+}
+
+/* Accept the client that holds the only instance once a second client
+ * found the pipe busy, then serve that second client's handshake. */
+static DWORD WINAPI busy_accept_thread(LPVOID arg)
+{
+    busy_accept_ctx_t *ctx = (busy_accept_ctx_t *)arg;
+    nipc_np_server_config_t cfg = default_server_config();
+    HANDLE first = INVALID_HANDLE_VALUE;
+    HANDLE second = INVALID_HANDLE_VALUE;
+
+    if (!test_flag_wait(&ctx->busy_seen))
+        return 1;
+    if (nipc_np_accept_pending(ctx->listener, &first) != NIPC_NP_OK)
+        return 1;
+    if (nipc_np_accept_pending(ctx->listener, &second) == NIPC_NP_OK) {
+        nipc_np_session_t session;
+        if (nipc_np_accept_handshake(second, &cfg, 2, TEST_WAIT_LIMIT_MS,
+                                     &session) == NIPC_NP_OK) {
+            ctx->accept_ok = 1;
+            nipc_np_close_session(&session);
+        }
+    }
+    DisconnectNamedPipe(first);
+    CloseHandle(first);
+    return 0;
+}
+
+static void test_connect_waits_for_busy_pipe(void)
+{
+    printf("--- Connect waits while every pipe instance is busy ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_np_server_config_t scfg = default_server_config();
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, service, &scfg, &listener);
+    check("listen for busy pipe", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK)
+        return;
+
+    /* The first client takes the only instance; the server has not
+     * accepted it, so no next instance exists yet. */
+    wchar_t pipe_name[NIPC_NP_MAX_PIPE_NAME];
+    nipc_np_build_pipe_name(pipe_name, NIPC_NP_MAX_PIPE_NAME, TEST_RUN_DIR, service);
+    HANDLE holder = CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                                OPEN_EXISTING, 0, NULL);
+    check("first client holds the only instance", holder != INVALID_HANDLE_VALUE);
+
+    busy_accept_ctx_t ctx = { .listener = &listener };
+    nipc_np_set_connect_busy_hook_for_tests(busy_hook, &ctx);
+    HANDLE thread = test_create_thread(NULL, 0, busy_accept_thread, &ctx, 0, NULL);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_np_session_t session;
+    err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("busy pipe connect waits and succeeds", err == NIPC_NP_OK);
+    if (err == NIPC_NP_OK)
+        nipc_np_close_session(&session);
+
+    /* Release the accept thread when connect failed without waiting. */
+    test_flag_set(&ctx.busy_seen);
+    if (err != NIPC_NP_OK)
+        nipc_np_close_listener(&listener);
+    WaitForSingleObject(thread, TEST_WAIT_LIMIT_MS);
+    CloseHandle(thread);
+    nipc_np_set_connect_busy_hook_for_tests(NULL, NULL);
+    check("server accepted the waiting client", ctx.accept_ok);
+
+    if (holder != INVALID_HANDLE_VALUE)
+        CloseHandle(holder);
+    nipc_np_close_listener(&listener);
+}
+
+
+typedef struct {
+    nipc_np_listener_t *listener;
+    const wchar_t *pipe_name;
+    HANDLE thief;
+    int busy_seen;
+    int thief_ready;
+    int accept_ok;
+} stolen_accept_ctx_t;
+
+static void stolen_busy_hook(void *user)
+{
+    test_flag_set(&((stolen_accept_ctx_t *)user)->busy_seen);
+}
+
+/* Runs in the connecting thread once WaitNamedPipeW reported the instance
+ * the server created on accept: a third client takes it first, once. */
+static void stolen_waited_hook(void *user)
+{
+    stolen_accept_ctx_t *ctx = (stolen_accept_ctx_t *)user;
+    if (ctx->thief != INVALID_HANDLE_VALUE)
+        return;
+    ctx->thief = CreateFileW(ctx->pipe_name, GENERIC_READ | GENERIC_WRITE, 0,
+                             NULL, OPEN_EXISTING, 0, NULL);
+    test_flag_set(&ctx->thief_ready);
+}
+
+/* Accept the holder once the client found the pipe busy, then the thief
+ * that took the freed instance, then the waiting client's handshake. */
+static DWORD WINAPI stolen_accept_thread(LPVOID arg)
+{
+    stolen_accept_ctx_t *ctx = (stolen_accept_ctx_t *)arg;
+    nipc_np_server_config_t cfg = default_server_config();
+    HANDLE first = INVALID_HANDLE_VALUE;
+    HANDLE second = INVALID_HANDLE_VALUE;
+    HANDLE third = INVALID_HANDLE_VALUE;
+
+    if (!test_flag_wait(&ctx->busy_seen))
+        return 1;
+    if (nipc_np_accept_pending(ctx->listener, &first) != NIPC_NP_OK)
+        return 1;
+    if (test_flag_wait(&ctx->thief_ready) &&
+        nipc_np_accept_pending(ctx->listener, &second) == NIPC_NP_OK &&
+        nipc_np_accept_pending(ctx->listener, &third) == NIPC_NP_OK) {
+        nipc_np_session_t session;
+        if (nipc_np_accept_handshake(third, &cfg, 3, TEST_WAIT_LIMIT_MS,
+                                     &session) == NIPC_NP_OK) {
+            ctx->accept_ok = 1;
+            nipc_np_close_session(&session);
+        }
+    }
+    if (second != INVALID_HANDLE_VALUE) {
+        DisconnectNamedPipe(second);
+        CloseHandle(second);
+    }
+    DisconnectNamedPipe(first);
+    CloseHandle(first);
+    return 0;
+}
+
+static void test_connect_retries_stolen_instance(void)
+{
+    printf("--- Connect retries when another client takes the freed instance ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_np_server_config_t scfg = default_server_config();
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, service, &scfg, &listener);
+    check("listen for stolen instance", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK)
+        return;
+
+    wchar_t pipe_name[NIPC_NP_MAX_PIPE_NAME];
+    nipc_np_build_pipe_name(pipe_name, NIPC_NP_MAX_PIPE_NAME, TEST_RUN_DIR, service);
+    HANDLE holder = CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                                OPEN_EXISTING, 0, NULL);
+    check("holder takes the only instance", holder != INVALID_HANDLE_VALUE);
+
+    stolen_accept_ctx_t ctx = { .listener = &listener, .pipe_name = pipe_name,
+                                .thief = INVALID_HANDLE_VALUE };
+    nipc_np_set_connect_busy_hook_for_tests(stolen_busy_hook, &ctx);
+    nipc_np_set_connect_waited_hook_for_tests(stolen_waited_hook, &ctx);
+    HANDLE thread = test_create_thread(NULL, 0, stolen_accept_thread, &ctx, 0, NULL);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_np_session_t session;
+    err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("thief took the freed instance", ctx.thief != INVALID_HANDLE_VALUE);
+    check("connect retries after the instance was taken", err == NIPC_NP_OK);
+    if (err == NIPC_NP_OK)
+        nipc_np_close_session(&session);
+
+    /* Release the accept thread when connect failed before its steps. */
+    test_flag_set(&ctx.busy_seen);
+    test_flag_set(&ctx.thief_ready);
+    if (err != NIPC_NP_OK)
+        nipc_np_close_listener(&listener);
+    WaitForSingleObject(thread, TEST_WAIT_LIMIT_MS);
+    CloseHandle(thread);
+    nipc_np_set_connect_busy_hook_for_tests(NULL, NULL);
+    nipc_np_set_connect_waited_hook_for_tests(NULL, NULL);
+    check("server accepted the retrying client", ctx.accept_ok);
+
+    if (ctx.thief != INVALID_HANDLE_VALUE)
+        CloseHandle(ctx.thief);
+    if (holder != INVALID_HANDLE_VALUE)
+        CloseHandle(holder);
+    nipc_np_close_listener(&listener);
+}
+
+/* The disconnected instance takes no client until accept listens on it
+ * again, so the next client finds the pipe busy first. */
+static DWORD WINAPI failed_instance_accept_thread(LPVOID arg)
+{
+    busy_accept_ctx_t *ctx = (busy_accept_ctx_t *)arg;
+    nipc_np_server_config_t cfg = default_server_config();
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+
+    if (!test_flag_wait(&ctx->busy_seen))
+        return 1;
+    if (nipc_np_accept_pending(ctx->listener, &pipe) != NIPC_NP_OK)
+        return 1;
+    nipc_np_session_t session;
+    if (nipc_np_accept_handshake(pipe, &cfg, 1, TEST_WAIT_LIMIT_MS,
+                                 &session) == NIPC_NP_OK) {
+        ctx->accept_ok = 1;
+        nipc_np_close_session(&session);
+    }
+    return 0;
+}
+
+
+/* A failed replacement instance drops the accepted client and keeps the
+ * listener's instance, so the next client is still accepted. */
+static void test_accept_survives_failed_instance(void)
+{
+    printf("--- Accept keeps listening after a failed replacement instance ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_np_server_config_t scfg = default_server_config();
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, service, &scfg, &listener);
+    check("listen for failed instance", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK)
+        return;
+
+    wchar_t pipe_name[NIPC_NP_MAX_PIPE_NAME];
+    nipc_np_build_pipe_name(pipe_name, NIPC_NP_MAX_PIPE_NAME, TEST_RUN_DIR, service);
+    HANDLE dropped = CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                                 OPEN_EXISTING, 0, NULL);
+    check("first client connects", dropped != INVALID_HANDLE_VALUE);
+
+    nipc_np_fail_next_instances_for_tests(1);
+    HANDLE session_pipe = INVALID_HANDLE_VALUE;
+    err = nipc_np_accept_pending(&listener, &session_pipe);
+    nipc_np_fail_next_instances_for_tests(0);
+    check("accept reports the failed instance", err == NIPC_NP_ERR_CREATE_PIPE);
+    check("no session pipe is returned", session_pipe == INVALID_HANDLE_VALUE);
+    check("listener keeps its instance", listener.pipe != INVALID_HANDLE_VALUE);
+
+    DWORD avail = 0;
+    BOOL peek = PeekNamedPipe(dropped, NULL, 0, NULL, &avail, NULL);
+    check("first client was disconnected", !peek);
+
+    busy_accept_ctx_t ctx = { .listener = &listener };
+    nipc_np_set_connect_busy_hook_for_tests(busy_hook, &ctx);
+    HANDLE thread = test_create_thread(NULL, 0, failed_instance_accept_thread,
+                                       &ctx, 0, NULL);
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_np_session_t session;
+    err = nipc_np_connect_timeout(TEST_RUN_DIR, service, &ccfg,
+                                  TEST_WAIT_LIMIT_MS, NULL, &session);
+    check("next client connects", err == NIPC_NP_OK);
+    if (err == NIPC_NP_OK)
+        nipc_np_close_session(&session);
+
+    test_flag_set(&ctx.busy_seen);
+    if (err != NIPC_NP_OK)
+        nipc_np_close_listener(&listener);
+    WaitForSingleObject(thread, TEST_WAIT_LIMIT_MS);
+    CloseHandle(thread);
+    nipc_np_set_connect_busy_hook_for_tests(NULL, NULL);
+    check("server accepted the next client", ctx.accept_ok);
+
+    if (dropped != INVALID_HANDLE_VALUE)
+        CloseHandle(dropped);
+    nipc_np_close_listener(&listener);
+}
+
+
+/* ------------------------------------------------------------------ */
+/*  Test: access policy                                                */
+/* ------------------------------------------------------------------ */
+
+static void test_pipe_dacl_owner_only(void)
+{
+    printf("--- Pipe DACL grants only SYSTEM, Administrators and self ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_np_server_config_t cfg = default_server_config();
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, service, &cfg, &listener);
+    check("listen for DACL check", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK)
+        return;
+
+    check("first instance DACL is owner-only",
+          test_object_dacl_owner_only(listener.pipe, FILE_ALL_ACCESS));
+
+    /* Instances created after an accept carry the same DACL. */
+    wchar_t pipe_name[NIPC_NP_MAX_PIPE_NAME];
+    nipc_np_build_pipe_name(pipe_name, NIPC_NP_MAX_PIPE_NAME, TEST_RUN_DIR, service);
+    HANDLE client = CreateFileW(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                                OPEN_EXISTING, 0, NULL);
+    HANDLE session_pipe = INVALID_HANDLE_VALUE;
+    err = nipc_np_accept_pending(&listener, &session_pipe);
+    check("accept pending for DACL check", err == NIPC_NP_OK);
+    check("next instance DACL is owner-only",
+          err == NIPC_NP_OK &&
+          test_object_dacl_owner_only(listener.pipe, FILE_ALL_ACCESS));
+
+    if (session_pipe != INVALID_HANDLE_VALUE)
+        CloseHandle(session_pipe);
+    if (client != INVALID_HANDLE_VALUE)
+        CloseHandle(client);
+    nipc_np_close_listener(&listener);
+}
+
+static void test_remote_client_rejected(void)
+{
+    printf("--- Pipe rejects remote clients ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_np_server_config_t cfg = default_server_config();
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, service, &cfg, &listener);
+    check("listen for remote client check", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK)
+        return;
+
+    /* The same pipe through the SMB loopback is a remote client. */
+    wchar_t pipe_name[NIPC_NP_MAX_PIPE_NAME];
+    wchar_t remote_name[NIPC_NP_MAX_PIPE_NAME + 16];
+    nipc_np_build_pipe_name(pipe_name, NIPC_NP_MAX_PIPE_NAME, TEST_RUN_DIR, service);
+    wcscpy(remote_name, L"\\\\127.0.0.1\\");
+    wcscat(remote_name, pipe_name + 4);
+    HANDLE remote = CreateFileW(remote_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                                OPEN_EXISTING, 0, NULL);
+    check("remote open is refused", remote == INVALID_HANDLE_VALUE);
+    if (remote != INVALID_HANDLE_VALUE)
+        CloseHandle(remote);
+
+    nipc_np_close_listener(&listener);
+}
+
+typedef struct {
+    nipc_np_listener_t *listener;
+    int accept_ok;
+    SECURITY_IMPERSONATION_LEVEL level;
+} identify_ctx_t;
+
+/* Accept one client and record the impersonation level it granted. */
+static DWORD WINAPI identify_accept_thread(LPVOID arg)
+{
+    identify_ctx_t *ctx = (identify_ctx_t *)arg;
+    ctx->level = SecurityAnonymous;
+
+    nipc_np_session_t session;
+    if (nipc_np_accept(ctx->listener, 1, &session) != NIPC_NP_OK)
+        return 1;
+    ctx->accept_ok = 1;
+
+    if (ImpersonateNamedPipeClient(session.pipe)) {
+        HANDLE token;
+        if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token)) {
+            DWORD len = 0;
+            GetTokenInformation(token, TokenImpersonationLevel, &ctx->level,
+                                sizeof(ctx->level), &len);
+            CloseHandle(token);
+        }
+        RevertToSelf();
+    }
+    nipc_np_close_session(&session);
+    return 0;
+}
+
+static void test_untrusted_server_rejected(void)
+{
+    printf("--- Client refuses a pipe owned by an untrusted account ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service));
+
+    nipc_np_server_config_t scfg = default_server_config();
+    nipc_np_listener_t listener;
+    nipc_np_error_t err = nipc_np_listen(TEST_RUN_DIR, service, &scfg, &listener);
+    check("listen for owner check", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK)
+        return;
+
+    nipc_np_client_config_t ccfg = default_client_config();
+    nipc_np_session_t session;
+
+    /* BUILTIN\Users never owns the test pipe. */
+    nipc_np_set_trusted_owner_for_tests("S-1-5-32-545");
+    /* Nobody accepts, so a client that skipped the check fails on the
+     * deadline instead of hanging. */
+    err = nipc_np_connect_timeout(TEST_RUN_DIR, service, &ccfg, 2000, NULL,
+                                  &session);
+    check("connect refuses the untrusted owner",
+          err == NIPC_NP_ERR_UNTRUSTED_SERVER);
+    if (err == NIPC_NP_OK)
+        nipc_np_close_session(&session);
+
+    /* The refused client left the only instance closing; start over. */
+    nipc_np_close_listener(&listener);
+    unique_service(service, sizeof(service));
+    err = nipc_np_listen(TEST_RUN_DIR, service, &scfg, &listener);
+    check("listen for trusted owner", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK) {
+        nipc_np_set_trusted_owner_for_tests(NULL);
+        return;
+    }
+
+    /* Trusting the real owner lets the client through, and the server sees
+     * only an identification-level token for it. */
+    char *owner = test_object_owner_sid(listener.pipe);
+    check("read pipe owner", owner != NULL);
+    nipc_np_set_trusted_owner_for_tests(owner);
+
+    identify_ctx_t ictx = { .listener = &listener };
+    HANDLE thread = test_create_thread(NULL, 0, identify_accept_thread, &ictx, 0, NULL);
+    err = nipc_np_connect(TEST_RUN_DIR, service, &ccfg, &session);
+    check("connect accepts the trusted owner", err == NIPC_NP_OK);
+    if (err != NIPC_NP_OK)
+        nipc_np_close_listener(&listener);
+    WaitForSingleObject(thread, TEST_WAIT_LIMIT_MS);
+    CloseHandle(thread);
+    if (err == NIPC_NP_OK) {
+        check("server accepted the trusted client", ictx.accept_ok);
+        check("server can only identify the client",
+              ictx.level == SecurityIdentification);
+        nipc_np_close_session(&session);
+    }
+
+    nipc_np_set_trusted_owner_for_tests(NULL);
+    if (owner)
+        LocalFree(owner);
+    nipc_np_close_listener(&listener);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Test: service name validation                                      */
 /* ------------------------------------------------------------------ */
 
@@ -2694,9 +3459,11 @@ int main(void)
     test_service_validation();
     test_ping_pong();
     test_preferred_profile_selection();
+    test_unassigned_profile_bit();
     test_chunked_ping_pong();
     test_chunked_receive_reuses_buffer();
     test_chunked_pipeline();
+    test_pipeline_beyond_pipe_buffers();
     test_auth_failure();
     test_duplicate_message_id();
     test_unknown_response_message_id();
@@ -2714,6 +3481,12 @@ int main(void)
     test_addr_in_use();
     test_bad_params_and_noop_close();
     test_accept_on_closed_listener();
+    test_connect_waits_for_busy_pipe();
+    test_connect_retries_stolen_instance();
+    test_accept_survives_failed_instance();
+    test_pipe_dacl_owner_only();
+    test_remote_client_rejected();
+    test_untrusted_server_rejected();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

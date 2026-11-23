@@ -5,6 +5,7 @@
 # Tests all 9 directed pairs: C, Rust, and Go servers and clients.
 # Each test starts a managed server with a cgroups handler (3 items),
 # the client connects, calls snapshot, verifies items.
+# All pairs run twice: once normally and once with a 300 ms server handler.
 #
 # Expects:
 #   $INTEROP_SVC_C    path to the C interop_service binary
@@ -16,6 +17,7 @@
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/run-low-priority.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/interop-lib.sh"
 netipc_low_priority_self "$@"
 
 RED='\033[0;31m'
@@ -27,6 +29,7 @@ PASS=0
 FAIL=0
 SKIP=0
 TIMEOUT=10
+HANDLER_DELAY_MS=""
 
 # Resolve binary paths
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -49,7 +52,7 @@ if [[ -x "$INTEROP_SVC_GO" ]]; then
     HAS_GO=1
 fi
 
-RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nipc_svc_interop.XXXXXX")"
+RUN_DIR="$(interop_mktemp_run_dir nipc_svc_interop)"
 
 cleanup() {
     local pids
@@ -101,56 +104,13 @@ run_test() {
     rm -f "${RUN_DIR}/${service}-"*.ipcshm
 
     # Start server in background, wait for READY
-    local server_pid
     local server_log="${RUN_DIR}/${service}.server.log"
-    env NIPC_PROFILE="${NIPC_PROFILE:-}" "$server_bin" server "$RUN_DIR" "$service" > "$server_log" 2>&1 &
-    server_pid=$!
-
-    # Wait for READY line (up to TIMEOUT seconds)
-    local waited=0
-    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
-        if ! kill -0 "$server_pid" 2>/dev/null; then
-            echo -e "${RED}FAIL${NC} (server exited early)"
-            cat "$server_log" >&2 2>/dev/null || true
-            FAIL=$((FAIL + 1))
-            return
-        fi
-        if grep -q "^READY$" "$server_log" 2>/dev/null; then
-            break
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    if [[ $waited -ge $((TIMEOUT * 10)) ]]; then
-        echo -e "${RED}FAIL${NC} (server not ready after ${TIMEOUT}s)"
-        kill "$server_pid" 2>/dev/null || true
-        wait "$server_pid" 2>/dev/null || true
-        FAIL=$((FAIL + 1))
-        return
-    fi
-
-    # READY alone is not enough for the Go/Rust fixtures: they emit READY
-    # just before entering server.Run(), so the socket may not exist yet.
-    waited=0
-    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
-        if ! kill -0 "$server_pid" 2>/dev/null; then
-            echo -e "${RED}FAIL${NC} (server exited before socket bind)"
-            cat "$server_log" >&2 2>/dev/null || true
-            FAIL=$((FAIL + 1))
-            return
-        fi
-        if [[ -S "${RUN_DIR}/${service}.sock" ]]; then
-            break
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    if [[ $waited -ge $((TIMEOUT * 10)) ]]; then
-        echo -e "${RED}FAIL${NC} (socket not ready after ${TIMEOUT}s)"
-        kill "$server_pid" 2>/dev/null || true
-        wait "$server_pid" 2>/dev/null || true
+    if ! interop_start_server "$TIMEOUT" "$server_log" \
+        env NIPC_PROFILE="${NIPC_PROFILE:-}" NIPC_HANDLER_DELAY_MS="$HANDLER_DELAY_MS" \
+        "$server_bin" server "$RUN_DIR" "$service"; then
+        echo -e "${RED}FAIL${NC} (server not ready)"
+        cat "$server_log" >&2 2>/dev/null || true
+        interop_stop_server
         FAIL=$((FAIL + 1))
         return
     fi
@@ -170,9 +130,40 @@ run_test() {
         FAIL=$((FAIL + 1))
     fi
 
-    # Kill server and wait
-    kill "$server_pid" 2>/dev/null || true
-    wait "$server_pid" 2>/dev/null || true
+    interop_stop_server
+}
+
+# Run all 9 directed pairs; HANDLER_DELAY_MS slows every server handler.
+run_all_pairs() {
+    local suffix="$1"
+    local label="$2"
+
+    run_test "C server, C client${label}" \
+        "$INTEROP_SVC_C" "$INTEROP_SVC_C" "svc_c_c${suffix}"
+
+    run_test "Rust server, Rust client${label}" \
+        "$INTEROP_SVC_RS" "$INTEROP_SVC_RS" "svc_rs_rs${suffix}"
+
+    run_test "Go server, Go client${label}" \
+        "$INTEROP_SVC_GO" "$INTEROP_SVC_GO" "svc_go_go${suffix}"
+
+    run_test "C server, Rust client${label}" \
+        "$INTEROP_SVC_C" "$INTEROP_SVC_RS" "svc_c_rs${suffix}"
+
+    run_test "Rust server, C client${label}" \
+        "$INTEROP_SVC_RS" "$INTEROP_SVC_C" "svc_rs_c${suffix}"
+
+    run_test "C server, Go client${label}" \
+        "$INTEROP_SVC_C" "$INTEROP_SVC_GO" "svc_c_go${suffix}"
+
+    run_test "Go server, C client${label}" \
+        "$INTEROP_SVC_GO" "$INTEROP_SVC_C" "svc_go_c${suffix}"
+
+    run_test "Rust server, Go client${label}" \
+        "$INTEROP_SVC_RS" "$INTEROP_SVC_GO" "svc_rs_go${suffix}"
+
+    run_test "Go server, Rust client${label}" \
+        "$INTEROP_SVC_GO" "$INTEROP_SVC_RS" "svc_go_rs${suffix}"
 }
 
 main() {
@@ -187,36 +178,12 @@ main() {
     echo "Go binary:   $INTEROP_SVC_GO"
     echo ""
 
-    # --- Same-language pairs (3 tests) ---
+    run_all_pairs "" ""
 
-    run_test "C server, C client" \
-        "$INTEROP_SVC_C" "$INTEROP_SVC_C" "svc_c_c"
-
-    run_test "Rust server, Rust client" \
-        "$INTEROP_SVC_RS" "$INTEROP_SVC_RS" "svc_rs_rs"
-
-    run_test "Go server, Go client" \
-        "$INTEROP_SVC_GO" "$INTEROP_SVC_GO" "svc_go_go"
-
-    # --- Cross-language pairs (6 tests) ---
-
-    run_test "C server, Rust client" \
-        "$INTEROP_SVC_C" "$INTEROP_SVC_RS" "svc_c_rs"
-
-    run_test "Rust server, C client" \
-        "$INTEROP_SVC_RS" "$INTEROP_SVC_C" "svc_rs_c"
-
-    run_test "C server, Go client" \
-        "$INTEROP_SVC_C" "$INTEROP_SVC_GO" "svc_c_go"
-
-    run_test "Go server, C client" \
-        "$INTEROP_SVC_GO" "$INTEROP_SVC_C" "svc_go_c"
-
-    run_test "Rust server, Go client" \
-        "$INTEROP_SVC_RS" "$INTEROP_SVC_GO" "svc_rs_go"
-
-    run_test "Go server, Rust client" \
-        "$INTEROP_SVC_GO" "$INTEROP_SVC_RS" "svc_go_rs"
+    # Handlers slower than the clients' 100 ms abort-poll slice must still
+    # complete within the call timeout (SOW-0041).
+    HANDLER_DELAY_MS=300
+    run_all_pairs "_slow" " (300 ms handler)"
 
     echo ""
     echo -e "=== Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}, ${YELLOW}${SKIP} skipped${NC} ==="

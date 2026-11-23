@@ -83,6 +83,7 @@ src/
           cgroups_lookup.rs   # cgroups lookup codec
           apps_lookup.rs      # apps lookup codec
       transport/
+        framing.rs            # L1: shared send/receive chunking and handshake
         posix.rs              # L1: UDS, SHM
         windows.rs            # L1: Named Pipe, SHM
       service/                # L2/L3: typed client/server helpers

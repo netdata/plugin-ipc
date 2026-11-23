@@ -7,13 +7,13 @@
 //!   interop_shm client <run_dir> <service_name>
 //!     Attaches to SHM, sends 1 message, verifies echo, exits 0 on success.
 
-#[cfg(windows)]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 fn main() {
-    eprintln!("interop_shm is only supported on Linux");
+    eprintln!("interop_shm is only supported on Linux and FreeBSD");
     std::process::exit(1);
 }
 
-#[cfg(not(windows))]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod linux_only {
 
     use netipc::protocol::{self, Header};
@@ -75,24 +75,8 @@ mod linux_only {
     }
 
     fn run_client(run_dir: &str, service: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Retry attach -- server may not be fully ready yet
-        let mut ctx = None;
-        for _ in 0..500 {
-            let attempt = ShmContext::client_attach(run_dir, service, 1);
-            match attempt {
-                Ok(c) => {
-                    ctx = Some(c);
-                    break;
-                }
-                Err(netipc::transport::shm::ShmError::NotReady)
-                | Err(netipc::transport::shm::ShmError::Open(_))
-                | Err(netipc::transport::shm::ShmError::BadMagic) => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-        let mut ctx = ctx.ok_or("client: attach failed after retries")?;
+        // The server prints READY only after creating the region.
+        let mut ctx = ShmContext::client_attach(run_dir, service, 1)?;
 
         // Build payload with known pattern
         let payload: Vec<u8> = (0..256).map(|i| (i & 0xFF) as u8).collect();
@@ -186,7 +170,7 @@ mod linux_only {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn main() {
     linux_only::main();
 }

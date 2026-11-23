@@ -1,6 +1,5 @@
-# CI/dev toolchains build with the latest Go 1.26.x patch release. The go
-# directive in go.mod must stay 1.26.0 until netdata (which vendors this
-# source) raises its own Go toolchain; bumping it would break netdata builds.
-# This override scans the stdlib at the toolchain version actually used.
-# Remove when netdata moves past Go 1.26.0 and go.mod is bumped.
-GoVersionOverride = "1.26.4"
+# Scan the Go standard library Netdata ships. go.mod keeps Netdata's
+# `go 1.27.0` directive, while Netdata builds with the patch release pinned
+# in netdata/netdata packaging/check-for-go-toolchain.sh. Keep this value
+# equal to that pin and bump it whenever Netdata bumps it.
+GoVersionOverride = "1.27.3"

@@ -12,6 +12,7 @@
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_uds.h"
+#include "test_sync.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -137,17 +138,21 @@ static nipc_error_t echo_handler(void *user,
     return (*response_len_out > 0) ? NIPC_OK : NIPC_ERR_OVERFLOW;
 }
 
-/* Handler that sleeps briefly to simulate work, allowing concurrency testing */
-static nipc_error_t slow_handler(void *user,
-                                 const nipc_header_t *request_hdr,
-                                 const uint8_t *request_payload,
-                                 size_t request_len,
-                                 uint8_t *response_buf,
-                                 size_t response_buf_size,
-                                 size_t *response_len_out)
+/* Gated handler: reports entry, then holds the request until the test
+ * opens the gate, so sessions provably overlap. */
+static int g_gate_entered;
+static int g_gate_open;
+
+static nipc_error_t gated_handler(void *user,
+                                  const nipc_header_t *request_hdr,
+                                  const uint8_t *request_payload,
+                                  size_t request_len,
+                                  uint8_t *response_buf,
+                                  size_t response_buf_size,
+                                  size_t *response_len_out)
 {
-    /* Sleep 100ms to ensure concurrent sessions overlap */
-    usleep(100000);
+    test_counter_add(&g_gate_entered);
+    (void)test_flag_wait(&g_gate_open);
     return echo_handler(user, request_hdr, request_payload, request_len,
                         response_buf, response_buf_size, response_len_out);
 }
@@ -173,6 +178,7 @@ static nipc_error_t selective_handler(void *user,
 typedef struct {
     const char *service;
     nipc_managed_server_t server;
+    test_server_events_t events;
     nipc_server_handler_fn handler;
     int worker_count;
     int ready;  /* use __atomic builtins for cross-thread access */
@@ -190,14 +196,15 @@ static void *server_thread_fn(void *arg)
 
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed: %d\n", err);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_server_use_test_timings(&ctx->server, &ctx->events);
+    test_flag_set(&ctx->ready);
     nipc_server_run(&ctx->server);
     nipc_server_destroy(&ctx->server);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -215,10 +222,7 @@ static void start_server_ex(server_thread_ctx_t *sctx, const char *service,
     pthread_create(tid, NULL, server_thread_fn, sctx);
 
     /* Wait for server to be ready */
-    for (int i = 0; i < 4000
-         && !__atomic_load_n(&sctx->ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx->done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx->ready, &sctx->done);
 }
 
 static void start_server(server_thread_ctx_t *sctx, const char *service,
@@ -297,14 +301,7 @@ static void *client_thread_fn(void *arg)
     nipc_client_ctx_t client;
     nipc_client_init(&client, TEST_RUN_DIR, ctx->service, &ccfg);
 
-    /* Connect with retry */
-    for (int i = 0; i < 100; i++) {
-        nipc_client_refresh(&client);
-        if (nipc_client_ready(&client))
-            break;
-        usleep(10000);
-    }
-
+    nipc_client_refresh(&client);
     if (!nipc_client_ready(&client)) {
         ctx->error_count = ctx->request_count;
         nipc_client_close(&client);
@@ -388,49 +385,57 @@ static void test_basic_multi_client(void)
 
 static void test_worker_limit(void)
 {
-    printf("Test 2: Worker limit (server workers=2, 5 clients)\n");
+    printf("Test 2: Worker limit (server workers=2, 3 clients)\n");
     const char *svc = "msvc_wlimit";
     cleanup_all(svc);
 
-    /* Server with only 2 workers */
+    __atomic_store_n(&g_gate_entered, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_gate_open, 0, __ATOMIC_RELAXED);
     server_thread_ctx_t sctx;
     pthread_t stid;
-    start_server_ex(&sctx, svc, slow_handler, 2, &stid);
+    start_server_ex(&sctx, svc, gated_handler, 2, &stid);
     check("server started", __atomic_load_n(&sctx.ready, __ATOMIC_ACQUIRE) == 1);
 
-    /* Try to connect 5 clients. With worker_count=2, only 2 can be
-     * served concurrently. The slow_handler sleeps 100ms per request,
-     * so we'll have clients that get rejected and retry. */
-    const int num_clients = 5;
+    /* Two clients occupy both workers inside the gated handler. */
+    const int busy_clients = 2;
     const int requests_per = 3;
-    pthread_t ctids[5];
-    client_thread_ctx_t cctxs[5];
-
-    for (int i = 0; i < num_clients; i++) {
+    pthread_t ctids[2];
+    client_thread_ctx_t cctxs[2];
+    for (int i = 0; i < busy_clients; i++) {
         cctxs[i].client_id = i;
         cctxs[i].request_count = requests_per;
         cctxs[i].service = svc;
         pthread_create(&ctids[i], NULL, client_thread_fn, &cctxs[i]);
     }
+    check("both workers are inside the handler",
+          test_counter_wait(&g_gate_entered, busy_clients));
 
-    for (int i = 0; i < num_clients; i++)
-        pthread_join(ctids[i], NULL);
+    /* A third client is refused while both workers are busy. */
+    nipc_client_config_t ccfg = default_client_config();
+    nipc_client_ctx_t third;
+    nipc_client_init(&third, TEST_RUN_DIR, svc, &ccfg);
+    nipc_client_refresh(&third);
+    check("third client refused at worker capacity", !nipc_client_ready(&third));
 
-    /* With worker_count=2, not all 5 clients will succeed simultaneously.
-     * But the key test is that the server doesn't crash and the 2 slots
-     * that do get served return correct data. */
-    int served_clients = 0;
+    test_flag_set(&g_gate_open);
     bool all_served_content_ok = true;
-    for (int i = 0; i < num_clients; i++) {
-        if (cctxs[i].success_count > 0) {
-            served_clients++;
-            if (!cctxs[i].content_verified)
-                all_served_content_ok = false;
-        }
+    int total_success = 0;
+    for (int i = 0; i < busy_clients; i++) {
+        pthread_join(ctids[i], NULL);
+        total_success += cctxs[i].success_count;
+        if (!cctxs[i].content_verified)
+            all_served_content_ok = false;
     }
-
-    check("at least 2 clients were served", served_clients >= 2);
+    check("busy clients got all responses",
+          total_success == busy_clients * requests_per);
     check("served clients got correct data", all_served_content_ok);
+
+    /* Once a worker frees its slot, the refused client is served. */
+    check("a worker freed its slot", test_server_wait_session_exits(&sctx.events, 1));
+    nipc_client_refresh(&third);
+    check("third client served once a worker is free",
+          nipc_client_ready(&third) && do_call_and_verify(&third, 2));
+    nipc_client_close(&third);
     check("server did not crash", !__atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE));
 
     stop_server(&sctx, stid);
@@ -468,7 +473,7 @@ static void test_client_disconnect_recovery(void)
         nipc_client_close(&c1);
     }
 
-    usleep(50000); /* let the server notice the disconnect */
+    check("client 1 session exited", test_server_wait_session_exits(&sctx.events, 1));
 
     /* Client 2: should still be able to connect and get served */
     {
@@ -484,7 +489,7 @@ static void test_client_disconnect_recovery(void)
         nipc_client_close(&c2);
     }
 
-    usleep(50000);
+    check("client 2 session exited", test_server_wait_session_exits(&sctx.events, 1));
 
     /* Client 3: verify server is still healthy */
     {
@@ -532,7 +537,7 @@ static void test_handler_failure_per_session(void)
     check("client 1 normal call succeeded", ok);
 
     nipc_client_close(&c1);
-    usleep(50000);
+    check("client 1 session exited", test_server_wait_session_exits(&sctx.events, 1));
 
     /* Client 2: should still succeed after client 1's success */
     nipc_client_ctx_t c2;
@@ -574,20 +579,11 @@ static void test_rapid_connect_disconnect(void)
         nipc_client_ctx_t client;
         nipc_client_init(&client, TEST_RUN_DIR, svc, &ccfg);
 
-        /* Connect with small retry window */
-        for (int r = 0; r < 50; r++) {
-            nipc_client_refresh(&client);
-            if (nipc_client_ready(&client))
-                break;
-            usleep(5000);
-        }
-
-        if (nipc_client_ready(&client)) {
-            if (do_call_and_verify(&client, i))
-                success_count++;
-        }
-
+        nipc_client_refresh(&client);
+        bool served = nipc_client_ready(&client) && do_call_and_verify(&client, i);
         nipc_client_close(&client);
+        if (served && test_server_wait_session_exits(&sctx.events, 1))
+            success_count++;
     }
 
     char msg[128];
@@ -672,6 +668,8 @@ typedef struct {
     int connected;   /* use __atomic builtins for cross-thread access */
     int finished;    /* use __atomic builtins for cross-thread access */
     int calls_made;  /* use __atomic builtins for cross-thread access */
+    int *server_gone; /* raised once the server was destroyed */
+    nipc_error_t after_err;
 } shutdown_client_ctx_t;
 
 static void *shutdown_client_fn(void *arg)
@@ -683,34 +681,27 @@ static void *shutdown_client_fn(void *arg)
     nipc_client_ctx_t client;
     nipc_client_init(&client, TEST_RUN_DIR, ctx->service, &ccfg);
 
-    for (int i = 0; i < 100; i++) {
-        nipc_client_refresh(&client);
-        if (nipc_client_ready(&client))
-            break;
-        usleep(10000);
-    }
-
+    nipc_client_refresh(&client);
     if (!nipc_client_ready(&client)) {
-        __atomic_store_n(&ctx->finished, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->connected);
+        test_flag_set(&ctx->finished);
         nipc_client_close(&client);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->connected, 1, __ATOMIC_RELEASE);
-
-    /* Keep making calls until failure (server shutdown) */
     nipc_cgroups_resp_view_t view;
-
-    while (1) {
-        nipc_error_t err = nipc_client_call_cgroups_snapshot(&client, &view);
-        if (err != NIPC_OK)
-            break;
-        __atomic_fetch_add(&ctx->calls_made, 1, __ATOMIC_RELAXED);
-        usleep(10000);
+    for (int i = 0; i < 5; i++) {
+        if (nipc_client_call_cgroups_snapshot(&client, &view) == NIPC_OK)
+            __atomic_fetch_add(&ctx->calls_made, 1, __ATOMIC_RELAXED);
     }
 
+    /* Stay connected across the shutdown, then call once it completed. */
+    test_flag_set(&ctx->connected);
+    (void)test_flag_wait(ctx->server_gone);
+    ctx->after_err = nipc_client_call_cgroups_snapshot(&client, &view);
+
     nipc_client_close(&client);
-    __atomic_store_n(&ctx->finished, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->finished);
     return NULL;
 }
 
@@ -730,34 +721,27 @@ static void test_graceful_shutdown(void)
     pthread_t ctids[3];
     shutdown_client_ctx_t cctxs[3];
 
+    int server_gone = 0;
     for (int i = 0; i < num_clients; i++) {
         cctxs[i].service = svc;
+        cctxs[i].server_gone = &server_gone;
+        cctxs[i].after_err = NIPC_OK;
         __atomic_store_n(&cctxs[i].connected, 0, __ATOMIC_RELAXED);
         __atomic_store_n(&cctxs[i].finished, 0, __ATOMIC_RELAXED);
         __atomic_store_n(&cctxs[i].calls_made, 0, __ATOMIC_RELAXED);
         pthread_create(&ctids[i], NULL, shutdown_client_fn, &cctxs[i]);
     }
 
-    /* Wait for all clients to connect */
-    for (int w = 0; w < 2000; w++) {
-        int connected = 0;
-        for (int i = 0; i < num_clients; i++)
-            if (__atomic_load_n(&cctxs[i].connected, __ATOMIC_ACQUIRE))
-                connected++;
-        if (connected == num_clients)
-            break;
-        usleep(1000);
-    }
+    /* Wait for all clients to connect and finish their calls */
+    for (int i = 0; i < num_clients; i++)
+        (void)test_flag_wait(&cctxs[i].connected);
 
     int connected_count = 0;
     for (int i = 0; i < num_clients; i++)
-        if (__atomic_load_n(&cctxs[i].connected, __ATOMIC_ACQUIRE))
+        if (__atomic_load_n(&cctxs[i].calls_made, __ATOMIC_ACQUIRE) == 5)
             connected_count++;
     check("all clients connected before shutdown",
           connected_count == num_clients);
-
-    /* Let them run for a bit */
-    usleep(200000);
 
     /* Signal shutdown */
     nipc_server_stop(&sctx.server);
@@ -765,6 +749,7 @@ static void test_graceful_shutdown(void)
     /* Wait for server thread to finish */
     pthread_join(stid, NULL);
     check("server thread exited cleanly", __atomic_load_n(&sctx.done, __ATOMIC_ACQUIRE) == 1);
+    test_flag_set(&server_gone);
 
     /* Wait for client threads to detect disconnection */
     for (int i = 0; i < num_clients; i++)
@@ -783,7 +768,12 @@ static void test_graceful_shutdown(void)
     check("all clients finished after shutdown",
           finished_count == num_clients);
     check("clients made calls before shutdown",
-          min_calls > 0);
+          min_calls == 5);
+    bool all_failed = true;
+    for (int i = 0; i < num_clients; i++)
+        if (cctxs[i].after_err == NIPC_OK)
+            all_failed = false;
+    check("every client's call fails after shutdown", all_failed);
 
     cleanup_all(svc);
 }

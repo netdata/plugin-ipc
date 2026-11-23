@@ -7,6 +7,13 @@
  *
  *   interop_named_pipe client <run_dir> <service_name>
  *     Connects, sends 1 message, verifies echo, exits 0 on success.
+ *
+ *   interop_named_pipe pipeline-server <run_dir> <service_name>
+ *     Like server, but echoes PIPELINE_REQUESTS messages one at a time.
+ *
+ *   interop_named_pipe pipeline-client <run_dir> <service_name>
+ *     Sends PIPELINE_REQUESTS messages before reading any response (more
+ *     than the pipe buffers hold), then verifies the echoes in order.
  */
 
 #if defined(_WIN32) || defined(__MSYS__)
@@ -20,6 +27,8 @@
 #include <windows.h>
 
 #define AUTH_TOKEN 0xDEADBEEFCAFEBABEull
+#define PIPELINE_PAYLOAD (16u * 1024u)
+#define PIPELINE_REQUESTS 32u /* 512 KiB each way, 8x the 64 KiB buffers */
 
 static nipc_np_server_config_t server_config(void)
 {
@@ -175,10 +184,115 @@ static int run_client(const char *run_dir, const char *service)
     return ok ? 0 : 1;
 }
 
+static void pipeline_fill(uint8_t *p, uint64_t id)
+{
+    for (size_t i = 0; i < PIPELINE_PAYLOAD; i++)
+        p[i] = (uint8_t)(id + i);
+}
+
+static int run_pipeline_server(const char *run_dir, const char *service)
+{
+    nipc_np_server_config_t cfg = server_config();
+    nipc_np_listener_t listener;
+
+    nipc_np_error_t err = nipc_np_listen(run_dir, service, &cfg, &listener);
+    if (err != NIPC_NP_OK) {
+        fprintf(stderr, "server: listen failed: %d\n", err);
+        return 1;
+    }
+
+    printf("READY\n");
+    fflush(stdout);
+
+    nipc_np_session_t session;
+    err = nipc_np_accept(&listener, 1, &session);
+    if (err != NIPC_NP_OK) {
+        fprintf(stderr, "server: accept failed: %d\n", err);
+        nipc_np_close_listener(&listener);
+        return 1;
+    }
+
+    static uint8_t buf[65536 + 64];
+    for (uint32_t i = 0; i < PIPELINE_REQUESTS && err == NIPC_NP_OK; i++) {
+        nipc_header_t hdr;
+        const void *payload;
+        size_t payload_len;
+        err = nipc_np_receive(&session, buf, sizeof(buf), &hdr, &payload, &payload_len);
+        if (err != NIPC_NP_OK) {
+            fprintf(stderr, "server: receive %u failed: %d\n", i, err);
+            break;
+        }
+        nipc_header_t resp = hdr;
+        resp.kind = NIPC_KIND_RESPONSE;
+        resp.transport_status = NIPC_STATUS_OK;
+        err = nipc_np_send(&session, &resp, payload, payload_len);
+        if (err != NIPC_NP_OK)
+            fprintf(stderr, "server: send %u failed: %d\n", i, err);
+    }
+
+    nipc_np_close_session(&session);
+    nipc_np_close_listener(&listener);
+    return err == NIPC_NP_OK ? 0 : 1;
+}
+
+static int run_pipeline_client(const char *run_dir, const char *service)
+{
+    nipc_np_client_config_t cfg = client_config();
+    nipc_np_session_t session;
+
+    nipc_np_error_t err = nipc_np_connect(run_dir, service, &cfg, &session);
+    if (err != NIPC_NP_OK) {
+        fprintf(stderr, "client: connect failed: %d\n", err);
+        return 1;
+    }
+
+    static uint8_t payload[PIPELINE_PAYLOAD];
+    for (uint64_t id = 1; id <= PIPELINE_REQUESTS; id++) {
+        nipc_header_t hdr = {
+            .kind       = NIPC_KIND_REQUEST,
+            .code       = NIPC_METHOD_INCREMENT,
+            .item_count = 1,
+            .message_id = id,
+        };
+        pipeline_fill(payload, id);
+        err = nipc_np_send(&session, &hdr, payload, sizeof(payload));
+        if (err != NIPC_NP_OK) {
+            fprintf(stderr, "client: send %llu failed: %d\n", (unsigned long long)id, err);
+            nipc_np_close_session(&session);
+            return 1;
+        }
+    }
+
+    static uint8_t rbuf[65536 + 64];
+    int ok = 1;
+    for (uint64_t id = 1; id <= PIPELINE_REQUESTS && ok; id++) {
+        nipc_header_t rhdr;
+        const void *rpayload;
+        size_t rpayload_len;
+        err = nipc_np_receive(&session, rbuf, sizeof(rbuf), &rhdr, &rpayload, &rpayload_len);
+        if (err != NIPC_NP_OK) {
+            fprintf(stderr, "client: receive %llu failed: %d\n", (unsigned long long)id, err);
+            ok = 0;
+            break;
+        }
+        pipeline_fill(payload, id);
+        if (rhdr.kind != NIPC_KIND_RESPONSE || rhdr.message_id != id ||
+            rpayload_len != sizeof(payload) || memcmp(rpayload, payload, sizeof(payload)) != 0) {
+            fprintf(stderr, "client: response %llu out of order or corrupted\n",
+                    (unsigned long long)id);
+            ok = 0;
+        }
+    }
+
+    nipc_np_close_session(&session);
+    printf(ok ? "PASS\n" : "FAIL\n");
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 4) {
-        fprintf(stderr, "Usage: %s <server|client> <run_dir> <service_name>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <server|client|pipeline-server|pipeline-client> <run_dir> <service_name>\n", argv[0]);
         return 1;
     }
 
@@ -190,6 +304,10 @@ int main(int argc, char **argv)
         return run_server(run_dir, service);
     else if (strcmp(mode, "client") == 0)
         return run_client(run_dir, service);
+    else if (strcmp(mode, "pipeline-server") == 0)
+        return run_pipeline_server(run_dir, service);
+    else if (strcmp(mode, "pipeline-client") == 0)
+        return run_pipeline_client(run_dir, service);
     else {
         fprintf(stderr, "Unknown mode: %s\n", mode);
         return 1;

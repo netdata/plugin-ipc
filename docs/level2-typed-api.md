@@ -241,7 +241,20 @@ once. Duplicate requests are acceptable by contract.
 There are two important cases:
 
 - For ordinary transport / peer failures, Level 2 reconnects and retries
-  once.
+  once. When the peer is gone (end of stream, `EPIPE`, `ECONNRESET`, broken
+  pipe, or an SHM session whose session socket/pipe the peer closed) and
+  the retry also fails, the reported error is a distinct disconnected
+  error (C `NIPC_ERR_DISCONNECTED`, Rust `NipcError::Disconnected`, Go
+  `protocol.ErrDisconnected`). Protocol violations keep their own errors
+  even if the peer closes right after sending them.
+- Any other send/receive I/O failure, with the peer still present, is a
+  distinct transport error (C `NIPC_ERR_TRANSPORT`, Rust
+  `NipcError::Transport`, Go `protocol.ErrTransport`). The same error
+  covers an SHM send or receive that fails for a reason other than
+  message size, and a READY client that has no session. An SHM response
+  larger than the negotiated capacity is an overflow, as a baseline
+  response over the limit is; an SHM message shorter than a header
+  (including zero length) is a truncated message.
 - Timeout and caller-requested abort are terminal for the current call:
   Level 2 reports the explicit error, disconnects or marks the current
   session broken, and does not reconnect/retry that same request.
@@ -254,22 +267,47 @@ There are two important cases:
   powers of 2.
 
 If the session was NOT previously READY, the call fails immediately
-without attempting reconnection.
+without attempting reconnection, with a distinct not-ready error (C
+`NIPC_ERR_NOT_READY`, Rust `NipcError::NotReady`, Go
+`protocol.ErrNotReady`).
 
 If recovery fails, Level 2 reports failure to the caller.
 
 Every synchronous Level 2 client call is bounded. A per-call timeout of
 zero means "use the client context default"; the default is 30000 ms.
-The deadline applies to the complete logical response, including baseline
-transport chunk continuations and SHM response waits. A timeout returns a
-distinct timeout error rather than being collapsed into disconnect or
-protocol failure.
+One deadline covers the whole call: every attempt, the reconnect and
+handshake between attempts, any SHM attach after a reconnect, and every
+overflow-driven reconnect. The deadline applies to the request send, which
+ends at the deadline when the server stops reading, and to the complete
+logical response, including baseline transport chunk continuations and SHM
+response waits; the response waits only for what the send left of it. A timeout returns a distinct timeout error rather than
+being collapsed into disconnect or protocol failure; a reconnect that ends
+because the deadline passed reports the timeout too.
+
+`refresh()` is bounded the same way, by the client context call timeout:
+its connect, handshake and SHM attach end once that timeout passes, so a
+server that accepts but never answers cannot hold the caller's loop. When
+the call deadline, not the SHM attach timeout, ends an SHM attach wait,
+SHM stays enabled for the next connect. A second such wait in a row that
+ends with the session still connected counts as an attach failure (below),
+so a region that never becomes attachable cannot make every call end at its
+deadline; a successful attach resets the count. Only the error classes a
+server that has not finished its setup can cause are waited for: any
+failure to open the region or its objects, an undersized region or ring
+fields not written yet (POSIX), and any magic mismatch. A permanent error in those classes costs at most this
+bounded wait. Any other attach error is an attach failure at once.
 
 Every Level 2 client context also exposes an abort signal that is safe to
 trigger from another thread while one thread is blocked in a typed call.
 Abort is sticky until the caller explicitly clears it or closes the
 client. A call that observes the abort signal returns a distinct aborted
-error and is not retried.
+error and is not retried. While an abort is pending, `refresh()` does not
+connect, and an abort raised during a connect or handshake ends it. A call
+or refresh blocked waiting for its peer observes an abort within 100 ms on
+every transport, including a request send blocked on a full socket or pipe
+and SHM response waits; an implementation may
+notice it sooner (for example C polls an abort descriptor together with
+the socket), but callers must not rely on faster than 100 ms.
 
 Negotiated request and response payload ceilings are configuration
 controlled. The library may provide documented defaults, but the effective
@@ -302,7 +340,10 @@ If handshake selects an SHM profile and the client cannot attach SHM
 locally, Level 2 must close that session, remove SHM from future transport
 proposals for that client context, reconnect with a new handshake, and
 continue on baseline if that reconnect succeeds. This is not same-session
-fallback; it is recovery through a new session.
+fallback; it is recovery through a new session. A server that closes the
+session while the client waits for its region is not an attach failure,
+whichever deadline ends the wait: the connect fails and SHM stays enabled
+for the next one.
 
 ### 6. No hidden background threads (client)
 
@@ -491,9 +532,17 @@ one service kind only.
 The managed server internally:
 
 1. Creates a Level 1 listener for the service endpoint
-2. Runs an acceptor loop that accepts incoming Level 1 sessions
-3. Spawns a thread (C, Rust) or goroutine (Go) per accepted session,
-   up to the configured maximum concurrent sessions. In Go, each
+2. Runs an acceptor loop that accepts incoming Level 1 connections
+   without reading from them
+3. Spawns a thread (C, Rust) or goroutine (Go) per accepted connection,
+   up to the configured maximum concurrent sessions. The worker runs the
+   handshake with the server handshake deadline (5000 ms, see Level 1),
+   so a client that never sends HELLO holds its worker only until then.
+   When all workers are busy, the server waits up to 200 ms (two poll
+   slices) for one to finish, so a client that reconnects right after
+   closing is not refused while its old worker exits. If none frees, the
+   server closes the new connection before HELLO_ACK: the client's connect
+   fails, and it retries on its next refresh. In Go, each
    session goroutine recovers from panics so that a single malformed
    request cannot crash the entire server process. In Rust, thread
    panics are contained by default — a panicking session thread dies
@@ -504,6 +553,24 @@ The managed server internally:
    callback, encodes the typed response, and sends it back via Level 1
 6. Per-session isolation: each session has its own internal reusable
    buffers and builders, with no cross-session coordination
+
+### Readiness
+
+Clients can connect once the listener exists:
+
+- C: `nipc_server_init()` creates the listener before it returns (POSIX
+  binds and listens on the socket; Windows creates the first pipe
+  instance). A client may connect as soon as init returns, even before
+  `nipc_server_run()` starts; the connection is accepted when the run
+  loop starts.
+- Rust and Go create the listener inside `run()` / `Run()`. Callers that
+  start a server and then start clients wait for the listening signal:
+  Rust `listening_signal()` returns a `ListeningSignal` whose
+  `wait(timeout)` reports whether the server listens; Go `Listening()`
+  returns a channel that closes once the server listens. Both exist on
+  the raw server and every typed server. The signal never fires when
+  `run()` / `Run()` fails before listening, so wait together with the
+  run result.
 
 ### Handler contract
 
@@ -563,11 +630,40 @@ gets `transport_status = INTERNAL_ERROR` with empty payload.
 
 ### Shutdown
 
-The caller signals shutdown explicitly. The managed server stops accepting
-new connections and cleans up resources. The exact drain/abort mechanics
-are implementation details.
+The caller signals shutdown explicitly (C `nipc_server_stop()`,
+`nipc_server_destroy()` or `nipc_server_drain()`; Rust `stop()`; Go
+`Stop()`). The managed server stops accepting new connections and cleans
+up resources:
+
+- A stop is remembered: a stop issued before the run loop starts makes it
+  return at once. A managed server is single-use.
+- Stop only signals; the run loop owns the listener and closes it when it
+  exits. On POSIX that closes the listening socket and removes the socket
+  file at once, while the endpoint lock stays held until every worker of
+  the server has exited (C releases it in `nipc_server_drain()` or
+  `nipc_server_destroy()` after joining the workers), so no other server
+  takes the endpoint while this one still serves sessions.
+- Handshakes in progress observe the stop and end at once.
+- Sessions get a 1000 ms grace period to finish on their own. After it,
+  the server interrupts blocking session I/O, so a worker blocked sending
+  to a client that stopped reading cannot hold shutdown: POSIX shuts the
+  session socket down (`shutdown(SHUT_RDWR)`), Windows cancels the worker
+  thread's pipe I/O (`CancelSynchronousIo`), repeated until every worker
+  has exited.
+- C `nipc_server_drain()` keeps its own caller-supplied wait for in-flight
+  requests before this step.
 
 ## Testing requirements
+
+Correctness tests are deterministic: they synchronize on events (server
+listening, handshake started, session exited, flags raised by handlers),
+never on sleeps or retry loops, and a test passes or fails in one run.
+Production timings (poll slice, stop grace, handshake deadline, client SHM
+attach window) are per-instance fields that tests shorten through
+test-only entrypoints (C `*_for_tests` functions under
+`NIPC_INTERNAL_TESTING`, Rust crate-internal setters, Go unexported
+fields). Fuzz, stress and randomized tests are not correctness tests; they
+run from `tests/run-extended-fuzz.sh` and `tests/run-extended-stress.sh`.
 
 Level 2 must have:
 

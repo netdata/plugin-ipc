@@ -74,17 +74,48 @@ func testHandler() cgroups.Handler {
 	}
 }
 
+type listeningServer interface {
+	Listening() <-chan struct{}
+	Stop()
+}
+
+// waitListening reports whether server accepts connections. On false it
+// has reported why and Run has returned.
+func waitListening(server listeningServer, serverErr chan error) bool {
+	select {
+	case <-server.Listening():
+		return true
+	case err := <-serverErr:
+		fmt.Fprintf(os.Stderr, "server: Run returned before listening: %v\n", err)
+		return false
+	case <-time.After(5 * time.Second):
+		server.Stop()
+		<-serverErr
+		fmt.Fprintf(os.Stderr, "server: not listening after 5s\n")
+		return false
+	}
+}
+
 func runServer(runDir, service string) int {
 	server := cgroups.NewServer(runDir, service, serverConfig(), testHandler())
-
-	fmt.Println("READY")
 
 	go func() {
 		time.Sleep(10 * time.Second)
 		server.Stop()
 	}()
 
-	if err := server.Run(); err != nil {
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.Run()
+	}()
+
+	if !waitListening(server, serverErr) {
+		return 1
+	}
+
+	fmt.Println("READY")
+
+	if err := <-serverErr; err != nil {
 		fmt.Fprintf(os.Stderr, "server: %v\n", err)
 		return 1
 	}
@@ -94,14 +125,7 @@ func runServer(runDir, service string) int {
 func runClient(runDir, service string) int {
 	cache := cgroups.NewCache(runDir, service, clientConfig())
 
-	updated := false
-	for i := 0; i < 200; i++ {
-		if cache.Refresh() {
-			updated = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	updated := cache.Refresh()
 	if !updated || !cache.Ready() {
 		fmt.Fprintf(os.Stderr, "client: cache not ready after refresh\n")
 		cache.Close()

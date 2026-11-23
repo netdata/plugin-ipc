@@ -126,7 +126,7 @@ run cargo llvm-cov clean --workspace
 
 echo -e "${YELLOW}Running Rust unit tests with coverage...${NC}"
 cd "$ROOT_DIR"
-run cargo test --manifest-path "$CRATE_DIR/Cargo.toml" --lib -- --test-threads=1
+run cargo test --manifest-path "$CRATE_DIR/Cargo.toml" --lib
 
 echo -e "${YELLOW}Preparing dedicated Windows Rust coverage build...${NC}"
 run rm -rf "$BUILD_DIR"

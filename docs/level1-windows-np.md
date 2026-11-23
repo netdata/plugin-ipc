@@ -42,14 +42,110 @@ identical pipe names from the same inputs.
 Named Pipe is profile bit 0 (`0x01`), named `NAMED_PIPE`.
 This is the Windows baseline profile.
 
+A Windows endpoint offers and accepts only the profiles it implements: the
+baseline, `SHM_HYBRID` (`0x02`) and `SHM_BUSYWAIT` (`0x04`, see
+`level1-windows-shm.md`). Configured bits outside that set, `0x08` included,
+are dropped before the handshake, so a peer can never select a profile
+Windows has no implementation for.
+
+## Access policy
+
+NetIPC services are local, and server and clients run as the same account
+(Netdata runs its agent and plugins as LocalSystem).
+
+- **Pipe DACL**: every pipe instance is created with an explicit, protected
+  security descriptor, `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;<server-SID>)`,
+  where `<server-SID>` is the user SID of the server process token. Only
+  SYSTEM, Administrators and the server's own account can open the pipe;
+  Everyone and Anonymous get no access, not even read-only. A client running
+  as another non-admin account fails to open the pipe with
+  `ERROR_ACCESS_DENIED`, which the client reports as a connect failure.
+- **Remote clients**: pipes are created with `PIPE_REJECT_REMOTE_CLIENTS`,
+  so opens through SMB (`\\host\pipe\...`, including `\\127.0.0.1`) are
+  refused.
+- **Client impersonation level**: clients open the pipe with
+  `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`. A server can identify
+  the client's account but never act as it.
+- **Server identity**: whoever creates a pipe name first owns it. Right after
+  opening the pipe, before HELLO, the client reads the pipe owner
+  (`GetSecurityInfo`, `OWNER_SECURITY_INFORMATION`) and continues only when
+  it is the client's own account, SYSTEM (`S-1-5-18`) or Administrators
+  (`S-1-5-32-544`). A non-admin account cannot assign any of those as owner,
+  so a pipe it squats is refused and receives neither HELLO nor the auth
+  token. The refusal is a distinct L1 error (C
+  `NIPC_NP_ERR_UNTRUSTED_SERVER`, Rust `NpError::UntrustedServer`, Go
+  `ErrUntrustedServer`); Level 2 clients report it as `AUTH_FAILED`.
+
+An elevated administrator creates objects owned by Administrators; a
+non-elevated user or a service account creates objects owned by its own SID.
+Both pass the client check when the client runs as the same account.
+
 ## Connection lifecycle
 
 1. **Server**: creates a Named Pipe instance with `CreateNamedPipeW`.
-   The pipe is created in message mode with overlapped I/O capability.
-   The server calls `ConnectNamedPipe` to wait for a client connection.
+   The pipe is created in message mode for synchronous I/O. The server
+   calls `ConnectNamedPipe` to wait for a client connection.
 
-2. **Client**: connects to the pipe with `CreateFileW`. The connection
-   is established when the server's `ConnectNamedPipe` completes.
+2. **Client**: connects to the pipe with `CreateFileW` and
+   `FILE_FLAG_OVERLAPPED`, so a pipelining send can read while its write
+   waits (see "Pipelining"). The connection is established when the
+   server's `ConnectNamedPipe` completes.
+
+   Between accepting one client and creating the next instance a server
+   has no free instance, and `CreateFileW` fails with `ERROR_PIPE_BUSY`.
+   The client then waits with `WaitNamedPipeW`, for at most 1000 ms
+   (C `NIPC_NP_CONNECT_BUSY_WAIT_MS`, Rust `CONNECT_BUSY_WAIT_MS`, Go
+   `ConnectBusyWaitMs`). `WaitNamedPipeW` does not reserve the instance it
+   reports, so another client may take it first: the client retries
+   `CreateFileW` after each successful wait, and waits again on
+   `ERROR_PIPE_BUSY`, until that bound ends. Any other failure fails the
+   connect.
+
+   The bounded connect (C `nipc_np_connect_timeout()`, Rust
+   `NpSession::connect_with_timeout()`, Go `ConnectTimeout()`) takes a
+   timeout (0 = none) and an abort signal (C an event handle, Rust an
+   `AtomicBool`, Go a channel). The busy wait then also ends at that
+   deadline, in `WaitNamedPipeW` slices of at most 100 ms so an abort ends
+   it promptly, and the wait for HELLO_ACK ends at the same deadline. Expiry
+   returns a timeout error, an abort an aborted error; both are checked
+   before the pipe is opened, so a connect that starts expired or aborted
+   never takes a pipe instance. `connect()` is the
+   bounded connect without a deadline or abort. A pipe that disconnected
+   while the client waits for HELLO_ACK is still read, because a server
+   that rejects the client writes its reply and then closes.
+
+   On the server, accept is split: `nipc_np_accept_pending()` (C),
+   `NpListener::accept_pending()` (Rust) and `Listener.AcceptPending()`
+   (Go) return the connected pipe instance without reading, after
+   creating the next instance for the next client. When that creation
+   fails, accept returns a create-pipe error, disconnects the client and
+   keeps its instance as the listener's, so the next accept listens on it
+   again;
+   `nipc_np_accept_handshake()`, `PendingPipe::handshake()` and
+   `PendingConn.Handshake()` then wait for HELLO with a timeout (0 = none)
+   and, in Rust and Go, an abort signal. Expiry returns a timeout error,
+   an abort an aborted error, in all three languages. A failed handshake
+   closes the instance without `DisconnectNamedPipe`, which would discard a rejection
+   reply the client has not read yet. `nipc_np_accept_handshake_prepared()`,
+   `PendingPipe::handshake_prepared()` and `PendingConn.HandshakePrepared()`
+   also take a prepare callback with the selected profile and the final
+   payload limits, called after the HELLO checks and before HELLO_ACK; on
+   false the server drops that profile and selects again, rejecting with
+   UNSUPPORTED when none is left. Level 2 servers create the session's SHM
+   objects for the selected profile only in this callback.
+   `nipc_np_accept()` / `accept()` / `Accept()` do both
+   steps with the 5000 ms server handshake deadline. A server wakes a
+   blocked `ConnectNamedPipe` by connecting to its own pipe name and
+   closing at once (Rust
+   `NpListenerWaker`, Go `Listener.Wake()`); it never closes a handle the
+   accepting thread may still use.
+
+   Closing a session only closes its handle, in both roles. The peer still
+   reads every message written before the close, then sees
+   `ERROR_BROKEN_PIPE`. Sessions do not call `FlushFileBuffers` or
+   `DisconnectNamedPipe` on close: a flush blocks while the peer is not
+   reading, and on a synchronous pipe handle neither `CancelSynchronousIo`
+   nor `DisconnectNamedPipe` from another thread releases it.
 
 3. **Handshake**: immediately after connection, the client sends a
    HELLO control message and the server responds with HELLO_ACK, as
@@ -89,6 +185,68 @@ sequentially.
 
 See the wire envelope spec for chunk header layout and validation.
 
+## Pipelining
+
+The pipelining guarantee in `level1-transport.md` ("Pipelining") works like
+this, the same in C, Rust and Go. Each pipe direction buffers the larger of
+the packet size and 64 KiB.
+
+- **Handles.** Client handles are overlapped; server handles are
+  synchronous. Every client read and write passes an `OVERLAPPED` with its
+  own manual-reset event and waits for completion before the call returns:
+  no I/O stays posted between calls.
+- **Who.** A client session sending a packet while another request is in
+  flight (the in-flight set holds more than the request being sent). A
+  client with one request in flight (every typed call) waits for each write
+  to complete, bounded by its deadline and abort when it has them (below),
+  and every server session sends with a blocking `WriteFile`.
+  The deadlock needs both peers blocked in send, and client progress alone
+  breaks it.
+- **Send.** The client posts the write, then loops until it completes:
+  while `PeekNamedPipe` reports bytes, it reads whole messages into a
+  per-session pending queue; otherwise it yields (`SwitchToThread`) for up
+  to 1 ms after the last progress, then waits on the write event in short
+  slices (1 ms requested; a slice lasts a system timer tick, and only the
+  write completing ends one early).
+  A send without a deadline or abort waits as long as a blocking write
+  would.
+- **Deadline and abort.** A client send with a deadline or abort
+  (`nipc_np_send_timeout`, Rust `NpSession::send_with_control`, Go
+  `Session.SendTimeout`; every typed call passes both) also ends when the
+  deadline passes or the abort is raised before its write completes. C
+  waits on the write and abort events together; Rust and Go recheck the
+  abort flag at least every 100 ms. The send returns the timeout or aborted
+  error and fails as below: part of the message may already be on the
+  wire.
+- **Receive.** Every receive takes messages from the pending queue before
+  the pipe, so reassembly, limits and in-flight validation are unchanged. A
+  message larger than the receive buffer fails the receive, from the queue
+  (which drops that message) as from the pipe (`ERROR_MORE_DATA`, which
+  leaves its rest in the pipe).
+- **Bound.** The queue may hold at most what the in-flight responses can
+  occupy on the wire: in-flight count × (maximum response payload + one
+  32-byte header per packet), plus the 4-byte length the queue keeps with
+  each packet. More fails the send with a protocol error.
+- **Failure.** A send that fails while its write is posted (the bound, a
+  failed peek, read or wait, the deadline or an abort) cancels the write with `CancelIoEx`, waits until the
+  kernel releases it, closes the pipe and fails every in-flight request: a
+  cancelled write leaves the message stream unknown and the dropped bytes
+  cannot be recovered. Later calls on the session fail; closing it still
+  releases the rest.
+- **Peer close.** When `PeekNamedPipe` or a read reports the pipe broken or
+  disconnected, the client stops reading and only waits for the write; the write then
+  fails with the existing send error.
+- **Waiting.** Queued responses no longer show on the pipe. Use
+  `nipc_np_wait_readable` (Rust `NpSession::wait_readable`, Go
+  `Session.WaitReadable`), which reports them, or check
+  `nipc_np_session_has_pending` (Rust `NpSession::has_pending`, Go
+  `Session.HasPending`) and receive without waiting while it is true. The
+  pipe handle (`nipc_np_session_handle`, Rust `NpSession::handle`, Go
+  `Session.Handle`) is not a readability signal: a pipe handle is signalled
+  by I/O completion, not by arriving data. Only a pipelining client fills
+  the queue; server sessions never do.
+- **Session close** frees the queue and the events.
+
 ## Receive timeout and abort
 
 The baseline receive primitive remains a blocking Level 1 operation for
@@ -101,9 +259,14 @@ The timeout-aware receive form must:
   caller-provided timeout
 - apply the same deadline to the first packet and all continuation
   packets that make up one logical message
-- observe an explicit abort event while waiting for pipe readability
+- observe the caller's abort signal while waiting for pipe readability,
+  either through an abort event or by waiting in slices of at most 100 ms
+  and checking an abort flag between slices; an abort is observed within
+  100 ms
+- treat the end of an abort-check slice as "keep waiting", never as the
+  deadline
 - return a distinct timeout error when the deadline expires
-- return a distinct aborted error when the abort event is signaled
+- return a distinct aborted error when the abort is observed
 
 Level 2 is responsible for deciding whether a timeout or abort should
 break the session. Level 1 reports timeout and abort distinctly; peer
@@ -128,7 +291,7 @@ Where:
   prevent unauthorized access to the shared region)
 - `service` = `service_name` (same character rules as the pipe name:
   alphanumeric, dash, underscore, dot only; reject otherwise)
-- `profile` = the selected profile number (1, 2, 4, or 8)
+- `profile` = the selected SHM profile number (2 or 4)
 - `session_id` = the server-assigned session identifier from HELLO_ACK
 
 The Named Pipe connection remains open for the session lifetime. The

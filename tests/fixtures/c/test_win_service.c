@@ -17,6 +17,7 @@
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_service.h"
+#include "test_sync.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -158,24 +159,27 @@ static bool on_snapshot_empty(void *user,
     return true;
 }
 
+/* Holds the request until the test, having seen the client give up,
+ * releases it. */
+static int g_slow_handler_release;
+
 static bool on_snapshot_slow(void *user,
                              const nipc_cgroups_req_t *request,
                              nipc_cgroups_builder_t *builder)
 {
-    Sleep(150);
+    (void)test_flag_wait(&g_slow_handler_release);
     return on_snapshot(user, request, builder);
 }
 
-static volatile LONG g_blocking_handler_entered;
-static volatile LONG g_blocking_handler_release;
+static int g_blocking_handler_entered;
+static int g_blocking_handler_release;
 
 static bool on_snapshot_blocking(void *user,
                                  const nipc_cgroups_req_t *request,
                                  nipc_cgroups_builder_t *builder)
 {
-    InterlockedExchange(&g_blocking_handler_entered, 1);
-    while (InterlockedCompareExchange(&g_blocking_handler_release, 0, 0) == 0)
-        Sleep(1);
+    test_flag_set(&g_blocking_handler_entered);
+    (void)test_flag_wait(&g_blocking_handler_release);
     return on_snapshot(user, request, builder);
 }
 
@@ -249,6 +253,7 @@ static DWORD WINAPI managed_server_thread(LPVOID arg)
     }
 
     InterlockedExchange(&ctx->init_ok, 1);
+    test_server_use_test_timings(&ctx->server, NULL);
     SetEvent(ctx->ready_event);
     nipc_server_run(&ctx->server);
     return 0;
@@ -268,7 +273,7 @@ static HANDLE start_server_named(server_thread_ctx_t *ctx,
     ctx->ready_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     InterlockedExchange(&ctx->init_ok, 0);
 
-    HANDLE thread = CreateThread(NULL, 0, managed_server_thread, ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, managed_server_thread, ctx, 0, NULL);
     check("server thread created", thread != NULL);
     if (!thread)
         return NULL;
@@ -431,7 +436,7 @@ static HANDLE start_raw_hello_ack_version_server(raw_hello_ack_server_ctx_t *ctx
     if (!ctx->ready_event)
         return NULL;
 
-    HANDLE thread = CreateThread(NULL, 0, raw_hello_ack_version_server_thread, ctx, 0, NULL);
+    HANDLE thread = test_create_thread(NULL, 0, raw_hello_ack_version_server_thread, ctx, 0, NULL);
     check("raw hello_ack server thread created", thread != NULL);
     if (!thread) {
         CloseHandle(ctx->ready_event);
@@ -453,16 +458,11 @@ static HANDLE start_raw_hello_ack_version_server(raw_hello_ack_server_ctx_t *ctx
     return thread;
 }
 
-static bool refresh_until_ready(nipc_client_ctx_t *client, int max_tries, DWORD sleep_ms)
+/* One refresh, then report whether the client is ready. */
+static bool refresh_ready(nipc_client_ctx_t *client)
 {
-    for (int i = 0; i < max_tries; i++) {
-        nipc_client_refresh(client);
-        if (nipc_client_ready(client))
-            return true;
-        Sleep(sleep_ms);
-    }
-
-    return false;
+    nipc_client_refresh(client);
+    return nipc_client_ready(client);
 }
 
 static void test_client_lifecycle(void)
@@ -511,7 +511,7 @@ static void test_client_lifecycle_ready(void)
         return;
 
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("client reaches READY", refresh_until_ready(&client, 100, 10));
+    check("client reaches READY", refresh_ready(&client));
     check("ready state cached", nipc_client_ready(&client));
 
     nipc_client_status_t status;
@@ -540,7 +540,7 @@ static void test_snapshot_calls(void)
     nipc_client_ctx_t client;
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("client ready", refresh_until_ready(&client, 100, 10));
+    check("client ready", refresh_ready(&client));
 
     if (nipc_client_ready(&client)) {
         nipc_cgroups_resp_view_t cg_view;
@@ -559,6 +559,36 @@ static void test_snapshot_calls(void)
     stop_server(&sctx, server_thread);
 }
 
+/* supported_profiles = 0 is the documented default: baseline. */
+static void test_server_zero_profiles_selects_baseline(void)
+{
+    printf("--- Server with supported_profiles = 0 serves baseline ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_zero_prof");
+
+    nipc_server_config_t config = default_server_config();
+    config.supported_profiles = 0;
+    config.preferred_profiles = 0;
+    server_thread_ctx_t sctx;
+    HANDLE server_thread = start_server_named(&sctx, service, 1, &config,
+                                              &full_service_handler);
+    if (!server_thread)
+        return;
+
+    nipc_client_ctx_t client;
+    nipc_client_config_t ccfg = default_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    check("client ready against a zero-profile server", refresh_ready(&client));
+    nipc_cgroups_resp_view_t view;
+    check("call against a zero-profile server succeeds",
+          nipc_client_ready(&client) &&
+          nipc_client_call_cgroups_snapshot(&client, &view) == NIPC_OK);
+
+    nipc_client_close(&client);
+    stop_server(&sctx, server_thread);
+}
+
 static void test_client_call_timeout_on_wedged_peer(void)
 {
     printf("--- Client call timeout on wedged peer ---\n");
@@ -567,6 +597,7 @@ static void test_client_call_timeout_on_wedged_peer(void)
     unique_service(service, sizeof(service), "svc_timeout");
 
     server_thread_ctx_t sctx;
+    __atomic_store_n(&g_slow_handler_release, 0, __ATOMIC_RELAXED);
     HANDLE server_thread = start_default_server_named(&sctx, service, 4,
                                                       &slow_snapshot_service_handler);
     if (!server_thread)
@@ -575,7 +606,7 @@ static void test_client_call_timeout_on_wedged_peer(void)
     nipc_client_ctx_t client;
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("timeout client ready", refresh_until_ready(&client, 100, 10));
+    check("timeout client ready", refresh_ready(&client));
 
     if (nipc_client_ready(&client)) {
         nipc_cgroups_resp_view_t view;
@@ -587,9 +618,148 @@ static void test_client_call_timeout_on_wedged_peer(void)
         check("wedged peer returns timeout", err == NIPC_ERR_TIMEOUT);
         check("timeout returns promptly", elapsed < 1000);
     }
+    test_flag_set(&g_slow_handler_release);
 
     nipc_client_close(&client);
     stop_server(&sctx, server_thread);
+}
+
+/* A server that completes the handshake and never reads, so a request
+ * larger than the pipe buffers blocks the client's write. */
+#define STALLED_READER_REQUEST_BYTES (8u * 1024u * 1024u)
+#define STALLED_READER_PIDS (1024u * 1024u)
+
+typedef struct {
+    const char *service;
+    int ready;
+    int reading_started;
+    int request_seen;
+    int release;
+} stalled_reader_ctx_t;
+
+static DWORD WINAPI stalled_reader_server_thread(LPVOID arg)
+{
+    stalled_reader_ctx_t *ctx = (stalled_reader_ctx_t *)arg;
+    nipc_np_listener_t listener;
+    nipc_np_session_t session;
+    nipc_np_server_config_t scfg = {
+        .supported_profiles = NIPC_PROFILE_BASELINE,
+        .max_request_payload_bytes = STALLED_READER_REQUEST_BYTES,
+        .max_request_batch_items = 16,
+        .max_response_payload_bytes = RESPONSE_BUF_SIZE,
+        .max_response_batch_items = 16,
+        .auth_token = AUTH_TOKEN,
+    };
+
+    memset(&listener, 0, sizeof(listener));
+    memset(&session, 0, sizeof(session));
+    if (nipc_np_listen(TEST_RUN_DIR, ctx->service, &scfg, &listener) !=
+        NIPC_NP_OK) {
+        test_flag_set(&ctx->ready);
+        test_flag_set(&ctx->reading_started);
+        return 0;
+    }
+    test_flag_set(&ctx->ready);
+
+    if (nipc_np_accept(&listener, 1, &session) == NIPC_NP_OK) {
+        /* The request's first bytes arrived: the client is in its write. */
+        bool readable = false;
+        if (nipc_np_wait_readable(&session, 10000, &readable) == NIPC_NP_OK &&
+            readable)
+            InterlockedExchange((volatile LONG *)&ctx->request_seen, 1);
+        test_flag_set(&ctx->reading_started);
+        (void)test_flag_wait(&ctx->release);
+        nipc_np_close_session(&session);
+    } else {
+        test_flag_set(&ctx->reading_started);
+    }
+    nipc_np_close_listener(&listener);
+    return 0;
+}
+
+typedef struct {
+    nipc_client_ctx_t *client;
+    const uint32_t *pids;
+    uint32_t timeout_ms;
+    nipc_error_t err;
+} stalled_send_call_ctx_t;
+
+static DWORD WINAPI stalled_send_call_thread(LPVOID arg)
+{
+    stalled_send_call_ctx_t *ctx = (stalled_send_call_ctx_t *)arg;
+    nipc_apps_lookup_resp_view_t view;
+    ctx->err = nipc_client_call_apps_lookup_timeout(
+        ctx->client, ctx->pids, STALLED_READER_PIDS, &view, ctx->timeout_ms);
+    return 0;
+}
+
+/* A request the server never reads ends at the call deadline, or on abort,
+ * instead of blocking in the write. */
+static void test_client_send_bounded_by_deadline_and_abort(void)
+{
+    printf("--- Client send bounded by deadline and abort ---\n");
+
+    uint32_t *pids = calloc(STALLED_READER_PIDS, sizeof(*pids));
+    check("stalled send pids allocated", pids != NULL);
+    if (!pids)
+        return;
+    for (uint32_t i = 0; i < STALLED_READER_PIDS; i++)
+        pids[i] = i + 1;
+
+    for (int use_abort = 0; use_abort <= 1; use_abort++) {
+        char service[64];
+        unique_service(service, sizeof(service),
+                       use_abort ? "svc_send_abort" : "svc_send_deadline");
+
+        stalled_reader_ctx_t sctx = {.service = service};
+        HANDLE server_thread = test_create_thread(
+            NULL, 0, stalled_reader_server_thread, &sctx, 0, NULL);
+        check("stalled reader thread created", server_thread != NULL);
+        if (!server_thread)
+            break;
+        check("stalled reader listening", test_flag_wait(&sctx.ready));
+
+        nipc_client_ctx_t client;
+        nipc_client_config_t ccfg = default_client_config();
+        ccfg.max_request_payload_bytes = STALLED_READER_REQUEST_BYTES;
+        ccfg.max_logical_lookup_items = STALLED_READER_PIDS;
+        nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+        check("stalled send client ready", refresh_ready(&client));
+
+        stalled_send_call_ctx_t cctx = {
+            .client = &client,
+            .pids = pids,
+            .timeout_ms = use_abort ? 30000u : 200u,
+        };
+        ULONGLONG start = GetTickCount64();
+        HANDLE call_thread = test_create_thread(
+            NULL, 0, stalled_send_call_thread, &cctx, 0, NULL);
+        check("stalled send call thread created", call_thread != NULL);
+        if (call_thread) {
+            if (use_abort) {
+                check("server saw the request start",
+                      test_flag_wait(&sctx.reading_started) &&
+                          InterlockedCompareExchange(
+                              (volatile LONG *)&sctx.request_seen, 0, 0));
+                nipc_client_abort(&client);
+            }
+            WaitForSingleObject(call_thread, INFINITE);
+            CloseHandle(call_thread);
+        }
+        ULONGLONG elapsed = GetTickCount64() - start;
+        test_flag_set(&sctx.release);
+        WaitForSingleObject(server_thread, INFINITE);
+        CloseHandle(server_thread);
+
+        if (use_abort)
+            check("blocked send returns aborted", cctx.err == NIPC_ERR_ABORTED);
+        else
+            check("blocked send returns timeout", cctx.err == NIPC_ERR_TIMEOUT);
+        check("blocked send ends promptly", elapsed < 5000);
+
+        nipc_client_close(&client);
+    }
+    free(pids);
 }
 
 static void test_client_abort_unblocks_call(void)
@@ -599,8 +769,8 @@ static void test_client_abort_unblocks_call(void)
     char service[64];
     unique_service(service, sizeof(service), "svc_abort");
 
-    InterlockedExchange(&g_blocking_handler_entered, 0);
-    InterlockedExchange(&g_blocking_handler_release, 0);
+    __atomic_store_n(&g_blocking_handler_entered, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_blocking_handler_release, 0, __ATOMIC_RELAXED);
 
     server_thread_ctx_t sctx;
     HANDLE server_thread = start_default_server_named(
@@ -611,23 +781,18 @@ static void test_client_abort_unblocks_call(void)
     nipc_client_ctx_t client;
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("abort client ready", refresh_until_ready(&client, 100, 10));
+    check("abort client ready", refresh_ready(&client));
 
     snapshot_call_thread_ctx_t call_ctx;
     memset(&call_ctx, 0, sizeof(call_ctx));
     call_ctx.client = &client;
 
-    HANDLE call_thread = CreateThread(NULL, 0, snapshot_call_thread_fn,
+    HANDLE call_thread = test_create_thread(NULL, 0, snapshot_call_thread_fn,
                                       &call_ctx, 0, NULL);
     check("snapshot call thread created", call_thread != NULL);
     if (call_thread) {
-        for (int i = 0; i < 2000
-             && InterlockedCompareExchange(&g_blocking_handler_entered,
-                                           0, 0) == 0; i++)
-            Sleep(1);
         check("blocking handler received request",
-              InterlockedCompareExchange(&g_blocking_handler_entered,
-                                         0, 0) == 1);
+              test_flag_wait(&g_blocking_handler_entered));
 
         ULONGLONG start = GetTickCount64();
         nipc_client_abort(&client);
@@ -640,7 +805,7 @@ static void test_client_abort_unblocks_call(void)
         CloseHandle(call_thread);
     }
 
-    InterlockedExchange(&g_blocking_handler_release, 1);
+    test_flag_set(&g_blocking_handler_release);
     nipc_client_close(&client);
     stop_server(&sctx, server_thread);
 }
@@ -660,7 +825,7 @@ static void test_retry_on_broken_session(void)
     nipc_client_ctx_t client;
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("client ready", refresh_until_ready(&client, 100, 10));
+    check("client ready", refresh_ready(&client));
 
     if (nipc_client_ready(&client)) {
         nipc_cgroups_resp_view_t view;
@@ -700,7 +865,7 @@ static void test_handler_failure(void)
     nipc_client_ctx_t client;
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("client ready", refresh_until_ready(&client, 100, 10));
+    check("client ready", refresh_ready(&client));
 
     if (nipc_client_ready(&client)) {
         nipc_cgroups_resp_view_t view;
@@ -734,6 +899,31 @@ static void test_client_auth_failure(void)
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
     nipc_client_refresh(&client);
     check("state is AUTH_FAILED", client.state == NIPC_CLIENT_AUTH_FAILED);
+
+    nipc_client_close(&client);
+    stop_server(&sctx, server_thread);
+}
+
+static void test_client_untrusted_server(void)
+{
+    printf("--- Client untrusted server mapping ---\n");
+
+    char service[64];
+    unique_service(service, sizeof(service), "svc_untrusted");
+
+    server_thread_ctx_t sctx;
+    HANDLE server_thread = start_default_server_named(&sctx, service, 4, &full_service_handler);
+    if (!server_thread)
+        return;
+
+    /* BUILTIN\Users never owns the test pipe. */
+    nipc_np_set_trusted_owner_for_tests("S-1-5-32-545");
+    nipc_client_ctx_t client;
+    nipc_client_config_t ccfg = default_client_config();
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    nipc_client_refresh(&client);
+    nipc_np_set_trusted_owner_for_tests(NULL);
+    check("untrusted server state is AUTH_FAILED", client.state == NIPC_CLIENT_AUTH_FAILED);
 
     nipc_client_close(&client);
     stop_server(&sctx, server_thread);
@@ -816,7 +1006,7 @@ static void test_status_reporting(void)
     nipc_client_ctx_t client;
     nipc_client_config_t ccfg = default_client_config();
     nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
-    check("client ready", refresh_until_ready(&client, 100, 10));
+    check("client ready", refresh_ready(&client));
 
     nipc_client_status_t s0;
     nipc_client_status(&client, &s0);
@@ -987,8 +1177,6 @@ static void test_non_request_terminates_session(void)
         bad.transport_status = NIPC_STATUS_OK;
         check("send non-request ok", nipc_np_send(&session, &bad, NULL, 0) == NIPC_NP_OK);
 
-        Sleep(200);
-
         nipc_header_t good = {0};
         good.kind = NIPC_KIND_REQUEST;
         good.code = NIPC_METHOD_CGROUPS_SNAPSHOT;
@@ -1015,7 +1203,7 @@ static void test_non_request_terminates_session(void)
     nipc_client_ctx_t verify_client;
     nipc_client_config_t verify_cfg = default_client_config();
     nipc_client_init(&verify_client, TEST_RUN_DIR, service, &verify_cfg);
-    check("verify client ready", refresh_until_ready(&verify_client, 100, 10));
+    check("verify client ready", refresh_ready(&verify_client));
     if (nipc_client_ready(&verify_client)) {
         nipc_cgroups_resp_view_t view;
         nipc_error_t err = nipc_client_call_cgroups_snapshot(&verify_client, &view);
@@ -1035,13 +1223,16 @@ int main(void)
     test_client_lifecycle();
     test_client_lifecycle_ready();
     test_snapshot_calls();
+    test_server_zero_profiles_selects_baseline();
     test_client_call_timeout_on_wedged_peer();
+    test_client_send_bounded_by_deadline_and_abort();
     test_client_abort_unblocks_call();
     /* Broken-session retry and cache subcases need a smaller Windows-only
      * harness. In this monolithic executable they deadlock intermittently
      * and poison the full ctest pass. */
     test_handler_failure();
     test_client_auth_failure();
+    test_client_untrusted_server();
     test_client_incompatible();
     test_client_protocol_version_incompatible();
     test_status_reporting();

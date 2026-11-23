@@ -51,7 +51,7 @@ echo -e "${YELLOW}Cleaning previous llvm-cov artifacts...${NC}"
 run cargo llvm-cov clean --workspace
 
 echo -e "${YELLOW}Running tests with llvm-cov coverage...${NC}"
-run cargo llvm-cov --lib --no-report -- --test-threads=1
+run cargo llvm-cov --lib --no-report
 
 echo
 echo -e "${CYAN}=== Coverage Report ===${NC}"

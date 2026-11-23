@@ -2,7 +2,9 @@
 #
 # test_named_pipe_interop.sh - Cross-language Named Pipe transport interop tests.
 #
-# Tests all 9 directed pairs: C, Rust, and Go servers and clients.
+# Tests all 9 directed pairs: C, Rust, and Go servers and clients, once with
+# one request and once with a client that pipelines more than the pipe
+# buffers hold before reading any response.
 # All binaries use identical wire protocol, FNV-1a pipe name derivation,
 # and auth tokens.
 #
@@ -16,6 +18,7 @@
 set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/run-low-priority.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/interop-lib.sh"
 netipc_low_priority_self "$@"
 
 RED='\033[0;31m'
@@ -57,12 +60,7 @@ else
 fi
 
 cleanup() {
-    local pids
-    pids=$(jobs -p 2>/dev/null) || true
-    if [[ -n "$pids" ]]; then
-        kill $pids 2>/dev/null || true
-        wait $pids 2>/dev/null || true
-    fi
+    interop_stop_server
     rm -rf "$RUN_DIR_HOST"
 }
 trap cleanup EXIT
@@ -91,6 +89,7 @@ run_test() {
     local server_bin="$2"
     local client_bin="$3"
     local service="$4"
+    local mode_prefix="${5:-}"
 
     # Skip if either binary is missing
     if [[ ! -x "$server_bin" || ! -x "$client_bin" ]]; then
@@ -101,53 +100,36 @@ run_test() {
 
     echo -n "  $name ... "
 
-    # Start server in background, wait for READY
-    local server_pid
     local server_log="${RUN_DIR_HOST}/${service}.server.log"
-    "$server_bin" server "$RUN_DIR" "$service" > "$server_log" 2>&1 &
-    server_pid=$!
-
-    # Wait for READY line (up to TIMEOUT seconds)
-    local waited=0
-    while [[ $waited -lt $((TIMEOUT * 10)) ]]; do
-        if ! kill -0 "$server_pid" 2>/dev/null; then
-            echo -e "${RED}FAIL${NC} (server exited early)"
-            cat "$server_log" >&2 2>/dev/null || true
-            FAIL=$((FAIL + 1))
-            return
-        fi
-        if grep -q "^READY$" "$server_log" 2>/dev/null; then
-            break
-        fi
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    if [[ $waited -ge $((TIMEOUT * 10)) ]]; then
-        echo -e "${RED}FAIL${NC} (server not ready after ${TIMEOUT}s)"
-        kill "$server_pid" 2>/dev/null || true
-        wait "$server_pid" 2>/dev/null || true
+    if ! interop_start_server "$TIMEOUT" "$server_log" \
+        "$server_bin" "${mode_prefix}server" "$RUN_DIR" "$service"; then
+        echo -e "${RED}FAIL${NC} (server not ready)"
+        cat "$server_log" >&2 2>/dev/null || true
+        interop_stop_server
         FAIL=$((FAIL + 1))
         return
     fi
 
-    # Run client
-    local client_out
-    if client_out=$("$client_bin" client "$RUN_DIR" "$service" 2>&1); then
-        if echo "$client_out" | grep -q "^PASS$"; then
-            echo -e "${GREEN}PASS${NC}"
-            PASS=$((PASS + 1))
-        else
-            echo -e "${RED}FAIL${NC} (client output: $client_out)"
-            FAIL=$((FAIL + 1))
-        fi
-    else
-        echo -e "${RED}FAIL${NC} (client exit code $?, output: $client_out)"
+    # The server printed READY after creating its endpoint, so the client
+    # connects once.
+    local client_out rc
+    set +e
+    client_out=$("$client_bin" "${mode_prefix}client" "$RUN_DIR" "$service" 2>&1)
+    rc=$?
+    set -e
+
+    if [[ $rc -ne 0 ]] || ! echo "$client_out" | grep -q "^PASS$"; then
+        echo -e "${RED}FAIL${NC} (client exit code $rc, output: $client_out)"
         FAIL=$((FAIL + 1))
+        # The server exits after serving one client; after a client failure
+        # it may still be waiting for one.
+        interop_stop_server
+        return
     fi
 
-    # Wait for server to exit
-    wait "$server_pid" 2>/dev/null || true
+    echo -e "${GREEN}PASS${NC}"
+    PASS=$((PASS + 1))
+    interop_wait_server
 }
 
 main() {
@@ -161,36 +143,32 @@ main() {
     echo "Go binary:   $INTEROP_NP_GO"
     echo ""
 
-    # --- Same-language baseline pairs (3 tests) ---
+    local pass
+    for pass in single pipeline; do
+        local prefix="" label="" tag=""
+        if [[ $pass == pipeline ]]; then
+            prefix="pipeline-" label=" (pipelining)" tag="_pl"
+        fi
 
-    run_test "C server, C client" \
-        "$INTEROP_NP_C" "$INTEROP_NP_C" "interop_np_c_c"
-
-    run_test "Rust server, Rust client" \
-        "$INTEROP_NP_RS" "$INTEROP_NP_RS" "interop_np_rs_rs"
-
-    run_test "Go server, Go client" \
-        "$INTEROP_NP_GO" "$INTEROP_NP_GO" "interop_np_go_go"
-
-    # --- Cross-language pairs (6 tests) ---
-
-    run_test "C server, Rust client" \
-        "$INTEROP_NP_C" "$INTEROP_NP_RS" "interop_np_c_rs"
-
-    run_test "Rust server, C client" \
-        "$INTEROP_NP_RS" "$INTEROP_NP_C" "interop_np_rs_c"
-
-    run_test "C server, Go client" \
-        "$INTEROP_NP_C" "$INTEROP_NP_GO" "interop_np_c_go"
-
-    run_test "Go server, C client" \
-        "$INTEROP_NP_GO" "$INTEROP_NP_C" "interop_np_go_c"
-
-    run_test "Rust server, Go client" \
-        "$INTEROP_NP_RS" "$INTEROP_NP_GO" "interop_np_rs_go"
-
-    run_test "Go server, Rust client" \
-        "$INTEROP_NP_GO" "$INTEROP_NP_RS" "interop_np_go_rs"
+        run_test "C server, C client${label}" \
+            "$INTEROP_NP_C" "$INTEROP_NP_C" "interop_np_c_c${tag}" "$prefix"
+        run_test "Rust server, Rust client${label}" \
+            "$INTEROP_NP_RS" "$INTEROP_NP_RS" "interop_np_rs_rs${tag}" "$prefix"
+        run_test "Go server, Go client${label}" \
+            "$INTEROP_NP_GO" "$INTEROP_NP_GO" "interop_np_go_go${tag}" "$prefix"
+        run_test "C server, Rust client${label}" \
+            "$INTEROP_NP_C" "$INTEROP_NP_RS" "interop_np_c_rs${tag}" "$prefix"
+        run_test "Rust server, C client${label}" \
+            "$INTEROP_NP_RS" "$INTEROP_NP_C" "interop_np_rs_c${tag}" "$prefix"
+        run_test "C server, Go client${label}" \
+            "$INTEROP_NP_C" "$INTEROP_NP_GO" "interop_np_c_go${tag}" "$prefix"
+        run_test "Go server, C client${label}" \
+            "$INTEROP_NP_GO" "$INTEROP_NP_C" "interop_np_go_c${tag}" "$prefix"
+        run_test "Rust server, Go client${label}" \
+            "$INTEROP_NP_RS" "$INTEROP_NP_GO" "interop_np_rs_go${tag}" "$prefix"
+        run_test "Go server, Rust client${label}" \
+            "$INTEROP_NP_GO" "$INTEROP_NP_RS" "interop_np_go_rs${tag}" "$prefix"
+    done
 
     echo ""
     echo -e "=== Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}, ${YELLOW}${SKIP} skipped${NC} ==="

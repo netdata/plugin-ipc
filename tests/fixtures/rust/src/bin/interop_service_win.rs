@@ -312,10 +312,24 @@ fn cgroups_lookup_mixed_handler() -> cgroups_lookup::Handler {
     }
 }
 
+/// NIPC_HANDLER_DELAY_MS makes every snapshot handler slow, so interop runs
+/// prove that clients wait past their internal 100 ms abort-poll slice.
+#[cfg(windows)]
+fn handler_delay() {
+    if let Some(ms) = std::env::var("NIPC_HANDLER_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&ms| ms > 0 && ms <= 10_000)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 #[cfg(windows)]
 fn server_handler() -> Handler {
     Handler {
         handle: Some(std::sync::Arc::new(|request, builder| {
+            handler_delay();
             if request.layout_version != 1 || request.flags != 0 {
                 return false;
             }
@@ -351,6 +365,36 @@ fn server_handler() -> Handler {
     }
 }
 
+/// Run a server on its own thread and print READY once it accepts
+/// connections. If the test never kills this process, stop the server after
+/// `self_stop` and wake its blocked accept with `wake`.
+#[cfg(windows)]
+fn serve(
+    listening: netipc::service::ListeningSignal,
+    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    self_stop: Duration,
+    wake: impl FnOnce() + Send + 'static,
+    run: impl FnOnce() -> Result<(), netipc::protocol::NipcError> + Send + 'static,
+) -> i32 {
+    let runner = thread::spawn(run);
+    if !listening.wait(Duration::from_secs(5)) {
+        stop_flag.store(false, std::sync::atomic::Ordering::Release);
+        let _ = runner.join();
+        eprintln!("server: not listening after 5s");
+        return 1;
+    }
+    println!("READY");
+
+    thread::spawn(move || {
+        thread::sleep(self_stop);
+        stop_flag.store(false, std::sync::atomic::Ordering::Release);
+        wake();
+    });
+
+    let _ = runner.join();
+    0
+}
+
 #[cfg(windows)]
 fn run_server(run_dir: &str, service: &str) -> i32 {
     let profiles = detect_profiles();
@@ -374,19 +418,17 @@ fn run_server(run_dir: &str, service: &str) -> i32 {
         ..ClientConfig::default()
     };
 
-    println!("READY");
-
-    // Auto-stop after 10 seconds
-    let sf = stop_flag.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(10));
-        sf.store(false, std::sync::atomic::Ordering::Release);
-        let mut wake = CgroupsClient::new(&wake_run_dir, &wake_service, wake_config);
-        let _ = wake.refresh();
-    });
-
-    let _ = server.run();
-    0
+    let listening = server.listening_signal();
+    serve(
+        listening,
+        stop_flag,
+        Duration::from_secs(10),
+        move || {
+            let mut wake = CgroupsClient::new(&wake_run_dir, &wake_service, wake_config);
+            let _ = wake.refresh();
+        },
+        move || server.run(),
+    )
 }
 
 #[cfg(windows)]
@@ -403,19 +445,18 @@ fn run_apps_server(run_dir: &str, service: &str) -> i32 {
     let wake_service = service.to_string();
     let wake_config = apps_lookup_client_config(1);
 
-    println!("READY");
-
-    let sf = stop_flag.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(120));
-        sf.store(false, std::sync::atomic::Ordering::Release);
-        let mut wake =
-            apps_lookup::AppsLookupClient::new(&wake_run_dir, &wake_service, wake_config);
-        let _ = wake.refresh();
-    });
-
-    let _ = server.run();
-    0
+    let listening = server.listening_signal();
+    serve(
+        listening,
+        stop_flag,
+        Duration::from_secs(120),
+        move || {
+            let mut wake =
+                apps_lookup::AppsLookupClient::new(&wake_run_dir, &wake_service, wake_config);
+            let _ = wake.refresh();
+        },
+        move || server.run(),
+    )
 }
 
 #[cfg(windows)]
@@ -432,19 +473,18 @@ fn run_cgroups_lookup_server(run_dir: &str, service: &str) -> i32 {
     let wake_service = service.to_string();
     let wake_config = cgroups_lookup_client_config(1);
 
-    println!("READY");
-
-    let sf = stop_flag.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(120));
-        sf.store(false, std::sync::atomic::Ordering::Release);
-        let mut wake =
-            cgroups_lookup::CgroupsLookupClient::new(&wake_run_dir, &wake_service, wake_config);
-        let _ = wake.refresh();
-    });
-
-    let _ = server.run();
-    0
+    let listening = server.listening_signal();
+    serve(
+        listening,
+        stop_flag,
+        Duration::from_secs(120),
+        move || {
+            let mut wake =
+                cgroups_lookup::CgroupsLookupClient::new(&wake_run_dir, &wake_service, wake_config);
+            let _ = wake.refresh();
+        },
+        move || server.run(),
+    )
 }
 
 #[cfg(windows)]
@@ -461,19 +501,18 @@ fn run_apps_mixed_server(run_dir: &str, service: &str) -> i32 {
     let wake_service = service.to_string();
     let wake_config = apps_lookup_client_config(1);
 
-    println!("READY");
-
-    let sf = stop_flag.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(120));
-        sf.store(false, std::sync::atomic::Ordering::Release);
-        let mut wake =
-            apps_lookup::AppsLookupClient::new(&wake_run_dir, &wake_service, wake_config);
-        let _ = wake.refresh();
-    });
-
-    let _ = server.run();
-    0
+    let listening = server.listening_signal();
+    serve(
+        listening,
+        stop_flag,
+        Duration::from_secs(120),
+        move || {
+            let mut wake =
+                apps_lookup::AppsLookupClient::new(&wake_run_dir, &wake_service, wake_config);
+            let _ = wake.refresh();
+        },
+        move || server.run(),
+    )
 }
 
 #[cfg(windows)]
@@ -490,19 +529,18 @@ fn run_cgroups_mixed_server(run_dir: &str, service: &str) -> i32 {
     let wake_service = service.to_string();
     let wake_config = cgroups_lookup_client_config(1);
 
-    println!("READY");
-
-    let sf = stop_flag.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(120));
-        sf.store(false, std::sync::atomic::Ordering::Release);
-        let mut wake =
-            cgroups_lookup::CgroupsLookupClient::new(&wake_run_dir, &wake_service, wake_config);
-        let _ = wake.refresh();
-    });
-
-    let _ = server.run();
-    0
+    let listening = server.listening_signal();
+    serve(
+        listening,
+        stop_flag,
+        Duration::from_secs(120),
+        move || {
+            let mut wake =
+                cgroups_lookup::CgroupsLookupClient::new(&wake_run_dir, &wake_service, wake_config);
+            let _ = wake.refresh();
+        },
+        move || server.run(),
+    )
 }
 
 #[cfg(windows)]
@@ -517,28 +555,18 @@ fn large_lookup_paths(item_count: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// The server printed READY after binding, so one refresh connects.
 #[cfg(windows)]
 fn wait_apps_client_ready(client: &mut apps_lookup::AppsLookupClient) -> bool {
-    for _ in 0..200 {
-        client.refresh();
-        if client.ready() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    false
+    client.refresh();
+    client.ready()
 }
 
+/// The server printed READY after binding, so one refresh connects.
 #[cfg(windows)]
 fn wait_cgroups_lookup_client_ready(client: &mut cgroups_lookup::CgroupsLookupClient) -> bool {
-    for _ in 0..200 {
-        client.refresh();
-        if client.ready() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    false
+    client.refresh();
+    client.ready()
 }
 
 #[cfg(windows)]
@@ -853,13 +881,7 @@ fn run_client(run_dir: &str, service: &str) -> i32 {
     };
 
     let mut client = CgroupsClient::new(run_dir, service, config);
-    for _ in 0..200 {
-        client.refresh();
-        if client.ready() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+    client.refresh();
 
     if !client.ready() {
         eprintln!("client: not ready");

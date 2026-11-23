@@ -154,7 +154,9 @@ Total: 32 bytes.
 - `total_message_len` must be > 0.
 - The receiver validates `magic`, `message_id`, `chunk_index`, and
   `chunk_count` on every continuation chunk. Any mismatch is a
-  protocol violation.
+  protocol violation, and so is a continuation whose index reaches the
+  declared count: a sender whose chunks are smaller than the budget would
+  need more chunks than it may declare.
 
 ## Handshake payloads
 
@@ -215,6 +217,10 @@ The server does not return partial success. A successful handshake means:
 - all session-operational fields in `HELLO_ACK` are final for that session
 - `selected_profile` is final and locked for that session
 
+The client must reject, as a protocol error, a successful `HELLO_ACK` whose
+`selected_profile` is not exactly one profile bit or is a profile the client
+did not offer in `supported_profiles`.
+
 If `selected_profile` is an SHM profile, the server must not send successful
 `HELLO_ACK` until the SHM resources for that session are already ready on the
 server side. If the client later cannot attach the negotiated SHM transport,
@@ -249,6 +255,16 @@ Clarifications:
   - all packed item payloads
 - `max_request_batch_items` and `max_response_batch_items` are item-count
   ceilings, enforced independently from payload-byte ceilings.
+- On every transport, a client rejects a HELLO_ACK whose
+  `agreed_packet_size` exceeds its own `packet_size` proposal, or is not
+  greater than the 32-byte header, as a protocol error: it sizes its
+  buffers, and on SEQPACKET its datagrams, from its proposal.
+- HELLO carries exactly 44 payload bytes and HELLO_ACK exactly 48. A
+  receiver rejects any other `payload_len` as a protocol error, after the
+  layout check, so a future layout is still reported as incompatible. On
+  message-oriented transports (SEQPACKET, Named Pipe) the packet must also
+  be exactly the header plus that payload; on the stream baseline the bytes
+  after the payload are read as the next packet.
 
 ### Handshake rejection semantics
 
@@ -301,9 +317,15 @@ Bit 0 is always the baseline profile for the platform.
      `(intersection & client_preferred & server_preferred)`
    - fallback choice: highest bit in `intersection`
 6. Server computes the final session limits using the matrix above.
-7. If the final profile is SHM, the server makes SHM for that session ready
-   before sending successful `HELLO_ACK`.
-8. Server allocates `session_id`.
+7. Server allocates `session_id`.
+8. If the final profile is SHM, the server makes SHM for that session ready
+   before sending successful `HELLO_ACK`, sized for the final limits. The
+   server creates SHM only for the selected profile and only after steps 2-6
+   succeed, so baseline sessions and rejected handshakes create none. If SHM
+   preparation fails, the server removes that profile from its supported set
+   and the intersection and repeats step 5 in the same handshake, keeping the
+   final limits and `session_id`; with no profile left it rejects with
+   `UNSUPPORTED`.
 9. Server sends `HELLO_ACK` with `transport_status = OK`.
 10. Both sides use the returned `HELLO_ACK` values for the rest of the session.
 

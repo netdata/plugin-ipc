@@ -10,6 +10,7 @@
 #include "netipc/netipc_service.h"
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_uds.h"
+#include "test_sync.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -198,14 +199,15 @@ static void *server_thread_fn(void *arg)
 
     if (err != NIPC_OK) {
         fprintf(stderr, "server init failed: %d\n", err);
-        __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        test_flag_set(&ctx->done);
         return NULL;
     }
 
-    __atomic_store_n(&ctx->ready, 1, __ATOMIC_RELEASE);
+    test_server_use_test_timings(&ctx->server, NULL);
+    test_flag_set(&ctx->ready);
     nipc_server_run(&ctx->server);
     nipc_server_destroy(&ctx->server);
-    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    test_flag_set(&ctx->done);
     return NULL;
 }
 
@@ -223,10 +225,7 @@ static void start_server(server_thread_ctx_t *sctx, const char *service,
 
     pthread_create(tid, NULL, server_thread_fn, sctx);
 
-    for (int i = 0; i < 2000
-         && !__atomic_load_n(&sctx->ready, __ATOMIC_ACQUIRE)
-         && !__atomic_load_n(&sctx->done, __ATOMIC_ACQUIRE); i++)
-        usleep(500);
+    (void)test_flag_wait_any(&sctx->ready, &sctx->done);
 }
 
 static void stop_server(server_thread_ctx_t *sctx, pthread_t tid)
@@ -349,7 +348,6 @@ static void test_refresh_failure_preserves(void)
     /* Kill server */
     stop_server(&sctx, tid);
     cleanup_all(svc);
-    usleep(50000);
 
     /* Refresh fails, old cache preserved */
     bool updated = nipc_cgroups_cache_refresh(&cache);
@@ -394,7 +392,6 @@ static void test_reconnect_rebuilds(void)
     /* Kill and restart */
     stop_server(&sctx1, tid1);
     cleanup_all(svc);
-    usleep(50000);
 
     server_thread_ctx_t sctx2;
     pthread_t tid2;

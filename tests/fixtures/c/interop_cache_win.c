@@ -13,6 +13,7 @@
 #if defined(_WIN32) || defined(__MSYS__)
 
 #include "netipc/netipc_service.h"
+#include "test_sync.h"
 #include "netipc/netipc_protocol.h"
 #include "netipc/netipc_named_pipe.h"
 #include "netipc/netipc_win_shm.h"
@@ -142,7 +143,7 @@ static int run_server(const char *run_dir, const char *service)
         return 1;
     }
 
-    HANDLE server_thread = CreateThread(NULL, 0, server_thread_main, &state, 0, NULL);
+    HANDLE server_thread = test_create_thread(NULL, 0, server_thread_main, &state, 0, NULL);
     if (!server_thread) {
         fprintf(stderr, "server thread create failed: %lu\n", (unsigned long)GetLastError());
         nipc_server_destroy(&state.server);
@@ -200,16 +201,12 @@ static int run_client(const char *run_dir, const char *service)
     nipc_cgroups_cache_t cache;
     nipc_cgroups_cache_init(&cache, run_dir, service, &ccfg);
 
-    bool updated = false;
-    for (int i = 0; i < 200; i++) {
-        if (nipc_cgroups_cache_refresh(&cache)) {
-            updated = true;
-            break;
-        }
-        Sleep(10);
-    }
+    bool updated = nipc_cgroups_cache_refresh(&cache);
     if (!updated || !nipc_cgroups_cache_ready(&cache)) {
-        fprintf(stderr, "client: cache not ready after refresh\n");
+        nipc_cgroups_cache_status_t status;
+        nipc_cgroups_cache_status(&cache, &status);
+        fprintf(stderr, "client: cache not ready after refresh (connection %d, failures %u)\n",
+                (int)status.connection_state, status.refresh_failure_count);
         nipc_cgroups_cache_close(&cache);
         printf("FAIL\n");
         return 1;

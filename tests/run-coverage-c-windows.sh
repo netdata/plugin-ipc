@@ -29,6 +29,7 @@ LIB_SOURCES=(
     "src/libnetdata/netipc/src/service/netipc_service_apps_lookup.c"
     "src/libnetdata/netipc/src/service/netipc_service_cgroups_lookup.c"
     "src/libnetdata/netipc/src/transport/windows/netipc_named_pipe.c"
+    "src/libnetdata/netipc/src/transport/windows/netipc_win_security.c"
     "src/libnetdata/netipc/src/transport/windows/netipc_win_shm.c"
 )
 

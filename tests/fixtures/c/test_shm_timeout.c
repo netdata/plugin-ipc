@@ -1,6 +1,7 @@
 /* Exercise the public SHM wait path on native and cross-compiled Linux ABIs. */
 #define _GNU_SOURCE
 #include "netipc/netipc_shm.h"
+#include "test_sync.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -50,6 +51,9 @@ static int wake_wait(nipc_shm_ctx_t *receiver, nipc_shm_ctx_t *sender,
     if (pid < 0)
         return 0;
     if (pid == 0) {
+        /* alarm() is not inherited; bound the child too so a hang fails
+         * the test instead of holding the output pipe open. */
+        alarm(10);
         usleep(50000);
         _exit(nipc_shm_send(sender, message, sizeof(message)) == NIPC_SHM_OK ? 0 : 1);
     }
@@ -58,7 +62,8 @@ static int wake_wait(nipc_shm_ctx_t *receiver, nipc_shm_ctx_t *sender,
     nipc_shm_error_t err = nipc_shm_receive(receiver, buf, sizeof(buf), &len, timeout_ms);
     int status = 0;
     int waited = waitpid(pid, &status, 0) == pid;
-    printf("wake %u ms: result %d, length %zu\n", timeout_ms, err, len);
+    printf("wake %u ms: result %d, length %zu, child status 0x%x\n",
+           timeout_ms, err, len, (unsigned)status);
     return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
            err == NIPC_SHM_OK && len == sizeof(message) &&
            memcmp(buf, message, sizeof(message)) == 0;
@@ -66,6 +71,8 @@ static int wake_wait(nipc_shm_ctx_t *receiver, nipc_shm_ctx_t *sender,
 
 int main(void)
 {
+    /* Unbuffered so progress survives a kill when stdout is a pipe. */
+    setvbuf(stdout, NULL, _IONBF, 0);
     /* Also bounds an accidentally infinite wait when run directly. */
     alarm(20);
     printf("ABI: pointer=%zu time_t=%zu timespec=%zu nsec_offset=%zu\n",
