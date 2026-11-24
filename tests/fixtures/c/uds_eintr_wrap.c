@@ -169,9 +169,12 @@ int __wrap_bind(int fd, const struct sockaddr *addr, socklen_t len)
     return __real_bind(fd, addr, len);
 }
 
-#if defined(__GLIBC__) && defined(__USE_TIME_BITS64)
-/* With 64-bit time_t on 32-bit glibc, sys/socket.h redirects sendmsg to
- * __sendmsg64, so the library references that symbol instead. */
+#if defined(__GLIBC__) && defined(__USE_TIME_BITS64) && __TIMESIZE == 32
+/* When a glibc ABI with a 32-bit time_t is built with _TIME_BITS=64,
+ * sys/socket.h redirects sendmsg to __sendmsg64, so the library references
+ * that symbol instead. This is the condition glibc uses for
+ * __USE_TIME64_REDIRECTS; since glibc 2.40, __USE_TIME_BITS64 alone is also
+ * set on every 64-bit target, where libc has no __sendmsg64. */
 ssize_t __real___sendmsg64(int fd, const struct msghdr *msg, int flags);
 
 ssize_t __wrap___sendmsg64(int fd, const struct msghdr *msg, int flags)
