@@ -22,6 +22,9 @@
  *   N5  SHM client notices a crashed server before its timeout
  *   N5  baseline client reports a crashed server as disconnected
  *   N5  SHM attach stops when the server closes the session
+ *   N12 a lookup retried after a reconnect resends the same request
+ *       (server restart SHM->SHM and baseline->SHM, apps and cgroups;
+ *       apps response over a fixed server limit)
  *   CLOEXEC  every NetIPC socket and pipe is close-on-exec
  *   N11 default packet size carries a message larger than SO_SNDBUF
  *       (plus an explicit-packet-size control)
@@ -1230,6 +1233,318 @@ static void test_default_packet_size_carries_large_message(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  N12: a lookup retried after a reconnect resends the same request   */
+/* ------------------------------------------------------------------ */
+
+#if defined(__linux__) || defined(__FreeBSD__)
+#define LOOKUP_RETRY_ITEMS 16u
+/* Spare workers: a session the server closes after LIMIT_EXCEEDED may still
+ * hold its worker while the client reconnects. */
+#define LOOKUP_SERVER_WORKERS 4
+
+/* What the lookup handler of one server saw, read under the lock. */
+typedef struct {
+    pthread_mutex_t lock;
+    uint32_t calls;
+    uint32_t mismatched; /* calls whose items differ from retry_path / 4000+i */
+    uint32_t item_count;
+    uint32_t pids[LOOKUP_RETRY_ITEMS];
+    char paths[LOOKUP_RETRY_ITEMS][16];
+} lookup_seen_t;
+
+typedef struct {
+    const char *service;
+    bool apps;
+    bool shm;
+    uint32_t max_response; /* 0 = RESPONSE_BUF_SIZE */
+    lookup_seen_t seen;
+    nipc_apps_lookup_service_handler_t apps_handler;
+    nipc_cgroups_lookup_service_handler_t cgroups_handler;
+    nipc_managed_server_t server;
+    test_server_events_t events;
+    pthread_t tid;
+} lookup_server_t;
+
+static void retry_path(uint32_t i, char *buf, size_t size)
+{
+    snprintf(buf, size, "/rt/%u", (unsigned)i);
+}
+
+static bool apps_lookup_record_handler(void *user,
+                                       const nipc_apps_lookup_req_view_t *request,
+                                       nipc_apps_lookup_builder_t *builder)
+{
+    lookup_seen_t *seen = (lookup_seen_t *)user;
+    pthread_mutex_lock(&seen->lock);
+    seen->calls++;
+    seen->item_count = request->item_count;
+    bool mismatch = request->item_count != LOOKUP_RETRY_ITEMS;
+    for (uint32_t i = 0; i < request->item_count; i++) {
+        nipc_apps_lookup_req_item_t item;
+        if (nipc_apps_lookup_req_item(request, i, &item) != NIPC_OK)
+            break;
+        if (i < LOOKUP_RETRY_ITEMS)
+            seen->pids[i] = item.pid;
+        if (item.pid != 4000u + i)
+            mismatch = true;
+    }
+    if (mismatch)
+        seen->mismatched++;
+    pthread_mutex_unlock(&seen->lock);
+
+    for (uint32_t i = 0; i < request->item_count; i++) {
+        nipc_apps_lookup_req_item_t item;
+        if (nipc_apps_lookup_req_item(request, i, &item) != NIPC_OK ||
+            nipc_apps_lookup_builder_add(builder, NIPC_PID_LOOKUP_UNKNOWN, 0, 0,
+                                         item.pid, 0, NIPC_UID_UNSET, 0, "", 0,
+                                         "", 0, "", 0, NULL, 0) != NIPC_OK)
+            return false;
+    }
+    return true;
+}
+
+static bool cgroups_lookup_record_handler(void *user,
+                                          const nipc_cgroups_lookup_req_view_t *request,
+                                          nipc_cgroups_lookup_builder_t *builder)
+{
+    lookup_seen_t *seen = (lookup_seen_t *)user;
+    pthread_mutex_lock(&seen->lock);
+    seen->calls++;
+    seen->item_count = request->item_count;
+    bool mismatch = request->item_count != LOOKUP_RETRY_ITEMS;
+    for (uint32_t i = 0; i < request->item_count; i++) {
+        nipc_cgroups_lookup_req_item_t item;
+        if (nipc_cgroups_lookup_req_item(request, i, &item) != NIPC_OK)
+            break;
+        if (i < LOOKUP_RETRY_ITEMS) {
+            size_t n = item.path.len < sizeof(seen->paths[i]) - 1
+                           ? item.path.len : sizeof(seen->paths[i]) - 1;
+            memcpy(seen->paths[i], item.path.ptr, n);
+            seen->paths[i][n] = '\0';
+        }
+        char want[16];
+        retry_path(i, want, sizeof(want));
+        if (item.path.len != strlen(want) || memcmp(item.path.ptr, want, item.path.len) != 0)
+            mismatch = true;
+    }
+    if (mismatch)
+        seen->mismatched++;
+    pthread_mutex_unlock(&seen->lock);
+
+    for (uint32_t i = 0; i < request->item_count; i++) {
+        nipc_cgroups_lookup_req_item_t item;
+        if (nipc_cgroups_lookup_req_item(request, i, &item) != NIPC_OK ||
+            nipc_cgroups_lookup_builder_add(builder, NIPC_CGROUP_LOOKUP_UNKNOWN_RETRY_LATER,
+                                            0, item.path.ptr, item.path.len, "", 0,
+                                            NULL, 0) != NIPC_OK)
+            return false;
+    }
+    return true;
+}
+
+static void *lookup_server_fn(void *arg)
+{
+    lookup_server_t *ls = (lookup_server_t *)arg;
+    nipc_server_run(&ls->server);
+    nipc_server_destroy(&ls->server);
+    return NULL;
+}
+
+static bool start_lookup_server(lookup_server_t *ls)
+{
+    cleanup_all(ls->service);
+    pthread_mutex_init(&ls->seen.lock, NULL);
+    nipc_server_config_t scfg = {
+        .supported_profiles         = NIPC_PROFILE_BASELINE |
+                                      (ls->shm ? NIPC_PROFILE_SHM_HYBRID : 0),
+        .preferred_profiles         = ls->shm ? NIPC_PROFILE_SHM_HYBRID : 0,
+        .max_request_payload_bytes  = 4096,
+        .max_request_batch_items    = 1,
+        .max_response_payload_bytes = ls->max_response ? ls->max_response : RESPONSE_BUF_SIZE,
+        .auth_token                 = AUTH_TOKEN,
+    };
+    nipc_error_t err;
+    if (ls->apps) {
+        ls->apps_handler.handle = apps_lookup_record_handler;
+        ls->apps_handler.user = &ls->seen;
+        err = nipc_server_init_apps_lookup(&ls->server, TEST_RUN_DIR, ls->service,
+                                           &scfg, LOOKUP_SERVER_WORKERS, &ls->apps_handler);
+    } else {
+        ls->cgroups_handler.handle = cgroups_lookup_record_handler;
+        ls->cgroups_handler.user = &ls->seen;
+        err = nipc_server_init_cgroups_lookup(&ls->server, TEST_RUN_DIR, ls->service,
+                                              &scfg, LOOKUP_SERVER_WORKERS, &ls->cgroups_handler);
+    }
+    if (err != NIPC_OK) {
+        fprintf(stderr, "lookup server init failed: %d\n", err);
+        pthread_mutex_destroy(&ls->seen.lock);
+        return false;
+    }
+    test_server_use_test_timings(&ls->server, &ls->events);
+    if (pthread_create(&ls->tid, NULL, lookup_server_fn, ls) != 0) {
+        nipc_server_destroy(&ls->server);
+        pthread_mutex_destroy(&ls->seen.lock);
+        return false;
+    }
+    return true;
+}
+
+static bool stop_lookup_server(lookup_server_t *ls)
+{
+    nipc_server_stop(&ls->server);
+    bool stopped = join_within(ls->tid, 5000);
+    if (!stopped)
+        join_rest(ls->tid);
+    pthread_mutex_destroy(&ls->seen.lock);
+    return stopped;
+}
+
+/* One lookup of LOOKUP_RETRY_ITEMS items; true when the call succeeded and
+ * the server's last handled request held exactly those items. */
+static bool lookup_call_matches(nipc_client_ctx_t *client, lookup_server_t *ls,
+                                nipc_error_t *err_out)
+{
+    static char path_bufs[LOOKUP_RETRY_ITEMS][16];
+    nipc_error_t err;
+    if (ls->apps) {
+        uint32_t pids[LOOKUP_RETRY_ITEMS];
+        for (uint32_t i = 0; i < LOOKUP_RETRY_ITEMS; i++)
+            pids[i] = 4000u + i;
+        nipc_apps_lookup_resp_view_t view;
+        err = nipc_client_call_apps_lookup(client, pids, LOOKUP_RETRY_ITEMS, &view);
+        if (err == NIPC_OK && view.item_count != LOOKUP_RETRY_ITEMS)
+            err = NIPC_ERR_BAD_ITEM_COUNT;
+    } else {
+        nipc_str_view_t paths[LOOKUP_RETRY_ITEMS];
+        for (uint32_t i = 0; i < LOOKUP_RETRY_ITEMS; i++) {
+            retry_path(i, path_bufs[i], sizeof(path_bufs[i]));
+            paths[i].ptr = path_bufs[i];
+            paths[i].len = (uint32_t)strlen(path_bufs[i]);
+        }
+        nipc_cgroups_lookup_resp_view_t view;
+        err = nipc_client_call_cgroups_lookup(client, paths, LOOKUP_RETRY_ITEMS, &view);
+        if (err == NIPC_OK && view.item_count != LOOKUP_RETRY_ITEMS)
+            err = NIPC_ERR_BAD_ITEM_COUNT;
+    }
+    *err_out = err;
+    if (err != NIPC_OK)
+        return false;
+
+    pthread_mutex_lock(&ls->seen.lock);
+    bool same = ls->seen.calls >= 1 && ls->seen.item_count == LOOKUP_RETRY_ITEMS;
+    for (uint32_t i = 0; same && i < LOOKUP_RETRY_ITEMS; i++) {
+        char want[16];
+        retry_path(i, want, sizeof(want));
+        same = ls->apps ? ls->seen.pids[i] == 4000u + i
+                        : strcmp(ls->seen.paths[i], want) == 0;
+    }
+    pthread_mutex_unlock(&ls->seen.lock);
+    return same;
+}
+
+/* A READY client keeps its session while the server is replaced; the next
+ * call fails on the dead session, reconnects to the replacement inside the
+ * call and must resend the request it was given. */
+static void lookup_retry_after_restart(const char *service, bool apps, bool first_shm)
+{
+    printf("N12: %s lookup retried after a server restart (%s -> SHM)\n",
+           apps ? "apps" : "cgroups", first_shm ? "SHM" : "baseline");
+    lookup_server_t first = {.service = service, .apps = apps, .shm = first_shm};
+    if (!start_lookup_server(&first)) {
+        check("first server started", 0);
+        return;
+    }
+
+    nipc_client_config_t ccfg = client_config(true);
+    ccfg.call_timeout_ms = 5000;
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    nipc_client_refresh(&client);
+    check("client ready", nipc_client_ready(&client));
+    check(first_shm ? "first session is SHM" : "first session is baseline",
+          (client.shm != NULL) == first_shm);
+
+    nipc_error_t err;
+    check("call 1 served with the exact items", lookup_call_matches(&client, &first, &err));
+    check("first server stops", stop_lookup_server(&first));
+
+    lookup_server_t second = {.service = service, .apps = apps, .shm = true};
+    if (!start_lookup_server(&second)) {
+        check("second server started", 0);
+        nipc_client_close(&client);
+        return;
+    }
+
+    bool matches = lookup_call_matches(&client, &second, &err);
+    nipc_client_status_t status;
+    nipc_client_status(&client, &status);
+    printf("    call 2 err=%d reconnects=%u\n", err, status.reconnect_count);
+    check("call 2 succeeds after reconnecting inside the call", err == NIPC_OK);
+    check("call 2 reconnected exactly once", status.reconnect_count == 1);
+    check("replacement server saw the exact items", matches);
+    check("second session is SHM", client.shm != NULL);
+
+    nipc_client_close(&client);
+    check("second server stops", stop_lookup_server(&second));
+    cleanup_all(service);
+}
+
+/* The response does not fit the server's fixed limit. The server answers
+ * LIMIT_EXCEEDED; the client raises its own response size, reconnects and
+ * resends inside the call, then reports the overflow once the server limit
+ * does not move. Every request the server sees must hold the same items.
+ * (A CGROUPS_LOOKUP of LOOKUP_RETRY_ITEMS short paths fits 1 KiB; it shares
+ * the retry code with APPS_LOOKUP.) */
+static void lookup_resend_after_response_limit(void)
+{
+    printf("N12: apps lookup resent after a response over the server limit\n");
+    const char *service = "rob_lookup_limit_apps";
+    lookup_server_t ls = {.service = service, .apps = true, .shm = true, .max_response = 1024};
+    if (!start_lookup_server(&ls)) {
+        check("server started", 0);
+        return;
+    }
+
+    nipc_client_config_t ccfg = client_config(true);
+    ccfg.max_response_payload_bytes = 1024;
+    ccfg.call_timeout_ms = 5000;
+    nipc_client_ctx_t client;
+    nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
+    nipc_client_refresh(&client);
+    check("client ready on SHM", nipc_client_ready(&client) && client.shm != NULL);
+
+    nipc_error_t err;
+    (void)lookup_call_matches(&client, &ls, &err);
+    nipc_client_status_t status;
+    nipc_client_status(&client, &status);
+    pthread_mutex_lock(&ls.seen.lock);
+    uint32_t calls = ls.seen.calls, mismatched = ls.seen.mismatched;
+    pthread_mutex_unlock(&ls.seen.lock);
+    printf("    call err=%d reconnects=%u server calls=%u mismatched=%u\n", err,
+           status.reconnect_count, calls, mismatched);
+    check("call reports the overflow", err == NIPC_ERR_OVERFLOW);
+    check("client reconnected twice (one size raise, one final check)",
+          status.reconnect_count == 2);
+    check("request was sent twice", calls == 2);
+    check("every resent request held the same items", mismatched == 0);
+
+    nipc_client_close(&client);
+    check("server stops", stop_lookup_server(&ls));
+    cleanup_all(service);
+}
+
+static void test_lookup_retry_after_restart(void)
+{
+    lookup_retry_after_restart("rob_lookup_retry_apps_shm", true, true);
+    lookup_retry_after_restart("rob_lookup_retry_apps_up", true, false);
+    lookup_retry_after_restart("rob_lookup_retry_cg_shm", false, true);
+    lookup_retry_after_restart("rob_lookup_retry_cg_up", false, false);
+    lookup_resend_after_response_limit();
+}
+
+#endif
+
+/* ------------------------------------------------------------------ */
 
 int main(int argc, char **argv)
 {
@@ -1271,6 +1586,7 @@ int main(int argc, char **argv)
     test_uds_client_reports_crashed_server_as_disconnected();
 #if defined(__linux__) || defined(__FreeBSD__)
     test_shm_attach_stops_when_server_closes_session();
+    test_lookup_retry_after_restart();
 #endif
     test_ipc_fds_are_cloexec();
     test_default_packet_size_carries_large_message();

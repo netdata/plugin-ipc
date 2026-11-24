@@ -230,13 +230,13 @@ static nipc_error_t do_apps_lookup_attempt(nipc_client_ctx_t *ctx,
       goto cleanup;
     }
     /* next_request_count returns only sizes bounded by the uint32 transport cap. */
-    if (!nipc_service_platform_ensure_client_send_buffer(ctx, req_size)) {
+    if (!nipc_service_platform_ensure_client_request_buffer(ctx, req_size)) {
       err = NIPC_ERR_OVERFLOW;
       goto cleanup;
     }
 
     size_t req_len = nipc_apps_lookup_req_encode(
-        req_pids, req_count, ctx->send_buf, ctx->send_buf_size);
+        req_pids, req_count, ctx->request_buf, ctx->request_buf_size);
     if (req_len == 0) {
       err = NIPC_ERR_BAD_LAYOUT;
       goto cleanup;
@@ -252,7 +252,7 @@ static nipc_error_t do_apps_lookup_attempt(nipc_client_ctx_t *ctx,
     err = apps_lookup_remaining_timeout(ctx, s->deadline_ms, &timeout_ms);
     if (err != NIPC_OK)
       goto cleanup;
-    err = apps_lookup_do_raw_call_with_retry(ctx, ctx->send_buf, req_len,
+    err = apps_lookup_do_raw_call_with_retry(ctx, ctx->request_buf, req_len,
                                              &payload, &payload_len,
                                              timeout_ms);
     if (err != NIPC_OK)

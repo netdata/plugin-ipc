@@ -179,8 +179,12 @@ typedef struct {
   /* Internal reusable Level 2 scratch, allocated lazily from session sizes. */
   uint8_t *response_buf;
   size_t response_buf_size;
+  /* SHM frame (header + request copy); a reconnect may resize it. */
   uint8_t *send_buf;
   size_t send_buf_size;
+  /* Encoded lookup request; an in-call retry resends it unchanged. */
+  uint8_t *request_buf;
+  size_t request_buf_size;
 } nipc_client_ctx_t;
 
 /* ------------------------------------------------------------------ */
@@ -505,6 +509,7 @@ typedef enum {
   NIPC_WIN_SERVICE_TEST_FAULT_CACHE_ITEMS_CALLOC,
   NIPC_WIN_SERVICE_TEST_FAULT_CACHE_ITEM_NAME_MALLOC,
   NIPC_WIN_SERVICE_TEST_FAULT_CACHE_ITEM_PATH_MALLOC,
+  NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_REQUEST_BUF_REALLOC,
 } nipc_win_service_test_fault_site_t;
 
 void nipc_win_service_test_fault_set(int site, uint32_t skip_matches);
@@ -524,6 +529,7 @@ typedef enum {
   NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_ITEMS_CALLOC,
   NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_ITEM_NAME_MALLOC,
   NIPC_POSIX_SERVICE_TEST_FAULT_CACHE_ITEM_PATH_MALLOC,
+  NIPC_POSIX_SERVICE_TEST_FAULT_CLIENT_REQUEST_BUF_REALLOC,
 } nipc_posix_service_test_fault_site_t;
 
 void nipc_posix_service_test_fault_set(int site, uint32_t skip_matches);

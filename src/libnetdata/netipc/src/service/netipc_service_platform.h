@@ -26,8 +26,8 @@ void *nipc_service_platform_malloc(size_t size, int fault_site);
 void *nipc_service_platform_calloc(size_t count, size_t size, int fault_site);
 uint64_t nipc_service_platform_monotonic_ms(void);
 
-bool nipc_service_platform_ensure_client_send_buffer(nipc_client_ctx_t *ctx,
-                                                     size_t need);
+bool nipc_service_platform_ensure_client_request_buffer(nipc_client_ctx_t *ctx,
+                                                        size_t need);
 bool nipc_service_platform_ensure_client_response_buffer(nipc_client_ctx_t *ctx,
                                                          size_t need);
 

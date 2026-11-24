@@ -160,10 +160,13 @@ void nipc_service_common_client_status(const nipc_client_ctx_t *ctx,
 void nipc_service_common_client_close_buffers(nipc_client_ctx_t *ctx) {
   free(ctx->response_buf);
   free(ctx->send_buf);
+  free(ctx->request_buf);
   ctx->response_buf = NULL;
   ctx->send_buf = NULL;
+  ctx->request_buf = NULL;
   ctx->response_buf_size = 0;
   ctx->send_buf_size = 0;
+  ctx->request_buf_size = 0;
   ctx->state = NIPC_CLIENT_DISCONNECTED;
 }
 
@@ -287,8 +290,10 @@ nipc_error_t nipc_service_common_client_prepare_shm_request(
   if (!msg || msg_len > ctx->send_buf_size)
     return NIPC_ERR_OVERFLOW;
 
+  /* The payload lives outside send_buf, so an in-call retry, which may
+   * reconnect and resize send_buf, resends it unchanged. */
   if (payload_len > 0)
-    memmove(msg + NIPC_HEADER_LEN, payload, payload_len);
+    memcpy(msg + NIPC_HEADER_LEN, payload, payload_len);
 
   hdr->magic = NIPC_MAGIC_MSG;
   hdr->version = NIPC_VERSION;

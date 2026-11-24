@@ -3681,10 +3681,10 @@ static void test_lookup_init_and_client_guards(void)
             { .ptr = "/known", .len = 6 },
         };
         nipc_win_service_test_fault_set(
-            NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC, 0);
+            NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_REQUEST_BUF_REALLOC, 0);
         err = nipc_client_call_cgroups_lookup(&client, valid_paths, 1, &view);
         clear_test_faults();
-        check("cgroups lookup send buffer fault rejected", err == NIPC_ERR_OVERFLOW);
+        check("cgroups lookup request buffer fault rejected", err == NIPC_ERR_OVERFLOW);
 
         nipc_client_close(&client);
         stop_lookup_server_drain(&sctx, server_thread);
@@ -3712,10 +3712,10 @@ static void test_lookup_init_and_client_guards(void)
         nipc_apps_lookup_resp_view_t view;
         uint32_t pids[] = {1234};
         nipc_win_service_test_fault_set(
-            NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC, 0);
+            NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_REQUEST_BUF_REALLOC, 0);
         nipc_error_t err = nipc_client_call_apps_lookup(&client, pids, 1, &view);
         clear_test_faults();
-        check("apps lookup send buffer fault rejected", err == NIPC_ERR_OVERFLOW);
+        check("apps lookup request buffer fault rejected", err == NIPC_ERR_OVERFLOW);
         nipc_client_close(&client);
 
         nipc_client_init(&client, TEST_RUN_DIR, service, &ccfg);
