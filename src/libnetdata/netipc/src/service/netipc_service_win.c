@@ -188,11 +188,11 @@ uint64_t nipc_service_platform_monotonic_ms(void) {
   return monotonic_time_ms();
 }
 
-bool nipc_service_platform_ensure_client_send_buffer(nipc_client_ctx_t *ctx,
-                                                     size_t need) {
+bool nipc_service_platform_ensure_client_request_buffer(nipc_client_ctx_t *ctx,
+                                                        size_t need) {
   return nipc_service_win_ensure_buffer(
-      &ctx->send_buf, &ctx->send_buf_size, need,
-      NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_SEND_BUF_REALLOC_INTERNAL);
+      &ctx->request_buf, &ctx->request_buf_size, need,
+      NIPC_WIN_SERVICE_TEST_FAULT_CLIENT_REQUEST_BUF_REALLOC_INTERNAL);
 }
 
 bool nipc_service_platform_ensure_client_response_buffer(nipc_client_ctx_t *ctx,
